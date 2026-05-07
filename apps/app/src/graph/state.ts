@@ -86,6 +86,18 @@ export const MainAgentGraphState = Annotation.Root({
     default: () => undefined,
     reducer: (_, curr) => curr,
   }),
+
+  /**
+   * Names of plugins the agent has loaded for the current thread via the
+   * `load_capability` meta-tool. Persists across turns within the same thread
+   * (per-thread isolation handled by the checkpointer). The reducer is a
+   * set-union — `load_capability` only ever adds; never removes.
+   */
+  loadedPlugins: Annotation<string[]>({
+    reducer: (current, update) =>
+      Array.from(new Set([...(current ?? []), ...(update ?? [])])),
+    default: () => [],
+  }),
 });
 
 export type TMainAgentGraphState = typeof MainAgentGraphState.State;

@@ -397,10 +397,10 @@ export class MemoryEngineService {
   async processConversationHistory({
     messages,
     roomId,
-    oracleToken,
-    userToken,
-    oracleHomeServer,
-    userHomeServer,
+    oracleToken = '',
+    userToken = '',
+    oracleHomeServer = '',
+    userHomeServer = '',
     ucanInvocation,
   }: {
     messages: Array<{
@@ -411,11 +411,15 @@ export class MemoryEngineService {
       source_description?: string;
     }>;
     roomId: string;
-    oracleToken: string;
-    userToken: string;
-    oracleHomeServer: string;
-    userHomeServer: string;
-    /** When set, uses UCAN auth instead of Matrix tokens */
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    oracleToken?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    userToken?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    oracleHomeServer?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    userHomeServer?: string;
+    /** Required under UCAN-only auth. */
     ucanInvocation?: string;
   }): Promise<{ success: boolean }> {
     if (!roomId) {

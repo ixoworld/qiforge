@@ -33,7 +33,7 @@ Move the auth-chain modules (Secrets, UCAN, AuthHeaderMiddleware) into the runti
 ## Acceptance
 
 - [ ] All three modules importable from runtime.
-- [ ] `req.authData = { did, userOpenIdToken, homeServer, ucanDelegation? }` is populated correctly per `apps/app/src/middleware/auth-header.middleware.ts:26-36` behavior.
+- [ ] `req.authData = { did, homeServer, ucanDelegation }` is populated correctly. **UCAN-only**: drop the Matrix OpenID token fallback that exists in today's `apps/app/src/middleware/auth-header.middleware.ts:26-36`. Requests without a valid `x-ucan-delegation` header → 401. The relocated middleware no longer accepts `x-matrix-access-token` as a fallback.
 - [ ] UCAN delegation validation cache (3-min TTL) preserved.
 - [ ] Matrix OpenID token validation cache (3-min TTL) preserved.
 - [ ] `SecretsService.getSecretIndex(roomId)` works identically — same JWE decryption, 24h cache.

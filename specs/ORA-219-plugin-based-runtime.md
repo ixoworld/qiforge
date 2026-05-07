@@ -430,9 +430,8 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   user: {
     did: string;
     matrixUserId: string;            // e.g. '@did-ixo-ixo1abc:ixo.world'
-    matrixOpenIdToken?: string;
     homeServer: string;
-    ucanDelegation?: UcanDelegation;
+    ucanDelegation: UcanDelegation;  // required — UCAN is the only auth mechanism
     timezone?: string;
     currentTime?: string;
   };
@@ -1952,10 +1951,10 @@ Per-thread keeps things predictable — fresh discovery each conversation. Forks
 
 ### 23.3 Manifest token-budget enforcement
 
-**Default:** Soft — log warning if Tier-1 block exceeds 1500 tokens; auto-demote `'always'` plugins with the lowest invocation count to `'on-demand'`.
-**Alternative:** Hard — boot error on exceeding budget.
+**Default:** Soft — log a warning if the Tier-1 block exceeds 5000 tokens. The warning names the largest manifests and suggests marking them `'on-demand'`. Boot does not fail.
+**Alternative:** Hard cap with boot error, or auto-demote (rejected — implicit demotion is hard for operators to predict).
 
-Soft to avoid breaking forks with many plugins. Operators see the auto-demote in `qiforge inspect`.
+Token counts are computed via `js-tiktoken` (cl100k_base). The 5000-token default is conservative for modern context windows (200K+) — the Tier-1 block is the discovery layer, not the bulk of the prompt. Operators can tune via `createOracleApp({ tier1TokenBudget: ... })`.
 
 ### 23.4 Bundled plugins importable as named exports?
 
