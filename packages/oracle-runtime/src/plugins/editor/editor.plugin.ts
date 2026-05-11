@@ -1,3 +1,4 @@
+import type { MatrixClient } from 'matrix-js-sdk';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
@@ -14,6 +15,15 @@ import {
 } from './blocknote-tools.js';
 import { createEditorSubAgent } from './editor-agent.js';
 import { createStandaloneEditorTool } from './standalone-editor-tool.js';
+
+/**
+ * Constructor options for `EditorPlugin`. Pass `matrixClient` when the host
+ * app already owns a long-lived matrix-js-sdk client — every editor tool
+ * will reuse it instead of constructing the internal singleton.
+ */
+export interface EditorPluginOptions {
+  matrixClient?: MatrixClient;
+}
 
 /**
  * Editor plugin config. The Matrix admin credentials live in the runtime's
@@ -53,13 +63,19 @@ const manifest: PluginManifest = {
   stability: 'stable',
 };
 
-function parseToolsConfig(cfg: Record<string, unknown>): BlocknoteToolsConfig {
+function parseToolsConfig(
+  cfg: Record<string, unknown>,
+  matrixClient?: MatrixClient,
+): BlocknoteToolsConfig {
   const parsed = configSchema.parse(cfg);
-  return buildBlocknoteToolsConfig({
-    baseUrl: parsed.MATRIX_BASE_URL,
-    userId: parsed.MATRIX_ORACLE_ADMIN_USER_ID,
-    accessToken: parsed.MATRIX_ORACLE_ADMIN_ACCESS_TOKEN,
-  });
+  return {
+    ...buildBlocknoteToolsConfig({
+      baseUrl: parsed.MATRIX_BASE_URL,
+      userId: parsed.MATRIX_ORACLE_ADMIN_USER_ID,
+      accessToken: parsed.MATRIX_ORACLE_ADMIN_ACCESS_TOKEN,
+    }),
+    matrixClient,
+  };
 }
 
 function readEditorRoomId(rtCtx: RuntimeContext): string | undefined {
@@ -102,13 +118,20 @@ export class EditorPlugin extends OraclePlugin {
 
   override readonly configSchema = configSchema;
 
+  private readonly matrixClient?: MatrixClient;
+
+  constructor(options: EditorPluginOptions = {}) {
+    super();
+    this.matrixClient = options.matrixClient;
+  }
+
   override async getRequestSubAgents(
     rtCtx: RuntimeContext,
   ): Promise<PluginSubAgent[]> {
     const editorRoomId = readEditorRoomId(rtCtx);
     if (!editorRoomId) return [];
 
-    const toolsConfig = parseToolsConfig(rtCtx.config);
+    const toolsConfig = parseToolsConfig(rtCtx.config, this.matrixClient);
 
     try {
       const subAgent = await createEditorSubAgent({
@@ -138,7 +161,7 @@ export class EditorPlugin extends OraclePlugin {
       return tools;
     }
 
-    const toolsConfig = parseToolsConfig(rtCtx.config);
+    const toolsConfig = parseToolsConfig(rtCtx.config, this.matrixClient);
 
     // Standalone editor tool — only when a space is in scope but no specific
     // editor session is active. The agent supplies `room_id` per call.

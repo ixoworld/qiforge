@@ -86,7 +86,16 @@ export function buildBlocknoteToolsConfig(matrix: BlocknoteToolsMatrixConfig) {
   };
 }
 
-export type BlocknoteToolsConfig = ReturnType<typeof buildBlocknoteToolsConfig>;
+/**
+ * The blocknote tools' config, optionally augmented with a host-provided
+ * `MatrixClient`. When `matrixClient` is set, `resolveEditorMatrixClient`
+ * uses it directly; when absent, the editor falls back to constructing
+ * its internal singleton from the matrix credentials.
+ */
+export type BlocknoteToolsConfig =
+  ReturnType<typeof buildBlocknoteToolsConfig> & {
+    matrixClient?: MatrixClient;
+  };
 
 /**
  * Track active provider managers for cleanup

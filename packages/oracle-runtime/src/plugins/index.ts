@@ -11,6 +11,7 @@ import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
 import { SkillsPlugin } from './skills/index.js';
+import { SlackPlugin } from './slack/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
@@ -41,10 +42,7 @@ export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = new EditorPlugin();
 export const aguiPlugin = new AGUIPlugin();
-export const slackPlugin = stub('slack', 'Slack', {
-  autoDetect: (env) => Boolean(env.SLACK_BOT_OAUTH_TOKEN),
-  autoDetectHint: 'SLACK_BOT_OAUTH_TOKEN',
-});
+export const slackPlugin = new SlackPlugin();
 export const tasksPlugin = stub('tasks', 'Tasks', {
   autoDetect: (env) => Boolean(env.REDIS_URL),
   autoDetectHint: 'REDIS_URL',

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import { type BlocknoteToolsConfig, createBlocknoteTools } from './blocknote-tools.js';
-import { EditorMatrixClient } from './editor-mx.js';
+import { resolveEditorMatrixClient } from './editor-mx.js';
 import { createPageTools } from './page-tools.js';
 import { editorAgentPrompt } from './prompts.js';
 import type { AppConfig, MatrixRoomConfig } from './provider.js';
@@ -98,13 +98,12 @@ export function createStandaloneEditorTool(
       try {
         const roomConfig: MatrixRoomConfig = { type: 'id', value: roomId };
 
-        const editorMatrixClient = EditorMatrixClient.getInstance({
+        const matrixClient = await resolveEditorMatrixClient({
           baseUrl: opts.toolsConfig.matrix.baseUrl,
           userId: opts.toolsConfig.matrix.userId,
           accessToken: opts.toolsConfig.matrix.accessToken,
+          matrixClient: opts.toolsConfig.matrixClient,
         });
-        await editorMatrixClient.waitUntilReady();
-        const matrixClient = editorMatrixClient.getClient();
 
         const appConfig: AppConfig = {
           matrix: { ...opts.toolsConfig.matrix, room: roomConfig },

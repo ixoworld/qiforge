@@ -19,7 +19,7 @@ import {
   simplifyBlockForAgent,
 } from './blocknote-helper.js';
 import type { BlocknoteToolsConfig } from './blocknote-tools.js';
-import { EditorMatrixClient } from './editor-mx.js';
+import { resolveEditorMatrixClient } from './editor-mx.js';
 import { MatrixProviderManager, type AppConfig } from './provider.js';
 
 /** Resolve a dot-notation path on an object (e.g. "data.credentials"). */
@@ -336,13 +336,12 @@ export function createApplySandboxOutputTool(
       }
 
       // ── 4. Write to block via Y.js ────────────────────────────────────
-      const editorMatrixClient = EditorMatrixClient.getInstance({
+      const matrixClient = await resolveEditorMatrixClient({
         baseUrl: opts.toolsConfig.matrix.baseUrl,
         userId: opts.toolsConfig.matrix.userId,
         accessToken: opts.toolsConfig.matrix.accessToken,
+        matrixClient: opts.toolsConfig.matrixClient,
       });
-      await editorMatrixClient.waitUntilReady();
-      const matrixClient = editorMatrixClient.getClient();
 
       const appConfig: AppConfig = {
         matrix: {

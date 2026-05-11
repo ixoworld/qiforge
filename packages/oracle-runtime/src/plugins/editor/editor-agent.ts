@@ -6,7 +6,7 @@ import {
   type BlocknoteToolsConfig,
   createBlocknoteTools,
 } from './blocknote-tools.js';
-import { EditorMatrixClient } from './editor-mx.js';
+import { resolveEditorMatrixClient } from './editor-mx.js';
 import { createPageTools } from './page-tools.js';
 import { editorAgentPrompt, editorAgentReadOnlyPrompt } from './prompts.js';
 import type { AppConfig, MatrixRoomConfig } from './provider.js';
@@ -218,13 +218,12 @@ export async function createEditorSubAgent(
 
   const roomConfig = normalizeRoom(room);
 
-  const editorMatrixClient = EditorMatrixClient.getInstance({
+  const matrixClient = await resolveEditorMatrixClient({
     baseUrl: toolsConfig.matrix.baseUrl,
     userId: toolsConfig.matrix.userId,
     accessToken: toolsConfig.matrix.accessToken,
+    matrixClient: toolsConfig.matrixClient,
   });
-  await editorMatrixClient.waitUntilReady();
-  const matrixClient = editorMatrixClient.getClient();
 
   const appConfig = buildAppConfig(toolsConfig, roomConfig, configOverrides);
 

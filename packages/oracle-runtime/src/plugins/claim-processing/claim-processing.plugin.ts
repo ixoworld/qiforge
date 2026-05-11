@@ -8,8 +8,14 @@ import type { PluginManifest } from '../../plugin-api/types.js';
  *
  * The plugin itself contributes no agent-visible tools — the actual
  * workflow lives in `ClaimProcessingService` (a `@Cron`-driven Nest
- * service) shipped via `ClaimProcessingModule`. The runtime wires that
- * module in when this plugin is loaded.
+ * service) shipped via `ClaimProcessingModule`.
+ *
+ * PENDING: `getNestModules()` not wired. `ClaimProcessingModule.register`
+ * needs a `TokenLimiter` instance owned by the credits plugin — that
+ * cross-plugin sharing pattern isn't solved yet. Host `main.ts` can pass
+ * `ClaimProcessingModule.register({ tokenLimiter })` via
+ * `createOracleApp.nestModules` as a workaround until we have a clean
+ * shared-services seam.
  */
 export class ClaimProcessingPlugin extends OraclePlugin {
   static readonly NAME = 'claim-processing';
