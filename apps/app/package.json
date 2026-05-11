@@ -30,7 +30,7 @@
     "@composio/langchain": "^0.8.0",
     "@ixo/common": "^1.1.41",
     "@ixo/editor": "3.0.0-beta.11",
-    "@ixo/matrix": "^1.2.32",
+    "@ixo/matrix": "^1.2.33",
     "@ixo/matrix-crdt": "^1.1.0",
     "@ixo/oracles-chain-client": "1.2.1",
     "@ixo/oracles-events": "1.0.4",
