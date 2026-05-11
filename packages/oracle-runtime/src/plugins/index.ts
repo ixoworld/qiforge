@@ -1,8 +1,10 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
+import { ComposioPlugin } from './composio/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
+import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
 
@@ -26,13 +28,10 @@ const stub = <Name extends string>(
 });
 
 export const memoryPlugin = stub('memory', 'Memory');
-export const portalPlugin = stub('portal', 'Portal');
+export const portalPlugin = new PortalPlugin();
 export const firecrawlPlugin = new FirecrawlPlugin();
 export const domainIndexerPlugin = new DomainIndexerPlugin();
-export const composioPlugin = stub('composio', 'Composio', {
-  autoDetect: (env) => Boolean(env.COMPOSIO_API_KEY),
-  autoDetectHint: 'COMPOSIO_API_KEY',
-});
+export const composioPlugin = new ComposioPlugin();
 export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = stub('skills', 'Skills', {
   dependsOn: ['sandbox'],

@@ -45,6 +45,8 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@composio/core": "^0.8.0",
+    "@composio/langchain": "^0.8.0",
     "@ixo/common": "workspace:*",
     "@ixo/matrix": "1.2.3",
     "@ixo/oracles-chain-client": "1.2.1",
