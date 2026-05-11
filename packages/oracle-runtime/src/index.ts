@@ -1,5 +1,11 @@
 export { createOracleApp } from './bootstrap/index.js';
-export type { OracleApp, CreateOracleAppOptions } from './bootstrap/index.js';
+export type {
+  OracleApp,
+  CreateOracleAppOptions,
+  BundledFeatureName,
+  PluginStatusReport,
+  PluginStatusChangeEvent,
+} from './bootstrap/index.js';
 
 export { OraclePlugin } from './plugin-api/oracle-plugin.js';
 export { defineOraclePlugin } from './plugin-api/define-plugin.js';

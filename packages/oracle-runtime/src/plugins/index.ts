@@ -9,58 +9,79 @@ const stubManifest = (title: string): PluginManifest => ({
   stability: 'experimental',
 });
 
-const stub = (
-  name: string,
+const stub = <Name extends string>(
+  name: Name,
   title: string,
-  extras: Partial<OraclePlugin> = {},
-): OraclePlugin => ({
-  name,
+  extras: Omit<Partial<OraclePlugin>, 'name'> = {},
+): OraclePlugin & { readonly name: Name } => ({
   version: '0.0.0',
   manifest: stubManifest(title),
   ...extras,
+  name,
 });
 
-export const memoryPlugin: OraclePlugin = stub('memory', 'Memory');
-export const portalPlugin: OraclePlugin = stub('portal', 'Portal');
-export const firecrawlPlugin: OraclePlugin = stub('firecrawl', 'Firecrawl');
-export const domainIndexerPlugin: OraclePlugin = stub(
-  'domain-indexer',
-  'Domain Indexer',
-);
-export const composioPlugin: OraclePlugin = stub('composio', 'Composio', {
+export const memoryPlugin = stub('memory', 'Memory');
+export const portalPlugin = stub('portal', 'Portal');
+export const firecrawlPlugin = stub('firecrawl', 'Firecrawl');
+export const domainIndexerPlugin = stub('domain-indexer', 'Domain Indexer');
+export const composioPlugin = stub('composio', 'Composio', {
   autoDetect: (env) => Boolean(env.COMPOSIO_API_KEY),
   autoDetectHint: 'COMPOSIO_API_KEY',
 });
-export const sandboxPlugin: OraclePlugin = stub('sandbox', 'Sandbox');
-export const skillsPlugin: OraclePlugin = stub('skills', 'Skills', {
+export const sandboxPlugin = stub('sandbox', 'Sandbox');
+export const skillsPlugin = stub('skills', 'Skills', {
   dependsOn: ['sandbox'],
 });
-export const editorPlugin: OraclePlugin = stub('editor', 'Editor');
-export const aguiPlugin: OraclePlugin = stub('agui', 'AG-UI');
-export const slackPlugin: OraclePlugin = stub('slack', 'Slack', {
+export const editorPlugin = stub('editor', 'Editor');
+export const aguiPlugin = stub('agui', 'AG-UI');
+export const slackPlugin = stub('slack', 'Slack', {
   autoDetect: (env) => Boolean(env.SLACK_BOT_OAUTH_TOKEN),
   autoDetectHint: 'SLACK_BOT_OAUTH_TOKEN',
 });
-export const tasksPlugin: OraclePlugin = stub('tasks', 'Tasks', {
+export const tasksPlugin = stub('tasks', 'Tasks', {
   autoDetect: (env) => Boolean(env.REDIS_URL),
   autoDetectHint: 'REDIS_URL',
 });
-export const creditsPlugin: OraclePlugin = stub('credits', 'Credits', {
+export const creditsPlugin = stub('credits', 'Credits', {
   autoDetect: (env) => env.DISABLE_CREDITS !== 'true',
   autoDetectHint: 'DISABLE_CREDITS!=true',
 });
-export const claimProcessingPlugin: OraclePlugin = stub(
+export const claimProcessingPlugin = stub(
   'claim-processing',
   'Claim Processing',
   { dependsOn: ['credits'] },
 );
-export const langfusePlugin: OraclePlugin = stub('langfuse', 'Langfuse', {
+export const langfusePlugin = stub('langfuse', 'Langfuse', {
   autoDetect: (env) =>
     Boolean(env.LANGFUSE_SECRET_KEY && env.LANGFUSE_PUBLIC_KEY && env.LANGFUSE_HOST),
   autoDetectHint: 'LANGFUSE_SECRET_KEY + LANGFUSE_PUBLIC_KEY + LANGFUSE_HOST',
 });
-export const callsPlugin: OraclePlugin = stub('calls', 'Calls');
-export const userPreferencesPlugin: OraclePlugin = stub(
-  'user-preferences',
-  'User Preferences',
-);
+export const callsPlugin = stub('calls', 'Calls');
+export const userPreferencesPlugin = stub('user-preferences', 'User Preferences');
+
+/**
+ * The canonical bundled-plugin set used by `createOracleApp` when the
+ * caller does not supply `bundledPlugins`. Forks that need a custom
+ * bundled set pass their own array via `bundledPlugins`.
+ *
+ * Typed as a readonly tuple via `as const` so `BundledFeatureName` can
+ * derive the literal union of plugin names from this single source.
+ */
+export const BUNDLED_PLUGINS = [
+  memoryPlugin,
+  portalPlugin,
+  firecrawlPlugin,
+  domainIndexerPlugin,
+  composioPlugin,
+  sandboxPlugin,
+  skillsPlugin,
+  editorPlugin,
+  aguiPlugin,
+  slackPlugin,
+  tasksPlugin,
+  creditsPlugin,
+  claimProcessingPlugin,
+  langfusePlugin,
+  callsPlugin,
+  userPreferencesPlugin,
+] as const satisfies ReadonlyArray<OraclePlugin>;

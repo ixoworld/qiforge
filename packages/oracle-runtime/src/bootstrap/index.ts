@@ -1,28 +1,19 @@
-import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type { OracleIdentity } from '../plugin-api/types.js';
+export { createOracleApp } from './create-oracle-app.js';
+export type {
+  CreateOracleAppOptions,
+  OracleApp,
+  BundledFeatureName,
+  PluginStatusReport,
+  PluginStatusChangeEvent,
+} from './create-oracle-app.js';
 
-export interface CreateOracleAppOptions {
-  identity: OracleIdentity;
-  plugins: OraclePlugin[];
-  port?: number;
-}
+export { RuntimeAppModule } from './runtime-app-module.js';
+export type { RuntimeAppModuleOptions } from './runtime-app-module.js';
 
-export interface OracleApp {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  getNestApp(): any;
-  beforeListen(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    callback: (app: any) => void | Promise<void>,
-  ): OracleApp;
-  onPluginStatusChange(
-    listener: (event: { plugin: string; status: string; reason?: string }) => void,
-  ): OracleApp;
-  listen(): Promise<void>;
-}
-
-export function createOracleApp(_options: CreateOracleAppOptions): Promise<OracleApp> {
-  throw new Error('not implemented');
-}
+export {
+  registerGracefulShutdown,
+} from './graceful-shutdown.js';
+export type { GracefulShutdownOptions } from './graceful-shutdown.js';
 
 export { resolvePlugins, topoSort } from './plugin-loader.js';
 export type {
