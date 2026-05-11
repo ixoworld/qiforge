@@ -11,6 +11,7 @@ import type {
   PluginTool,
 } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
+import { MemoryPlugin } from '../plugins/memory/index.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -153,18 +154,7 @@ export async function createMainAgent(
   ).filter(({ pluginName }) => loadedSet.has(pluginName));
   const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
 
-  // ── 4. Sub-agents — Promise.allSettled fallback ─────────────────────────
-  const subAgentTools = await collectSubAgentsWithFallback({
-    registry: registries.subAgents,
-    buildCtx,
-    ambient,
-    state: wrapState,
-    userDid: requestCtx.user.did,
-    sessionId: requestCtx.session.id,
-    rtCtx,
-  });
-
-  // ── 5. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
+  // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
   const metaTools = buildMetaTools({
     manifestRegistry: registries.manifests,
     toolRegistry: registries.tools,
@@ -176,6 +166,26 @@ export async function createMainAgent(
       state: wrapState,
       pluginTitle: titleByPlugin.get(entry.pluginName),
     });
+
+  // Memory tools are eligible to flow into every sub-agent's tool list, so
+  // any sub-agent can recall/save memory without round-tripping through the
+  // main agent. `clear_memory` is excluded — destructive, main-agent-only.
+  const memoryPassthrough = allTools
+    .filter(({ pluginName }) => pluginName === MemoryPlugin.NAME)
+    .filter(({ tool }) => tool.name !== 'clear_memory')
+    .map(wrap);
+
+  // ── 5. Sub-agents — Promise.allSettled fallback ─────────────────────────
+  const subAgentTools = await collectSubAgentsWithFallback({
+    registry: registries.subAgents,
+    buildCtx,
+    ambient,
+    state: wrapState,
+    userDid: requestCtx.user.did,
+    sessionId: requestCtx.session.id,
+    rtCtx,
+    passthroughTools: memoryPassthrough,
+  });
 
   const tools: StructuredTool[] = [
     ...metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState })),

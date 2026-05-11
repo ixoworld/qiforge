@@ -2,10 +2,13 @@ import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
 import { ComposioPlugin } from './composio/index.js';
+import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
+import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
+import { SkillsPlugin } from './skills/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
@@ -27,15 +30,13 @@ const stub = <Name extends string>(
   name,
 });
 
-export const memoryPlugin = stub('memory', 'Memory');
+export const memoryPlugin = new MemoryPlugin();
 export const portalPlugin = new PortalPlugin();
 export const firecrawlPlugin = new FirecrawlPlugin();
 export const domainIndexerPlugin = new DomainIndexerPlugin();
 export const composioPlugin = new ComposioPlugin();
 export const sandboxPlugin = new SandboxPlugin();
-export const skillsPlugin = stub('skills', 'Skills', {
-  dependsOn: ['sandbox'],
-});
+export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = stub('editor', 'Editor');
 export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = stub('slack', 'Slack', {
@@ -46,10 +47,7 @@ export const tasksPlugin = stub('tasks', 'Tasks', {
   autoDetect: (env) => Boolean(env.REDIS_URL),
   autoDetectHint: 'REDIS_URL',
 });
-export const creditsPlugin = stub('credits', 'Credits', {
-  autoDetect: (env) => env.DISABLE_CREDITS !== 'true',
-  autoDetectHint: 'DISABLE_CREDITS!=true',
-});
+export const creditsPlugin = new CreditsPlugin();
 export const claimProcessingPlugin = stub(
   'claim-processing',
   'Claim Processing',

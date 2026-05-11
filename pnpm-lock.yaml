@@ -664,6 +664,9 @@ importers:
       class-validator:
         specifier: ^0.14.1
         version: 0.14.2
+      ioredis:
+        specifier: ^5.10.1
+        version: 5.10.1
       js-tiktoken:
         specifier: ^1.0.21
         version: 1.0.21

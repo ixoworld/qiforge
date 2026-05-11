@@ -9,6 +9,7 @@ import type { SubAgentRegistry } from '../registries/subagent-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool.js';
+import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 /** Inputs for collecting and wrapping sub-agents. */
 export interface CollectSubAgentsInput {
@@ -29,17 +30,25 @@ export interface CollectSubAgentsInput {
   rtCtx?: RuntimeContext;
   /**
    * Optional adaptor turning a `PluginSubAgent` into the `AgentSpec` shape
-   * understood by `createSubagentAsTool`. Default uses a permissive bridge
-   * that materialises the plugin's tools list (when an array, not a function)
-   * into the spec.
+   * understood by `createSubagentAsTool`. Default wraps each `PluginTool`
+   * via `wrapPluginTool` so its handler receives a real `RuntimeContext`,
+   * and resolves the sub-agent's `model` role via `ambient.llm.get(...)`.
    */
   toAgentSpec?: (
     subAgent: PluginSubAgent,
     buildCtx: PluginContext,
+    ambient: AmbientServices,
+    state: RuntimeStateInput,
   ) => AgentSpec;
+  /**
+   * Tools the runtime wants every sub-agent to be able to call (e.g. the
+   * non-destructive memory CRUD tools the memory plugin contributes to the
+   * main agent). Appended to each sub-agent's own tool list when the inner
+   * `createAgent` is built — the sub-agent's tools take precedence in name
+   * collisions.
+   */
+  passthroughTools?: StructuredTool[];
 }
-
-const NOOP_HANDLER = async () => '';
 
 /**
  * Default adaptor — turns a `PluginSubAgent` into the `AgentSpec` shape
@@ -47,14 +56,20 @@ const NOOP_HANDLER = async () => '';
  *
  * Plugin sub-agent tools are `PluginTool[]` with `(args, ctx)` handlers; the
  * sub-agent runs them inside its own `createAgent` call where LangChain
- * supplies a `runConfig`, not a `RuntimeContext`. For now we just project the
- * names, descriptions, and schemas as `StructuredTool`s — full wrapping for
- * sub-agent-internal tool calls will land alongside the bundled plugins
- * that actually own them.
+ * supplies a `ToolRuntime`, not a `RuntimeContext`. Each tool is wrapped via
+ * `wrapPluginTool` so its handler observes a fully-built `RuntimeContext`
+ * (same bridge the main agent uses).
+ *
+ * The sub-agent's `model` role (default `'subagent'`) is resolved via the
+ * ambient LLM adapter and propagated to `AgentSpec.model` so the wrapping
+ * `createSubagentAsTool` can actually run a `createAgent` instead of
+ * returning the "no model configured" error path.
  */
 function defaultToAgentSpec(
   subAgent: PluginSubAgent,
   buildCtx: PluginContext,
+  ambient: AmbientServices,
+  state: RuntimeStateInput,
   userDid: string,
   sessionId: string,
 ): AgentSpec {
@@ -67,25 +82,18 @@ function defaultToAgentSpec(
     ? subAgent.tools
     : subAgent.tools(buildCtx);
 
-  const tools: StructuredTool[] = pluginTools.map(
-    (t) =>
-      // Minimal pass-through; sub-agent-internal tools are exercised by their
-      // owning plugins directly. We keep the descriptor shape so the agent-side
-      // schema is stable.
-      ({
-        name: t.name,
-        description: t.description,
-        schema: t.schema,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        invoke: NOOP_HANDLER as any,
-      }) as unknown as StructuredTool,
+  const tools: StructuredTool[] = pluginTools.map((t) =>
+    wrapPluginTool(t, { ambient, state }),
   );
+
+  const model = ambient.llm.get(subAgent.model ?? 'subagent');
 
   return {
     name: subAgent.name,
     description: subAgent.description,
     systemPrompt,
     tools,
+    model,
     middleware: subAgent.middlewares,
     userDid,
     sessionId,
@@ -106,10 +114,12 @@ export async function collectSubAgentsWithFallback(
     registry,
     buildCtx,
     ambient,
+    state,
     userDid,
     sessionId,
     rtCtx,
     toAgentSpec,
+    passthroughTools,
   } = input;
 
   const entries = await registry.collect(buildCtx, rtCtx);
@@ -118,9 +128,19 @@ export async function collectSubAgentsWithFallback(
     entries.map(async ({ pluginName, subAgent }) => {
       try {
         const spec = toAgentSpec
-          ? toAgentSpec(subAgent, buildCtx)
-          : defaultToAgentSpec(subAgent, buildCtx, userDid, sessionId);
-        return createSubagentAsTool(spec);
+          ? toAgentSpec(subAgent, buildCtx, ambient, state)
+          : defaultToAgentSpec(
+              subAgent,
+              buildCtx,
+              ambient,
+              state,
+              userDid,
+              sessionId,
+            );
+        const withPassthrough: AgentSpec = passthroughTools?.length
+          ? { ...spec, passthroughTools }
+          : spec;
+        return createSubagentAsTool(withPassthrough);
       } catch (err) {
         ambient.logger.error(
           { pluginName, err: err instanceof Error ? err.message : String(err) },
