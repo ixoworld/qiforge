@@ -19,6 +19,7 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:e2e": "vitest run --config ./test/vitest-e2e.config.ts",
+    "test:eval": "vitest run --config ./test/vitest-eval.config.ts",
     "db:up": "docker-compose up -d",
     "db:down": "docker-compose down",
     "db:clean": "docker-compose down -v",
