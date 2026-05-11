@@ -9,15 +9,20 @@
  * 5. User delegation caching (keyed by user DID)
  */
 
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
+import { type Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import {
-  type MCPUCANConfig,
-  createMCPUCANConfig,
-  requiresUCANAuth,
+  Inject,
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+} from '@nestjs/common';
+import { type ConfigService } from '@nestjs/config';
+import {
   buildRequiredCapability,
+  createMCPUCANConfig,
   loadUCANConfigFromEnv,
+  type MCPUCANConfig,
+  requiresUCANAuth,
 } from './ucan.config.js';
 
 // ============================================================================
@@ -295,7 +300,8 @@ export class UcanService implements OnModuleDestroy {
   private loadConfig(): MCPUCANConfig {
     const envConfig = loadUCANConfigFromEnv();
     const oracleDid =
-      this.configService.get<string>('ORACLE_ENTITY_DID') || envConfig.oracleDid;
+      this.configService.get<string>('ORACLE_ENTITY_DID') ||
+      envConfig.oracleDid;
     const rootIssuers =
       envConfig.rootIssuers.length > 0 ? envConfig.rootIssuers : [oracleDid];
 

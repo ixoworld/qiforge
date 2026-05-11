@@ -6,6 +6,7 @@ import type {
   MergedConfig,
   ModelRole,
   OracleIdentity,
+  UcanDelegation,
 } from '../plugin-api/types.js';
 import type { ConfigSchemaRegistry } from '../registries/config-schema-registry.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
@@ -30,12 +31,23 @@ export interface MainAgentRegistries {
 export interface MainAgentRequestContext {
   user: {
     did: string;
+    /**
+     * Authenticated Matrix user id. Required so request-build can synthesize
+     * a `RuntimeContext` and pass it to registries' request-time hooks.
+     */
+    matrixUserId: string;
+    /** UCAN delegation envelope for this request. */
+    ucanDelegation: UcanDelegation;
     timezone?: string;
     currentTime?: string;
   };
   session: {
     id: string;
     client: 'portal' | 'matrix' | 'slack';
+    /** Propagated to scoped emitter and per-room secrets. */
+    requestId: string;
+    /** Optional WebSocket id for SSE/WS clients. */
+    wsId?: string;
     roomId?: string;
   };
   history: {

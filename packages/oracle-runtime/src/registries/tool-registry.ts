@@ -1,5 +1,9 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type { PluginContext, PluginTool } from '../plugin-api/types.js';
+import type {
+  PluginContext,
+  PluginTool,
+  RuntimeContext,
+} from '../plugin-api/types.js';
 
 /** A collected tool tagged with the plugin that contributed it. */
 export interface RegisteredTool {
@@ -28,15 +32,29 @@ export class ToolRegistry {
    * Invoke `getTools(buildCtx)` on every registered plugin in registration
    * order and return the flattened list with plugin attribution.
    *
-   * Skips plugins that do not implement `getTools`.
+   * When `rtCtx` is supplied, also invokes `getRequestTools(rtCtx)` on each
+   * plugin that implements it and appends those results — the request-time
+   * tools land immediately after the same plugin's boot-time tools.
+   *
+   * Plugins that implement neither hook contribute nothing.
    */
-  async collect(buildCtx: PluginContext): Promise<RegisteredTool[]> {
+  async collect(
+    buildCtx: PluginContext,
+    rtCtx?: RuntimeContext,
+  ): Promise<RegisteredTool[]> {
     const out: RegisteredTool[] = [];
     for (const plugin of this.plugins) {
-      if (!plugin.getTools) continue;
-      const tools = await plugin.getTools(buildCtx);
-      for (const tool of tools) {
-        out.push({ pluginName: plugin.name, tool });
+      if (plugin.getTools) {
+        const tools = await plugin.getTools(buildCtx);
+        for (const tool of tools) {
+          out.push({ pluginName: plugin.name, tool });
+        }
+      }
+      if (rtCtx && plugin.getRequestTools) {
+        const requestTools = await plugin.getRequestTools(rtCtx);
+        for (const tool of requestTools) {
+          out.push({ pluginName: plugin.name, tool });
+        }
       }
     }
     this.collected = out;

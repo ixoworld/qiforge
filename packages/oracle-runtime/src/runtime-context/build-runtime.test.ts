@@ -65,6 +65,7 @@ function makeAmbient(overrides: AmbientMockOverrides = {}): AmbientServices {
       hasCapability: vi.fn(() => true),
       requireCapability: vi.fn(),
       mintInvocation: vi.fn(async () => 'invocation-cid'),
+      resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
     },
     logger: noopLogger,
   };
@@ -199,6 +200,19 @@ describe('buildRuntimeContext', () => {
 
     ctx.ucan.requireCapability('ixo:sandbox', '*');
     expect(ambient.ucan.requireCapability).toHaveBeenCalled();
+  });
+
+  it('ucan.resolveServiceDid delegates to ambient.ucan.resolveServiceDid', async () => {
+    const ambient = makeAmbient();
+    const ctx = buildRuntimeContext(makeRunConfig(), ambient, { messages: [] });
+
+    const result = await ctx.ucan.resolveServiceDid(
+      'https://sandbox.test/path',
+    );
+    expect(result).toBe('did:web:example.com');
+    expect(ambient.ucan.resolveServiceDid).toHaveBeenCalledWith(
+      'https://sandbox.test/path',
+    );
   });
 
   it('shared accessors are a frozen empty object', () => {

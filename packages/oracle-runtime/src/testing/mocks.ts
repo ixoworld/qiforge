@@ -143,6 +143,7 @@ export function mockUcan(): UcanAdapter {
     hasCapability: vi.fn(() => true),
     requireCapability: vi.fn(),
     mintInvocation: vi.fn(async () => 'mock-invocation-cid'),
+    resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
   };
 }
 

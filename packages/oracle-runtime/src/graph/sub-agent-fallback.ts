@@ -22,12 +22,21 @@ export interface CollectSubAgentsInput {
   /** Session ID — used for thread/run scoping. */
   sessionId: string;
   /**
+   * Optional per-request runtime context. Plumbed through to
+   * `SubAgentRegistry.collect` so plugins implementing `getRequestSubAgents`
+   * can branch on live state (e.g. AG-UI actions).
+   */
+  rtCtx?: RuntimeContext;
+  /**
    * Optional adaptor turning a `PluginSubAgent` into the `AgentSpec` shape
    * understood by `createSubagentAsTool`. Default uses a permissive bridge
    * that materialises the plugin's tools list (when an array, not a function)
    * into the spec.
    */
-  toAgentSpec?: (subAgent: PluginSubAgent, buildCtx: PluginContext) => AgentSpec;
+  toAgentSpec?: (
+    subAgent: PluginSubAgent,
+    buildCtx: PluginContext,
+  ) => AgentSpec;
 }
 
 const NOOP_HANDLER = async () => '';
@@ -58,17 +67,18 @@ function defaultToAgentSpec(
     ? subAgent.tools
     : subAgent.tools(buildCtx);
 
-  const tools: StructuredTool[] = pluginTools.map((t) =>
-    // Minimal pass-through; sub-agent-internal tools are exercised by their
-    // owning plugins directly. We keep the descriptor shape so the agent-side
-    // schema is stable.
-    ({
-      name: t.name,
-      description: t.description,
-      schema: t.schema,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      invoke: NOOP_HANDLER as any,
-    }) as unknown as StructuredTool,
+  const tools: StructuredTool[] = pluginTools.map(
+    (t) =>
+      // Minimal pass-through; sub-agent-internal tools are exercised by their
+      // owning plugins directly. We keep the descriptor shape so the agent-side
+      // schema is stable.
+      ({
+        name: t.name,
+        description: t.description,
+        schema: t.schema,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        invoke: NOOP_HANDLER as any,
+      }) as unknown as StructuredTool,
   );
 
   return {
@@ -92,10 +102,17 @@ function defaultToAgentSpec(
 export async function collectSubAgentsWithFallback(
   input: CollectSubAgentsInput,
 ): Promise<StructuredTool[]> {
-  const { registry, buildCtx, ambient, userDid, sessionId, toAgentSpec } =
-    input;
+  const {
+    registry,
+    buildCtx,
+    ambient,
+    userDid,
+    sessionId,
+    rtCtx,
+    toAgentSpec,
+  } = input;
 
-  const entries = registry.collect(buildCtx);
+  const entries = await registry.collect(buildCtx, rtCtx);
 
   const results = await Promise.allSettled(
     entries.map(async ({ pluginName, subAgent }) => {

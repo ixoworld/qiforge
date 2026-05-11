@@ -1,6 +1,9 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
+import { AGUIPlugin } from './agui/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
+import { FirecrawlPlugin } from './firecrawl/index.js';
+import { SandboxPlugin } from './sandbox/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
@@ -24,18 +27,18 @@ const stub = <Name extends string>(
 
 export const memoryPlugin = stub('memory', 'Memory');
 export const portalPlugin = stub('portal', 'Portal');
-export const firecrawlPlugin = stub('firecrawl', 'Firecrawl');
+export const firecrawlPlugin = new FirecrawlPlugin();
 export const domainIndexerPlugin = new DomainIndexerPlugin();
 export const composioPlugin = stub('composio', 'Composio', {
   autoDetect: (env) => Boolean(env.COMPOSIO_API_KEY),
   autoDetectHint: 'COMPOSIO_API_KEY',
 });
-export const sandboxPlugin = stub('sandbox', 'Sandbox');
+export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = stub('skills', 'Skills', {
   dependsOn: ['sandbox'],
 });
 export const editorPlugin = stub('editor', 'Editor');
-export const aguiPlugin = stub('agui', 'AG-UI');
+export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = stub('slack', 'Slack', {
   autoDetect: (env) => Boolean(env.SLACK_BOT_OAUTH_TOKEN),
   autoDetectHint: 'SLACK_BOT_OAUTH_TOKEN',

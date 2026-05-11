@@ -100,6 +100,12 @@ export interface TestPluginInit {
   getTools?: (ctx: PluginContext) => PluginTool[] | Promise<PluginTool[]>;
   getSubAgents?: (ctx: PluginContext) => PluginSubAgent[];
   getMiddlewares?: (ctx: PluginContext) => AgentMiddleware[];
+  getRequestTools?: (
+    rtCtx: RuntimeContext,
+  ) => PluginTool[] | Promise<PluginTool[]>;
+  getRequestSubAgents?: (
+    rtCtx: RuntimeContext,
+  ) => PluginSubAgent[] | Promise<PluginSubAgent[]>;
   getSharedState?: () => Record<
     string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -153,6 +159,7 @@ export function makeRuntimeContext(
       requireCapability: () => undefined,
       hasCapability: () => true,
       mintInvocation: async () => 'invocation-cid',
+      resolveServiceDid: async () => 'did:web:example.com',
     },
     llm: {
       get: () => ({}) as unknown as RuntimeContext['llm'] extends {
@@ -210,6 +217,9 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
     override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
       return init.getMiddlewares ? init.getMiddlewares(ctx) : [];
     }
+
+    override getRequestTools = init.getRequestTools;
+    override getRequestSubAgents = init.getRequestSubAgents;
 
     override getSharedState(): Record<
       string,

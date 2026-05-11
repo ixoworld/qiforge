@@ -228,7 +228,7 @@ export async function createTestRuntime(
   // anything inside the ctx, so a shared ctx is correct.
   const sharedBuildCtx = buildCtxFor('__test__');
   const collectedTools = await tools.collect(sharedBuildCtx);
-  const collectedSubAgents = subAgents.collect(sharedBuildCtx);
+  const collectedSubAgents = await subAgents.collect(sharedBuildCtx);
   const collectedMiddlewares = middlewares.collect(sharedBuildCtx);
 
   const loadedSet = new Set<string>();

@@ -86,6 +86,7 @@ function makeRuntimeContext(
       requireCapability: () => undefined,
       hasCapability: () => true,
       mintInvocation: async () => 'invocation-cid',
+      resolveServiceDid: async () => 'did:web:example.com',
     },
     llm: {
       get: () => ({}) as unknown as RuntimeContext['llm'] extends {

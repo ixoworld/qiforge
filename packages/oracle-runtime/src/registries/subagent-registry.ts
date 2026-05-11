@@ -1,5 +1,9 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type { PluginContext, PluginSubAgent } from '../plugin-api/types.js';
+import type {
+  PluginContext,
+  PluginSubAgent,
+  RuntimeContext,
+} from '../plugin-api/types.js';
 
 /** A collected sub-agent tagged with the plugin that contributed it. */
 export interface RegisteredSubAgent {
@@ -26,15 +30,30 @@ export class SubAgentRegistry {
 
   /**
    * Invoke `getSubAgents(buildCtx)` on every registered plugin in registration
-   * order. Skips plugins that do not implement `getSubAgents`.
+   * order. When `rtCtx` is supplied, also invokes `getRequestSubAgents(rtCtx)`
+   * on each plugin that implements it and appends those results — the
+   * request-time sub-agents land immediately after the same plugin's
+   * boot-time sub-agents.
+   *
+   * Plugins that implement neither hook contribute nothing.
    */
-  collect(buildCtx: PluginContext): RegisteredSubAgent[] {
+  async collect(
+    buildCtx: PluginContext,
+    rtCtx?: RuntimeContext,
+  ): Promise<RegisteredSubAgent[]> {
     const out: RegisteredSubAgent[] = [];
     for (const plugin of this.plugins) {
-      if (!plugin.getSubAgents) continue;
-      const subAgents = plugin.getSubAgents(buildCtx);
-      for (const subAgent of subAgents) {
-        out.push({ pluginName: plugin.name, subAgent });
+      if (plugin.getSubAgents) {
+        const subAgents = plugin.getSubAgents(buildCtx);
+        for (const subAgent of subAgents) {
+          out.push({ pluginName: plugin.name, subAgent });
+        }
+      }
+      if (rtCtx && plugin.getRequestSubAgents) {
+        const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
+        for (const subAgent of requestSubAgents) {
+          out.push({ pluginName: plugin.name, subAgent });
+        }
       }
     }
     this.collected = out;

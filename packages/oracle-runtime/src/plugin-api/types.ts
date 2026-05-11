@@ -236,6 +236,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       did: string;
       capability: string;
     }) => Promise<string>;
+    /**
+     * Resolve a downstream service URL to its did:web identifier. Returns
+     * `null` when the document is missing or has no `id` — used by plugins
+     * minting service-targeted UCAN invocations.
+     */
+    resolveServiceDid: (serviceUrl: string) => Promise<string | null>;
   };
 
   /** LLM provider. */

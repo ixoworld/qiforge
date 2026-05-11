@@ -50,6 +50,13 @@ export interface UcanAdapter {
     userDid: string,
     target: { did: string; capability: string },
   ): Promise<string>;
+  /**
+   * Resolve a downstream service URL to its did:web identifier (fetched
+   * once from `/.well-known/did.json` and cached by origin). Returns `null`
+   * when the document is missing or has no `id` — callers degrade gracefully
+   * instead of throwing.
+   */
+  resolveServiceDid(serviceUrl: string): Promise<string | null>;
 }
 
 /** Raw event payload — what callers pass before the scoped emitter adds session/request ids. */

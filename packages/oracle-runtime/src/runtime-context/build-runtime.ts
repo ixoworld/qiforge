@@ -137,6 +137,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.ucan.requireCapability(delegation, resource, action);
       },
       mintInvocation: (target) => ambient.ucan.mintInvocation(user.did, target),
+      resolveServiceDid: (serviceUrl) =>
+        ambient.ucan.resolveServiceDid(serviceUrl),
     },
     llm: {
       get: (role, params) => ambient.llm.get(role, params),

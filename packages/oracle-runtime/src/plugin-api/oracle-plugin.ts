@@ -49,6 +49,29 @@ export abstract class OraclePlugin {
   getSubAgents?(ctx: PluginContext): PluginSubAgent[];
 
   /**
+   * Request-time tool contributions. Called once per `createMainAgent`
+   * invocation with the full per-request `RuntimeContext`, so the plugin
+   * can decide which tools to expose based on live state (e.g. AG-UI
+   * actions in `state.agActions`).
+   *
+   * Results are merged with `getTools(ctx)` — both can fire on the same
+   * build. Plugins should pick whichever hook fits: boot-time when only
+   * config/identity matters; request-time when state/user/session matters.
+   */
+  getRequestTools?(
+    rtCtx: RuntimeContext,
+  ): PluginTool[] | Promise<PluginTool[]>;
+
+  /**
+   * Request-time sub-agent contributions. Same merge semantics as
+   * `getRequestTools` — boot-time `getSubAgents` and request-time
+   * `getRequestSubAgents` outputs are both collected.
+   */
+  getRequestSubAgents?(
+    rtCtx: RuntimeContext,
+  ): PluginSubAgent[] | Promise<PluginSubAgent[]>;
+
+  /**
    * LangChain middlewares inserted after the four always-on middlewares
    * (tool-validation, retry, page-context, safety-guardrail).
    */

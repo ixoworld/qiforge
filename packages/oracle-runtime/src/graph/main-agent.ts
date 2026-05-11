@@ -12,7 +12,11 @@ import type {
 } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
-import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
+import {
+  buildRuntimeContext,
+  type RunConfig,
+  type RuntimeStateInput,
+} from '../runtime-context/build-runtime.js';
 import type {
   CompiledMainAgent,
   MainAgentArgs,
@@ -101,8 +105,37 @@ export async function createMainAgent(
     pluginName: PLUGIN_LOGGER_COMPONENT,
   });
 
-  // ── 2. Resolve registries ───────────────────────────────────────────────
-  const allTools = await registries.tools.collect(buildCtx);
+  // ── 2. Request-time runtime context (drives getRequestTools/...SubAgents) ─
+  const loadedSet = new Set<string>(state.loadedPlugins ?? []);
+  const wrapState: RuntimeStateInput = {
+    messages: state.messages ?? [],
+    userContext: state.userContext,
+    loadedPlugins: loadedSet,
+    ...(state as Record<string, unknown>),
+  };
+
+  const runConfig: RunConfig = {
+    context: {
+      user: {
+        did: requestCtx.user.did,
+        matrixUserId: requestCtx.user.matrixUserId,
+        ucanDelegation: requestCtx.user.ucanDelegation,
+        timezone: requestCtx.user.timezone,
+        currentTime: requestCtx.user.currentTime,
+      },
+      session: {
+        id: requestCtx.session.id,
+        client: requestCtx.session.client,
+        requestId: requestCtx.session.requestId,
+        wsId: requestCtx.session.wsId,
+        roomId: requestCtx.session.roomId,
+      },
+    },
+  };
+  const rtCtx = buildRuntimeContext(runConfig, ambient, wrapState);
+
+  // ── 3. Resolve registries (boot-time + request-time contributions) ──────
+  const allTools = await registries.tools.collect(buildCtx, rtCtx);
   const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
   const titleByPlugin = new Map(
@@ -111,7 +144,6 @@ export async function createMainAgent(
       manifest.title,
     ]),
   );
-  const loadedSet = new Set<string>(state.loadedPlugins ?? []);
 
   const eagerTools = selectByVisibility(allTools, manifestViz, 'always');
   const loadedLazyTools = selectByVisibility(
@@ -121,14 +153,7 @@ export async function createMainAgent(
   ).filter(({ pluginName }) => loadedSet.has(pluginName));
   const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
 
-  // ── 3. Sub-agents — Promise.allSettled fallback ─────────────────────────
-  const wrapState: RuntimeStateInput = {
-    messages: state.messages ?? [],
-    userContext: state.userContext,
-    loadedPlugins: loadedSet,
-    ...(state as Record<string, unknown>),
-  };
-
+  // ── 4. Sub-agents — Promise.allSettled fallback ─────────────────────────
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -136,9 +161,10 @@ export async function createMainAgent(
     state: wrapState,
     userDid: requestCtx.user.did,
     sessionId: requestCtx.session.id,
+    rtCtx,
   });
 
-  // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
+  // ── 5. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
   const metaTools = buildMetaTools({
     manifestRegistry: registries.manifests,
     toolRegistry: registries.tools,
@@ -159,7 +185,7 @@ export async function createMainAgent(
     ...subAgentTools,
   ];
 
-  // ── 5. Middleware stack — 4 always-on + plugin contributions ────────────
+  // ── 6. Middleware stack — 4 always-on + plugin contributions ────────────
   const pluginMiddlewares = registries.middlewares
     .collect(buildCtx)
     .map(({ middleware }) => middleware);
@@ -189,7 +215,7 @@ export async function createMainAgent(
     ...pluginMiddlewares,
   ];
 
-  // ── 6. Prompt composition ───────────────────────────────────────────────
+  // ── 7. Prompt composition ───────────────────────────────────────────────
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
     ({ manifest }) => manifest.visibility === 'always',
   );
@@ -218,14 +244,14 @@ export async function createMainAgent(
     degradedServicesBlock: hooks?.degradedServicesBlock,
   });
 
-  // ── 7. Model + checkpointer ─────────────────────────────────────────────
+  // ── 8. Model + checkpointer ─────────────────────────────────────────────
   const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
   const model = resolveModel('main');
   const checkpointer = hooks?.checkpointerForUser
     ? await hooks.checkpointerForUser(requestCtx.user.did)
     : undefined;
 
-  // ── 8. Compile ──────────────────────────────────────────────────────────
+  // ── 9. Compile ──────────────────────────────────────────────────────────
   return createAgent({
     model,
     tools,

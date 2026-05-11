@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { makeBuildCtx, makePlugin, makeTool } from './test-fixtures.js';
+import {
+  makeBuildCtx,
+  makePlugin,
+  makeRuntimeContext,
+  makeTool,
+} from './test-fixtures.js';
 import { ToolRegistry } from './tool-registry.js';
 
 describe('ToolRegistry', () => {
@@ -100,6 +105,58 @@ describe('ToolRegistry', () => {
   it('throws when assertNoCollisions called before collect', () => {
     const reg = new ToolRegistry();
     expect(() => reg.assertNoCollisions()).toThrow(/before collect/);
+  });
+
+  it('merges boot-time getTools with request-time getRequestTools when rtCtx is supplied', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        // Boot-time contributes a baseline tool.
+        getTools: () => [makeTool('agui_baseline')],
+        // Request-time contributes additional tools derived from state.
+        getRequestTools: (rtCtx) => {
+          const actions = (rtCtx.history.state as { agActions?: string[] })
+            .agActions ?? [];
+          return actions.map((name) => makeTool(`agui_${name}`));
+        },
+      }),
+    );
+
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: { messages: [], agActions: ['submit', 'cancel'] },
+      },
+    });
+    const collected = await reg.collect(makeBuildCtx(), rtCtx);
+    expect(collected.map((c) => c.tool.name)).toEqual([
+      'agui_baseline',
+      'agui_submit',
+      'agui_cancel',
+    ]);
+    expect(collected.every((c) => c.pluginName === 'agui')).toBe(true);
+  });
+
+  it('skips request-time hooks when rtCtx is not supplied', async () => {
+    const reg = new ToolRegistry();
+    let requestCalls = 0;
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        getTools: () => [makeTool('agui_baseline')],
+        getRequestTools: () => {
+          requestCalls += 1;
+          return [makeTool('agui_dynamic')];
+        },
+      }),
+    );
+
+    const collected = await reg.collect(makeBuildCtx());
+    expect(collected.map((c) => c.tool.name)).toEqual(['agui_baseline']);
+    expect(requestCalls).toBe(0);
   });
 
   it('exposes per-plugin tool names after collect', async () => {

@@ -80,6 +80,7 @@ function makeAmbient(): AmbientServices {
       hasCapability: vi.fn(() => true),
       requireCapability: vi.fn(),
       mintInvocation: vi.fn(async () => 'inv'),
+      resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
     },
     logger: {
       log: vi.fn(),
@@ -114,8 +115,12 @@ function baseArgs(overrides: Partial<MainAgentArgs> = {}): MainAgentArgs {
     },
     config: { FOO: 'bar' },
     requestCtx: {
-      user: { did: 'did:ixo:user1' },
-      session: { id: 'sess-1', client: 'portal' },
+      user: {
+        did: 'did:ixo:user1',
+        matrixUserId: '@did-ixo-user1:ixo.world',
+        ucanDelegation: { raw: 'test-ucan' },
+      },
+      session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
       history: { userContext: undefined },
     },
     ambient: overrides.ambient ?? makeAmbient(),
