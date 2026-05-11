@@ -547,8 +547,8 @@ importers:
         specifier: ^16.4.0
         version: 16.4.2
       matrix-bot-sdk:
-        specifier: npm:@ixo/matrix-bot-sdk@^0.8.0-ixo.6
-        version: '@ixo/matrix-bot-sdk@0.8.0-ixo.6'
+        specifier: npm:@ixo/matrix-bot-sdk@^0.8.0-ixo.12
+        version: '@ixo/matrix-bot-sdk@0.8.0-ixo.12'
       matrix-js-sdk:
         specifier: ^37.11.0
         version: 37.13.0
@@ -3212,6 +3212,10 @@ packages:
 
   '@ixo/logger@0.0.2':
     resolution: {integrity: sha512-HRoYZXXVoyKRoLXTFhY6wKE/nHcYddzEfk5L9gbcdkPF9+IQ7pQnXzL5yQtuiO8yWP2f6VamP8JAWTlASBTW/w==}
+
+  '@ixo/matrix-bot-sdk@0.8.0-ixo.12':
+    resolution: {integrity: sha512-T3gQb2MwytN+A+hzLrOmrIsROOOU9S4mHEJ68O/U86s+3R3vqTtQTwum4tetGXqg2pwJHXCVn8F449Xh/ybc4g==}
+    engines: {node: '>=22.0.0'}
 
   '@ixo/matrix-bot-sdk@0.8.0-ixo.6':
     resolution: {integrity: sha512-uhsZLv/rT2bdwOLLxR+oUb/4jDLg+SblfPtP+2HzKWReH6s/lUHAijxQlj5YMrPp+7sNjtx7XtN92hUWhZymJQ==}
@@ -12639,7 +12643,7 @@ packages:
 
   uuid@3.4.0:
     resolution: {integrity: sha512-HjSDRw6gZE5JMggctHBcjVak08+KEVhSIiDzFnT9S9aegmp85S/bReBVTb4QTFaRNptJ9kuYaNhnbNEOkbKb/A==}
-    deprecated: Please upgrade  to version 7 or higher.  Older versions may use Math.random() in certain circumstances, which is known to be problematic.  See https://v8.dev/blog/math-random for details.
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   uuid@7.0.3:
@@ -16582,6 +16586,30 @@ snapshots:
   '@ixo/logger@0.0.2':
     dependencies:
       winston: 3.18.3
+
+  '@ixo/matrix-bot-sdk@0.8.0-ixo.12':
+    dependencies:
+      '@ixo/matrix-sdk-crypto-nodejs': 0.4.2
+      '@types/express': 4.17.25
+      another-json: 0.2.0
+      async-lock: 1.4.1
+      bs58: 6.0.0
+      chalk: 4.1.2
+      express: 4.21.2
+      glob-to-regexp: 0.4.1
+      hash.js: 1.1.7
+      html-to-text: 9.0.5
+      htmlencode: 0.0.4
+      lowdb: 1.0.0
+      lru-cache: 10.4.3
+      mkdirp: 3.0.1
+      morgan: 1.10.1
+      postgres: 3.4.7
+      request: 2.88.2
+      request-promise: 4.2.6(request@2.88.2)
+      sanitize-html: 2.17.0
+    transitivePeerDependencies:
+      - supports-color
 
   '@ixo/matrix-bot-sdk@0.8.0-ixo.6':
     dependencies:
@@ -24332,7 +24360,7 @@ snapshots:
     dependencies:
       graceful-fs: 4.2.11
       is-promise: 2.2.2
-      lodash: 4.17.21
+      lodash: 4.18.1
       pify: 3.0.0
       steno: 0.4.4
 
@@ -26728,7 +26756,7 @@ snapshots:
 
   request-promise-core@1.1.4(request@2.88.2):
     dependencies:
-      lodash: 4.17.21
+      lodash: 4.18.1
       request: 2.88.2
 
   request-promise@4.2.6(request@2.88.2):
