@@ -1,9 +1,11 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
+import { ClaimProcessingPlugin } from './claim-processing/index.js';
 import { ComposioPlugin } from './composio/index.js';
 import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
+import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
 import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
@@ -37,7 +39,7 @@ export const domainIndexerPlugin = new DomainIndexerPlugin();
 export const composioPlugin = new ComposioPlugin();
 export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = new SkillsPlugin();
-export const editorPlugin = stub('editor', 'Editor');
+export const editorPlugin = new EditorPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = stub('slack', 'Slack', {
   autoDetect: (env) => Boolean(env.SLACK_BOT_OAUTH_TOKEN),
@@ -48,11 +50,7 @@ export const tasksPlugin = stub('tasks', 'Tasks', {
   autoDetectHint: 'REDIS_URL',
 });
 export const creditsPlugin = new CreditsPlugin();
-export const claimProcessingPlugin = stub(
-  'claim-processing',
-  'Claim Processing',
-  { dependsOn: ['credits'] },
-);
+export const claimProcessingPlugin = new ClaimProcessingPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 

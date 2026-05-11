@@ -45,44 +45,62 @@ The slicing rules I followed:
 
 ## Status table
 
-Update the **Status** column as you work. `TODO` → `In Progress` → `Done`.
+Status: `TODO` → `In Progress` → `Done`. Special states: `Removed` (no longer needed), `Deferred` (parked pending design decision).
+
+**Progress: 25 of 32 in-scope tasks done.** TASK-16 (langfuse) removed; TASK-18 (calls) deferred — see notes below the table.
 
 | ID | Task | Phase | Effort | Depends on | Blocks | Status |
 |---|---|---|---|---|---|---|
-| [TASK-01](TASK-01-package-skeleton.md) | Package skeleton + public types | 1 | 1.5d | — | all | TODO |
-| [TASK-02](TASK-02-manifest-schema.md) | Manifest schema + validator | 1 | 1d | 01 | 03, 07 | TODO |
-| [TASK-03](TASK-03-registries.md) | Six registries | 1 | 2.5d | 01, 02 | 04, 09, 10 | TODO |
-| [TASK-04](TASK-04-loader-composer.md) | Plugin loader + schema composer | 1 | 3d | 03 | 11 | TODO |
-| [TASK-05](TASK-05-contexts-ambient.md) | Plugin & Runtime contexts + ambient services + scoped emitter | 1 | 4d | 01 | 06, 09, 10, 12, 13, 14 | TODO |
-| [TASK-06](TASK-06-plugin-api-entry.md) | Plugin API entry (class, POJO, tool helper) | 1 | 1.5d | 05 | all plugin tasks | TODO |
-| [TASK-07](TASK-07-loadedplugins-tier1-search.md) | `loadedPlugins` state + Tier-1 renderer + TF-IDF search | 2 | 2d | 02, 03 | 08, 10 | TODO |
-| [TASK-08](TASK-08-meta-tools.md) | Four meta-tools | 2 | 2d | 07 | 10 | TODO |
-| [TASK-09](TASK-09-subagent-middlewares.md) | `createSubagentAsTool` + 4 always-on middlewares (relocate) | 2 | 2d | 03, 05 | 10 | TODO |
-| [TASK-10](TASK-10-createmainagent.md) | `createMainAgent` rewrite | 2 | 5d | 07, 08, 09 | 11 | TODO |
-| [TASK-11](TASK-11-createoracleapp.md) | `createOracleApp` factory + `getNestApp` | 2 | 3d | 04, 10 | 15, all plugin tasks | TODO |
-| [TASK-12](TASK-12-modules-sessions-messages-ws.md) | Sessions, Messages, WS modules relocate | 3 | 2d | 05 | 11 | TODO |
-| [TASK-13](TASK-13-modules-secrets-ucan-auth.md) | Secrets, UCAN, Auth modules relocate | 3 | 2d | 05 | 11 | TODO |
-| [TASK-14](TASK-14-modules-subscription-throttler-checkpointer.md) | Subscription, Throttler, Matrix checkpointer, Tier-0 env schema | 3 | 1.5d | 05 | 11 | TODO |
-| [TASK-15](TASK-15-testing-harness.md) | `createTestRuntime` + mocks | 4 | 3d | 11 | 16…31 | TODO |
-| [TASK-16](TASK-16-langfuse-plugin.md) | Convert `langfusePlugin` (silent) | 5 | 1d | 11, 15 | 32 | TODO |
-| [TASK-17](TASK-17-userpreferences-plugin.md) | Convert `userPreferencesPlugin` (silent) | 5 | 1d | 11, 15 | 32 | TODO |
-| [TASK-18](TASK-18-calls-plugin.md) | Convert `callsPlugin` | 5 | 2d | 11, 15 | 32 | TODO |
-| [TASK-19](TASK-19-composio-plugin.md) | Convert `composioPlugin` | 5 | 2d | 11, 15 | 32 | TODO |
-| [TASK-20](TASK-20-firecrawl-plugin.md) | Convert `firecrawlPlugin` | 5 | 1d | 11, 15 | 32 | TODO |
-| [TASK-21](TASK-21-domain-indexer-plugin.md) | Convert `domainIndexerPlugin` | 5 | 1d | 11, 15 | 32 | TODO |
-| [TASK-22](TASK-22-sandbox-plugin.md) | Convert `sandboxPlugin` | 5 | 1.5d | 11, 15 | 23, 32 | TODO |
-| [TASK-23](TASK-23-skills-plugin.md) | Convert `skillsPlugin` (depends on sandbox) | 5 | 2d | 22 | 32 | TODO |
+| [TASK-01](TASK-01-package-skeleton.md) | Package skeleton + public types | 1 | 1.5d | — | all | Done |
+| [TASK-02](TASK-02-manifest-schema.md) | Manifest schema + validator | 1 | 1d | 01 | 03, 07 | Done |
+| [TASK-03](TASK-03-registries.md) | Six registries | 1 | 2.5d | 01, 02 | 04, 09, 10 | Done |
+| [TASK-04](TASK-04-loader-composer.md) | Plugin loader + schema composer | 1 | 3d | 03 | 11 | Done |
+| [TASK-05](TASK-05-contexts-ambient.md) | Plugin & Runtime contexts + ambient services + scoped emitter | 1 | 4d | 01 | 06, 09, 10, 12, 13, 14 | Done |
+| [TASK-06](TASK-06-plugin-api-entry.md) | Plugin API entry (class, POJO, tool helper) | 1 | 1.5d | 05 | all plugin tasks | Done |
+| [TASK-07](TASK-07-loadedplugins-tier1-search.md) | `loadedPlugins` state + Tier-1 renderer + search | 2 | 2d | 02, 03 | 08, 10 | Done |
+| [TASK-08](TASK-08-meta-tools.md) | Four meta-tools | 2 | 2d | 07 | 10 | Done |
+| [TASK-09](TASK-09-subagent-middlewares.md) | `createSubagentAsTool` + 4 always-on middlewares (relocate) | 2 | 2d | 03, 05 | 10 | Done |
+| [TASK-10](TASK-10-createmainagent.md) | `createMainAgent` rewrite | 2 | 5d | 07, 08, 09 | 11 | Done |
+| [TASK-11](TASK-11-createoracleapp.md) | `createOracleApp` factory + `getNestApp` | 2 | 3d | 04, 10 | 15, all plugin tasks | Done |
+| [TASK-12](TASK-12-modules-sessions-messages-ws.md) | Sessions, Messages, WS modules relocate | 3 | 2d | 05 | 11 | Done |
+| [TASK-13](TASK-13-modules-secrets-ucan-auth.md) | Secrets, UCAN, Auth modules relocate | 3 | 2d | 05 | 11 | Done |
+| [TASK-14](TASK-14-modules-subscription-throttler-checkpointer.md) | Subscription, Throttler, Matrix checkpointer, Tier-0 env schema | 3 | 1.5d | 05 | 11 | Done |
+| [TASK-15](TASK-15-testing-harness.md) | `createTestRuntime` + mocks | 4 | 3d | 11 | 16…31 | Done |
+| [TASK-16](TASK-16-langfuse-plugin.md) | Convert `langfusePlugin` (silent) | 5 | 1d | 11, 15 | 32 | Removed |
+| [TASK-17](TASK-17-userpreferences-plugin.md) | Convert `userPreferencesPlugin` (silent) | 5 | 1d | 11, 15 | 32 | Done |
+| [TASK-18](TASK-18-calls-plugin.md) | Convert `callsPlugin` | 5 | 2d | 11, 15 | 32 | Deferred |
+| [TASK-19](TASK-19-composio-plugin.md) | Convert `composioPlugin` | 5 | 2d | 11, 15 | 32 | Done |
+| [TASK-20](TASK-20-firecrawl-plugin.md) | Convert `firecrawlPlugin` | 5 | 1d | 11, 15 | 32 | Done |
+| [TASK-21](TASK-21-domain-indexer-plugin.md) | Convert `domainIndexerPlugin` | 5 | 1d | 11, 15 | 32 | Done |
+| [TASK-22](TASK-22-sandbox-plugin.md) | Convert `sandboxPlugin` | 5 | 1.5d | 11, 15 | 23, 32 | Done |
+| [TASK-23](TASK-23-skills-plugin.md) | Convert `skillsPlugin` (depends on sandbox) | 5 | 2d | 22 | 32 | Done |
 | [TASK-24](TASK-24-editor-plugin.md) | Convert `editorPlugin` | 5 | 2.5d | 11, 15 | 32 | TODO |
-| [TASK-25](TASK-25-agui-plugin.md) | Convert `aguiPlugin` | 5 | 1.5d | 11, 15 | 32 | TODO |
-| [TASK-26](TASK-26-portal-plugin.md) | Convert `portalPlugin` | 5 | 2d | 11, 15 | 32 | TODO |
-| [TASK-27](TASK-27-memory-plugin.md) | Convert `memoryPlugin` (with `sharedState.userProfile`) | 5 | 2.5d | 11, 15 | 32 | TODO |
+| [TASK-25](TASK-25-agui-plugin.md) | Convert `aguiPlugin` | 5 | 1.5d | 11, 15 | 32 | Done |
+| [TASK-26](TASK-26-portal-plugin.md) | Convert `portalPlugin` | 5 | 2d | 11, 15 | 32 | Done |
+| [TASK-27](TASK-27-memory-plugin.md) | Convert `memoryPlugin` (with `sharedState.userProfile`) | 5 | 2.5d | 11, 15 | 32 | Done |
 | [TASK-28](TASK-28-slack-plugin.md) | Convert `slackPlugin` | 5 | 2.5d | 11, 15 | 32 | TODO |
-| [TASK-29](TASK-29-credits-plugin.md) | Convert `creditsPlugin` | 5 | 2d | 11, 15 | 30, 32 | TODO |
+| [TASK-29](TASK-29-credits-plugin.md) | Convert `creditsPlugin` | 5 | 2d | 11, 15 | 30, 32 | Done |
 | [TASK-30](TASK-30-claim-processing-plugin.md) | Convert `claimProcessingPlugin` (depends on credits) | 5 | 2d | 29 | 32 | TODO |
 | [TASK-31](TASK-31-tasks-plugin.md) | Convert `tasksPlugin` (TasksModule + BullMQ + sub-agent) | 5 | 5d | 11, 15 | 32 | TODO |
 | [TASK-32](TASK-32-replace-app.md) | Replace `apps/app/src/` with starter | 6 | 1d | 16…31 | 33 | TODO |
 | [TASK-33](TASK-33-cli-updates.md) | CLI updates (`qiforge plugin new`, `env`, `inspect`) | 6 | 3d | 32 | 34 | TODO |
 | [TASK-34](TASK-34-documentation.md) | Documentation (READMEs + playbook + CLAUDE.md) | 6 | 2d | 33 | — | TODO |
+
+### Status notes
+
+- **TASK-16 (langfuse) — Removed.** Langfuse was replaced by LangSmith env vars (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`) declared on the base env schema. LangChain auto-wires tracing when these are set; no plugin needed.
+- **TASK-18 (calls) — Deferred.** `apps/app/src/calls/calls.controller.ts` is a `@Controller`. The plugin API has no hook for plugins to contribute NestJS Controllers. Resolving requires either (a) a new `getNestModules?(ctx)` plugin method, (b) keeping calls as a Tier-0 NestJS module, or (c) reshaping the FE contract. Same architectural question will hit slack (TASK-28) and tasks (TASK-31).
+- **In-progress (next wave):** TASK-24 (editor), TASK-28 (slack), TASK-30 (claim-processing), TASK-31 (tasks).
+
+### Beyond-spec work delivered in addition to the 34 tasks
+
+These weren't in the original spec but landed during execution:
+
+- **Runtime API extension** — `getRequestSubAgents(rtCtx)` and `getRequestTools(rtCtx)` on `OraclePlugin` (request-time builder hooks for plugins that need state-aware tool/sub-agent registration, e.g. agui's `state.agActions`, portal's `state.browserTools`).
+- **`UcanAdapter.resolveServiceDid`** — exposed on the adapter interface + `RuntimeContext.ucan`. Plugins use `ctx.ucan.resolveServiceDid(url)` instead of rolling their own did:web resolution.
+- **Memory passthrough** — runtime filter in `createMainAgent` propagates non-destructive memory CRUD tools (search/save/read/delete) to every sub-agent. `clear_memory` stays main-agent-only. No new plugin API.
+- **`defaultToAgentSpec` bug fix** — was NOOP'ing inner tools and dropping `subAgent.model`. Now uses `wrapPluginTool` + `ambient.llm.get(role)` so plugin sub-agents actually execute in production.
+- **Cleanup passes** — domain-indexer NETWORK-based URL lookup, user-preferences userName field + `set_user_preferences` tool + trimmed formality enum, credits `Redis` from ioredis directly (dropped `CreditsRedisClient` port + provider wrapper), `SKIP_LOGGING_CHAT_HISTORY_TO_MATRIX` removed across the repo.
 
 ---
 

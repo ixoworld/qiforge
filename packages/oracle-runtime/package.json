@@ -45,10 +45,13 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@blocknote/server-util": "0.29.1",
     "@composio/core": "^0.8.0",
     "@composio/langchain": "^0.8.0",
     "@ixo/common": "workspace:*",
-    "@ixo/matrix": "1.2.3",
+    "@ixo/editor": "3.0.0-beta.11",
+    "@ixo/matrix": "1.2.33",
+    "@ixo/matrix-crdt": "^1.2.1",
     "@ixo/oracles-chain-client": "1.2.1",
     "@ixo/oracles-events": "1.0.4",
     "@ixo/sqlite-saver": "^1.0.52",
@@ -73,9 +76,11 @@
     "ioredis": "^5.10.1",
     "js-tiktoken": "^1.0.21",
     "langchain": "^1.4.0",
+    "matrix-js-sdk": "^37.11.0",
     "minisearch": "^7.2.0",
     "node-emoji": "^2.2.0",
     "socket.io": "4.8.3",
+    "yjs": "^13.6.27",
     "zod": "^4.4.3"
   },
   "peerDependencies": {

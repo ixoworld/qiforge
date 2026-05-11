@@ -291,3 +291,41 @@ describe('createOracleApp — credits + subscription middleware', () => {
     expect(registerArg.enableSubscriptionMiddleware).toBe(true);
   });
 });
+
+describe('createOracleApp — plugin-contributed NestJS modules', () => {
+  it('flows getNestModules() output into RuntimeAppModule.imports', async () => {
+    class FakeSlackModule {}
+    class FakeTasksModule {}
+
+    class SocketPlugin extends OraclePlugin {
+      readonly name = 'socket-plugin';
+      readonly version = '1.0.0';
+      readonly manifest: PluginManifest = {
+        title: 'Socket',
+        summary: 'Plugin contributing a NestJS module.',
+        whenToUse: ['always'],
+        visibility: 'silent',
+      };
+      override getNestModules(): Array<typeof FakeSlackModule> {
+        return [FakeSlackModule, FakeTasksModule];
+      }
+    }
+
+    await createOracleApp({
+      ...defaultOpts,
+      plugins: [new SocketPlugin()],
+    });
+
+    const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
+    expect(registerArg.pluginNestModules).toEqual([
+      FakeSlackModule,
+      FakeTasksModule,
+    ]);
+  });
+
+  it('passes an empty array when no plugin defines getNestModules', async () => {
+    await createOracleApp({ ...defaultOpts, plugins: [] });
+    const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
+    expect(registerArg.pluginNestModules).toEqual([]);
+  });
+});

@@ -67,7 +67,13 @@ export interface SandboxPluginOptions {
  *     into the sandbox HTTP headers on every call
  */
 export class SandboxPlugin extends OraclePlugin {
-  readonly name = 'sandbox';
+  /**
+   * Static handle other plugins use to test `availablePlugins.has(...)`
+   * without hardcoding the string. Mirrors the precedent set by `MemoryPlugin`.
+   */
+  static readonly NAME = 'sandbox';
+
+  readonly name = SandboxPlugin.NAME;
   readonly version = '1.0.0';
   readonly manifest = manifest;
   override readonly configSchema = configSchema;

@@ -183,10 +183,13 @@ export async function createOracleApp(
 
   // 7. NestJS bootstrap
   const enableSubscription = resolved.loaded.some((p) => p.name === 'credits');
+  const pluginNestModules = resolved.loaded.flatMap(
+    (p) => p.getNestModules?.() ?? [],
+  );
   const appModule = RuntimeAppModule.register({
     validatedEnv: validated.config,
     userNestModules: opts.nestModules,
-    pluginNestModules: [],
+    pluginNestModules,
     enableSubscriptionMiddleware: enableSubscription,
   });
 

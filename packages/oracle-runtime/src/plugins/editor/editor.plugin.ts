@@ -1,0 +1,182 @@
+import { z } from 'zod';
+import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
+import type {
+  PluginManifest,
+  PluginSubAgent,
+  PluginTool,
+  RuntimeContext,
+} from '../../plugin-api/types.js';
+import { SandboxPlugin } from '../sandbox/index.js';
+import { createApplySandboxOutputTool } from './apply-sandbox-output.js';
+import {
+  buildBlocknoteToolsConfig,
+  type BlocknoteToolsConfig,
+} from './blocknote-tools.js';
+import { createEditorSubAgent } from './editor-agent.js';
+import { createStandaloneEditorTool } from './standalone-editor-tool.js';
+
+/**
+ * Editor plugin config. The Matrix admin credentials live in the runtime's
+ * base env schema; this plugin reads them via `ctx.config` and consumes the
+ * optional sandbox sibling env so it can wire `apply_sandbox_output_to_block`
+ * when sandbox is also loaded.
+ */
+const configSchema = z.object({
+  MATRIX_BASE_URL: z.string(),
+  MATRIX_ORACLE_ADMIN_USER_ID: z.string(),
+  MATRIX_ORACLE_ADMIN_ACCESS_TOKEN: z.string(),
+});
+
+const siblingEnvSchema = z.object({
+  SANDBOX_MCP_URL: z.url().optional(),
+  SKILLS_CAPSULES_BASE_URL: z.url().optional(),
+  ORACLE_SECRETS: z.string().optional(),
+});
+
+const manifest: PluginManifest = {
+  title: 'Editor',
+  summary:
+    'Reads and edits BlockNote pages (collaborative Y.js documents stored in Matrix rooms).',
+  whenToUse: [
+    'User asks to read, summarize, or edit a page in their workspace.',
+    'User wants to update specific blocks (status, properties, content) on a page.',
+    'User wants to create a new page or update an existing one.',
+  ],
+  whenNotToUse: [
+    'IXO entity lookups (use the Domain Indexer).',
+    'Web search or scraping (use Firecrawl).',
+    'Long-term user memory (use Memory).',
+  ],
+  tags: ['editor', 'blocknote', 'pages', 'documents'],
+  category: 'data',
+  visibility: 'always',
+  stability: 'stable',
+};
+
+function parseToolsConfig(cfg: Record<string, unknown>): BlocknoteToolsConfig {
+  const parsed = configSchema.parse(cfg);
+  return buildBlocknoteToolsConfig({
+    baseUrl: parsed.MATRIX_BASE_URL,
+    userId: parsed.MATRIX_ORACLE_ADMIN_USER_ID,
+    accessToken: parsed.MATRIX_ORACLE_ADMIN_ACCESS_TOKEN,
+  });
+}
+
+function readEditorRoomId(rtCtx: RuntimeContext): string | undefined {
+  const value = rtCtx.history.state.editorRoomId;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readSpaceId(rtCtx: RuntimeContext): string | undefined {
+  const value = rtCtx.history.state.spaceId;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function buildUserMatrixId(rtCtx: RuntimeContext): string | undefined {
+  // Mirrors today's apps/app pattern: derive `@did-ixo-...:homeserver` from
+  // the canonical user DID + base URL when no explicit Matrix ID is wired in.
+  const did = rtCtx.user.did;
+  if (!did) return undefined;
+  const matrixId = rtCtx.user.matrixUserId;
+  return matrixId || undefined;
+}
+
+/**
+ * Editor plugin. Behaviour by state:
+ *
+ *   - `state.editorRoomId` set → editor sub-agent (`call_editor_agent`)
+ *     bound to that room; plus `apply_sandbox_output_to_block` when the
+ *     sandbox plugin is also loaded.
+ *   - `state.spaceId` set without `editorRoomId` → standalone
+ *     `call_editor_agent` tool that accepts a `room_id` argument per call.
+ *   - neither set → no contributions; the agent has no editor surface.
+ */
+export class EditorPlugin extends OraclePlugin {
+  static readonly NAME = 'editor';
+
+  readonly name = EditorPlugin.NAME;
+
+  readonly version = '1.0.0';
+
+  readonly manifest = manifest;
+
+  override readonly configSchema = configSchema;
+
+  override async getRequestSubAgents(
+    rtCtx: RuntimeContext,
+  ): Promise<PluginSubAgent[]> {
+    const editorRoomId = readEditorRoomId(rtCtx);
+    if (!editorRoomId) return [];
+
+    const toolsConfig = parseToolsConfig(rtCtx.config);
+
+    try {
+      const subAgent = await createEditorSubAgent({
+        room: editorRoomId,
+        mode: 'edit',
+        toolsConfig,
+        userMatrixId: buildUserMatrixId(rtCtx),
+        spaceId: readSpaceId(rtCtx),
+      });
+      return [subAgent];
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : String(error);
+      rtCtx.logger.error(`[editor] failed to build sub-agent: ${detail}`);
+      return [];
+    }
+  }
+
+  override async getRequestTools(
+    rtCtx: RuntimeContext,
+  ): Promise<PluginTool[]> {
+    const tools: PluginTool[] = [];
+    const editorRoomId = readEditorRoomId(rtCtx);
+    const spaceId = readSpaceId(rtCtx);
+
+    if (!editorRoomId && !spaceId) {
+      return tools;
+    }
+
+    const toolsConfig = parseToolsConfig(rtCtx.config);
+
+    // Standalone editor tool — only when a space is in scope but no specific
+    // editor session is active. The agent supplies `room_id` per call.
+    if (!editorRoomId && spaceId) {
+      tools.push(
+        createStandaloneEditorTool({
+          toolsConfig,
+          spaceId,
+          userMatrixId: buildUserMatrixId(rtCtx),
+        }),
+      );
+    }
+
+    // apply_sandbox_output_to_block — only with both an editor session AND
+    // a loaded sandbox plugin (it brokers UCAN headers for the MCP call).
+    if (editorRoomId && rtCtx.availablePlugins.has(SandboxPlugin.NAME)) {
+      const siblings = siblingEnvSchema.safeParse(rtCtx.config);
+      const sandboxMcpUrl = siblings.success
+        ? siblings.data.SANDBOX_MCP_URL
+        : undefined;
+
+      if (sandboxMcpUrl) {
+        tools.push(
+          createApplySandboxOutputTool({
+            sandboxMcpUrl,
+            skillsServiceUrl: siblings.success
+              ? siblings.data.SKILLS_CAPSULES_BASE_URL
+              : undefined,
+            oracleSecretsRaw: siblings.success
+              ? (siblings.data.ORACLE_SECRETS ?? '')
+              : '',
+            toolsConfig,
+            editorRoomId,
+          }),
+        );
+      }
+    }
+
+    return tools;
+  }
+}

@@ -1,3 +1,4 @@
+import type { Type } from '@nestjs/common';
 import type { z } from 'zod';
 import type {
   AgentMiddleware,
@@ -87,4 +88,15 @@ export abstract class OraclePlugin {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (state: any, runCtx: RuntimeContext) => unknown
   >;
+
+  /**
+   * NestJS modules the plugin contributes. Spread into `RuntimeAppModule.imports`,
+   * so the module gets full DI access to Tier-0 services (Sessions, Messages,
+   * Cache, etc.) and can declare its own Controllers, providers, and
+   * `OnModuleInit` / `OnModuleDestroy` lifecycle hooks.
+   *
+   * Use this for plugins that need a long-lived NestJS service (Slack socket,
+   * BullMQ workers) or HTTP Controllers (Calls REST API).
+   */
+  getNestModules?(): Type[];
 }
