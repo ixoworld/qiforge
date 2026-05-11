@@ -44,9 +44,9 @@ function newRegistry(): ManifestRegistry {
   );
   reg.register(
     makePlugin({
-      name: 'langfuse',
+      name: 'tracing',
       manifest: makeManifest({
-        title: 'Langfuse',
+        title: 'Tracing',
         summary: 'Observability.',
         visibility: 'silent',
         tags: ['observability'],
@@ -77,7 +77,7 @@ describe('list_capabilities', () => {
       makeRuntimeContext(),
     )) as Listing[];
     const names = out.map((e) => e.name).sort();
-    expect(names).toEqual(['composio', 'langfuse', 'memory']);
+    expect(names).toEqual(['composio', 'memory', 'tracing']);
   });
 
   it('excludes on-demand plugins when includeOnDemand is false', async () => {

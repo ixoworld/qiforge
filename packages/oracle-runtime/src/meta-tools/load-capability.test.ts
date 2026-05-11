@@ -45,10 +45,10 @@ async function buildRegistries(): Promise<{
     }),
     getTools: () => [makeTool('search_memory', { description: 'Search memory.' })],
   });
-  const langfuse = makePlugin({
-    name: 'langfuse',
+  const tracing = makePlugin({
+    name: 'tracing',
     manifest: makeManifest({
-      title: 'Langfuse',
+      title: 'Tracing',
       summary: 'Observability — runs as middleware.',
       visibility: 'silent',
     }),
@@ -56,11 +56,11 @@ async function buildRegistries(): Promise<{
 
   manifests.register(composio);
   manifests.register(memory);
-  manifests.register(langfuse);
+  manifests.register(tracing);
 
   tools.register(composio);
   tools.register(memory);
-  tools.register(langfuse);
+  tools.register(tracing);
   await tools.collect(makeBuildCtx());
 
   return { manifests, tools };
@@ -131,7 +131,7 @@ describe('load_capability', () => {
     const tool = buildLoadCapabilityTool(manifests, tools);
 
     await expect(
-      tool.handler({ name: 'langfuse' }, makeRuntimeContext()),
+      tool.handler({ name: 'tracing' }, makeRuntimeContext()),
     ).rejects.toThrow(/internal|silent|find_capability/i);
   });
 

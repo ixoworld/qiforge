@@ -108,7 +108,6 @@ export {
   tasksPlugin,
   creditsPlugin,
   claimProcessingPlugin,
-  langfusePlugin,
   callsPlugin,
   userPreferencesPlugin,
 } from './plugins/index.js';

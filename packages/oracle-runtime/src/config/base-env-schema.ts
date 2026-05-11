@@ -5,9 +5,14 @@ import { z } from 'zod';
  * regardless of which plugins are installed.
  *
  * Plugin-owned env vars (Composio, Slack, Memory, Firecrawl, Domain Indexer,
- * Sandbox, Skills, Credits/Subscription, Tasks/Redis, Langfuse) are NOT
- * declared here — each plugin contributes its own `configSchema` which the
- * boot composer extends onto this base schema at runtime.
+ * Sandbox, Skills, Credits/Subscription, Tasks/Redis) are NOT declared here —
+ * each plugin contributes its own `configSchema` which the boot composer
+ * extends onto this base schema at runtime.
+ *
+ * `LANGSMITH_*` keys are declared here because LangChain auto-wires tracing
+ * when they are present in `process.env`; the runtime never reads them
+ * directly, but documenting them in the base schema makes them visible to
+ * `qiforge env` / inspect tooling.
  *
  * Field names match today's `apps/app/src/config.ts` exactly so existing
  * `.env` files keep working without renames.
@@ -54,6 +59,12 @@ export const baseEnvSchema = z.object({
 
   // Live agent auth
   LIVE_AGENT_AUTH_API_KEY: z.string().optional().default(''),
+
+  // LangSmith tracing — auto-wired by LangChain when these are set. Optional.
+  LANGSMITH_TRACING: z.string().optional(),
+  LANGSMITH_API_KEY: z.string().optional(),
+  LANGSMITH_PROJECT: z.string().optional(),
+  LANGSMITH_ENDPOINT: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;

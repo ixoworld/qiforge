@@ -1,5 +1,7 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
+import { DomainIndexerPlugin } from './domain-indexer/index.js';
+import { UserPreferencesPlugin } from './user-preferences/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
   title,
@@ -23,7 +25,7 @@ const stub = <Name extends string>(
 export const memoryPlugin = stub('memory', 'Memory');
 export const portalPlugin = stub('portal', 'Portal');
 export const firecrawlPlugin = stub('firecrawl', 'Firecrawl');
-export const domainIndexerPlugin = stub('domain-indexer', 'Domain Indexer');
+export const domainIndexerPlugin = new DomainIndexerPlugin();
 export const composioPlugin = stub('composio', 'Composio', {
   autoDetect: (env) => Boolean(env.COMPOSIO_API_KEY),
   autoDetectHint: 'COMPOSIO_API_KEY',
@@ -51,13 +53,8 @@ export const claimProcessingPlugin = stub(
   'Claim Processing',
   { dependsOn: ['credits'] },
 );
-export const langfusePlugin = stub('langfuse', 'Langfuse', {
-  autoDetect: (env) =>
-    Boolean(env.LANGFUSE_SECRET_KEY && env.LANGFUSE_PUBLIC_KEY && env.LANGFUSE_HOST),
-  autoDetectHint: 'LANGFUSE_SECRET_KEY + LANGFUSE_PUBLIC_KEY + LANGFUSE_HOST',
-});
 export const callsPlugin = stub('calls', 'Calls');
-export const userPreferencesPlugin = stub('user-preferences', 'User Preferences');
+export const userPreferencesPlugin = new UserPreferencesPlugin();
 
 /**
  * The canonical bundled-plugin set used by `createOracleApp` when the
@@ -81,7 +78,6 @@ export const BUNDLED_PLUGINS = [
   tasksPlugin,
   creditsPlugin,
   claimProcessingPlugin,
-  langfusePlugin,
   callsPlugin,
   userPreferencesPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

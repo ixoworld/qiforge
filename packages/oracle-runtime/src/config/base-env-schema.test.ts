@@ -71,9 +71,6 @@ describe('baseEnvSchema', () => {
     'SUBSCRIPTION_URL',
     'SUBSCRIPTION_ORACLE_MCP_URL',
     'REDIS_URL',
-    'LANGFUSE_SECRET_KEY',
-    'LANGFUSE_PUBLIC_KEY',
-    'LANGFUSE_HOST',
     'BLOCKSYNC_URI',
   ];
 
@@ -110,6 +107,10 @@ describe('baseEnvSchema', () => {
       'OPEN_ROUTER_API_KEY',
       'NEBIUS_API_KEY',
       'LIVE_AGENT_AUTH_API_KEY',
+      'LANGSMITH_TRACING',
+      'LANGSMITH_API_KEY',
+      'LANGSMITH_PROJECT',
+      'LANGSMITH_ENDPOINT',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);
   });

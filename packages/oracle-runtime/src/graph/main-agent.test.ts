@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   ConfigSchemaRegistry,
@@ -68,7 +68,12 @@ function makeAmbient(): AmbientServices {
       })),
     },
     llm: {
-      get: vi.fn(() => ({ invoke: vi.fn() } as unknown as ReturnType<AmbientServices['llm']['get']>)),
+      get: vi.fn(
+        () =>
+          ({ invoke: vi.fn() }) as unknown as ReturnType<
+            AmbientServices['llm']['get']
+          >,
+      ),
     },
     emit: { emit: vi.fn() },
     ucan: {
@@ -98,9 +103,7 @@ function emptyRegistries(): MainAgentArgs['registries'] {
   };
 }
 
-function baseArgs(
-  overrides: Partial<MainAgentArgs> = {},
-): MainAgentArgs {
+function baseArgs(overrides: Partial<MainAgentArgs> = {}): MainAgentArgs {
   return {
     registries: overrides.registries ?? emptyRegistries(),
     identity: {
@@ -140,7 +143,7 @@ describe('createMainAgent', () => {
 
     const [params] = createAgentCalls;
     const toolNames =
-      (params.tools as { name: string }[] | undefined)?.map((t) => t.name) ??
+      (params?.tools as { name: string }[] | undefined)?.map((t) => t.name) ??
       [];
 
     expect(toolNames.slice(0, 4)).toEqual([
@@ -207,7 +210,9 @@ describe('createMainAgent', () => {
         manifest: makeManifest({ visibility: 'silent' }),
         getSubAgents: () => [
           makeSubAgent('search_agent', {
-            tools: [makeTool('search', { schema: z.object({ q: z.string() }) })],
+            tools: [
+              makeTool('search', { schema: z.object({ q: z.string() }) }),
+            ],
           }),
         ],
       }),
