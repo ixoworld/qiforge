@@ -1,4 +1,4 @@
-import type { Type } from '@nestjs/common';
+import type { DynamicModule, Type } from '@nestjs/common';
 import type { z } from 'zod';
 import type {
   AgentMiddleware,
@@ -95,8 +95,11 @@ export abstract class OraclePlugin {
    * Cache, etc.) and can declare its own Controllers, providers, and
    * `OnModuleInit` / `OnModuleDestroy` lifecycle hooks.
    *
+   * Returns either plain module classes or `DynamicModule` configs (from
+   * `Module.register(...)` / `forRoot(...)` style helpers).
+   *
    * Use this for plugins that need a long-lived NestJS service (Slack socket,
    * BullMQ workers) or HTTP Controllers (Calls REST API).
    */
-  getNestModules?(): Type[];
+  getNestModules?(): Array<Type | DynamicModule>;
 }

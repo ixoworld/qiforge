@@ -1,5 +1,10 @@
 import { MatrixManager } from '@ixo/matrix';
-import { Logger, type INestApplication, type Type } from '@nestjs/common';
+import {
+  Logger,
+  type DynamicModule,
+  type INestApplication,
+  type Type,
+} from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import pkg from '../../package.json' with { type: 'json' };
 import { baseEnvSchema } from '../config/base-env-schema.js';
@@ -39,7 +44,7 @@ export interface CreateOracleAppOptions {
   features?: Partial<Record<BundledFeatureName | (string & {}), FeatureToggle>>;
   plugins?: OraclePlugin[];
   /** Developer's own NestJS modules. Spread into `RuntimeAppModule.imports`. */
-  nestModules?: Type[];
+  nestModules?: Array<Type | DynamicModule>;
   /**
    * Optional override of the bundled plugin set. Provided primarily for tests
    * so the harness can spin up `createOracleApp` without dragging in the full

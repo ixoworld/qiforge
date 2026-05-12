@@ -18,7 +18,7 @@ import {
 } from '@langchain/langgraph';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import { TokenLimiter } from '../credits/token-limiter.js';
+import { TokenLimiter } from './token-limiter.js';
 
 /** Token used to inject the credits-plugin TokenLimiter instance into the service. */
 export const CLAIM_PROCESSING_TOKEN_LIMITER = Symbol.for(

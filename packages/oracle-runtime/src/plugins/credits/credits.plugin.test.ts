@@ -189,4 +189,28 @@ describe('CreditsPlugin', () => {
     expect(rt.listTools('credits')).toEqual([]);
     await rt.close();
   });
+
+  describe('getNestModules — claim-processing wiring', () => {
+    it('returns the ClaimProcessingModule when redis + network are both set', () => {
+      const plugin = new CreditsPlugin({
+        redis: makeRedisStub(100),
+        network: 'devnet',
+      });
+      const modules = plugin.getNestModules();
+      expect(modules).toHaveLength(1);
+      // DynamicModule shape: { module, providers, exports }
+      const dynamicModule = modules[0] as { module: unknown };
+      expect(dynamicModule.module).toBeDefined();
+    });
+
+    it('returns [] when redis is null', () => {
+      const plugin = new CreditsPlugin({ network: 'devnet' });
+      expect(plugin.getNestModules()).toEqual([]);
+    });
+
+    it('returns [] when network is omitted (cron cannot start)', () => {
+      const plugin = new CreditsPlugin({ redis: makeRedisStub(100) });
+      expect(plugin.getNestModules()).toEqual([]);
+    });
+  });
 });

@@ -107,7 +107,6 @@ export {
   slackPlugin,
   tasksPlugin,
   creditsPlugin,
-  claimProcessingPlugin,
   callsPlugin,
   userPreferencesPlugin,
 } from './plugins/index.js';

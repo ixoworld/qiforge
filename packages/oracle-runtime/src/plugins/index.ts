@@ -1,7 +1,6 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
-import { ClaimProcessingPlugin } from './claim-processing/index.js';
 import { ComposioPlugin } from './composio/index.js';
 import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
@@ -48,7 +47,6 @@ export const tasksPlugin = stub('tasks', 'Tasks', {
   autoDetectHint: 'REDIS_URL',
 });
 export const creditsPlugin = new CreditsPlugin();
-export const claimProcessingPlugin = new ClaimProcessingPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 
@@ -73,7 +71,6 @@ export const BUNDLED_PLUGINS = [
   slackPlugin,
   tasksPlugin,
   creditsPlugin,
-  claimProcessingPlugin,
   callsPlugin,
   userPreferencesPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

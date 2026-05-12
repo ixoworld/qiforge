@@ -1,3 +1,4 @@
+import type { DynamicModule, Type } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
@@ -6,6 +7,7 @@ import type {
   PluginContext,
   PluginManifest,
 } from '../../plugin-api/types.js';
+import { ClaimProcessingModule } from './claim-processing.module.js';
 import { createCreditsMiddleware } from './credits-middleware.js';
 import {
   TokenLimiter,
@@ -21,6 +23,12 @@ export interface CreditsPluginOptions {
    * same client they already use elsewhere in the app.
    */
   redis?: Redis | null;
+  /**
+   * Network tier — required when `redis` is set, so the claim-processing
+   * Nest module can construct its `TokenLimiter` at boot. Omitted in tests
+   * that don't exercise the cron path.
+   */
+  network?: CreditsNetwork;
   /** Optional per-model pricing lookup; defaults to flat-rate fallback. */
   modelPricingLookup?: ModelPricingLookup;
 }
@@ -38,13 +46,17 @@ interface AppliedConfig extends CreditsConfig {
 }
 
 /**
- * Enforces per-user credit budgets on every model call. Silent (no
- * agent-visible tools) — runs purely as middleware. Stays loaded by
- * default and only opts out when `DISABLE_CREDITS=true`.
+ * Owns the full credit lifecycle:
+ *   - **Enforcement**: per-request middleware that aborts model calls when
+ *     the user is out of credits (`createCreditsMiddleware` + `TokenLimiter`).
+ *   - **Settlement**: background cron that converts held credits into
+ *     on-chain claims, shipped via `ClaimProcessingModule` (returned from
+ *     `getNestModules()` when Redis is configured).
  *
- * When loaded, this plugin also activates the runtime's Tier-0
- * `SubscriptionMiddleware`, which gates the HTTP request before the
- * graph even runs.
+ * Silent (no agent-visible tools). Stays loaded by default and only opts
+ * out when `DISABLE_CREDITS=true`. When loaded, this plugin also activates
+ * the runtime's Tier-0 `SubscriptionMiddleware`, which gates the HTTP
+ * request before the graph even runs.
  */
 export class CreditsPlugin extends OraclePlugin {
   static readonly NAME = 'credits';
@@ -56,7 +68,7 @@ export class CreditsPlugin extends OraclePlugin {
   readonly manifest: PluginManifest = {
     title: 'Credits',
     summary:
-      'Enforces per-user credit budgets; aborts model calls when the user is out of credits.',
+      'Enforces per-user credit budgets and settles held credits to the chain on a cron.',
     whenToUse: [],
     visibility: 'silent',
     stability: 'stable',
@@ -69,11 +81,14 @@ export class CreditsPlugin extends OraclePlugin {
 
   private readonly redis: Redis | null;
 
+  private readonly network?: CreditsNetwork;
+
   private readonly modelPricingLookup?: ModelPricingLookup;
 
   constructor(options: CreditsPluginOptions = {}) {
     super();
     this.redis = options.redis ?? null;
+    this.network = options.network;
     this.modelPricingLookup = options.modelPricingLookup;
   }
 
@@ -101,5 +116,18 @@ export class CreditsPlugin extends OraclePlugin {
     });
 
     return [createCreditsMiddleware({ limiter, logger: ctx.logger })];
+  }
+
+  override getNestModules(): Array<Type | DynamicModule> {
+    // Claim-processing cron settles held credits to the chain. Only meaningful
+    // when Redis + a known network are configured. Host opt-in is explicit:
+    // pass both `redis` AND `network` to the plugin's constructor.
+    if (!this.redis || !this.network) return [];
+    return [
+      ClaimProcessingModule.register({
+        redis: this.redis,
+        network: this.network,
+      }),
+    ];
   }
 }

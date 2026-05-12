@@ -25,9 +25,9 @@ export interface RuntimeAppModuleOptions {
   /** Pre-validated env values, fed straight into `ConfigModule`. */
   validatedEnv: Record<string, unknown>;
   /** Additional modules supplied by the fork at `createOracleApp`. */
-  userNestModules?: Type[];
+  userNestModules?: Array<Type | DynamicModule>;
   /** Plugin-shipped NestJS modules collected from bundled plugins. */
-  pluginNestModules?: Type[];
+  pluginNestModules?: Array<Type | DynamicModule>;
   /**
    * Whether to wire `SubscriptionMiddleware` ahead of the routes. The credits
    * plugin owns that decision — when credits is disabled, only auth runs.

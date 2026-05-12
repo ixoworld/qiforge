@@ -47,7 +47,7 @@ The slicing rules I followed:
 
 Status: `TODO` → `In Progress` → `Done`. Special states: `Removed` (no longer needed), `Deferred` (parked pending design decision).
 
-**Progress: 25 of 32 in-scope tasks done.** TASK-16 (langfuse) removed; TASK-18 (calls) deferred — see notes below the table.
+**Progress: 29 of 31 in-scope tasks done.** TASK-16 (langfuse) removed; TASK-18 (calls) and TASK-31 (tasks) deferred — see notes below the table.
 
 | ID | Task | Phase | Effort | Depends on | Blocks | Status |
 |---|---|---|---|---|---|---|
@@ -74,23 +74,31 @@ Status: `TODO` → `In Progress` → `Done`. Special states: `Removed` (no longe
 | [TASK-21](TASK-21-domain-indexer-plugin.md) | Convert `domainIndexerPlugin` | 5 | 1d | 11, 15 | 32 | Done |
 | [TASK-22](TASK-22-sandbox-plugin.md) | Convert `sandboxPlugin` | 5 | 1.5d | 11, 15 | 23, 32 | Done |
 | [TASK-23](TASK-23-skills-plugin.md) | Convert `skillsPlugin` (depends on sandbox) | 5 | 2d | 22 | 32 | Done |
-| [TASK-24](TASK-24-editor-plugin.md) | Convert `editorPlugin` | 5 | 2.5d | 11, 15 | 32 | TODO |
+| [TASK-24](TASK-24-editor-plugin.md) | Convert `editorPlugin` | 5 | 2.5d | 11, 15 | 32 | Done |
 | [TASK-25](TASK-25-agui-plugin.md) | Convert `aguiPlugin` | 5 | 1.5d | 11, 15 | 32 | Done |
 | [TASK-26](TASK-26-portal-plugin.md) | Convert `portalPlugin` | 5 | 2d | 11, 15 | 32 | Done |
 | [TASK-27](TASK-27-memory-plugin.md) | Convert `memoryPlugin` (with `sharedState.userProfile`) | 5 | 2.5d | 11, 15 | 32 | Done |
-| [TASK-28](TASK-28-slack-plugin.md) | Convert `slackPlugin` | 5 | 2.5d | 11, 15 | 32 | TODO |
+| [TASK-28](TASK-28-slack-plugin.md) | Convert `slackPlugin` | 5 | 2.5d | 11, 15 | 32 | Done |
 | [TASK-29](TASK-29-credits-plugin.md) | Convert `creditsPlugin` | 5 | 2d | 11, 15 | 30, 32 | Done |
-| [TASK-30](TASK-30-claim-processing-plugin.md) | Convert `claimProcessingPlugin` (depends on credits) | 5 | 2d | 29 | 32 | TODO |
-| [TASK-31](TASK-31-tasks-plugin.md) | Convert `tasksPlugin` (TasksModule + BullMQ + sub-agent) | 5 | 5d | 11, 15 | 32 | TODO |
-| [TASK-32](TASK-32-replace-app.md) | Replace `apps/app/src/` with starter | 6 | 1d | 16…31 | 33 | TODO |
+| [TASK-30](TASK-30-claim-processing-plugin.md) | Convert `claimProcessingPlugin` (depends on credits) | 5 | 2d | 29 | 32 | Done |
+| [TASK-31](TASK-31-tasks-plugin.md) | Convert `tasksPlugin` (TasksModule + BullMQ + sub-agent) | 5 | 5d | 11, 15 | 32 | Deferred |
+| [TASK-32](TASK-32-replace-app.md) | Replace `apps/app/src/` with starter | 6 | 1d | 16…31 | 33 | TODO (split into 32a–e) |
 | [TASK-33](TASK-33-cli-updates.md) | CLI updates (`qiforge plugin new`, `env`, `inspect`) | 6 | 3d | 32 | 34 | TODO |
 | [TASK-34](TASK-34-documentation.md) | Documentation (READMEs + playbook + CLAUDE.md) | 6 | 2d | 33 | — | TODO |
 
+### Working philosophy — reuse, don't blindly copy
+
+When converting plugins or rewiring runtime modules, the goal is to **reuse as much existing apps/app code as possible**, BUT only as long as it aligns with the plugin API. If a lifted file violates the plugin contracts (module-level singletons, direct `MatrixManager.getInstance()` or env reads, lifted providers that bypass `ctx.llm`/`ctx.matrix`/`ctx.ucan`/`ctx.config`, etc.), **stop and propose a reimplementation** before pressing on. Reimplementation requires explicit user confirmation. The tasks port (TASK-31) is the cautionary tale — it copy-pasted everything and ended up bypassing 5+ plugin contracts; we deferred and will rebuild properly. The right cadence: lift → check alignment → if it's clean keep it; if it isn't, surface the violation, propose the rewrite, get sign-off, then do it.
+
 ### Status notes
 
-- **TASK-16 (langfuse) — Removed.** Langfuse was replaced by LangSmith env vars (`LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`) declared on the base env schema. LangChain auto-wires tracing when these are set; no plugin needed.
-- **TASK-18 (calls) — Deferred.** `apps/app/src/calls/calls.controller.ts` is a `@Controller`. The plugin API has no hook for plugins to contribute NestJS Controllers. Resolving requires either (a) a new `getNestModules?(ctx)` plugin method, (b) keeping calls as a Tier-0 NestJS module, or (c) reshaping the FE contract. Same architectural question will hit slack (TASK-28) and tasks (TASK-31).
-- **In-progress (next wave):** TASK-24 (editor), TASK-28 (slack), TASK-30 (claim-processing), TASK-31 (tasks).
+- **TASK-16 (langfuse) — Removed.** Replaced by `LANGSMITH_*` env vars on the base env schema. LangChain auto-wires tracing when set; no plugin needed.
+- **TASK-18 (calls) — Deferred.** Has `@Controller('calls')`. The `getNestModules()` API extension that landed later would technically unblock it, but user decision to skip the calls plugin for now. Revisit alongside the tasks rebuild.
+- **TASK-31 (tasks) — Deferred for full rebuild.** A port attempt revealed the apps/app TasksModule is fundamentally incompatible with the new plugin contracts: it uses module-level singletons (`getActiveTasksService`), bypasses `ctx.matrix.*` (calls `MatrixManager.getInstance()` directly), bypasses `ctx.llm.get(role)` (lifts a custom provider), bypasses `ctx.config` (reads env directly), and runs workers as the oracle admin instead of threading per-user UCAN. Workers also don't actually integrate with the memory plugin's tool surface (the soft-dep is a stub). The port was abandoned; reimplementation should: (1) use `ctx.matrix`/`ctx.llm`/`ctx.ucan`/`ctx.config` throughout, (2) re-enter the agent via the runtime's `MainAgentGraph` with a proper per-user `RuntimeContext`, (3) wire memory soft-dep via `ctx.availablePlugins.has('memory')` + actual memory tool calls, (4) ship `TasksModule` via `getNestModules()` (the API hook now exists). Pure-data files from the port (task-doc, task-page-template, task-meta, template-registry, scheduler types, the 3 lifted unit specs) are reusable; runtime-layer files must be rewritten.
+- **Runtime API additions during execution:**
+  - `getRequestSubAgents(rtCtx)` / `getRequestTools(rtCtx)` — for state-aware plugins (agui, portal)
+  - `getNestModules()` — for plugins shipping NestJS modules (slack landed using this; tasks rebuild will use it)
+  - `UcanAdapter.resolveServiceDid(url)` — exposed so plugins don't roll their own did:web resolution
 
 ### Beyond-spec work delivered in addition to the 34 tasks
 
