@@ -167,6 +167,16 @@ Use curl (or oracles-client-sdk) against a locally-booted oracle. Verify:
 6. Credits middleware enforces budgets
 7. Matrix room messages get logged
 
+#### Specific behaviors to verify (from 32b)
+
+- **`OracleRuntimeBundleHolder` populates correctly**: confirm `holder.get()` doesn't throw on the first chat request; verify all 5 fields (`ambient`, `registries`, `identity`, `config`, `availablePlugins`) are populated.
+- **Per-process sync-once**: first chat request for a user pulls Matrix → SQLite (slow, 100-500ms); the second request for the same user skips the sync (fast). Log line `Syncing checkpoint for user ...` should appear exactly once per user per process.
+- **Auth cache miss is hot**: with `@ixo/ucan` hoisted to top-of-file import, the first cache miss should be in the 30-100ms range, not 300-500ms.
+- **Subscription cache hit skips Redis writes**: verify `setSubscriptionPayload` + `overrideUserBalance` are NOT called on the second authenticated request within the 3-minute TTL window.
+- **Registry boot warm-up**: `registries.tools.bootCache` and `subAgents.bootCache` should be non-null after `createOracleApp` resolves; per-request `collect()` should only call `getRequestTools/getRequestSubAgents` (verify via instrumentation that boot-time hooks fire once).
+- **File-processing credit deduction**: send a chat with an image attachment, verify the user's Redis balance decrements by the expected amount (cost USD × markup) via the `FileProcessingSinkModule` path.
+- **`priorState` via `getTuple` returns the right shape**: chat once, then in a follow-up turn verify the agent's prompt includes the previously-set `userPreferences`/`userContext` and that any on-demand plugins loaded in turn 1 are visible to the agent in turn 2. **If the second-turn build does NOT see prior `loadedPlugins`/`userContext`, the `getTuple` approach in `agent-builder.ts` is broken — switch to building a throwaway agent + `getGraphState`, or drop the pre-read entirely and accept the regression.** The comment in `agent-builder.ts` enumerates the alternatives.
+
 Document the smoke procedure in `specs/notes/task-32-smoke.md` so it's reproducible.
 
 Depends on 32d.

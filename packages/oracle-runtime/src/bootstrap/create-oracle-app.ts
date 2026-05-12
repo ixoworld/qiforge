@@ -1,4 +1,6 @@
 import { MatrixManager } from '@ixo/matrix';
+import { SqliteSaver } from '@ixo/sqlite-saver';
+import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   Logger,
   type DynamicModule,
@@ -8,13 +10,17 @@ import {
 import { NestFactory } from '@nestjs/core';
 import pkg from '../../package.json' with { type: 'json' };
 import { baseEnvSchema } from '../config/base-env-schema.js';
+import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { validateManifest } from '../manifest/validator.js';
+import { UserMatrixSqliteSyncService } from '../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
+import { OracleRuntimeBundleHolder } from '../modules/messages/oracle-runtime-bundle.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
   OracleIdentity,
   Logger as PluginLogger,
 } from '../plugin-api/types.js';
 import { BUNDLED_PLUGINS } from '../plugins/index.js';
+import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import { buildAmbientServices } from './ambient-factory.js';
 import {
@@ -67,6 +73,14 @@ export interface CreateOracleAppOptions {
   skipGracefulShutdown?: boolean;
   /** Override the bootstrap logger. Falls back to NestJS `Logger`. */
   logger?: PluginLogger;
+  /**
+   * Optional overrides for the agent-build hooks (checkpointer, model
+   * resolver, prompt section snippets). Merged on top of the runtime's
+   * defaults — host hooks WIN. The runtime supplies a per-user SQLite
+   * checkpointer by default; pass `{ checkpointerForUser: ... }` here to
+   * swap it for an alternate implementation.
+   */
+  hooks?: MainAgentHooks;
 }
 
 export interface PluginStatusReport {
@@ -212,7 +226,7 @@ export async function createOracleApp(
 
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
-  // the messages controller (32b) on a per-request basis.
+  // the messages controller on a per-request basis.
   const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
   const ambient = buildAmbientServices({
     nestApp,
@@ -222,7 +236,66 @@ export async function createOracleApp(
     logger,
   });
 
-  // 9. Background Matrix init — fire-and-forget.
+  // 9. Warm the boot caches inside each registry so the per-request agent
+  // build only re-runs the request-time hooks (`getRequestTools`,
+  // `getRequestSubAgents`). Boot-time outputs are identical for every
+  // request and don't need to be recomputed.
+  const warmBuildCtx = buildPluginContext({
+    config: validated.config,
+    identity: opts.identity,
+    availablePlugins: loadedPluginNames,
+    logger,
+    pluginName: '__runtime__',
+  });
+  await registries.tools.collectBoot(warmBuildCtx);
+  registries.subAgents.collectBoot(warmBuildCtx);
+  registries.middlewares.collect(warmBuildCtx);
+
+  // 10. Build the merged hooks the agent build will use:
+  //   - default: per-user SQLite checkpointer backed by
+  //     `UserMatrixSqliteSyncService` (already DI-managed)
+  //   - override: anything the host passed in `opts.hooks` wins
+  //
+  // The merged hooks live inside the bundle so `agent-builder.ts` reads
+  // them through `bundle.hooks` without ever rewriting the contract.
+  const checkpointSync = nestApp.get(UserMatrixSqliteSyncService, {
+    strict: false,
+  });
+  const defaultHooks: MainAgentHooks = checkpointSync
+    ? {
+        checkpointerForUser: async (userDid: string) => {
+          const db = await checkpointSync.getUserDatabase(userDid);
+          // Cross-package interop: SqliteSaver extends BaseCheckpointSaver
+          // from `@langchain/langgraph-checkpoint`; the hook return type
+          // pulls from `@langchain/langgraph`. pnpm hoists these into
+          // separate type identities even at the same version — they are
+          // structurally identical at runtime.
+          return SqliteSaver.fromDatabase(db) as unknown as BaseCheckpointSaver;
+        },
+      }
+    : {};
+  const mergedHooks: MainAgentHooks = { ...defaultHooks, ...opts.hooks };
+
+  // 11. Populate the OracleRuntimeBundleHolder so MessagesService (and any
+  // other Nest-managed consumer) can grab the boot-snapshot per request.
+  // `strict: false` so we get `undefined` instead of throwing when the
+  // holder isn't registered (lightweight test runtimes that skip
+  // MessagesModule). In that case the bundle is just not available.
+  const bundleHolder = nestApp.get(OracleRuntimeBundleHolder, {
+    strict: false,
+  });
+  if (bundleHolder) {
+    bundleHolder.populate({
+      ambient,
+      registries,
+      identity: opts.identity,
+      config: validated.config,
+      availablePlugins: loadedPluginNames,
+      hooks: mergedHooks,
+    });
+  }
+
+  // 12. Background Matrix init — fire-and-forget.
   const beforeListenHooks: Array<
     (nestApp: INestApplication) => Promise<void> | void
   > = [];

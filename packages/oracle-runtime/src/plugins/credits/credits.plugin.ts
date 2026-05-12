@@ -9,6 +9,7 @@ import type {
 } from '../../plugin-api/types.js';
 import { ClaimProcessingModule } from './claim-processing.module.js';
 import { createCreditsMiddleware } from './credits-middleware.js';
+import { FileProcessingSinkModule } from './file-processing-sink.module.js';
 import {
   TokenLimiter,
   type CreditsNetwork,
@@ -119,12 +120,18 @@ export class CreditsPlugin extends OraclePlugin {
   }
 
   override getNestModules(): Array<Type | DynamicModule> {
-    // Claim-processing cron settles held credits to the chain. Only meaningful
-    // when Redis + a known network are configured. Host opt-in is explicit:
-    // pass both `redis` AND `network` to the plugin's constructor.
+    // Both modules require Redis + a known network. Host opt-in is explicit:
+    // pass both to the plugin's constructor. The claim-processing cron
+    // settles held credits to the chain. The file-processing sink exposes
+    // `FILE_PROCESSING_CREDIT_SINK` so `FileProcessingService` can deduct
+    // pre-flight LLM usage from the same per-user Redis budget.
     if (!this.redis || !this.network) return [];
     return [
       ClaimProcessingModule.register({
+        redis: this.redis,
+        network: this.network,
+      }),
+      FileProcessingSinkModule.register({
         redis: this.redis,
         network: this.network,
       }),

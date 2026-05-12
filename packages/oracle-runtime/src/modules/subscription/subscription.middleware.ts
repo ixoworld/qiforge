@@ -154,7 +154,10 @@ export class SubscriptionMiddleware implements NestMiddleware {
         this.logger.debug(`Subscription found in cache for user: ${did}`);
         req.subscriptionData = cachedSubscription;
         this.checkCanContinue(cachedSubscription);
-        await this.syncCreditSink(did, cachedSubscription);
+        // Credit sink was already synced on the original cache miss; the
+        // subscription cache TTL is the source of truth for "this user's
+        // Redis state is fresh enough." Re-syncing on every cached request
+        // adds two Redis writes for no gain.
         next();
         return;
       }

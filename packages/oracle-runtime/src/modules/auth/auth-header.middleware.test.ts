@@ -3,8 +3,19 @@ import type { Cache } from 'cache-manager';
 import type { ConfigService } from '@nestjs/config';
 import type { Request, Response, NextFunction } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createUCANValidator } from '@ixo/ucan';
 import { AuthHeaderMiddleware } from './auth-header.middleware.js';
 import type { UcanService } from '../ucan/ucan.service.js';
+
+// Hoisted mock — the middleware now statically imports `@ixo/ucan` (the
+// dynamic import is gone for first-cache-miss latency wins), so we mock
+// at module-init time and retarget per test via `vi.mocked(...)`.
+vi.mock('@ixo/ucan', () => ({
+  createUCANValidator: vi.fn(),
+  createIxoDIDResolver: vi.fn(() => ({})),
+}));
+
+const mockedCreateUCANValidator = vi.mocked(createUCANValidator);
 
 interface CacheMock extends Partial<Cache> {
   store: Map<string, unknown>;
@@ -134,7 +145,7 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     expect((next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBeUndefined();
     expect(req.authData).toEqual({
       did: USER_DID,
-      ucanDelegation: cachedAuth.delegation,
+      ucanDelegation: { ...cachedAuth.delegation, raw: VALID_DELEGATION_RAW },
     });
     expect(ucan.cacheDelegation).toHaveBeenCalledWith(
       USER_DID,
@@ -150,17 +161,14 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
 
   it('validates delegation and populates req.authData on miss', async () => {
     const expiration = Math.floor(Date.now() / 1000) + 600;
-    vi.doMock('@ixo/ucan', () => ({
-      createUCANValidator: vi.fn(async () => ({
-        validateDelegation: vi.fn(async () => ({
-          ok: true,
-          invoker: USER_DID,
-          capability: { resource: 'r', action: 'a' },
-          expiration,
-        })),
+    mockedCreateUCANValidator.mockResolvedValueOnce({
+      validateDelegation: vi.fn(async () => ({
+        ok: true,
+        invoker: USER_DID,
+        capability: { resource: 'r', action: 'a' },
+        expiration,
       })),
-      createIxoDIDResolver: vi.fn(() => ({})),
-    }));
+    } as unknown as Awaited<ReturnType<typeof createUCANValidator>>);
 
     const req = makeReq({ 'x-ucan-delegation': VALID_DELEGATION_RAW });
     const next = vi.fn() as unknown as NextFunction;
@@ -183,20 +191,15 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
       VALID_DELEGATION_RAW,
       expiration,
     );
-
-    vi.doUnmock('@ixo/ucan');
   });
 
   it('rejects with 401 when delegation validation fails', async () => {
-    vi.doMock('@ixo/ucan', () => ({
-      createUCANValidator: vi.fn(async () => ({
-        validateDelegation: vi.fn(async () => ({
-          ok: false,
-          error: { code: 'BAD_SIG', message: 'bad signature' },
-        })),
+    mockedCreateUCANValidator.mockResolvedValueOnce({
+      validateDelegation: vi.fn(async () => ({
+        ok: false,
+        error: { code: 'BAD_SIG', message: 'bad signature' },
       })),
-      createIxoDIDResolver: vi.fn(() => ({})),
-    }));
+    } as unknown as Awaited<ReturnType<typeof createUCANValidator>>);
 
     const req = makeReq({ 'x-ucan-delegation': VALID_DELEGATION_RAW });
     const next = vi.fn() as unknown as NextFunction;
@@ -208,7 +211,5 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     expect(err).toBeInstanceOf(HttpException);
     expect(err.getStatus()).toBe(HttpStatus.UNAUTHORIZED);
     expect((req as unknown as { authData?: unknown }).authData).toBeUndefined();
-
-    vi.doUnmock('@ixo/ucan');
   });
 });

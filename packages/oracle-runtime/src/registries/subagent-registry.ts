@@ -17,45 +17,68 @@ export interface RegisteredSubAgent {
  *
  * Sub-agents are wrapped as tools by the runtime, so their names share the
  * tool namespace. Duplicate sub-agent names across plugins are a boot error.
+ *
+ * Like `ToolRegistry`, boot-time outputs are cached on the first
+ * `collectBoot(buildCtx)` call so per-request builds only re-run the
+ * request-time hook.
  */
 export class SubAgentRegistry {
   private readonly plugins: OraclePlugin[] = [];
+  private bootCache: RegisteredSubAgent[] | null = null;
   private collected: RegisteredSubAgent[] | null = null;
 
   /** Add a plugin whose `getSubAgents` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
+    this.bootCache = null;
     this.collected = null;
   }
 
   /**
-   * Invoke `getSubAgents(buildCtx)` on every registered plugin in registration
-   * order. When `rtCtx` is supplied, also invokes `getRequestSubAgents(rtCtx)`
-   * on each plugin that implements it and appends those results — the
-   * request-time sub-agents land immediately after the same plugin's
-   * boot-time sub-agents.
-   *
-   * Plugins that implement neither hook contribute nothing.
+   * Run every plugin's `getSubAgents(buildCtx)` once and cache the result.
+   */
+  collectBoot(buildCtx: PluginContext): RegisteredSubAgent[] {
+    if (this.bootCache !== null) return this.bootCache;
+    const out: RegisteredSubAgent[] = [];
+    for (const plugin of this.plugins) {
+      if (!plugin.getSubAgents) continue;
+      const subAgents = plugin.getSubAgents(buildCtx);
+      for (const subAgent of subAgents) {
+        out.push({ pluginName: plugin.name, subAgent });
+      }
+    }
+    this.bootCache = out;
+    return out;
+  }
+
+  /**
+   * Run every plugin's `getRequestSubAgents(rtCtx)`. Does NOT touch the boot
+   * cache.
+   */
+  async collectRequest(
+    rtCtx: RuntimeContext,
+  ): Promise<RegisteredSubAgent[]> {
+    const out: RegisteredSubAgent[] = [];
+    for (const plugin of this.plugins) {
+      if (!plugin.getRequestSubAgents) continue;
+      const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
+      for (const subAgent of requestSubAgents) {
+        out.push({ pluginName: plugin.name, subAgent });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Combined boot + request collection used by the main agent build.
    */
   async collect(
     buildCtx: PluginContext,
     rtCtx?: RuntimeContext,
   ): Promise<RegisteredSubAgent[]> {
-    const out: RegisteredSubAgent[] = [];
-    for (const plugin of this.plugins) {
-      if (plugin.getSubAgents) {
-        const subAgents = plugin.getSubAgents(buildCtx);
-        for (const subAgent of subAgents) {
-          out.push({ pluginName: plugin.name, subAgent });
-        }
-      }
-      if (rtCtx && plugin.getRequestSubAgents) {
-        const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
-        for (const subAgent of requestSubAgents) {
-          out.push({ pluginName: plugin.name, subAgent });
-        }
-      }
-    }
+    const boot = this.collectBoot(buildCtx);
+    const request = rtCtx ? await this.collectRequest(rtCtx) : [];
+    const out = [...boot, ...request];
     this.collected = out;
     return out;
   }
@@ -65,14 +88,15 @@ export class SubAgentRegistry {
    * message names both plugin names so the boot log points at the conflict.
    */
   assertNoCollisions(): void {
-    if (this.collected === null) {
+    const source = this.collected ?? this.bootCache;
+    if (source === null) {
       throw new Error(
         'SubAgentRegistry.assertNoCollisions called before collect',
       );
     }
     const seen = new Map<string, string>();
     const collisions: string[] = [];
-    for (const { pluginName, subAgent } of this.collected) {
+    for (const { pluginName, subAgent } of source) {
       const prev = seen.get(subAgent.name);
       if (prev !== undefined && prev !== pluginName) {
         collisions.push(

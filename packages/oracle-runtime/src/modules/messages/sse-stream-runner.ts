@@ -1,0 +1,420 @@
+import {
+  ActionCallEvent,
+  ReasoningEvent,
+  ToolCallEvent,
+} from '@ixo/oracles-events';
+import { Injectable, Logger } from '@nestjs/common';
+import type { Response } from 'express';
+import {
+  AIMessageChunk,
+  type HumanMessage,
+  ToolMessage,
+} from 'langchain';
+import { emojify } from 'node-emoji';
+import { AgentBuilder } from './agent-builder.js';
+import { type SendMessagePayload } from './dto/send-message.dto.js';
+import { type PreparedRequest } from './request-preparer.js';
+import {
+  emitSSEEvent,
+  formatSSE,
+  runWithSSEContext,
+  sendSSEDone,
+  sendSSEError,
+  setSSEHeaders,
+  startSSEHeartbeat,
+} from './sse.utils.js';
+
+interface RawDelta {
+  reasoning?: string;
+  reasoning_content?: string | null;
+  reasoning_details?: unknown;
+}
+
+interface RawResponse {
+  choices?: Array<{ delta?: RawDelta }>;
+}
+
+const THINKING_PHRASES = [
+  'Thinking...',
+  'Working...',
+  'Analyzing...',
+  'Processing...',
+  'Computing...',
+  'Crunching...',
+  'Deliberating...',
+  'Reasoning...',
+  'Calculating...',
+  'Evaluating...',
+  'Pondering...',
+  'Reading...',
+  'Synthesizing...',
+  'Formulating...',
+  'Considering...',
+  'Exploring ideas...',
+  'Investigating...',
+  'Brainstorming...',
+  'Solving...',
+  'Reviewing...',
+  'Reflecting...',
+];
+
+function pickThinkingPhrase(): string {
+  return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)]!;
+}
+
+/**
+ * Parse a `ToolMessage.content` payload into a JSON object when possible.
+ * Returns `null` if the content is a non-JSON string, an array of content
+ * blocks (LangChain multi-modal output), or anything else we can't reason
+ * about. Used by the action-call status decoder to detect failures.
+ */
+function safeParseToolContent(
+  content: unknown,
+): Record<string, unknown> | null {
+  if (typeof content === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(content);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Non-JSON text — fall through.
+    }
+    return null;
+  }
+  if (content && typeof content === 'object' && !Array.isArray(content)) {
+    return content as Record<string, unknown>;
+  }
+  return null;
+}
+
+export interface StreamRunInput {
+  payload: SendMessagePayload & {
+    msgFromMatrixRoom?: boolean;
+    clientType?: 'matrix' | 'slack' | 'portal';
+  };
+  prepared: PreparedRequest;
+  inputMessages: HumanMessage[];
+  res: Response;
+  abortControllers: Map<string, AbortController>;
+  /**
+   * Called once the agent stream completes with the assembled assistant
+   * content, so the orchestrator can fire-and-forget Matrix replay and
+   * post-message sync without coupling SseStreamRunner to either.
+   */
+  onComplete?: (assistantText: string) => void;
+}
+
+/**
+ * Owns the SSE side of the chat request: headers, heartbeat, abort
+ * controller registration, and the for-await loop translating
+ * `streamEvents` output into the wire format the frontend consumes.
+ *
+ * Event types preserved verbatim from the legacy implementation:
+ *
+ *   - `ReasoningEvent` (thinking + chunked reasoning + completion marker)
+ *   - `ToolCallEvent`  (server-executed tools — fired on `tool_calls`)
+ *   - `ActionCallEvent` (AG-UI actions — same `tool_calls` channel but
+ *      named in `payload.agActions`; the runner branches on the name)
+ *   - `message` chunk (plain assistant text)
+ *   - `error` + `done`
+ *
+ * The SSE headers and the first `Thinking...` event are emitted by
+ * `MessagesController` BEFORE the orchestrator hands off — this class
+ * picks up after the connection is open, so we don't pay the pre-flight
+ * latency before the client knows the request was accepted.
+ */
+@Injectable()
+export class SseStreamRunner {
+  private readonly logger = new Logger(SseStreamRunner.name);
+
+  constructor(private readonly agentBuilder: AgentBuilder) {}
+
+  async run(input: StreamRunInput): Promise<void> {
+    const { payload, prepared, inputMessages, res, abortControllers } = input;
+    const { sessionId, requestId } = prepared;
+
+    // SSE headers + heartbeat may already be set by the controller (early
+    // flush). Set them defensively here in case run() is called directly.
+    if (!res.headersSent) {
+      setSSEHeaders(res, requestId);
+      res.flushHeaders();
+    }
+    const heartbeat = startSSEHeartbeat(res);
+    const abortController = new AbortController();
+
+    const existingController = abortControllers.get(sessionId);
+    if (existingController) {
+      existingController.abort();
+    }
+    abortControllers.set(sessionId, abortController);
+
+    const onClose = () => abortController.abort();
+    res.on('close', onClose);
+
+    try {
+      await runWithSSEContext(
+        res,
+        async () => {
+          const thinkingText = pickThinkingPhrase();
+          const thinkingEvent = ReasoningEvent.createChunk(
+            sessionId,
+            requestId,
+            thinkingText,
+            [{ type: 'thinking', text: thinkingText }],
+            false,
+          );
+          emitSSEEvent(thinkingEvent);
+          thinkingEvent.emit();
+
+          const { agent, stateInput, langGraphConfig } =
+            await this.agentBuilder.build(
+              { payload, prepared, inputMessages },
+              abortController,
+            );
+
+          // ReactAgent.streamEvents returns the same `{event, data, tags}`
+          // shape as LangChain's `streamEvents v2` — the v2 envelope is the
+          // default for ReactAgent in langchain@1.4, no extra option needed.
+          const stream = agent.streamEvents(stateInput, langGraphConfig);
+
+          let fullContent = '';
+          const toolCallMap = new Map<string, ToolCallEvent>();
+          const actionCallMap = new Map<string, ActionCallEvent>();
+          const agActionNames = new Set(
+            (payload.agActions ?? []).map((a) => a.name),
+          );
+
+          for await (const evt of stream) {
+            if (abortController.signal.aborted) break;
+            const { data, event } = evt as {
+              data: unknown;
+              event: string;
+            };
+
+            if (event === 'on_tool_end') {
+              this.handleToolEnd(
+                data as { output: ToolMessage },
+                toolCallMap,
+                actionCallMap,
+                res,
+                abortController,
+              );
+              continue;
+            }
+
+            if (event === 'on_chat_model_stream') {
+              const chunkContent = this.handleChatStream(
+                data as { chunk: AIMessageChunk },
+                payload,
+                sessionId,
+                requestId,
+                agActionNames,
+                toolCallMap,
+                actionCallMap,
+                res,
+                abortController,
+              );
+              if (chunkContent) fullContent += chunkContent;
+            }
+          }
+
+          if (!abortController.signal.aborted) {
+            const completeEvent = ReasoningEvent.createChunk(
+              sessionId,
+              requestId,
+              '',
+              undefined,
+              true,
+            );
+            if (!res.writableEnded) {
+              res.write(
+                formatSSE(completeEvent.eventName, completeEvent.payload),
+              );
+            }
+            sendSSEDone(res);
+            input.onComplete?.(fullContent);
+          }
+        },
+        abortController,
+      );
+    } catch (error) {
+      const aborted =
+        error instanceof Error &&
+        (error.name === 'AbortError' ||
+          error.message.includes('aborted') ||
+          error.message.includes('Stream aborted by client'));
+      if (aborted) {
+        if (!res.writableEnded) sendSSEDone(res);
+        return;
+      }
+      this.logger.error('Stream failed', error);
+      if (!res.writableEnded && !abortController.signal.aborted) {
+        sendSSEError(
+          res,
+          error instanceof Error ? error : 'Something went wrong',
+        );
+        sendSSEDone(res);
+      }
+    } finally {
+      clearInterval(heartbeat);
+      res.off('close', onClose);
+      abortControllers.delete(sessionId);
+      if (!res.writableEnded) res.end();
+    }
+  }
+
+  private handleToolEnd(
+    data: { output: ToolMessage },
+    toolCallMap: Map<string, ToolCallEvent>,
+    actionCallMap: Map<string, ActionCallEvent>,
+    res: Response,
+    abortController: AbortController,
+  ): void {
+    const toolMessage = data.output;
+    const toolCallId = toolMessage.tool_call_id;
+
+    const actionCallEvent = actionCallMap.get(toolCallId);
+    if (actionCallEvent) {
+      actionCallEvent.payload.output = emojify(toolMessage.content as string);
+      actionCallEvent.payload.toolCallId = toolCallId;
+      const parsed = safeParseToolContent(toolMessage.content);
+      if (parsed?.success === false || parsed?.error) {
+        actionCallEvent.payload.status = 'error';
+        actionCallEvent.payload.error =
+          (parsed.error as string) || 'Action failed';
+      } else {
+        actionCallEvent.payload.status = 'done';
+      }
+      this.writeSse(
+        res,
+        abortController,
+        actionCallEvent.eventName,
+        actionCallEvent.payload,
+      );
+      actionCallMap.delete(toolCallId);
+      return;
+    }
+
+    const toolCallEvent = toolCallMap.get(toolCallId);
+    if (!toolCallEvent) return;
+    toolCallEvent.payload.output = emojify(toolMessage.content as string);
+    toolCallEvent.payload.status = 'done';
+    (toolCallEvent.payload.args as Record<string, unknown>).toolName =
+      toolMessage.name;
+    toolCallEvent.payload.eventId = toolCallId;
+    this.writeSse(
+      res,
+      abortController,
+      toolCallEvent.eventName,
+      toolCallEvent.payload,
+    );
+    toolCallMap.delete(toolCallId);
+  }
+
+  private handleChatStream(
+    data: { chunk: AIMessageChunk },
+    payload: { msgFromMatrixRoom?: boolean },
+    sessionId: string,
+    requestId: string,
+    agActionNames: Set<string>,
+    toolCallMap: Map<string, ToolCallEvent>,
+    actionCallMap: Map<string, ActionCallEvent>,
+    res: Response,
+    abortController: AbortController,
+  ): string | undefined {
+    const chunk = data.chunk;
+    const rawResponse = chunk.additional_kwargs?.__raw_response as
+      | RawResponse
+      | undefined;
+    const delta = rawResponse?.choices?.[0]?.delta;
+    const reasoning = delta?.reasoning ?? delta?.reasoning_content;
+    if (reasoning && reasoning.trim()) {
+      const reasoningDetails = Array.isArray(delta?.reasoning_details)
+        ? delta!.reasoning_details
+            .filter(
+              (d): d is { type: string; text: string } =>
+                d != null &&
+                typeof d === 'object' &&
+                typeof (d as { type?: unknown }).type === 'string' &&
+                typeof (d as { text?: unknown }).text === 'string' &&
+                ((d as { text: string }).text.trim().length > 0),
+            )
+            .map((d) => ({ type: d.type, text: d.text }))
+        : undefined;
+      const reasoningEvent = ReasoningEvent.createChunk(
+        sessionId,
+        requestId,
+        reasoning,
+        reasoningDetails,
+        false,
+      );
+      this.writeSse(
+        res,
+        abortController,
+        reasoningEvent.eventName,
+        reasoningEvent.payload,
+      );
+    }
+
+    chunk.tool_calls?.forEach((tool) => {
+      if (!tool.name.trim() || !tool.id) return;
+      const isAction = agActionNames.has(tool.name);
+      if (isAction) {
+        const actionCallEvent = new ActionCallEvent({
+          requestId,
+          sessionId,
+          toolCallId: tool.id,
+          toolName: tool.name,
+          args: undefined,
+          status: 'isRunning',
+        });
+        this.writeSse(
+          res,
+          abortController,
+          actionCallEvent.eventName,
+          actionCallEvent.payload,
+        );
+        actionCallMap.set(tool.id, actionCallEvent);
+      } else {
+        const toolCallEvent = new ToolCallEvent({
+          requestId,
+          sessionId,
+          toolName: 'toolCall',
+          args: {},
+          status: 'isRunning',
+        });
+        toolCallEvent.payload.args = tool.args;
+        (toolCallEvent.payload.args as Record<string, unknown>).toolName =
+          tool.name;
+        toolCallEvent.payload.eventId = tool.id;
+        this.writeSse(
+          res,
+          abortController,
+          toolCallEvent.eventName,
+          toolCallEvent.payload,
+        );
+        toolCallMap.set(tool.id, toolCallEvent);
+      }
+    });
+
+    const content = chunk.content;
+    if (!content) return undefined;
+    const parsed = emojify(String(content));
+    this.writeSse(res, abortController, 'message', {
+      content: parsed,
+      timestamp: new Date().toISOString(),
+    });
+    return parsed;
+  }
+
+  private writeSse(
+    res: Response,
+    abortController: AbortController,
+    eventName: string,
+    payload: unknown,
+  ): void {
+    if (res.writableEnded || abortController.signal.aborted) return;
+    res.write(formatSSE(eventName, payload));
+  }
+}

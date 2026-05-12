@@ -1,8 +1,12 @@
 import { loadFileFromBuffer } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type AttachmentDto } from './dto/send-message.dto.js';
+import {
+  FILE_PROCESSING_CREDIT_SINK,
+  type FileProcessingCreditSink,
+} from './file-processing-credit-sink.port.js';
 
 interface AiProcessUsage {
   cost?: number;
@@ -161,7 +165,12 @@ export class FileProcessingService {
   private readonly providerHeaders: Record<string, string>;
   private readonly processingModel: string;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    @Optional()
+    @Inject(FILE_PROCESSING_CREDIT_SINK)
+    private readonly creditSink?: FileProcessingCreditSink,
+  ) {
     const providerCfg = providerConfigGetter();
     this.providerApiKey = providerCfg.apiKey;
     this.providerBaseURL = providerCfg.baseURL.replace(/\/+$/, '');
@@ -237,6 +246,7 @@ export class FileProcessingService {
   async processAttachments(
     attachments: AttachmentDto[],
     roomId: string,
+    userDid?: string,
     sandboxConfig?: SandboxUploadConfig,
   ): Promise<{
     texts: string[];
@@ -346,6 +356,17 @@ export class FileProcessingService {
     this.logger.log(
       `Attachments done — ${texts.length} text result(s), ${aiCallsMade} AI call(s), total downloaded: ${totalDownloaded} bytes, usage: cost=$${totalUsage.cost} tokens=${totalUsage.promptTokens + totalUsage.completionTokens}`,
     );
+
+    if (this.creditSink && userDid && aiCallsMade > 0) {
+      try {
+        await this.creditSink.deductForFileProcessing(userDid, totalUsage);
+      } catch (error) {
+        // Non-blocking: the file was already processed; surface and continue.
+        this.logger.warn(
+          `[FileProcessing] Credit deduction failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     return { texts, metadata, totalUsage };
   }

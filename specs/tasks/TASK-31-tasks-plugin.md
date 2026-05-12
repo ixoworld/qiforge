@@ -55,3 +55,23 @@ Convert the Tasks feature (TasksModule, 4 BullMQ queues, scheduler, processors, 
 - §19.3 has the plugin example structure. Follow it.
 - BullMQ workers internally call `MatrixManager.getInstance()` per the matrix-storage review; preserve that. Don't refactor processors.
 - Note: `failureMode: 'disable'` in v2 spec — in v3 absent. If init fails, runtime logs and skips. Tasks is `'auto'` by default (`REDIS_URL` presence), so usually it's a clean enable/disable.
+
+## Re-implement during rebuild (removed during TASK-32b)
+
+TASK-32b deleted approval-gate plumbing from MessagesService because it's tasks-coupled and the tasks plugin needs a clean redo anyway. When the plugin is rebuilt, restore these behaviors via the plugin (not via MessagesService stubs):
+
+- **Approval gate interception** — Pre-LLM check that detects when a user message is responding to a pending approval request. Today's flow (in the deleted code): cheap Redis `GET` for a pending taskId in the room → LLM classification of the message text (`approved`/`rejected`/`other`) → `handleApprovalResponse({ taskId, approved, mainRoomId, rejectionReason })`. The plugin should own the entire pipeline; MessagesService should expose either an early `beforeChat` hook or a NestJS middleware that the tasks plugin installs via `getNestModules()`. **Add a keyword fast-path** before the LLM classify call — trivial yes/no/cancel matches should skip the model.
+- **`tryHandleApprovalResponse` was called from two places**: the Portal sendMessage path (after `prepareForQuery`) AND inside the Matrix listener (`MatrixListenerBridge.handleMessage`, prior to `flushMatrixEvents`). The rebuild should ensure both ingress paths still get the gate.
+- **`@Optional() approvalService: ApprovalService`** and **`@Optional() tasksService: TasksService`** injections were removed from `MessagesService`. Replace with proper plugin-owned ports (e.g. `APPROVAL_GATE_PORT` symbol token, `TASK_DISPATCH_PORT`) wired through Nest DI in the plugin's `getNestModules()`.
+- **`classifyApprovalResponse(text)`** — the cheap LLM classifier was a stub in `forward-refs.ts` (returned null). Real implementation lives in the deleted `apps/app/src/tasks/...`. Carry it into the new plugin and call it via the gate port.
+- **`isRedisEnabled()` + `TokenLimiter` stubs** were also in `forward-refs.ts` and have been deleted. The credits plugin now provides a `FILE_PROCESSING_CREDIT_SINK` (Nest token); if tasks ever needs to bill outside the agent graph, it should use the same pattern — define a port + have credits supply the adapter.
+
+## File-processing credit deduction (preserved via different wiring)
+
+Before TASK-32b, `MessagesService` deducted credits for file-processing LLM calls inline using `TokenLimiter.usdCostToCredits/limit` stubs. Now:
+
+- `FileProcessingService` accepts `@Optional() @Inject(FILE_PROCESSING_CREDIT_SINK)`.
+- The credits plugin's `getNestModules()` registers `FileProcessingSinkModule`, which provides the sink (a `TokenLimiter`-backed adapter).
+- `processAttachments(attachments, roomId, userDid)` now deducts internally — no MessagesService coupling.
+
+This means file processing is billed whenever credits is loaded, regardless of whether MessagesService imports a TokenLimiter. The wiring is clean and the tasks rebuild can copy it for any future "bill outside the agent" needs.

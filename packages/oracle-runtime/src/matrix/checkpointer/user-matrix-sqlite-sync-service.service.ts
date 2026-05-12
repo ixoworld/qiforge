@@ -123,6 +123,15 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
 
   private readonly lastUploadedChecksum = new Map<string, string>();
 
+  /**
+   * Users whose SQLite checkpoint has been synced from Matrix at least once
+   * in this process lifetime. We're a single-node deployment: after the
+   * first sync, the local copy IS the source of truth until shutdown (which
+   * uploads back to Matrix). Skipping re-syncs on subsequent requests for
+   * the same user is the dominant TTFB win.
+   */
+  private readonly syncedUsers = new Set<string>();
+
   /** Prevents overlapping cron executions from interleaving I/O on the same files */
   private cronRunning = false;
 
@@ -235,13 +244,31 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
 
   /**
    * Get or create database connection for a user.
-   * Ensures database exists and is synced from Matrix.
+   * Ensures database exists and is synced from Matrix on the first request
+   * per user per process; subsequent calls reuse the local file.
    * Includes automatic corruption recovery.
    */
   public async getUserDatabase(userDid: string): Promise<DatabaseType> {
-    // Ensure database is synced locally first
-    await this.syncLocalStorageFromMatrixStorage({ userDid });
+    if (!this.syncedUsers.has(userDid)) {
+      await this.syncLocalStorageFromMatrixStorage({ userDid });
+      this.syncedUsers.add(userDid);
+    }
 
+    return this.openUserDatabaseFromDisk(userDid);
+  }
+
+  /**
+   * Same as `getUserDatabase` but never triggers a Matrix → SQLite sync.
+   * Used by hot paths that follow an earlier `getUserDatabase` call within
+   * the same request (e.g. the fire-and-forget post-message sync).
+   */
+  public async getUserDatabaseNoSync(userDid: string): Promise<DatabaseType> {
+    return this.openUserDatabaseFromDisk(userDid);
+  }
+
+  private async openUserDatabaseFromDisk(
+    userDid: string,
+  ): Promise<DatabaseType> {
     const dbPath = UserMatrixSqliteSyncService.getUserCheckpointDbPath(userDid);
 
     // Check cache
@@ -417,7 +444,12 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       this.dbConnectionCache.delete(userDid);
     }
 
-    // Clear file path cache and checksum cache (both in-memory and DB)
+    // Clear file path cache, checksum cache, AND the "synced-once" flag.
+    // Dropping `syncedUsers` here is critical: without it, the next
+    // `getUserDatabase` call after the local file is deleted would skip the
+    // Matrix → SQLite re-download (because we'd think we're still synced),
+    // landing in the corruption-recovery path instead of a clean sync.
+    this.syncedUsers.delete(userDid);
     this.filePathCache.delete(userDid);
     const storageKey =
       UserMatrixSqliteSyncService.createUserStorageKey(userDid);
@@ -552,7 +584,10 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
             );
           }
           // Always clear caches regardless of fs.rm result — stale cache
-          // entries are worse than missing ones (next access re-downloads)
+          // entries are worse than missing ones (next access re-downloads).
+          // `syncedUsers` is cleared here for the same reason: the local
+          // file is gone, the next request must re-pull from Matrix.
+          this.syncedUsers.delete(userDid);
           this.filePathCache.delete(userDid);
           this.lastUploadedChecksum.delete(storageKey);
         }

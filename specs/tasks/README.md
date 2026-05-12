@@ -101,6 +101,29 @@ When converting plugins or rewiring runtime modules, the goal is to **reuse as m
   - `getNestModules()` — for plugins shipping NestJS modules (slack landed using this; tasks rebuild will use it)
   - `UcanAdapter.resolveServiceDid(url)` — exposed so plugins don't roll their own did:web resolution
 
+### Bootstrap pattern: `OracleRuntimeBundleHolder`
+
+The plugin runtime has a chicken-and-egg between Nest's DI lifecycle and `createOracleApp`:
+
+1. `createOracleApp` calls `NestFactory.create(RuntimeAppModule)` — Nest constructs every `@Injectable()` here, including `MessagesService`.
+2. Right after, `createOracleApp` builds `AmbientServices` (UcanAdapter, MatrixAdapter, etc.) using `nestApp.get(UcanService)` etc. — so ambient can't exist until AFTER Nest boots.
+3. But `MessagesService` (constructed in step 1) needs `ambient` + `registries` + `identity` to call `createMainAgent` per request.
+
+The Holder is the workaround:
+
+```ts
+@Injectable()
+class OracleRuntimeBundleHolder {
+  private bundle = null;
+  populate(b) { this.bundle = b; }   // called by createOracleApp post-bootstrap
+  get() { return this.bundle; }      // called by MessagesService per request
+}
+```
+
+Nest constructs the holder empty in step 1; `createOracleApp` populates it in step 2; consumers read in step 3+ via DI. This pattern (also called "deferred provider" / "post-init container") is the standard escape hatch when external bootstrap code needs to push values into Nest-managed services AFTER `NestFactory.create` resolves.
+
+Alternatives considered and rejected: `useFactory` providers (chicken-egg between ambient and DI), passing through `RuntimeAppModule.register({...})` (can't satisfy ambient's UcanService dependency), module-level singletons (hides global state, breaks test isolation). The holder is the simplest workable shape.
+
 ### Beyond-spec work delivered in addition to the 34 tasks
 
 These weren't in the original spec but landed during execution:

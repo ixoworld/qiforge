@@ -19,6 +19,10 @@ export {
   type ClaimProcessingModuleOptions,
 } from './claim-processing.module.js';
 export {
+  FileProcessingSinkModule,
+  type FileProcessingSinkModuleOptions,
+} from './file-processing-sink.module.js';
+export {
   ClaimProcessingService,
   CLAIM_PROCESSING_TOKEN_LIMITER,
   submitClaimToSubscriptionApi,

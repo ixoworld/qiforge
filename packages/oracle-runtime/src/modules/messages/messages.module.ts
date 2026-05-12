@@ -5,10 +5,17 @@ import { ConfigService } from '@nestjs/config';
 import { CheckpointStorageSyncModule } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.module.js';
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { UcanModule } from '../ucan/ucan.module.js';
+import { AgentBuilder } from './agent-builder.js';
+import { BatchInvoker } from './batch-invoker.js';
 import { FileProcessingService } from './file-processing.service.js';
-import { MainAgentGraph } from './forward-refs.js';
+import { HomeServerCache } from './homeserver-cache.js';
+import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { MessagesController } from './messages.controller.js';
 import { MessagesService } from './messages.service.js';
+import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
+import { PostMessageSyncer } from './post-message-syncer.js';
+import { RequestPreparer } from './request-preparer.js';
+import { SseStreamRunner } from './sse-stream-runner.js';
 
 @Module({
   imports: [CheckpointStorageSyncModule, UcanModule],
@@ -16,7 +23,14 @@ import { MessagesService } from './messages.service.js';
   providers: [
     MessagesService,
     FileProcessingService,
-    MainAgentGraph,
+    OracleRuntimeBundleHolder,
+    HomeServerCache,
+    RequestPreparer,
+    AgentBuilder,
+    SseStreamRunner,
+    BatchInvoker,
+    PostMessageSyncer,
+    MatrixListenerBridge,
     {
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
@@ -41,6 +55,11 @@ import { MessagesService } from './messages.service.js';
       inject: [UserMatrixSqliteSyncService, MemoryEngineService],
     },
   ],
-  exports: [MessagesService, MemoryEngineService, SessionManagerService],
+  exports: [
+    MessagesService,
+    MemoryEngineService,
+    SessionManagerService,
+    OracleRuntimeBundleHolder,
+  ],
 })
 export class MessagesModule {}

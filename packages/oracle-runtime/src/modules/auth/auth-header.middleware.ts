@@ -1,3 +1,4 @@
+import { createIxoDIDResolver, createUCANValidator } from '@ixo/ucan';
 import { Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import {
   HttpException,
@@ -20,6 +21,12 @@ declare global {
       authData: {
         did: string;
         ucanDelegation: {
+          /**
+           * Raw base64-encoded delegation header as sent by the client.
+           * Plugin code reads this from `runCtx.user.ucanDelegation.raw`
+           * to mint downstream service invocations.
+           */
+          raw: string;
           issuer: string;
           audience: string;
           capabilities: unknown[];
@@ -73,9 +80,6 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       return null;
     }
 
-    const { createUCANValidator, createIxoDIDResolver } = await import(
-      '@ixo/ucan'
-    );
     const blocksyncUri = this.configService.getOrThrow<string>(
       'BLOCKSYNC_GRAPHQL_URL',
     );
@@ -133,7 +137,7 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       if (cachedUcan) {
         req.authData = {
           did: cachedUcan.userDid,
-          ucanDelegation: cachedUcan.delegation,
+          ucanDelegation: { ...cachedUcan.delegation, raw: ucanHeader },
         };
 
         // Re-cache raw delegation for downstream invocations
@@ -160,7 +164,7 @@ export class AuthHeaderMiddleware implements NestMiddleware {
 
       req.authData = {
         did: ucanResult.userDid,
-        ucanDelegation: ucanResult.delegation,
+        ucanDelegation: { ...ucanResult.delegation, raw: ucanHeader },
       };
 
       // Cache auth result
