@@ -22,7 +22,7 @@ Delete the now-redundant contents of `apps/app/src/` and replace with the 30-lin
 - `apps/app/src/ucan/` — moved in TASK-13.
 - `apps/app/src/middleware/` — auth-header moved in TASK-13, subscription moved in TASK-14.
 - `apps/app/src/calls/` — moved to plugin in TASK-18.
-- `apps/app/src/claim-processing/` — moved to plugin in TASK-30.
+- `apps/app/src/claim-processing/` — folded into the credits plugin in TASK-29 (was originally TASK-30; the two plugins merged). Files now live at `packages/oracle-runtime/src/plugins/credits/claim-processing.{module,service}.ts`.
 - `apps/app/src/slack/` — moved to plugin in TASK-28.
 - `apps/app/src/tasks/` — moved to plugin in TASK-31.
 - `apps/app/src/user-matrix-sqlite-sync-service/` — moved in TASK-14.
@@ -120,7 +120,7 @@ Depends on 32a.
 The ~30-line entry per §18.2:
 
 ```ts
-import { createOracleApp, CreditsPlugin, EditorPlugin, ClaimProcessingPlugin } from '@ixo/oracle-runtime';
+import { createOracleApp, CreditsPlugin, EditorPlugin } from '@ixo/oracle-runtime';
 import { createClient as createMatrixJsClient } from 'matrix-js-sdk';
 import Redis from 'ioredis';
 
@@ -139,15 +139,16 @@ const app = await createOracleApp({
     entityDid: process.env.ORACLE_ENTITY_DID!,
   },
   plugins: [
-    new CreditsPlugin({ redis }),
-    new ClaimProcessingPlugin({ redis }),  // same Redis — both plugins build their own TokenLimiter internally
+    // CreditsPlugin owns BOTH enforcement (middleware) AND settlement (cron).
+    // Pass `network` so the cron's TokenLimiter can construct itself for that chain.
+    new CreditsPlugin({ redis, network: 'devnet' }),
     new EditorPlugin({ matrixClient: matrixJsClient }),
   ],
 });
 await app.listen();
 ```
 
-Also: resolve the ClaimProcessingPlugin.getNestModules() wiring per the simple "pass redis, plugins build their own TokenLimiter" pattern. Depends on 32a, 32b.
+Depends on 32a, 32b.
 
 ### TASK-32d — Delete obsolete `apps/app/src/` files
 

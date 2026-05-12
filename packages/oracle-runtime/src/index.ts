@@ -74,6 +74,14 @@ export { createScopedEmitter, EVENT_NAMES } from './events/scoped-emitter.js';
 export type { ScopedEmitter, ScopeKeys } from './events/scoped-emitter.js';
 
 export {
+  getModelForRole,
+  getProviderChatModel,
+  getProviderConfig,
+  getLLMProvider,
+  type ProviderModelRole,
+} from './llm/index.js';
+
+export {
   pluginManifestSchema,
   manifestExampleSchema,
   manifestCategorySchema,

@@ -1,5 +1,5 @@
 import { loadFileFromBuffer } from '@ixo/common';
-import { getModelForRole, getProviderConfig } from 'src/graph/llm-provider';
+import { getModelForRole, getProviderConfig } from '@ixo/oracle-runtime';
 import { MatrixManager } from '@ixo/matrix';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

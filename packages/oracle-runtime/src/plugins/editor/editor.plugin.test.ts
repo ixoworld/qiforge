@@ -166,11 +166,14 @@ describe('EditorPlugin', () => {
   });
 
   it('is registered in the bundled plugins set under the name "editor"', async () => {
+    // Importing `../index.js` cascades into every bundled plugin's module
+    // graph, which pulls matrix-js-sdk; cold-loading those decls can take
+    // several seconds. The default 5s vitest timeout is too tight.
     const { BUNDLED_PLUGINS, editorPlugin } = await import('../index.js');
     expect(editorPlugin.name).toBe('editor');
     expect(editorPlugin).toBeInstanceOf(EditorPlugin);
     expect(BUNDLED_PLUGINS.some((p) => p.name === 'editor')).toBe(true);
-  });
+  }, 15_000);
 });
 
 describe('EditorPlugin: standalone tool schema', () => {

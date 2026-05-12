@@ -32,6 +32,7 @@
     "@ixo/editor": "3.0.0-beta.11",
     "@ixo/matrix": "1.2.3",
     "@ixo/matrix-crdt": "^1.1.0",
+    "@ixo/oracle-runtime": "workspace:*",
     "@ixo/oracles-chain-client": "1.2.1",
     "@ixo/oracles-events": "1.0.4",
     "@ixo/slack": "1.0.0",

@@ -61,7 +61,7 @@
     },
     "overrides": {
       "ws": "8.18.2",
-      "@langchain/core": "^1.1.42",
+      "@langchain/core": "^1.1.45",
       "@langchain/langgraph": "^1.2.9",
       "@digitalbazaar/http-client": "4.2.0",
       "@ixo/matrix": "1.2.33"

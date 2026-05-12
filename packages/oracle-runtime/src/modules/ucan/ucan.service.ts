@@ -451,6 +451,27 @@ export class UcanService implements OnModuleDestroy {
     userDid: string,
     resource = 'ixo:sandbox',
   ): Promise<string | null> {
+    const serviceDid = await this.resolveServiceDid(serviceUrl);
+    if (!serviceDid) {
+      this.logger.debug(
+        `[UCAN] Could not resolve service DID for ${serviceUrl}`,
+      );
+      return null;
+    }
+    return this.mintInvocationForServiceDid(userDid, serviceDid, resource);
+  }
+
+  /**
+   * Mint a UCAN invocation when the downstream service DID is already known
+   * (e.g. a plugin called `resolveServiceDid` separately and now wants to
+   * mint with the resolved DID directly). Same semantics as
+   * `createServiceInvocation` minus the URL → DID lookup.
+   */
+  async mintInvocationForServiceDid(
+    userDid: string,
+    serviceDid: string,
+    resource = 'ixo:sandbox',
+  ): Promise<string | null> {
     if (!this.signingMnemonic || !this.oracleDid) {
       this.logger.debug('[UCAN] No signing key available, skipping invocation');
       return null;
@@ -460,14 +481,6 @@ export class UcanService implements OnModuleDestroy {
     if (!rawDelegation) {
       this.logger.debug(
         `[UCAN] No cached delegation for ${userDid}, skipping invocation`,
-      );
-      return null;
-    }
-
-    const serviceDid = await this.resolveServiceDid(serviceUrl);
-    if (!serviceDid) {
-      this.logger.debug(
-        `[UCAN] Could not resolve service DID for ${serviceUrl}`,
       );
       return null;
     }

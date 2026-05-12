@@ -15,6 +15,8 @@ import type {
   Logger as PluginLogger,
 } from '../plugin-api/types.js';
 import { BUNDLED_PLUGINS } from '../plugins/index.js';
+import type { AmbientServices } from '../runtime-context/ambient.js';
+import { buildAmbientServices } from './ambient-factory.js';
 import {
   ConfigSchemaRegistry,
   ManifestRegistry,
@@ -83,6 +85,12 @@ export interface PluginStatusChangeEvent {
 export interface OracleApp {
   /** The underlying `INestApplication`. Use for direct customization. */
   getNestApp(): INestApplication;
+  /**
+   * The production `AmbientServices` bag — used by `MessagesController` to
+   * build per-request `RuntimeContext`s before invoking `createMainAgent`.
+   * Forks normally don't touch this directly.
+   */
+  ambient: AmbientServices;
   /** Snapshot of loader/exclusion/soft-dep state. */
   plugins: { status(): PluginStatusReport };
   /** Pre-listen hook (before HTTP starts accepting). */
@@ -202,7 +210,19 @@ export async function createOracleApp(
     bufferLogs: false,
   });
 
-  // 8. Background Matrix init — fire-and-forget.
+  // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
+  // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
+  // the messages controller (32b) on a per-request basis.
+  const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
+  const ambient = buildAmbientServices({
+    nestApp,
+    config: validated.config,
+    identity: opts.identity,
+    availablePlugins: loadedPluginNames,
+    logger,
+  });
+
+  // 9. Background Matrix init — fire-and-forget.
   const beforeListenHooks: Array<
     (nestApp: INestApplication) => Promise<void> | void
   > = [];
@@ -284,6 +304,7 @@ export async function createOracleApp(
     getNestApp(): INestApplication {
       return nestApp;
     },
+    ambient,
     plugins: {
       status: statusReport,
     },

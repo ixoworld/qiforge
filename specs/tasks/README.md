@@ -47,7 +47,7 @@ The slicing rules I followed:
 
 Status: `TODO` → `In Progress` → `Done`. Special states: `Removed` (no longer needed), `Deferred` (parked pending design decision).
 
-**Progress: 29 of 31 in-scope tasks done.** TASK-16 (langfuse) removed; TASK-18 (calls) and TASK-31 (tasks) deferred — see notes below the table.
+**Progress: 28 of 30 in-scope tasks done.** TASK-16 (langfuse) removed; TASK-18 (calls) and TASK-31 (tasks) deferred; TASK-30 (claim-processing) merged into TASK-29 (credits) — see notes below the table.
 
 | ID | Task | Phase | Effort | Depends on | Blocks | Status |
 |---|---|---|---|---|---|---|
@@ -80,7 +80,7 @@ Status: `TODO` → `In Progress` → `Done`. Special states: `Removed` (no longe
 | [TASK-27](TASK-27-memory-plugin.md) | Convert `memoryPlugin` (with `sharedState.userProfile`) | 5 | 2.5d | 11, 15 | 32 | Done |
 | [TASK-28](TASK-28-slack-plugin.md) | Convert `slackPlugin` | 5 | 2.5d | 11, 15 | 32 | Done |
 | [TASK-29](TASK-29-credits-plugin.md) | Convert `creditsPlugin` | 5 | 2d | 11, 15 | 30, 32 | Done |
-| [TASK-30](TASK-30-claim-processing-plugin.md) | Convert `claimProcessingPlugin` (depends on credits) | 5 | 2d | 29 | 32 | Done |
+| [TASK-30](TASK-30-claim-processing-plugin.md) | Convert `claimProcessingPlugin` (depends on credits) | 5 | 2d | 29 | 32 | Merged into TASK-29 |
 | [TASK-31](TASK-31-tasks-plugin.md) | Convert `tasksPlugin` (TasksModule + BullMQ + sub-agent) | 5 | 5d | 11, 15 | 32 | Deferred |
 | [TASK-32](TASK-32-replace-app.md) | Replace `apps/app/src/` with starter | 6 | 1d | 16…31 | 33 | TODO (split into 32a–e) |
 | [TASK-33](TASK-33-cli-updates.md) | CLI updates (`qiforge plugin new`, `env`, `inspect`) | 6 | 3d | 32 | 34 | TODO |
@@ -94,6 +94,7 @@ When converting plugins or rewiring runtime modules, the goal is to **reuse as m
 
 - **TASK-16 (langfuse) — Removed.** Replaced by `LANGSMITH_*` env vars on the base env schema. LangChain auto-wires tracing when set; no plugin needed.
 - **TASK-18 (calls) — Deferred.** Has `@Controller('calls')`. The `getNestModules()` API extension that landed later would technically unblock it, but user decision to skip the calls plugin for now. Revisit alongside the tasks rebuild.
+- **TASK-30 (claim-processing) — Merged into TASK-29 (credits).** The two plugins were inseparable: `claim-processing` hard-depends on `credits` (uses the same `TokenLimiter`, the same Redis, the same on-chain settlement path). `TokenLimiter` is stateless — two instances pointing at the same Redis are equivalent. Splitting them as separate plugins forced an awkward cross-plugin DI hop. Now the credits plugin owns the **enforcement** middleware (`createCreditsMiddleware`) AND the **settlement** cron (`ClaimProcessingModule`, returned from `getNestModules()` when both `redis` and `network` are set). Files relocated *within* the runtime to `plugins/credits/`; no public API broken (only internal `ClaimProcessingPlugin` re-export removed).
 - **TASK-31 (tasks) — Deferred for full rebuild.** A port attempt revealed the apps/app TasksModule is fundamentally incompatible with the new plugin contracts: it uses module-level singletons (`getActiveTasksService`), bypasses `ctx.matrix.*` (calls `MatrixManager.getInstance()` directly), bypasses `ctx.llm.get(role)` (lifts a custom provider), bypasses `ctx.config` (reads env directly), and runs workers as the oracle admin instead of threading per-user UCAN. Workers also don't actually integrate with the memory plugin's tool surface (the soft-dep is a stub). The port was abandoned; reimplementation should: (1) use `ctx.matrix`/`ctx.llm`/`ctx.ucan`/`ctx.config` throughout, (2) re-enter the agent via the runtime's `MainAgentGraph` with a proper per-user `RuntimeContext`, (3) wire memory soft-dep via `ctx.availablePlugins.has('memory')` + actual memory tool calls, (4) ship `TasksModule` via `getNestModules()` (the API hook now exists). Pure-data files from the port (task-doc, task-page-template, task-meta, template-registry, scheduler types, the 3 lifted unit specs) are reusable; runtime-layer files must be rewritten.
 - **Runtime API additions during execution:**
   - `getRequestSubAgents(rtCtx)` / `getRequestTools(rtCtx)` — for state-aware plugins (agui, portal)
