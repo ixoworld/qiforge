@@ -32,11 +32,19 @@ import { SseStreamRunner } from './sse-stream-runner.js';
     PostMessageSyncer,
     MatrixListenerBridge,
     {
+      // `MemoryEngineService` is OPTIONAL — `SessionManagerService` guards
+      // every call site with `if (this.memoryEngineService && ...)`. When
+      // `MEMORY_ENGINE_URL` isn't set, we provide `null` so Nest can still
+      // satisfy the SessionManagerService factory's inject list. The
+      // memory plugin still gates its OWN tool surface on the same env
+      // via its `autoDetect`/`configSchema`.
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
         const memoryEngineUrl =
-          configService.getOrThrow<string>('MEMORY_ENGINE_URL');
-        return new MemoryEngineService(memoryEngineUrl);
+          configService.get<string>('MEMORY_ENGINE_URL');
+        return memoryEngineUrl
+          ? new MemoryEngineService(memoryEngineUrl)
+          : null;
       },
       inject: [ConfigService],
     },
@@ -44,12 +52,12 @@ import { SseStreamRunner } from './sse-stream-runner.js';
       provide: SessionManagerService,
       useFactory: (
         syncService: UserMatrixSqliteSyncService,
-        memoryEngineService: MemoryEngineService,
+        memoryEngineService: MemoryEngineService | null,
       ) => {
         return new SessionManagerService(
           syncService,
           MatrixManager.getInstance(),
-          memoryEngineService,
+          memoryEngineService ?? undefined,
         );
       },
       inject: [UserMatrixSqliteSyncService, MemoryEngineService],

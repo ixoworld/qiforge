@@ -270,6 +270,7 @@ export async function createMainAgent(
     systemPrompt: prompt,
     ...(checkpointer ? { checkpointer } : {}),
     name: identity.name,
+    
   });
 }
 

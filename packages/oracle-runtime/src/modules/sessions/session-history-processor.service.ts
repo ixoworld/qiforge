@@ -1,14 +1,16 @@
+// VALUE imports required for Nest DI — `design:paramtypes` metadata needs
+// the runtime constructor, not a stripped `type`-only reference.
 import {
-  type MemoryEngineService,
-  type SessionManagerService,
+  MemoryEngineService,
+  SessionManagerService,
 } from '@ixo/common';
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { type ConfigService } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { type Cache } from 'cache-manager';
-import { type MessagesService } from '../messages/messages.service.js';
-import { type UcanService } from '../ucan/ucan.service.js';
+import { MessagesService } from '../messages/messages.service.js';
+import { UcanService } from '../ucan/ucan.service.js';
 
 export interface ProcessSessionHistoryParams {
   sessionId: string;

@@ -128,7 +128,17 @@ export class MessagesService implements OnModuleInit {
         (tuple?.checkpoint?.channel_values?.messages as
           | BaseMessage[]
           | undefined) ?? [];
-      return transformGraphStateMessageToListMessageResponse(messages);
+      const transformed =
+        transformGraphStateMessageToListMessageResponse(messages);
+      // DIAG (TASK-32e): correlate with `[stream-complete]` log — if
+      // stream-complete shows N and this shows N-1, we have a race
+      // between LangGraph's stream end and the durable checkpoint write.
+      this.logger.log(
+        `[listMessages] did=${did} thread=${sessionId} ` +
+          `rawMessages=${messages.length} ` +
+          `transformedMessages=${transformed.messages.length}`,
+      );
+      return transformed;
     } finally {
       this.checkpointSync.markUserInactive(did);
     }

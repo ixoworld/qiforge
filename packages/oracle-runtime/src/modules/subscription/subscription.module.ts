@@ -6,9 +6,9 @@ import { SubscriptionMiddleware } from './subscription.middleware.js';
  * `MiddlewareConsumer.apply(...)`. The middleware itself is the unit of
  * work — this module just owns the provider registration.
  *
- * Optional ports (`SUBSCRIPTION_UCAN_PORT`, `SUBSCRIPTION_CREDIT_SINK`)
- * are wired by their respective modules (UCAN module, credits plugin).
- * The middleware tolerates either being absent.
+ * `UcanService` flows in via Nest's global UCAN module (always present).
+ * `SUBSCRIPTION_CREDIT_SINK` is plugin-supplied (credits plugin's
+ * `getNestModules()`); the middleware tolerates it being absent.
  */
 @Module({
   providers: [SubscriptionMiddleware],

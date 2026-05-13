@@ -43,9 +43,11 @@ describe('EditorPlugin', () => {
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
 
-    expect(plugin.configSchema).toBeDefined();
-    expect(plugin.configSchema!.safeParse({}).success).toBe(false);
-    expect(plugin.configSchema!.safeParse(MATRIX_CONFIG).success).toBe(true);
+    // Editor intentionally exposes no public configSchema — the Matrix
+    // env vars it needs are owned by the core base env schema. Internal
+    // parsing of `ctx.config` still validates the trio via
+    // `matrixConfigSchema` inside `parseToolsConfig`.
+    expect(plugin.configSchema).toBeUndefined();
   });
 
   it('contributes no request tools or sub-agents when neither editorRoomId nor spaceId is set', async () => {

@@ -26,12 +26,14 @@ export interface EditorPluginOptions {
 }
 
 /**
- * Editor plugin config. The Matrix admin credentials live in the runtime's
- * base env schema; this plugin reads them via `ctx.config` and consumes the
- * optional sandbox sibling env so it can wire `apply_sandbox_output_to_block`
- * when sandbox is also loaded.
+ * Internal parse schema for `parseToolsConfig`. These 3 env vars already
+ * live in the runtime's core base env schema — re-declaring them via
+ * `OraclePlugin.configSchema` would make schema-composer warn about
+ * duplicate ownership ("editor wins") on every boot. Keep this schema
+ * LOCAL: used to extract typed values from the already-validated
+ * `ctx.config`, but NOT exposed as the plugin's public configSchema.
  */
-const configSchema = z.object({
+const matrixConfigSchema = z.object({
   MATRIX_BASE_URL: z.string(),
   MATRIX_ORACLE_ADMIN_USER_ID: z.string(),
   MATRIX_ORACLE_ADMIN_ACCESS_TOKEN: z.string(),
@@ -67,7 +69,7 @@ function parseToolsConfig(
   cfg: Record<string, unknown>,
   matrixClient?: MatrixClient,
 ): BlocknoteToolsConfig {
-  const parsed = configSchema.parse(cfg);
+  const parsed = matrixConfigSchema.parse(cfg);
   return {
     ...buildBlocknoteToolsConfig({
       baseUrl: parsed.MATRIX_BASE_URL,
@@ -116,7 +118,8 @@ export class EditorPlugin extends OraclePlugin {
 
   readonly manifest = manifest;
 
-  override readonly configSchema = configSchema;
+  // Intentionally no `configSchema` — the matrix env vars editor needs are
+  // owned by the core base env schema. See `matrixConfigSchema` above.
 
   private readonly matrixClient?: MatrixClient;
 

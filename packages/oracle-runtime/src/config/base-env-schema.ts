@@ -42,6 +42,12 @@ export const baseEnvSchema = z.object({
 
   // Blocksync / chain
   BLOCKSYNC_GRAPHQL_URL: z.string(),
+  /**
+   * The oracle's own DID (`did:ixo:ixo1...`). Distinct from the
+   * `ORACLE_ENTITY_DID` (entity record on chain). Used by UcanService as
+   * the signer identity when minting downstream-service invocations.
+   */
+  ORACLE_DID: z.string(),
   ORACLE_ENTITY_DID: z.string(),
   SECP_MNEMONIC: z.string(),
   RPC_URL: z.string(),

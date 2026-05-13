@@ -13,7 +13,6 @@ import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { AbortRequestDto, SendMessageDto } from './dto/send-message.dto.js';
 import { MessagesService } from './messages.service.js';
-import { sendSSEHeartbeat, setSSEHeaders } from './sse.utils.js';
 
 @ApiTags('messages')
 @Controller('messages')
@@ -66,16 +65,11 @@ export class MessagesController {
     };
 
     if (sendMessageDto.stream) {
-      // Open the SSE channel BEFORE the service's pre-flight runs (session
-      // lookup, checkpoint sync, room resolution). The client sees the
-      // connection accepted within ~1ms; the orchestrator emits the first
-      // `Thinking...` event once the agent build starts. No headers/body
-      // contention because nothing else writes to `res` until the runner
-      // takes over.
-      setSSEHeaders(res);
-      res.flushHeaders();
-      sendSSEHeartbeat(res);
-
+      // SSE headers are set inside `SseStreamRunner` *after* prepareForQuery
+      // resolves the requestId — that lets us include `X-Request-Id` in the
+      // response and the matching `Access-Control-Expose-Headers` so the FE
+      // can read it. The earlier "flush before pre-flight" optimization
+      // dropped those headers and broke FE clients that expect them.
       await this.messagesService.sendMessage({ ...payload, res, req });
       // The service ends the response in its `finally` — nothing to return.
       return;

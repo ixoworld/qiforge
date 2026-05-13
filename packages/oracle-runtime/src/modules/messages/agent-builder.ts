@@ -1,16 +1,16 @@
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { type BaseMessage, type HumanMessage } from 'langchain';
-import { createMainAgent } from '../../graph/main-agent.js';
 import type {
   CompiledMainAgent,
   MainAgentRequestContext,
 } from '../../graph/main-agent-types.js';
+import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
+import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
-import type { SendMessageRequest } from './messages.service.js';
 
 export interface BuildAgentArgs {
   payload: SendMessageRequest;
@@ -21,14 +21,18 @@ export interface BuildAgentArgs {
 export interface BuiltAgent {
   agent: CompiledMainAgent;
   stateInput: Partial<TMainAgentGraphState>;
-  langGraphConfig: {
-    configurable: {
-      thread_id: string;
-      requestId: string;
-      sessionId: string;
-    };
-    signal?: AbortSignal;
-  };
+  /**
+   * Config passed as the 2nd argument to `agent.streamEvents` /
+   * `agent.invoke`. `version: 'v2'` is REQUIRED for streaming — without it
+   * langchain defaults to v1 (or emits nothing) and the SSE connection
+   * hangs with no events on the wire. `streamMode` + `recursionLimit`
+   * match the apps/app reference values.
+   *
+   * Typed loosely (`Record<string, unknown>`) because langchain's
+   * `streamEvents` config union doesn't perfectly intersect with the
+   * langgraph-specific options we pass.
+   */
+  langGraphConfig: Record<string, unknown>;
 }
 
 /**
@@ -55,6 +59,8 @@ export interface BuiltAgent {
  */
 @Injectable()
 export class AgentBuilder {
+  private readonly logger = new Logger(AgentBuilder.name);
+
   constructor(private readonly bundleHolder: OracleRuntimeBundleHolder) {}
 
   async build(
@@ -108,6 +114,18 @@ export class AgentBuilder {
       }
     }
 
+    // DIAG (TASK-32e): trace what the checkpoint has going INTO the build,
+    // so we can correlate against what `listMessages` reads AFTER the
+    // stream completes. If priorState.messages is N going in, and
+    // listMessages returns N after `event: done`, the new turn never
+    // got committed — race between stream-end and checkpoint write.
+    this.logger.log(
+      `[agent-build] did=${payload.did} thread=${prepared.langchainThreadId} ` +
+        `priorMessages=${priorState.messages?.length ?? 0} ` +
+        `priorLoadedPlugins=${JSON.stringify([...(priorState.loadedPlugins ?? [])])} ` +
+        `newInputMessages=${inputMessages.length}`,
+    );
+
     const clientType: 'portal' | 'matrix' | 'slack' =
       payload.clientType ?? 'portal';
 
@@ -152,8 +170,7 @@ export class AgentBuilder {
 
     const buildTimeState: Partial<TMainAgentGraphState> = {
       ...priorState,
-      editorRoomId:
-        payload.metadata?.editorRoomId ?? priorState.editorRoomId,
+      editorRoomId: payload.metadata?.editorRoomId ?? priorState.editorRoomId,
       spaceId: payload.metadata?.spaceId ?? priorState.spaceId,
       currentEntityDid:
         payload.metadata?.currentEntityDid ?? priorState.currentEntityDid,
@@ -189,8 +206,19 @@ export class AgentBuilder {
       ...(payload.agActions !== undefined && { agActions: payload.agActions }),
     };
 
-    const langGraphConfig = {
+    // `version: 'v2'` is REQUIRED for `agent.streamEvents` to emit the
+    // `{event, data, tags}` envelope the SSE loop expects. Without it,
+    // langchain defaults to v1 (or emits nothing) and the FE sees a
+    // hanging connection with no events. `streamMode` + `recursionLimit`
+    // mirror the apps/app reference. Typed `Record<string, unknown>`
+    // because the langchain streamEvents config union doesn't perfectly
+    // intersect with the langgraph-specific options here.
+    const langGraphConfig: Record<string, unknown> = {
+      version: 'v2',
+      streamMode: ['updates', 'messages'],
+      recursionLimit: 150,
       configurable: prepared.runnableConfig.configurable,
+      context: requestCtx,
       ...(abortController && { signal: abortController.signal }),
     };
 

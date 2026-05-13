@@ -117,4 +117,22 @@ export {
   creditsPlugin,
   callsPlugin,
   userPreferencesPlugin,
+  BUNDLED_PLUGINS,
 } from './plugins/index.js';
+
+// Plugin classes — for hosts that need to instantiate with custom args
+// (Redis, Matrix clients, etc.). The bundled `*Plugin` singletons above
+// cover the no-arg case; pass your own instance via `plugins: [...]` to
+// `createOracleApp` to override.
+export { AGUIPlugin } from './plugins/agui/index.js';
+export { ComposioPlugin } from './plugins/composio/index.js';
+export { CreditsPlugin } from './plugins/credits/index.js';
+export { DomainIndexerPlugin } from './plugins/domain-indexer/index.js';
+export { EditorPlugin } from './plugins/editor/index.js';
+export { FirecrawlPlugin } from './plugins/firecrawl/index.js';
+export { MemoryPlugin } from './plugins/memory/index.js';
+export { PortalPlugin } from './plugins/portal/index.js';
+export { SandboxPlugin } from './plugins/sandbox/index.js';
+export { SkillsPlugin } from './plugins/skills/index.js';
+export { SlackPlugin } from './plugins/slack/index.js';
+export { UserPreferencesPlugin } from './plugins/user-preferences/index.js';

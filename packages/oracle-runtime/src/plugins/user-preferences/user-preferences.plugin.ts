@@ -1,3 +1,4 @@
+import type { DynamicModule, Type } from '@nestjs/common';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   AgentMiddleware,
@@ -10,6 +11,7 @@ import {
   type UserPreferencesReader,
   type UserPreferencesWriter,
 } from './service/user-preferences.service.js';
+import { UserPreferencesHttpModule } from './user-preferences-http.module.js';
 import { createUserPreferencesMiddleware } from './user-preferences-middleware.js';
 import { createSetUserPreferencesTool } from './user-preferences-tool.js';
 
@@ -65,5 +67,10 @@ export class UserPreferencesPlugin extends OraclePlugin {
         logger: ctx.logger,
       }),
     ];
+  }
+
+  override getNestModules(): Array<Type | DynamicModule> {
+    // Ships `GET /user-preferences` only when this plugin is loaded.
+    return [UserPreferencesHttpModule];
   }
 }

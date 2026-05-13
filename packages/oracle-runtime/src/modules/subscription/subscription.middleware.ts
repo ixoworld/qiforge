@@ -16,22 +16,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { minutes } from '@nestjs/throttler';
 import { type NextFunction, type Request, type Response } from 'express';
-
-/**
- * Optional UCAN service port. Mirrors the subset of `UcanService` the
- * middleware actually uses. Wiring lives in `RuntimeAppModule` — defined
- * here as a port so this module stays decoupled from the UCAN module.
- */
-export interface SubscriptionUcanPort {
-  hasSigningKey(): boolean;
-  createServiceInvocation(
-    serviceUrl: string,
-    userDid: string,
-    capability: string,
-  ): Promise<string | null | undefined>;
-}
-
-export const SUBSCRIPTION_UCAN_PORT = Symbol('SUBSCRIPTION_UCAN_PORT');
+import { UcanService } from '../ucan/ucan.service.js';
 
 /**
  * Optional credit/token-limiter sink. Subscription syncs the per-DID
@@ -45,7 +30,7 @@ export interface SubscriptionCreditSink {
     userDid: string,
     payload: GetMySubscriptionsResponseDto,
   ): Promise<void>;
-  overrideUserBalance(userDid: string, balance: number): Promise<void>;
+  overrideUserBalance(userDid: string, balance: number): Promise<string>;
 }
 
 export const SUBSCRIPTION_CREDIT_SINK = Symbol('SUBSCRIPTION_CREDIT_SINK');
@@ -85,9 +70,12 @@ export class SubscriptionMiddleware implements NestMiddleware {
   constructor(
     private readonly configService: ConfigService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    @Optional()
-    @Inject(SUBSCRIPTION_UCAN_PORT)
-    private readonly ucanService?: SubscriptionUcanPort,
+    // UCAN is core runtime (global `UcanModule` exports `UcanService`).
+    // Direct DI — no port indirection.
+    private readonly ucanService: UcanService,
+    // Credit sink IS plugin-supplied (credits plugin's getNestModules) so
+    // it stays as an optional port. Absent → middleware enforces the 402
+    // gate purely from the subscription API, no Redis mirror.
     @Optional()
     @Inject(SUBSCRIPTION_CREDIT_SINK)
     private readonly creditSink?: SubscriptionCreditSink,
@@ -125,6 +113,10 @@ export class SubscriptionMiddleware implements NestMiddleware {
     this.logger.debug(
       `SubscriptionMiddleware processing request for: ${req.originalUrl}`,
     );
+
+    if (!this.creditSink) {
+    this.logger.warn('No SubscriptionCreditSink configured; credits plugin is not active. Enforcing 402 policy directly based on subscription API only.');
+    }
 
     try {
       // Check if authData is available (set upstream by AuthHeaderMiddleware)
@@ -170,7 +162,7 @@ export class SubscriptionMiddleware implements NestMiddleware {
         this.configService.get<string>('SUBSCRIPTION_URL') ??
         getSubscriptionUrlByNetwork(network);
 
-      if (!this.ucanService?.hasSigningKey()) {
+      if (!this.ucanService.hasSigningKey()) {
         throw new HttpException(
           'UCAN signing key not configured; subscription check unavailable',
           HttpStatus.UNAUTHORIZED,

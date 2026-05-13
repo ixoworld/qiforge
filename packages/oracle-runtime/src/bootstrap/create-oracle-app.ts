@@ -1,4 +1,8 @@
 import { MatrixManager } from '@ixo/matrix';
+import {
+  loadEncryptionKey,
+  setupClaimSigningMnemonics,
+} from '@ixo/oracles-chain-client';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
@@ -8,12 +12,20 @@ import {
   type Type,
 } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import pkg from '../../package.json' with { type: 'json' };
 import { baseEnvSchema } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
+import {
+  getModelForRole,
+  getProviderConfig,
+} from '../llm/llm-provider.js';
 import { validateManifest } from '../manifest/validator.js';
 import { UserMatrixSqliteSyncService } from '../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
+import { setFileProcessingProvider } from '../modules/messages/file-processing.service.js';
 import { OracleRuntimeBundleHolder } from '../modules/messages/oracle-runtime-bundle.js';
+import { SecretsService } from '../modules/secrets/secrets.service.js';
+import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
   OracleIdentity,
@@ -220,9 +232,84 @@ export async function createOracleApp(
     enableSubscriptionMiddleware: enableSubscription,
   });
 
+  // Wire the file-processing LLM provider getter BEFORE Nest constructs
+  // `FileProcessingService`. The service's module-level getter throws on
+  // first call until this runs — has to happen pre-bootstrap.
+  // Uses the same OpenRouter / Nebius config + 'vision' role mapping the
+  // legacy apps/app wired up.
+  setFileProcessingProvider(() => {
+    const cfg = getProviderConfig();
+    return {
+      apiKey: cfg.apiKey,
+      baseURL: cfg.baseURL,
+      headers: cfg.headers,
+      model: getModelForRole('vision'),
+    };
+  });
+
   const nestApp = await NestFactory.create(appModule, {
     bufferLogs: false,
   });
+
+  // CORS — auth flows from the browser need `x-ucan-delegation` allowed.
+  // `credentials: true` requires a specific origin (not `*`); when the
+  // host configures a wildcard we disable credentials so the browser
+  // doesn't reject the preflight. Guarded for the same reason as Swagger
+  // (test runtimes stub `NestFactory.create`).
+  if (typeof nestApp.enableCors === 'function') {
+    const corsOrigin =
+      typeof validated.config.CORS_ORIGIN === 'string' &&
+      validated.config.CORS_ORIGIN.length > 0
+        ? validated.config.CORS_ORIGIN
+        : '*';
+    const useCredentials = corsOrigin !== '*';
+    nestApp.enableCors({
+      origin: corsOrigin,
+      credentials: useCredentials,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'x-ucan-delegation',
+        'x-matrix-access-token',
+        'x-matrix-homeserver',
+        'x-did',
+        'x-request-id',
+        'x-timezone',
+      ],
+      exposedHeaders: ['X-Request-Id'],
+    });
+  }
+
+  // Swagger UI at `/docs`. Auth middleware already excludes `/docs` and
+  // `/docs/(.*)`. Forks can replace by registering their own setup in a
+  // `beforeListen` hook.
+  //
+  // Guarded because lightweight test runtimes stub `NestFactory.create`
+  // with an object that lacks `getHttpAdapter` — Swagger introspects the
+  // adapter to know whether it's express/fastify. In production both are
+  // present.
+  try {
+    const swaggerDoc = SwaggerModule.createDocument(
+      nestApp,
+      new DocumentBuilder()
+        .setTitle(opts.identity.name)
+        .setDescription(
+          `${opts.identity.description}\n\nQiForge runtime v${pkg.version}.`,
+        )
+        .setVersion(pkg.version)
+        .addApiKey(
+          { type: 'apiKey', name: 'x-ucan-delegation', in: 'header' },
+          'ucan',
+        )
+        .build(),
+    );
+    SwaggerModule.setup('docs', nestApp, swaggerDoc);
+  } catch (err) {
+    logger.warn?.(
+      `[createOracleApp] Swagger setup skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
@@ -338,7 +425,33 @@ export async function createOracleApp(
       dispatchStatus({ plugin: 'matrix', from: 'pending', to: 'pending' });
       matrixManager
         .init()
-        .then(() => {
+        .then(async () => {
+          // Matrix is up. Load the UCAN signing mnemonic + (optional)
+          // user-secrets encryption key from the oracle's Matrix account
+          // room. Both rely on Matrix state events as the source of truth,
+          // so this MUST run after init.
+          //
+          // The signing mnemonic enables `UcanService.createServiceInvocation`
+          // → which the credits/subscription middleware needs on the very
+          // first authenticated request. Failing this step silently is the
+          // origin of "UCAN signing key not configured" errors mid-flight.
+          //
+          // Wrapped in try/catch so a key-setup failure (e.g. test env
+          // without real Matrix state events) doesn't block the
+          // `matrix:loaded` status dispatch — auth-requiring routes will
+          // 401 until the operator provisions the keys, but the rest of
+          // the app stays usable (health, docs, ws).
+          try {
+            await wireSigningAndEncryptionKeys({
+              nestApp,
+              config: validated.config,
+              logger,
+            });
+          } catch (err) {
+            logger.error?.(
+              `[boot] key setup failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
           dispatchStatus({ plugin: 'matrix', from: 'pending', to: 'loaded' });
         })
         .catch((err: unknown) => {
@@ -434,4 +547,106 @@ function coercePort(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
+}
+
+/**
+ * After Matrix init succeeds, load the oracle's UCAN signing mnemonic and
+ * (optional) P-256 secrets encryption key from the oracle's Matrix account
+ * room, and seat them on the corresponding services.
+ *
+ * Without the signing mnemonic the credits/subscription middleware can't
+ * mint downstream invocations — every authenticated request would fail at
+ * the gate. Without the encryption key, the user-secrets read path skips
+ * silently and returns nothing (acceptable degraded mode).
+ */
+async function wireSigningAndEncryptionKeys(args: {
+  nestApp: INestApplication;
+  config: Record<string, unknown>;
+  logger: PluginLogger;
+}): Promise<void> {
+  const { nestApp, config, logger } = args;
+  const need = (key: string): string => {
+    const value = config[key];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`[boot] missing required env '${key}' for key setup`);
+    }
+    return value;
+  };
+
+  const matrixRoomId = typeof config.MATRIX_ACCOUNT_ROOM_ID === 'string'
+    ? config.MATRIX_ACCOUNT_ROOM_ID
+    : '';
+  const matrixAccessToken = need('MATRIX_ORACLE_ADMIN_ACCESS_TOKEN');
+  const walletMnemonic = need('SECP_MNEMONIC');
+  const pin = need('MATRIX_VALUE_PIN');
+  const signerDid = need('ORACLE_DID');
+  const network = need('NETWORK');
+
+  try {
+    logger.log?.('[boot] Loading UCAN signing mnemonic from Matrix...');
+    const signingMnemonic = await setupClaimSigningMnemonics({
+      matrixRoomId,
+      matrixAccessToken,
+      walletMnemonic,
+      pin,
+      signerDid,
+      network: network as 'mainnet' | 'testnet' | 'devnet',
+    });
+    if (signingMnemonic) {
+      const ucan = nestApp.get(UcanService, { strict: false });
+      if (ucan) {
+        ucan.setSigningMnemonic(signingMnemonic, signerDid);
+        logger.log?.('[boot] UCAN signing mnemonic loaded.');
+      } else {
+        logger.warn?.(
+          '[boot] UcanService not available — signing mnemonic dropped.',
+        );
+      }
+    } else {
+      logger.warn?.(
+        '[boot] setupClaimSigningMnemonics returned null. ' +
+          'UCAN minting will be unavailable until the mnemonic is provisioned ' +
+          '(run `oracles-cli setup-claim-signing-mnemonics`).',
+      );
+    }
+  } catch (error) {
+    logger.error?.(
+      `[boot] Failed to set up claim signing mnemonics: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  if (!matrixRoomId) {
+    logger.warn?.(
+      '[boot] No MATRIX_ACCOUNT_ROOM_ID; skipping encryption-key load. ' +
+        'User secrets will be unavailable.',
+    );
+    return;
+  }
+
+  try {
+    logger.log?.('[boot] Loading P-256 user-secrets encryption key...');
+    const result = await loadEncryptionKey({
+      matrixRoomId,
+      matrixAccessToken,
+      pin,
+      signerDid,
+    });
+    if (result) {
+      SecretsService.getInstance().setEncryptionKey(result.privateJwk);
+      logger.log?.('[boot] P-256 encryption key loaded.');
+    } else {
+      logger.warn?.(
+        '[boot] No P-256 encryption key found. User secrets will be ' +
+          'unavailable. Provision one via `oracles-cli setup-encryption-key`.',
+      );
+    }
+  } catch (error) {
+    logger.error?.(
+      `[boot] Failed to load P-256 encryption key: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }

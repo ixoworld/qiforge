@@ -1,12 +1,12 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { ReactAgent } from 'langchain';
+import { z } from 'zod';
 import type {
   ChatOpenAIFields,
   MergedConfig,
   ModelRole,
   OracleIdentity,
-  UcanDelegation,
 } from '../plugin-api/types.js';
 import type { ConfigSchemaRegistry } from '../registries/config-schema-registry.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
@@ -16,7 +16,6 @@ import type { SubAgentRegistry } from '../registries/subagent-registry.js';
 import type { ToolRegistry } from '../registries/tool-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { TMainAgentGraphState } from './state.js';
-
 /** The 6 internal registries the runtime composes. */
 export interface MainAgentRegistries {
   tools: ToolRegistry;
@@ -27,33 +26,29 @@ export interface MainAgentRegistries {
   sharedState: SharedStateRegistry;
 }
 
+export const mainAgentRequestContextSchema = z.object({
+  user: z.object({
+    did: z.string(),
+    matrixUserId: z.string(),
+    ucanDelegation: z.any(), // You may prefer a stricter schema for UCAN later.
+    timezone: z.string().optional(),
+    currentTime: z.string().optional(),
+  }),
+  session: z.object({
+    id: z.string(),
+    client: z.enum(['portal', 'matrix', 'slack']),
+    requestId: z.string(),
+    wsId: z.string().optional(),
+    roomId: z.string().optional(),
+  }),
+  history: z.object({
+    userContext: z.record(z.string(), z.unknown()).optional(),
+  }),
+});
 /** Per-request shape — exposes only what the main-agent build needs. */
-export interface MainAgentRequestContext {
-  user: {
-    did: string;
-    /**
-     * Authenticated Matrix user id. Required so request-build can synthesize
-     * a `RuntimeContext` and pass it to registries' request-time hooks.
-     */
-    matrixUserId: string;
-    /** UCAN delegation envelope for this request. */
-    ucanDelegation: UcanDelegation;
-    timezone?: string;
-    currentTime?: string;
-  };
-  session: {
-    id: string;
-    client: 'portal' | 'matrix' | 'slack';
-    /** Propagated to scoped emitter and per-room secrets. */
-    requestId: string;
-    /** Optional WebSocket id for SSE/WS clients. */
-    wsId?: string;
-    roomId?: string;
-  };
-  history: {
-    userContext: Record<string, unknown> | undefined;
-  };
-}
+export type MainAgentRequestContext = z.infer<
+  typeof mainAgentRequestContextSchema
+>;
 
 /**
  * Optional hooks the consuming app provides to keep platform-specific behaviour

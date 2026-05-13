@@ -1,7 +1,8 @@
 import { AIMessageChunk } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
+import { mainAgentRequestContextSchema } from '../../graph/main-agent-types.js';
 import type { Logger } from '../../plugin-api/types.js';
-import { TokenLimiter, TokenLimiterError } from './token-limiter.js';
+import { type TokenLimiter, TokenLimiterError } from './token-limiter.js';
 
 const NOOP_LOGGER: Logger = {
   log: () => undefined,
@@ -195,5 +196,6 @@ export const createCreditsMiddleware = (
         throw error;
       }
     },
+    contextSchema: mainAgentRequestContextSchema,
   });
 };

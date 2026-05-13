@@ -16,7 +16,10 @@ import {
   Logger,
   type OnModuleDestroy,
 } from '@nestjs/common';
-import { type ConfigService } from '@nestjs/config';
+// `ConfigService` must be a VALUE import — Nest needs the constructor in
+// the compiled `design:paramtypes` metadata to resolve the DI graph.
+// A `type` import erases it to `Function` and DI fails at boot.
+import { ConfigService } from '@nestjs/config';
 import {
   buildRequiredCapability,
   createMCPUCANConfig,

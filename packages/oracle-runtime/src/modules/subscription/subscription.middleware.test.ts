@@ -5,9 +5,9 @@ import { Test, type TestingModule } from '@nestjs/testing';
 import type { NextFunction, Request, Response } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { UcanService } from '../ucan/ucan.service.js';
 import {
   SUBSCRIPTION_CREDIT_SINK,
-  SUBSCRIPTION_UCAN_PORT,
   SubscriptionMiddleware,
 } from './subscription.middleware.js';
 
@@ -65,6 +65,13 @@ async function bootstrapMiddleware({
     overrideUserBalance: ReturnType<typeof vi.fn>;
   };
 }): Promise<{ middleware: SubscriptionMiddleware; module: TestingModule }> {
+  // `ucanService` is now a non-optional dep; tests that don't supply one
+  // get a default with no signing key so the unauth code path triggers
+  // exactly like in production.
+  const ucanService = ucanPort ?? {
+    hasSigningKey: () => false,
+    createServiceInvocation: vi.fn().mockResolvedValue(null),
+  };
   const providers: Parameters<typeof Test.createTestingModule>[0]['providers'] =
     [
       SubscriptionMiddleware,
@@ -80,10 +87,8 @@ async function bootstrapMiddleware({
           },
         },
       },
+      { provide: UcanService, useValue: ucanService },
     ];
-  if (ucanPort) {
-    providers.push({ provide: SUBSCRIPTION_UCAN_PORT, useValue: ucanPort });
-  }
   if (creditSink) {
     providers.push({ provide: SUBSCRIPTION_CREDIT_SINK, useValue: creditSink });
   }

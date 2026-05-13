@@ -23,6 +23,10 @@ export {
   type FileProcessingSinkModuleOptions,
 } from './file-processing-sink.module.js';
 export {
+  SubscriptionSinkModule,
+  type SubscriptionSinkModuleOptions,
+} from './subscription-sink.module.js';
+export {
   ClaimProcessingService,
   CLAIM_PROCESSING_TOKEN_LIMITER,
   submitClaimToSubscriptionApi,

@@ -1,0 +1,27 @@
+{
+  "name": "qiforge-example",
+  "version": "0.0.1",
+  "description": "Reference oracle that boots the QiForge runtime with all bundled plugins.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit"
+  },
+  "dependencies": {
+    "@ixo/oracle-runtime": "workspace:*",
+    "dotenv": "^16.4.7",
+    "ioredis": "^5.6.1",
+    "matrix-js-sdk": "^37.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

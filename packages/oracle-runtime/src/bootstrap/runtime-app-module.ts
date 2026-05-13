@@ -13,6 +13,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { AuthHeaderMiddleware } from '../modules/auth/auth-header.middleware.js';
 import { AuthModule } from '../modules/auth/auth.module.js';
+import { HealthModule } from '../modules/health/health.module.js';
 import { MessagesModule } from '../modules/messages/messages.module.js';
 import { SessionsModule } from '../modules/sessions/sessions.module.js';
 import { SubscriptionMiddleware } from '../modules/subscription/subscription.middleware.js';
@@ -75,6 +76,7 @@ export class RuntimeAppModule implements NestModule {
       SessionsModule,
       MessagesModule,
       WsModule,
+      HealthModule,
       ...(opts.pluginNestModules ?? []),
       ...(opts.userNestModules ?? []),
     ];

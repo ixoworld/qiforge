@@ -17,11 +17,14 @@ import { SessionsService } from './sessions.service.js';
     SessionsService,
     SessionHistoryProcessor,
     {
+      // MEMORY_ENGINE_URL is optional — see comment in messages.module.ts.
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
         const memoryEngineUrl =
-          configService.getOrThrow<string>('MEMORY_ENGINE_URL');
-        return new MemoryEngineService(memoryEngineUrl);
+          configService.get<string>('MEMORY_ENGINE_URL');
+        return memoryEngineUrl
+          ? new MemoryEngineService(memoryEngineUrl)
+          : null;
       },
       inject: [ConfigService],
     },
@@ -29,12 +32,12 @@ import { SessionsService } from './sessions.service.js';
       provide: SessionManagerService,
       useFactory: (
         syncService: UserMatrixSqliteSyncService,
-        memoryEngineService: MemoryEngineService,
+        memoryEngineService: MemoryEngineService | null,
       ) => {
         return new SessionManagerService(
           syncService,
           MatrixManager.getInstance(),
-          memoryEngineService,
+          memoryEngineService ?? undefined,
         );
       },
       inject: [UserMatrixSqliteSyncService, MemoryEngineService],

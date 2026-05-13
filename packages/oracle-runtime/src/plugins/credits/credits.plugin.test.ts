@@ -191,14 +191,15 @@ describe('CreditsPlugin', () => {
   });
 
   describe('getNestModules — Nest wiring', () => {
-    it('returns ClaimProcessingModule + FileProcessingSinkModule when redis + network are set', () => {
+    it('returns claim-processing + file-processing sink + subscription sink modules when redis + network are set', () => {
       const plugin = new CreditsPlugin({
         redis: makeRedisStub(100),
         network: 'devnet',
       });
       const modules = plugin.getNestModules();
-      // Two modules: claim-processing cron + file-processing credit sink.
-      expect(modules).toHaveLength(2);
+      // Three modules: claim-processing cron + FILE_PROCESSING_CREDIT_SINK
+      // + SUBSCRIPTION_CREDIT_SINK.
+      expect(modules).toHaveLength(3);
       for (const mod of modules) {
         const dynamicModule = mod as { module: unknown };
         expect(dynamicModule.module).toBeDefined();

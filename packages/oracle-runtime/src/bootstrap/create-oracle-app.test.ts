@@ -26,6 +26,14 @@ vi.mock('./runtime-app-module.js', () => ({
   },
 }));
 
+vi.mock('@ixo/oracles-chain-client', () => ({
+  setupClaimSigningMnemonics: vi.fn().mockResolvedValue(null),
+  loadEncryptionKey: vi.fn().mockResolvedValue(null),
+  // Other named exports used elsewhere in the runtime; if a test imports
+  // them transitively, provide harmless stubs.
+  getMatrixHomeServerCroppedForDid: vi.fn().mockResolvedValue('test-server'),
+}));
+
 vi.mock('@ixo/matrix', () => {
   const initMock = vi.fn(async () => undefined);
   const shutdownMock = vi.fn(async () => undefined);
@@ -79,6 +87,7 @@ const validBaseEnv: NodeJS.ProcessEnv = {
   MATRIX_VALUE_PIN: '1234',
   SQLITE_DATABASE_PATH: ':memory:',
   BLOCKSYNC_GRAPHQL_URL: 'http://localhost/graphql',
+  ORACLE_DID: 'did:ixo:oracle',
   ORACLE_ENTITY_DID: 'did:ixo:oracle:test',
   SECP_MNEMONIC: 'word '.repeat(12).trim(),
   RPC_URL: 'http://localhost:26657',
@@ -226,8 +235,11 @@ describe('createOracleApp — Matrix lifecycle', () => {
     );
 
     expect(MatrixManager.getInstance).toHaveBeenCalled();
-    // setImmediate inside the factory defers init kick-off — flush twice so
-    // both the macrotask and the inner microtask drain.
+    // setImmediate inside the factory defers init kick-off — flush a few
+    // times so both the macrotask + the inner key-setup microtask drain
+    // (post-init we await `wireSigningAndEncryptionKeys` before dispatch).
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
 
