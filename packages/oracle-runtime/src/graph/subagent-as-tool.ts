@@ -13,7 +13,7 @@ import {
   type StructuredTool,
 } from 'langchain';
 import { randomUUID } from 'node:crypto';
-import { emojify } from 'node-emoji';
+import { emojify } from '../utils/emoji.js';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types.js';
 

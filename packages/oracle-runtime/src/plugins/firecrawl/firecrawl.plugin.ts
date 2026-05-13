@@ -34,7 +34,7 @@ const manifest: PluginManifest = {
   ],
   tags: ['web', 'search', 'scrape', 'firecrawl'],
   category: 'data',
-  visibility: 'always',
+  visibility: 'on-demand',
   stability: 'stable',
 };
 

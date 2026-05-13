@@ -1,6 +1,6 @@
 import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
 import { createAgent, type StructuredTool } from 'langchain';
-import { emojify } from 'node-emoji';
+import { emojify } from '../../utils/emoji.js';
 import { z } from 'zod';
 
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';

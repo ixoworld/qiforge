@@ -31,7 +31,7 @@ import {
   type BlockSnapshot,
   type ConditionConfig,
 } from './blocknote-helper.js';
-import { emojify, unemojify } from 'node-emoji';
+import { emojify, unemojify } from '../../utils/emoji.js';
 import { findAndReplaceInDoc, insertBlock, moveBlock } from './block-actions.js';
 import { type AppConfig, MatrixProviderManager } from './provider.js';
 import {

@@ -26,7 +26,7 @@ const manifest: PluginManifest = {
   ],
   tags: ['agui', 'ui', 'portal', 'copilot'],
   category: 'ui',
-  visibility: 'always',
+  visibility: 'on-demand',
   stability: 'stable',
 };
 

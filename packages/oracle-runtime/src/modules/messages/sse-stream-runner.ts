@@ -6,7 +6,7 @@ import {
 import { Injectable, Logger } from '@nestjs/common';
 import type { Response } from 'express';
 import { AIMessageChunk, type HumanMessage, ToolMessage } from 'langchain';
-import { emojify } from 'node-emoji';
+import { emojify } from '../../utils/emoji.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
 import { type PreparedRequest } from './request-preparer.js';
@@ -301,7 +301,7 @@ export class SseStreamRunner {
 
     const actionCallEvent = actionCallMap.get(toolCallId);
     if (actionCallEvent) {
-      actionCallEvent.payload.output = emojify(toolMessage.content as string);
+      actionCallEvent.payload.output = emojify(toolMessage.content);
       actionCallEvent.payload.toolCallId = toolCallId;
       const parsed = safeParseToolContent(toolMessage.content);
       if (parsed?.success === false || parsed?.error) {
@@ -323,7 +323,7 @@ export class SseStreamRunner {
 
     const toolCallEvent = toolCallMap.get(toolCallId);
     if (!toolCallEvent) return;
-    toolCallEvent.payload.output = emojify(toolMessage.content as string);
+    toolCallEvent.payload.output = emojify(toolMessage.content);
     toolCallEvent.payload.status = 'done';
     (toolCallEvent.payload.args as Record<string, unknown>).toolName =
       toolMessage.name;

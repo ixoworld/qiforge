@@ -6,7 +6,7 @@ import { tool } from '@langchain/core/tools';
 import type { MatrixClient } from 'matrix-js-sdk';
 import * as z from 'zod';
 
-import { emojify } from 'node-emoji';
+import { emojify } from '../../utils/emoji.js';
 import type { BlocknoteToolsConfig } from './blocknote-tools.js';
 import { createPage, readPage, updatePage } from './page-functions.js';
 

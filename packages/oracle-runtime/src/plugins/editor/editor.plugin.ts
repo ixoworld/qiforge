@@ -61,7 +61,7 @@ const manifest: PluginManifest = {
   ],
   tags: ['editor', 'blocknote', 'pages', 'documents'],
   category: 'data',
-  visibility: 'always',
+  visibility: 'on-demand',
   stability: 'stable',
 };
 
