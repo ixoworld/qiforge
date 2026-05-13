@@ -5,14 +5,16 @@ export {
   type UserContextReader,
 } from './memory-middleware.js';
 export {
-  createMemoryTools,
+  fetchMemoryTools,
   createDefaultMemoryMcpFactory,
-  MEMORY_SEARCH_TOOL,
-  MEMORY_SAVE_TOOL,
-  MEMORY_READ_TOOL,
-  MEMORY_DELETE_TOOL,
-  MEMORY_CLEAR_TOOL,
+  DEFAULT_MEMORY_TOOLS,
+  MEMORY_SEARCH_MCP_NAME,
+  MEMORY_ADD_MCP_NAME,
+  MEMORY_ADD_ORACLE_KNOWLEDGE_MCP_NAME,
+  MEMORY_DELETE_EPISODE_MCP_NAME,
+  MEMORY_DELETE_EDGE_MCP_NAME,
+  MEMORY_CLEAR_MCP_NAME,
   type MemoryMcpFactory,
-  type MemoryMcpProxyTool,
+  type UpstreamMcpTool,
 } from './memory-tools.js';
 export { buildMemoryHeaders } from './memory-ucan.js';

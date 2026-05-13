@@ -59,7 +59,7 @@ export function buildListCapabilitiesTool(
           tags: manifest.tags ?? [],
         });
       }
-      return out.toString();
+      return out
     },
     {
       name: 'list_capabilities',

@@ -216,35 +216,6 @@ export class SseStreamRunner {
           }
 
           if (!abortController.signal.aborted) {
-            // DIAG (TASK-32e): read the post-run state via the compiled
-            // agent's official `getState()` so we know what's in the
-            // checkpoint AT THE MOMENT we send `event: done`. The FE
-            // refetches `listMessages` immediately after this — if our
-            // log shows N messages here but listMessages later returns
-            // N-1, we have a race between stream-end and the durable
-            // commit. If both show N-1, the new turn never persisted.
-            //
-            // Typed as `unknown` because ReactAgent's `getState` lives on
-            // the inner graph and the public type erases the shape; we
-            // only read for diagnostic logging.
-            try {
-              const agentWithState = agent as unknown as {
-                getState: (cfg: unknown) => Promise<{
-                  values?: { messages?: unknown[] };
-                } | null>;
-              };
-              const postState = await agentWithState.getState(langGraphConfig);
-              const postMessages = postState?.values?.messages?.length ?? 'unknown';
-              this.logger.log(
-                `[stream-complete] session=${sessionId} request=${requestId} ` +
-                  `postRunMessages=${postMessages} fullContentLen=${fullContent.length}`,
-              );
-            } catch (err) {
-              this.logger.warn(
-                `[stream-complete] could not read postRun state: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            }
-
             const completeEvent = ReasoningEvent.createChunk(
               sessionId,
               requestId,

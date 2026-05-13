@@ -147,11 +147,16 @@ function registriesWith({
       name: 'memory',
       manifest: makeManifest({ visibility: 'always', title: 'Memory' }),
       getTools: () => [
-        makeTool('search_memory', { schema: z.object({ q: z.string() }) }),
-        makeTool('save_memory', { schema: z.object({ c: z.string() }) }),
-        makeTool('read_memory', { schema: z.object({ id: z.string() }) }),
-        makeTool('delete_memory', { schema: z.object({ id: z.string() }) }),
-        makeTool('clear_memory', {
+        makeTool('memory-engine__search_memory_engine', {
+          schema: z.object({ q: z.string() }),
+        }),
+        makeTool('memory-engine__add_memory', {
+          schema: z.object({ c: z.string() }),
+        }),
+        makeTool('memory-engine__delete_episode', {
+          schema: z.object({ id: z.string() }),
+        }),
+        makeTool('memory-engine__clear', {
           schema: z.object({ confirm: z.boolean() }),
         }),
       ],
@@ -197,7 +202,7 @@ describe('memory passthrough wiring', () => {
     fakeCompiledAgent.stream.mockReset();
   });
 
-  it('forwards the four memory CRUD tools to every sub-agent (visible in inner agent tool list)', async () => {
+  it('forwards the non-destructive memory tools to every sub-agent (visible in inner agent tool list)', async () => {
     await createMainAgent(
       baseArgs({ registries: registriesWith({ includeMemory: true }) }),
     );
@@ -226,17 +231,17 @@ describe('memory passthrough wiring', () => {
     const innerToolNames = (innerCall!.tools as Array<{ name: string }>).map(
       (t) => t.name,
     );
-    // Sub-agent's own tool first, then the four memory passthroughs.
+    // Sub-agent's own tool first, then the memory passthroughs
+    // (everything except the destructive `memory-engine__clear`).
     expect(innerToolNames).toEqual([
       'do_search',
-      'search_memory',
-      'save_memory',
-      'read_memory',
-      'delete_memory',
+      'memory-engine__search_memory_engine',
+      'memory-engine__add_memory',
+      'memory-engine__delete_episode',
     ]);
   });
 
-  it('never gives sub-agents `clear_memory` but DOES bind it on the main agent', async () => {
+  it('never gives sub-agents `memory-engine__clear` but DOES bind it on the main agent', async () => {
     await createMainAgent(
       baseArgs({ registries: registriesWith({ includeMemory: true }) }),
     );
@@ -244,7 +249,7 @@ describe('memory passthrough wiring', () => {
     const mainNames = (
       createAgentCalls[0]!.tools as Array<{ name: string }>
     ).map((t) => t.name);
-    expect(mainNames).toContain('clear_memory');
+    expect(mainNames).toContain('memory-engine__clear');
 
     const subTool = findSubAgentTool('call_search_agent');
     await subTool.invoke?.(
@@ -265,7 +270,7 @@ describe('memory passthrough wiring', () => {
     const innerToolNames = (
       createAgentCalls[1]!.tools as Array<{ name: string }>
     ).map((t) => t.name);
-    expect(innerToolNames).not.toContain('clear_memory');
+    expect(innerToolNames).not.toContain('memory-engine__clear');
   });
 
   it('gives sub-agents only their own tools when the memory plugin is not loaded', async () => {

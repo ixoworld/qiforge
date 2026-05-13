@@ -11,7 +11,10 @@ import type {
   PluginTool,
 } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
-import { MemoryPlugin } from '../plugins/memory/index.js';
+import {
+  MEMORY_CLEAR_MCP_NAME,
+  MemoryPlugin,
+} from '../plugins/memory/index.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -169,10 +172,11 @@ export async function createMainAgent(
 
   // Memory tools are eligible to flow into every sub-agent's tool list, so
   // any sub-agent can recall/save memory without round-tripping through the
-  // main agent. `clear_memory` is excluded — destructive, main-agent-only.
+  // main agent. The destructive upstream `memory-engine__clear` is excluded —
+  // main-agent-only (and not in the default selectedTools anyway).
   const memoryPassthrough = allTools
     .filter(({ pluginName }) => pluginName === MemoryPlugin.NAME)
-    .filter(({ tool }) => tool.name !== 'clear_memory')
+    .filter(({ tool }) => tool.name !== MEMORY_CLEAR_MCP_NAME)
     .map(wrap);
 
   // ── 5. Sub-agents — Promise.allSettled fallback ─────────────────────────

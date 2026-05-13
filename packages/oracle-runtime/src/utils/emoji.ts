@@ -17,7 +17,7 @@ export function emojify(input: unknown): string {
     return nodeEmojify(input as string);
   } catch (err) {
     const str = toStringSafe(input);
-    logger.warn(
+    logger.debug(
       `emojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
       err,
@@ -31,7 +31,7 @@ export function unemojify(input: unknown): string {
     return nodeUnemojify(input as string);
   } catch (err) {
     const str = toStringSafe(input);
-    logger.warn(
+    logger.debug(
       `unemojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
       err

@@ -12,8 +12,8 @@ QA pass for the new QiForge runtime via `apps/qiforge-example`. The goal is to v
 
 ## 0. Pre-flight
 
-- [ ] `apps/qiforge-example/.env` is filled with real Matrix creds, oracle DID, `OPEN_ROUTER_API_KEY` (or `NEBIUS_API_KEY`)
-- [ ] `oracle.config.json` has the right `entityDid` for your test oracle
+- [x] `apps/qiforge-example/.env` is filled with real Matrix creds, oracle DID, `OPEN_ROUTER_API_KEY` (or `NEBIUS_API_KEY`)
+- [x] `oracle.config.json` has the right `entityDid` for your test oracle
 - [ ] Redis is running locally (`docker run -p 6379:6379 redis` or `docker compose up redis`) — required for credits + claim-processing
 - [ ] You have a way to obtain a UCAN delegation header for an authenticated test user (CLI/portal/script — whatever your flow is)
 - [ ] Pick a tool to hit endpoints: `curl`, Postman, the qiforge web portal, or `oracles-client-sdk`

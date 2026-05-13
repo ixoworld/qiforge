@@ -15,7 +15,8 @@ import {
 } from './memory-middleware.js';
 import {
   createDefaultMemoryMcpFactory,
-  createMemoryTools,
+  DEFAULT_MEMORY_TOOLS,
+  fetchMemoryTools,
   type MemoryMcpFactory,
 } from './memory-tools.js';
 
@@ -39,18 +40,6 @@ const manifest: PluginManifest = {
     'Volatile session-only state (use the current message thread).',
     'Public web facts (use Firecrawl).',
   ],
-  examples: [
-    {
-      user: 'Remember that I prefer dark mode.',
-      tool: 'save_memory',
-      args: { content: 'User prefers dark mode for UI surfaces.' },
-    },
-    {
-      user: 'What did I say about my morning routine last week?',
-      tool: 'search_memory',
-      args: { query: 'morning routine' },
-    },
-  ],
   tags: ['memory', 'recall', 'personalization'],
   category: 'memory',
   visibility: 'always',
@@ -62,20 +51,21 @@ const NOOP_READER: UserContextReader = {
   get: async () => undefined,
 };
 
-/** Optional dependency injection — primarily for tests. */
 export interface MemoryPluginOptions {
   /**
-   * Override the MCP-tools factory. Defaults to a Memory-Engine MCP HTTP
-   * client built from `MEMORY_MCP_URL` and authenticated with the per-call
-   * UCAN invocation. Tests pass a stub so the plugin never touches the
-   * network.
+   * Override the MCP-tools factory. Defaults to an HTTP MCP client against
+   * `MEMORY_MCP_URL` authenticated with a per-request UCAN invocation.
    */
   mcpFactory?: (memoryMcpUrl: string) => MemoryMcpFactory;
   /**
+   * Filter the upstream tool surface. Defaults to {@link DEFAULT_MEMORY_TOOLS}
+   * (search + add + delete-episode). Pass an explicit list to expose
+   * `clear`, `add_oracle_knowledge`, etc.
+   */
+  selectedTools?: readonly string[];
+  /**
    * Optional reader the middleware uses to populate `state.userContext`
-   * before the first model call. Forks that source userContext from the
-   * session (the apps/app pattern) leave this unset — the caller hydrates
-   * `state.userContext` directly when invoking the agent.
+   * before the first model call.
    */
   userContextReader?: UserContextReader;
 }
@@ -86,26 +76,20 @@ function resolveMemoryUrl(config: MergedConfig): string {
 }
 
 /**
- * Memory plugin. Exposes the five memory tools (`search_memory`,
- * `save_memory`, `read_memory`, `delete_memory`, `clear_memory`) directly on
- * the main agent — no sub-agent. The runtime's passthrough filter (in
- * `createMainAgent`) forwards the four non-destructive tools into every
- * sub-agent's tool list as well, so any sub-agent can recall or save memory
- * without round-tripping through the main agent.
+ * Memory plugin. Surfaces upstream Memory Engine MCP tools directly — the
+ * agent sees the upstream names (`memory-engine__search_memory_engine`,
+ * `memory-engine__add_memory`, ...) with the upstream's own schemas. This
+ * matches the apps/app pattern that worked in production and avoids
+ * schema-mismatch failures from a local wrapper layer.
  *
- * `clear_memory` is intentionally bound to the main agent only. The runtime
- * filter excludes it from the passthrough — destructive ops require explicit
- * user consent in the active turn.
+ * Tool list is fetched per-request via `getRequestTools` because the MCP
+ * headers depend on the in-flight user's UCAN delegation.
  *
- * UCAN minting goes through `ctx.ucan.resolveServiceDid` +
- * `ctx.ucan.mintInvocation` — the plugin never builds did:web inline.
+ * The runtime forwards memory tools into every sub-agent's tool list
+ * (filter in `main-agent.ts`), except `memory-engine__clear` — destructive,
+ * main-agent-only.
  */
 export class MemoryPlugin extends OraclePlugin {
-  /**
-   * Static handle used by the runtime to filter memory tools off the main
-   * agent's collected tool list for sub-agent passthrough. Keeping the name
-   * on the class avoids hardcoding the string in `main-agent.ts`.
-   */
   static readonly NAME = 'memory';
 
   readonly name = MemoryPlugin.NAME;
@@ -120,11 +104,14 @@ export class MemoryPlugin extends OraclePlugin {
 
   private readonly mcpFactory: (memoryMcpUrl: string) => MemoryMcpFactory;
 
+  private readonly selectedTools: readonly string[];
+
   private readonly userContextReader: UserContextReader;
 
   constructor(options: MemoryPluginOptions = {}) {
     super();
     this.mcpFactory = options.mcpFactory ?? createDefaultMemoryMcpFactory;
+    this.selectedTools = options.selectedTools ?? DEFAULT_MEMORY_TOOLS;
     this.userContextReader = options.userContextReader ?? NOOP_READER;
   }
 
@@ -132,10 +119,12 @@ export class MemoryPlugin extends OraclePlugin {
     return Boolean(env.MEMORY_MCP_URL);
   }
 
-  override getTools(ctx: PluginContext): PluginTool[] {
-    const memoryUrl = resolveMemoryUrl(ctx.config);
+  override async getRequestTools(
+    rtCtx: RuntimeContext,
+  ): Promise<PluginTool[]> {
+    const memoryUrl = resolveMemoryUrl(rtCtx.config);
     const factory = this.mcpFactory(memoryUrl);
-    return createMemoryTools(factory);
+    return fetchMemoryTools(rtCtx, factory, this.selectedTools);
   }
 
   override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {

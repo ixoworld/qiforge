@@ -1,5 +1,5 @@
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { type BaseMessage, type HumanMessage } from 'langchain';
 import type {
   CompiledMainAgent,
@@ -59,8 +59,6 @@ export interface BuiltAgent {
  */
 @Injectable()
 export class AgentBuilder {
-  private readonly logger = new Logger(AgentBuilder.name);
-
   constructor(private readonly bundleHolder: OracleRuntimeBundleHolder) {}
 
   async build(
@@ -113,18 +111,6 @@ export class AgentBuilder {
         // First message in a thread — no prior tuple. Continue with empty state.
       }
     }
-
-    // DIAG (TASK-32e): trace what the checkpoint has going INTO the build,
-    // so we can correlate against what `listMessages` reads AFTER the
-    // stream completes. If priorState.messages is N going in, and
-    // listMessages returns N after `event: done`, the new turn never
-    // got committed — race between stream-end and checkpoint write.
-    this.logger.log(
-      `[agent-build] did=${payload.did} thread=${prepared.langchainThreadId} ` +
-        `priorMessages=${priorState.messages?.length ?? 0} ` +
-        `priorLoadedPlugins=${JSON.stringify([...(priorState.loadedPlugins ?? [])])} ` +
-        `newInputMessages=${inputMessages.length}`,
-    );
 
     const clientType: 'portal' | 'matrix' | 'slack' =
       payload.clientType ?? 'portal';
