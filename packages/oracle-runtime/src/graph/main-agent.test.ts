@@ -209,35 +209,33 @@ describe('createMainAgent', () => {
     const registries = emptyRegistries();
 
     // Plugin contributes one good sub-agent, one whose tools accessor throws.
-    registries.subAgents.register(
-      makePlugin({
-        name: 'good',
-        manifest: makeManifest({ visibility: 'silent' }),
-        getSubAgents: () => [
-          makeSubAgent('search_agent', {
-            tools: [
-              makeTool('search', { schema: z.object({ q: z.string() }) }),
-            ],
-          }),
-        ],
-      }),
-    );
+    const goodPlugin = makePlugin({
+      name: 'good',
+      manifest: makeManifest({ visibility: 'silent' }),
+      getSubAgents: () => [
+        makeSubAgent('search_agent', {
+          tools: [makeTool('search', { schema: z.object({ q: z.string() }) })],
+        }),
+      ],
+    });
+    registries.subAgents.register(goodPlugin);
+    registries.manifests.register(goodPlugin);
 
-    registries.subAgents.register(
-      makePlugin({
-        name: 'broken',
-        manifest: makeManifest({ visibility: 'silent' }),
-        getSubAgents: () => [
-          makeSubAgent('broken_agent', {
-            // A function-tools accessor that throws when sub-agent-fallback
-            // tries to materialise it.
-            tools: () => {
-              throw new Error('boom');
-            },
-          }),
-        ],
-      }),
-    );
+    const brokenPlugin = makePlugin({
+      name: 'broken',
+      manifest: makeManifest({ visibility: 'silent' }),
+      getSubAgents: () => [
+        makeSubAgent('broken_agent', {
+          // A function-tools accessor that throws when sub-agent-fallback
+          // tries to materialise it.
+          tools: () => {
+            throw new Error('boom');
+          },
+        }),
+      ],
+    });
+    registries.subAgents.register(brokenPlugin);
+    registries.manifests.register(brokenPlugin);
 
     const ambient = makeAmbient();
     const agent = await createMainAgent(baseArgs({ registries, ambient }));

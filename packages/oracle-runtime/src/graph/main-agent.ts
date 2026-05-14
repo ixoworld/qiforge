@@ -179,7 +179,20 @@ export async function createMainAgent(
     .filter(({ tool }) => tool.name !== MEMORY_CLEAR_MCP_NAME)
     .map(wrap);
 
-  // ── 5. Sub-agents — Promise.allSettled fallback ─────────────────────────
+  // ── 5. Sub-agents — collect, filter by visibility + loaded state ────────
+  // Sub-agents share the tool namespace, so the same visibility rules that
+  // gate tools must gate sub-agents: `always`/`silent` always bind;
+  // `on-demand` binds only when the user has loaded the plugin.
+  const allSubAgents = await registries.subAgents.collect(buildCtx, rtCtx);
+  const visibleSubAgents = allSubAgents.filter(({ pluginName }) => {
+    const viz = manifestViz.get(pluginName) ?? 'on-demand';
+    if (viz === 'always' || viz === 'silent') return true;
+    return loadedSet.has(pluginName);
+  });
+  const filteredOutSubAgents = allSubAgents.filter(
+    (e) => !visibleSubAgents.includes(e),
+  );
+
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -189,7 +202,30 @@ export async function createMainAgent(
     sessionId: requestCtx.session.id,
     rtCtx,
     passthroughTools: memoryPassthrough,
+    subAgents: visibleSubAgents,
   });
+
+  ambient.logger.log(
+    {
+      eagerTools: eagerTools.length,
+      loadedLazyTools: loadedLazyTools.length,
+      loadedPlugins: Array.from(loadedSet),
+      silentTools: silentTools.length,
+      visibleSubAgents: {
+        count: visibleSubAgents.length,
+        names: visibleSubAgents.map((e) => e.subAgent.name),
+      },
+      filteredOutSubAgents: {
+        count: filteredOutSubAgents.length,
+        entries: filteredOutSubAgents.map((e) => ({
+          name: e.subAgent.name,
+          plugin: e.pluginName,
+          visibility: manifestViz.get(e.pluginName) ?? 'on-demand',
+        })),
+      },
+    },
+    'main-agent: tool/sub-agent binding summary',
+  );
 
   const tools: StructuredTool[] = [
     ...metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState })),

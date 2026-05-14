@@ -5,7 +5,10 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../plugin-api/types.js';
-import type { SubAgentRegistry } from '../registries/subagent-registry.js';
+import type {
+  RegisteredSubAgent,
+  SubAgentRegistry,
+} from '../registries/subagent-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool.js';
@@ -48,6 +51,13 @@ export interface CollectSubAgentsInput {
    * collisions.
    */
   passthroughTools?: StructuredTool[];
+  /**
+   * Optional pre-collected sub-agent list. When provided, the registry is not
+   * queried — callers that need to filter the entries (e.g. by visibility +
+   * `loadedPlugins`) collect from the registry themselves, apply the filter,
+   * and pass the result here.
+   */
+  subAgents?: RegisteredSubAgent[];
 }
 
 /**
@@ -120,9 +130,10 @@ export async function collectSubAgentsWithFallback(
     rtCtx,
     toAgentSpec,
     passthroughTools,
+    subAgents,
   } = input;
 
-  const entries = await registry.collect(buildCtx, rtCtx);
+  const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
 
   const results = await Promise.allSettled(
     entries.map(async ({ pluginName, subAgent }) => {
