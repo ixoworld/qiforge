@@ -1,5 +1,8 @@
 import { encodingForModel, type Tiktoken } from 'js-tiktoken';
-import type { PluginManifest } from '../plugin-api/types.js';
+import type {
+  ManifestExample,
+  PluginManifest,
+} from '../plugin-api/types.js';
 
 /** A plugin manifest paired with the name of the plugin that contributed it. */
 export interface Tier1Entry {
@@ -36,16 +39,42 @@ function tiktokenEstimate(text: string): number {
   return cachedEncoder.encode(text).length;
 }
 
-const formatLine = (entry: Tier1Entry): string =>
-  `- ${entry.pluginName}: ${entry.manifest.summary}`;
+function formatExample(ex: ManifestExample): string {
+  const argSummary =
+    ex.args && Object.keys(ex.args).length > 0
+      ? `${ex.tool}(${JSON.stringify(ex.args)})`
+      : `${ex.tool}()`;
+  return `"${ex.user}" → ${argSummary}`;
+}
+
+function formatEntry(entry: Tier1Entry): string {
+  const { pluginName, manifest } = entry;
+  const lines: string[] = [`- **${pluginName}** — ${manifest.summary}`];
+
+  const whenToUse = manifest.whenToUse.slice(0, 2);
+  if (whenToUse.length > 0) {
+    lines.push(`  - When to use: ${whenToUse.join('; ')}`);
+  }
+
+  if (manifest.whenNotToUse && manifest.whenNotToUse.length > 0) {
+    lines.push(`  - Avoid for: ${manifest.whenNotToUse[0]}`);
+  }
+
+  const firstExample = manifest.examples?.[0];
+  if (firstExample) {
+    lines.push(`  - Example: ${formatExample(firstExample)}`);
+  }
+
+  return lines.join('\n');
+}
 
 /**
  * Compose the Tier-1 capability block from a list of plugin manifests.
  *
  * Only `visibility: 'always'` manifests are included, sorted alphabetically
  * for prompt-caching determinism. Over-budget calls produce a warning naming
- * the largest manifests so operators can mark them `'on-demand'`. The block
- * is rendered as-is — no auto-demotion.
+ * the largest manifests so operators can mark them `'on-demand'` — degrading
+ * verbosity is an operator decision, not a runtime guess.
  */
 export function renderTier1(input: Tier1Input): Tier1Output {
   const budget = input.tokenBudget ?? DEFAULT_BUDGET;
@@ -60,13 +89,16 @@ export function renderTier1(input: Tier1Input): Tier1Output {
     return { block: '', tokens: 0, warnings: [] };
   }
 
-  const lines = entries.map(formatLine);
-  const tokens = lines.reduce((sum, line) => sum + estimate(line), 0);
+  const renderedLines = entries.map(formatEntry);
+  const tokens = renderedLines.reduce((sum, line) => sum + estimate(line), 0);
   const warnings: string[] = [];
 
   if (tokens > budget) {
-    const largest = [...entries]
-      .map((entry) => ({ name: entry.pluginName, t: estimate(formatLine(entry)) }))
+    const largest = entries
+      .map((entry) => ({
+        name: entry.pluginName,
+        t: estimate(formatEntry(entry)),
+      }))
       .sort((a, b) => b.t - a.t)
       .slice(0, 3)
       .map((e) => `${e.name} (~${e.t} tok)`)
@@ -77,6 +109,6 @@ export function renderTier1(input: Tier1Input): Tier1Output {
     );
   }
 
-  const block = `${HEADER}${lines.join('\n')}${FOOTER}`;
+  const block = `${HEADER}${renderedLines.join('\n\n')}${FOOTER}`;
   return { block, tokens, warnings };
 }

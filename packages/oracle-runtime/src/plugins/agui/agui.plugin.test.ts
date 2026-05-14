@@ -36,7 +36,7 @@ describe('AGUIPlugin', () => {
     expect(plugin.name).toBe('agui');
     expect(plugin.version).toBe('1.0.0');
     expect(plugin.manifest.title).toBe('AG-UI');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.category).toBe('ui');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.manifest.whenToUse.length).toBeGreaterThan(0);

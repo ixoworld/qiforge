@@ -18,6 +18,8 @@ export type {
   RuntimeContext,
   PluginTool,
   PluginSubAgent,
+  OracleConfig,
+  OraclePromptConfig,
   OracleIdentity,
   MergedConfig,
   Logger,

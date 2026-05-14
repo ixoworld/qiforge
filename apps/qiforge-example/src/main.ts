@@ -4,42 +4,43 @@ import {
   CreditsPlugin,
   EditorPlugin,
   createOracleApp,
+  type OracleConfig,
 } from '@ixo/oracle-runtime';
 import Redis from 'ioredis';
 import * as sdk from 'matrix-js-sdk';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
-
-interface OracleIdentityConfig {
-  name: string;
-  org: string;
-  description: string;
-  entityDid: string;
-}
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const oracleConfig = JSON.parse(
-  readFileSync(resolve(__dirname, '..', 'oracle.config.json'), 'utf-8'),
-) as OracleIdentityConfig;
 
 /**
  * QiForge example oracle.
  *
- * Everything that needs no constructor args is picked up automatically from
- * `BUNDLED_PLUGINS` inside `createOracleApp` (each plugin's `autoDetect`
- * inspects `process.env` and opts in/out cleanly). We only instantiate the
- * two plugins that take live runtime objects (Redis + Matrix client) and
- * pass them explicitly — the plugin loader dedupes by name, so our explicit
- * instances override the bundled defaults.
+ * Identity + prompt are declared inline below. `entityDid` is sourced from
+ * the `ORACLE_ENTITY_DID` env var by the runtime — don't put it here.
+ *
+ * Plugins with no constructor args flow in automatically from
+ * `BUNDLED_PLUGINS` (each plugin's `autoDetect` inspects `process.env` and
+ * opts in/out). We only instantiate the two plugins that take live runtime
+ * objects (Redis + Matrix client) and pass them explicitly — the plugin
+ * loader dedupes by name so our explicit instances override the bundled
+ * defaults.
  */
-async function bootstrap(): Promise<void> {
-  if (!oracleConfig.entityDid) {
-    throw new Error(
-      'oracle.config.json: `entityDid` is empty. Set the oracle entity DID before booting.',
-    );
-  }
+const config: OracleConfig = {
+  name: 'QiForge Example Oracle',
+  org: 'IXO',
+  description: 'Reference QiForge oracle wired with every bundled plugin',
+  prompt: {
+    opening:
+      'You are the QiForge reference oracle, operated by IXO. You exist to show what a QiForge-built AI agent can do — every bundled plugin is wired in (memory, skills, sandbox, editor, web search, IXO entity lookups, browser actions, SaaS integrations, user preferences). Show, don\'t tell: when someone asks what you can do, demonstrate it by actually doing it.',
+    communicationStyle: [
+      '- Lead with action, not preamble. Skip "Sure!" and "I\'d be happy to" — just do the thing.',
+      '- Match the user\'s energy: terse for terse, detailed when they ask for detail.',
+      '- When you call a tool, explain in one sentence what you\'re doing and why — not three.',
+      '- If the user asks "what can you do?", pick one capability and demonstrate it, then offer the menu.',
+    ].join('\n'),
+    capabilities:
+      'I\'m here to demonstrate what a QiForge oracle can do — memory across conversations, executing skills in a sandbox, editing collaborative pages, web search, IXO entity lookups, and SaaS integrations through Composio. Ask me anything and I\'ll show you the right capability rather than describing it.',
+  },
+};
 
+async function bootstrap(): Promise<void> {
   const redisUrl = process.env.REDIS_URL;
   const redis = redisUrl ? new Redis(redisUrl) : null;
 
@@ -64,17 +65,8 @@ async function bootstrap(): Promise<void> {
     | 'devnet';
 
   const app = await createOracleApp({
-    identity: {
-      name: oracleConfig.name,
-      org: oracleConfig.org,
-      description: oracleConfig.description,
-      entityDid: oracleConfig.entityDid,
-    },
+    config,
     plugins: [
-      // Plugins that need live runtime objects passed explicitly. Everything
-      // else (memory, portal, agui, firecrawl, domain-indexer, composio,
-      // sandbox, skills, slack, user-preferences) flows in via
-      // BUNDLED_PLUGINS and auto-detects from env.
       ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
     ],

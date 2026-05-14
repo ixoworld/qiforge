@@ -32,12 +32,20 @@ const manifest: PluginManifest = {
     'Discover IXO skill capsules — the caller\'s published private skills first, then the public registry.',
   whenToUse: [
     'User asks "what skills are available?" or "what can you do?".',
-    'User asks the agent to find a skill for a specific task (e.g. "a skill for invoices").',
-    'Before running a skill via the sandbox, list or search to obtain the skill cid + path.',
+    'User asks the agent to find a skill for a specific task ("a skill for invoices", "is there a skill for KYC?").',
+    'Before running a skill via the sandbox, list or search to obtain its cid + path.',
   ],
   whenNotToUse: [
-    'Executing a skill — use the sandbox (`sandbox_run`).',
-    'General web search (use firecrawl).',
+    'Executing a skill — that goes through the Sandbox (`sandbox_run`), not the skills tools.',
+    'General web search (use Firecrawl).',
+  ],
+  examples: [
+    {
+      user: 'Do you have a skill that can generate an invoice?',
+      thought:
+        'Skill discovery — search the registry, then hand the cid+path off to sandbox_run for execution.',
+      tool: 'search_skills',
+    },
   ],
   tags: ['skills', 'capsules', 'registry', 'ucan'],
   category: 'data',

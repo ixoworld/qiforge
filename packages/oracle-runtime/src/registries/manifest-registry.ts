@@ -1,6 +1,7 @@
 import { validateExamplesAgainstTools } from '../manifest/validator.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
+import type { SubAgentRegistry } from './subagent-registry.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 /** A collected manifest tagged with the plugin that contributed it. */
@@ -40,17 +41,25 @@ export class ManifestRegistry {
 
   /**
    * For each registered manifest, validate that every `examples[].tool`
-   * reference exists in the supplied ToolRegistry. The ToolRegistry MUST
-   * have been collected and asserted before calling this.
+   * reference exists in the supplied registries. Sub-agents are first-class
+   * tools to the agent — they get wrapped as `call_<name>` StructuredTools —
+   * so the validator unions tool names with sub-agent wrapped names. Both
+   * registries MUST have been collected and asserted before calling this.
    *
    * Returns the union of all per-plugin error strings — each entry is
    * prefixed with the plugin name and field path (delegated to
    * `validateExamplesAgainstTools`).
    */
-  validateAgainstTools(toolRegistry: ToolRegistry): ManifestCrossCheckResult {
+  validateAgainstTools(
+    toolRegistry: ToolRegistry,
+    subAgentRegistry: SubAgentRegistry,
+  ): ManifestCrossCheckResult {
     const errors: string[] = [];
     for (const { pluginName, manifest } of this.entries) {
-      const toolNames = toolRegistry.toolNamesForPlugin(pluginName);
+      const toolNames = [
+        ...toolRegistry.toolNamesForPlugin(pluginName),
+        ...subAgentRegistry.subAgentNamesForPlugin(pluginName),
+      ];
       const result = validateExamplesAgainstTools(
         manifest,
         toolNames,

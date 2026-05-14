@@ -33,9 +33,30 @@ export class UserPreferencesPlugin extends OraclePlugin {
   readonly manifest: PluginManifest = {
     title: 'User Preferences',
     summary:
-      'Loads per-room user preferences into the system prompt and lets the agent update them.',
+      'Behavioral preferences — how the user wants you to respond (tone, language, formality, what to call you).',
     whenToUse: [
-      'User asks to change how the agent behaves (tone, formality, language) or what to call them.',
+      'User states how they want you to behave: "be more terse", "respond in Spanish", "call me Alex", "stop using emojis".',
+      'User asks to change the voice, formality, or language of your replies — save it so it persists across sessions, not just this turn.',
+    ],
+    whenNotToUse: [
+      'Facts about who the user is (name, role, project) — those go to memory, not preferences.',
+      'Artifacts you have produced or how the user reacted to them — also memory, not preferences.',
+      'One-turn formatting requests ("just for this answer, use bullets") — adapt locally without saving.',
+    ],
+    examples: [
+      {
+        user: 'From now on, please respond in Spanish.',
+        thought:
+          'Behavioral preference about language — save it so it persists.',
+        tool: 'set_user_preferences',
+        args: { language: 'Spanish' },
+      },
+      {
+        user: 'Be more concise — drop the explanations.',
+        thought: 'Preference about tone/length, not a single-turn request.',
+        tool: 'set_user_preferences',
+        args: { tone: 'concise' },
+      },
     ],
     visibility: 'always',
     stability: 'stable',

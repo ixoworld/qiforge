@@ -48,16 +48,31 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Editor',
   summary:
-    'Reads and edits BlockNote pages (collaborative Y.js documents stored in Matrix rooms).',
+    'Reads and edits BlockNote pages — collaborative documents in the user\'s workspace.',
   whenToUse: [
     'User asks to read, summarize, or edit a page in their workspace.',
     'User wants to update specific blocks (status, properties, content) on a page.',
     'User wants to create a new page or update an existing one.',
+    'A skill produced output (URLs, credentials, status values) that should land on specific blocks.',
   ],
   whenNotToUse: [
-    'IXO entity lookups (use the Domain Indexer).',
+    'IXO entity lookups (use Domain Indexer) — pages are documents, not entities.',
     'Web search or scraping (use Firecrawl).',
     'Long-term user memory (use Memory).',
+  ],
+  examples: [
+    {
+      user: 'Summarize the current page.',
+      thought:
+        'Delegate to the Editor sub-agent with the active room. It will read the page and return a summary.',
+      tool: 'call_editor_agent',
+    },
+    {
+      user: 'Set the status block to completed.',
+      thought:
+        'Page edit — delegate with explicit block target + new value. Never paraphrase block IDs or status names.',
+      tool: 'call_editor_agent',
+    },
   ],
   tags: ['editor', 'blocknote', 'pages', 'documents'],
   category: 'data',

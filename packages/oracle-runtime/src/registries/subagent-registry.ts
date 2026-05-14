@@ -1,3 +1,4 @@
+import { computeSubAgentToolName } from '../graph/subagent-as-tool.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
   PluginContext,
@@ -81,6 +82,22 @@ export class SubAgentRegistry {
     const out = [...boot, ...request];
     this.collected = out;
     return out;
+  }
+
+  /**
+   * The *wrapped* tool names contributed by a given plugin in the most recent
+   * collection (boot-only if a full request collection has not yet happened).
+   * Mirrors `ToolRegistry.toolNamesForPlugin` so the manifest validator can
+   * treat sub-agents as the tools they become to the agent.
+   *
+   * Each entry passes through `computeSubAgentToolName` — the same transform
+   * `createSubagentAsTool` applies when building the StructuredTool — so the
+   * names returned here match what the agent will actually see.
+   */
+  subAgentNamesForPlugin(pluginName: string): string[] {
+    return (this.collected ?? this.bootCache ?? [])
+      .filter((entry) => entry.pluginName === pluginName)
+      .map((entry) => computeSubAgentToolName(entry.subAgent.name));
   }
 
   /**

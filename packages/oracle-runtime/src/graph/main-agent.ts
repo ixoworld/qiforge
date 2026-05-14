@@ -43,7 +43,7 @@ import { wrapPluginTool } from './wrap-plugin-tool.js';
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
 const DEFAULT_OPERATIONAL_MODE = [
-  '**General Conversation Mode**',
+  '**General conversation mode**',
   '',
   'Default to conversation mode, using available capabilities for recall, search, and task delegation.',
 ].join('\n');

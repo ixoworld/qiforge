@@ -28,6 +28,7 @@ import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
+  OracleConfig,
   OracleIdentity,
   Logger as PluginLogger,
 } from '../plugin-api/types.js';
@@ -60,7 +61,12 @@ import { composeEnvSchema, validateEnv } from './schema-composer.js';
 export type BundledFeatureName = (typeof BUNDLED_PLUGINS)[number]['name'];
 
 export interface CreateOracleAppOptions {
-  identity: OracleIdentity;
+  /**
+   * Inline oracle config. `entityDid` is sourced from `ORACLE_ENTITY_DID` env
+   * — do not put it here. The runtime merges this with env-derived fields to
+   * build the internal `OracleIdentity`.
+   */
+  config: OracleConfig;
   features?: Partial<Record<BundledFeatureName | (string & {}), FeatureToggle>>;
   plugins?: OraclePlugin[];
   /** Developer's own NestJS modules. Spread into `RuntimeAppModule.imports`. */
@@ -151,7 +157,7 @@ function reportBootError(
 export async function createOracleApp(
   opts: CreateOracleAppOptions,
 ): Promise<OracleApp> {
-  validateIdentity(opts.identity);
+  validateConfig(opts.config);
 
   const logger: PluginLogger = opts.logger ?? new Logger('createOracleApp');
   const env = opts.env ?? process.env;
@@ -201,6 +207,23 @@ export async function createOracleApp(
       `Env validation failed (${validated.errors.length} issues).`,
     );
   }
+
+  // 5a. Build the internal identity from config + validated env. Defer until
+  // here so `ORACLE_ENTITY_DID` has been parsed by the base env schema —
+  // a missing/empty value fails validation above with a clear message.
+  const entityDid = String(validated.config.ORACLE_ENTITY_DID ?? '');
+  if (!entityDid) {
+    throw new Error(
+      'createOracleApp: ORACLE_ENTITY_DID env is required and was empty after validation.',
+    );
+  }
+  const identity: OracleIdentity = {
+    name: opts.config.name,
+    org: opts.config.org ?? '',
+    description: opts.config.description ?? '',
+    entityDid,
+    prompt: opts.config.prompt ?? {},
+  };
 
   // 6. Registry population
   const registries = {
@@ -293,9 +316,9 @@ export async function createOracleApp(
     const swaggerDoc = SwaggerModule.createDocument(
       nestApp,
       new DocumentBuilder()
-        .setTitle(opts.identity.name)
+        .setTitle(identity.name)
         .setDescription(
-          `${opts.identity.description}\n\nQiForge runtime v${pkg.version}.`,
+          `${identity.description}\n\nQiForge runtime v${pkg.version}.`,
         )
         .setVersion(pkg.version)
         .addApiKey(
@@ -318,7 +341,7 @@ export async function createOracleApp(
   const ambient = buildAmbientServices({
     nestApp,
     config: validated.config,
-    identity: opts.identity,
+    identity,
     availablePlugins: loadedPluginNames,
     logger,
   });
@@ -329,7 +352,7 @@ export async function createOracleApp(
   // request and don't need to be recomputed.
   const warmBuildCtx = buildPluginContext({
     config: validated.config,
-    identity: opts.identity,
+    identity,
     availablePlugins: loadedPluginNames,
     logger,
     pluginName: '__runtime__',
@@ -375,7 +398,7 @@ export async function createOracleApp(
     bundleHolder.populate({
       ambient,
       registries,
-      identity: opts.identity,
+      identity,
       config: validated.config,
       availablePlugins: loadedPluginNames,
       hooks: mergedHooks,
@@ -518,25 +541,18 @@ export async function createOracleApp(
         5678;
       await nestApp.listen(portValue, '0.0.0.0');
       logger.log(
-        `Oracle '${opts.identity.name}' (runtime v${pkg.version}) listening on :${portValue}`,
+        `Oracle '${identity.name}' (runtime v${pkg.version}) listening on :${portValue}`,
       );
     },
   };
 }
 
-function validateIdentity(identity: OracleIdentity | undefined): void {
-  if (!identity) {
-    throw new Error("createOracleApp: 'identity' is required.");
+function validateConfig(config: OracleConfig | undefined): void {
+  if (!config) {
+    throw new Error("createOracleApp: 'config' is required.");
   }
-  const missing: string[] = [];
-  if (!identity.name) missing.push('name');
-  if (!identity.org) missing.push('org');
-  if (!identity.description) missing.push('description');
-  if (!identity.entityDid) missing.push('entityDid');
-  if (missing.length > 0) {
-    throw new Error(
-      `createOracleApp: identity is missing required fields: ${missing.join(', ')}.`,
-    );
+  if (!config.name) {
+    throw new Error("createOracleApp: 'config.name' is required.");
   }
 }
 

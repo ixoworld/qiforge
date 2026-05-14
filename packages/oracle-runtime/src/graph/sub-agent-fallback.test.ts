@@ -6,6 +6,7 @@ import {
   makeManifest,
   makePlugin,
   makeSubAgent,
+  makeTool,
 } from '../registries/test-fixtures.js';
 import { SubAgentRegistry } from '../registries/index.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
@@ -26,6 +27,20 @@ import {
 } from '../testing/mocks.js';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
+import * as SubagentAsTool from './subagent-as-tool.js';
+
+// Spy on createSubagentAsTool while passing through to the real impl, so
+// existing real-flow tests stay green AND we can inspect the options the
+// fallback path forwards into the wrapper. Reset between tests via the
+// top-level `vi.clearAllMocks()` in beforeEach.
+vi.mock('./subagent-as-tool.js', async () => {
+  const actual =
+    await vi.importActual<typeof SubagentAsTool>('./subagent-as-tool.js');
+  return {
+    ...actual,
+    createSubagentAsTool: vi.fn(actual.createSubagentAsTool),
+  };
+});
 
 const IDENTITY: OracleIdentity = {
   name: 'TestOracle',
@@ -312,5 +327,63 @@ describe('collectSubAgentsWithFallback — real flow', () => {
     expect(tools.map((t) => t.name)).toEqual(['call_ok_agent']);
     expect(ambient.logger.error).toHaveBeenCalled();
   });
+});
 
+describe('collectSubAgentsWithFallback — forwardTools plumbing', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function collectOne(forwardTools: PluginTool[] | boolean | undefined) {
+    const ambient = makeAmbient();
+    const registry = new SubAgentRegistry();
+    registry.register(
+      makePlugin({
+        name: 'p',
+        manifest: makeManifest({ visibility: 'silent' }),
+        getSubAgents: () => [
+          makeSubAgent('fwd_agent', {
+            tools: [makeTool('toolA'), makeTool('toolB')],
+            ...(forwardTools === undefined
+              ? {}
+              : Array.isArray(forwardTools)
+                ? { forwardTools: forwardTools.map((t) => t.name) }
+                : { forwardTools }),
+          }),
+        ],
+      }),
+    );
+
+    await collectSubAgentsWithFallback({
+      registry,
+      buildCtx: makeBuildCtx(),
+      ambient,
+      state: STATE,
+      userDid: 'did:ixo:user1',
+      sessionId: 'sess-1',
+    });
+
+    return vi.mocked(SubagentAsTool.createSubagentAsTool);
+  }
+
+  it('forwardTools: true → passes all own tool names to createSubagentAsTool', async () => {
+    const spy = await collectOne(true);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const opts = spy.mock.calls[0]![1];
+    expect(opts?.forwardTools).toEqual(['toolA', 'toolB']);
+  });
+
+  it('forwardTools: string[] → passes the list as-is', async () => {
+    const spy = await collectOne([makeTool('toolA')]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const opts = spy.mock.calls[0]![1];
+    expect(opts?.forwardTools).toEqual(['toolA']);
+  });
+
+  it('forwardTools: omitted → no options passed (forwardTools undefined)', async () => {
+    const spy = await collectOne(undefined);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const opts = spy.mock.calls[0]![1];
+    expect(opts?.forwardTools).toBeUndefined();
+  });
 });

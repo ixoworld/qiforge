@@ -314,8 +314,8 @@ describe('createMainAgent', () => {
     const prompt = params.systemPrompt as string;
 
     expect(prompt).toContain('Available Capabilities');
-    expect(prompt).toContain('memory: Recall and store user knowledge.');
+    expect(prompt).toContain('**memory** — Recall and store user knowledge.');
     // Operational mode default is rendered.
-    expect(prompt).toContain('General Conversation Mode');
+    expect(prompt).toContain('General conversation mode');
   });
 });

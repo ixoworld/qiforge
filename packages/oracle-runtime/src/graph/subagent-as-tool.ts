@@ -58,6 +58,13 @@ export interface AgentSpec {
     | ((userDid: string) => Promise<BaseCheckpointSaver>);
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
+  /**
+   * Tool names whose AIMessage(tool_calls) + ToolMessage results should be
+   * forwarded into the parent graph's messages via Command. Surfaced on the
+   * spec so adaptors (e.g. plugin → spec conversion) can resolve a plugin's
+   * declared `forwardTools` once and let the wrapper pick it up downstream.
+   */
+  forwardTools?: string[];
 }
 
 /**
@@ -182,14 +189,24 @@ async function resolveCheckpointer(
  * @param options.forwardTools — tool names whose calls should be pushed into
  *   the parent graph's messages via Command (decided by the oracle).
  */
+/**
+ * Compute the tool name the agent will see for a sub-agent given its
+ * authored name. Single source of truth — used by `createSubagentAsTool` to
+ * actually create the tool AND by the manifest validator to know what the
+ * agent will see. Keeping these in lockstep prevents silent drift.
+ *
+ * Example: `"Portal Agent"` → `"call_portal_agent"`.
+ */
+export function computeSubAgentToolName(subAgentName: string): string {
+  const base = subAgentName.toLowerCase().replace(/\s+/g, '_');
+  return base.endsWith('_agent') ? `call_${base}` : `call_${base}_agent`;
+}
+
 export function createSubagentAsTool(
   spec: AgentSpec,
   options?: SubagentToolOptions,
 ): StructuredTool {
-  const base = spec.name.toLowerCase().replace(/\s+/g, '_');
-  const toolName = base.endsWith('_agent')
-    ? `call_${base}`
-    : `call_${base}_agent`;
+  const toolName = computeSubAgentToolName(spec.name);
   const forwardSet = new Set(options?.forwardTools ?? []);
   const logger = spec.logger ?? NOOP_LOGGER;
 

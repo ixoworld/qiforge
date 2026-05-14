@@ -30,17 +30,21 @@ const configSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Memory',
   summary:
-    'Long-term memory of user facts, preferences, and prior conversations via the Memory Engine.',
+    'Durable memory across conversations: who the user is, what you have made for them, and what worked.',
   whenToUse: [
-    'Recall durable facts the user shared in a past conversation.',
-    'Save a new fact, preference, or relationship the user wants the agent to remember.',
-    'The user references something they told the agent before.',
+    'First contact (no prior context loaded): greet, ask their name and what they want help with, then save what they tell you.',
+    'You learn something durable about the user — name, role, ongoing project, a constraint, a relationship.',
+    'You create an artifact for the user (file, document, edit, generated content): record what it is, what it is for, and the structural choices you made.',
+    'The user expresses satisfaction or dissatisfaction with something you produced: capture what worked or what did not — tone, length, structure, style — against that artifact entry.',
+    'The user references something they told you before, or something you made before.',
   ],
   whenNotToUse: [
-    'Volatile session-only state (use the current message thread).',
-    'Public web facts (use Firecrawl).',
+    'Ephemeral conversation-only state (use the current message thread).',
+    'Behavioral preferences about how to respond (call the user-preferences tool instead).',
+    'Public web facts that are not specific to this user (use a web-search capability).',
+    'Anything the user asked you to forget or framed as temporary.',
   ],
-  tags: ['memory', 'recall', 'personalization'],
+  tags: ['memory', 'recall', 'artifacts', 'personalization'],
   category: 'memory',
   visibility: 'always',
   stability: 'stable',

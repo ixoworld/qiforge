@@ -143,12 +143,61 @@ export interface ManifestExample {
   args?: Record<string, unknown>;
 }
 
-/** Identity of the oracle running this plugin (set by the fork at `createOracleApp`). */
+/**
+ * Author-provided prompt customization. Every field is optional — when absent
+ * the runtime falls back to its built-in defaults. Authored once, baked into
+ * the system prompt at build time.
+ */
+export interface OraclePromptConfig {
+  /**
+   * Full replacement of the identity preamble. When set, used verbatim as the
+   * opening paragraph. When unset, the composer generates one from
+   * `name`/`org`/`description`.
+   */
+  opening?: string;
+
+  /**
+   * Appended to the runtime's operating-principles section. Use for tone,
+   * voice, formality, or oracle-specific behavioral hints.
+   */
+  communicationStyle?: string;
+
+  /**
+   * Author-written elevator pitch for what this oracle does. Rendered above
+   * the plugin-derived capability list — additive, not a replacement.
+   */
+  capabilities?: string;
+}
+
+/**
+ * Developer-facing oracle config. Passed inline to `createOracleApp`. The
+ * runtime fills in `entityDid` from the `ORACLE_ENTITY_DID` env var and
+ * combines this with bundled defaults to build the internal `OracleIdentity`.
+ */
+export interface OracleConfig {
+  /** Oracle display name. Required. */
+  name: string;
+  /** Sponsoring organization. Optional — composer falls back gracefully. */
+  org?: string;
+  /** One-line description of what this oracle is for. */
+  description?: string;
+  /** Optional prompt customization (opening, communicationStyle, capabilities). */
+  prompt?: OraclePromptConfig;
+}
+
+/**
+ * Identity of the oracle running this plugin. Built by the runtime from
+ * `OracleConfig` + `ORACLE_ENTITY_DID` env var. Plugins read it via
+ * `PluginContext.identity` / `RuntimeContext` and should treat it as
+ * read-only.
+ */
 export interface OracleIdentity {
   name: string;
   org: string;
   description: string;
   entityDid: string;
+  /** Author-provided prompt customization. Undefined when not configured. */
+  prompt?: OraclePromptConfig;
 }
 
 /**
@@ -291,8 +340,18 @@ export interface PluginSubAgent {
   model?: ModelRole;
   /** Sub-agent-scoped middleware (e.g. summarization for long conversations). */
   middlewares?: AgentMiddleware[];
-  /** Forward parent's tool calls into this sub-agent's tool list (e.g. portal pattern). */
-  forwardTools?: boolean;
+  /**
+   * Forward this sub-agent's internal tool calls + results into the parent
+   * graph's message history so the UI renders them in the main chat.
+   *
+   *   - `true` → forward ALL of this sub-agent's own tools
+   *   - `false` / omitted → forward nothing
+   *   - `string[]` → forward only the listed tool names
+   *
+   * Runtime-injected passthrough tools (e.g. memory CRUD) are never
+   * forwarded — they're already on the main agent.
+   */
+  forwardTools?: boolean | string[];
   /** Called after sub-agent completes; can emit follow-up events. */
   onComplete?: (result: string, ctx: RuntimeContext) => Promise<void>;
 }

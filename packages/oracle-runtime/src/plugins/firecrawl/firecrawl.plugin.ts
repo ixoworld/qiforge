@@ -24,13 +24,26 @@ const manifest: PluginManifest = {
   summary: 'Web search and scraping of human-readable pages via Firecrawl.',
   whenToUse: [
     'User asks the agent to search the web for current information.',
-    'User wants the contents of a specific human-readable page summarised or extracted.',
+    'User wants the contents of a specific page summarized or extracted.',
     'A question can only be answered by recent public web content.',
   ],
   whenNotToUse: [
-    'Fetching from an API endpoint (any URL with /api/, /v1/, /v2/, /v3/, or that returns JSON/XML) — use the Sandbox instead.',
+    'Fetching from an API endpoint (URLs containing /api/, /v1/, /v2/, /v3/, or that return JSON/XML) — use the Sandbox instead.',
     'IXO entity lookups (use the Domain Indexer).',
-    'Personal memory or past-conversation recall (use memory).',
+    'Personal memory or past-conversation recall (use Memory).',
+  ],
+  examples: [
+    {
+      user: 'What did OpenAI announce at their last event?',
+      thought:
+        'Recent public web content — delegate to call_firecrawl_agent for a fresh search.',
+      tool: 'call_firecrawl_agent',
+    },
+    {
+      user: 'Pull the key points from this page: https://example.com/blog/post',
+      thought: 'Specific human-readable page — scrape it, summarize.',
+      tool: 'call_firecrawl_agent',
+    },
   ],
   tags: ['web', 'search', 'scrape', 'firecrawl'],
   category: 'data',

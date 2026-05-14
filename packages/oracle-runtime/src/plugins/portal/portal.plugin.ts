@@ -14,14 +14,22 @@ import { createPortalSubAgent } from './portal-agent.js';
 const manifest: PluginManifest = {
   title: 'Portal',
   summary:
-    'Executes browser-side tools declared by the user’s portal/UI on the current request — opens URLs, manipulates the DOM, and runs FE-defined actions.',
+    'Browser-side actions on the user\'s Portal UI — opens URLs, manipulates the DOM, runs FE-defined browser tools.',
   whenToUse: [
-    'The user is on the Portal and asks for an action the FE has declared as a browser tool.',
-    'A task requires a browser-side capability (open URL, click, type) the client exposes via `state.browserTools`.',
+    'User asks for an action the Portal FE exposes as a browser tool (declared in `state.browserTools`).',
+    'A task needs a browser-side capability the server can\'t do alone — open a URL in the user\'s tab, click a Portal button, fill a form.',
   ],
   whenNotToUse: [
     'No browser tools are declared on this request (sub-agent is not built).',
-    'The task can be completed purely server-side without browser interaction.',
+    'The task can be completed purely server-side (use a server tool or sub-agent).',
+  ],
+  examples: [
+    {
+      user: 'Open my workspace and navigate to the Reports page.',
+      thought:
+        'Portal exposes navigation as a browser tool — delegate via call_portal_agent with the target URL.',
+      tool: 'call_portal_agent',
+    },
   ],
   tags: ['portal', 'browser', 'ui'],
   category: 'ui',

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ManifestRegistry } from './manifest-registry.js';
+import { SubAgentRegistry } from './subagent-registry.js';
 import {
   makeBuildCtx,
   makeManifest,
@@ -7,6 +8,9 @@ import {
   makeTool,
 } from './test-fixtures.js';
 import { ToolRegistry } from './tool-registry.js';
+
+/** Empty sub-agent registry — these tests only exercise tool-based validation. */
+const emptySubAgents = (): SubAgentRegistry => new SubAgentRegistry();
 
 describe('ManifestRegistry', () => {
   it('collects manifests in registration order with plugin attribution', () => {
@@ -58,7 +62,7 @@ describe('ManifestRegistry', () => {
       }),
     );
 
-    expect(manifests.validateAgainstTools(tools).errors).toEqual([]);
+    expect(manifests.validateAgainstTools(tools, emptySubAgents()).errors).toEqual([]);
   });
 
   it('validateAgainstTools reports plugin + missing tool when an example references a non-existent tool', async () => {
@@ -84,7 +88,7 @@ describe('ManifestRegistry', () => {
       }),
     );
 
-    const result = manifests.validateAgainstTools(tools);
+    const result = manifests.validateAgainstTools(tools, emptySubAgents());
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain('mystery_tool');
     expect(result.errors[0]).toContain('[climate]');
@@ -118,7 +122,7 @@ describe('ManifestRegistry', () => {
       }),
     );
 
-    const result = manifests.validateAgainstTools(tools);
+    const result = manifests.validateAgainstTools(tools, emptySubAgents());
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0]).toContain('[climate]');
     expect(result.errors[0]).toContain('open_url');

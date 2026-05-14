@@ -66,11 +66,10 @@ class TestPlugin extends OraclePlugin {
   });
 }
 
-const baseIdentity = {
+const baseConfig = {
   name: 'TestOracle',
   org: 'Acme',
   description: 'createOracleApp tests',
-  entityDid: 'did:ixo:test',
 };
 
 // Minimum env values that satisfy `baseEnvSchema`. Tests spread this so they
@@ -96,7 +95,7 @@ const validBaseEnv: NodeJS.ProcessEnv = {
 // Shared defaults used by happy-path tests — `bundledPlugins: []` keeps the
 // canonical bundled set out of these unit tests.
 const defaultOpts = {
-  identity: baseIdentity,
+  config: baseConfig,
   bundledPlugins: [],
   env: validBaseEnv,
   skipMatrixInit: true,
@@ -109,25 +108,24 @@ beforeEach(() => {
   mockNestApp.close.mockResolvedValue(undefined);
 });
 
-describe('createOracleApp — identity validation', () => {
-  it('throws when identity is missing', async () => {
-    // @ts-expect-error — exercising the runtime guard against omitted identity
-    await expect(createOracleApp({ plugins: [] })).rejects.toThrow(/identity/);
+describe('createOracleApp — config validation', () => {
+  it('throws when config is missing', async () => {
+    // @ts-expect-error — exercising the runtime guard against omitted config
+    await expect(createOracleApp({ plugins: [] })).rejects.toThrow(/config/);
   });
 
-  it('throws when identity is missing required fields', async () => {
+  it('throws when config.name is missing', async () => {
     await expect(
       createOracleApp({
         ...defaultOpts,
-        identity: {
+        config: {
           name: '',
           org: 'Acme',
           description: '',
-          entityDid: '',
         },
         plugins: [],
       }),
-    ).rejects.toThrow(/name, description, entityDid/);
+    ).rejects.toThrow(/config\.name/);
   });
 });
 

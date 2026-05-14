@@ -98,6 +98,18 @@ function defaultToAgentSpec(
 
   const model = ambient.llm.get(subAgent.model ?? 'subagent');
 
+  // Normalize `forwardTools`:
+  //   true       → all of this sub-agent's own tool names
+  //   string[]   → as-is
+  //   false/undef → undefined (nothing forwarded)
+  // Passthrough tools are NOT included — they're already on the main agent.
+  let forwardTools: string[] | undefined;
+  if (subAgent.forwardTools === true) {
+    forwardTools = pluginTools.map((t) => t.name);
+  } else if (Array.isArray(subAgent.forwardTools)) {
+    forwardTools = subAgent.forwardTools;
+  }
+
   return {
     name: subAgent.name,
     description: subAgent.description,
@@ -107,6 +119,7 @@ function defaultToAgentSpec(
     middleware: subAgent.middlewares,
     userDid,
     sessionId,
+    ...(forwardTools ? { forwardTools } : {}),
   };
 }
 
@@ -151,7 +164,12 @@ export async function collectSubAgentsWithFallback(
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }
           : spec;
-        return createSubagentAsTool(withPassthrough);
+        return createSubagentAsTool(
+          withPassthrough,
+          withPassthrough.forwardTools
+            ? { forwardTools: withPassthrough.forwardTools }
+            : undefined,
+        );
       } catch (err) {
         ambient.logger.error(
           { pluginName, err: err instanceof Error ? err.message : String(err) },

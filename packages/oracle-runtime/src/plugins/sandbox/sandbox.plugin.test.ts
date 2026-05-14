@@ -166,7 +166,7 @@ describe('SandboxPlugin', () => {
     const plugin = new SandboxPlugin();
     expect(plugin.name).toBe('sandbox');
     expect(plugin.version).toBe('1.0.0');
-    expect(plugin.manifest.visibility).toBe('silent');
+    expect(plugin.manifest.visibility).toBe('always');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.autoDetectHint).toBe('SANDBOX_MCP_URL');
     expect(plugin.autoDetect!({ SANDBOX_MCP_URL: SANDBOX_URL })).toBe(true);

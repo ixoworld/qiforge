@@ -30,19 +30,17 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Composio',
   summary:
-    'External SaaS tools (Gmail, GitHub, Linear, Slack, Google Calendar, ' +
-    'Notion, Jira, HubSpot, and hundreds more) invoked on behalf of the ' +
-    'user through Composio.',
+    'External SaaS tools (Gmail, GitHub, Linear, Slack, Google Calendar, Notion, Jira, HubSpot, hundreds more) invoked on behalf of the user through Composio.',
   whenToUse: [
     'User asks to send, read, or search emails (Gmail, Outlook).',
     'User asks to create or modify issues, pull requests, or stars in a tracker (GitHub, Linear, Jira).',
     'User asks to manage calendar events, files, or documents in a SaaS app.',
-    'A skill is not available for the requested action — try `COMPOSIO_SEARCH_TOOLS` before giving up.',
+    'No native skill covers the requested action — call `COMPOSIO_SEARCH_TOOLS` before giving up.',
   ],
   whenNotToUse: [
     'A native skill or sub-agent already covers the action — prefer the skill.',
-    'The request is a normal conversation or general question with no external SaaS interaction.',
-    'The user has not connected the required toolkit — call `COMPOSIO_MANAGE_CONNECTIONS` first.',
+    'Normal conversation or general question with no external SaaS interaction.',
+    'The user hasn\'t connected the required toolkit — call `COMPOSIO_MANAGE_CONNECTIONS` first to surface the connect link.',
   ],
   tags: ['composio', 'integration', 'saas', 'tools'],
   category: 'integration',

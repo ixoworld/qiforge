@@ -33,13 +33,34 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Sandbox',
   summary:
-    'Sandboxed code execution capability (used internally by skills, editor, ' +
-    'and file processing).',
-  whenToUse: [],
-  visibility: 'silent',
+    'Per-user filesystem at `/workspace/` and code execution via `sandbox_run`. Attachments the user sends are auto-archived to `/workspace/output/<filename>`; for media files an `<filename>-analysis.md` is saved alongside.',
+  whenToUse: [
+    'You need to execute code, run a skill, or process data with shell/Python.',
+    'You want to save a generated artifact (file, script, report) so it persists across turns — write it under `/workspace/output/`.',
+    'You need to re-read or transform a previously archived attachment from its `/workspace/output/<filename>` path.',
+  ],
+  whenNotToUse: [
+    'Re-reading an attachment whose content is already embedded inline in this conversation — the text is already here.',
+    'Fetching a URL the user just mentioned in chat — use `process_file` instead.',
+  ],
+  examples: [
+    {
+      user: 'Generate a CSV of last quarter\'s totals and save it.',
+      thought:
+        'Write the CSV under `/workspace/output/` so the user can reuse it. Reference it back by its path.',
+      tool: 'sandbox_run',
+    },
+    {
+      user: 'Run that Python script you wrote on the data file I sent.',
+      thought:
+        'The attachment was archived to `/workspace/output/<filename>` — pass that path to the script.',
+      tool: 'sandbox_run',
+    },
+  ],
+  visibility: 'always',
   stability: 'stable',
   category: 'core',
-  tags: ['sandbox', 'execution', 'ucan'],
+  tags: ['sandbox', 'execution', 'workspace', 'artifacts'],
 };
 
 export interface SandboxPluginOptions {

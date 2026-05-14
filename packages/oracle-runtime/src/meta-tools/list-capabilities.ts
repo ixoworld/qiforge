@@ -59,7 +59,13 @@ export function buildListCapabilitiesTool(
           tags: manifest.tags ?? [],
         });
       }
-      return out
+      if (ctx.logger && typeof ctx.logger.debug === 'function') {
+        ctx.logger.debug(
+          `[listCapabilities] includeOnDemand: ${includeOnDemand} | includeSilent: ${includeSilent} | loadedSet: ${Array.from(loadedSet).join(', ')} | results: ${out.length}`,
+        );
+      }
+
+      return out;
     },
     {
       name: 'list_capabilities',

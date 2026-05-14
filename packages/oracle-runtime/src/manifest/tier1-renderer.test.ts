@@ -54,11 +54,11 @@ describe('renderTier1', () => {
     expect(result.block).toContain('## Available Capabilities');
     expect(result.block).toContain('find_capability(query)');
     expect(result.block).toContain(
-      '- memory: Persistent memory for users and conversations.',
+      '- **memory** — Persistent memory for users and conversations.',
     );
-    expect(result.block).toContain('- tasks: Create and manage tasks for users.');
-    const memoryIdx = result.block.indexOf('- memory:');
-    const tasksIdx = result.block.indexOf('- tasks:');
+    expect(result.block).toContain('- **tasks** — Create and manage tasks for users.');
+    const memoryIdx = result.block.indexOf('- **memory**');
+    const tasksIdx = result.block.indexOf('- **tasks**');
     expect(memoryIdx).toBeLessThan(tasksIdx);
   });
 
@@ -68,8 +68,8 @@ describe('renderTier1', () => {
     });
     expect(result.block).not.toContain('slack');
     expect(result.block).not.toContain('audit');
-    expect(result.block).toContain('- memory:');
-    expect(result.block).toContain('- tasks:');
+    expect(result.block).toContain('- **memory**');
+    expect(result.block).toContain('- **tasks**');
   });
 
   it('returns an empty block when no always-visibility entries exist', () => {
@@ -101,9 +101,9 @@ describe('renderTier1', () => {
     expect(result.warnings.length).toBeGreaterThan(0);
     expect(result.warnings[0]).toContain('Tier-1 prompt is');
     expect(result.warnings[0]).toContain('budget 50');
-    expect(result.block).toContain('- memory:');
-    expect(result.block).toContain('- tasks:');
-    expect(result.block).toContain('- zenith:');
+    expect(result.block).toContain('- **memory**');
+    expect(result.block).toContain('- **tasks**');
+    expect(result.block).toContain('- **zenith**');
     expect(result.tokens).toBe(300);
   });
 

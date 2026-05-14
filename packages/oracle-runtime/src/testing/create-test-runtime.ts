@@ -395,7 +395,7 @@ export async function createTestRuntime(
       configSchemas.assertNoCollisions();
       sharedState.assertNoCollisions();
       // Cross-check examples against tools too — surfaces stale `examples[].tool`.
-      const cross = manifests.validateAgainstTools(tools);
+      const cross = manifests.validateAgainstTools(tools, subAgents);
       if (cross.errors.length > 0) {
         throw new Error(
           `Manifest cross-check failed:\n  - ${cross.errors.join('\n  - ')}`,

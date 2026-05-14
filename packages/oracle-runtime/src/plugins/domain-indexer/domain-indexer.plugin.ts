@@ -44,7 +44,7 @@ function resolveDomainIndexerUrl(config: MergedConfig): string {
 
 const manifest: PluginManifest = {
   title: 'Domain Indexer',
-  summary: 'Domain analysis and entity lookup across the IXO ecosystem.',
+  summary: 'Domain analysis and entity lookup across the IXO ecosystem — organizations, projects, DAOs, DIDs.',
   whenToUse: [
     'User asks "what is X?" or "tell me about X" for an organization, project, DAO, or DID.',
     'User needs the summary, overview, or FAQ of an IXO entity.',
@@ -52,8 +52,21 @@ const manifest: PluginManifest = {
     'Discovering entities by topic, category, or keyword.',
   ],
   whenNotToUse: [
-    'General web search unrelated to IXO entities (use firecrawl).',
-    'Personal memory or past-conversation recall (use memory).',
+    'General web search unrelated to IXO entities (use Firecrawl).',
+    'Personal memory or past-conversation recall (use Memory).',
+    'Page editing or workspace pages (use Editor) — pages are NOT entities.',
+  ],
+  examples: [
+    {
+      user: 'Tell me about did:ixo:entity:abc123.',
+      thought: 'IXO DID lookup — delegate to call_domain_indexer_agent.',
+      tool: 'call_domain_indexer_agent',
+    },
+    {
+      user: 'Find DAOs working on climate.',
+      thought: 'Discovery by topic across IXO entities.',
+      tool: 'call_domain_indexer_agent',
+    },
   ],
   tags: ['ixo', 'entities', 'search', 'dids'],
   category: 'data',

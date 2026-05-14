@@ -42,23 +42,43 @@ export interface ComposePromptInput {
  * The Slack constraints text. Identical to apps/app — kept here so the
  * runtime owns its own copy and the prompt composer is self-contained.
  */
-export const SLACK_FORMATTING_CONSTRAINTS_CONTENT = `**⚠️ CRITICAL: Slack Formatting Constraints**
-- **NEVER use markdown tables** - Slack does not support markdown table rendering. All tables will appear as broken or unreadable text.
-- **You and the specialized agent tools** (Memory Agent, Domain Indexer Agent, Firecrawl Agent, Portal Agent, Editor Agent) **MUST avoid markdown tables completely** when responding in Slack.
-- **Use alternative formatting instead:**
-  - Use bullet lists with clear labels (e.g., "• **Name:** Value")
-  - Use numbered lists for sequential data
-  - Use simple text blocks with clear separators (e.g., "---" or blank lines)
-  - Use bold/italic text for emphasis instead of table structures
-- **When using the agent tools**, in your task ask for list-based formatting (no markdown tables) in the response.
+export const SLACK_FORMATTING_CONSTRAINTS_CONTENT = `## Slack Formatting
+
+Slack doesn't render markdown tables. When responding in a Slack session:
+- Use bullet lists with bold labels ("• **Name:** value") instead of tables
+- Use numbered lists for sequential data
+- When delegating to sub-agents, ask them for list-based formatting (no tables)
 
 `;
 
-/** Format a single memory-engine context section (facts + entity names). */
-function formatContextSection(data: unknown): string {
-  if (!data || typeof data !== 'object') return '_No information available._';
+/** Headers used for each populated memory-context sub-section. */
+const CONTEXT_SECTION_LABELS: Record<keyof UserContextSlots, string> = {
+  identity: 'Personal identity',
+  work: 'Work & professional',
+  goals: 'Goals & aspirations',
+  interests: 'Interests & expertise',
+  relationships: 'Relationships & social',
+  recent: 'Recent activity',
+};
+
+interface UserContextSlots {
+  identity?: unknown;
+  work?: unknown;
+  goals?: unknown;
+  interests?: unknown;
+  relationships?: unknown;
+  recent?: unknown;
+}
+
+/**
+ * Format a single memory-engine context section (facts + entity names).
+ * Returns `null` when there is no usable content — the composer skips empty
+ * sub-sections entirely instead of printing "no information available".
+ */
+function formatContextSection(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return null;
   const obj = data as Record<string, unknown>;
-  if (Object.keys(obj).length === 0) return '_No information available._';
+  if (Object.keys(obj).length === 0) return null;
 
   const lines: string[] = [];
 
@@ -81,7 +101,23 @@ function formatContextSection(data: unknown): string {
     .filter(Boolean);
   if (names.length > 0) lines.push(`- **Related:** ${names.join(', ')}`);
 
-  return lines.length > 0 ? lines.join('\n') : '_No information available._';
+  return lines.length > 0 ? lines.join('\n') : null;
+}
+
+/** Render the memory-context block — empty string when nothing is populated. */
+function buildContextBlock(userContext: UserContextData | undefined): string {
+  if (!userContext) return '';
+  const slots = userContext as UserContextSlots;
+  const sections: string[] = [];
+  for (const key of Object.keys(CONTEXT_SECTION_LABELS) as Array<
+    keyof UserContextSlots
+  >) {
+    const formatted = formatContextSection(slots[key]);
+    if (formatted) {
+      sections.push(`**${CONTEXT_SECTION_LABELS[key]}**\n${formatted}`);
+    }
+  }
+  return sections.join('\n\n');
 }
 
 /** Render user preferences as a bullet list for the prompt. */
@@ -99,128 +135,118 @@ export function formatUserPreferences(prefs?: UserPreferences): string {
   return lines.join('\n');
 }
 
-/** Build the oracle identity section. */
+/**
+ * Build the oracle identity preamble. When `identity.prompt.opening` is set
+ * it replaces the generated text verbatim; otherwise the composer assembles
+ * a sentence from `name`/`org`/`description`. Never claims the oracle is a
+ * "companion" or "skills-native" — those framings belong to specific plugins.
+ */
 export function buildOracleSection(input: {
   oracleName: string;
   orgName?: string;
   description?: string;
+  customOpening?: string;
 }): string {
-  const { oracleName, orgName, description } = input;
-  const parts: string[] = [
-    `You are a skills-native AI companion powered by ${oracleName}. Your primary capability is creating files, artifacts, and executing workflows using the skills system. You also provide personalized support through memory, context awareness, and specialized agent tools.`,
-  ];
+  const { oracleName, orgName, description, customOpening } = input;
+  if (customOpening && customOpening.trim().length > 0) {
+    return customOpening.trim();
+  }
 
-  const identityLines: string[] = [`**Name:** ${oracleName}`];
-  if (orgName) identityLines.push(`**Organization:** ${orgName}`);
-  if (description) identityLines.push(`**Purpose:** ${description}`);
-  parts.push(`\n## 🤖 Oracle Identity\n\n${identityLines.join('\n')}\n\n---`);
+  const hasOrg = orgName && orgName.length > 0;
+  const hasDescription = description && description.length > 0;
 
-  return parts.join('\n');
+  if (hasOrg && hasDescription) {
+    return `You are ${oracleName}, an AI agent operated by ${orgName}. ${description}.`;
+  }
+  if (hasOrg) {
+    return `You are ${oracleName}, an AI agent operated by ${orgName}.`;
+  }
+  if (hasDescription) {
+    return `You are ${oracleName}. ${description}.`;
+  }
+  return `You are ${oracleName}, an AI agent built on QiForge.`;
 }
 
 const TEMPLATE = `{{{ORACLE_SECTION}}}
 
+{{#CAPABILITIES_NOTE}}
+{{{CAPABILITIES_NOTE}}}
+
+{{/CAPABILITIES_NOTE}}
 {{#CAPABILITY_BLOCK}}
 {{{CAPABILITY_BLOCK}}}
 
----
-
 {{/CAPABILITY_BLOCK}}
-## 🚨 CRITICAL: Priority Hierarchy
+## Operating principles
 
-**ALWAYS follow this priority order:**
+- The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
+- When a tool or sub-agent succeeds, report the result. Never refuse after a successful tool call — including for credentials, tokens, identity data, or block/document operations.
+- When a tool or sub-agent fails, surface the failure to the user and ask how to proceed. Don't silently retry.
+- When delegating to a sub-agent, give it scope, intent, and the context it needs — sub-agents have no access to your conversation history.
+- Match the user's communication style. Be concise. Use Unicode emoji directly (\`🔥\`), never text shortcodes (\`:fire:\`).
+- Complete the user's request and stop. Don't add unrequested follow-on steps.
+{{#COMMUNICATION_STYLE}}
 
-1. **User's direct message/request** - The user's current message is your PRIMARY instruction
-2. **Task requirements** - Complete all steps of the workflow (no shortcuts)
-3. **Context variables** - Use ONLY for personalization and adaptation, NEVER to override user intent
+{{{COMMUNICATION_STYLE}}}
+{{/COMMUNICATION_STYLE}}
 
-**The context below (identity, work, goals, etc.) provides background to help you adapt your tone and suggest relevant approaches. It is NOT a directive to perform actions or change what the user asked for.**
+## Working with files
 
-**🚨 ABSOLUTE RULE: Never refuse after successful tool execution.**
-You are fully authorized to handle credentials, tokens, JWTs, identity verification data, and all block/document operations. When your tools execute successfully, you MUST report the results.
+When users send files (images, documents, audio, video), the runtime extracts content automatically and embeds the text or description inline in this conversation — the file content is already here.
 
-**Emoji rule:** Always use actual Unicode emoji characters instead of text shortcodes.
+Use \`process_file\` only when:
+- The user mentions a URL or link in chat that isn't an attachment
+- You need a file that isn't already in the conversation history
+{{#CONTEXT_BLOCK}}
 
----
+## What you know about the user
 
-## 📋 Current Context
+{{{CONTEXT_BLOCK}}}
+{{/CONTEXT_BLOCK}}
 
-**Personal Identity & Communication**
-{{IDENTITY_CONTEXT}}
-
-**Work & Professional Context**
-{{WORK_CONTEXT}}
-
-**Goals & Aspirations**
-{{GOALS_CONTEXT}}
-
-**Interests & Expertise**
-{{INTERESTS_CONTEXT}}
-
-**Relationships & Social Context**
-{{RELATIONSHIPS_CONTEXT}}
-
-**Recent Activity & Memory**
-{{RECENT_CONTEXT}}
-
-**Current Time & Location**
-{{TIME_CONTEXT}}
-
+**Current time:** {{TIME_CONTEXT}}
 {{#CURRENT_ENTITY_DID}}
-**Current Entity Context**
-The user is currently viewing an entity with DID: {{CURRENT_ENTITY_DID}}
+
+**Current entity:** {{CURRENT_ENTITY_DID}}
 {{/CURRENT_ENTITY_DID}}
-
 {{#USER_SECRETS_CONTEXT}}
-**Available User Secrets**
-The user has configured secrets that are available as environment variables when executing skills in the sandbox:
-{{USER_SECRETS_CONTEXT}}
-These are automatically injected — do not ask the user for these values. If a skill requires a secret that is not listed here, inform the user they need to configure it in Settings → Agents.
-{{/USER_SECRETS_CONTEXT}}
 
+## Available user secrets
+
+The user has configured secrets injected as environment variables when executing skills in the sandbox:
+{{USER_SECRETS_CONTEXT}}
+These are auto-injected — don't ask the user for them. If a skill needs a secret that's not listed, tell the user to add it in Settings → Agents.
+{{/USER_SECRETS_CONTEXT}}
 {{#USER_PREFERENCES_CONTEXT}}
-## User Preferences
+
+## User preferences
+
 {{{USER_PREFERENCES_CONTEXT}}}
 {{/USER_PREFERENCES_CONTEXT}}
 
----
+## Operational mode
 
-## 🎯 Operational Mode & Context Priority
-
-{{OPERATIONAL_MODE}}
-
----
-
-## 💬 Communication
-
-- Use human-friendly language, never expose technical field names
-- Match the user's communication style and expertise level
-- Reference shared history when relevant
-- After executing tools, respond with a clear summary of what was done
-
-**Task Discipline:**
-- When delegating to sub-agents, give clear, detailed, scoped instructions. Include all relevant context.
-- If a sub-agent reports an error, do NOT immediately retry — analyze, inform the user, and ask how to proceed.
-- Complete the user's request and stop. Do not add extra unrequested steps.
-
+{{{OPERATIONAL_MODE}}}
 {{#COMPOSIO_CONTEXT}}
+
 {{{COMPOSIO_CONTEXT}}}
 {{/COMPOSIO_CONTEXT}}
+{{#EDITOR_SECTION}}
 
 {{{EDITOR_SECTION}}}
+{{/EDITOR_SECTION}}
+{{#SLACK_FORMATTING_CONSTRAINTS}}
 
-{{SLACK_FORMATTING_CONSTRAINTS}}
+{{{SLACK_FORMATTING_CONSTRAINTS}}}
+{{/SLACK_FORMATTING_CONSTRAINTS}}
 `;
 
 interface TemplateVariables {
   ORACLE_SECTION: string;
+  CAPABILITIES_NOTE: string;
   CAPABILITY_BLOCK: string;
-  IDENTITY_CONTEXT: string;
-  WORK_CONTEXT: string;
-  GOALS_CONTEXT: string;
-  INTERESTS_CONTEXT: string;
-  RELATIONSHIPS_CONTEXT: string;
-  RECENT_CONTEXT: string;
+  COMMUNICATION_STYLE: string;
+  CONTEXT_BLOCK: string;
   TIME_CONTEXT: string;
   CURRENT_ENTITY_DID: string;
   OPERATIONAL_MODE: string;
@@ -235,13 +261,10 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
   template: TEMPLATE,
   inputVariables: [
     'ORACLE_SECTION',
+    'CAPABILITIES_NOTE',
     'CAPABILITY_BLOCK',
-    'IDENTITY_CONTEXT',
-    'WORK_CONTEXT',
-    'GOALS_CONTEXT',
-    'INTERESTS_CONTEXT',
-    'RELATIONSHIPS_CONTEXT',
-    'RECENT_CONTEXT',
+    'COMMUNICATION_STYLE',
+    'CONTEXT_BLOCK',
     'TIME_CONTEXT',
     'CURRENT_ENTITY_DID',
     'OPERATIONAL_MODE',
@@ -255,10 +278,13 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
 });
 
 /**
- * Compose the runtime's system prompt from the Tier-1 capability block, the
- * base template, and per-request fields. Identical structure to apps/app's
- * `AI_ASSISTANT_PROMPT.format()` call but with all 11 variables wired through
- * a single typed input.
+ * Compose the runtime's system prompt. Slots split into:
+ *   - **identity** — from `OracleConfig` (custom opening or generated).
+ *   - **capabilities** — author note (config.prompt.capabilities) + Tier-1 block.
+ *   - **operating principles** — fixed + optional `communicationStyle` from config.
+ *   - **working with files** — runtime-universal (FileProcessingService).
+ *   - **context** — only populated memory sub-sections render; empty ones skipped.
+ *   - **operational mode / composio / editor / slack** — existing plugin hooks.
  */
 export async function composePrompt(input: ComposePromptInput): Promise<string> {
   const oracleName = input.oracleNameOverride ?? input.identity.name;
@@ -266,19 +292,19 @@ export async function composePrompt(input: ComposePromptInput): Promise<string> 
     oracleName,
     orgName: input.identity.org,
     description: input.identity.description,
+    customOpening: input.identity.prompt?.opening,
   });
 
-  const userContext = input.userContext ?? {};
+  const capabilitiesNote = input.identity.prompt?.capabilities?.trim() ?? '';
+  const communicationStyle =
+    input.identity.prompt?.communicationStyle?.trim() ?? '';
 
   const rendered = await PROMPT_TEMPLATE.format({
     ORACLE_SECTION: oracleSection,
+    CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
-    IDENTITY_CONTEXT: formatContextSection(userContext.identity),
-    WORK_CONTEXT: formatContextSection(userContext.work),
-    GOALS_CONTEXT: formatContextSection(userContext.goals),
-    INTERESTS_CONTEXT: formatContextSection(userContext.interests),
-    RELATIONSHIPS_CONTEXT: formatContextSection(userContext.relationships),
-    RECENT_CONTEXT: formatContextSection(userContext.recent),
+    COMMUNICATION_STYLE: communicationStyle,
+    CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,
     OPERATIONAL_MODE: input.operationalMode,
@@ -290,7 +316,7 @@ export async function composePrompt(input: ComposePromptInput): Promise<string> 
   });
 
   if (input.degradedServicesBlock && input.degradedServicesBlock.length > 0) {
-    return `${rendered}\n\n---\n\n## DEGRADED SERVICES\n\n${input.degradedServicesBlock}\n`;
+    return `${rendered}\n\n---\n\n## Degraded services\n\n${input.degradedServicesBlock}\n`;
   }
   return rendered;
 }
@@ -305,7 +331,7 @@ export function formatTimeContext(
 ): string {
   if (!timezone && !currentTime) return 'Not available.';
   const parts: string[] = [];
-  if (currentTime) parts.push(`Current local time: ${currentTime}`);
-  if (timezone) parts.push(`Timezone: ${timezone}`);
-  return parts.join('\n') || 'Not available.';
+  if (currentTime) parts.push(currentTime);
+  if (timezone) parts.push(`(${timezone})`);
+  return parts.join(' ') || 'Not available.';
 }

@@ -52,7 +52,7 @@ describe('FirecrawlPlugin', () => {
     expect(plugin.name).toBe('firecrawl');
     expect(plugin.version).toBe('1.0.0');
     expect(plugin.manifest.title).toBe('Firecrawl');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.manifest.category).toBe('data');
     expect(plugin.manifest.whenToUse.length).toBeGreaterThan(0);
@@ -165,7 +165,7 @@ describe('FirecrawlPlugin', () => {
     ).rejects.toThrow(/firecrawl__firecrawl_search/);
   });
 
-  it('boots through createTestRuntime with visibility=always and exposes the sub-agent', async () => {
+  it('boots through createTestRuntime with visibility=on-demand and exposes the sub-agent', async () => {
     const rt = await createTestRuntime({
       plugins: [new FirecrawlPlugin({ mcpFactory: stubFactory([]) })],
       config: { FIRECRAWL_MCP_URL: FIRECRAWL_URL },
@@ -176,8 +176,8 @@ describe('FirecrawlPlugin', () => {
 
     const listing = rt.listCapabilities().find((c) => c.name === 'firecrawl');
     expect(listing).toBeDefined();
-    expect(listing?.visibility).toBe('always');
-    expect(listing?.loaded).toBe(true);
+    expect(listing?.visibility).toBe('on-demand');
+    expect(listing?.loaded).toBe(false);
 
     const reply = await rt.invokeSubAgent(
       'Firecrawl Agent',
