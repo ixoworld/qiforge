@@ -353,6 +353,16 @@ export class UcanService implements OnModuleDestroy {
     return this.signingMnemonic !== null;
   }
 
+  /**
+   * Read the in-memory signing mnemonic. Other runtime consumers (e.g. the
+   * credits plugin's claim-signing path) call this to avoid re-fetching and
+   * re-decrypting it from the oracle's Matrix account room on every claim.
+   * Returns `null` when boot hasn't populated it yet.
+   */
+  getSigningMnemonic(): string | null {
+    return this.signingMnemonic;
+  }
+
   // ============================================================================
   // User delegation caching
   // ============================================================================

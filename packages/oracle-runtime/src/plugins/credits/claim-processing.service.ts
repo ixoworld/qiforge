@@ -18,6 +18,7 @@ import {
 } from '@langchain/langgraph';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import { UcanService } from '../../modules/ucan/ucan.service.js';
 import { TokenLimiter } from './token-limiter.js';
 
 /** Token used to inject the credits-plugin TokenLimiter instance into the service. */
@@ -108,6 +109,7 @@ export class ClaimProcessingService {
 
   constructor(
     private readonly configService: ConfigService<ClaimProcessingConfig>,
+    private readonly ucanService: UcanService,
     @Optional()
     @Inject(CLAIM_PROCESSING_TOKEN_LIMITER)
     tokenLimiter?: TokenLimiter,
@@ -239,6 +241,17 @@ export class ClaimProcessingService {
       await client.init();
       const claimsClient = new Claims(client);
 
+      // Reuse the signing mnemonic that boot already pulled out of the
+      // oracle's Matrix account room. When this is null (cron tick beat the
+      // post-Matrix-init boot wiring), fall back to the original lookup so
+      // the claim still goes through.
+      const cachedSigningMnemonic = this.ucanService.getSigningMnemonic();
+      if (!cachedSigningMnemonic) {
+        this.logger.warn(
+          'Signing mnemonic not yet loaded by UcanService; falling back to per-claim Matrix lookup for this run',
+        );
+      }
+
       const cid = await claimsClient.saveSignedClaimToMatrix({
         accessToken: params.configService.getOrThrow(
           'MATRIX_ORACLE_ADMIN_ACCESS_TOKEN',
@@ -266,6 +279,7 @@ export class ClaimProcessingService {
         matrixValuePin: params.configService.getOrThrow('MATRIX_VALUE_PIN'),
         oracleDid: params.configService.getOrThrow('ORACLE_DID'),
         network: params.configService.getOrThrow('NETWORK'),
+        decryptedSigningMnemonic: cachedSigningMnemonic ?? undefined,
       });
 
       this.logger.log(

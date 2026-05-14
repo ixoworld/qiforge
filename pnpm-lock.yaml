@@ -640,8 +640,8 @@ importers:
         specifier: ^1.2.1
         version: 1.2.1(lib0@0.2.114)(matrix-js-sdk@37.13.0)(y-protocols@1.0.6(yjs@13.6.27))(yjs@13.6.27)
       '@ixo/oracles-chain-client':
-        specifier: 1.2.1
-        version: 1.2.1
+        specifier: workspace:*
+        version: link:../oracles-chain-client
       '@ixo/oracles-events':
         specifier: 1.0.4
         version: 1.0.4
