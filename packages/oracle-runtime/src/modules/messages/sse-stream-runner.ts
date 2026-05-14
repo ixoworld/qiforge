@@ -5,7 +5,7 @@ import {
 } from '@ixo/oracles-events';
 import { Injectable, Logger } from '@nestjs/common';
 import type { Response } from 'express';
-import { AIMessageChunk, type HumanMessage, ToolMessage } from 'langchain';
+import { AIMessageChunk, type BaseMessage, ToolMessage } from 'langchain';
 import { emojify } from '../../utils/emoji.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
@@ -90,7 +90,7 @@ export interface StreamRunInput {
     clientType?: 'matrix' | 'slack' | 'portal';
   };
   prepared: PreparedRequest;
-  inputMessages: HumanMessage[];
+  inputMessages: BaseMessage[];
   res: Response;
   abortControllers: Map<string, AbortController>;
   /**

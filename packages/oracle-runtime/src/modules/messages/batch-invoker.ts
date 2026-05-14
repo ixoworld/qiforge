@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { type BaseMessage, type HumanMessage } from 'langchain';
+import { type BaseMessage } from 'langchain';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
 import { type PreparedRequest } from './request-preparer.js';
@@ -10,7 +10,7 @@ export interface BatchInvokeInput {
     clientType?: 'matrix' | 'slack' | 'portal';
   };
   prepared: PreparedRequest;
-  inputMessages: HumanMessage[];
+  inputMessages: BaseMessage[];
 }
 
 export interface BatchInvokeResult {

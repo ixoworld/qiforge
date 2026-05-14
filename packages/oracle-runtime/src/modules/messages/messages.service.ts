@@ -4,14 +4,10 @@ import {
   type ListOracleMessagesResponse,
 } from '@ixo/common';
 import { SqliteSaver } from '@ixo/sqlite-saver';
-import {
-  Injectable,
-  Logger,
-  type OnModuleInit,
-} from '@nestjs/common';
+import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
-import { HumanMessage, type BaseMessage } from 'langchain';
+import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { BatchInvoker } from './batch-invoker.js';
@@ -174,10 +170,7 @@ export class MessagesService implements OnModuleInit {
                   isOracleAdmin: true,
                 })
                 .catch((err) =>
-                  this.logger.error(
-                    'Matrix replay (AI response) failed',
-                    err,
-                  ),
+                  this.logger.error('Matrix replay (AI response) failed', err),
                 );
             }
             this.firePostSync(params, prepared);
@@ -214,10 +207,10 @@ export class MessagesService implements OnModuleInit {
   private async assembleInput(
     params: SendMessageRequest,
     prepared: { roomId: string; sessionId: string },
-  ): Promise<HumanMessage[]> {
+  ): Promise<BaseMessage[]> {
     const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
     const timestamp = new Date().toISOString();
-    const out: HumanMessage[] = [
+    const out: BaseMessage[] = [
       new HumanMessage({
         content: params.message,
         additional_kwargs: { msgFromMatrixRoom, timestamp },
@@ -245,7 +238,7 @@ export class MessagesService implements OnModuleInit {
           : '';
       const content = sourceRef ? `${sourceRef}\n${text}` : text;
       out.push(
-        new HumanMessage({
+        new AIMessage({
           content,
           additional_kwargs: {
             msgFromMatrixRoom,

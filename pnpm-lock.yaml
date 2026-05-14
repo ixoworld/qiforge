@@ -440,9 +440,9 @@ importers:
       openai:
         specifier: ^6.34.0
         version: 6.34.0(ws@8.18.2)(zod@4.3.6)
-      pdf-parse:
-        specifier: 2.4.5
-        version: 2.4.5
+      pdfjs-dist:
+        specifier: ^5.4.296
+        version: 5.4.296
       playwright:
         specifier: ^1.59.1
         version: 1.59.1

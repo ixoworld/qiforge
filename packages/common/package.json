@@ -68,7 +68,7 @@
     "mammoth": "1.12.0",
     "node-emoji": "^2.2.0",
     "openai": "^6.34.0",
-    "pdf-parse": "2.4.5",
+    "pdfjs-dist": "^5.4.296",
     "playwright": "^1.59.1",
     "store": "^2.0.12",
     "zod": "^4.3.6"

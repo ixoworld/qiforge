@@ -2,6 +2,7 @@ import { loadFileFromBuffer } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { UcanService } from '../ucan/ucan.service.js';
 import { type AttachmentDto } from './dto/send-message.dto.js';
 import {
   FILE_PROCESSING_CREDIT_SINK,
@@ -76,7 +77,7 @@ const MAGIC_BYTES: Array<{
   { bytes: [0x66, 0x4c, 0x61, 0x43], mime: 'audio/flac' }, // fLaC
   // Video
   { bytes: [0x1a, 0x45, 0xdf, 0xa3], mime: 'video/webm' }, // WebM/MKV (EBML)
-  { bytes: [0x00, 0x00, 0x00], mime: 'video/mp4' }, // MP4/MOV (ftyp box, 4th byte varies)
+  { bytes: [0x66, 0x74, 0x79, 0x70], offset: 4, mime: 'video/mp4' }, // MP4/MOV `ftyp` box at offset 4
 ];
 
 const MAGIC_MIME_CATEGORIES: Record<string, FileCategory[]> = {
@@ -114,11 +115,17 @@ export interface ProcessedAttachment {
 }
 
 export interface SandboxUploadConfig {
+  /** Base URL of the sandbox MCP server. The `/artifacts/upload` endpoint
+   *  shares the same host — only the `/mcp` suffix is stripped. */
   sandboxMcpUrl: string;
-  userToken: string;
-  oracleToken: string;
-  homeServerName: string;
-  oracleHomeServerUrl: string;
+  /**
+   * Auth headers minted by the caller. Must match the same scheme the
+   * sandbox plugin uses for MCP tool calls — `Authorization: Bearer <ucan>`
+   * plus `X-Auth-Type: ucan`, optionally followed by `x-os-*` / `x-us-*`
+   * secret headers. See `plugins/sandbox/sandbox-mcp.ts`
+   * (`createDefaultAuthBuilder`). Forwarded to the upload endpoint verbatim.
+   */
+  authHeaders: Record<string, string>;
 }
 
 /**
@@ -167,6 +174,7 @@ export class FileProcessingService {
 
   constructor(
     private readonly config: ConfigService,
+    private readonly ucanService: UcanService,
     @Optional()
     @Inject(FILE_PROCESSING_CREDIT_SINK)
     private readonly creditSink?: FileProcessingCreditSink,
@@ -179,11 +187,55 @@ export class FileProcessingService {
   }
 
   /**
+   * Build the sandbox upload config for the current user. Returns `undefined`
+   * when sandbox archival isn't possible — `SANDBOX_MCP_URL` unset, the user
+   * has no cached UCAN delegation, or the oracle has no signing key. The
+   * caller treats `undefined` as "skip upload"; processing still happens.
+   *
+   * Auth header shape matches `plugins/sandbox/sandbox-mcp.ts`
+   * (`createDefaultAuthBuilder`) exactly — same `Authorization: Bearer <ucan>`
+   * + `X-Auth-Type: ucan` the sandbox MCP client sends for tool calls.
+   */
+  private async buildSandboxConfig(
+    userDid: string,
+  ): Promise<SandboxUploadConfig | undefined> {
+    const sandboxMcpUrl = this.config.get<string>('SANDBOX_MCP_URL');
+    if (!sandboxMcpUrl) return undefined;
+
+    const invocation = await this.ucanService.createServiceInvocation(
+      sandboxMcpUrl,
+      userDid,
+      'ixo:sandbox',
+    );
+    if (!invocation) {
+      this.logger.debug(
+        `[FileProcessing] Skipping sandbox archive for ${userDid} — UCAN invocation unavailable`,
+      );
+      return undefined;
+    }
+
+    return {
+      sandboxMcpUrl,
+      authHeaders: {
+        Authorization: `Bearer ${invocation}`,
+        'X-Auth-Type': 'ucan',
+      },
+    };
+  }
+
+  /**
    * Sanitize a filename/path for the sandbox upload endpoint.
-   * Only alphanumeric, dots, dashes, underscores, and slashes are allowed.
+   * Only alphanumeric, dots, dashes, underscores, and slashes are allowed,
+   * and `..` path segments are removed so the sandbox can't be escaped.
    */
   private sanitizeSandboxPath(p: string): string {
-    return p.replace(/[^a-zA-Z0-9._\-/]/g, '_');
+    const charset = p.replace(/[^a-zA-Z0-9._\-/]/g, '_');
+    // Strip any `..` segment surrounded by `/` or string boundaries — a
+    // payload like `/workspace/../etc` reduces to `/workspace/etc`.
+    return charset
+      .split('/')
+      .filter((seg) => seg !== '..')
+      .join('/');
   }
 
   async uploadToSandbox(
@@ -213,12 +265,7 @@ export class FileProcessingService {
 
     const response = await fetch(uploadUrl, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${sandboxConfig.userToken}`,
-        'x-matrix-homeserver': sandboxConfig.homeServerName,
-        'X-oracle-openid-token': sandboxConfig.oracleToken,
-        'x-oracle-homeserver': sandboxConfig.oracleHomeServerUrl,
-      },
+      headers: { ...sandboxConfig.authHeaders },
       body: formData,
     });
 
@@ -247,7 +294,6 @@ export class FileProcessingService {
     attachments: AttachmentDto[],
     roomId: string,
     userDid?: string,
-    sandboxConfig?: SandboxUploadConfig,
   ): Promise<{
     texts: string[];
     metadata: ProcessedAttachment[];
@@ -271,68 +317,90 @@ export class FileProcessingService {
       );
     }
 
-    const results = await Promise.all(
-      attachments.map(async (attachment) => {
-        this.logger.log(
-          `Attachment: "${attachment.filename}" (${attachment.mimetype}, ${attachment.size ?? 'unknown'} bytes) — source: ${attachment.eventId ? `eventId=${attachment.eventId}` : `mxcUri=${attachment.mxcUri}`}`,
-        );
-        try {
-          const { text, downloadedSize, sandboxPath, usage } =
-            await this.processAttachment(attachment, 0, roomId, sandboxConfig);
-          this.logger.log(
-            `Attachment "${attachment.filename}" processed — downloaded ${downloadedSize} bytes, text extracted: ${text ? text.length + ' chars' : 'none'}`,
-          );
-          const category = this.categorizeFile(attachment.mimetype);
-          return {
-            text,
-            downloadedSize,
-            usage,
-            metadata: text
-              ? {
-                  filename: attachment.filename,
-                  mimetype: attachment.mimetype,
-                  size: attachment.size,
-                  mxcUri: attachment.mxcUri,
-                  eventId: attachment.eventId,
-                  category:
-                    category === 'unsupported'
-                      ? ('document' as const)
-                      : category,
-                  sandboxPath,
-                }
-              : null,
-          };
-        } catch (error) {
-          this.logger.error(
-            `Failed to process attachment ${attachment.filename}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          const errorText = `[File "${this.sanitizeFilename(attachment.filename)}" (${attachment.mimetype}) failed to process: ${error instanceof Error ? error.message : 'unknown error'}. Let the user know this file could not be read.]`;
-          const category = this.categorizeFile(attachment.mimetype);
-          return {
-            text: errorText,
-            downloadedSize: 0,
-            metadata: {
-              filename: attachment.filename,
-              mimetype: attachment.mimetype,
-              size: attachment.size,
-              mxcUri: attachment.mxcUri,
-              eventId: attachment.eventId,
-              category:
-                category === 'unsupported' ? ('document' as const) : category,
-            } as ProcessedAttachment,
-          };
-        }
-      }),
-    );
-
-    const totalDownloaded = results.reduce(
-      (sum, r) => sum + r.downloadedSize,
-      0,
-    );
-    if (totalDownloaded > MAX_TOTAL_SIZE) {
-      throw new Error(
-        `Total downloaded size (${Math.round(totalDownloaded / 1024 / 1024)} MB) exceeds budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB)`,
+    // Mint the sandbox UCAN once per request — the cached invocation is reused
+    // for every attachment so we don't re-resolve did:web or re-sign per file.
+    const sandboxConfig = userDid
+      ? await this.buildSandboxConfig(userDid)
+      : undefined;
+    if (sandboxConfig) {
+      this.logger.log(
+        `[FileProcessing] Sandbox archival enabled for this request → ${sandboxConfig.sandboxMcpUrl}`,
       );
+    }
+
+    // Process sequentially so the running download total is enforced *before*
+    // the next attachment is fetched. Parallel `Promise.all` would let N
+    // attachments each download up to MAX_FILE_SIZE before any cumulative
+    // check fired, blowing past MAX_TOTAL_SIZE by a factor of N in the worst
+    // case.
+    const results: Array<{
+      text: string | null;
+      downloadedSize: number;
+      usage?: AiProcessUsage;
+      metadata: ProcessedAttachment | null;
+    }> = [];
+    let totalDownloaded = 0;
+    for (const attachment of attachments) {
+      this.logger.log(
+        `Attachment: "${attachment.filename}" (${attachment.mimetype}, ${attachment.size ?? 'unknown'} bytes) — source: ${attachment.eventId ? `eventId=${attachment.eventId}` : `mxcUri=${attachment.mxcUri}`}`,
+      );
+      try {
+        const { text, downloadedSize, sandboxPath, usage } =
+          await this.processAttachment(
+            attachment,
+            totalDownloaded,
+            roomId,
+            sandboxConfig,
+          );
+        totalDownloaded += downloadedSize;
+        if (totalDownloaded > MAX_TOTAL_SIZE) {
+          throw new Error(
+            `Total downloaded size (${Math.round(totalDownloaded / 1024 / 1024)} MB) exceeds budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB)`,
+          );
+        }
+        this.logger.log(
+          `Attachment "${attachment.filename}" processed — downloaded ${downloadedSize} bytes, text extracted: ${text ? text.length + ' chars' : 'none'}`,
+        );
+        const category = this.categorizeFile(attachment.mimetype);
+        results.push({
+          text,
+          downloadedSize,
+          usage,
+          metadata: text
+            ? {
+                filename: attachment.filename,
+                mimetype: attachment.mimetype,
+                size: attachment.size,
+                mxcUri: attachment.mxcUri,
+                eventId: attachment.eventId,
+                category:
+                  category === 'unsupported'
+                    ? ('document' as const)
+                    : category,
+                sandboxPath,
+              }
+            : null,
+        });
+      } catch (error) {
+        this.logger.error(
+          `Failed to process attachment ${attachment.filename}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        const errorText = `[File "${this.sanitizeFilename(attachment.filename)}" (${attachment.mimetype}) failed to process: ${error instanceof Error ? error.message : 'unknown error'}. Let the user know this file could not be read.]`;
+        const category = this.categorizeFile(attachment.mimetype);
+        results.push({
+          text: errorText,
+          downloadedSize: 0,
+          metadata: {
+            filename: attachment.filename,
+            mimetype: attachment.mimetype,
+            size: attachment.size,
+            mxcUri: attachment.mxcUri,
+            eventId: attachment.eventId,
+            category:
+              category === 'unsupported' ? ('document' as const) : category,
+          } as ProcessedAttachment,
+        });
+      }
     }
 
     const texts: string[] = [];
@@ -898,7 +966,15 @@ export class FileProcessingService {
         attachment.mimetype,
         attachment.filename,
       );
-      const text = docs.map((doc) => doc.pageContent).join('\n\n');
+      // PDFs return one Document per page — preserve the page boundary so the
+      // model can cite "page N" downstream. Other doc types return one chunk.
+      const isPdf = attachment.mimetype === 'application/pdf';
+      const text =
+        isPdf && docs.length > 1
+          ? docs
+              .map((doc, i) => `## Page ${i + 1}\n\n${doc.pageContent}`)
+              .join('\n\n')
+          : docs.map((doc) => doc.pageContent).join('\n\n');
       if (text.trim().length > 0) {
         return {
           text: this.formatContent(
@@ -921,7 +997,11 @@ export class FileProcessingService {
       attachment.filename,
     );
     return {
-      text: this.formatContent('Content', safeFilename, content),
+      text: this.formatContent(
+        'Content',
+        safeFilename,
+        this.truncateText(content),
+      ),
       usage,
     };
   }
@@ -996,6 +1076,12 @@ export class FileProcessingService {
     category: 'image' | 'video',
     _filename: string,
   ): Promise<AiProcessResult> {
+    // The upstream model fetches `url` from its own infrastructure, so this
+    // path bypasses our normal `downloadFromUrl` SSRF check. Validate here
+    // so we can't be coerced into asking an external LLM to read internal
+    // metadata endpoints or private network hosts.
+    this.validateUrlTarget(url);
+
     const prompt = PROMPTS[category];
 
     const contentParts: Record<string, unknown>[] = [
@@ -1504,6 +1590,7 @@ export class FileProcessingService {
 
     // Try passing the URL to AI as video — Gemini natively handles YouTube,
     // Vimeo, and many other platforms that serve HTML pages with embedded video.
+    // SSRF validation is performed inside `aiProcessFromUrl`.
     this.logger.log(
       `[processFileFromUrl] Type still unknown (HEAD Content-Type: ${headContentType ?? 'none'}) — trying AI video passthrough as fallback`,
     );

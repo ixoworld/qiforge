@@ -1,6 +1,6 @@
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { Injectable } from '@nestjs/common';
-import { type BaseMessage, type HumanMessage } from 'langchain';
+import { type BaseMessage } from 'langchain';
 import type {
   CompiledMainAgent,
   MainAgentRequestContext,
@@ -15,7 +15,7 @@ import { type PreparedRequest } from './request-preparer.js';
 export interface BuildAgentArgs {
   payload: SendMessageRequest;
   prepared: PreparedRequest;
-  inputMessages: HumanMessage[];
+  inputMessages: BaseMessage[];
 }
 
 export interface BuiltAgent {
@@ -176,7 +176,7 @@ export class AgentBuilder {
     });
 
     const stateInput: Partial<TMainAgentGraphState> = {
-      messages: inputMessages as BaseMessage[],
+      messages: inputMessages,
       config: { did: payload.did },
       client: clientType,
       ...(payload.metadata?.editorRoomId !== undefined && {
