@@ -109,5 +109,9 @@ export function createAguiSubAgent(tools: PluginTool[]): PluginSubAgent {
     tools,
     model: 'subagent',
     middlewares: [],
+    // AG-UI action invocations must surface in the main chat so the UI can
+    // render the corresponding component events. Forward every action this
+    // sub-agent exposes — the tool list IS the action list.
+    forwardTools: true,
   };
 }

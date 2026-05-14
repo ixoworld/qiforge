@@ -272,7 +272,7 @@ export class SseStreamRunner {
 
     const actionCallEvent = actionCallMap.get(toolCallId);
     if (actionCallEvent) {
-      actionCallEvent.payload.output = emojify(toolMessage.content);
+      actionCallEvent.payload.output = emojify(toolMessage.content.toString());
       actionCallEvent.payload.toolCallId = toolCallId;
       const parsed = safeParseToolContent(toolMessage.content);
       if (parsed?.success === false || parsed?.error) {

@@ -5,7 +5,7 @@ import type { RuntimeContext } from '../../plugin-api/types.js';
  *
  *   1. Resolves the composio-worker DID via `runCtx.ucan.resolveServiceDid`
  *      (delegates the did:web lookup + cache to the Tier-0 UCAN service).
- *   2. Mints an `ixo:composio` invocation using the user's signing key.
+ *   2. Mints an `ixo:sandbox` invocation using the user's signing key.
  *
  * Returns `null` when DID resolution fails, when minting throws, or when no
  * signing material is available. Callers degrade silently — the composio
@@ -19,19 +19,22 @@ export async function mintComposioInvocation(
   if (!composioDid) return null;
 
   try {
-    const invocation = await runCtx.ucan.mintInvocation({
-      did: composioDid,
-      capability: 'ixo:composio',
-    });
+    // skipCache: the composio-worker enforces single-use replay protection
+    // per invocation CID (see composio-worker `lib/validation.ts`
+    // `createInvocationStore`, KV-backed, 120s default TTL). A cached
+    // invocation would be replayed on the second request and rejected with
+    // `401 REPLAY: Invocation has already been used`. Mint fresh every call.
+    const invocation = await runCtx.ucan.mintInvocation(
+      { did: composioDid, capability: 'ixo:sandbox' },
+      { skipCache: true },
+    );
     return invocation && invocation.length > 0 ? invocation : null;
   } catch (error) {
     const detail =
       error instanceof Error
         ? `${error.name}: ${error.message}`
         : String(error);
-    runCtx.logger.warn(
-      `[composio] failed to mint UCAN invocation: ${detail}`,
-    );
+    runCtx.logger.warn(`[composio] failed to mint UCAN invocation: ${detail}`);
     return null;
   }
 }

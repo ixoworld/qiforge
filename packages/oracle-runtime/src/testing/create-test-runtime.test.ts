@@ -154,34 +154,6 @@ describe('createTestRuntime', () => {
     expect(out.before).toEqual({ touched: true });
   });
 
-  it('findCapability returns ranked matches via minisearch', async () => {
-    const rt = await createTestRuntime({
-      plugins: [
-        makePlugin({
-          name: 'climate',
-          manifest: makeManifest({
-            summary: 'Greenhouse-gas emissions data and reporting.',
-            whenToUse: ['user asks about emissions', 'user asks about co2'],
-            tags: ['emissions', 'climate', 'reporting'],
-          }),
-        }),
-        makePlugin({
-          name: 'memory',
-          manifest: makeManifest({
-            summary: 'Persistent memory for the agent.',
-            whenToUse: ['storing facts', 'recalling user preferences'],
-            tags: ['memory'],
-          }),
-        }),
-      ],
-    });
-    const hits = rt.findCapability('emissions');
-    expect(hits.length).toBeGreaterThan(0);
-    expect(hits[0]!.name).toBe('climate');
-    expect(hits[0]!.score).toBeGreaterThan(0);
-    expect(hits[0]!.matchReason).toMatch(/matched/);
-  });
-
   it('loadCapability marks a plugin loaded and updates listCapabilities', async () => {
     const rt = await createTestRuntime({
       plugins: [

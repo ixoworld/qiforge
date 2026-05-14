@@ -3,7 +3,6 @@ import {
   resolvePlugins,
   type FeatureToggle,
 } from '../bootstrap/plugin-loader.js';
-import { buildSearchIndex } from '../manifest/search.js';
 import { validateManifest } from '../manifest/validator.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
@@ -70,14 +69,6 @@ export interface CreateTestRuntimeOptions {
   };
 }
 
-/** A `find_capability`-shaped search hit. */
-export interface CapabilitySearchHit {
-  name: string;
-  score: number;
-  summary: string;
-  matchReason: string;
-}
-
 /** A `list_capabilities`-shaped row. */
 export interface CapabilityListing {
   name: string;
@@ -106,8 +97,6 @@ export interface TestRuntime {
   getManifest: (plugin: string) => PluginManifest;
   /** Same shape as the `list_capabilities` meta-tool. */
   listCapabilities: () => CapabilityListing[];
-  /** Same shape as the `find_capability` meta-tool. */
-  findCapability: (query: string, limit?: number) => CapabilitySearchHit[];
   /** Add a plugin to `loadedPlugins` for subsequent calls. */
   loadCapability: (name: string) => void;
   /** Throws on any registry collision. */
@@ -259,12 +248,6 @@ export async function createTestRuntime(
     return buildRuntimeContext(runConfig, ambient, stateInput);
   };
 
-  // Search index for findCapability.
-  const searchEntries = manifests
-    .collect()
-    .map(({ pluginName, manifest }) => ({ pluginName, manifest }));
-  const searchIndex = buildSearchIndex(searchEntries);
-
   // 6. Public surface.
   const runtime: TestRuntime = {
     async invokeTool(name, args) {
@@ -368,15 +351,11 @@ export async function createTestRuntime(
       return out;
     },
 
-    findCapability(query, limit = 5) {
-      return searchIndex.query(query, limit);
-    },
-
     loadCapability(name) {
       const entry = manifests.collect().find((m) => m.pluginName === name);
       if (!entry) {
         throw new Error(
-          `Cannot load capability "${name}" — not registered. Try findCapability("${name}") to discover what's available.`,
+          `Cannot load capability "${name}" — not registered. Call rt.listCapabilities() to see what's available.`,
         );
       }
       if (entry.manifest.visibility === 'silent') {

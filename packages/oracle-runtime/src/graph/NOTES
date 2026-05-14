@@ -6,7 +6,12 @@
 
 6- review the image read setup and how it works u can pass dirct the image since Kimi can handle that for u and files if possible but try to parse first? 
 
-7- pass tools from subAgents to mainAgent context so we can see on UI 
-8- explore using the sqliteDB messages list for listing messages
+7- pass tools from subAgents to mainAgent context so we can see on UI (done)
+8- explore using the sqliteDB messages list for listing messages (done)
 
-9-saveSignedClaimToMatrix review this is not broken as it might be breaking the matrix flow 
+9-saveSignedClaimToMatrix review this is not broken as it might be breaking the matrix flow (done)
+
+
+__ NEW 
+
+Check find capabilty 

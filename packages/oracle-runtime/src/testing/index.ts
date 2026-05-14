@@ -3,7 +3,6 @@ export {
   type CreateTestRuntimeOptions,
   type TestRuntime,
   type CapabilityListing,
-  type CapabilitySearchHit,
 } from './create-test-runtime.js';
 
 export {

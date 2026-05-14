@@ -27,6 +27,12 @@ import {
   type MCPUCANConfig,
   requiresUCANAuth,
 } from './ucan.config.js';
+import {
+  signerFromMnemonic,
+  parseDelegation,
+  createInvocation,
+  serializeInvocation,
+} from '@ixo/ucan';
 
 // ============================================================================
 // Inline implementations (can be replaced with @ixo/ucan imports once built)
@@ -479,11 +485,17 @@ export class UcanService implements OnModuleDestroy {
    * (e.g. a plugin called `resolveServiceDid` separately and now wants to
    * mint with the resolved DID directly). Same semantics as
    * `createServiceInvocation` minus the URL → DID lookup.
+   *
+   * `opts.skipCache` — bypass the invocation cache. Required for downstream
+   * services that enforce single-use replay protection per invocation CID
+   * (e.g. composio-worker). Without this flag a cached CID would be reused
+   * across requests and rejected as a replay.
    */
   async mintInvocationForServiceDid(
     userDid: string,
     serviceDid: string,
     resource = 'ixo:sandbox',
+    opts: { skipCache?: boolean } = {},
   ): Promise<string | null> {
     if (!this.signingMnemonic || !this.oracleDid) {
       this.logger.debug('[UCAN] No signing key available, skipping invocation');
@@ -498,27 +510,22 @@ export class UcanService implements OnModuleDestroy {
       return null;
     }
 
-    // Check invocation cache
+    // Check invocation cache (skipped for replay-protected services)
     const cacheKey = `${INVOCATION_CACHE_PREFIX}${userDid}:${serviceDid}`;
-    const cached = await this.cacheManager.get<{
-      invocation: string;
-      expiresAt: number;
-    }>(cacheKey);
-    if (cached && cached.expiresAt > Date.now() / 1000) {
-      this.logger.debug(
-        `[UCAN] Using cached invocation for ${userDid} → ${serviceDid}`,
-      );
-      return cached.invocation;
+    if (!opts.skipCache) {
+      const cached = await this.cacheManager.get<{
+        invocation: string;
+        expiresAt: number;
+      }>(cacheKey);
+      if (cached && cached.expiresAt > Date.now() / 1000) {
+        this.logger.debug(
+          `[UCAN] Using cached invocation for ${userDid} → ${serviceDid}`,
+        );
+        return cached.invocation;
+      }
     }
 
     try {
-      const {
-        signerFromMnemonic,
-        createInvocation,
-        serializeInvocation,
-        parseDelegation,
-      } = await import('@ixo/ucan');
-
       const { signer } = await signerFromMnemonic(
         this.signingMnemonic,
         this.oracleDid as `did:ixo:${string}`,
@@ -548,9 +555,9 @@ export class UcanService implements OnModuleDestroy {
 
       const serialized = await serializeInvocation(invocation);
 
-      // Cache the invocation for its full lifetime
+      // Cache the invocation for its full lifetime (unless caller opted out)
       const ttlMs = (expirationSeconds - nowSeconds) * 1000;
-      if (ttlMs > 0) {
+      if (!opts.skipCache && ttlMs > 0) {
         await this.cacheManager.set(
           cacheKey,
           { invocation: serialized, expiresAt: expirationSeconds },

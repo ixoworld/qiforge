@@ -31,7 +31,7 @@ const DEFAULT_BUDGET = 5000;
 
 const HEADER = '## Available Capabilities\n\n';
 const FOOTER =
-  '\n\nFor more capabilities, call `find_capability(query)` to search by intent,\nthen `load_capability(name)` to make its tools available.';
+  '\n\nFor more capabilities, call `list_capabilities()` to see what else is available,\nthen `load_capability(name)` to make its tools available.';
 
 let cachedEncoder: Tiktoken | null = null;
 function tiktokenEstimate(text: string): number {

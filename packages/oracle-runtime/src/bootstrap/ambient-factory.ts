@@ -75,11 +75,12 @@ export function buildAmbientServices(
         );
       }
     },
-    async mintInvocation(userDid, target) {
+    async mintInvocation(userDid, target, opts) {
       const result = await ucanService.mintInvocationForServiceDid(
         userDid,
         target.did,
         target.capability,
+        opts,
       );
       if (!result) {
         throw new Error(

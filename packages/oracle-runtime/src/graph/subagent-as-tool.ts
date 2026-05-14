@@ -246,7 +246,7 @@ export function createSubagentAsTool(
     messages: BaseMessage[],
     toolCallId: string,
   ): string | Command => {
-    const text = emojify(lastMessageContent(messages));
+    const text = emojify(lastMessageContent(messages).toString());
     if (forwardSet.size === 0) return text;
 
     const idPrefix = toolCallId || `run_${randomUUID().slice(0, 8)}`;

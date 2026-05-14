@@ -80,7 +80,6 @@
     "js-tiktoken": "^1.0.21",
     "langchain": "^1.4.0",
     "matrix-js-sdk": "^37.11.0",
-    "minisearch": "^7.2.0",
     "node-emoji": "^2.2.0",
     "socket.io": "4.8.3",
     "yjs": "^13.6.27",

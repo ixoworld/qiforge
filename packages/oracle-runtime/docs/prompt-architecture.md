@@ -21,8 +21,8 @@ sub-agent prompts (those live in their owning plugin).
   model call (`wrapModelCall.systemMessage.concat(...)`) — used today by
   `PageContextMiddleware` and the editor plugin.
 - The agent only learns about **on-demand** plugins by calling
-  `find_capability` and `load_capability`. Their manifest text never lands in
-  the prompt directly.
+  `list_capabilities` and `load_capability`. Their manifest text never lands
+  in the prompt directly.
 
 ---
 
@@ -137,9 +137,9 @@ stateDiagram-v2
     }
 
     state OnDemand {
-        [*] --> InSearchIndex
-        InSearchIndex: indexed for find_capability<br/>(NOT in prompt)
-        InSearchIndex --> LoadedThread: agent calls<br/>load_capability(name)
+        [*] --> Discoverable
+        Discoverable: shown by list_capabilities<br/>(NOT in prompt)
+        Discoverable --> LoadedThread: agent calls<br/>load_capability(name)
         LoadedThread: state.loadedPlugins += name<br/>tools become callable
     }
 
@@ -153,7 +153,6 @@ stateDiagram-v2
 
 | Tool                       | Purpose                                                                                       |
 | -------------------------- | --------------------------------------------------------------------------------------------- |
-| `find_capability(query)`   | Search manifests by intent. Returns ranked `{ name, summary, score, … }` hits.                |
 | `load_capability(name)`    | Mark plugin as loaded for this thread. Returns `Command{ update: { loadedPlugins: [name] } }`. |
 | `list_capabilities`        | List every visible plugin with a `loaded` flag.                                               |
 | `list_capability_details(name)` | Full manifest + per-tool input shape summary.                                           |
@@ -215,7 +214,7 @@ What's missing today — concrete, with the file each issue lives in.
 | 4  | **No first-class plan / scratchpad** — `MainAgentGraphState` tracks `loadedPlugins` but not goals, steps, or completion.                              | `graph/state.ts`                                                     |
 | 5  | **Hard-coded identity preamble** — every oracle is forced to introduce itself as "a skills-native AI companion".                                     | `prompt-composer.ts:110` (`buildOracleSection`)                      |
 | 6  | **Manifest `examples` are unused** — few-shot data is defined in the type but never rendered in any prompt path.                                     | `plugin-api/types.ts:135` (`ManifestExample`)                        |
-| 7  | **No proactive capability routing** — agent must call `find_capability` reactively. No "Likely capabilities for this turn" pre-suggestion.            | No router middleware                                                 |
+| 7  | **No proactive capability routing** — agent must call `list_capabilities` reactively. No "Likely capabilities for this turn" pre-suggestion.          | No router middleware                                                 |
 | 8  | **No conversation-stage awareness** — no turn number, no idle delta, no topic-shift signal in the prompt.                                            | `prompt-composer.ts` time block is just `now + tz`                  |
 | 9  | **No failure / retry budget surfaced to agent** — middleware retries silently, but agent never reads "you've retried tool X 3 times this turn".      | `tool-retry` and `tool-validation` middlewares                       |
 | 10 | **Priority hierarchy is monolithic** — plugins can override `operationalMode` but not the top-level priority directives.                              | `prompt-composer.ts:121` (template) — no priority delta slot         |
@@ -262,7 +261,7 @@ A new slot the runtime fills before each model call:
 ## 🧠 Self-Model
 - You are running on the IXO oracle runtime (LangGraph + plugin registry).
 - Plugins loaded this thread: memory, skills, editor.
-- Capabilities available on-demand: 7 (call find_capability to search).
+- Capabilities available on-demand: 7 (call list_capabilities to see them).
 - Sub-agents you can delegate to: Memory Agent, Editor Agent, Portal Agent.
 - Your reasoning is private; only final replies + tool calls are visible to the user.
 
@@ -320,7 +319,7 @@ A `silent` plugin contributing a middleware that, on every user turn:
 3. Either auto-loads them (`update.loadedPlugins`) **or** appends a
    `SUGGESTED_CAPABILITIES` block to the system message.
 
-This means the agent doesn't always need to call `find_capability` —
+This means the agent doesn't always need to call `list_capabilities` —
 discovery becomes ambient.
 
 ### Stage E — failure budgets surfaced as prompt signals

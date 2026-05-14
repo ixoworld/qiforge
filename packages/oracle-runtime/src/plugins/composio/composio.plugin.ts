@@ -74,9 +74,8 @@ export interface ComposioPluginOptions {
  * Auth is UCAN-only — no Matrix-OpenID fallback. If minting fails (no
  * signing key, no cached delegation, did:web unresolved) the plugin
  * contributes zero tools and the agent simply does not see composio that
- * request. Visibility is `on-demand` so the per-tool descriptions are
- * indexed for `find_capability` rather than burning prompt budget every
- * call.
+ * request. Visibility is `on-demand` so the plugin is discoverable via
+ * `list_capabilities` rather than burning prompt budget every call.
  */
 export class ComposioPlugin extends OraclePlugin {
   readonly name = 'composio';

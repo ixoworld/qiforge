@@ -92,16 +92,12 @@ export {
   validateManifest,
   validateExamplesAgainstTools,
   renderTier1,
-  buildSearchIndex,
 } from './manifest/index.js';
 export type {
   ManifestValidationResult,
   Tier1Entry,
   Tier1Input,
   Tier1Output,
-  SearchEntry,
-  SearchIndex,
-  SearchResult,
 } from './manifest/index.js';
 
 export {

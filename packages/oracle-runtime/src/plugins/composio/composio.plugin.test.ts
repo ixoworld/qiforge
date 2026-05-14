@@ -43,9 +43,9 @@ describe('ComposioPlugin — identity & config', () => {
     const valid = plugin.configSchema!.safeParse({ COMPOSIO_API_KEY });
     expect(valid.success).toBe(true);
     // COMPOSIO_BASE_URL has a default
-    expect(
-      valid.success && valid.data.COMPOSIO_BASE_URL,
-    ).toBe('https://composio.ixo.earth');
+    expect(valid.success && valid.data.COMPOSIO_BASE_URL).toBe(
+      'https://composio.ixo.earth',
+    );
     // Empty COMPOSIO_API_KEY rejected
     expect(
       plugin.configSchema!.safeParse({ COMPOSIO_API_KEY: '' }).success,
@@ -68,7 +68,7 @@ describe('ComposioPlugin — identity & config', () => {
 });
 
 describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
-  it('resolves the composio DID via runCtx.ucan, mints an ixo:composio invocation, and forwards it to the session factory', async () => {
+  it('resolves the composio DID via runCtx.ucan, mints an ixo:sandbox invocation, and forwards it to the session factory', async () => {
     const resolveSpy = vi.fn(async (url: string) =>
       url === COMPOSIO_URL ? 'did:web:composio.test' : null,
     );
@@ -92,10 +92,10 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
     const tools = await plugin.getRequestTools(rtCtx);
 
     expect(resolveSpy).toHaveBeenCalledWith(COMPOSIO_URL);
-    expect(mintSpy).toHaveBeenCalledWith({
-      did: 'did:web:composio.test',
-      capability: 'ixo:composio',
-    });
+    expect(mintSpy).toHaveBeenCalledWith(
+      { did: 'did:web:composio.test', capability: 'ixo:sandbox' },
+      { skipCache: true },
+    );
     expect(sessionFactory).toHaveBeenCalledWith({
       apiKey: COMPOSIO_API_KEY,
       baseUrl: COMPOSIO_URL,

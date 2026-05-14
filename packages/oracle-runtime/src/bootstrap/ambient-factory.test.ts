@@ -104,6 +104,7 @@ describe('buildAmbientServices', () => {
       'did:ixo:user',
       'did:web:service.test',
       'ixo:memory',
+      undefined,
     );
 
     vi.mocked(ucan.mintInvocationForServiceDid).mockResolvedValueOnce(null);

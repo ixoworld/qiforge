@@ -65,7 +65,11 @@ export function buildListCapabilitiesTool(
         );
       }
 
-      return out;
+      // Return a JSON string — LangChain's `tool()` mis-handles a raw array
+      // return (the `[content, artifact]` heuristic can drop the content),
+      // so the agent ends up with an empty ToolMessage. Explicit JSON keeps
+      // the contract unambiguous; tests parse the result.
+      return JSON.stringify(out);
     },
     {
       name: 'list_capabilities',

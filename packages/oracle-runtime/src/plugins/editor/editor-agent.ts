@@ -260,5 +260,9 @@ export async function createEditorSubAgent(
     tools,
     model: 'subagent',
     middlewares: [],
+    // Bubble the page + block mutation events into the main chat so the FE
+    // renders artifact previews and edit confirmations inline. Names absent
+    // in the read-only toolset are simply nothing-to-forward.
+    forwardTools: ['create_page', 'update_page', 'edit_block', 'create_block'],
   };
 }

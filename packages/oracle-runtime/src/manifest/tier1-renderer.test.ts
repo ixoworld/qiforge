@@ -52,7 +52,7 @@ describe('renderTier1', () => {
     const result = renderTier1({ manifests: [tasksEntry, memoryEntry] });
     expect(result.warnings).toEqual([]);
     expect(result.block).toContain('## Available Capabilities');
-    expect(result.block).toContain('find_capability(query)');
+    expect(result.block).toContain('list_capabilities()');
     expect(result.block).toContain(
       '- **memory** — Persistent memory for users and conversations.',
     );
