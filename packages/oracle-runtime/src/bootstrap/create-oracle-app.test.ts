@@ -338,4 +338,105 @@ describe('createOracleApp — plugin-contributed NestJS modules', () => {
     const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
     expect(registerArg.pluginNestModules).toEqual([]);
   });
+
+  it('passes a PluginContext with validated config to getNestModules', async () => {
+    class FakeModule {}
+    const received: Array<{
+      apiKey: unknown;
+      pluginNames: string[];
+      identityName: string;
+    }> = [];
+
+    class ConfigConsumerPlugin extends OraclePlugin {
+      readonly name = 'config-consumer';
+      readonly version = '1.0.0';
+      readonly manifest: PluginManifest = {
+        title: 'Config Consumer',
+        summary: 'Reads validated config inside getNestModules.',
+        whenToUse: ['always'],
+        visibility: 'silent',
+      };
+      override readonly configSchema = z.object({
+        TEST_API_KEY: z.string(),
+      });
+      override getNestModules(ctx?: PluginContext): Array<typeof FakeModule> {
+        received.push({
+          apiKey: ctx?.config.TEST_API_KEY,
+          pluginNames: ctx ? [...ctx.availablePlugins] : [],
+          identityName: ctx?.identity.name ?? '',
+        });
+        return [FakeModule];
+      }
+    }
+
+    await createOracleApp({
+      ...defaultOpts,
+      plugins: [new ConfigConsumerPlugin()],
+      env: { ...validBaseEnv, TEST_API_KEY: 'sk-test-123' },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({
+      apiKey: 'sk-test-123',
+      pluginNames: ['config-consumer'],
+      identityName: 'TestOracle',
+    });
+  });
+});
+
+describe('createOracleApp — plugin-declared auth exclusions', () => {
+  it('aggregates getAuthExcludedRoutes() from every loaded plugin', async () => {
+    const { RequestMethod } = await import('@nestjs/common');
+
+    class WebhookPlugin extends OraclePlugin {
+      readonly name = 'webhook-plugin';
+      readonly version = '1.0.0';
+      readonly manifest: PluginManifest = {
+        title: 'Webhook',
+        summary: 'Exposes a public webhook.',
+        whenToUse: ['always'],
+        visibility: 'silent',
+      };
+      override getAuthExcludedRoutes(): Array<{
+        path: string;
+        method?: number;
+      }> {
+        return [{ path: 'hooks/incoming', method: RequestMethod.POST }];
+      }
+    }
+
+    class HealthProbePlugin extends OraclePlugin {
+      readonly name = 'probe-plugin';
+      readonly version = '1.0.0';
+      readonly manifest: PluginManifest = {
+        title: 'Probe',
+        summary: 'Public liveness probe.',
+        whenToUse: ['always'],
+        visibility: 'silent',
+      };
+      override getAuthExcludedRoutes(): Array<{
+        path: string;
+        method?: number;
+      }> {
+        return [{ path: 'probe/alive', method: RequestMethod.GET }];
+      }
+    }
+
+    await createOracleApp({
+      ...defaultOpts,
+      plugins: [new WebhookPlugin(), new HealthProbePlugin()],
+    });
+
+    const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
+    expect(registerArg.pluginAuthExclusions).toEqual([
+      { path: 'hooks/incoming', method: RequestMethod.POST },
+      { path: 'probe/alive', method: RequestMethod.GET },
+    ]);
+  });
+
+  it('passes an empty array when no plugin declares exclusions', async () => {
+    await createOracleApp({ ...defaultOpts, plugins: [] });
+    const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
+    expect(registerArg.pluginAuthExclusions).toEqual([]);
+  });
 });

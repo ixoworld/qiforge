@@ -101,23 +101,23 @@ graph TD
 
 ### Source of each slot
 
-| Slot                              | Source                                                                                                            | Type                |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `ORACLE_SECTION`                  | `buildOracleSection(identity)` — `prompt-composer.ts:103`                                                         | **boot**            |
-| `CAPABILITY_BLOCK`                | `renderTier1(manifests where visibility==='always')` — `manifest/tier1-renderer.ts`                               | **boot**            |
-| Priority hierarchy                | Hard-coded in `TEMPLATE` — `prompt-composer.ts:121`                                                               | **static**          |
+| Slot                                 | Source                                                                                                              | Type                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| `ORACLE_SECTION`                     | `buildOracleSection(identity)` — `prompt-composer.ts:103`                                                           | **boot**             |
+| `CAPABILITY_BLOCK`                   | `renderTier1(manifests where visibility==='always')` — `manifest/tier1-renderer.ts`                                 | **boot**             |
+| Priority hierarchy                   | Hard-coded in `TEMPLATE` — `prompt-composer.ts:121`                                                                 | **static**           |
 | `IDENTITY_CONTEXT` …`RECENT_CONTEXT` | `formatContextSection(state.userContext.<key>)` — populated by **memory plugin middleware** before first model call | **request + plugin** |
-| `TIME_CONTEXT`                    | `formatTimeContext(requestCtx.user.timezone, currentTime)`                                                        | **request**         |
-| `CURRENT_ENTITY_DID`              | `state.currentEntityDid`                                                                                          | **request**         |
-| `USER_SECRETS_CONTEXT`            | `hooks.userSecretsContext` (per-request, plugin-provided)                                                          | **plugin hook**     |
-| `USER_PREFERENCES_CONTEXT`        | `formatUserPreferences(state.userPreferences)` — written by `user-preferences` plugin                              | **plugin state**    |
-| `OPERATIONAL_MODE`                | `hooks.operationalMode ?? DEFAULT_OPERATIONAL_MODE` (editor plugin overrides this)                                | **plugin hook**     |
-| Communication / Task Discipline   | Hard-coded                                                                                                        | **static**          |
-| `COMPOSIO_CONTEXT`                | `hooks.composioContext` (composio plugin)                                                                         | **plugin hook**     |
-| `EDITOR_SECTION`                  | `hooks.editorSection` (editor plugin — `STANDALONE_EDITOR_PROMPTS` / `EDITOR_MODE_PROMPTS`)                       | **plugin hook**     |
-| `SLACK_FORMATTING_CONSTRAINTS`    | Set when `requestCtx.session.client === 'slack'`                                                                  | **request**         |
-| Degraded services                 | Appended outside the template when `hooks.degradedServicesBlock` is non-empty                                     | **runtime + plugin** |
-| Middleware-appended blocks        | Each plugin middleware can `request.systemMessage.concat(...)` per model call (see `PageContextMiddleware`)        | **runtime**         |
+| `TIME_CONTEXT`                       | `formatTimeContext(requestCtx.user.timezone, currentTime)`                                                          | **request**          |
+| `CURRENT_ENTITY_DID`                 | `state.currentEntityDid`                                                                                            | **request**          |
+| `USER_SECRETS_CONTEXT`               | `hooks.userSecretsContext` (per-request, plugin-provided)                                                           | **plugin hook**      |
+| `USER_PREFERENCES_CONTEXT`           | `formatUserPreferences(state.userPreferences)` — written by `user-preferences` plugin                               | **plugin state**     |
+| `OPERATIONAL_MODE`                   | `hooks.operationalMode ?? DEFAULT_OPERATIONAL_MODE` (editor plugin overrides this)                                  | **plugin hook**      |
+| Communication / Task Discipline      | Hard-coded                                                                                                          | **static**           |
+| `COMPOSIO_CONTEXT`                   | `hooks.composioContext` (composio plugin)                                                                           | **plugin hook**      |
+| `EDITOR_SECTION`                     | `hooks.editorSection` (editor plugin — `STANDALONE_EDITOR_PROMPTS` / `EDITOR_MODE_PROMPTS`)                         | **plugin hook**      |
+| `SLACK_FORMATTING_CONSTRAINTS`       | Set when `requestCtx.session.client === 'slack'`                                                                    | **request**          |
+| Degraded services                    | Appended outside the template when `hooks.degradedServicesBlock` is non-empty                                       | **runtime + plugin** |
+| Middleware-appended blocks           | Each plugin middleware can `request.systemMessage.concat(...)` per model call (see `PageContextMiddleware`)         | **runtime**          |
 
 ---
 
@@ -151,11 +151,11 @@ stateDiagram-v2
 
 ### Meta-tools the agent always has
 
-| Tool                       | Purpose                                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------------------- |
-| `load_capability(name)`    | Mark plugin as loaded for this thread. Returns `Command{ update: { loadedPlugins: [name] } }`. |
-| `list_capabilities`        | List every visible plugin with a `loaded` flag.                                               |
-| `list_capability_details(name)` | Full manifest + per-tool input shape summary.                                           |
+| Tool                            | Purpose                                                                                        |
+| ------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `load_capability(name)`         | Mark plugin as loaded for this thread. Returns `Command{ update: { loadedPlugins: [name] } }`. |
+| `list_capabilities`             | List every visible plugin with a `loaded` flag.                                                |
+| `list_capability_details(name)` | Full manifest + per-tool input shape summary.                                                  |
 
 Manifests carry **more than is currently rendered** — `whenToUse`,
 `whenNotToUse`, `examples`, `tags`, `category`, `stability`. Today only
@@ -206,22 +206,22 @@ iteration), but the base body is fixed for the request.
 
 What's missing today — concrete, with the file each issue lives in.
 
-| #  | Gap                                                                                                                                                  | Where                                                                |
-| -- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| 1  | **Tier-1 capability block only renders `summary`** — `whenToUse`, `whenNotToUse`, `examples` defined in `PluginManifest` are ignored at prompt time. | `manifest/tier1-renderer.ts:39` (`formatLine`)                       |
-| 2  | **No "self-model" block** — agent never reads a description of *itself*: how many tools it has, which plugins are loaded, that it can load more.    | `prompt-composer.ts` template — no `SELF_MODEL` slot                 |
-| 3  | **No execution state in prompt** — agent has no synthesized view of "tools called this turn", "failures so far", "active sub-agents".                | No tracker; agent has to infer from message history.                 |
-| 4  | **No first-class plan / scratchpad** — `MainAgentGraphState` tracks `loadedPlugins` but not goals, steps, or completion.                              | `graph/state.ts`                                                     |
-| 5  | **Hard-coded identity preamble** — every oracle is forced to introduce itself as "a skills-native AI companion".                                     | `prompt-composer.ts:110` (`buildOracleSection`)                      |
-| 6  | **Manifest `examples` are unused** — few-shot data is defined in the type but never rendered in any prompt path.                                     | `plugin-api/types.ts:135` (`ManifestExample`)                        |
-| 7  | **No proactive capability routing** — agent must call `list_capabilities` reactively. No "Likely capabilities for this turn" pre-suggestion.          | No router middleware                                                 |
-| 8  | **No conversation-stage awareness** — no turn number, no idle delta, no topic-shift signal in the prompt.                                            | `prompt-composer.ts` time block is just `now + tz`                  |
-| 9  | **No failure / retry budget surfaced to agent** — middleware retries silently, but agent never reads "you've retried tool X 3 times this turn".      | `tool-retry` and `tool-validation` middlewares                       |
-| 10 | **Priority hierarchy is monolithic** — plugins can override `operationalMode` but not the top-level priority directives.                              | `prompt-composer.ts:121` (template) — no priority delta slot         |
-| 11 | **No "reflect before acting" hook** — sub-agent prompts already say *"if unclear, stop and ask"* but the main agent has no automated reflect node.   | `graph/main-agent.ts` middleware stack                               |
-| 12 | **`load_capability` return is minimal** — returns tool summaries only, not the manifest's `whenToUse`/`examples`, so the agent loses guidance after loading. | `meta-tools/load-capability.ts:60`                              |
-| 13 | **Memory write nudge missing** — agent reads `userContext` but isn't reminded "you've learned X — consider writing it back to memory".               | No `afterAgent` hook around memory writes                            |
-| 14 | **Static priority text becomes background noise** — long lists of "ALWAYS / NEVER" rules erode after many turns; no rotation / re-injection logic.   | `prompt-composer.ts:121`                                             |
+| #   | Gap                                                                                                                                                          | Where                                                        |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| 1   | **Tier-1 capability block only renders `summary`** — `whenToUse`, `whenNotToUse`, `examples` defined in `PluginManifest` are ignored at prompt time.         | `manifest/tier1-renderer.ts:39` (`formatLine`)               |
+| 2   | **No "self-model" block** — agent never reads a description of _itself_: how many tools it has, which plugins are loaded, that it can load more.             | `prompt-composer.ts` template — no `SELF_MODEL` slot         |
+| 3   | **No execution state in prompt** — agent has no synthesized view of "tools called this turn", "failures so far", "active sub-agents".                        | No tracker; agent has to infer from message history.         |
+| 4   | **No first-class plan / scratchpad** — `MainAgentGraphState` tracks `loadedPlugins` but not goals, steps, or completion.                                     | `graph/state.ts`                                             |
+| 5   | **Hard-coded identity preamble** — every oracle is forced to introduce itself as "a skills-native AI companion".                                             | `prompt-composer.ts:110` (`buildOracleSection`)              |
+| 6   | **Manifest `examples` are unused** — few-shot data is defined in the type but never rendered in any prompt path.                                             | `plugin-api/types.ts:135` (`ManifestExample`)                |
+| 7   | **No proactive capability routing** — agent must call `list_capabilities` reactively. No "Likely capabilities for this turn" pre-suggestion.                 | No router middleware                                         |
+| 8   | **No conversation-stage awareness** — no turn number, no idle delta, no topic-shift signal in the prompt.                                                    | `prompt-composer.ts` time block is just `now + tz`           |
+| 9   | **No failure / retry budget surfaced to agent** — middleware retries silently, but agent never reads "you've retried tool X 3 times this turn".              | `tool-retry` and `tool-validation` middlewares               |
+| 10  | **Priority hierarchy is monolithic** — plugins can override `operationalMode` but not the top-level priority directives.                                     | `prompt-composer.ts:121` (template) — no priority delta slot |
+| 11  | **No "reflect before acting" hook** — sub-agent prompts already say _"if unclear, stop and ask"_ but the main agent has no automated reflect node.           | `graph/main-agent.ts` middleware stack                       |
+| 12  | **`load_capability` return is minimal** — returns tool summaries only, not the manifest's `whenToUse`/`examples`, so the agent loses guidance after loading. | `meta-tools/load-capability.ts:60`                           |
+| 13  | **Memory write nudge missing** — agent reads `userContext` but isn't reminded "you've learned X — consider writing it back to memory".                       | No `afterAgent` hook around memory writes                    |
+| 14  | **Static priority text becomes background noise** — long lists of "ALWAYS / NEVER" rules erode after many turns; no rotation / re-injection logic.           | `prompt-composer.ts:121`                                     |
 
 ---
 
@@ -380,14 +380,14 @@ working untouched.
 
 ## 8. Files to touch (when implementing)
 
-| Stage | Files                                                                                            |
-| ----- | ------------------------------------------------------------------------------------------------ |
-| A     | `manifest/tier1-renderer.ts`, `meta-tools/load-capability.ts`                                    |
-| B     | `graph/prompt-composer.ts` (slots), new `graph/middlewares/execution-tracker-middleware.ts`     |
+| Stage | Files                                                                                                  |
+| ----- | ------------------------------------------------------------------------------------------------------ |
+| A     | `manifest/tier1-renderer.ts`, `meta-tools/load-capability.ts`                                          |
+| B     | `graph/prompt-composer.ts` (slots), new `graph/middlewares/execution-tracker-middleware.ts`            |
 | C     | `graph/state.ts` (`plan` annotation), new `meta-tools/plan-*.ts` (3 tools), `graph/prompt-composer.ts` |
-| D     | New plugin `plugins/capability-router/` (silent), `graph/middlewares/` if always-on              |
-| E     | Wrap existing `toolRetryMiddleware` in `graph/main-agent.ts` with a counter                      |
-| F     | `plugin-api/types.ts` (`OracleIdentity.tagline?`), `graph/prompt-composer.ts:103`               |
+| D     | New plugin `plugins/capability-router/` (silent), `graph/middlewares/` if always-on                    |
+| E     | Wrap existing `toolRetryMiddleware` in `graph/main-agent.ts` with a counter                            |
+| F     | `plugin-api/types.ts` (`OracleIdentity.tagline?`), `graph/prompt-composer.ts:103`                      |
 
 ---
 

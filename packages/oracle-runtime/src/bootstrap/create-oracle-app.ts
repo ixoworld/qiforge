@@ -28,6 +28,7 @@ import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
+  AuthExcludedRoute,
   OracleConfig,
   OracleIdentity,
   Logger as PluginLogger,
@@ -71,6 +72,14 @@ export interface CreateOracleAppOptions {
   plugins?: OraclePlugin[];
   /** Developer's own NestJS modules. Spread into `RuntimeAppModule.imports`. */
   nestModules?: Array<Type | DynamicModule>;
+  /**
+   * Host-declared routes that must NOT pass through `AuthHeaderMiddleware`.
+   * Use for routes contributed by `nestModules` (e.g. webhooks, OAuth
+   * callbacks, public probes). Symmetric with the plugin-side
+   * `OraclePlugin.getAuthExcludedRoutes()` hook — both lists merge onto
+   * the runtime's built-in exclusions (`/health`, `/docs`, etc.).
+   */
+  authExcludedRoutes?: AuthExcludedRoute[];
   /**
    * Optional override of the bundled plugin set. Provided primarily for tests
    * so the harness can spin up `createOracleApp` without dragging in the full
@@ -245,13 +254,29 @@ export async function createOracleApp(
 
   // 7. NestJS bootstrap
   const enableSubscription = resolved.loaded.some((p) => p.name === 'credits');
-  const pluginNestModules = resolved.loaded.flatMap(
-    (p) => p.getNestModules?.() ?? [],
-  );
+  const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
+  const pluginNestModules = resolved.loaded.flatMap((p) => {
+    const ctx = buildPluginContext({
+      config: validated.config,
+      identity,
+      availablePlugins: loadedPluginNames,
+      logger,
+      pluginName: p.name,
+    });
+    return p.getNestModules?.(ctx) ?? [];
+  });
+  // Merge plugin-declared exclusions with host-declared ones (from opts).
+  // Both flow into the same `RuntimeAppModule` configurer so the runtime
+  // doesn't care whose route is opted out — only that it is.
+  const pluginAuthExclusions = [
+    ...resolved.loaded.flatMap((p) => p.getAuthExcludedRoutes?.() ?? []),
+    ...(opts.authExcludedRoutes ?? []),
+  ];
   const appModule = RuntimeAppModule.register({
     validatedEnv: validated.config,
     userNestModules: opts.nestModules,
     pluginNestModules,
+    pluginAuthExclusions,
     enableSubscriptionMiddleware: enableSubscription,
   });
 
@@ -337,7 +362,6 @@ export async function createOracleApp(
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
   // the messages controller on a per-request basis.
-  const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
   const ambient = buildAmbientServices({
     nestApp,
     config: validated.config,

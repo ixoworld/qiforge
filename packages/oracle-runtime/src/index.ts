@@ -18,6 +18,7 @@ export type {
   RuntimeContext,
   PluginTool,
   PluginSubAgent,
+  AuthExcludedRoute,
   OracleConfig,
   OraclePromptConfig,
   OracleIdentity,

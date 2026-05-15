@@ -2,6 +2,7 @@ import type { DynamicModule, Type } from '@nestjs/common';
 import type { z } from 'zod';
 import type {
   AgentMiddleware,
+  AuthExcludedRoute,
   PluginContext,
   PluginManifest,
   PluginSubAgent,
@@ -100,6 +101,24 @@ export abstract class OraclePlugin {
    *
    * Use this for plugins that need a long-lived NestJS service (Slack socket,
    * BullMQ workers) or HTTP Controllers (Calls REST API).
+   *
+   * `ctx` carries the validated merged config + identity + logger so
+   * module-construction code can read env without going through `process.env`.
+   * The optional arg keeps existing plugins source-compatible —
+   * implementations that ignore it work unchanged.
    */
-  getNestModules?(): Array<Type | DynamicModule>;
+  getNestModules?(ctx?: PluginContext): Array<Type | DynamicModule>;
+
+  /**
+   * Routes owned by this plugin's `getNestModules()` controllers that MUST NOT
+   * pass through `AuthHeaderMiddleware`. Use for webhooks, OAuth callbacks,
+   * public probes — anything that doesn't authenticate via UCAN. Returning an
+   * empty array (or omitting the method) keeps every plugin route auth-locked.
+   *
+   * The returned `path` is matched against the request URL the same way
+   * `MiddlewareConsumer.exclude(...)` matches — leading slash is optional and
+   * the value should be the full path the controller mounts at (e.g.
+   * `weather/now`, not just `now`).
+   */
+  getAuthExcludedRoutes?(): AuthExcludedRoute[];
 }

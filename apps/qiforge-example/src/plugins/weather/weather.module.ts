@@ -22,11 +22,8 @@ interface WeatherNowResponse {
 }
 
 /**
- * `GET /weather/now?city=X`. Mirrors the shape of `HealthController` but
- * NOTE: the runtime auth middleware wraps all non-health routes. The
- * AUTH_EXCLUDED_ROUTES list is hardcoded in `runtime-app-module.ts` and
- * there is no plugin hook to add to it. See WEATHER-PLUGIN.md for testing
- * with a UCAN header.
+ * `GET /weather/now?city=X`. Public route — the plugin opts this path out of
+ * `AuthHeaderMiddleware` via `getAuthExcludedRoutes()` in `weather.plugin.ts`.
  */
 @Controller('weather')
 export class WeatherController {

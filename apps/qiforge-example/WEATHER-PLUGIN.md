@@ -4,7 +4,7 @@ Reference plugin that exercises every documented `OraclePlugin` hook against a r
 
 **Start the app:** from `apps/qiforge-example`, run `pnpm dev`. Server boots on the port from `PORT` (default `5678` if unset, often `3000` in your `.env`).
 
-## 1. HTTP endpoint (`getNestModules`)
+## 1. HTTP endpoint (`getNestModules` + `getAuthExcludedRoutes`)
 
 ```sh
 curl 'http://localhost:3000/weather/now?city=Berlin'
@@ -12,7 +12,7 @@ curl 'http://localhost:3000/weather/now?city=Berlin'
 
 **Expect:** `{"ok":true,"city":"Berlin","temp_c":<num>,"units":"celsius","conditions":"<label>","latitude":52.52,"longitude":13.405}`
 
-**Auth gotcha:** the runtime's `AuthHeaderMiddleware` wraps every non-health route — `AUTH_EXCLUDED_ROUTES` is hardcoded in `packages/oracle-runtime/src/bootstrap/runtime-app-module.ts` and there is **no plugin hook to add to it**. So this curl returns `401 Missing x-ucan-delegation header` until either (a) you send a valid UCAN, or (b) the runtime grows a plugin exclusion API. Add `-H 'x-ucan-delegation: <token>'` to test with auth.
+The plugin opts `/weather/now` out of `AuthHeaderMiddleware` via `getAuthExcludedRoutes()`, so no UCAN header is required. Other plugin routes (if any) still go through auth — only the paths returned by that hook are excluded.
 
 ## 2. Plugin is on-demand (`manifest.visibility`)
 

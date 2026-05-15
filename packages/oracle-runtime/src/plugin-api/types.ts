@@ -1,6 +1,19 @@
+import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+
+/**
+ * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Mirrors the
+ * NestJS `RouteInfo` accepted by `MiddlewareConsumer.exclude(...)` so the
+ * runtime can pass these straight through.
+ */
+export interface AuthExcludedRoute {
+  /** Path under the plugin's controller, e.g. `weather/now`. Leading slash optional. */
+  path: string;
+  /** HTTP method. Defaults to `RequestMethod.ALL` when omitted. */
+  method?: RequestMethod;
+}
 
 /** Merged Zod-validated env vars (core schema + every loaded plugin's `configSchema`). */
 export type MergedConfig = Record<string, unknown>;

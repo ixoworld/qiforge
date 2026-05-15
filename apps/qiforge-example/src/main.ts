@@ -1,14 +1,43 @@
 import 'dotenv/config';
 
 import {
-  CreditsPlugin,
   EditorPlugin,
   createOracleApp,
+  type AuthExcludedRoute,
   type OracleConfig,
 } from '@ixo/oracle-runtime';
 // import Redis from 'ioredis';
+import { Controller, Get, Logger, Module, RequestMethod } from '@nestjs/common';
 import * as sdk from 'matrix-js-sdk';
 import { WeatherPlugin } from './plugins/weather/index.js';
+
+// ─────────────────────────────────────────────────────────────────────────
+// Host-supplied Nest module — proves the `nestModules` slot works AND
+// demos the new `authExcludedRoutes` option (TASK-35).
+//
+// Without `authExcludedRoutes: [{ path: 'version', method: GET }]` below,
+// every call to GET /version would 401 with "Missing x-ucan-delegation
+// header". Listing it here merges onto the runtime's exclusion list so
+// the route is reachable without auth.
+// ─────────────────────────────────────────────────────────────────────────
+@Controller('version')
+class VersionController {
+  @Get()
+  get(): { name: string; description: string } {
+    return {
+      name: 'QiForge Example Oracle',
+      description: 'Reference QiForge oracle wired with every bundled plugin',
+    };
+  }
+}
+
+@Module({ controllers: [VersionController] })
+class VersionModule {}
+
+const HOST_AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
+  // VersionController's GET /version — no UCAN needed.
+  { path: 'version', method: RequestMethod.GET },
+];
 
 /**
  * QiForge example oracle.
@@ -67,26 +96,37 @@ async function bootstrap(): Promise<void> {
 
   const app = await createOracleApp({
     config,
+    features: {
+      memory: true,
+      skills: false,
+    },
+    logger: Logger,
     plugins: [
       // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
     ],
+    // Host-supplied Nest modules — see VersionController above.
+    nestModules: [VersionModule],
+    // Opt host routes out of `AuthHeaderMiddleware`. Symmetric with the
+    // plugin-side `getAuthExcludedRoutes()` hook used by the Weather plugin
+    // for `/weather/now`. Both merge onto the runtime's built-in exclusions.
+    authExcludedRoutes: HOST_AUTH_EXCLUDED_ROUTES,
   });
 
   app.onPluginStatusChange((event) => {
-    console.log(
+    Logger.log(
       `[plugin] ${event.plugin} ${event.from} → ${event.to}${event.reason ? ` (${event.reason})` : ''}`,
     );
   });
   app.onError((err, source) => {
-    console.error(`[runtime] ${source}: ${err.message}`);
+    Logger.error(`[runtime] ${source}: ${err.message}`);
   });
 
   const status = app.plugins.status();
-  console.log(`[boot] loaded plugins: ${status.loaded.join(', ') || '(none)'}`);
+  Logger.log(`[boot] loaded plugins: ${status.loaded.join(', ') || '(none)'}`);
   if (status.excluded.length > 0) {
-    console.log(
+    Logger.log(
       '[boot] excluded plugins:',
       status.excluded.map((e) => `${e.plugin} (${e.reason})`).join(', '),
     );
@@ -96,6 +136,31 @@ async function bootstrap(): Promise<void> {
 }
 
 bootstrap().catch((err) => {
-  console.error('Oracle failed to start:', err);
+  Logger.error('Oracle failed to start:', err);
   process.exit(1);
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Verify the new framework features (TASK-35 + TASK-36)
+//
+// Boot: `pnpm dev` (default port 5678; respects PORT env).
+//
+// TASK-35 — auth-excluded routes:
+//   Plugin-declared:
+//     curl 'http://localhost:5678/weather/now?city=Berlin'
+//     → 200 with {ok:true, city, temp_c, ...}   (no UCAN header sent)
+//
+//   Host-declared (via authExcludedRoutes above):
+//     curl 'http://localhost:5678/version'
+//     → 200 with {name, description}            (no UCAN header sent)
+//
+//   Any other plugin/host route returns 401 without a UCAN header — proves
+//   the exclusion list only opts these two paths out, not the whole app.
+//
+// TASK-36 — getNestModules(ctx):
+//   The Weather plugin's `getNestModules(ctx)` reads
+//   `ctx.config.WEATHER_DEFAULT_UNITS`. To see it in action, set:
+//     WEATHER_DEFAULT_UNITS=fahrenheit pnpm dev
+//   then curl `/weather/now?city=Berlin` — response should report
+//   `"units":"fahrenheit"` and a Fahrenheit-scale value.
+// ─────────────────────────────────────────────────────────────────────────

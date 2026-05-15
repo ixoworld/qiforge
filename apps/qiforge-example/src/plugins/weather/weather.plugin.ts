@@ -1,5 +1,6 @@
 import {
   type AgentMiddleware,
+  type AuthExcludedRoute,
   OraclePlugin,
   type PluginContext,
   type PluginManifest,
@@ -8,7 +9,7 @@ import {
   type RuntimeContext,
   z,
 } from '@ixo/oracle-runtime';
-import type { DynamicModule } from '@nestjs/common';
+import { type DynamicModule, RequestMethod } from '@nestjs/common';
 import type { Units } from './weather-client.js';
 import { buildWeatherMiddleware } from './weather-middleware.js';
 import { buildWeatherPlannerSubAgent } from './weather-sub-agent.js';
@@ -67,15 +68,16 @@ const manifest: PluginManifest = {
 
 /**
  * Weather plugin — exercises every documented `OraclePlugin` hook:
- *  • `getTools`            → `get_current_weather` (boot-time, uses config)
- *  • `getRequestTools`     → `get_weather_forecast` (reads `rtCtx.user.timezone`)
- *  • `getSubAgents`        → Weather Planner Agent (forecast → outfit chain)
- *  • `getMiddlewares`      → logs before/after every model call w/ elapsed ms
- *  • `getNestModules`      → `GET /weather/now?city=X` (Open-Meteo via REST)
- *  • `getSharedState`      → `lastWeatherQuery` accessor for other plugins
- *  • `configSchema`        → optional `WEATHER_DEFAULT_UNITS` (celsius|fahrenheit)
- *  • `autoDetect`          → always-on (no env gate)
- *  • `manifest.visibility` → `on-demand` so `load_capability` is testable
+ *  • `getTools`                 → `get_current_weather` (boot-time, uses config)
+ *  • `getRequestTools`          → `get_weather_forecast` (reads `rtCtx.user.timezone`)
+ *  • `getSubAgents`             → Weather Planner Agent (forecast → outfit chain)
+ *  • `getMiddlewares`           → logs before/after every model call w/ elapsed ms
+ *  • `getNestModules`           → `GET /weather/now?city=X` (Open-Meteo via REST)
+ *  • `getAuthExcludedRoutes`    → opts `/weather/now` out of `AuthHeaderMiddleware`
+ *  • `getSharedState`           → `lastWeatherQuery` accessor for other plugins
+ *  • `configSchema`             → optional `WEATHER_DEFAULT_UNITS` (celsius|fahrenheit)
+ *  • `autoDetect`               → always-on (no env gate)
+ *  • `manifest.visibility`      → `on-demand` so `load_capability` is testable
  */
 export class WeatherPlugin extends OraclePlugin {
   readonly name = NAME;
@@ -119,14 +121,15 @@ export class WeatherPlugin extends OraclePlugin {
     return [buildWeatherMiddleware(ctx)];
   }
 
-  override getNestModules(): DynamicModule[] {
-    // Nest module construction happens before the merged Zod config is
-    // available on a per-plugin DI token, so we read from process.env here
-    // for the controller's static units. Safe — the value is bounded by
-    // the same enum the Zod schema uses.
-    const raw = process.env.WEATHER_DEFAULT_UNITS;
-    const units: Units = raw === 'fahrenheit' ? 'fahrenheit' : 'celsius';
+  override getNestModules(ctx: PluginContext): DynamicModule[] {
+    const units = this.units(ctx.config);
     return [WeatherHttpModule.register(units)];
+  }
+
+  override getAuthExcludedRoutes(): AuthExcludedRoute[] {
+    // `/weather/now` is a public lookup — Open-Meteo doesn't need user auth.
+    // Opting out lets curl hit it without a UCAN header.
+    return [{ path: 'weather/now', method: RequestMethod.GET }];
   }
 
   override getSharedState(): Record<

@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>QiForge v2 — the plugin runtime</title>
+<style>
+  :root{
+    --bg:#fafaf7;
+    --ink:#101013;
+    --ink-soft:#4a4a4f;
+    --ink-faint:#8a8a90;
+    --line:#1010131a;
+    --line-soft:#10101310;
+    --accent:#d2541b;
+    --code-bg:#111418;
+    --code-ink:#e9e7df;
+    --code-faint:#9aa0a6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  html{scroll-snap-type:y mandatory;scroll-behavior:smooth}
+  body{font-size:18px;line-height:1.5}
+
+  section{
+    min-height:100vh;
+    scroll-snap-align:start;
+    padding:clamp(40px,7vw,96px) clamp(28px,8vw,120px);
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    position:relative;
+    border-bottom:1px solid var(--line-soft);
+  }
+  .eyebrow{
+    position:absolute;
+    top:clamp(20px,3vw,36px);
+    right:clamp(24px,4vw,56px);
+    font-size:12px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    color:var(--ink-faint);
+    font-variant-numeric:tabular-nums;
+  }
+
+  h1,h2,h3,p{margin:0}
+  h1{font-size:clamp(40px,7.2vw,108px);line-height:1.02;letter-spacing:-.02em;font-weight:600;max-width:18ch}
+  h2{font-size:clamp(30px,4.4vw,64px);line-height:1.08;letter-spacing:-.015em;font-weight:600;max-width:22ch}
+  h3{font-size:clamp(16px,1.4vw,20px);font-weight:600;letter-spacing:-.005em}
+  .sub{margin-top:24px;font-size:clamp(18px,1.8vw,26px);color:var(--ink-soft);max-width:34ch;line-height:1.4}
+  .lede{margin-top:28px;font-size:clamp(18px,1.6vw,22px);color:var(--ink-soft);max-width:60ch;line-height:1.5}
+  .caption{margin-top:28px;font-size:14px;color:var(--ink-faint);max-width:60ch;letter-spacing:.01em}
+  .footnote{margin-top:24px;font-size:13px;color:var(--ink-faint);max-width:80ch}
+
+  /* headline underline */
+  .head{position:relative;display:inline-block}
+  .head::after{
+    content:"";
+    position:absolute;
+    left:0;bottom:-12px;
+    height:3px;width:0;
+    background:var(--accent);
+    transition:width .35s ease .15s;
+  }
+  section.is-visible .head::after{width:60px}
+
+  /* slide enter animation */
+  section > *{opacity:0;transform:translateY(10px);transition:opacity .55s ease, transform .55s ease}
+  section.is-visible > *{opacity:1;transform:none}
+  section.is-visible > *:nth-child(1){transition-delay:.00s}
+  section.is-visible > *:nth-child(2){transition-delay:.05s}
+  section.is-visible > *:nth-child(3){transition-delay:.10s}
+  section.is-visible > *:nth-child(4){transition-delay:.15s}
+  section.is-visible > *:nth-child(5){transition-delay:.20s}
+  section.is-visible > *:nth-child(6){transition-delay:.25s}
+
+  /* code blocks */
+  pre{
+    margin:0;
+    background:var(--code-bg);
+    color:var(--code-ink);
+    padding:clamp(20px,2.4vw,32px);
+    border-radius:10px;
+    font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    overflow:auto;
+    max-width:780px;
+  }
+  pre .c{color:var(--code-faint)}
+  pre .k{color:#e89568}
+  pre .s{color:#b3d39c}
+
+  /* card grids */
+  .grid{display:grid;gap:14px;margin-top:36px}
+  .grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media (max-width:900px){
+    .grid-4,.grid-3{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid-2{grid-template-columns:1fr}
+  }
+  .card{
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:18px 18px 16px;
+    background:#fff;
+  }
+  .card .name{font-weight:600;font-size:15px;color:var(--ink)}
+  .card .desc{margin-top:6px;font-size:13.5px;color:var(--ink-soft);line-height:1.45}
+
+  /* transform diagram (slide 03) */
+  .transform{display:grid;grid-template-columns:1fr auto 1fr;gap:36px;align-items:center;margin-top:48px}
+  @media (max-width:900px){.transform{grid-template-columns:1fr;gap:18px}}
+  .blob{border:1px solid var(--line);border-radius:14px;padding:28px;background:#fff;min-height:220px;display:flex;flex-direction:column;justify-content:center}
+  .blob.mono{background:#10101308;border-style:dashed}
+  .blob h3{margin-bottom:14px;color:var(--ink)}
+  .blob .row{font-size:13px;color:var(--ink-soft);padding:4px 0;border-bottom:1px dashed var(--line-soft)}
+  .blob .row:last-child{border:0}
+  .arrow{font-size:36px;color:var(--accent);text-align:center;line-height:1}
+  .stack{display:flex;flex-direction:column;gap:8px}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12.5px;background:#fff;color:var(--ink);display:inline-flex;align-items:center;gap:8px;width:fit-content}
+  .chip .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+
+  /* hero pills (slide 06) */
+  .hero{margin-top:48px;display:grid;grid-template-columns:1fr auto 1fr;gap:24px;align-items:center}
+  @media (max-width:900px){.hero{grid-template-columns:1fr}}
+  .pillset{display:flex;flex-wrap:wrap;gap:10px}
+  .pill{border:1px solid var(--line);border-radius:999px;padding:10px 16px;font-size:14px;background:#fff;color:var(--ink)}
+  .pill.new{
+    border-color:var(--accent);
+    color:var(--accent);
+    background:#d2541b0d;
+    transform:scale(.85);
+    opacity:0;
+    transition:transform .45s ease .45s, opacity .45s ease .45s;
+  }
+  section.is-visible .pill.new{transform:scale(1);opacity:1}
+  .arrow-r{font-size:28px;color:var(--accent);text-align:center}
+
+  /* before/after stat (slide 04) */
+  .stat{margin-top:24px;display:flex;gap:36px;flex-wrap:wrap;font-size:14px;color:var(--ink-soft)}
+  .stat b{color:var(--ink);font-weight:600}
+
+  /* perf bullets (slide 07) */
+  .perf{margin:36px 0 0;padding:0;display:flex;flex-direction:column;gap:18px;max-width:78ch;list-style:none}
+  .perf li{padding-left:0;display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:flex-start}
+  .perf .marker{margin-top:8px;width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
+  .perf li .lead{font-weight:600;color:var(--ink);font-size:16px;line-height:1.45;display:block}
+  .perf li .tail{color:var(--ink-soft);font-size:14.5px;line-height:1.5;margin-top:2px;display:block}
+
+  /* sub-agent visual (slide 08) */
+  .delegate{margin-top:40px;display:grid;grid-template-columns:1fr auto 1fr;gap:28px;align-items:center}
+  @media (max-width:900px){.delegate{grid-template-columns:1fr}}
+
+  /* tool events (slide 09) */
+  .events{margin-top:40px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  @media (max-width:900px){.events{grid-template-columns:1fr}}
+  .panel{border:1px solid var(--line);border-radius:12px;padding:22px;background:#fff;min-height:240px}
+  .panel.dim{background:#10101306}
+  .panel h3{margin-bottom:14px}
+  .event-row{font-size:13.5px;color:var(--ink-soft);padding:8px 0;border-bottom:1px dashed var(--line-soft);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .event-row.final{color:var(--ink);font-family:system-ui,sans-serif}
+  .event-row:last-child{border:0}
+
+  /* steps (slide 11) */
+  .steps{margin-top:32px;display:grid;grid-template-columns:repeat(5,1fr);gap:14px;counter-reset:s}
+  @media (max-width:900px){.steps{grid-template-columns:1fr 1fr}}
+  .step{border:1px solid var(--line);border-radius:10px;padding:18px;background:#fff;font-size:14px;color:var(--ink-soft)}
+  .step::before{counter-increment:s;content:counter(s);display:block;color:var(--accent);font-weight:600;font-size:12px;letter-spacing:.1em;margin-bottom:6px}
+  .step code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink);background:#10101308;padding:1px 6px;border-radius:4px;font-size:13px}
+
+  /* closer */
+  .closer-url{margin-top:32px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:clamp(14px,1.4vw,18px);color:var(--accent)}
+
+  /* reduced motion */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{transition:none !important;animation:none !important}
+    section > *{opacity:1;transform:none}
+    .head::after{width:60px}
+    .pill.new{transform:none;opacity:1}
+  }
+</style>
+</head>
+<body>
+
+<!-- 01 Title -->
+<section id="s1">
+  <span class="eyebrow">01 / 13</span>
+  <h1><span class="head">QiForge v2:<br/>the plugin runtime.</span></h1>
+  <p class="sub">Build an AI oracle in 30 lines instead of 3000.</p>
+</section>
+
+<!-- 02 The problem -->
+<section id="s2">
+  <span class="eyebrow">02 / 13</span>
+  <h2><span class="head">One file. Three thousand lines. Every feature baked in.</span></h2>
+  <p class="lede">The previous oracle worked — but every capability lived in the same codebase. Adding memory, editing, web search or skills meant editing the core. New teams forking the project inherited everything, whether they needed it or not.</p>
+  <p class="caption">It got us here. It won't get us where we're going.</p>
+</section>
+
+<!-- 03 The transformation -->
+<section id="s3">
+  <span class="eyebrow">03 / 13</span>
+  <h2><span class="head">From monolith to plugin runtime.</span></h2>
+  <div class="transform">
+    <div class="blob mono">
+      <h3>Before — one oracle</h3>
+      <div class="row">core graph + chat loop</div>
+      <div class="row">memory hard-wired</div>
+      <div class="row">editor hard-wired</div>
+      <div class="row">web search hard-wired</div>
+      <div class="row">skills hard-wired</div>
+      <div class="row">slack, portal, credits…</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="blob">
+      <h3>After — core + plugins</h3>
+      <div class="stack">
+        <span class="chip"><span class="dot"></span>core engine</span>
+        <span class="chip">memory</span>
+        <span class="chip">editor</span>
+        <span class="chip">firecrawl</span>
+        <span class="chip">skills</span>
+        <span class="chip">…pick what you need</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 04 The new main.ts -->
+<section id="s4">
+  <span class="eyebrow">04 / 13</span>
+  <h2><span class="head">This is the entire entry point of your oracle.</span></h2>
+  <pre><span class="c">// apps/your-oracle/src/main.ts</span>
+<span class="k">import</span> { createOracleApp } <span class="k">from</span> <span class="s">'@ixo/oracle-runtime'</span>;
+
+<span class="k">const</span> config = {
+  name: <span class="s">'My Oracle'</span>,
+  org: <span class="s">'IXO'</span>,
+  prompt: {
+    opening: <span class="s">'You are a helpful agent…'</span>,
+  },
+};
+
+<span class="k">const</span> app = <span class="k">await</span> createOracleApp({ config });
+<span class="k">await</span> app.listen();</pre>
+  <div class="stat">
+    <div><b>Before</b> — 3000+ lines, every feature inline.</div>
+    <div><b>After</b> — ~30 lines, plugins auto-detected from env.</div>
+  </div>
+</section>
+
+<!-- 05 Plugins in the box -->
+<section id="s5">
+  <span class="eyebrow">05 / 13</span>
+  <h2><span class="head">Twelve plugins, in the box.</span></h2>
+  <div class="grid grid-4">
+    <div class="card"><div class="name">memory</div><div class="desc">Long-term memory across conversations.</div></div>
+    <div class="card"><div class="name">editor</div><div class="desc">Read/write collaborative BlockNote pages.</div></div>
+    <div class="card"><div class="name">firecrawl</div><div class="desc">Web scraping &amp; search.</div></div>
+    <div class="card"><div class="name">portal</div><div class="desc">Web portal integration.</div></div>
+    <div class="card"><div class="name">domain-indexer</div><div class="desc">IXO entity lookup.</div></div>
+    <div class="card"><div class="name">agui</div><div class="desc">Render UI components live in chat.</div></div>
+    <div class="card"><div class="name">sandbox</div><div class="desc">Run user skills in a safe sandbox.</div></div>
+    <div class="card"><div class="name">skills</div><div class="desc">Discover and load AI skills on the fly.</div></div>
+    <div class="card"><div class="name">composio</div><div class="desc">200+ third-party tool integrations.</div></div>
+    <div class="card"><div class="name">credits</div><div class="desc">Usage metering &amp; subscription gating.</div></div>
+    <div class="card"><div class="name">slack</div><div class="desc">Slack bot integration.</div></div>
+    <div class="card"><div class="name">user-preferences</div><div class="desc">Per-user settings the agent remembers.</div></div>
+  </div>
+  <p class="footnote">Each plugin can contribute: tools &middot; a sub-agent &middot; middlewares &middot; HTTP routes &middot; shared state &middot; its own env vars.</p>
+</section>
+
+<!-- 06 Load on demand (HERO) -->
+<section id="s6">
+  <span class="eyebrow">06 / 13</span>
+  <h2><span class="head">100 plugins. Only the ones you need, loaded per conversation.</span></h2>
+  <div class="hero">
+    <div>
+      <h3>Main agent — before</h3>
+      <div class="pillset" style="margin-top:18px">
+        <span class="pill">chat</span>
+        <span class="pill">memory.recall</span>
+        <span class="pill">skills.search</span>
+      </div>
+    </div>
+    <div class="arrow-r">&rarr;</div>
+    <div>
+      <h3>Editor capability loads</h3>
+      <div class="pillset" style="margin-top:18px">
+        <span class="pill">chat</span>
+        <span class="pill">memory.recall</span>
+        <span class="pill">skills.search</span>
+        <span class="pill new">editor.delegate</span>
+      </div>
+    </div>
+  </div>
+  <p class="caption">Main agent stays slim. Context stays small. Costs stay low.</p>
+</section>
+
+<!-- 07 What got faster -->
+<section id="s7">
+  <span class="eyebrow">07 / 13</span>
+  <h2><span class="head">What got faster.</span></h2>
+  <ul class="perf">
+    <li><span class="marker"></span><div><span class="lead">On-demand loading shrinks per-turn context.</span><span class="tail">Fewer tokens, lower cost, lower latency on every turn.</span></div></li>
+    <li><span class="marker"></span><div><span class="lead">First request per user warms a local DB.</span><span class="tail">Subsequent requests skip the sync entirely.</span></div></li>
+    <li><span class="marker"></span><div><span class="lead">Subscription credits use a 3-min cache.</span><span class="tail">Cache hits skip redundant writes to the network.</span></div></li>
+    <li><span class="marker"></span><div><span class="lead">State reads use the checkpoint directly.</span><span class="tail">No more rebuilding a throwaway agent just to inspect state.</span></div></li>
+    <li><span class="marker"></span><div><span class="lead">Messages pipeline: 1490 lines &rarr; 210-line orchestrator over 6 focused services.</span><span class="tail">Clearer fast path, fewer allocations, simpler to reason about.</span></div></li>
+  </ul>
+  <p class="caption">The wins compound on every turn.</p>
+</section>
+
+<!-- 08 Sub-agents -->
+<section id="s8">
+  <span class="eyebrow">08 / 13</span>
+  <h2><span class="head">Each plugin can ship its own mini-agent.</span></h2>
+  <div class="delegate">
+    <div class="blob">
+      <h3>Main agent</h3>
+      <p class="caption" style="margin-top:8px">"Rewrite paragraph 3 as bullets."</p>
+      <div class="chip" style="margin-top:18px"><span class="dot"></span>delegate &rarr; editor</div>
+    </div>
+    <div class="arrow">&rarr;</div>
+    <div class="blob">
+      <h3>Editor sub-agent</h3>
+      <div class="row">own prompt</div>
+      <div class="row">own tools (read block, write block)</div>
+      <div class="row">owns the task end-to-end</div>
+    </div>
+  </div>
+  <p class="caption">The main agent doesn't have to know how editing works — it just delegates.</p>
+</section>
+
+<!-- 09 Live tool events -->
+<section id="s9">
+  <span class="eyebrow">09 / 13</span>
+  <h2><span class="head">See every step, as it happens.</span></h2>
+  <div class="events">
+    <div class="panel dim">
+      <h3>Without forwardTools</h3>
+      <div class="event-row">…</div>
+      <div class="event-row">…</div>
+      <div class="event-row">…</div>
+      <div class="event-row final">"Done — page updated."</div>
+    </div>
+    <div class="panel">
+      <h3>With forwardTools</h3>
+      <div class="event-row">&rarr; editor.createPage("Q3 plan")</div>
+      <div class="event-row">&rarr; editor.writeBlock(p1)</div>
+      <div class="event-row">&rarr; editor.writeBlock(p2)</div>
+      <div class="event-row">&rarr; editor.format(bullets)</div>
+      <div class="event-row final">"Done — page updated."</div>
+    </div>
+  </div>
+  <p class="caption">Same answer. Vastly more legible.</p>
+</section>
+
+<!-- 10 What else is in the box -->
+<section id="s10">
+  <span class="eyebrow">10 / 13</span>
+  <h2><span class="head">What else is in the box.</span></h2>
+  <div class="grid grid-4">
+    <div class="card"><div class="desc">UCAN-based authorization across services.</div></div>
+    <div class="card"><div class="desc">Matrix-encrypted message persistence.</div></div>
+    <div class="card"><div class="desc">Per-user checkpointed conversations.</div></div>
+    <div class="card"><div class="desc">SSE streaming to web clients.</div></div>
+    <div class="card"><div class="desc">File attachments (PDF, docx, markdown).</div></div>
+    <div class="card"><div class="desc">Multi-client: Portal + Matrix + Slack.</div></div>
+    <div class="card"><div class="desc">Built-in throttling, health checks, Swagger.</div></div>
+    <div class="card"><div class="desc">One-call <code>createOracleApp()</code> boot.</div></div>
+    <div class="card"><div class="desc">Decoupled ambient adapters — every plugin testable in isolation.</div></div>
+    <div class="card"><div class="desc">Cross-plugin shared state — plugins compose, not collide.</div></div>
+    <div class="card"><div class="desc">Boot-time validation catches broken plugins before serving traffic.</div></div>
+    <div class="card"><div class="desc">Graceful shutdown — checkpoints synced to encrypted Matrix rooms.</div></div>
+  </div>
+</section>
+
+<!-- 11 Build in 5 minutes -->
+<section id="s11">
+  <span class="eyebrow">11 / 13</span>
+  <h2><span class="head">Build your own oracle in 5 minutes.</span></h2>
+  <div class="steps">
+    <div class="step"><code>qiforge init my-oracle</code></div>
+    <div class="step">Configure <code>.env</code></div>
+    <div class="step">Pick bundled plugins to enable</div>
+    <div class="step">Add your own plugin (below)</div>
+    <div class="step"><code>pnpm dev</code> &mdash; <code>:4000</code></div>
+  </div>
+  <pre style="margin-top:32px"><span class="k">class</span> WeatherPlugin <span class="k">extends</span> OraclePlugin {
+  name = <span class="s">'weather'</span>;
+  manifest = { title: <span class="s">'Weather'</span> };
+  getTools() {
+    <span class="k">return</span> [tool(<span class="s">'forecast'</span>,
+      z.object({ city: z.string() }),
+      <span class="k">async</span> ({ city }) =&gt; fetchForecast(city))];
+  }
+}</pre>
+</section>
+
+<!-- 12 What's next -->
+<section id="s12">
+  <span class="eyebrow">12 / 13</span>
+  <h2><span class="head">What's next.</span></h2>
+  <div class="grid grid-3" style="margin-top:48px">
+    <div class="card">
+      <div class="name">Skills marketplace</div>
+      <div class="desc">Discover &amp; install community plugins.</div>
+    </div>
+    <div class="card">
+      <div class="name">More bundled plugins</div>
+      <div class="desc">Tasks &amp; calls coming next.</div>
+    </div>
+    <div class="card">
+      <div class="name">CLI scaffolding</div>
+      <div class="desc">Generate a custom plugin in one command.</div>
+    </div>
+  </div>
+</section>
+
+<!-- 13 Closer -->
+<section id="s13">
+  <span class="eyebrow">13 / 13</span>
+  <h1><span class="head">Build the oracle you actually need.</span></h1>
+  <p class="closer-url">github.com/ixoworld/qiforge</p>
+</section>
+
+<script>
+(function(){
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if(e.isIntersecting) e.target.classList.add('is-visible');
+    });
+  },{threshold:0.25});
+  document.querySelectorAll('section').forEach(function(s){ io.observe(s); });
+})();
+</script>
+</body>
+</html>
