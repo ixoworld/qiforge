@@ -86,7 +86,7 @@ export type { AgentMiddleware };
 
 /**
  * The agent's structured interface to a plugin. Drives Tier-1 prompt
- * composition and powers `find_capability` discovery.
+ * composition and powers `list_capabilities` discovery.
  */
 export interface PluginManifest {
   /** Human-readable name. */
@@ -120,8 +120,9 @@ export interface PluginManifest {
   /**
    * Discovery and loading mode:
    *  - `always`    — tools bound to agent at boot; listed in Tier-1 prompt.
-   *  - `on-demand` — tools NOT bound; manifest indexed for `find_capability`;
-   *                  agent calls `load_capability(name)` to load.
+   *  - `on-demand` — tools NOT bound; manifest discoverable via
+   *                  `list_capabilities`; agent calls `load_capability(name)`
+   *                  to load.
    *  - `silent`    — invisible to agent; runs as middleware-only.
    *
    * Default: `on-demand`.
@@ -281,10 +282,10 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   ucan: {
     requireCapability: (resource: string, action: string) => void;
     hasCapability: (resource: string, action: string) => boolean;
-    mintInvocation: (target: {
-      did: string;
-      capability: string;
-    }) => Promise<string>;
+    mintInvocation: (
+      target: { did: string; capability: string },
+      opts?: { skipCache?: boolean },
+    ) => Promise<string>;
     /**
      * Resolve a downstream service URL to its did:web identifier. Returns
      * `null` when the document is missing or has no `id` — used by plugins
@@ -319,6 +320,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Read accessors for state owned by other plugins. */
   shared: SharedAccessors;
+
+  /**
+   * Identifier of the inbound tool call that triggered this handler, when
+   * available. Undefined for direct/test invocations. Used by tools that
+   * return a LangGraph `Command` and need to append a matching `ToolMessage`
+   * to the state update.
+   */
+  toolCallId?: string;
 }
 
 export interface PluginTool {

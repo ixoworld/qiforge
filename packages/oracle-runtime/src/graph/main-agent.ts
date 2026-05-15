@@ -26,6 +26,7 @@ import type {
   MainAgentArgs,
 } from './main-agent-types.js';
 import {
+  createCapabilityGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
   createToolValidationMiddleware,
@@ -38,6 +39,7 @@ import {
 } from './prompt-composer.js';
 import { MainAgentGraphState } from './state.js';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback.js';
+import { computeSubAgentToolName } from './subagent-as-tool.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
@@ -150,11 +152,11 @@ export async function createMainAgent(
   );
 
   const eagerTools = selectByVisibility(allTools, manifestViz, 'always');
-  const loadedLazyTools = selectByVisibility(
-    allTools,
-    manifestViz,
-    'on-demand',
-  ).filter(({ pluginName }) => loadedSet.has(pluginName));
+  // Bind ALL on-demand tools at compile time — gating happens per model call
+  // in `CapabilityGateMiddleware` based on the live `loadedPlugins` state.
+  // This lets `load_capability` take effect on the very next LLM call inside
+  // the same run, instead of waiting for the next request to rebuild.
+  const onDemandTools = selectByVisibility(allTools, manifestViz, 'on-demand');
   const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
 
   // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
@@ -179,19 +181,12 @@ export async function createMainAgent(
     .filter(({ tool }) => tool.name !== MEMORY_CLEAR_MCP_NAME)
     .map(wrap);
 
-  // ── 5. Sub-agents — collect, filter by visibility + loaded state ────────
-  // Sub-agents share the tool namespace, so the same visibility rules that
-  // gate tools must gate sub-agents: `always`/`silent` always bind;
-  // `on-demand` binds only when the user has loaded the plugin.
+  // ── 5. Sub-agents — bind all at compile time; gating happens at runtime ─
+  // Sub-agents share the tool namespace with plugin tools, so they go through
+  // the same `CapabilityGateMiddleware` filter as plugin tools. Binding all
+  // of them keeps the bound list stable across runs while still respecting
+  // the manifest's visibility rule on every model call.
   const allSubAgents = await registries.subAgents.collect(buildCtx, rtCtx);
-  const visibleSubAgents = allSubAgents.filter(({ pluginName }) => {
-    const viz = manifestViz.get(pluginName) ?? 'on-demand';
-    if (viz === 'always' || viz === 'silent') return true;
-    return loadedSet.has(pluginName);
-  });
-  const filteredOutSubAgents = allSubAgents.filter(
-    (e) => !visibleSubAgents.includes(e),
-  );
 
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
@@ -202,38 +197,57 @@ export async function createMainAgent(
     sessionId: requestCtx.session.id,
     rtCtx,
     passthroughTools: memoryPassthrough,
-    subAgents: visibleSubAgents,
+    subAgents: allSubAgents,
   });
 
   ambient.logger.log(
     {
       eagerTools: eagerTools.length,
-      loadedLazyTools: loadedLazyTools.length,
+      onDemandTools: onDemandTools.length,
       loadedPlugins: Array.from(loadedSet),
       silentTools: silentTools.length,
-      visibleSubAgents: {
-        count: visibleSubAgents.length,
-        names: visibleSubAgents.map((e) => e.subAgent.name),
-      },
-      filteredOutSubAgents: {
-        count: filteredOutSubAgents.length,
-        entries: filteredOutSubAgents.map((e) => ({
+      subAgents: {
+        count: allSubAgents.length,
+        entries: allSubAgents.map((e) => ({
           name: e.subAgent.name,
           plugin: e.pluginName,
           visibility: manifestViz.get(e.pluginName) ?? 'on-demand',
         })),
       },
     },
-    'main-agent: tool/sub-agent binding summary',
+    'main-agent: tool/sub-agent binding summary (all bound; gated at runtime)',
   );
 
   const tools: StructuredTool[] = [
     ...metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState })),
     ...eagerTools.map(wrap),
-    ...loadedLazyTools.map(wrap),
+    ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
     ...subAgentTools,
   ];
+
+  // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
+  // and sub-agents per model call. Meta-tools/ad-hoc tools omitted from the
+  // map are pass-through.
+  const pluginByToolName = new Map<string, string>();
+  const visibilityByToolName = new Map<
+    string,
+    NonNullable<PluginManifest['visibility']>
+  >();
+  for (const { pluginName, tool } of allTools) {
+    pluginByToolName.set(tool.name, pluginName);
+    const effective =
+      tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
+    visibilityByToolName.set(tool.name, effective);
+  }
+  for (const { pluginName, subAgent } of allSubAgents) {
+    const toolName = computeSubAgentToolName(subAgent.name);
+    pluginByToolName.set(toolName, pluginName);
+    visibilityByToolName.set(
+      toolName,
+      manifestViz.get(pluginName) ?? 'on-demand',
+    );
+  }
 
   // ── 6. Middleware stack — 4 always-on + plugin contributions ────────────
   const pluginMiddlewares = registries.middlewares
@@ -241,6 +255,11 @@ export async function createMainAgent(
     .map(({ middleware }) => middleware);
 
   const middleware = [
+    createCapabilityGateMiddleware({
+      pluginByToolName,
+      visibilityByToolName,
+      logger: ambient.logger,
+    }),
     createToolValidationMiddleware({
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,
@@ -301,6 +320,8 @@ export async function createMainAgent(
     ? await hooks.checkpointerForUser(requestCtx.user.did)
     : undefined;
 
+  
+  ambient?.logger?.debug?.('All tools', tools)
   // ── 9. Compile ──────────────────────────────────────────────────────────
   return createAgent({
     model,

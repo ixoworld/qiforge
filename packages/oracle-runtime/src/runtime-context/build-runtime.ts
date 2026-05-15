@@ -41,12 +41,15 @@ export interface RunConfigContext {
 }
 
 /**
- * The `runtime` argument passed to a tool handler in LangGraph v1. We only
- * read the `context` channel and the optional `signal`.
+ * The `runtime` argument passed to a tool handler in LangGraph v1. We read
+ * the `context` channel, the optional `signal`, and the optional `toolCall`
+ * (populated by LangChain when the handler runs in response to a model tool
+ * call — surfaced on `RuntimeContext.toolCallId`).
  */
 export interface RunConfig {
   context: RunConfigContext;
   signal?: AbortSignal;
+  toolCall?: { id?: string };
 }
 
 /**
@@ -136,7 +139,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       requireCapability: (resource, action) => {
         ambient.ucan.requireCapability(delegation, resource, action);
       },
-      mintInvocation: (target) => ambient.ucan.mintInvocation(user.did, target),
+      mintInvocation: (target, opts) =>
+        ambient.ucan.mintInvocation(user.did, target, opts),
       resolveServiceDid: (serviceUrl) =>
         ambient.ucan.resolveServiceDid(serviceUrl),
     },
@@ -147,6 +151,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     logger: ambient.logger,
     abortSignal,
     shared: EMPTY_SHARED,
+    ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
   };
 }
 

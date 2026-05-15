@@ -32,6 +32,7 @@ const manifest: PluginManifest = {
   summary:
     'External SaaS tools (Gmail, GitHub, Linear, Slack, Google Calendar, Notion, Jira, HubSpot, hundreds more) invoked on behalf of the user through Composio.',
   whenToUse: [
+    'ALWAYS call `COMPOSIO_MANAGE_CONNECTIONS` first — before calling any other Composio tool — to verify the required toolkit is connected. If the response contains a `redirect_url`, show it as a clickable markdown link and stop; do not attempt the action.',
     'User asks to send, read, or search emails (Gmail, Outlook).',
     'User asks to create or modify issues, pull requests, or stars in a tracker (GitHub, Linear, Jira).',
     'User asks to manage calendar events, files, or documents in a SaaS app.',
@@ -40,7 +41,23 @@ const manifest: PluginManifest = {
   whenNotToUse: [
     'A native skill or sub-agent already covers the action — prefer the skill.',
     'Normal conversation or general question with no external SaaS interaction.',
-    'The user hasn\'t connected the required toolkit — call `COMPOSIO_MANAGE_CONNECTIONS` first to surface the connect link.',
+    'NEVER write, guess, or fabricate any URL yourself — the only valid auth link is the `redirect_url` returned by `COMPOSIO_MANAGE_CONNECTIONS`. Typing a link from memory is forbidden.',
+  ],
+  examples: [
+    {
+      user: 'Create a Linear issue for this bug',
+      thought:
+        'Must verify Linear is connected before touching any Linear tool.',
+      tool: 'COMPOSIO_MANAGE_CONNECTIONS',
+      args: { toolkit: 'linear' },
+    },
+    {
+      user: 'Send an email to the team',
+      thought:
+        'Must verify Gmail is connected before calling any Gmail tool.',
+      tool: 'COMPOSIO_MANAGE_CONNECTIONS',
+      args: { toolkit: 'gmail' },
+    },
   ],
   tags: ['composio', 'integration', 'saas', 'tools'],
   category: 'integration',

@@ -1,4 +1,9 @@
 export {
+  createCapabilityGateMiddleware,
+  type CapabilityGateMiddlewareOptions,
+} from './capability-gate-middleware.js';
+
+export {
   createToolValidationMiddleware,
   type ToolValidationMiddlewareOptions,
 } from './tool-validation-middleware.js';

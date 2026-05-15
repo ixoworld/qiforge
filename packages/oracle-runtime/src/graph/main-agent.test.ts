@@ -143,7 +143,7 @@ describe('createMainAgent', () => {
     expect(createAgentCalls).toHaveLength(1);
   });
 
-  it('always includes the four meta-tools at the head of the tools list', async () => {
+  it('always includes the two meta-tools at the head of the tools list', async () => {
     await createMainAgent(baseArgs());
 
     const [params] = createAgentCalls;
@@ -151,11 +151,9 @@ describe('createMainAgent', () => {
       (params?.tools as { name: string }[] | undefined)?.map((t) => t.name) ??
       [];
 
-    expect(toolNames.slice(0, 4)).toEqual([
-      'find_capability',
+    expect(toolNames.slice(0, 2)).toEqual([
       'load_capability',
       'list_capabilities',
-      'list_capability_details',
     ]);
   });
 
@@ -192,11 +190,13 @@ describe('createMainAgent', () => {
       }),
     );
 
-    const [params] = createAgentCalls;
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
     const middleware = params.middleware as readonly { name?: string }[];
     const names = middleware.map((m) => m.name);
 
     expect(names).toEqual([
+      'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
       'ToolRetryMiddleware',
       'PageContextMiddleware',
@@ -243,7 +243,8 @@ describe('createMainAgent', () => {
     expect(agent).toBe(fakeCompiledAgent);
     expect(ambient.logger.error).toHaveBeenCalled();
 
-    const [params] = createAgentCalls;
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
     const toolNames = (params.tools as { name: string }[]).map((t) => t.name);
     // The good sub-agent surfaces as `call_search_agent`; the broken one is
     // skipped silently.
@@ -251,7 +252,7 @@ describe('createMainAgent', () => {
     expect(toolNames).not.toContain('call_broken_agent');
   });
 
-  it('binds an on-demand plugin only when state.loadedPlugins includes it', async () => {
+  it('binds all on-demand plugins at compile time; gating happens via CapabilityGateMiddleware', async () => {
     const registries = emptyRegistries();
     registries.tools.register(
       makePlugin({
@@ -267,17 +268,25 @@ describe('createMainAgent', () => {
       }),
     );
 
-    // First build: nothing loaded — composio_search should NOT be present.
+    // On-demand tools are bound regardless of `loadedPlugins` — runtime
+    // gating is the middleware's job, not the bind step.
     await createMainAgent(baseArgs({ registries }));
     {
-      const [params] = createAgentCalls;
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
       const names = (params.tools as { name: string }[]).map((t) => t.name);
-      expect(names).not.toContain('composio_search');
+      expect(names).toContain('composio_search');
+
+      const mwNames = (params.middleware as { name?: string }[]).map(
+        (m) => m.name,
+      );
+      expect(mwNames).toContain('CapabilityGateMiddleware');
     }
 
     createAgentCalls.length = 0;
 
-    // Second build: agent has called load_capability — composio is loaded.
+    // Same shape when the plugin is already loaded — the bound tools array
+    // doesn't change between builds; only the middleware's filter result does.
     await createMainAgent(
       baseArgs({
         registries,
@@ -285,7 +294,8 @@ describe('createMainAgent', () => {
       }),
     );
     {
-      const [params] = createAgentCalls;
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
       const names = (params.tools as { name: string }[]).map((t) => t.name);
       expect(names).toContain('composio_search');
     }
@@ -310,7 +320,8 @@ describe('createMainAgent', () => {
 
     await createMainAgent(baseArgs({ registries }));
 
-    const [params] = createAgentCalls;
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
     const prompt = params.systemPrompt as string;
 
     expect(prompt).toContain('Available Capabilities');
