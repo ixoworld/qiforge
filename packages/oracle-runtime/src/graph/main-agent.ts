@@ -320,8 +320,6 @@ export async function createMainAgent(
     ? await hooks.checkpointerForUser(requestCtx.user.did)
     : undefined;
 
-  
-  ambient?.logger?.debug?.('All tools', tools)
   // ── 9. Compile ──────────────────────────────────────────────────────────
   return createAgent({
     model,

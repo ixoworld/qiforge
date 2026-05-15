@@ -15,8 +15,10 @@
   },
   "dependencies": {
     "@ixo/oracle-runtime": "workspace:*",
+    "@nestjs/common": "^11.1.19",
     "dotenv": "^16.4.7",
     "ioredis": "^5.6.1",
+    "langchain": "^1.4.0",
     "matrix-js-sdk": "^37.11.0"
   },
   "devDependencies": {

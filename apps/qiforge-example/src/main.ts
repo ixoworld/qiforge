@@ -6,8 +6,9 @@ import {
   createOracleApp,
   type OracleConfig,
 } from '@ixo/oracle-runtime';
-import Redis from 'ioredis';
+// import Redis from 'ioredis';
 import * as sdk from 'matrix-js-sdk';
+import { WeatherPlugin } from './plugins/weather/index.js';
 
 /**
  * QiForge example oracle.
@@ -28,21 +29,21 @@ const config: OracleConfig = {
   description: 'Reference QiForge oracle wired with every bundled plugin',
   prompt: {
     opening:
-      'You are the QiForge reference oracle, operated by IXO. You exist to show what a QiForge-built AI agent can do — every bundled plugin is wired in (memory, skills, sandbox, editor, web search, IXO entity lookups, browser actions, SaaS integrations, user preferences). Show, don\'t tell: when someone asks what you can do, demonstrate it by actually doing it.',
+      "You are the QiForge reference oracle, operated by IXO. You exist to show what a QiForge-built AI agent can do — every bundled plugin is wired in (memory, skills, sandbox, editor, web search, IXO entity lookups, browser actions, SaaS integrations, user preferences). Show, don't tell: when someone asks what you can do, demonstrate it by actually doing it.",
     communicationStyle: [
       '- Lead with action, not preamble. Skip "Sure!" and "I\'d be happy to" — just do the thing.',
-      '- Match the user\'s energy: terse for terse, detailed when they ask for detail.',
-      '- When you call a tool, explain in one sentence what you\'re doing and why — not three.',
+      "- Match the user's energy: terse for terse, detailed when they ask for detail.",
+      "- When you call a tool, explain in one sentence what you're doing and why — not three.",
       '- If the user asks "what can you do?", pick one capability and demonstrate it, then offer the menu.',
     ].join('\n'),
     capabilities:
-      'I\'m here to demonstrate what a QiForge oracle can do — memory across conversations, executing skills in a sandbox, editing collaborative pages, web search, IXO entity lookups, and SaaS integrations through Composio. Ask me anything and I\'ll show you the right capability rather than describing it.',
+      "I'm here to demonstrate what a QiForge oracle can do — memory across conversations, executing skills in a sandbox, editing collaborative pages, web search, IXO entity lookups, and SaaS integrations through Composio. Ask me anything and I'll show you the right capability rather than describing it.",
   },
 };
 
 async function bootstrap(): Promise<void> {
-  const redisUrl = process.env.REDIS_URL;
-  const redis = redisUrl ? new Redis(redisUrl) : null;
+  // const redisUrl = process.env.REDIS_URL;
+  // const redis = redisUrl ? new Redis(redisUrl) : null;
 
   const matrixBaseUrl = process.env.MATRIX_BASE_URL;
   const matrixUserId = process.env.MATRIX_ORACLE_ADMIN_USER_ID;
@@ -67,8 +68,9 @@ async function bootstrap(): Promise<void> {
   const app = await createOracleApp({
     config,
     plugins: [
-      ...(redis ? [new CreditsPlugin({ redis, network })] : []),
+      // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
+      new WeatherPlugin(),
     ],
   });
 
@@ -82,15 +84,11 @@ async function bootstrap(): Promise<void> {
   });
 
   const status = app.plugins.status();
-  console.log(
-    `[boot] loaded plugins: ${status.loaded.join(', ') || '(none)'}`,
-  );
+  console.log(`[boot] loaded plugins: ${status.loaded.join(', ') || '(none)'}`);
   if (status.excluded.length > 0) {
     console.log(
       '[boot] excluded plugins:',
-      status.excluded
-        .map((e) => `${e.plugin} (${e.reason})`)
-        .join(', '),
+      status.excluded.map((e) => `${e.plugin} (${e.reason})`).join(', '),
     );
   }
 
