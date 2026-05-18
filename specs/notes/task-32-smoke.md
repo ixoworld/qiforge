@@ -130,10 +130,10 @@ Ask the agent to do something that triggers a plugin tool. Examples:
 
 If you have a Portal/UI client that sends `agActions` in the request body:
 
-- [ ] `agActions` array in request body → those names get routed as `ActionCallEvent`
-- [ ] Server-tools (NOT in agActions) → routed as `ToolCallEvent`
-- [ ] Both types stream `isRunning` → `done` (or `error`)
-- [ ] AG-UI actions get their args sent via WebSocket (per old behavior)
+- [x] `agActions` array in request body → those names get routed as `ActionCallEvent`
+- [x] Server-tools (NOT in agActions) → routed as `ToolCallEvent`
+- [x] Both types stream `isRunning` → `done` (or `error`)
+- [x] AG-UI actions get their args sent via WebSocket (per old behavior)
 
 ---
 

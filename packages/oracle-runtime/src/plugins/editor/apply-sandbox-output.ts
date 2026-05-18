@@ -9,10 +9,10 @@ import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import {
   createDefaultAuthBuilder,
   parseOracleSecrets,
+  SANDBOX_RUN_TOOL_NAME,
   type SandboxAuthBuilder,
   type SandboxHeaderInputs,
 } from '../sandbox/sandbox-mcp.js';
-import { SANDBOX_RUN_TOOL_NAME } from '../sandbox/sandbox-run-tool.js';
 import {
   editBlock,
   getBlockDetail,

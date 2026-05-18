@@ -1,36 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { validateManifest } from '../../manifest/validator.js';
-import type {
-  PluginContext,
-  RuntimeContext,
-} from '../../plugin-api/types.js';
-import {
-  makeBuildCtx,
-  makeRuntimeContext,
-} from '../../registries/test-fixtures.js';
-import { createTestRuntime } from '../../testing/create-test-runtime.js';
+import type { RuntimeContext } from '../../plugin-api/types.js';
+import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import {
   createDefaultAuthBuilder,
   parseOracleSecrets,
   type SandboxAuthBuilder,
 } from './sandbox-mcp.js';
-import { SandboxPlugin } from './sandbox.plugin.js';
+import {
+  SandboxPlugin,
+  type SandboxMcpClientFactory,
+  type SandboxMcpTool,
+} from './sandbox.plugin.js';
 
 const SANDBOX_URL = 'https://sandbox.test';
 const SKILLS_URL = 'https://capsules.skills.test';
 
-/** Build a `PluginContext` with the env vars sandbox cares about. */
-function buildCtx(overrides: Record<string, unknown> = {}): PluginContext {
-  return makeBuildCtx({
-    config: {
-      SANDBOX_MCP_URL: SANDBOX_URL,
-      ORACLE_SECRETS: '',
-      ...overrides,
-    },
-  });
-}
-
-/** Recorded MCP client config (shape we assert against in tests). */
+/** Recorded MCP-client config the test factory captures on each construction. */
 interface RecordedMcpConfig {
   url: string;
   headers: Record<string, string>;
@@ -51,15 +38,15 @@ function asStringRecord(value: unknown): Record<string, string> {
   return out;
 }
 
-/** A noop MCP client factory backed by a recorded handler. */
-function makeMcpFactory(
-  invokeImpl: (args: unknown) => Promise<unknown> = async () => 'ok',
-  toolName = 'sandbox_run',
-) {
+/**
+ * Build a stub MCP client factory that returns the supplied upstream tools.
+ * Records every client config it sees so tests can assert on the headers
+ * passed to the MCP server.
+ */
+function makeMcpFactory(upstream: SandboxMcpTool[]) {
   const closeSpy = vi.fn(async () => undefined);
-  const invokeSpy = vi.fn(invokeImpl);
   const seenConfigs: RecordedMcpConfig[] = [];
-  const factory = (config: { mcpServers: Record<string, unknown> }) => {
+  const factory: SandboxMcpClientFactory = (config) => {
     const server = config.mcpServers.sandbox;
     if (!server || typeof server !== 'object') {
       throw new Error('test factory: unexpected mcpServers shape');
@@ -75,11 +62,35 @@ function makeMcpFactory(
       headers: asStringRecord(server.headers),
     });
     return {
-      getTools: async () => [{ name: toolName, invoke: invokeSpy }],
+      getTools: async () => upstream,
       close: closeSpy,
     };
   };
-  return { factory, closeSpy, invokeSpy, seenConfigs };
+  return { factory, closeSpy, seenConfigs };
+}
+
+/** Build an upstream MCP tool double with a recorded invoke spy. */
+function makeUpstreamTool(
+  name: string,
+  invokeImpl: (input: unknown) => Promise<unknown> = async () => `${name}-ok`,
+): SandboxMcpTool & { invoke: ReturnType<typeof vi.fn> } {
+  const invoke = vi.fn(invokeImpl);
+  return {
+    name,
+    description: `Upstream description for ${name}`,
+    schema: z.object({ command: z.string() }),
+    invoke,
+  };
+}
+
+/** Sandbox-specific RuntimeContext defaults shared across the suite. */
+function makeSandboxRuntimeContext(
+  overrides: Partial<RuntimeContext> = {},
+): RuntimeContext {
+  return makeRuntimeContext({
+    config: { SANDBOX_MCP_URL: SANDBOX_URL },
+    ...overrides,
+  });
 }
 
 describe('parseOracleSecrets', () => {
@@ -174,9 +185,7 @@ describe('SandboxPlugin', () => {
 
     const ok = plugin.configSchema!.safeParse({ SANDBOX_MCP_URL: SANDBOX_URL });
     expect(ok.success).toBe(true);
-    // Required env enforced
     expect(plugin.configSchema!.safeParse({}).success).toBe(false);
-    // URL validity enforced
     expect(
       plugin.configSchema!.safeParse({ SANDBOX_MCP_URL: 'not-a-url' }).success,
     ).toBe(false);
@@ -189,12 +198,13 @@ describe('SandboxPlugin', () => {
     expect(result.valid).toBe(true);
   });
 
-  describe('getTools(sandbox_run)', () => {
+  describe('getRequestTools', () => {
     let authBuilder: SandboxAuthBuilder;
 
     beforeEach(() => {
-      // Stub UCAN minting — returns sandbox auth + a skills invocation
-      // when SKILLS_CAPSULES_BASE_URL is configured.
+      // Stub UCAN minting — returns sandbox auth headers plus a skills
+      // invocation when SKILLS_CAPSULES_BASE_URL is configured, and folds
+      // operator / user secrets into x-os-* / x-us-* headers.
       authBuilder = vi.fn(async (inputs) => {
         const headers: Record<string, string> = {
           Authorization: 'Bearer ucan-sandbox',
@@ -213,53 +223,84 @@ describe('SandboxPlugin', () => {
       });
     });
 
-    it('throws when SANDBOX_MCP_URL is missing', () => {
-      const plugin = new SandboxPlugin({ authBuilder });
-      expect(() => plugin.getTools(makeBuildCtx({ config: {} }))).toThrow(
-        /SANDBOX_MCP_URL/,
-      );
+    it('rejects boot when SANDBOX_MCP_URL is missing', async () => {
+      const { factory } = makeMcpFactory([]);
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+      await expect(
+        plugin.getRequestTools(makeRuntimeContext({ config: {} })),
+      ).rejects.toThrow(/SANDBOX_MCP_URL/);
     });
 
-    it('exposes exactly one sandbox_run tool', () => {
-      const plugin = new SandboxPlugin({ authBuilder });
-      const tools = plugin.getTools(buildCtx());
-      expect(tools).toHaveLength(1);
-      expect(tools[0]?.name).toBe('sandbox_run');
-    });
+    it('surfaces every upstream MCP tool verbatim (name, description, schema, handler delegates to upstream invoke)', async () => {
+      const upstream = [
+        makeUpstreamTool('sandbox_run', async (a) => ({ ran: a })),
+        makeUpstreamTool('sandbox_write_file', async (a) => ({ wrote: a })),
+        makeUpstreamTool('artifact_list'),
+      ];
+      const { factory, seenConfigs } = makeMcpFactory(upstream);
 
-    it('mints headers, injects oracle + user secrets as x-os-*/x-us-*, and forwards args to the MCP sandbox_run tool', async () => {
-      // Drive `createSandboxRunTool` directly so the test can intercept the
-      // MCP client factory. The plugin-level wiring is covered by the
-      // separate "loads via createTestRuntime" test below.
-      const { factory, invokeSpy, seenConfigs, closeSpy } = makeMcpFactory(
-        async (a) => ({ echoed: a }),
-      );
-      const { createSandboxRunTool } = await import('./sandbox-run-tool.js');
-      const wrapped = createSandboxRunTool({
-        sandboxMcpUrl: SANDBOX_URL,
-        skillsServiceUrl: SKILLS_URL,
-        oracleSecretsRaw: 'OPENAI_KEY=sk-oracle,STRIPE_KEY=stripe-oracle',
+      const plugin = new SandboxPlugin({
         authBuilder,
         mcpClientFactory: factory,
       });
 
-      const runCtx = makeRuntimeContext({
+      const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
+
+      expect(tools.map((t) => t.name)).toEqual([
+        'sandbox_run',
+        'sandbox_write_file',
+        'artifact_list',
+      ]);
+      expect(tools[1]!.description).toBe(
+        'Upstream description for sandbox_write_file',
+      );
+      expect(tools[1]!.schema).toBe(upstream[1]!.schema);
+
+      // Handler forwards args verbatim to the upstream invoke
+      const result = await tools[0]!.handler(
+        { command: 'echo hi' },
+        makeRuntimeContext(),
+      );
+      expect(result).toEqual({ ran: { command: 'echo hi' } });
+      expect(upstream[0]!.invoke).toHaveBeenCalledWith({ command: 'echo hi' });
+
+      // One MCP client built per request — no second client for sandbox_run
+      expect(seenConfigs).toHaveLength(1);
+    });
+
+    it('mints headers once per request and includes auth, skills, oracle (x-os-*) and user (x-us-*) secrets', async () => {
+      const upstream = [makeUpstreamTool('sandbox_run')];
+      const { factory, seenConfigs } = makeMcpFactory(upstream);
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+
+      const rtCtx = makeSandboxRuntimeContext({
+        config: {
+          SANDBOX_MCP_URL: SANDBOX_URL,
+          SKILLS_CAPSULES_BASE_URL: SKILLS_URL,
+          ORACLE_SECRETS: 'OPENAI_KEY=sk-oracle,STRIPE_KEY=stripe-oracle',
+        },
         secrets: {
           getIndex: async () => ({ DATABASE_URL: { key: 'DATABASE_URL' } }),
           getValues: async (keys: string[]) => {
             const out: Record<string, string> = {};
             for (const k of keys) {
-              if (k === 'DATABASE_URL') out[k] = 'postgres://user:pass@host/db';
+              if (k === 'DATABASE_URL')
+                out[k] = 'postgres://user:pass@host/db';
             }
             return out;
           },
         },
-      }) satisfies RuntimeContext;
+      });
 
-      const result = await wrapped.handler({ command: 'python -c print(1)' }, runCtx);
-      expect(result).toEqual({ echoed: { command: 'python -c print(1)' } });
+      await plugin.getRequestTools(rtCtx);
 
-      // MCP client was constructed once with our headers
       expect(seenConfigs).toHaveLength(1);
       const headers = seenConfigs[0]!.headers;
       expect(headers.Authorization).toBe('Bearer ucan-sandbox');
@@ -271,7 +312,7 @@ describe('SandboxPlugin', () => {
         'postgres://user:pass@host/db',
       );
 
-      // authBuilder received the correct inputs (URL + parsed secrets)
+      expect(authBuilder).toHaveBeenCalledTimes(1);
       expect(authBuilder).toHaveBeenCalledWith(
         {
           sandboxMcpUrl: SANDBOX_URL,
@@ -279,39 +320,78 @@ describe('SandboxPlugin', () => {
           oracleSecrets: { OPENAI_KEY: 'sk-oracle', STRIPE_KEY: 'stripe-oracle' },
           userSecrets: { DATABASE_URL: 'postgres://user:pass@host/db' },
         },
-        runCtx,
+        rtCtx,
       );
-
-      // Forwarded args to the underlying MCP tool
-      expect(invokeSpy).toHaveBeenCalledWith({ command: 'python -c print(1)' });
-
-      // Client released after the call
-      expect(closeSpy).toHaveBeenCalled();
     });
 
-    it('throws a descriptive error when the MCP server omits a sandbox_run tool', async () => {
-      const { createSandboxRunTool } = await import('./sandbox-run-tool.js');
-      const { factory } = makeMcpFactory(undefined, 'something_else');
-      const wrapped = createSandboxRunTool({
-        sandboxMcpUrl: SANDBOX_URL,
-        oracleSecretsRaw: '',
+    it('filters out oracle_* management tools by default', async () => {
+      const upstream = [
+        makeUpstreamTool('sandbox_run'),
+        makeUpstreamTool('sandbox_write_file'),
+        makeUpstreamTool('oracle_list'),
+        makeUpstreamTool('oracle_stop'),
+        makeUpstreamTool('oracle_get_logs'),
+        makeUpstreamTool('artifact_list'),
+      ];
+      const { factory } = makeMcpFactory(upstream);
+
+      const plugin = new SandboxPlugin({
         authBuilder,
         mcpClientFactory: factory,
       });
-      await expect(
-        wrapped.handler({}, makeRuntimeContext()),
-      ).rejects.toThrow(/sandbox_run.*Available tools: something_else/);
-    });
-  });
 
-  it('loads via createTestRuntime and registers sandbox_run', async () => {
-    const rt = await createTestRuntime({
-      plugins: [new SandboxPlugin()],
-      config: { SANDBOX_MCP_URL: SANDBOX_URL, ORACLE_SECRETS: '' },
+      const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
+      expect(tools.map((t) => t.name)).toEqual([
+        'sandbox_run',
+        'sandbox_write_file',
+        'artifact_list',
+      ]);
     });
-    rt.assertNoCollisions();
-    rt.assertManifestValid();
-    expect(rt.listTools('sandbox').map((t) => t.name)).toEqual(['sandbox_run']);
-    await rt.close();
+
+    it('includes oracle_* management tools when includeOracleManagementTools is enabled', async () => {
+      const upstream = [
+        makeUpstreamTool('sandbox_run'),
+        makeUpstreamTool('oracle_list'),
+        makeUpstreamTool('oracle_stop'),
+        makeUpstreamTool('artifact_list'),
+      ];
+      const { factory } = makeMcpFactory(upstream);
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+        includeOracleManagementTools: true,
+      });
+
+      const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
+      expect(tools.map((t) => t.name)).toEqual([
+        'sandbox_run',
+        'oracle_list',
+        'oracle_stop',
+        'artifact_list',
+      ]);
+    });
+
+    it('skips user-secret loading when the room has no indexed secrets', async () => {
+      const upstream = [makeUpstreamTool('sandbox_run')];
+      const { factory } = makeMcpFactory(upstream);
+      const getValuesSpy = vi.fn(async () => ({}));
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+
+      await plugin.getRequestTools(
+        makeSandboxRuntimeContext({
+          secrets: {
+            getIndex: async () => ({}),
+            getValues: getValuesSpy,
+          },
+        }),
+      );
+
+      expect(getValuesSpy).not.toHaveBeenCalled();
+    });
   });
 });

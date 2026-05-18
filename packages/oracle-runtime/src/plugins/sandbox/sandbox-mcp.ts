@@ -1,5 +1,8 @@
 import type { RuntimeContext } from '../../plugin-api/types.js';
 
+/** Tool name surfaced by the upstream sandbox MCP. */
+export const SANDBOX_RUN_TOOL_NAME = 'sandbox_run';
+
 /**
  * Parse the `ORACLE_SECRETS` env value (format: `KEY1=value1,KEY2=value2`).
  *

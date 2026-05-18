@@ -96,10 +96,6 @@ async function bootstrap(): Promise<void> {
 
   const app = await createOracleApp({
     config,
-    features: {
-      memory: true,
-      skills: false,
-    },
     logger: Logger,
     plugins: [
       // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
