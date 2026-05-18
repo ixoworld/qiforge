@@ -1,16 +1,12 @@
-import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { describe, expect, it, vi } from 'vitest';
+import { AIMessage } from '@langchain/core/messages';
+import { fakeModel } from 'langchain';
+import { describe, expect, it } from 'vitest';
 import { createSummarizationMiddleware } from './summarization-middleware.js';
-
-function makeFakeModel(): BaseChatModel {
-  return {
-    invoke: vi.fn().mockResolvedValue({ content: 'summary' }),
-  } as unknown as BaseChatModel;
-}
 
 describe('createSummarizationMiddleware', () => {
   it('returns a middleware with a beforeModel hook (configured by langchain)', () => {
-    const mw = createSummarizationMiddleware({ model: makeFakeModel() });
+    const model = fakeModel().respond(new AIMessage('summary'));
+    const mw = createSummarizationMiddleware({ model });
     expect(mw.name).toBeDefined();
     // langchain's summarizationMiddleware wires its work into the agent
     // lifecycle; we just verify the returned object is structurally a
@@ -23,8 +19,9 @@ describe('createSummarizationMiddleware', () => {
   });
 
   it('accepts trigger and keep overrides', () => {
+    const model = fakeModel().respond(new AIMessage('summary'));
     const mw = createSummarizationMiddleware({
-      model: makeFakeModel(),
+      model,
       triggerMessages: 5,
       keepMessages: 2,
     });

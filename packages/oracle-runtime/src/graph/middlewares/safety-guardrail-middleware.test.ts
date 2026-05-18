@@ -1,17 +1,12 @@
-import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
   AIMessage,
   HumanMessage,
   RemoveMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
-import { describe, expect, it, vi } from 'vitest';
+import { fakeModel } from 'langchain';
+import { describe, expect, it } from 'vitest';
 import { createSafetyGuardrailMiddleware } from './safety-guardrail-middleware.js';
-
-function makeFakeModel(decision: 'SAFE' | 'UNSAFE'): BaseChatModel {
-  const invoke = vi.fn().mockResolvedValue({ content: decision });
-  return { invoke } as unknown as BaseChatModel;
-}
 
 function getHook(
   mw: ReturnType<typeof createSafetyGuardrailMiddleware>,
@@ -24,7 +19,7 @@ function getHook(
 
 describe('createSafetyGuardrailMiddleware', () => {
   it('returns nothing when the safety model says SAFE', async () => {
-    const safetyModel = makeFakeModel('SAFE');
+    const safetyModel = fakeModel().respond(new AIMessage('SAFE'));
     const mw = createSafetyGuardrailMiddleware({ safetyModel });
     const hook = getHook(mw);
 
@@ -35,10 +30,11 @@ describe('createSafetyGuardrailMiddleware', () => {
       ],
     });
     expect(result).toBeUndefined();
+    expect(safetyModel.callCount).toBe(1);
   });
 
   it('replaces the last AI message when the safety model says UNSAFE', async () => {
-    const safetyModel = makeFakeModel('UNSAFE');
+    const safetyModel = fakeModel().respond(new AIMessage('UNSAFE'));
     const mw = createSafetyGuardrailMiddleware({
       safetyModel,
       safeReply: 'BLOCKED.',
@@ -56,8 +52,7 @@ describe('createSafetyGuardrailMiddleware', () => {
   });
 
   it('skips the safety check when the last message is a tool call', async () => {
-    const invoke = vi.fn();
-    const safetyModel = { invoke } as unknown as BaseChatModel;
+    const safetyModel = fakeModel();
     const mw = createSafetyGuardrailMiddleware({ safetyModel });
     const hook = getHook(mw);
 
@@ -69,12 +64,11 @@ describe('createSafetyGuardrailMiddleware', () => {
       messages: [new HumanMessage('hi'), aiWithToolCalls],
     });
     expect(result).toBeUndefined();
-    expect(invoke).not.toHaveBeenCalled();
+    expect(safetyModel.callCount).toBe(0);
   });
 
   it('does nothing when the last message is not from the AI', async () => {
-    const invoke = vi.fn();
-    const safetyModel = { invoke } as unknown as BaseChatModel;
+    const safetyModel = fakeModel();
     const mw = createSafetyGuardrailMiddleware({ safetyModel });
     const hook = getHook(mw);
 
@@ -82,6 +76,6 @@ describe('createSafetyGuardrailMiddleware', () => {
       messages: [new HumanMessage('still typing...')],
     });
     expect(result).toBeUndefined();
-    expect(invoke).not.toHaveBeenCalled();
+    expect(safetyModel.callCount).toBe(0);
   });
 });
