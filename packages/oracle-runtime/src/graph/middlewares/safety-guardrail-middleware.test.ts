@@ -48,7 +48,7 @@ describe('createSafetyGuardrailMiddleware', () => {
 
     expect(result.jumpTo).toBe('end');
     expect(result.messages[0]).toBeInstanceOf(RemoveMessage);
-    expect(String(result.messages[1].content)).toBe('BLOCKED.');
+    expect(String(result.messages[1]?.content)).toBe('BLOCKED.');
   });
 
   it('skips the safety check when the last message is a tool call', async () => {

@@ -3,21 +3,22 @@
   "compilerOptions": {
     "baseUrl": "./",
     "outDir": "dist",
-    "rootDir": "src",
+    "rootDir": ".",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "esModuleInterop": true,
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true,
+    "noEmit": true,
     "paths": {
       "src/*": ["./src/*"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "test"],
   "exclude": [
     "node_modules",
     "dist",
-    "**/*.test.ts",
-    "**/*.spec.ts"
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts"
   ]
 }

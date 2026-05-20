@@ -35,6 +35,8 @@ export {
   type MintUserDelegationOptions,
 } from './ucan.js';
 
+export { waitForMatrixLoaded } from './wait-for-matrix-loaded.js';
+
 // Typed SSE events — mirror of `packages/oracles-client-sdk/src/utils/sse-parser.ts`.
 // Tests use these to type-narrow when asserting on streamed events:
 //   for await (const evt of client.stream(sessionId, msg)) {

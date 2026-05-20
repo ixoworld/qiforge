@@ -57,6 +57,7 @@ import {
   type IntegrationRuntime,
   memoryCap,
   mintUserDelegation,
+  waitForMatrixLoaded,
   type SSEEvent,
   type SSEToolCallEventData,
 } from '../../testing/integration/index.js';
@@ -100,36 +101,6 @@ const MEMORY_RUNTIME_CAPS = [
   { resource: memoryCap.with, action: memoryCap.can },
 ];
 
-/**
- * Wait until the oracle reports `matrix:loaded`. The signing mnemonic only
- * lands in `UcanService` after Matrix init completes — Tier A's
- * `mintInvocation` calls return null until then.
- */
-async function waitForMatrixLoaded(
-  oracle: IntegrationOracle,
-  timeoutMs = 60_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const evt = oracle.events.statusChanges.find(
-      (e) => e.plugin === 'matrix' && e.to === 'loaded',
-    );
-    if (evt) return;
-    const failed = oracle.events.statusChanges.find(
-      (e) => e.plugin === 'matrix' && e.to === 'failed',
-    );
-    if (failed) {
-      throw new Error(
-        `Matrix init failed during boot: ${failed.reason ?? 'no reason given'}`,
-      );
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(
-    `Timed out after ${timeoutMs}ms waiting for matrix:loaded — UCAN ` +
-      `mintInvocation cannot succeed without the signing mnemonic.`,
-  );
-}
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {

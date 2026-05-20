@@ -38,6 +38,7 @@ import {
   createIntegrationRuntime,
   mintUserDelegation,
   allCaps,
+  waitForMatrixLoaded,
   type IntegrationOracle,
   type IntegrationRuntime,
   type SSEEvent,
@@ -82,41 +83,6 @@ const HAS_LLM_ENV = Boolean(process.env.OPEN_ROUTER_API_KEY);
 // the session doesn't exist). Tests below call `client.createSession()` per
 // test to get a fresh server-side session — mirrors the SDK's pattern
 // (`useSessionManager` creates one before any `useSendMessage` call).
-
-/**
- * Wait until the runtime has loaded the UCAN signing mnemonic from Matrix.
- * `/messages/:sessionId` runs through `SubscriptionMiddleware`, which needs
- * the signing key — without it every authenticated request 401s with
- * "UCAN signing key not configured." The `matrix:loaded` plugin status
- * event signals both Matrix init AND key wiring are complete.
- */
-async function waitForMatrixLoaded(
-  oracle: IntegrationOracle,
-  timeoutMs = 90_000,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const loaded = oracle.events.statusChanges.find(
-      (e) => e.plugin === 'matrix' && e.to === 'loaded',
-    );
-    if (loaded) return;
-    const failed = oracle.events.statusChanges.find(
-      (e) => e.plugin === 'matrix' && e.to === 'failed',
-    );
-    if (failed) {
-      throw new Error(
-        `Matrix init failed: ${failed.reason ?? '(no reason)'}; ` +
-          'cannot run agent-loop tests without the signing key wired.',
-      );
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error(
-    `Matrix did not reach 'loaded' within ${timeoutMs}ms — ` +
-      'last events: ' +
-      JSON.stringify(oracle.events.statusChanges.slice(-5)),
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tier A — direct tool invoke (no LLM, no HTTP).
@@ -249,7 +215,7 @@ describe.skipIf(!TIER_B_ENABLED)('Tier B — agent loop with real model', () => 
     });
     // Block until Matrix init + signing-key wiring are done — otherwise
     // SubscriptionMiddleware rejects every /messages/* with 401.
-    await waitForMatrixLoaded(oracle);
+    await waitForMatrixLoaded(oracle, 90_000);
     const delegation = await mintUserDelegation({
       userMnemonic: process.env.TEST_USER_MNEMONIC!,
       oracleDid: process.env.ORACLE_DID!,
