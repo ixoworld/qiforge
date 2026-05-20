@@ -75,6 +75,7 @@ export function createDefaultMemoryMcpFactory(
             maxAttempts: 3,
             delayMs: 2000,
           },
+          defaultToolTimeout: 420_000
         },
       },
     });

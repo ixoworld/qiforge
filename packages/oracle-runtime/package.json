@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run --mode int"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -26,6 +27,11 @@
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js",
       "default": "./dist/testing/index.js"
+    },
+    "./testing/integration": {
+      "types": "./dist/testing/integration/index.d.ts",
+      "import": "./dist/testing/integration/index.js",
+      "default": "./dist/testing/integration/index.js"
     }
   },
   "files": [
@@ -40,6 +46,7 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "@vitest/coverage-v8": "^3.2.4",
+    "dotenv": "^16.4.7",
     "reflect-metadata": "^0.2.2",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"

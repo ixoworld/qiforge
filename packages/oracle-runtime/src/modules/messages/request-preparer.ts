@@ -29,7 +29,6 @@ export interface PreparedRequest {
   homeServerName: string;
   requestId: string;
   runnableConfig: RuntimeRequestConfig;
-  userContext?: Record<string, unknown>;
   targetSession: ChatSession;
   timezone?: string;
   currentTime?: string;
@@ -124,9 +123,6 @@ export class RequestPreparer {
       homeServerName,
       requestId,
       runnableConfig,
-      userContext: targetSession.userContext as
-        | Record<string, unknown>
-        | undefined,
       targetSession,
       timezone,
       currentTime,

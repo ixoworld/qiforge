@@ -269,6 +269,33 @@ export class ChatClient {
     return iterable;
   }
 
+  /**
+   * `POST /sessions` — create a new chat session and return its id.
+   *
+   * Required before `send`/`stream` against a sessionId — `MessagesService`
+   * throws 404 if the session doesn't already exist. Tests call this in
+   * `beforeAll` and reuse the returned id, matching the SDK's
+   * `useSessionManager` flow on the frontend.
+   */
+  async createSession(): Promise<string> {
+    const res = await this.fetchImpl(`${this.baseUrl}/sessions`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+    });
+    if (!res.ok) {
+      throw new Error(
+        `createSession failed: ${res.status} ${await res.text().catch(() => '')}`,
+      );
+    }
+    const body = (await res.json()) as { sessionId?: string };
+    if (!body.sessionId) {
+      throw new Error(
+        `createSession response missing sessionId: ${JSON.stringify(body)}`,
+      );
+    }
+    return body.sessionId;
+  }
+
   /** `GET /messages/:sessionId` — list messages in a session. */
   async list(sessionId: string): Promise<SendResult> {
     const start = Date.now();

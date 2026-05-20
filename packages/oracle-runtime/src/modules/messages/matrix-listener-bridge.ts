@@ -169,10 +169,6 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     if (hasSession) return;
 
     const userHomeServer = event.sender.split(':').slice(1).join(':');
-    const oracleHomeServer = this.config
-      .getOrThrow<string>('MATRIX_BASE_URL')
-      .replace(/\/$/, '')
-      .replace(/^https?:\/\//, '');
 
     try {
       await this.sessions.createSession(
@@ -182,8 +178,6 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
           oracleEntityDid: this.config.getOrThrow('ORACLE_ENTITY_DID'),
           oracleName: this.config.getOrThrow('ORACLE_NAME'),
           homeServer: userHomeServer,
-          oracleHomeServer,
-          userHomeServer,
           roomId,
         },
         event.eventId,

@@ -11,7 +11,8 @@
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.build.json --noEmit"
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "test:integration": "vitest run --mode int"
   },
   "dependencies": {
     "@ixo/oracle-runtime": "workspace:*",
@@ -19,11 +20,15 @@
     "dotenv": "^16.4.7",
     "ioredis": "^5.6.1",
     "langchain": "^1.4.0",
-    "matrix-js-sdk": "^37.11.0"
+    "matrix-js-sdk": "^37.11.0",
+    "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
+    "@ixo/vitest-config": "workspace:*",
+    "@langchain/core": "^1.1.45",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
   }
 }

@@ -8,7 +8,6 @@ import {
   getOpenRouterChatModel,
   getProviderConfig,
 } from '../../ai/index.js';
-import { type MemoryEngineService } from '../memory-engine/memory-engine.service.js';
 import { type UserContextData } from '../memory-engine/types.js';
 import {
   type ChatSession,
@@ -27,7 +26,6 @@ export class SessionManagerService {
   constructor(
     private readonly syncService: IDatabaseSyncService,
     public readonly matrixManger = MatrixManager.getInstance(),
-    private readonly memoryEngineService?: MemoryEngineService,
   ) {}
 
   public getSessionsStateKey({
@@ -417,30 +415,11 @@ ___________________________________________________________
         isOracleAdmin: true,
       }));
 
-    // Gather user context from Memory Engine
-    let userContext: UserContextData | undefined;
-    if (
-      this.memoryEngineService &&
-      (createSessionDto.ucanInvocation ||
-        (createSessionDto.oracleToken && createSessionDto.userToken))
-    ) {
-      try {
-        Logger.debug('Gathering user context from Memory Engine');
-        userContext = await this.memoryEngineService.gatherUserContext({
-          oracleDid: createSessionDto.oracleDid,
-          roomId,
-          oracleToken: createSessionDto.oracleToken ?? '',
-          userToken: createSessionDto.userToken ?? '',
-          oracleHomeServer: createSessionDto.oracleHomeServer ?? '',
-          userHomeServer: createSessionDto.userHomeServer ?? '',
-          ucanInvocation: createSessionDto.ucanInvocation,
-        });
-      } catch (error) {
-        Logger.error('Failed to gather user context:', error);
-        throw error;
-      }
-    }
-
+    // `userContext` is no longer fetched at session creation. It is
+    // populated per-message by the runtime's `UserContextFetcher` (cached
+    // for 3 minutes), which keeps the session-create path off the Memory
+    // Engine critical path AND keeps the prompt fresher than a snapshot
+    // taken once at session start.
     const session = await this.syncSessionSet({
       sessionId: eventId,
       oracleName: createSessionDto.oracleName,
@@ -449,7 +428,6 @@ ___________________________________________________________
       oracleDid: createSessionDto.oracleDid,
       messages: [],
       roomId,
-      userContext,
       slackThreadTs: createSessionDto.slackThreadTs,
     });
 

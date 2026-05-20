@@ -14,7 +14,10 @@ import {
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import pkg from '../../package.json' with { type: 'json' };
-import { baseEnvSchema } from '../config/base-env-schema.js';
+import {
+  baseEnvSchema,
+  validateLlmProviderKey,
+} from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import {
   getModelForRole,
@@ -214,6 +217,22 @@ export async function createOracleApp(
     }
     throw new Error(
       `Env validation failed (${validated.errors.length} issues).`,
+    );
+  }
+
+  // Cross-field check the merged schema cannot express — the selected
+  // LLM_PROVIDER must have its API key set. Surfaced here so the message
+  // names the missing field exactly (`OPEN_ROUTER_API_KEY` / `NEBIUS_API_KEY`).
+  const llmKeyErrors = validateLlmProviderKey(validated.config);
+  if (llmKeyErrors.length > 0) {
+    for (const issue of llmKeyErrors) {
+      reportBootError(
+        logger,
+        `LLM provider env validation failed for '${issue.field}': ${issue.message}`,
+      );
+    }
+    throw new Error(
+      `Env validation failed (${llmKeyErrors.length} issue${llmKeyErrors.length === 1 ? '' : 's'}).`,
     );
   }
 

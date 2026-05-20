@@ -11,10 +11,6 @@ export {
   type UserPreferencesWriter,
 } from './service/user-preferences.service.js';
 export {
-  createUserPreferencesMiddleware,
-  type UserPreferencesMiddlewareOptions,
-} from './user-preferences-middleware.js';
-export {
   createSetUserPreferencesTool,
   type CreateSetUserPreferencesToolOptions,
 } from './user-preferences-tool.js';

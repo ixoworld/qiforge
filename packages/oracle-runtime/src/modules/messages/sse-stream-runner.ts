@@ -84,6 +84,36 @@ function safeParseToolContent(
   return null;
 }
 
+/**
+ * Unwrap the args object emitted on `on_tool_start.data.input`. MCP tools
+ * surface their args as `{ input: "<json-string>" }` because their schema
+ * accepts a single stringified payload — parse the inner JSON so the
+ * frontend sees the real fields. For native tools, `input` is already
+ * the parsed args object and is returned as-is.
+ */
+function extractToolArgs(input: unknown): Record<string, unknown> | undefined {
+  if (input == null || typeof input !== 'object' || Array.isArray(input)) {
+    return undefined;
+  }
+  const obj = input as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  if (
+    keys.length === 1 &&
+    keys[0] === 'input' &&
+    typeof obj.input === 'string'
+  ) {
+    try {
+      const parsed: unknown = JSON.parse(obj.input);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON — fall through and return the wrapper as-is.
+    }
+  }
+  return obj;
+}
+
 export interface StreamRunInput {
   payload: SendMessagePayload & {
     msgFromMatrixRoom?: boolean;
@@ -183,13 +213,32 @@ export class SseStreamRunner {
 
           for await (const evt of stream) {
             if (abortController.signal.aborted) break;
-            const { data, event } = evt as {
+            const { data, event, run_id, name } = evt as {
               data: unknown;
               event: string;
+              run_id: string;
+              name?: string;
             };
+
+            if (event === 'on_tool_start') {
+              this.handleToolStart(
+                run_id,
+                name ?? 'tool',
+                data as { input: unknown },
+                sessionId,
+                requestId,
+                agActionNames,
+                toolCallMap,
+                actionCallMap,
+                res,
+                abortController,
+              );
+              continue;
+            }
 
             if (event === 'on_tool_end') {
               this.handleToolEnd(
+                run_id,
                 data as { output: ToolMessage },
                 toolCallMap,
                 actionCallMap,
@@ -202,12 +251,8 @@ export class SseStreamRunner {
             if (event === 'on_chat_model_stream') {
               const chunkContent = this.handleChatStream(
                 data as { chunk: AIMessageChunk },
-                payload,
                 sessionId,
                 requestId,
-                agActionNames,
-                toolCallMap,
-                actionCallMap,
                 res,
                 abortController,
               );
@@ -260,7 +305,68 @@ export class SseStreamRunner {
     }
   }
 
+  /**
+   * Fires when an agent invokes a tool. `data.input` carries the fully
+   * parsed args — the right place to emit the `isRunning` event with
+   * complete args. We key the map by `run_id` from the event envelope so
+   * the matching `on_tool_end` (which shares the same `run_id`) can pair
+   * with it regardless of how the model formatted the original
+   * `tool_call_id`.
+   */
+  private handleToolStart(
+    runId: string,
+    toolName: string,
+    data: { input: unknown },
+    sessionId: string,
+    requestId: string,
+    agActionNames: Set<string>,
+    toolCallMap: Map<string, ToolCallEvent>,
+    actionCallMap: Map<string, ActionCallEvent>,
+    res: Response,
+    abortController: AbortController,
+  ): void {
+    const args = extractToolArgs(data.input);
+    const isAction = agActionNames.has(toolName);
+
+    if (isAction) {
+      const actionCallEvent = new ActionCallEvent({
+        requestId,
+        sessionId,
+        toolCallId: runId,
+        toolName,
+        args,
+        status: 'isRunning',
+      });
+      this.writeSse(
+        res,
+        abortController,
+        actionCallEvent.eventName,
+        actionCallEvent.payload,
+      );
+      actionCallMap.set(runId, actionCallEvent);
+      return;
+    }
+
+    const toolCallEvent = new ToolCallEvent({
+      requestId,
+      sessionId,
+      toolName,
+      args: args ?? {},
+      status: 'isRunning',
+    });
+    (toolCallEvent.payload.args as Record<string, unknown>).toolName = toolName;
+    toolCallEvent.payload.eventId = runId;
+    this.writeSse(
+      res,
+      abortController,
+      toolCallEvent.eventName,
+      toolCallEvent.payload,
+    );
+    toolCallMap.set(runId, toolCallEvent);
+  }
+
   private handleToolEnd(
+    runId: string,
     data: { output: ToolMessage },
     toolCallMap: Map<string, ToolCallEvent>,
     actionCallMap: Map<string, ActionCallEvent>,
@@ -268,12 +374,11 @@ export class SseStreamRunner {
     abortController: AbortController,
   ): void {
     const toolMessage = data.output;
-    const toolCallId = toolMessage.tool_call_id;
 
-    const actionCallEvent = actionCallMap.get(toolCallId);
+    const actionCallEvent = actionCallMap.get(runId);
     if (actionCallEvent) {
       actionCallEvent.payload.output = emojify(toolMessage.content.toString());
-      actionCallEvent.payload.toolCallId = toolCallId;
+      actionCallEvent.payload.toolCallId = runId;
       const parsed = safeParseToolContent(toolMessage.content);
       if (parsed?.success === false || parsed?.error) {
         actionCallEvent.payload.status = 'error';
@@ -288,34 +393,37 @@ export class SseStreamRunner {
         actionCallEvent.eventName,
         actionCallEvent.payload,
       );
-      actionCallMap.delete(toolCallId);
+      actionCallMap.delete(runId);
       return;
     }
 
-    const toolCallEvent = toolCallMap.get(toolCallId);
+    const toolCallEvent = toolCallMap.get(runId);
     if (!toolCallEvent) return;
     toolCallEvent.payload.output = emojify(toolMessage.content);
     toolCallEvent.payload.status = 'done';
     (toolCallEvent.payload.args as Record<string, unknown>).toolName =
       toolMessage.name;
-    toolCallEvent.payload.eventId = toolCallId;
+    toolCallEvent.payload.eventId = runId;
     this.writeSse(
       res,
       abortController,
       toolCallEvent.eventName,
       toolCallEvent.payload,
     );
-    toolCallMap.delete(toolCallId);
+    toolCallMap.delete(runId);
   }
 
+  /**
+   * Emits reasoning + text chunks. Tool-call emission has moved to
+   * `handleToolStart` (which fires on `on_tool_start` with full,
+   * finalized args) — the chunk's partial `tool_calls` deltas are
+   * intentionally ignored here to avoid emitting an `isRunning` event
+   * with empty args before the model finishes producing the call.
+   */
   private handleChatStream(
     data: { chunk: AIMessageChunk },
-    payload: { msgFromMatrixRoom?: boolean },
     sessionId: string,
     requestId: string,
-    agActionNames: Set<string>,
-    toolCallMap: Map<string, ToolCallEvent>,
-    actionCallMap: Map<string, ActionCallEvent>,
     res: Response,
     abortController: AbortController,
   ): string | undefined {
@@ -352,47 +460,6 @@ export class SseStreamRunner {
         reasoningEvent.payload,
       );
     }
-
-    chunk.tool_calls?.forEach((tool) => {
-      if (!tool.name.trim() || !tool.id) return;
-      const isAction = agActionNames.has(tool.name);
-      if (isAction) {
-        const actionCallEvent = new ActionCallEvent({
-          requestId,
-          sessionId,
-          toolCallId: tool.id,
-          toolName: tool.name,
-          args: undefined,
-          status: 'isRunning',
-        });
-        this.writeSse(
-          res,
-          abortController,
-          actionCallEvent.eventName,
-          actionCallEvent.payload,
-        );
-        actionCallMap.set(tool.id, actionCallEvent);
-      } else {
-        const toolCallEvent = new ToolCallEvent({
-          requestId,
-          sessionId,
-          toolName: 'toolCall',
-          args: {},
-          status: 'isRunning',
-        });
-        toolCallEvent.payload.args = tool.args;
-        (toolCallEvent.payload.args as Record<string, unknown>).toolName =
-          tool.name;
-        toolCallEvent.payload.eventId = tool.id;
-        this.writeSse(
-          res,
-          abortController,
-          toolCallEvent.eventName,
-          toolCallEvent.payload,
-        );
-        toolCallMap.set(tool.id, toolCallEvent);
-      }
-    });
 
     const content = chunk.content;
     if (!content) return undefined;

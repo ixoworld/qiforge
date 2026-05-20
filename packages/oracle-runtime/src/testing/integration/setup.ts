@@ -31,4 +31,9 @@ const packageRoot = resolve(__dirname, '../../..');
 // reads. Missing file is silently tolerated (CI provides env via secrets).
 dotenvConfig({ path: resolve(packageRoot, '.env.integration') });
 
+// Silence @ixo/logger (winston) info/debug spam in integration runs. The
+// logger is a singleton that reads LOG_LEVEL at construction, so this must
+// land before any test module imports it. Honors a caller-provided value.
+process.env.LOG_LEVEL ??= 'warn';
+
 expect.extend(langchainMatchers);

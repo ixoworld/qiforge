@@ -56,26 +56,6 @@ export class CreateChatSessionDto extends UserAuthDto {
   @IsOptional()
   slackThreadTs?: string;
 
-  @IsString()
-  @IsOptional()
-  oracleToken?: string;
-
-  @IsString()
-  @IsOptional()
-  userToken?: string;
-
-  @IsString()
-  @IsOptional()
-  oracleHomeServer?: string;
-
-  @IsString()
-  @IsOptional()
-  userHomeServer?: string;
-
-  @IsString()
-  @IsOptional()
-  ucanInvocation?: string;
-
   /** Override the roomId stored on the session (e.g. task-specific room). */
   @IsString()
   @IsOptional()

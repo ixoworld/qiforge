@@ -20,25 +20,30 @@
  * from the unit-test runtime so they validate the same wiring code that
  * production goes through.
  */
-import type { AddressInfo } from 'node:net';
-import { Logger } from '@nestjs/common';
 import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
-import { createOracleApp, type OracleApp, type PluginStatusChangeEvent } from '../../bootstrap/create-oracle-app.js';
+import { type DynamicModule, type Type } from '@nestjs/common';
+// import { Logger } from '@nestjs/common';
+import type { AddressInfo } from 'node:net';
+import {
+  createOracleApp,
+  type OracleApp,
+  type PluginStatusChangeEvent,
+} from '../../bootstrap/create-oracle-app.js';
 import {
   resolvePlugins,
   type FeatureToggle,
 } from '../../bootstrap/plugin-loader.js';
 import type { MainAgentHooks } from '../../graph/main-agent-types.js';
 import { getProviderChatModel } from '../../llm/llm-provider.js';
+import { buildMetaTools } from '../../meta-tools/index.js';
 import type { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   AuthExcludedRoute,
   ChatOpenAIFields,
-  Logger as PluginLogger,
   ModelRole,
   OracleConfig,
   OracleIdentity,
-  PluginManifest,
+  Logger as PluginLogger,
   ReadonlyState,
   RuntimeContext,
   UcanDelegation,
@@ -51,11 +56,6 @@ import {
   SubAgentRegistry,
   ToolRegistry,
 } from '../../registries/index.js';
-import { buildPluginContext } from '../../runtime-context/build-plugin.js';
-import {
-  buildRuntimeContext,
-  type RunConfig,
-} from '../../runtime-context/build-runtime.js';
 import type {
   AmbientServices,
   EmitAdapter,
@@ -64,7 +64,11 @@ import type {
   SecretsAdapter,
   UcanAdapter,
 } from '../../runtime-context/ambient.js';
-import type { Type, DynamicModule } from '@nestjs/common';
+import { buildPluginContext } from '../../runtime-context/build-plugin.js';
+import {
+  buildRuntimeContext,
+  type RunConfig,
+} from '../../runtime-context/build-runtime.js';
 
 /**
  * Capability shape exposed to tests on the `RuntimeContext`. Matches the
@@ -193,7 +197,12 @@ export async function createIntegrationOracle(
     errors: [],
   };
 
-  const logger = opts.logger ?? new Logger('createIntegrationOracle');
+  const logger = opts.logger ?? {
+    log: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
 
   // Default `resolveModel` swaps the production main/subagent models for the
   // PR-tier test pair (spec §7). Caller-supplied hooks merge on top — any
@@ -355,7 +364,12 @@ export interface IntegrationRuntime {
 export async function createIntegrationRuntime(
   opts: CreateIntegrationRuntimeOptions,
 ): Promise<IntegrationRuntime> {
-  const logger = opts.logger ?? new Logger('createIntegrationRuntime');
+  const logger = opts.logger ?? {
+    log: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+    debug: () => undefined,
+  };
   const config = opts.config ?? (process.env as Record<string, unknown>);
 
   // Stringify the config for plugin-loader autoDetect probes — `process.env`
@@ -498,9 +512,19 @@ export async function createIntegrationRuntime(
     });
 
   const sharedBuildCtx = buildCtxFor('__integration__');
-  const collectedTools = await tools.collect(sharedBuildCtx);
+  const pluginCollectedTools = await tools.collect(sharedBuildCtx);
   const collectedSubAgents = await subAgents.collect(sharedBuildCtx);
   const collectedMiddlewares = middlewares.collect(sharedBuildCtx);
+
+  // Meta-tools (`list_capabilities`, `load_capability`) are registered by
+  // the runtime at agent-build time in production — not by plugins. The
+  // Tier A harness wires them in here so direct `invokeTool` can reach
+  // them; same instance the agent would see at runtime.
+  const metaToolEntries = buildMetaTools({
+    manifestRegistry: manifests,
+    toolRegistry: tools,
+  }).map((tool) => ({ pluginName: '__meta__', tool }));
+  const collectedTools = [...pluginCollectedTools, ...metaToolEntries];
 
   const delegation: UcanDelegation = {
     raw: opts.delegation ?? '',
@@ -529,8 +553,13 @@ export async function createIntegrationRuntime(
     };
     const stateInput = {
       messages: [],
-      ...(opts.state ?? {}),
+      // Default: pre-load every resolved plugin so Tier A direct-invoke
+      // tests don't need to call `load_capability` before reaching the
+      // plugin's tools. Tests that exercise the on-demand-load flow itself
+      // (`list_capabilities`, `load_capability`) override this with
+      // `state: { loadedPlugins: new Set() }` for an empty-start scenario.
       loadedPlugins: loadedPluginNames,
+      ...(opts.state ?? {}),
     };
     return buildRuntimeContext(runConfig, ambient, stateInput);
   };
@@ -578,11 +607,7 @@ export async function createIntegrationRuntime(
         string,
         HookEntry<unknown, unknown> | undefined
       >;
-      const before1 = await runHook(
-        hookBag.beforeAgent,
-        state,
-        runtimeCtx,
-      );
+      const before1 = await runHook(hookBag.beforeAgent, state, runtimeCtx);
       if (before1 !== undefined) out.before = before1;
       const before2 = await runHook(hookBag.beforeModel, state, runtimeCtx);
       if (before2 !== undefined) out.before = before2;

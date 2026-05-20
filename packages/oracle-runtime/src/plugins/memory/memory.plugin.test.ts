@@ -1,9 +1,8 @@
-import { z } from 'zod';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { validateManifest } from '../../manifest/validator.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import { createTestRuntime } from '../../testing/create-test-runtime.js';
-import { MemoryPlugin } from './memory.plugin.js';
 import {
   MEMORY_ADD_MCP_NAME,
   MEMORY_CLEAR_MCP_NAME,
@@ -12,6 +11,7 @@ import {
   type MemoryMcpFactory,
   type UpstreamMcpTool,
 } from './memory-tools.js';
+import { MemoryPlugin } from './memory.plugin.js';
 
 const MEMORY_MCP_URL = 'https://memory.test/mcp';
 const MEMORY_ENGINE_URL = 'https://memory.test/api';
@@ -61,25 +61,25 @@ describe('MemoryPlugin', () => {
   it('declares MEMORY_MCP_URL and MEMORY_ENGINE_URL in its configSchema', () => {
     const plugin = new MemoryPlugin({ mcpFactory: stubFactory([]) });
     expect(plugin.configSchema).toBeDefined();
-    expect(plugin.configSchema!.safeParse({}).success).toBe(false);
+    expect(plugin.configSchema.safeParse({}).success).toBe(false);
+    expect(plugin.configSchema.safeParse({ MEMORY_MCP_URL }).success).toBe(
+      false,
+    );
     expect(
-      plugin.configSchema!.safeParse({ MEMORY_MCP_URL }).success,
-    ).toBe(false);
-    expect(
-      plugin.configSchema!.safeParse({
+      plugin.configSchema.safeParse({
         MEMORY_MCP_URL: 'not-a-url',
         MEMORY_ENGINE_URL,
       }).success,
     ).toBe(false);
     expect(
-      plugin.configSchema!.safeParse({
+      plugin.configSchema.safeParse({
         MEMORY_MCP_URL,
         MEMORY_ENGINE_URL,
       }).success,
     ).toBe(true);
   });
 
-  it('getRequestTools surfaces the upstream MCP tools (default selection: search + add + delete-episode)', async () => {
+  it('getRequestTools surfaces the upstream MCP tools (default selection: search + add + delete-episode + clear)', async () => {
     const upstream: UpstreamMcpTool[] = [
       fakeMcpTool(MEMORY_SEARCH_MCP_NAME),
       fakeMcpTool(MEMORY_ADD_MCP_NAME),
@@ -90,11 +90,14 @@ describe('MemoryPlugin', () => {
 
     expect(plugin.getSubAgents).toBeUndefined();
 
-    const tools = await plugin.getRequestTools!(ctxWithConfig());
+    // DEFAULT_MEMORY_TOOLS exposes `clear` to the main agent (destructive
+    // tool, main-agent-only — `main-agent.ts` filters it out for sub-agents).
+    const tools = await plugin.getRequestTools(ctxWithConfig());
     expect(tools.map((t) => t.name)).toEqual([
       MEMORY_SEARCH_MCP_NAME,
       MEMORY_ADD_MCP_NAME,
       MEMORY_DELETE_EPISODE_MCP_NAME,
+      MEMORY_CLEAR_MCP_NAME,
     ]);
   });
 
@@ -111,12 +114,14 @@ describe('MemoryPlugin', () => {
     const plugin = new MemoryPlugin({ mcpFactory: factoryFn });
 
     const ctx = ctxWithConfig();
-    const tools = await plugin.getRequestTools!(ctx);
+    const tools = await plugin.getRequestTools(ctx);
     expect(factoryFn).toHaveBeenCalledWith(MEMORY_MCP_URL);
 
     const search = tools.find((t) => t.name === MEMORY_SEARCH_MCP_NAME)!;
     const save = tools.find((t) => t.name === MEMORY_ADD_MCP_NAME)!;
-    const remove = tools.find((t) => t.name === MEMORY_DELETE_EPISODE_MCP_NAME)!;
+    const remove = tools.find(
+      (t) => t.name === MEMORY_DELETE_EPISODE_MCP_NAME,
+    )!;
 
     const searchResult = await search.handler(
       { query: 'morning routine', limit: 3 },
@@ -128,10 +133,7 @@ describe('MemoryPlugin', () => {
       limit: 3,
     });
 
-    await save.handler(
-      { episode_body: 'User prefers dark mode.' },
-      ctx,
-    );
+    await save.handler({ episode_body: 'User prefers dark mode.' }, ctx);
     expect(addInvoke).toHaveBeenCalledWith({
       episode_body: 'User prefers dark mode.',
     });
@@ -150,7 +152,7 @@ describe('MemoryPlugin', () => {
       selectedTools: [MEMORY_SEARCH_MCP_NAME, MEMORY_CLEAR_MCP_NAME],
     });
 
-    const tools = await plugin.getRequestTools!(ctxWithConfig());
+    const tools = await plugin.getRequestTools(ctxWithConfig());
     expect(tools.map((t) => t.name)).toEqual([
       MEMORY_SEARCH_MCP_NAME,
       MEMORY_CLEAR_MCP_NAME,
@@ -161,7 +163,7 @@ describe('MemoryPlugin', () => {
     const plugin = new MemoryPlugin({
       mcpFactory: () => async () => null,
     });
-    const tools = await plugin.getRequestTools!(ctxWithConfig());
+    const tools = await plugin.getRequestTools(ctxWithConfig());
     expect(tools).toEqual([]);
   });
 
@@ -199,46 +201,6 @@ describe('MemoryPlugin', () => {
     });
   });
 
-  it('middleware preloads userContext on the first model call and skips when already populated', async () => {
-    const stored = { identity: { name: 'Yousef' } };
-    const get = vi.fn(async () => stored);
-
-    const rt = await createTestRuntime({
-      plugins: [
-        new MemoryPlugin({
-          mcpFactory: stubFactory([]),
-          userContextReader: { get },
-        }),
-      ],
-      config: { MEMORY_MCP_URL, MEMORY_ENGINE_URL },
-    });
-
-    const loaded = await rt.invokeMiddleware(
-      'MemoryMiddleware',
-      {},
-      { context: { session: { roomId: '!room:ixo' } } },
-    );
-    expect(get).toHaveBeenCalledWith('!room:ixo');
-    expect(loaded.before).toEqual({ userContext: stored });
-
-    const alreadyPopulated = await rt.invokeMiddleware(
-      'MemoryMiddleware',
-      { userContext: { identity: { name: 'Pre-hydrated' } } },
-      { context: { session: { roomId: '!room:ixo' } } },
-    );
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(alreadyPopulated.before).toBeUndefined();
-
-    const noRoom = await rt.invokeMiddleware(
-      'MemoryMiddleware',
-      {},
-      { context: {} },
-    );
-    expect(get).toHaveBeenCalledTimes(1);
-    expect(noRoom.before).toBeUndefined();
-
-    await rt.close();
-  });
 
   it('exposes a `userProfile` shared-state accessor that reads from state.userContext', async () => {
     const plugin = new MemoryPlugin({ mcpFactory: stubFactory([]) });

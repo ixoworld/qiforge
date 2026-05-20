@@ -1,18 +1,12 @@
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
-  AgentMiddleware,
   MergedConfig,
-  PluginContext,
   PluginManifest,
   PluginTool,
   RuntimeContext,
   UserContextData,
 } from '../../plugin-api/types.js';
-import {
-  createMemoryMiddleware,
-  type UserContextReader,
-} from './memory-middleware.js';
 import {
   createDefaultMemoryMcpFactory,
   DEFAULT_MEMORY_TOOLS,
@@ -50,11 +44,6 @@ const manifest: PluginManifest = {
   stability: 'stable',
 };
 
-/** No-op reader — returned when the middleware has no upstream wired in. */
-const NOOP_READER: UserContextReader = {
-  get: async () => undefined,
-};
-
 export interface MemoryPluginOptions {
   /**
    * Override the MCP-tools factory. Defaults to an HTTP MCP client against
@@ -67,11 +56,6 @@ export interface MemoryPluginOptions {
    * `clear`, `add_oracle_knowledge`, etc.
    */
   selectedTools?: readonly string[];
-  /**
-   * Optional reader the middleware uses to populate `state.userContext`
-   * before the first model call.
-   */
-  userContextReader?: UserContextReader;
 }
 
 function resolveMemoryUrl(config: MergedConfig): string {
@@ -110,13 +94,10 @@ export class MemoryPlugin extends OraclePlugin {
 
   private readonly selectedTools: readonly string[];
 
-  private readonly userContextReader: UserContextReader;
-
   constructor(options: MemoryPluginOptions = {}) {
     super();
     this.mcpFactory = options.mcpFactory ?? createDefaultMemoryMcpFactory;
     this.selectedTools = options.selectedTools ?? DEFAULT_MEMORY_TOOLS;
-    this.userContextReader = options.userContextReader ?? NOOP_READER;
   }
 
   override autoDetect(env: NodeJS.ProcessEnv): boolean {
@@ -129,15 +110,6 @@ export class MemoryPlugin extends OraclePlugin {
     const memoryUrl = resolveMemoryUrl(rtCtx.config);
     const factory = this.mcpFactory(memoryUrl);
     return fetchMemoryTools(rtCtx, factory, this.selectedTools);
-  }
-
-  override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
-    return [
-      createMemoryMiddleware({
-        reader: this.userContextReader,
-        logger: ctx.logger,
-      }),
-    ];
   }
 
   override getSharedState(): Record<

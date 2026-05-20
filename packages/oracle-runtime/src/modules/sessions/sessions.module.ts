@@ -30,17 +30,13 @@ import { SessionsService } from './sessions.service.js';
     },
     {
       provide: SessionManagerService,
-      useFactory: (
-        syncService: UserMatrixSqliteSyncService,
-        memoryEngineService: MemoryEngineService | null,
-      ) => {
+      useFactory: (syncService: UserMatrixSqliteSyncService) => {
         return new SessionManagerService(
           syncService,
           MatrixManager.getInstance(),
-          memoryEngineService ?? undefined,
         );
       },
-      inject: [UserMatrixSqliteSyncService, MemoryEngineService],
+      inject: [UserMatrixSqliteSyncService],
     },
   ],
   exports: [SessionsService, SessionHistoryProcessor],

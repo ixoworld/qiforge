@@ -16,6 +16,7 @@ import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
+import { UserContextFetcher } from './user-context-fetcher.js';
 
 @Module({
   imports: [CheckpointStorageSyncModule, UcanModule],
@@ -28,16 +29,16 @@ import { SseStreamRunner } from './sse-stream-runner.js';
     RequestPreparer,
     AgentBuilder,
     SseStreamRunner,
+    UserContextFetcher,
     BatchInvoker,
     PostMessageSyncer,
     MatrixListenerBridge,
     {
-      // `MemoryEngineService` is OPTIONAL — `SessionManagerService` guards
-      // every call site with `if (this.memoryEngineService && ...)`. When
-      // `MEMORY_ENGINE_URL` isn't set, we provide `null` so Nest can still
-      // satisfy the SessionManagerService factory's inject list. The
-      // memory plugin still gates its OWN tool surface on the same env
-      // via its `autoDetect`/`configSchema`.
+      // `MemoryEngineService` is OPTIONAL. `UserContextFetcher` reads it
+      // each turn (cached for 3 min) to populate `state.userContext`
+      // before the agent is built. When `MEMORY_ENGINE_URL` isn't set,
+      // we provide `null` and the fetcher returns `undefined`. The memory
+      // plugin still gates its OWN tool surface via `autoDetect`/`configSchema`.
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
         const memoryEngineUrl =
@@ -50,17 +51,13 @@ import { SseStreamRunner } from './sse-stream-runner.js';
     },
     {
       provide: SessionManagerService,
-      useFactory: (
-        syncService: UserMatrixSqliteSyncService,
-        memoryEngineService: MemoryEngineService | null,
-      ) => {
+      useFactory: (syncService: UserMatrixSqliteSyncService) => {
         return new SessionManagerService(
           syncService,
           MatrixManager.getInstance(),
-          memoryEngineService ?? undefined,
         );
       },
-      inject: [UserMatrixSqliteSyncService, MemoryEngineService],
+      inject: [UserMatrixSqliteSyncService],
     },
   ],
   exports: [

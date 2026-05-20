@@ -1,9 +1,25 @@
+import type {
+  SearchEnhancedResponse,
+  UserContextData as TypedUserContextData,
+} from '@ixo/common';
 import { PromptTemplate } from '@langchain/core/prompts';
 import type {
   OracleIdentity,
   UserContextData,
 } from '../plugin-api/types.js';
 import type { UserPreferences } from './state.js';
+
+/**
+ * Keys of UserContextData rendered into the prompt. Single source of truth for
+ * both the section labels and the iteration order in buildContextBlock.
+ */
+type ContextSlot =
+  | 'identity'
+  | 'work'
+  | 'goals'
+  | 'interests'
+  | 'relationships'
+  | 'recent';
 
 /**
  * Composer inputs. Each field maps 1:1 to a slot in the base template.
@@ -52,7 +68,7 @@ Slack doesn't render markdown tables. When responding in a Slack session:
 `;
 
 /** Headers used for each populated memory-context sub-section. */
-const CONTEXT_SECTION_LABELS: Record<keyof UserContextSlots, string> = {
+const CONTEXT_SECTION_LABELS: Record<ContextSlot, string> = {
   identity: 'Personal identity',
   work: 'Work & professional',
   goals: 'Goals & aspirations',
@@ -61,58 +77,109 @@ const CONTEXT_SECTION_LABELS: Record<keyof UserContextSlots, string> = {
   recent: 'Recent activity',
 };
 
-interface UserContextSlots {
-  identity?: unknown;
-  work?: unknown;
-  goals?: unknown;
-  interests?: unknown;
-  relationships?: unknown;
-  recent?: unknown;
-}
-
 /**
- * Format a single memory-engine context section (facts + entity names).
- * Returns `null` when there is no usable content — the composer skips empty
- * sub-sections entirely instead of printing "no information available".
+ * Format a single memory-engine context section as mid-density rich content.
+ *
+ * Goal: enough high-level signal that the agent can converse without re-querying,
+ * but compact enough that six categorical sections don't blow up the prompt.
+ * The agent can always deep-dive via the search_memory_engine tool.
+ *
+ * Layout per section (in priority order):
+ *   1. **Key entities** with summaries — entity.summary contains the richest
+ *      multi-fact synthesis graphiti produces (e.g. "user had a 1:1 with Carlos
+ *      at 2pm today; user agreed to do the database migration in three phases").
+ *   2. **Facts** — short relationship-level bullets for breadth.
+ *   3. **Recent episodes** — raw source text, only when `includeEpisodes` is on.
+ *
+ * Returns `null` when the slot has no usable content — composer drops the
+ * sub-section entirely rather than emitting an empty header.
  */
-function formatContextSection(data: unknown): string | null {
-  if (!data || typeof data !== 'object') return null;
-  const obj = data as Record<string, unknown>;
-  if (Object.keys(obj).length === 0) return null;
+/**
+ * Render a single SearchEnhancedResponse slot. Dumps everything the memory
+ * engine returned — entities (with their multi-fact summaries), facts,
+ * episodes (raw source text), and communities (topic clusters). The server
+ * already caps result counts via per-query max_* settings, so no further
+ * truncation is needed here.
+ *
+ * Returns `null` for an empty/missing slot so the composer can skip the
+ * sub-section entirely instead of printing a bare header.
+ */
+function formatContextSection(
+  data: SearchEnhancedResponse | undefined,
+): string | null {
+  if (!data) return null;
+  const { entities, facts, episodes, communities } = data;
+  if (
+    !entities?.length &&
+    !facts?.length &&
+    !episodes?.length &&
+    !communities?.length
+  ) {
+    return null;
+  }
 
   const lines: string[] = [];
 
-  const facts = Array.isArray(obj.facts) ? obj.facts : [];
-  for (const f of facts) {
-    const fact =
-      typeof f === 'object' && f !== null && 'fact' in f
-        ? String(f.fact)
-        : null;
-    if (fact) lines.push(`- ${fact}`);
+  if (entities?.length) {
+    lines.push('_Key entities:_');
+    for (const e of entities) {
+      const labels = e.labels.filter((l) => l !== 'Entity').join('/');
+      const tag = labels ? ` (${labels})` : '';
+      const summary = e.summary?.trim();
+      lines.push(
+        summary ? `- **${e.name}**${tag}: ${summary}` : `- **${e.name}**${tag}`,
+      );
+    }
   }
 
-  const entities = Array.isArray(obj.entities) ? obj.entities : [];
-  const names = entities
-    .map((e) =>
-      typeof e === 'object' && e !== null && 'name' in e
-        ? String(e.name)
-        : null,
-    )
-    .filter(Boolean);
-  if (names.length > 0) lines.push(`- **Related:** ${names.join(', ')}`);
+  if (facts?.length) {
+    if (lines.length) lines.push('');
+    lines.push('_Facts:_');
+    for (const f of facts) {
+      const text = f.fact?.trim();
+      if (text) lines.push(`- ${text}`);
+    }
+  }
 
-  return lines.length > 0 ? lines.join('\n') : null;
+  if (episodes?.length) {
+    if (lines.length) lines.push('');
+    lines.push('_Episodes (raw):_');
+    for (const ep of episodes) {
+      const content = ep.content?.trim();
+      if (!content) continue;
+      const date = ep.created_at?.slice(0, 10) ?? '';
+      lines.push(date ? `- *${date}* — ${content}` : `- ${content}`);
+    }
+  }
+
+  if (communities?.length) {
+    if (lines.length) lines.push('');
+    lines.push('_Topic clusters:_');
+    for (const c of communities) {
+      const summary = c.summary?.trim();
+      lines.push(
+        summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`,
+      );
+    }
+  }
+
+  return lines.length ? lines.join('\n') : null;
 }
 
-/** Render the memory-context block — empty string when nothing is populated. */
+/**
+ * Render the memory-context block — empty string when nothing is populated.
+ *
+ * The runtime always feeds in the strongly-typed UserContextData shape from
+ * @ixo/common (see memory-engine.service.ts gatherUserContext), but the
+ * plugin-api surface keeps it as `Record<string, unknown>` to avoid forcing
+ * plugins to depend on the common package. Cast once at this boundary.
+ */
 function buildContextBlock(userContext: UserContextData | undefined): string {
   if (!userContext) return '';
-  const slots = userContext as UserContextSlots;
+  const typed = userContext as TypedUserContextData;
   const sections: string[] = [];
-  for (const key of Object.keys(CONTEXT_SECTION_LABELS) as Array<
-    keyof UserContextSlots
-  >) {
-    const formatted = formatContextSection(slots[key]);
+  for (const key of Object.keys(CONTEXT_SECTION_LABELS) as ContextSlot[]) {
+    const formatted = formatContextSection(typed[key]);
     if (formatted) {
       sections.push(`**${CONTEXT_SECTION_LABELS[key]}**\n${formatted}`);
     }

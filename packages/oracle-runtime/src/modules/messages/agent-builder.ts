@@ -1,5 +1,5 @@
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { type BaseMessage } from 'langchain';
 import type {
   CompiledMainAgent,
@@ -8,9 +8,11 @@ import type {
 import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
+import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
+import { UserContextFetcher } from './user-context-fetcher.js';
 
 export interface BuildAgentArgs {
   payload: SendMessageRequest;
@@ -44,11 +46,17 @@ export interface BuiltAgent {
  * `hooks.checkpointerForUser` to `createOracleApp` keep their override;
  * the runtime's per-user SQLite saver is the default fallback.
  *
- * Reads the prior checkpoint so build-time decisions in `createMainAgent`
- * (which on-demand plugins are loaded, `userPreferences`/`userContext`
- * in the prompt, remembered `currentEntityDid`) see the same state the
- * graph will see at runtime. Without this preload, the first turn after
- * restart would expose no on-demand plugins and forget user preferences.
+ * `userContext` (Memory Engine batch) and `userPreferences` (Matrix room
+ * state) are fetched HERE — before `createMainAgent` — and merged into the
+ * build-time state so the system prompt includes them on turn 1.
+ * `UserContextFetcher` caches per room for 3 minutes; `UserPreferencesService`
+ * caches internally too. Both fall through to `priorState` if the fetch
+ * fails or the upstream is unconfigured.
+ *
+ * Reads the prior checkpoint for OTHER build-time decisions: which
+ * on-demand plugins are loaded (`state.loadedPlugins`) and the remembered
+ * `currentEntityDid`. Without this preload, the first turn after restart
+ * would expose no on-demand plugins.
  *
  * Per-request overrides from the payload (`metadata.editorRoomId`,
  * `metadata.spaceId`, `metadata.currentEntityDid`, `tools`, `agActions`)
@@ -59,7 +67,12 @@ export interface BuiltAgent {
  */
 @Injectable()
 export class AgentBuilder {
-  constructor(private readonly bundleHolder: OracleRuntimeBundleHolder) {}
+  private readonly logger = new Logger(AgentBuilder.name);
+
+  constructor(
+    private readonly bundleHolder: OracleRuntimeBundleHolder,
+    private readonly userContextFetcher: UserContextFetcher,
+  ) {}
 
   async build(
     args: BuildAgentArgs,
@@ -70,27 +83,14 @@ export class AgentBuilder {
     const hooks = bundle.hooks ?? {};
 
     // ────────────────────────────────────────────────────────────────────
-    // Prior state for the BUILD-TIME branches inside `createMainAgent`:
-    //   - which on-demand plugins are loaded (`state.loadedPlugins`)
-    //   - userPreferences / userContext / currentEntityDid in the prompt
-    //
-    // We read via `checkpointer.getTuple(config)` — this is the same call
-    // LangGraph itself makes inside `agent.getState()` (see langgraph's
-    // pregel/index.js `getState`: line 526 `const saved = await
-    // checkpointer.getTuple(config)`). Between invokes there are no
-    // pending writes, so `getTuple().checkpoint.channel_values` matches
-    // what `agent.getState(config).values` would return. Reading via the
-    // saver directly skips a redundant agent rebuild and one
-    // `_prepareStateSnapshot` materialisation pass.
-    //
-    // **TODO (verify in TASK-32e smoke):** confirm reading priorState via
-    // getTuple gives the same `loadedPlugins`/`userPreferences`/etc. that
-    // the agent sees post-merge. If it diverges, alternatives are:
-    //   (a) Drop the pre-read; build sees defaults. Lazy tools require
-    //       reload after every server restart.
-    //   (b) Build a throwaway agent → `getState()` → build real agent.
-    //   (c) Move prompt composition INSIDE the graph as a node so it
-    //       reads merged state directly.
+    // Prior state from the checkpoint — used for build-time decisions that
+    // must survive restarts: `loadedPlugins` (so on-demand capabilities
+    // don't need to be re-loaded each session) and `currentEntityDid`.
+    // We read via `checkpointer.getTuple(config)` — the same call
+    // LangGraph itself makes inside `agent.getState()`. Between invokes
+    // there are no pending writes so the tuple's `channel_values` matches
+    // what `getState().values` would return; reading directly skips a
+    // redundant agent rebuild + state-snapshot materialization.
     // ────────────────────────────────────────────────────────────────────
     let checkpointer: BaseCheckpointSaver | undefined;
     if (hooks.checkpointerForUser) {
@@ -111,6 +111,58 @@ export class AgentBuilder {
         // First message in a thread — no prior tuple. Continue with empty state.
       }
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Fetch userContext + userPreferences BEFORE building the agent so the
+    // system prompt sees both on turn 1. The previous middleware approach
+    // wrote them mid-run, by which point the prompt was already locked.
+    // Both are best-effort: failures fall through to checkpointed values
+    // and the agent still works without enrichment.
+    // ────────────────────────────────────────────────────────────────────
+    this.logger.log(
+      `[AgentBuilder] resolving prompt enrichments — roomId=${prepared.roomId}, did=${payload.did}`,
+    );
+
+    const userPrefsService = UserPreferencesService.getInstance();
+    const [freshUserContext, freshUserPreferences] = await Promise.all([
+      this.userContextFetcher
+        .fetch({
+          roomId: prepared.roomId,
+          userDid: payload.did,
+          sessionId: prepared.sessionId,
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return undefined;
+        }),
+      userPrefsService.get(prepared.roomId).catch((err) => {
+        this.logger.warn(
+          `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return undefined;
+      }),
+    ]);
+
+    const userContext = freshUserContext ?? priorState.userContext;
+    const userPreferences = freshUserPreferences ?? priorState.userPreferences;
+
+    this.logger.log(
+      `[AgentBuilder] prompt enrichments resolved — userContext: ${
+        freshUserContext
+          ? `fresh (${Object.keys(freshUserContext).length} keys)`
+          : priorState.userContext
+            ? `checkpoint (${Object.keys(priorState.userContext).length} keys)`
+            : 'none'
+      }, userPreferences: ${
+        freshUserPreferences
+          ? 'fresh'
+          : priorState.userPreferences
+            ? 'checkpoint'
+            : 'none'
+      }`,
+    );
 
     const clientType: 'portal' | 'matrix' | 'slack' =
       payload.clientType ?? 'portal';
@@ -151,11 +203,13 @@ export class AgentBuilder {
         requestId: prepared.requestId,
         roomId: prepared.roomId,
       },
-      history: { userContext: priorState.userContext },
+      history: { userContext },
     };
 
     const buildTimeState: Partial<TMainAgentGraphState> = {
       ...priorState,
+      userContext,
+      userPreferences,
       editorRoomId: payload.metadata?.editorRoomId ?? priorState.editorRoomId,
       spaceId: payload.metadata?.spaceId ?? priorState.spaceId,
       currentEntityDid:
@@ -179,6 +233,8 @@ export class AgentBuilder {
       messages: inputMessages,
       config: { did: payload.did },
       client: clientType,
+      ...(userContext !== undefined && { userContext }),
+      ...(userPreferences !== undefined && { userPreferences }),
       ...(payload.metadata?.editorRoomId !== undefined && {
         editorRoomId: payload.metadata.editorRoomId,
       }),

@@ -1,7 +1,6 @@
 import type { DynamicModule, Type } from '@nestjs/common';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
-  AgentMiddleware,
   PluginContext,
   PluginManifest,
   PluginTool,
@@ -12,7 +11,6 @@ import {
   type UserPreferencesWriter,
 } from './service/user-preferences.service.js';
 import { UserPreferencesHttpModule } from './user-preferences-http.module.js';
-import { createUserPreferencesMiddleware } from './user-preferences-middleware.js';
 import { createSetUserPreferencesTool } from './user-preferences-tool.js';
 
 /** Service contract the plugin needs: read for the middleware, write for the tool. */
@@ -20,10 +18,15 @@ export type UserPreferencesPluginService = UserPreferencesReader &
   UserPreferencesWriter;
 
 /**
- * Loads per-room user preferences (preferred user name, agent name, language,
- * tone, formality, custom instructions) into `state.userPreferences` before
- * each model call, and exposes a `set_user_preferences` tool the agent can
- * call when the user asks to change how it behaves.
+ * Per-room user preferences plugin.
+ *
+ * - `state.userPreferences` is hydrated by `AgentBuilder` (via
+ *   `UserPreferencesService.getInstance().get(roomId)`) BEFORE the agent is
+ *   compiled so the system prompt sees the value on turn 1.
+ * - Exposes a `set_user_preferences` tool the agent calls when the user
+ *   asks to change behavioral preferences (tone, language, formality,
+ *   what to call the agent).
+ * - Ships `GET /user-preferences` via `getNestModules`.
  */
 export class UserPreferencesPlugin extends OraclePlugin {
   readonly name = 'user-preferences';
@@ -70,15 +73,6 @@ export class UserPreferencesPlugin extends OraclePlugin {
   ) {
     super();
     this.service = service;
-  }
-
-  override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
-    return [
-      createUserPreferencesMiddleware({
-        service: this.service,
-        logger: ctx.logger,
-      }),
-    ];
   }
 
   override getTools(ctx: PluginContext): PluginTool[] {

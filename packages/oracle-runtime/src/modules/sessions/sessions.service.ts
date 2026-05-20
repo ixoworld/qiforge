@@ -82,35 +82,6 @@ export class SessionsService {
           this.syncService.markUserInactive(data.did);
         });
 
-      // Memory engine auth — UCAN-only. The session is created without
-      // a memory invocation if no signing key is available; downstream
-      // memory writes will simply skip until UCAN is configured.
-      const oracleMatrixBaseUrl = this.configService
-        .getOrThrow<string>('MATRIX_BASE_URL')
-        .replace(/\/$/, '');
-
-      let memoryUcanInvocation: string | undefined;
-
-      if (this.ucanService?.hasSigningKey() && data.did) {
-        try {
-          const engineUrl = this.configService.getOrThrow('MEMORY_ENGINE_URL');
-          const invocation = await this.ucanService.createServiceInvocation(
-            engineUrl,
-            data.did,
-            'ixo:memory',
-          );
-          if (invocation) {
-            memoryUcanInvocation = invocation;
-          }
-        } catch (err) {
-          Logger.warn(
-            `[Session UCAN] Failed to create invocation: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-
-      const oracleHomeServer = oracleMatrixBaseUrl.replace(/^https?:\/\//, '');
-
       const session = await this.sessionManager.createSession({
         did: data.did,
         homeServer: data.homeServer,
@@ -118,9 +89,6 @@ export class SessionsService {
         oracleEntityDid,
         oracleDid: this.configService.getOrThrow('ORACLE_DID'),
         slackThreadTs: data.slackThreadTs,
-        oracleHomeServer,
-        userHomeServer: data.homeServer,
-        ucanInvocation: memoryUcanInvocation,
       });
       return session;
     } catch (error) {

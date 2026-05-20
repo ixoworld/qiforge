@@ -90,6 +90,8 @@ const validBaseEnv: NodeJS.ProcessEnv = {
   ORACLE_ENTITY_DID: 'did:ixo:oracle:test',
   SECP_MNEMONIC: 'word '.repeat(12).trim(),
   RPC_URL: 'http://localhost:26657',
+  // LLM_PROVIDER defaults to 'openrouter' — match by setting the OpenRouter key.
+  OPEN_ROUTER_API_KEY: 'sk-or-test',
 };
 
 // Shared defaults used by happy-path tests — `bundledPlugins: []` keeps the

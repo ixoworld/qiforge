@@ -2,6 +2,9 @@
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": ["**/.env"],
   "globalEnv": [
+    "TEST_USER_MNEMONIC",
+    "SQLITE_DATABASE_PATH",
+    "TEST_USER_DID",
     "NODE_ENV",
     "PORT",
     "LOG_LEVEL",

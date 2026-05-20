@@ -4,11 +4,13 @@ import {
   MemoryEngineService,
   SessionManagerService,
 } from '@ixo/common';
+import { MatrixManager } from '@ixo/matrix';
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type Cache } from 'cache-manager';
+import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import { MessagesService } from '../messages/messages.service.js';
 import { UcanService } from '../ucan/ucan.service.js';
 
@@ -152,9 +154,31 @@ export class SessionHistoryProcessor {
       return;
     }
 
+    // Speaker identities for graphiti's extractor. Without these, every
+    // message's episode body starts with the literal string "user" or
+    // "assistant" — graphiti's extraction prompt then creates entity nodes
+    // with those generic names and pins all extracted facts to them,
+    // polluting the graph. Real identities make the graph person-centric.
+    // Graphiti partitions memories per (user, oracle) via group_id, so a
+    // simple "Me"/"Oracle" fallback is collision-safe within a user's graph.
+    const prefs = await UserPreferencesService.getInstance()
+      .get(roomId)
+      .catch(() => undefined);
+    const userSpeakerLabel = await this.resolveUserDisplayName(
+      did,
+      prefs?.userName,
+      userHomeServer,
+    );
+    const oracleSpeakerLabel =
+      prefs?.agentName?.trim() ||
+      this.configService.get<string>('ORACLE_NAME')?.trim() ||
+      'Oracle';
+
     const transformedMessages = this.transformMessagesToMemoryEngineFormat(
       newMessages,
       session.title ?? '',
+      userSpeakerLabel,
+      oracleSpeakerLabel,
     );
 
     if (!this.ucanService?.hasSigningKey()) {
@@ -218,11 +242,18 @@ export class SessionHistoryProcessor {
 
   /**
    * Transform LangChain messages into the role/content shape the
-   * memory engine expects.
+   * memory engine expects. `userSpeakerLabel` and `oracleSpeakerLabel` become
+   * the `name` (and `role`) the memory engine sees for each message — these
+   * are what graphiti's extractor will use as the speaker entity in the graph,
+   * so they MUST be meaningful identities (not the literal strings
+   * "user"/"assistant"), otherwise every fact gets pinned to a generic
+   * placeholder node.
    */
   private transformMessagesToMemoryEngineFormat(
     messages: Array<{ type: string; content: string }>,
     sessionTitle: string,
+    userSpeakerLabel: string,
+    oracleSpeakerLabel: string,
   ): Array<{
     content: string;
     role_type: 'user' | 'assistant' | 'system';
@@ -238,29 +269,31 @@ export class SessionHistoryProcessor {
       switch (message.type) {
         case 'human':
           role_type = 'user';
-          role = 'user';
-          name = 'User';
+          role = userSpeakerLabel;
+          name = userSpeakerLabel;
           break;
         case 'ai':
           role_type = 'assistant';
-          role = 'assistant';
-          name = 'AI Assistant';
+          role = oracleSpeakerLabel;
+          name = oracleSpeakerLabel;
           break;
         case 'system':
           role_type = 'system';
-          role = 'system';
+          role = 'System';
           name = 'System';
           break;
         case 'tool':
           // Memory engine has no tool role — fold tool replies into assistant.
+          // Tool responses are framed as the oracle reporting back, so they
+          // share the oracle speaker label.
           role_type = 'assistant';
-          role = 'assistant';
-          name = 'Tool Response';
+          role = oracleSpeakerLabel;
+          name = oracleSpeakerLabel;
           break;
         default:
           role_type = 'user';
-          role = 'user';
-          name = 'User';
+          role = userSpeakerLabel;
+          name = userSpeakerLabel;
       }
 
       return {
@@ -271,5 +304,38 @@ export class SessionHistoryProcessor {
         source_description: `Chat Session: ${sessionTitle}`,
       };
     });
+  }
+
+  /**
+   * Resolve the user's display name for graphiti's speaker label. Cascade:
+   *   1. `userName` from preferences (caller passes it in — fetched once
+   *      alongside agentName)
+   *   2. Matrix profile displayname (looked up via @did-…:homeServer)
+   *   3. "Me" — safe fallback because each user has their own group_id
+   *      partition in graphiti, so a generic label can't collide cross-user.
+   */
+  private async resolveUserDisplayName(
+    did: string,
+    prefsUserName: string | undefined,
+    userHomeServer: string,
+  ): Promise<string> {
+    const fromPrefs = prefsUserName?.trim();
+    if (fromPrefs) return fromPrefs;
+
+    try {
+      const matrixUserId = `@did-${did.replace(/:/g, '-')}:${userHomeServer}`;
+      const displayName = await MatrixManager.getInstance()
+        .getDisplayName(matrixUserId);
+      const trimmed = displayName?.trim();
+      if (trimmed) return trimmed;
+    } catch (error) {
+      this.logger.warn(
+        `[resolveUserDisplayName] matrix lookup failed for ${did}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    return 'Me';
   }
 }

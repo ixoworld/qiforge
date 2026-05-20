@@ -74,3 +74,44 @@ export const baseEnvSchema = z.object({
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
+
+/**
+ * Cross-field check the merged schema cannot express on its own (we keep the
+ * base schema as a `ZodObject` so plugins can still `.extend()` on top of it
+ * via the schema composer).
+ *
+ * Enforces that the API key for the selected `LLM_PROVIDER` is set —
+ * otherwise the runtime would boot fine and every model call would fail at
+ * request time with a generic upstream 401. Returns a list of structured
+ * errors in the same shape as the schema composer's so they slot into the
+ * existing boot-error reporter without special-casing.
+ */
+export function validateLlmProviderKey(
+  env: Record<string, unknown>,
+): Array<{ field: string; message: string }> {
+  const errors: Array<{ field: string; message: string }> = [];
+  const provider = env.LLM_PROVIDER;
+  if (provider === 'nebius') {
+    const key = env.NEBIUS_API_KEY;
+    if (typeof key !== 'string' || key.length === 0) {
+      errors.push({
+        field: 'NEBIUS_API_KEY',
+        message:
+          "LLM provider 'nebius' selected via LLM_PROVIDER but NEBIUS_API_KEY is not set. " +
+          'Set NEBIUS_API_KEY, or switch LLM_PROVIDER to openrouter and set OPEN_ROUTER_API_KEY.',
+      });
+    }
+    return errors;
+  }
+  // Default (openrouter) — selected when LLM_PROVIDER is unset or 'openrouter'.
+  const key = env.OPEN_ROUTER_API_KEY;
+  if (typeof key !== 'string' || key.length === 0) {
+    errors.push({
+      field: 'OPEN_ROUTER_API_KEY',
+      message:
+        "LLM provider 'openrouter' selected via LLM_PROVIDER but OPEN_ROUTER_API_KEY is not set. " +
+        'Set OPEN_ROUTER_API_KEY, or switch LLM_PROVIDER to nebius and set NEBIUS_API_KEY.',
+    });
+  }
+  return errors;
+}

@@ -71,3 +71,5 @@ matrix-local-storage/
 matrix-storage/
 
 checkpoints/
+
+.data/

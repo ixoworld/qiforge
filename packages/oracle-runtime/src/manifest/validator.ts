@@ -126,6 +126,13 @@ export function validateManifest(
  * Cross-check `examples[].tool` references against the set of tool names
  * actually registered by this plugin. Run after the plugin's `getTools()`
  * has been invoked.
+ *
+ * **Lenient for MCP-sourced plugins**: when `registeredToolNames` is empty,
+ * the plugin's tools come from `getRequestTools` (fetched per-request from
+ * an upstream MCP server like sandbox or memory) — boot-time validation
+ * can't see them. We skip the cross-check in that case rather than
+ * false-flag every example. Plugins with boot-time tools still get the
+ * full check, so stale `examples[].tool` references are caught.
  */
 export function validateExamplesAgainstTools(
   manifest: PluginManifest,
@@ -134,6 +141,10 @@ export function validateExamplesAgainstTools(
 ): { errors: string[] } {
   const errors: string[] = [];
   if (!manifest.examples) return { errors };
+
+  // No boot-time tools registered for this plugin — tools come from
+  // request-time MCP fetch. We can't validate references at boot.
+  if (registeredToolNames.length === 0) return { errors };
 
   const known = new Set(registeredToolNames);
   manifest.examples.forEach((ex, i) => {
