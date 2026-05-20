@@ -44,7 +44,6 @@
  */
 import { parseDelegation } from '@ixo/ucan';
 
-import { Logger } from '@nestjs/common';
 import console from 'node:console';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -72,12 +71,6 @@ import {
   type ClearMemorySpaceInput,
   type SearchMemoryInput,
 } from './types.js';
-
-// Silence NestJS internal logs (route mappings, module init, etc.) — the
-// harness already passes a no-op `PluginLogger` to `createOracleApp`, but
-// Nest core instantiates its own `Logger` singletons that write to stdout
-// independently. `error` + `warn` stay on so real failures surface.
-Logger.overrideLogger(['error', 'warn']);
 
 const requiredEnv = [
   'MEMORY_MCP_URL',
@@ -205,7 +198,7 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     });
 
     // clear memory
-    const clearRes = await runtime.invokeTool(MEMORY_CLEAR_MCP_NAME, {
+    await runtime.invokeTool(MEMORY_CLEAR_MCP_NAME, {
       confirmed_deletion_from_user: true,
     } satisfies ClearMemorySpaceInput);
 
@@ -261,12 +254,6 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     expect(JSON.stringify(searchResult).length).toBeGreaterThan(20);
   }, 120_000);
 
-  // A3 — cross-user isolation is deferred. The memory engine isolates by
-  // issuer DID upstream; to test it we'd need a second on-chain test user
-  // (different mnemonic + verification method registered). Not provisioned
-  // today. Re-enable when a TEST_USER_2_* environment is provided.
-  test.skip('A3 — different user DID cannot see user A memories (deferred: needs second test user)', () => {});
-
   // ──────────────────────────────────────────────────────────────────────
   // Tier B — agent loop via ChatClient (real HTTP, real model)
   // ──────────────────────────────────────────────────────────────────────
@@ -293,8 +280,7 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     );
     expect(
       addCalls.length,
-      `expected at least one add_memory call; saw event types: ` +
-        events.map((e) => e.event).join(', '),
+      `expected at least one add_memory call; saw event types: ${events.map((e) => e.event).join(', ')}`,
     ).toBeGreaterThan(0);
 
     const aggregatedContent = addCalls
@@ -345,8 +331,8 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     ).toLowerCase();
     expect(
       responseText,
-      `cross-session recall did not surface any concrete artifact ` +
-        `(Carlos / three phases / cutover) — response was: "${responseText.slice(0, 200)}"`,
+      `cross-session recall did not surface any concrete artifact 
+        (Carlos / three phases / cutover) — response was: "${responseText.slice(0, 200)}"`,
     ).toMatch(/carlos|three phases|cutover|migration/);
   }, 180_000);
 
@@ -376,9 +362,7 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     );
     expect(
       calledSearch || askedForContext,
-      `first-contact: agent neither searched memory nor asked for context. ` +
-        `assistantText="${assistantText.slice(0, 200)}" ` +
-        `events=${events.map((e) => e.event).join(', ')}`,
+      `first-contact: agent neither searched memory nor asked for context. assistantText="${assistantText.slice(0, 200)}" events=${events.map((e) => e.event).join(', ')}`,
     ).toBe(true);
   }, 120_000);
 });
