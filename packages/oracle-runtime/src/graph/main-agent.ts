@@ -29,6 +29,7 @@ import {
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
+  createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares/index.js';
 import {
@@ -264,6 +265,7 @@ export async function createMainAgent(
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,
     }),
+    createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
     toolRetryMiddleware({ onFailure: (error) => error.message }),
     ...(hooks?.getRoomTitle
       ? [

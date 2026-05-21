@@ -198,6 +198,7 @@ describe('createMainAgent', () => {
     expect(names).toEqual([
       'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
+      'ToolRepetitionGuardMiddleware',
       'ToolRetryMiddleware',
       'PageContextMiddleware',
       'SafetyGuardrailMiddleware',

@@ -62,7 +62,7 @@ Each entry includes:
 - description: skill description
 - path: absolute sandbox path to the skill folder
 - source: "private" (your published skill) or "public" (registry)
-- cid: required by load_skill, exec, read_skill. Never use a CID as a file path.`;
+- cid: required by load_skill and by sandbox_run (when the run depends on the skill). Never use a CID as a file path.`;
 
 const SEARCH_DESCRIPTION = `Search the caller's published skills and the public IXO registry by query.
 

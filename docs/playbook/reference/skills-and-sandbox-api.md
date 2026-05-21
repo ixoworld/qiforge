@@ -80,14 +80,7 @@ These are the tools your oracle uses behind the scenes to execute skills in a se
 Downloads a skill into the sandbox so it can be used.
 
 - **Input:** `cid` — the Content ID from the skills registry
-- **What it does:** Fetches the skill archive, extracts it to `/workspace/skills/`, and makes it read-only
-
-### `read_skill(cid, path)`
-
-Reads a file from inside a loaded skill.
-
-- **Input:** `cid` + `path` (relative to the skill root, e.g., `SKILL.md` or `scripts/helper.py`)
-- **What it does:** Returns the contents of the file
+- **What it does:** Fetches the skill archive, extracts it to `/workspace/skills/<name>/`, and makes it read-only. After this, read or browse files with `sandbox_run` and plain shell (`cat`, `ls`, `grep`, `sed` against `/workspace/skills/<name>/...`).
 
 ### `sandbox_write(path, content)`
 

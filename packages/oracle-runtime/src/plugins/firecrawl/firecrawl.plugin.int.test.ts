@@ -115,7 +115,7 @@ describe('firecrawl plugin — integration', () => {
     test('B1 — "search the web for X" discovers firecrawl on-demand and calls call_firecrawl_agent', async () => {
       const stream = chatClient.stream(
         sharedSessionId,
-        'Please search the web for current news about the IXO Foundation and summarize what you find.',
+        'Please search the web for current portfolio for www.youssefhany.dev',
       );
       const events: SSEEvent[] = [];
       for await (const evt of stream) events.push(evt);

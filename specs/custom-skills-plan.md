@@ -50,7 +50,7 @@ graph LR
     SB --> US["/workspace/data/user-skills/<br/>(R2-backed, persistent)"]
     ST -- "cache by user DID" --> C[(NestJS cache-manager)]
     LG -- "sandbox_write to<br/>user-skills/&lt;slug&gt;/" --> SB
-    LG -- "read_skill / exec" --> SB
+    LG -- "sandbox_run (cat/ls/grep)" --> SB
 ```
 
 **Two moving parts only:**
@@ -80,7 +80,7 @@ Properties we get for free:
 - **No new keys / encryption surface** — whatever encryption-at-rest R2 / the sandbox provides for `/workspace/data/output/` is the same posture user skills inherit.
 - **Natural path** — agent's exec cwd is already `/workspace/data`, so it can write `user-skills/foo/SKILL.md` and reach the persistent location without ever typing `/workspace/data/`. Server-side code uses absolute paths to avoid any cwd ambiguity.
 
-The agent reads, writes, and deletes through the same sandbox MCP tools it already has access to (`sandbox_write`, `sandbox_run` / `exec`, `read_skill`).
+The agent reads, writes, and deletes through the same sandbox MCP tools it already has access to (`sandbox_write_file`, `sandbox_run` / `exec`). File reads are plain shell over `sandbox_run` (`cat`, `ls`, `grep`, `sed`) — there is no dedicated `read_skill` tool.
 
 ---
 
@@ -128,7 +128,7 @@ done 2>/dev/null
 
 Parse the output server-side, derive `{ slug, description, path }` per entry. The `mkdir -p` upfront makes first-time use idempotent — if no skills exist yet, the loop produces nothing and we return an empty list.
 
-**Caveat — secret scrubbing:** `execSafe` runs `scrubSecrets` on stdout/stderr before returning. If a SKILL.md description happens to contain a substring that matches a configured secret value, it'll be replaced in the listing output. Low-probability but worth noting; if it bites in practice, we move the listing to a path-bypass channel (e.g., `read_skill` per file) instead of `exec`.
+**Caveat — secret scrubbing:** `execSafe` runs `scrubSecrets` on stdout/stderr before returning. If a SKILL.md description happens to contain a substring that matches a configured secret value, it'll be replaced in the listing output. Low-probability but worth noting; if it bites in practice, we move the listing to a path-bypass channel (e.g., a per-file read tool) instead of `exec`.
 
 ### Cache
 
@@ -169,7 +169,7 @@ User skills come first in the merged array. Combined with the prompt's "user ski
 
 That means we don't need to wrap or intercept it. We just teach the agent in the prompt:
 
-> Skills with `source: 'user'` are already on disk. Skip `load_skill` and go straight to `read_skill`.
+> Skills with `source: 'user'` are already on disk. Skip `load_skill` and read SKILL.md directly with `sandbox_run` (`cat /workspace/data/user-skills/<slug>/SKILL.md`).
 
 Two consequences worth knowing about:
 
@@ -226,7 +226,7 @@ In `apps/app/src/graph/nodes/chat-node/prompt.ts`:
 
 2. **Canonical workflow (lines 200–226):**
    - Branch step 2 (Load): for `source: 'public'`, call `load_skill(cid)`. For `source: 'user'`, skip — the skill is already on disk.
-   - Step 3 (Read): same `read_skill` call works for both, just use the path from the listing.
+   - Step 3 (Read): `sandbox_run` with `cat <absolute-path>` works for both sources — use the absolute path from the listing.
 
 3. **Sandbox file system (lines 265–280):**
    - Add `/workspace/data/user-skills/` to the list. Mark it as **read/write and persistent** (contrast with `/workspace/skills/`, which is read-only and ephemeral).

@@ -48,6 +48,7 @@ export { z } from 'zod';
 export {
   createSubagentAsTool,
   createToolValidationMiddleware,
+  createToolRepetitionGuardMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
   createSummarizationMiddleware,
@@ -56,6 +57,7 @@ export type {
   AgentSpec,
   SubagentToolOptions,
   ToolValidationMiddlewareOptions,
+  ToolRepetitionGuardMiddlewareOptions,
   PageContextMiddlewareOptions,
   SafetyGuardrailMiddlewareOptions,
   SummarizationMiddlewareOptions,

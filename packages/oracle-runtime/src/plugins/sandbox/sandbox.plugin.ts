@@ -40,29 +40,42 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Sandbox',
   summary:
-    'Per-user Linux box for code execution. `sandbox_run` runs shell/python; `sandbox_write_file` writes raw bytes. Files under `/workspace/data/` persist across sessions; `/tmp` is scratch.',
+    'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those.',
   whenToUse: [
-    'Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<cid>/`.',
+    'Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`\'s `skillFiles`).',
+    'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
     'Hit a JSON/REST API — write curl or python in `sandbox_run`. Never use a web scraper for `/api/`, `/v1/`, `/v2/`, `/v3/` endpoints.',
     'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`).',
     'Re-read an attachment the user sent earlier — it was auto-archived to `/workspace/output/<filename>`; load from there.',
-    'Save a large or escape-sensitive blob (multi-line markdown, structured data) byte-perfect — use `sandbox_write_file` so quoting bugs do not corrupt it.',
-    'Always check the result envelope: `success === true` AND `exitCode === 0` before trusting `output`. On failure, inspect `error` (stderr).',
+    'Save a large or escape-sensitive blob (multi-line markdown, structured data) byte-perfect to `/workspace/data/...` — use `sandbox_write_file` so quoting bugs do not corrupt it.',
+    'Write a scratch / throwaway file (build artefacts, temp scripts you will execute then delete) — use `sandbox_run` with a here-doc: `cat > /tmp/<name> <<\'EOF\'\\n<content>\\nEOF`. Never use `sandbox_write_file` for `/tmp` or anywhere outside `/workspace/data/` — it will be rejected.',
+    'Always check the result envelope: `success === true` AND `exitCode === 0` before trusting `output`. On failure, READ the `error` text and change your approach — do not retry the same call with the same args.',
   ],
   whenNotToUse: [
     'The value is already inline in chat — just use it; opening the sandbox to echo it back wastes a turn.',
     'Fetching a URL the user just mentioned — prefer `process_file` so it auto-archives to `/workspace/output/`.',
     'A long human-readable page (blog, article, news) — use the Firecrawl agent.',
-    'Installing native deps in cwd (`pip install -e .`, `bun install`) — `.venv`/`node_modules` get persisted to R2 and slow every future session. Install under `/tmp` or inside the skill folder.',
+    'Installing native deps in cwd (`pip install -e .`, `bun install`) — `.venv`/`node_modules` get persisted to R2 and slow every future session. Install under `/tmp` (via `sandbox_run`) or inside the skill folder.',
+    '`sandbox_write_file` with a path outside `/workspace/data/` (e.g. `/tmp/foo`, `/workspace/tmp/foo`, `/workspace/output-only-if-data-prefix-missing`) — the validator hard-rejects this. For temp/scratch writes, switch to `sandbox_run`.',
   ],
   examples: [
+    {
+      user: 'Read the pptx skill\'s instructions before generating slides.',
+      thought:
+        "After `load_skill`, the SKILL.md path is the absolute path the response returned (e.g. /workspace/skills/pptx/SKILL.md). Cat it directly through sandbox_run — there's no separate read tool. Pass `cid` so the same skill context is in place.",
+      tool: 'sandbox_run',
+      args: {
+        code: 'cat /workspace/skills/pptx/SKILL.md',
+        cid: 'cid returned by list_skills / search_skills',
+      },
+    },
     {
       user: 'Run the price-forecast skill on the Q3 sales data.',
       thought:
         'Skill execution → pass the skill CID so user + oracle secrets are injected. Write the forecast to /workspace/data/output/ so the user can re-read it next turn.',
       tool: 'sandbox_run',
       args: {
-        code: 'cd /workspace/skills/$CID && bash run.sh "/workspace/output/q3-sales.csv" > /workspace/data/output/forecast.json',
+        code: 'cd /workspace/skills/price-forecast && bash run.sh "/workspace/output/q3-sales.csv" > /workspace/data/output/forecast.json',
         cid: 'cid from list/search skills',
       },
     },
@@ -83,6 +96,15 @@ const manifest: PluginManifest = {
       args: {
         path: '/workspace/data/output/draft-report.md',
         content: '# Q3 Report\n\n## Findings\n\n...',
+      },
+    },
+    {
+      user: 'Build a one-off JS script to transform some data and run it.',
+      thought:
+        'Scratch script — runs once, then discarded. /tmp is the right home, but sandbox_write_file refuses anything outside /workspace/data/. Use sandbox_run with a here-doc to write + execute in one shot.',
+      tool: 'sandbox_run',
+      args: {
+        code: "cat > /tmp/transform.js <<'EOF'\nconst fs = require('fs');\nconst rows = JSON.parse(fs.readFileSync('/workspace/output/data.json'));\nconsole.log(JSON.stringify(rows.map(r => ({...r, normalized: r.value / 100}))));\nEOF\nnode /tmp/transform.js > /workspace/data/output/transformed.json",
       },
     },
   ],
@@ -143,7 +165,7 @@ const ORACLE_MANAGEMENT_TOOL_PREFIX = 'oracle_';
  * Sandbox plugin.
  *
  * Surfaces every upstream sandbox MCP tool — `sandbox_run`, `sandbox_write_file`,
- * the `artifact_*` family, `read_skill` / `load_skill`, and the `oracle_*`
+ * the `artifact_*` family, `load_skill`, and the `oracle_*`
  * management tools — to the main agent. Each tool flows through verbatim
  * (name, description, schema all from upstream); the plugin's only job is to
  * authenticate the MCP connection and forward operator + per-user secrets in

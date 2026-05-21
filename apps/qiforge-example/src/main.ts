@@ -4,11 +4,11 @@ import {
   EditorPlugin,
   createOracleApp,
   type AuthExcludedRoute,
-  type OracleConfig,
 } from '@ixo/oracle-runtime';
 // import Redis from 'ioredis';
 import { Controller, Get, Logger, Module, RequestMethod } from '@nestjs/common';
 import * as sdk from 'matrix-js-sdk';
+import { config } from './config.js';
 import { WeatherPlugin } from './plugins/weather/index.js';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -40,36 +40,15 @@ const HOST_AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
 ];
 
 /**
- * QiForge example oracle.
- *
- * Identity + prompt are declared inline below. `entityDid` is sourced from
- * the `ORACLE_ENTITY_DID` env var by the runtime — don't put it here.
- *
  * Plugins with no constructor args flow in automatically from
  * `BUNDLED_PLUGINS` (each plugin's `autoDetect` inspects `process.env` and
  * opts in/out). We only instantiate the two plugins that take live runtime
- * objects (Redis + Matrix client) and pass them explicitly — the plugin
- * loader dedupes by name so our explicit instances override the bundled
- * defaults.
+ * objects (Matrix client) and pass them explicitly — the plugin loader
+ * dedupes by name so our explicit instances override the bundled defaults.
+ *
+ * Oracle identity + prompt live in `./config.ts` so integration tests can
+ * import them without triggering this file's top-level `bootstrap()` call.
  */
-const config: OracleConfig = {
-  name: 'QiForge Example Oracle',
-  org: 'IXO',
-  description: 'Reference QiForge oracle wired with every bundled plugin',
-  prompt: {
-    opening:
-      "You are the QiForge reference oracle, operated by IXO. You exist to show what a QiForge-built AI agent can do — every bundled plugin is wired in (memory, skills, sandbox, editor, web search, IXO entity lookups, browser actions, SaaS integrations, user preferences). Show, don't tell: when someone asks what you can do, demonstrate it by actually doing it.",
-    communicationStyle: [
-      '- Lead with action, not preamble. Skip "Sure!" and "I\'d be happy to" — just do the thing.',
-      "- Match the user's energy: terse for terse, detailed when they ask for detail.",
-      "- When you call a tool, explain in one sentence what you're doing and why — not three.",
-      '- If the user asks "what can you do?", pick one capability and demonstrate it, then offer the menu.',
-    ].join('\n'),
-    capabilities:
-      "I'm here to demonstrate what a QiForge oracle can do — memory across conversations, executing skills in a sandbox, editing collaborative pages, web search, IXO entity lookups, and SaaS integrations through Composio. Ask me anything and I'll show you the right capability rather than describing it.",
-  },
-};
-
 async function bootstrap(): Promise<void> {
   // const redisUrl = process.env.REDIS_URL;
   // const redis = redisUrl ? new Redis(redisUrl) : null;

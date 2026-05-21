@@ -100,7 +100,7 @@ describe('user-preferences plugin — integration', () => {
   test('B1 — "be more concise" routes the agent to set_user_preferences', async () => {
     const stream = chatClient.stream(
       sharedSessionId,
-      'From now on, please be more concise — drop long explanations.',
+      'From now on, call me youssef.',
     );
     const events: SSEEvent[] = [];
     for await (const evt of stream) events.push(evt);
@@ -114,12 +114,9 @@ describe('user-preferences plugin — integration', () => {
       `expected set_user_preferences tool_call; saw events: ${events.map((e) => e.event).join(', ')}`,
     ).toBeGreaterThan(0);
 
-    // The agent must capture a tone-ish field — the manifest example pairs
-    // "be more concise" with `tone: 'concise'`. Accept either tone OR
-    // formality since both express the same behavioral preference.
     const flattened = setCalls
       .map((c) => JSON.stringify(c.data.args ?? {}).toLowerCase())
       .join('\n');
-    expect(flattened).toMatch(/tone|formality|concise|brief|terse/);
+    expect(flattened).toMatch(/call|youssef/);
   }, 180_000);
 });

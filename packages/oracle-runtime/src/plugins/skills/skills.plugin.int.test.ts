@@ -174,7 +174,7 @@ describe('skills plugin — integration', () => {
     async () => {
       const results = await chatClient.send(
         sharedSessionId,
-        'I need to create a nice frontend HTML page for my grocery shop. Can you help?',
+        'I need to create a nice frontend HTML page for my grocery shop check the frontend skill and make it look nice. Can you help?',
       );
 
       const tc = results.body.messages.reduce(

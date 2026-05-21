@@ -137,7 +137,7 @@ export interface CreateIntegrationOracleOptions {
  * `skills`, etc. all behave exactly like production.
  */
 const TEST_MODEL_OVERRIDES: Partial<Record<string, string>> = {
-  main: 'moonshotai/kimi-k2.5',
+  main: 'moonshotai/kimi-k2.6',
   subagent: 'openai/gpt-oss-120b',
 };
 

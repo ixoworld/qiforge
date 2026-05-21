@@ -9,6 +9,11 @@ export {
 } from './tool-validation-middleware.js';
 
 export {
+  createToolRepetitionGuardMiddleware,
+  type ToolRepetitionGuardMiddlewareOptions,
+} from './tool-repetition-guard-middleware.js';
+
+export {
   createPageContextMiddleware,
   type PageContextMiddlewareOptions,
 } from './page-context-middleware.js';
