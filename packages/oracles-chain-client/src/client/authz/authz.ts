@@ -34,17 +34,21 @@ export class Authz {
       warn: (message: string, ...meta: unknown[]) => void;
     } = {
       info: (message: string, ...meta: unknown[]) => {
+        // eslint-disable-next-line no-console
         console.info(message, ...meta);
       },
       error: (message: string, ...meta: unknown[]) => {
+        // eslint-disable-next-line no-console
         console.error(message, ...meta);
       },
       warn: (message: string, ...meta: unknown[]) => {
+        // eslint-disable-next-line no-console
         console.warn(message, ...meta);
       },
     },
   ) {
     if (!process.env.RPC_URL && !process.env.NEXT_PUBLIC_RPC_URL) {
+      // eslint-disable-next-line no-console
       console.warn(
         'RPC_URL is not set, using default testnet RPC URL',
         'RPC_URL',

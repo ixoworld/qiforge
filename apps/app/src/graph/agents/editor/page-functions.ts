@@ -401,6 +401,7 @@ export async function updatePage(
       );
 
       const newContentMd = await serverEditor.blocksToMarkdownLossy(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- yXmlFragmentToBlocks returns the editor's internal Block[] but blocksToMarkdownLossy types the parameter via its own narrower generic; the value flows through unchanged
         newBlocks as any,
       );
       diff.content = { old: oldContentMd, new: newContentMd };

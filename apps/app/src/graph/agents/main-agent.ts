@@ -9,6 +9,7 @@ import {
   type ReactAgent,
   type StructuredTool,
 } from 'langchain';
+import { type BlobStoreService } from 'src/blob-store/blob-store.service';
 import { getConfig, isRedisEnabled } from 'src/config';
 import { type UcanService } from 'src/ucan/ucan.service';
 
@@ -175,6 +176,11 @@ interface InvokeMainAgentParams {
   config: IRunnableConfigWithRequiredFields;
   /** Optional UCAN service for MCP tool authorization */
   ucanService?: UcanService;
+  /** Optional blob store — used by tools that produce or consume long
+   * opaque strings (UCAN CARs, etc.) without round-tripping them through
+   * the LLM. Required for `mint_invocation` to return a blobId, and for
+   * `sandbox_write_blob` to look one up. */
+  blobStore?: BlobStoreService;
   /** Optional file processing service for the process_file tool */
   fileProcessingService?: FileProcessingService;
   /** Optional model override — a provider model ID (e.g. from getModelForRole). When set, overrides the default 'main' model. */
@@ -253,6 +259,7 @@ export const createMainAgent = async ({
   state,
   config,
   ucanService,
+  blobStore,
   fileProcessingService,
   modelOverride,
   tasksService,
@@ -804,6 +811,86 @@ Promise<ReactAgent<any>> => {
     });
   });
 
+  // sandbox_write_blob — companion to mint_invocation. Takes a blobId
+  // (server-side stored long string) and a sandbox path; looks up the blob
+  // in the BlobStore and calls the underlying sandbox_write_file MCP tool
+  // with the value. The LLM only ever passes the short blobId + path —
+  // long base64 strings (UCAN CARs etc.) never enter its context, so they
+  // can't be corrupted in transit.
+  const userDidForBlob = configurable.configs?.user?.did ?? '';
+  const sandboxWriteFileTool = wrappedSandboxTools.find(
+    (t) => t.name === 'sandbox_write_file',
+  );
+  let sandboxWriteBlobTool: StructuredTool | null = null;
+  if (blobStore && sandboxWriteFileTool && userDidForBlob) {
+    sandboxWriteBlobTool = new DynamicStructuredTool({
+      name: 'sandbox_write_blob',
+      description: `Write a server-stored blob to a file in the sandbox without ever paste-relaying the value through the LLM.
+
+Use this whenever a tool returns a \`blobId\` (e.g. \`mint_invocation\`'s response). Pass the blobId + the destination path; the runtime looks the value up server-side and calls sandbox_write_file with its content. The long opaque value (base64 CARs, JWTs, etc.) never enters the LLM context — eliminates string-corruption-in-relay as a failure mode.
+
+Inputs:
+  - blobId: short hex identifier returned by the producing tool (format \`blob_<16 hex chars>\`).
+  - path: destination path in the sandbox. Must be under \`/workspace/data/\` (the sandbox enforces this; writes elsewhere are rejected).
+
+Returns: \`{ success: true, path, bytesWritten }\` on success, \`{ success: false, error }\` on failure. Common errors: blob not found (re-mint and retry — for invocations this can happen on a multi-replica deployment if the lookup lands on a different process), invalid blobId format, path outside /workspace/data/.`,
+      schema: z.object({
+        blobId: z
+          .string()
+          .describe(
+            'The blobId returned by the tool that produced the value (e.g. mint_invocation). Format: `blob_<16 hex chars>`.',
+          ),
+        path: z
+          .string()
+          .describe(
+            'Destination path in the sandbox, e.g. `/workspace/data/<skill>/ucan_token`. Must be under /workspace/data/.',
+          ),
+      }),
+      func: async ({ blobId, path }) => {
+        if (!blobStore.isValidBlobId(blobId)) {
+          return JSON.stringify({
+            success: false,
+            error: `Invalid blobId format. Expected blob_<16 hex chars>, got "${blobId}".`,
+          });
+        }
+        if (typeof path !== 'string' || !path.startsWith('/workspace/data/')) {
+          return JSON.stringify({
+            success: false,
+            error: `path must be under /workspace/data/. Got: "${path}".`,
+          });
+        }
+        const blob = await blobStore.get({ userDid: userDidForBlob, blobId });
+        if (!blob) {
+          return JSON.stringify({
+            success: false,
+            error: `Blob "${blobId}" not found (expired, never existed, or owned by another user). Re-mint and retry — for single-use invocations this is expected if the blob's TTL elapsed.`,
+          });
+        }
+
+        try {
+          const result = await sandboxWriteFileTool.invoke({
+            path,
+            content: blob.value,
+            encoding: 'utf8',
+          });
+          return JSON.stringify({
+            success: true,
+            path,
+            bytesWritten: blob.value.length,
+            blobName: blob.name,
+            note: typeof result === 'string' ? result : undefined,
+          });
+        } catch (err) {
+          return JSON.stringify({
+            success: false,
+            error: `sandbox_write_file failed: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+      },
+    });
+    Logger.log('📦 Created sandbox_write_blob tool');
+  }
+
   // Reuse the ixo:skills invocation already minted for sandbox forwarding.
   // Listing/search tools forward this directly to ai-skills so the user's
   // own private (published) skills surface alongside the public registry.
@@ -813,6 +900,12 @@ Promise<ReactAgent<any>> => {
 
   const listSkillsTool = createListSkillsTool({ skillsUcan });
   const searchSkillsTool = createSearchSkillsTool({ skillsUcan });
+  // `mint_invocation` lives on the editor agent (it needs Y.Doc access to
+  // resolve a delegationCid → CAR without round-tripping the long base64
+  // string through the LLM). The main agent reaches it via call_editor_agent;
+  // it's listed in that subagent tool's `forwardTools` so the call/result
+  // surface in the main stream as native tool events.
+  const mintInvocationCapable = !!(ucanService && ucanService.hasSigningKey());
 
   // Conditionally create BlockNote (editor) agent tool if editorRoomId is provided
   let blockNoteAgentSpec:
@@ -829,6 +922,8 @@ Promise<ReactAgent<any>> => {
         userMatrixId,
         spaceId: state.spaceId,
         memoryAuth: pageMemoryAuth,
+        ucanService: mintInvocationCapable ? ucanService : undefined,
+        blobStore,
         userDid: configurable.configs.user.did,
         sessionId: configurable.thread_id,
       });
@@ -863,6 +958,8 @@ Promise<ReactAgent<any>> => {
       spaceId: state.spaceId,
       memoryAuth: pageMemoryAuth,
       transformSpec: withTimeContext,
+      ucanService: mintInvocationCapable ? ucanService : undefined,
+      blobStore,
       userDid: configurable.configs.user.did,
       sessionId: configurable.thread_id,
     });
@@ -911,6 +1008,7 @@ Promise<ReactAgent<any>> => {
           'update_page',
           'edit_block',
           'create_block',
+          'mint_invocation',
         ],
         onComplete: pageMemoryAuth
           ? (messages, task) =>
@@ -1035,6 +1133,7 @@ Promise<ReactAgent<any>> => {
         : []),
       ...channelMemoryTools,
       ...(applySandboxOutputToBlockTool ? [applySandboxOutputToBlockTool] : []),
+      ...(sandboxWriteBlobTool ? [sandboxWriteBlobTool] : []),
       ...(standaloneEditorTool ? [standaloneEditorTool] : []),
     ],
     middleware,

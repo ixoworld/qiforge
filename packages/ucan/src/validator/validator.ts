@@ -354,6 +354,7 @@ export async function createUCANValidator(
    */
 
   async function verifyDelegationChain(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's parsed-delegation type is internal/union-heavy; we treat it structurally
     delegation: any,
   ): Promise<ValidateResult> {
     const issuerDid: string = delegation.issuer.did();
@@ -402,6 +403,7 @@ export async function createUCANValidator(
       };
 
       try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's Verifier type expects a verifier object whose structural shape varies by SignatureAlgorithm; the wrappedVerifier we build above satisfies it at runtime
         if (await UCAN.verifySignature(ucanView, wrappedVerifier as any)) {
           sigValid = true;
           didKey = candidateKey;

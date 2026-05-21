@@ -4,6 +4,7 @@ export async function getUserOraclesClaimCollection(
   if (process.env.NODE_ENV === 'production') {
     return undefined;
   }
+  // eslint-disable-next-line no-console -- browser-reachable file; @ixo/logger uses node:util and breaks webpack frontend builds (see package CLAUDE.md)
   console.warn(
     '[Authz] getUserOraclesClaimCollection is not implemented',
     'getUserOraclesClaimCollection',
@@ -11,6 +12,7 @@ export async function getUserOraclesClaimCollection(
     'userAddress',
     userAddress,
   );
+  // eslint-disable-next-line no-console
   console.warn(
     '[Authz] getUserOraclesClaimCollection returning hardcoded value',
   );

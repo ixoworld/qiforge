@@ -6,6 +6,7 @@ import {
   type AgActionDto,
   type BrowserToolCallDto,
 } from 'src/messages/dto/send-message.dto';
+import { type BlobStoreService } from 'src/blob-store/blob-store.service';
 import { type UcanService } from 'src/ucan/ucan.service';
 import { type FileProcessingService } from 'src/messages/file-processing.service';
 import { type TasksService } from 'src/tasks/task.service';
@@ -39,6 +40,7 @@ export interface SendMessageOptions {
   currentEntityDid?: string;
   clientType?: 'matrix' | 'slack';
   ucanOptions?: UCANOptions;
+  blobStore?: BlobStoreService;
   fileProcessingService?: FileProcessingService;
   spaceId?: string;
   tasksService?: TasksService;
@@ -61,6 +63,7 @@ export interface StreamMessageOptions {
   clientType?: 'matrix' | 'slack';
   agActions?: AgActionDto[];
   ucanOptions?: UCANOptions;
+  blobStore?: BlobStoreService;
   fileProcessingService?: FileProcessingService;
   spaceId?: string;
   tasksService?: TasksService;
@@ -80,6 +83,7 @@ export class MainAgentGraph {
       currentEntityDid,
       clientType,
       ucanOptions,
+      blobStore,
       fileProcessingService,
       spaceId,
       tasksService,
@@ -138,6 +142,7 @@ export class MainAgentGraph {
         },
       },
       ucanService: ucanOptions?.ucanService,
+      blobStore,
       fileProcessingService,
       modelOverride: configModelOverride,
       tasksService,
@@ -185,6 +190,7 @@ export class MainAgentGraph {
       clientType = 'portal',
       agActions,
       ucanOptions,
+      blobStore,
       fileProcessingService,
       spaceId,
       tasksService,
@@ -245,6 +251,7 @@ export class MainAgentGraph {
         },
       },
       ucanService: ucanOptions?.ucanService,
+      blobStore,
       fileProcessingService,
       tasksService,
     });

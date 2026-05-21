@@ -11,6 +11,9 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { Cache } from 'cache-manager';
 import helmet from 'helmet';
+import { totalmem, freemem } from 'node:os';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 import { AppModule } from './app.module';
 import { type ENV, isRedisEnabled } from './config';
 import { UcanService } from './ucan/ucan.service';
@@ -19,6 +22,68 @@ import { initModelPricingCache } from './graph/llm-provider';
 import { SecretsService } from './secrets/secrets.service';
 import { UserMatrixSqliteSyncService } from './user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service';
 import { UserPreferencesService } from './user-preferences/user-preferences.service';
+
+// --- DEBUG: event-loop + memory monitor (concurrency repro) ----------------
+// Off by default. Enable with `ENABLE_PERF_LOGS=true` in the environment.
+// Runs at module-load time (before NestJS bootstrap) so we read the raw
+// env var directly — the Zod-validated config isn't available yet.
+//
+// When enabled, every 5s logs one line with:
+//   • Event loop:   max / p99 / mean lag. >1000ms = same condition that fails
+//                   the prod 1s liveness probe.
+//   • V8 heap:      heapUsed / heapTotal / heapLimit (the --max-old-space-size
+//                   ceiling). V8 throws fatal "JS heap out of memory" near
+//                   100% of heapLimit.
+//   • rss:          Resident set — what the kernel cgroup-OOM-killer measures.
+//                   Container limit is 1.5 GiB in testnet; kernel SIGKILLs the
+//                   container when rss exceeds that.
+//   • external:     C++ side of V8 (includes arrayBuffers + native objects
+//                   like sqlite handles, Olm sessions held by JS).
+//   • arrayBuffers: Subset of external — typed-array / ArrayBuffer / Buffer
+//                   memory. If external is high but arrayBuffers is low, the
+//                   pressure is from native modules (Olm crypto, better-sqlite3).
+//                   If arrayBuffers is high, it's from JS-managed buffers (MCP
+//                   responses, message decryption staging, etc.).
+//   • sysFree/sysTotal: cgroup-aware view of container memory (Node ≥16 honours
+//                   the container limit, so totalMB is the cgroup limit and
+//                   freeMB is what's left for any allocation, JS or native).
+// Logged at WARN if event-loop lag ≥1000ms OR any one of:
+//   - heapUsed ≥ 80% of heapLimit (V8 OOM risk)
+//   - rss      ≥ 90% of sysTotal  (kernel OOM risk)
+// Otherwise LOG so we get a continuous trail. Modeled on the recording-bot's
+// memory-profiler.
+if (process.env.ENABLE_PERF_LOGS === 'true') {
+  const eventLoopMonitor = monitorEventLoopDelay({ resolution: 50 });
+  eventLoopMonitor.enable();
+  setInterval(() => {
+    const max = Math.round(eventLoopMonitor.max / 1e6);
+    const p99 = Math.round(eventLoopMonitor.percentile(99) / 1e6);
+    const mean = Math.round(eventLoopMonitor.mean / 1e6);
+    eventLoopMonitor.reset();
+
+    const mem = process.memoryUsage();
+    const heapLimit = getHeapStatistics().heap_size_limit;
+    const sysTotal = totalmem();
+    const sysFree = freemem();
+    const mb = (n: number): number => Math.round(n / 1024 / 1024);
+    const heapPct = Math.round((mem.heapUsed / heapLimit) * 100);
+    const rssPct = Math.round((mem.rss / sysTotal) * 100);
+
+    const line =
+      `[lag] max=${max}ms p99=${p99}ms mean=${mean}ms | ` +
+      `heap=${mb(mem.heapUsed)}/${mb(mem.heapTotal)}/${mb(heapLimit)}MB (${heapPct}%) ` +
+      `rss=${mb(mem.rss)}MB (${rssPct}% of cgroup) ` +
+      `external=${mb(mem.external)}MB arrBuf=${mb(mem.arrayBuffers)}MB ` +
+      `sysFree=${mb(sysFree)}/${mb(sysTotal)}MB`;
+
+    if (max >= 1000 || heapPct >= 80 || rssPct >= 90) {
+      Logger.warn(line, 'EventLoopMonitor');
+    } else {
+      Logger.log(line, 'EventLoopMonitor');
+    }
+  }, 5000).unref();
+}
+// --------------------------------------------------------------------------
 
 async function bootstrap(): Promise<void> {
   // await migrate();

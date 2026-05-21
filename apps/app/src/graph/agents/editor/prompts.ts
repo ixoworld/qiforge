@@ -98,7 +98,9 @@ You have access to tools for editing collaborative documents backed by Y.js CRDT
 - \`read_flow_context\` — **CALL FIRST**: flow metadata, owner DID, doc type, schema version, block/node counts
 - \`read_flow_status\` — execution state of flow nodes, runtime state (who did what, when, evaluation status)
 - \`read_block_history\` — audit trail + UCAN invocations for a specific block
-- \`read_permissions\` — UCAN delegation chain (who has what capabilities, filter by DID or action)
+- \`read_permissions\` — UCAN **delegations** (who has what capabilities, filter by DID or action). For inspection only. Do NOT use this to fetch a delegation CAR for minting — \`mint_invocation\` does the lookup itself.
+- \`read_invocations\` — previously-minted UCAN **invocations** from the audit trail. Pass \`cid\` to fetch one entry. Use only when the prompt explicitly references an existing invocation CID; for a fresh single-use token, use \`mint_invocation\` instead.
+- \`mint_invocation\` — **mints a fresh single-use UCAN invocation against an external UCAN-gated service**. This is the right tool whenever a skill needs to authenticate against a worker. Pass \`delegationCid\` (from the companion prompt — the tool resolves the CAR from the flow's Y.Doc itself, so you never type out the long base64 string), \`serviceUrl\` (worker base URL — audience DID auto-resolved via did:web), and the route's \`can\` + \`withResource\`. Returns \`{ success: true, blobId: "blob_<hex>", invocation: "<base64 CAR>", ... }\`. **Return the JSON to the caller verbatim — they will use \`blobId\` with \`sandbox_write_blob\` to write the token to the sandbox without the CAR ever crossing the LLM.** Do NOT try to copy/paste the \`invocation\` field yourself. Single-use — re-mint per call.
 
 ### Block Tools
 
@@ -223,7 +225,9 @@ When editor room is active, the **default context** for the conversation is the 
 - \`read_flow_context\` — **CALL FIRST**: flow metadata, owner DID, doc type, schema version, block/node counts
 - \`read_flow_status\` — execution state of flow nodes, runtime state (who did what, when, evaluation status)
 - \`read_block_history\` — audit trail + UCAN invocations for a specific block
-- \`read_permissions\` — UCAN delegation chain (who has what capabilities)
+- \`read_permissions\` — UCAN **delegations** (who has what capabilities). For inspection only.
+- \`read_invocations\` — previously-minted **invocations** from the audit trail (pass \`cid\` to fetch one).
+- \`mint_invocation\` — **fresh single-use invocation** against an external UCAN-gated service. Pass \`delegationCid\` (the tool resolves the CAR from the flow's Y.Doc — you never paste a long base64 string), \`serviceUrl\`, and the route's \`can\` + \`withResource\`. Returns \`{ blobId, invocation, ... }\` — return verbatim so the caller can pass \`blobId\` to \`sandbox_write_blob\`. Single-use; re-mint per call.
 
 ### Block Tools
 
@@ -257,6 +261,10 @@ Each block has two data stores:
 **"What happened?"** → \`read_block_by_id\` (for current state) → \`read_block_history\` (for audit trail)
 
 **"Who can do X?"** → \`read_permissions\` with optional DID/capability filter
+
+**"Fetch the UCAN invocation with CID …"** → \`read_invocations\` with \`cid: <thatCid>\`. Returns one entry; the \`invocation\` field is the Base64 CAR token to forward as the Bearer credential.
+
+**"Mint a UCAN invocation for service X"** (or any skill needing fresh auth against a worker) → \`mint_invocation\` with \`delegationCid\` (from the prompt), \`serviceUrl\` (worker base URL from the prompt), \`can\` and \`withResource\` (from the skill docs). Return the JSON result verbatim to the caller — it contains the \`invocation\` Base64 CAR they need to write into the sandbox.
 
 **"Show me the form"** → \`list_blocks\` → \`read_survey\` → \`validate_survey_answers\`
 

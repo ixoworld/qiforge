@@ -51,6 +51,7 @@ import {
 import { TasksService } from 'src/tasks/task.service';
 import { isRedisEnabled } from 'src/config';
 import { type ENV } from 'src/types';
+import { BlobStoreService } from 'src/blob-store/blob-store.service';
 import { UcanService } from 'src/ucan/ucan.service';
 import { UserMatrixSqliteSyncService } from 'src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service';
 import { normalizeDid } from 'src/utils/header.utils';
@@ -142,6 +143,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly tasksService?: TasksService,
     @Optional() private readonly approvalService?: ApprovalService,
     @Optional() private readonly ucanService?: UcanService,
+    @Optional() private readonly blobStore?: BlobStoreService,
   ) {
     this.matrixManager = this.sessionManagerService.matrixManger;
     this.oracleMatrixBaseUrl = this.config
@@ -383,7 +385,8 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     }
 
     const threadEv = await this.matrixManager.getEventById(roomId, threadId);
-    const langchainThreadId = (threadEv.content as any)?.sessionId;
+    const langchainThreadId = (threadEv.content as { sessionId?: string })
+      ?.sessionId;
     const sessionId = threadId;
     if (!isText && !isFile) {
       Logger.log(
@@ -1301,6 +1304,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
                   ucanService: this.ucanService,
                   mcpInvocations: params.mcpInvocations,
                 },
+                blobStore: this.blobStore,
                 fileProcessingService: this.fileProcessingService,
                 spaceId: params.metadata?.spaceId,
                 tasksService: this.tasksService,
@@ -1704,6 +1708,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
           ucanService: this.ucanService,
           mcpInvocations: params.mcpInvocations,
         },
+        blobStore: this.blobStore,
         fileProcessingService: this.fileProcessingService,
         spaceId: params.metadata?.spaceId,
         tasksService: this.tasksService,
