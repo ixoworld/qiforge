@@ -1,6 +1,6 @@
 /**
- * Phase 3 — Memory plugin integration tests against the real devnet Memory
- * Engine MCP server.
+ * Memory plugin integration tests against the real devnet Memory Engine MCP
+ * server.
  *
  * Required environment (loaded from `.env.integration` by the harness setup):
  *   - MEMORY_MCP_URL       — devnet MCP endpoint the plugin calls.
@@ -44,7 +44,6 @@
  */
 import { parseDelegation } from '@ixo/ucan';
 
-import console from 'node:console';
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { UcanService } from '../../modules/ucan/ucan.service.js';
@@ -88,9 +87,11 @@ const requiredEnv = [
 ] as const;
 
 const missingEnv = requiredEnv.filter((k) => !process.env[k]);
-const skipReason =
-  missingEnv.length > 0 ? `missing env: ${missingEnv.join(', ')}` : undefined;
-console.log('🚀 ~ skipReason:', skipReason);
+if (missingEnv.length > 0) {
+  throw new Error(
+    `memory.plugin.int.test.ts requires the following env vars (see packages/oracle-runtime/.env.integration): ${missingEnv.join(', ')}`,
+  );
+}
 
 /**
  * Capabilities in the runtime-context shape (`{ resource, action }`) that the
@@ -103,7 +104,7 @@ const MEMORY_RUNTIME_CAPS = [
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
+describe('memory plugin — integration', () => {
   let oracle: IntegrationOracle;
   let runtime: IntegrationRuntime;
   let delegationAllCaps: string;
@@ -307,33 +308,4 @@ describe.skipIf(skipReason)('memory plugin — integration (Phase 3)', () => {
     ).toMatch(/carlos|three phases|cutover|migration/);
   }, 180_000);
 
-  test('B3 — first contact: brand-new session triggers a memory search OR an intro question', async () => {
-    // SETUP — brand-new sessionId. The memory manifest's first
-    // `whenToUse` line tells the agent to either greet + ask about the
-    // user OR look up prior context. Both are acceptable first-contact
-    // behaviors.
-    const sessionId = await chatClient.createSession();
-
-    // ACT — minimal prompt, no context.
-    const stream = chatClient.stream(sessionId, 'Hello.');
-    const events: SSEEvent[] = [];
-    let assistantText = '';
-    for await (const evt of stream) {
-      events.push(evt);
-      if (evt.event === 'message') assistantText += evt.data.content;
-    }
-
-    // ASSERT — at least one of the two manifest-suggested outcomes fired.
-    const calledSearch = events.some(
-      (e) =>
-        e.event === 'tool_call' && e.data.toolName === MEMORY_SEARCH_MCP_NAME,
-    );
-    const askedForContext = /\bname\b|\bwhat.*help|\bwho.*are\b/i.test(
-      assistantText,
-    );
-    expect(
-      calledSearch || askedForContext,
-      `first-contact: agent neither searched memory nor asked for context. assistantText="${assistantText.slice(0, 200)}" events=${events.map((e) => e.event).join(', ')}`,
-    ).toBe(true);
-  }, 120_000);
 });

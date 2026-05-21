@@ -36,8 +36,8 @@ export interface CreditsPluginOptions {
 }
 
 const CreditsConfigSchema = z.object({
-  SUBSCRIPTION_URL: z.string().url().optional(),
-  SUBSCRIPTION_ORACLE_MCP_URL: z.string().url().optional(),
+  SUBSCRIPTION_URL: z.url().optional(),
+  SUBSCRIPTION_ORACLE_MCP_URL: z.url().optional(),
 });
 
 type CreditsConfig = z.infer<typeof CreditsConfigSchema>;

@@ -12,7 +12,10 @@ import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { BatchInvoker } from './batch-invoker.js';
 import { type ListMessagesDto } from './dto/list-messages.dto.js';
-import { type SendMessagePayload } from './dto/send-message.dto.js';
+import {
+  type SendMessagePayload,
+  type SendMessageResponse,
+} from './dto/send-message.dto.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
@@ -50,10 +53,7 @@ export interface SendMessageRequest extends SendMessagePayload {
   ucanDelegation?: AuthUcanDelegation;
 }
 
-interface SendMessageReply {
-  message: { type: string; content: string; id: string };
-  sessionId: string;
-}
+type SendMessageReply = SendMessageResponse;
 
 /**
  * Public entry point for the chat HTTP surface. Owns:

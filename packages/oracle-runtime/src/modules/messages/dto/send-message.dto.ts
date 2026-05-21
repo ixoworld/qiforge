@@ -1,3 +1,4 @@
+import { type ListOracleMessagesResponse } from '@ixo/common';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
@@ -154,6 +155,17 @@ export class SendMessageDto {
   stream?: boolean;
 
   @ApiProperty({
+    description:
+      'When true (non-stream only), the response includes the full transcript of messages from the session in addition to the last assistant message. Intended for testing — defaults to false.',
+    required: false,
+    default: false,
+    type: Boolean,
+  })
+  @IsOptional()
+  @IsBoolean()
+  returnAllMessages?: boolean;
+
+  @ApiProperty({
     description: 'The message content to be sent',
     required: true,
     example: 'Hello, how can I get help with my account?',
@@ -245,6 +257,7 @@ export class SendMessageDto {
 
 export class SendMessagePayload {
   stream?: boolean;
+  returnAllMessages?: boolean;
   message!: string;
   sessionId!: string;
   did!: string;
@@ -266,6 +279,16 @@ export class SendMessagePayload {
   mcpInvocations?: Record<string, string>;
 
   attachments?: AttachmentDto[];
+}
+
+/**
+ * Shape returned by `POST /messages/:sessionId` when `stream` is false.
+ * `messages` is only present when the request set `returnAllMessages: true`.
+ */
+export interface SendMessageResponse {
+  message: { type: string; content: string; id: string };
+  sessionId: string;
+  messages?: ListOracleMessagesResponse['messages'];
 }
 
 export class AbortRequestDto {

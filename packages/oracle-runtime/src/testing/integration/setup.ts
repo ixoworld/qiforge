@@ -14,13 +14,13 @@
  * bans `env-loader`, `requires()`, `runScenario`, custom matchers
  * modules, and failure-diagnostics modules — use vitest as-is.
  */
-import 'reflect-metadata';
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
-import { config as dotenvConfig } from 'dotenv';
-import { expect } from 'vitest';
 import { langchainMatchers } from '@langchain/core/testing';
 import { Logger } from '@nestjs/common';
+import { config as dotenvConfig } from 'dotenv';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import 'reflect-metadata';
+import { expect } from 'vitest';
 
 // Resolve package root relative to this setup file. This file lives at
 // `src/testing/integration/setup.ts`; package root is three directories up.

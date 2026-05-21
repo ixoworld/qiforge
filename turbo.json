@@ -4,6 +4,8 @@
   "globalEnv": [
     "TEST_USER_MNEMONIC",
     "SQLITE_DATABASE_PATH",
+    "FIRECRAWL_MCP_URL",
+    "SKILLS_CAPSULES_BASE_URL",
     "TEST_USER_DID",
     "NODE_ENV",
     "PORT",

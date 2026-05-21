@@ -35,10 +35,13 @@ const REQUIRED_ENV = [
   'ORACLE_ENTITY_DID',
 ] as const;
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-const skipReason =
-  missing.length > 0 ? `missing env: ${missing.join(', ')}` : undefined;
+if (missing.length > 0) {
+  throw new Error(
+    `error-paths.int.test.ts requires the following env vars (see packages/oracle-runtime/.env.integration): ${missing.join(', ')}`,
+  );
+}
 
-describe.skipIf(skipReason)('Phase 1 — error paths', () => {
+describe('Phase 1 — error paths', () => {
   let oracle: IntegrationOracle;
   let client: ChatClient;
 

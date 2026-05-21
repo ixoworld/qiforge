@@ -11,8 +11,8 @@
  *      phases will gate on that event. We just verify the HTTP layer comes
  *      up and shutdown is clean.
  *
- * No skip flags, no mocks. If env is missing, the relevant test is skipped
- * via `test.skipIf` — never silently passed.
+ * No skip flags, no mocks. Missing env fails the file at load time, loud and
+ * obvious — never silently passed.
  */
 import { test, expect } from 'vitest';
 import { parseDelegation } from '@ixo/ucan';
@@ -22,34 +22,41 @@ import {
   createIntegrationOracle,
 } from '@ixo/oracle-runtime/testing/integration';
 
-test.skipIf(!process.env.TEST_USER_MNEMONIC || !process.env.ORACLE_DID)(
-  'mintUserDelegation produces a parseable token',
-  async () => {
-    const token = await mintUserDelegation({
-      userMnemonic: process.env.TEST_USER_MNEMONIC!,
-      oracleDid: process.env.ORACLE_DID!,
-      capabilities: allCaps,
-    });
-    expect(token).toBeTypeOf('string');
-    expect(token.length).toBeGreaterThan(20);
+const REQUIRED_ENV = [
+  'TEST_USER_MNEMONIC',
+  'ORACLE_DID',
+  'ORACLE_ENTITY_DID',
+  'MATRIX_BASE_URL',
+] as const;
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length > 0) {
+  throw new Error(
+    `hello-world.int.test.ts requires the following env vars (see packages/oracle-runtime/.env.integration): ${missing.join(', ')}`,
+  );
+}
 
-    const parsed = await parseDelegation(token);
-    expect(parsed).toBeDefined();
-  },
-);
+test('mintUserDelegation produces a parseable token', async () => {
+  const token = await mintUserDelegation({
+    userMnemonic: process.env.TEST_USER_MNEMONIC!,
+    oracleDid: process.env.ORACLE_DID!,
+    capabilities: allCaps,
+  });
+  expect(token).toBeTypeOf('string');
+  expect(token.length).toBeGreaterThan(20);
 
-test.skipIf(!process.env.MATRIX_BASE_URL || !process.env.ORACLE_ENTITY_DID)(
-  'createIntegrationOracle boots real oracle, serves /health, closes',
-  async () => {
-    const oracle = await createIntegrationOracle({
-      plugins: [],
-      bundledPlugins: [],
-    });
-    try {
-      const res = await fetch(`${oracle.baseUrl}/health`);
-      expect(res.status).toBe(200);
-    } finally {
-      await oracle.close();
-    }
-  },
-);
+  const parsed = await parseDelegation(token);
+  expect(parsed).toBeDefined();
+});
+
+test('createIntegrationOracle boots real oracle, serves /health, closes', async () => {
+  const oracle = await createIntegrationOracle({
+    plugins: [],
+    bundledPlugins: [],
+  });
+  try {
+    const res = await fetch(`${oracle.baseUrl}/health`);
+    expect(res.status).toBe(200);
+  } finally {
+    await oracle.close();
+  }
+});

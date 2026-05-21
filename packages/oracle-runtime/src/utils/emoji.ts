@@ -13,15 +13,23 @@ function toStringSafe(input: unknown): string {
 }
 
 export function emojify(input: unknown): string {
+  if (typeof input !== 'string') {
+        logger.debug(
+          'emojify received non-string input; returning input as-is.',
+          input
+        );
+   
+  }
   try {
-    return nodeEmojify(input as string);
+    return nodeEmojify(String(input));
   } catch (err) {
     const str = toStringSafe(input);
     logger.debug(
       `emojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
-      err,
+      err
     );
+
     return str;
   }
 }

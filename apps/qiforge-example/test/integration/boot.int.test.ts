@@ -23,8 +23,8 @@
  *     `authExcludedRoutes` slot works end-to-end.
  *   - The expected plugins show up in `app.plugins.status().loaded`.
  *
- * No mocks, no skip-flags. If Matrix is unreachable, the test fails — that
- * failure IS the signal (spec §6, §11 #10).
+ * No mocks, no skip-flags. Missing env fails the file loudly at load time —
+ * never silently passed (spec §6, §11 #10).
  */
 import { test, expect, beforeAll, afterAll } from 'vitest';
 import { Controller, Get, Module, RequestMethod } from '@nestjs/common';
@@ -39,6 +39,18 @@ import {
   type IntegrationOracle,
 } from '@ixo/oracle-runtime/testing/integration';
 import { WeatherPlugin } from '../../src/plugins/weather/index.js';
+
+const REQUIRED_ENV = [
+  'MATRIX_BASE_URL',
+  'MATRIX_ORACLE_ADMIN_USER_ID',
+  'MATRIX_ORACLE_ADMIN_ACCESS_TOKEN',
+] as const;
+const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missing.length > 0) {
+  throw new Error(
+    `boot.int.test.ts requires the following env vars (see apps/qiforge-example/.env.integration): ${missing.join(', ')}`,
+  );
+}
 
 // ─── Host-supplied modules (copied from src/main.ts) ─────────────────────
 @Controller('version')
@@ -72,19 +84,9 @@ const config: OracleConfig = {
 // present in `.env`.
 const REQUIRED_LOADED_PLUGINS = ['editor', 'weather'] as const;
 
-// Skip the whole suite when the Matrix env isn't wired — Phase 2 needs a
-// real Nest boot, which needs Matrix. Failing here would mean "infra not
-// provisioned," not "code broken."
-const HAS_MATRIX_ENV =
-  Boolean(process.env.MATRIX_BASE_URL) &&
-  Boolean(process.env.MATRIX_ORACLE_ADMIN_USER_ID) &&
-  Boolean(process.env.MATRIX_ORACLE_ADMIN_ACCESS_TOKEN);
-
 let oracle: IntegrationOracle | undefined;
 
 beforeAll(async () => {
-  if (!HAS_MATRIX_ENV) return;
-
   const matrixClient = sdk.createClient({
     baseUrl: process.env.MATRIX_BASE_URL!,
     userId: process.env.MATRIX_ORACLE_ADMIN_USER_ID!,
@@ -103,34 +105,25 @@ afterAll(async () => {
   if (oracle) await oracle.close();
 });
 
-test.skipIf(!HAS_MATRIX_ENV)(
-  'boot: /health returns 200',
-  async () => {
-    if (!oracle) throw new Error('oracle not booted');
-    const res = await fetch(`${oracle.baseUrl}/health`);
-    expect(res.status).toBe(200);
-  },
-);
+test('boot: /health returns 200', async () => {
+  if (!oracle) throw new Error('oracle not booted');
+  const res = await fetch(`${oracle.baseUrl}/health`);
+  expect(res.status).toBe(200);
+});
 
-test.skipIf(!HAS_MATRIX_ENV)(
-  'boot: /version is reachable without UCAN (host auth-excluded route)',
-  async () => {
-    if (!oracle) throw new Error('oracle not booted');
-    const res = await fetch(`${oracle.baseUrl}/version`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { name: string; description: string };
-    expect(body.name).toBe('QiForge Example Oracle');
-    expect(body.description).toContain('Reference QiForge oracle');
-  },
-);
+test('boot: /version is reachable without UCAN (host auth-excluded route)', async () => {
+  if (!oracle) throw new Error('oracle not booted');
+  const res = await fetch(`${oracle.baseUrl}/version`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { name: string; description: string };
+  expect(body.name).toBe('QiForge Example Oracle');
+  expect(body.description).toContain('Reference QiForge oracle');
+});
 
-test.skipIf(!HAS_MATRIX_ENV)(
-  'boot: app.plugins.status().loaded contains every expected plugin',
-  () => {
-    if (!oracle) throw new Error('oracle not booted');
-    const status = oracle.status();
-    for (const name of REQUIRED_LOADED_PLUGINS) {
-      expect(status.loaded).toContain(name);
-    }
-  },
-);
+test('boot: app.plugins.status().loaded contains every expected plugin', () => {
+  if (!oracle) throw new Error('oracle not booted');
+  const status = oracle.status();
+  for (const name of REQUIRED_LOADED_PLUGINS) {
+    expect(status.loaded).toContain(name);
+  }
+});

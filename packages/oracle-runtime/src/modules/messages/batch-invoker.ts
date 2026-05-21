@@ -1,3 +1,7 @@
+import {
+  transformGraphStateMessageToListMessageResponse,
+  type ListOracleMessagesResponse,
+} from '@ixo/common';
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { type BaseMessage } from 'langchain';
 import { TMainAgentGraphState } from 'src/graph/state.js';
@@ -21,6 +25,7 @@ export interface BatchInvokeResult {
     id: string;
   };
   sessionId: string;
+  messages?: ListOracleMessagesResponse['messages'];
 }
 
 /**
@@ -64,6 +69,10 @@ export class BatchInvoker {
         id: lastMessage.id ?? '',
       },
       sessionId: prepared.sessionId,
+      ...(payload.returnAllMessages && {
+        messages:
+          transformGraphStateMessageToListMessageResponse(messages).messages,
+      }),
     };
   }
 }

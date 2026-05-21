@@ -31,15 +31,17 @@ const configSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Weather',
   summary:
-    'Look up current weather and short forecasts for any city, and get outfit recommendations. Powered by Open-Meteo (free, no API key).',
+    'ALWAYS use the provided weather tools to answer user questions about current weather, forecasts, or outfit recommendations. Do NOT attempt to answer from prior knowledge or assumptions—call the appropriate tool for every weather-related request to obtain up-to-date results. Powered by Open-Meteo (no API key required).',
   whenToUse: [
-    'User asks about weather/temperature/rain/snow in a specific place.',
-    'User asks "what should I wear" or "should I bring a jacket/umbrella" for a city.',
-    'User asks for a forecast (today, tomorrow, this week) for a place.',
+    'Whenever asked about current weather, temperature, precipitation, wind, or other weather conditions in any city or region.',
+    'Any question related to forecasts (e.g., today, tomorrow, next week, weekend, specific date) for any location.',
+    'Whenever the user asks "what should I wear", "do I need an umbrella", "do I need a jacket", or similar outfit/clothing guidance—ALWAYS use the weather tools to get real forecast data first.',
+    'If the user inquires about whether to bring weather-related items (umbrella, jacket, sunglasses, etc.), make sure to call the relevant weather tool(s) before providing recommendations.',
   ],
   whenNotToUse: [
-    'Historical climate data — Open-Meteo current/forecast endpoints only.',
-    'Block-level micro-weather — geocoding resolves to a city centroid.',
+    'Questions about historical or long-term climate data (the tools provide only current or short-term forecast information).',
+    'Locations smaller than city-level precision (e.g., a specific street address)—weather will be provided for the nearest city centroid.',
+    'If the user asks about unrelated topics not connected to weather, temperature, climate, or outfit recommendations.',
   ],
   examples: [
     {
@@ -56,11 +58,21 @@ const manifest: PluginManifest = {
       user: 'Should I bring a jacket to Berlin tomorrow?',
       tool: 'call_weather_planner_agent',
       args: {
-        task: 'Decide whether the user needs a jacket in Berlin tomorrow. Fetch a 2-day forecast, pick tomorrow, recommend an outfit.',
+        task: 'Decide whether the user needs a jacket in Berlin tomorrow. Always fetch a 2-day weather forecast for Berlin, select the tomorrow value, and then recommend an outfit. Do NOT answer without calling get_weather_forecast first.',
       },
     },
+    {
+      user: "Do I need an umbrella in Paris today?",
+      tool: 'get_current_weather',
+      args: { city: 'Paris' },
+    },
+    {
+      user: "Is it cold in San Francisco this weekend?",
+      tool: 'get_weather_forecast',
+      args: { city: 'San Francisco', days: 3 },
+    },
   ],
-  tags: ['weather', 'forecast', 'outfit', 'travel'],
+  tags: ['weather', 'forecast', 'outfit', 'travel', 'temperature', 'rain', 'umbrella', 'jacket', 'clothing', 'recommendation'],
   category: 'data',
   visibility: 'on-demand',
   stability: 'experimental',

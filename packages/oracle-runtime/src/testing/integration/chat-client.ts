@@ -12,9 +12,11 @@
  * so test assertions reason about the exact event payloads the frontend
  * consumes. No bespoke parser, no `unknown`-typed events.
  */
+import { type SendMessageResponse } from '../../modules/messages/dto/send-message.dto.js';
 import { parseSSEStream, type SSEEvent } from './sse-parser.js';
 
 export type { SSEEvent } from './sse-parser.js';
+export type { SendMessageResponse } from '../../modules/messages/dto/send-message.dto.js';
 
 /** Options used to construct a `ChatClient`. */
 export interface ChatClientOptions {
@@ -59,11 +61,28 @@ export interface SendOptions {
     schema: Record<string, unknown>;
     hasRender?: boolean;
   }>;
+  /**
+   * Per-call override — defaults to `true` in `ChatClient` so tests always
+   * receive the full transcript. Pass `false` to mirror the production
+   * payload (only the last assistant message).
+   */
+  returnAllMessages?: boolean;
 }
 
-/** Result of a non-stream send. */
-export interface SendResult {
-  body: unknown;
+/**
+ * Non-stream `send()` body — guaranteed to include the full transcript
+ * since `ChatClient` defaults `returnAllMessages: true`. The `message`
+ * field is the last assistant message (the older response shape, kept for
+ * backward-compatible test assertions).
+ */
+export interface SendMessageWithTranscriptResponse
+  extends SendMessageResponse {
+  messages: NonNullable<SendMessageResponse['messages']>;
+}
+
+/** Result of an HTTP request issued by `ChatClient`. */
+export interface SendResult<TBody = unknown> {
+  body: TBody;
   durationMs: number;
   status: number;
   requestId?: string;
@@ -121,6 +140,13 @@ export class ChatClient {
       message,
       stream,
       timezone: opts.timezone ?? this.timezone,
+      // ChatClient defaults `returnAllMessages` to true — tests get the full
+      // transcript by default and can opt out with `returnAllMessages: false`.
+      // Stream requests ignore the flag server-side, so only send it when
+      // non-stream.
+      ...(!stream && {
+        returnAllMessages: opts.returnAllMessages ?? true,
+      }),
       ...(opts.metadata && { metadata: opts.metadata }),
       ...(opts.attachments?.length && { attachments: opts.attachments }),
       ...(opts.tools?.length && { tools: opts.tools }),
@@ -137,12 +163,21 @@ export class ChatClient {
     return this.fetchImpl(url, { ...init, headers: mergedHeaders });
   }
 
-  /** `POST /messages/:sessionId` with `stream: false`. */
+  /**
+   * `POST /messages/:sessionId` with `stream: false`.
+   *
+   * `ChatClient` defaults `returnAllMessages: true`, so `body.messages`
+   * holds the full session transcript and `body.message` is the last
+   * assistant message (same shape the production payload returns). The
+   * caller can opt out via `opts.returnAllMessages = false` — in that case
+   * `body.messages` will be `undefined` at runtime but the type stays
+   * non-optional for the default case; narrow manually if you opt out.
+   */
   async send(
     sessionId: string,
     message: string,
     opts: SendOptions = {},
-  ): Promise<SendResult> {
+  ): Promise<SendResult<SendMessageWithTranscriptResponse>> {
     const start = Date.now();
     const headers = this.authHeaders(
       opts.delegation ? { 'x-ucan-delegation': opts.delegation } : {},
@@ -166,12 +201,7 @@ export class ChatClient {
       );
       const requestId = res.headers.get('x-request-id') ?? undefined;
       const text = await res.text();
-      let body: unknown = text;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        // non-JSON — leave as raw text
-      }
+      const body = JSON.parse(text) as SendMessageWithTranscriptResponse;
       return {
         body,
         status: res.status,
@@ -284,7 +314,7 @@ export class ChatClient {
     });
     if (!res.ok) {
       throw new Error(
-        `createSession failed: ${res.status} ${await res.text().catch(() => '')}`,
+        `createSession failed: ${res.status} ${JSON.stringify(await res.json().catch(() => ''))}`,
       );
     }
     const body = (await res.json()) as { sessionId?: string };

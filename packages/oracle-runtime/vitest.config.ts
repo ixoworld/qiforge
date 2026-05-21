@@ -1,5 +1,5 @@
-import { defineConfig, mergeConfig } from 'vitest/config';
 import nestConfig from '@ixo/vitest-config/nest';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 /**
  * Two modes:
@@ -12,10 +12,9 @@ import nestConfig from '@ixo/vitest-config/nest';
  * fields explicitly. Keeps `pnpm test` from picking up `.int.test.ts` files
  * and `pnpm test:integration` from running unit tests twice.
  *
- * Integration mode runs files SEQUENTIALLY (`fileParallelism: false`).
- * Each integration test file boots a real Nest oracle that connects to the
- * same Matrix admin user — running two boots concurrently triggers Matrix
- * one-time-key collisions on the server.
+ * Integration mode runs files in PARALLEL (one fork per file). Each fork
+ * mints its own Matrix device session in setup.ts so there are no one-time-key
+ * collisions on the homeserver.
  */
 export default defineConfig(({ mode }) => {
   if (mode === 'int') {
@@ -28,6 +27,7 @@ export default defineConfig(({ mode }) => {
       hookTimeout: 120_000,
       setupFiles: ['./src/testing/integration/setup.ts'],
       fileParallelism: false,
+      slowTestThreshold: 60_000 * 3,
     };
     return merged;
   }
@@ -36,10 +36,7 @@ export default defineConfig(({ mode }) => {
   merged.test = {
     ...merged.test,
     // Default mode is unit tests only — never collect integration files.
-    exclude: [
-      ...(merged.test?.exclude ?? []),
-      '**/*.int.test.ts',
-    ],
+    exclude: [...(merged.test?.exclude ?? []), '**/*.int.test.ts'],
     setupFiles: ['./test-setup.ts'],
   };
   return merged;

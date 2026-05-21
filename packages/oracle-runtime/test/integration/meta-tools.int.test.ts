@@ -28,12 +28,16 @@ const REQUIRED_ENV = [
   'ORACLE_ENTITY_DID',
   'MEMORY_MCP_URL',
   'BLOCKSYNC_GRAPHQL_URL',
+  'TEST_USER_DID',
 ] as const;
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
-const skipReason =
-  missing.length > 0 ? `missing env: ${missing.join(', ')}` : undefined;
+if (missing.length > 0) {
+  throw new Error(
+    `meta-tools.int.test.ts requires the following env vars (see packages/oracle-runtime/.env.integration): ${missing.join(', ')}`,
+  );
+}
 
-describe.skipIf(skipReason)('Phase 1 — meta-tools (Tier A direct invoke)', () => {
+describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
   // 1.12 — list_capabilities returns a row per registered plugin with the
   // right visibility + loaded flag. Memory is `'always'` (loaded=true),
   // Firecrawl is `'on-demand'` (loaded=false until load_capability runs),
