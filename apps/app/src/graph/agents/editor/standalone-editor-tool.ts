@@ -8,6 +8,8 @@ import { Logger } from '@nestjs/common';
 import { DynamicStructuredTool, type StructuredTool } from 'langchain';
 import { z } from 'zod';
 
+import type { BlobStoreService } from 'src/blob-store/blob-store.service';
+import type { UcanService } from 'src/ucan/ucan.service';
 import { createSubagentAsTool, type AgentSpec } from '../subagent-as-tool';
 import { createEditorAgent } from './editor-agent';
 import { logEditorSessionToMemory, type PageMemoryAuth } from './page-memory';
@@ -21,6 +23,10 @@ export interface CreateStandaloneEditorToolParams {
   memoryAuth?: PageMemoryAuth;
   /** Optional transform to inject extra context (e.g. time) into the agent spec */
   transformSpec?: (spec: AgentSpec) => AgentSpec;
+  /** UCAN service — when provided, the spawned editor exposes `mint_invocation`. */
+  ucanService?: UcanService;
+  /** Blob store — propagated so the spawned editor's `mint_invocation` can return a blobId. */
+  blobStore?: BlobStoreService;
   userDid: string;
   sessionId: string;
 }
@@ -35,6 +41,8 @@ export function createStandaloneEditorTool({
   spaceId,
   memoryAuth,
   transformSpec = (s) => s,
+  ucanService,
+  blobStore,
   userDid,
   sessionId,
 }: CreateStandaloneEditorToolParams): StructuredTool {
@@ -71,6 +79,8 @@ export function createStandaloneEditorTool({
           userMatrixId,
           spaceId,
           memoryAuth,
+          ucanService,
+          blobStore,
           userDid,
           sessionId,
         });
@@ -83,6 +93,7 @@ export function createStandaloneEditorTool({
             'update_page',
             'edit_block',
             'create_block',
+            'mint_invocation',
           ],
           onComplete: memoryAuth
             ? (messages) =>

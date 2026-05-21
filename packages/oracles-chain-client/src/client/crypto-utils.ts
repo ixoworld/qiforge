@@ -31,6 +31,7 @@ export class CryptoUtils {
       const encryptedBuffer = encrypt(publicKeyBytes, dataBuffer);
       return bs58.encode(encryptedBuffer); // Convert to bs58 string
     } catch (error) {
+      // eslint-disable-next-line no-console -- browser-reachable file; @ixo/logger uses node:util and breaks webpack frontend builds (see package CLAUDE.md)
       console.error('Error encrypting data:', error);
       throw error;
     }
@@ -54,6 +55,7 @@ export class CryptoUtils {
         return new TextDecoder().decode(decryptedBuffer);
       }
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.error('Error decrypting data:', error);
       throw error;
     }

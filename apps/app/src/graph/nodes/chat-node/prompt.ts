@@ -345,6 +345,24 @@ When a form.submit action block triggers a skill: **first** \`call_editor_agent\
 
 For long or opaque skill outputs destined for editor blocks (credentials, JWTs, tokens), use \`apply_sandbox_output_to_block\` with dot-notation \`fieldMapping\`. Never route those through \`edit_block\` — the values get truncated.
 
+#### UCAN Permissions vs. Invocations
+
+Three editor-agent tools exist for UCAN data — pick the correct one:
+
+- **\`read_permissions\`** — reads UCAN **delegations** (the static "who is allowed to do what" records). Use when the question is about who has permission, or when you need to inspect / display the delegation chain. Do NOT use this just to fetch a delegation CAR for minting — \`mint_invocation\` does the lookup itself.
+- **\`read_invocations\`** — reads previously-minted invocations from the audit trail. Use when the prompt explicitly references an invocation CID, or when displaying invocation history. **Not** the right tool for getting a fresh single-use token — for that, mint a new one.
+- **\`mint_invocation\`** — produces a fresh, single-use UCAN invocation against a UCAN-gated service. **This is the tool to use whenever a skill needs to authenticate against an external worker.** It lives on the editor agent (it needs Y.Doc access to look up the user's signed delegation by CID without round-tripping a long base64 string through the LLM), so you reach it via \`call_editor_agent\` with a self-contained task that names the tool and its args. Pass:
+  - \`delegationCid\` — from the companion prompt (\`UCAN delegation CID: bafy…\`). Always pass the CID; never the CAR string itself.
+  - \`serviceUrl\` — the worker base URL from the prompt. The audience DID is auto-resolved via \`<serviceUrl>/.well-known/did.json\`.
+  - \`can\` and \`withResource\` — the route-specific capability the skill's docs define.
+  The tool returns \`{ success: true, blobId: "blob_<hex>", invocation: "<base64 CAR>", ... }\`.
+
+  **Use \`blobId\` — not \`invocation\` — to write the token to the sandbox.** Call \`sandbox_write_blob({ blobId, path: "/workspace/data/<skill>/ucan_token" })\`. The runtime looks up the value server-side and writes it via \`sandbox_write_file\` for you, so the long base64 CAR never enters this conversation and can't be corrupted in relay. Then run the protected command in the sandbox. Mint a fresh invocation per protected call — invocations are single-use; reusing one triggers a REPLAY rejection.
+
+  The \`invocation\` field is the same value verbatim, kept only for back-compat / debugging — do NOT paste it into \`sandbox_write_file\` arguments. The blob expires shortly after minting (TTL ~90s), so call \`sandbox_write_blob\` immediately after \`mint_invocation\`. If the write returns "blob not found", just re-mint and retry.
+
+A delegation is **not** a substitute for an invocation. If a worker rejects the request, do NOT send the raw delegation in its place — re-mint via \`mint_invocation\`.
+
 ### Quality Checklist
 
 Before creating any file:

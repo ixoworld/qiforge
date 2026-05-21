@@ -8,8 +8,11 @@ import {
   BLOCKNOTE_TOOLS_CONFIG,
   createBlocknoteTools,
 } from './blocknote-tools';
+import type { BlobStoreService } from 'src/blob-store/blob-store.service';
+import type { UcanService } from 'src/ucan/ucan.service';
 import type { AppConfig, MatrixRoomConfig } from './config';
 import { EditorMatrixClient } from './editor-mx';
+import type { PageMemoryAuth } from './page-memory';
 import { createPageTools } from './page-tools';
 import { editorAgentPrompt, editorAgentReadOnlyPrompt } from './prompts';
 
@@ -83,8 +86,10 @@ type BlocknoteToolset =
       readFlowStatusTool: StructuredTool;
       readBlockHistoryTool: StructuredTool;
       readPermissionsTool: StructuredTool;
+      readInvocationsTool: StructuredTool;
       readSurveyTool: StructuredTool;
       validateSurveyAnswersTool: StructuredTool;
+      mintInvocationTool: StructuredTool | null;
     }
   | {
       listBlocksTool: StructuredTool;
@@ -97,6 +102,7 @@ type BlocknoteToolset =
       readFlowStatusTool: StructuredTool;
       readBlockHistoryTool: StructuredTool;
       readPermissionsTool: StructuredTool;
+      readInvocationsTool: StructuredTool;
       readSurveyTool: StructuredTool;
       fillSurveyAnswersTool: StructuredTool;
       validateSurveyAnswersTool: StructuredTool;
@@ -104,6 +110,7 @@ type BlocknoteToolset =
       findAndReplaceTool: StructuredTool;
       moveBlockTool: StructuredTool;
       bulkEditBlocksTool: StructuredTool;
+      mintInvocationTool: StructuredTool | null;
     };
 
 export type EditorAgentMode = 'edit' | 'readOnly';
@@ -121,7 +128,11 @@ export interface CreateEditorAgentParams {
   /** Matrix space ID to nest new pages under */
   spaceId?: string;
   /** Auth context for logging page/block operations to the Memory Engine */
-  memoryAuth?: import('./page-memory').PageMemoryAuth;
+  memoryAuth?: PageMemoryAuth;
+  /** When provided, registers `mint_invocation` on the editor agent so skills can sign UCAN invocations against external services without round-tripping the delegation CAR through the LLM. */
+  ucanService?: UcanService;
+  /** When provided alongside `ucanService`, the minted invocation is also stored in the blob store under a fresh blobId; the tool returns that blobId so the main agent can pass it to `sandbox_write_blob` instead of relaying the CAR through the LLM. */
+  blobStore?: BlobStoreService;
 }
 
 const resolveTools = (
@@ -129,7 +140,7 @@ const resolveTools = (
   toolset: BlocknoteToolset,
 ): StructuredTool[] => {
   if (mode === 'readOnly') {
-    return [
+    const tools: StructuredTool[] = [
       toolset.listBlocksTool,
       toolset.readBlockByIdTool,
       toolset.searchBlocksTool,
@@ -137,9 +148,12 @@ const resolveTools = (
       toolset.readFlowStatusTool,
       toolset.readBlockHistoryTool,
       toolset.readPermissionsTool,
+      toolset.readInvocationsTool,
       toolset.readSurveyTool,
       toolset.validateSurveyAnswersTool,
     ];
+    if (toolset.mintInvocationTool) tools.push(toolset.mintInvocationTool);
+    return tools;
   }
 
   const writableToolset = toolset as Extract<
@@ -155,6 +169,7 @@ const resolveTools = (
       readFlowStatusTool: StructuredTool;
       readBlockHistoryTool: StructuredTool;
       readPermissionsTool: StructuredTool;
+      readInvocationsTool: StructuredTool;
       readSurveyTool: StructuredTool;
       fillSurveyAnswersTool: StructuredTool;
       validateSurveyAnswersTool: StructuredTool;
@@ -162,6 +177,7 @@ const resolveTools = (
       findAndReplaceTool: StructuredTool;
       moveBlockTool: StructuredTool;
       bulkEditBlocksTool: StructuredTool;
+      mintInvocationTool: StructuredTool | null;
     }
   >;
 
@@ -169,7 +185,7 @@ const resolveTools = (
     throw new Error('Writable editor mode requires edit and create tools.');
   }
 
-  return [
+  const tools: StructuredTool[] = [
     writableToolset.listBlocksTool,
     writableToolset.editBlockTool,
     writableToolset.createBlockTool,
@@ -180,6 +196,7 @@ const resolveTools = (
     writableToolset.readFlowStatusTool,
     writableToolset.readBlockHistoryTool,
     writableToolset.readPermissionsTool,
+    writableToolset.readInvocationsTool,
     writableToolset.readSurveyTool,
     writableToolset.fillSurveyAnswersTool,
     writableToolset.validateSurveyAnswersTool,
@@ -188,6 +205,9 @@ const resolveTools = (
     writableToolset.moveBlockTool,
     writableToolset.bulkEditBlocksTool,
   ];
+  if (writableToolset.mintInvocationTool)
+    tools.push(writableToolset.mintInvocationTool);
+  return tools;
 };
 
 export const createEditorAgent = async ({
@@ -199,6 +219,8 @@ export const createEditorAgent = async ({
   userMatrixId,
   spaceId,
   memoryAuth,
+  ucanService,
+  blobStore,
   userDid,
   sessionId,
 }: CreateEditorAgentParams & {
@@ -216,6 +238,9 @@ export const createEditorAgent = async ({
     matrixClient,
     appConfig,
     mode === 'readOnly',
+    ucanService,
+    blobStore,
+    userDid,
   )) as BlocknoteToolset;
 
   const agentTools = resolveTools(mode, blocknoteTools);

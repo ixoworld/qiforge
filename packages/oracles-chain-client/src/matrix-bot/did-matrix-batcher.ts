@@ -183,6 +183,7 @@ async function queryIidServices(
     }>(getBlocksyncGraphqlUrl(), QUERY_IIDS, { dids });
 
     if (!data?.iids?.nodes) {
+      // eslint-disable-next-line no-console -- browser-reachable file; @ixo/logger uses node:util and breaks webpack frontend builds (see package CLAUDE.md)
       console.error(
         '[DidMatrixBatcher] Error querying IIDs: no nodes returned',
       );
@@ -212,6 +213,7 @@ async function queryIidServices(
       }
     }
   } catch (error) {
+    // eslint-disable-next-line no-console
     console.error('[DidMatrixBatcher] Error executing IID query:', error);
     dids.forEach((did) => results.set(did, null));
   }
@@ -234,6 +236,7 @@ async function queryEntityServices(
     }>(getBlocksyncGraphqlUrl(), QUERY_ENTITIES, { dids: entityDids });
 
     if (!data?.entities?.nodes) {
+      // eslint-disable-next-line no-console
       console.error(
         '[DidMatrixBatcher] Error querying entities: no nodes returned',
       );
@@ -263,6 +266,7 @@ async function queryEntityServices(
       }
     }
   } catch (error) {
+    // eslint-disable-next-line no-console
     console.error('[DidMatrixBatcher] Error executing entity query:', error);
     entityDids.forEach((did) => results.set(did, null));
   }
