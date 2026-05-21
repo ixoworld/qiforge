@@ -33,8 +33,6 @@ import {
   type IntegrationRuntime,
   mintUserDelegation,
   skillsCap,
-  type SSEEvent,
-  type SSEToolCallEventData,
   waitForMatrixLoaded,
 } from '../../testing/integration/index.js';
 import { SandboxPlugin } from '../sandbox/sandbox.plugin.js';
@@ -174,27 +172,31 @@ describe('skills plugin — integration', () => {
   test(
     'B1 — "I need to create a frontend page" routes to a skills tool',
     async () => {
-      const stream = chatClient.stream(
+      const results = await chatClient.send(
         sharedSessionId,
-        'I need to create a nice frontend HTML page. Can you help?',
+        'I need to create a nice frontend HTML page for my grocery shop. Can you help?',
       );
-      const events: SSEEvent[] = [];
-      for await (const evt of stream) events.push(evt);
 
-      const skillsCalls = events.filter(
-        (e): e is { event: 'tool_call'; data: SSEToolCallEventData } =>
-          e.event === 'tool_call' &&
-          (e.data.toolName === 'list_skills' ||
-            e.data.toolName === 'search_skills'),
+      const tc = results.body.messages.reduce(
+        (acc, m) => (m.toolCalls ? acc.concat(m.toolCalls) : acc),
+        [] as Array<
+          NonNullable<
+            (typeof results.body.messages)[number]['toolCalls']
+          >[number]
+        >,
       );
+
+      const skillsCalls = tc?.filter((t) =>
+        ['search_skills', 'list_skills'].includes(t.name),
+      );
+
       expect(
         skillsCalls.length,
-        `expected list_skills or search_skills; saw events: ${events.map((e) => e.event).join(', ')}`,
+        `expected list_skills or search_skills; saw toolCalls: ${tc
+          .map((t) => t.name)
+          .join(', ')}`,
       ).toBeGreaterThan(0);
     },
-    {
-      timeout: 180_000,
-      retry: 2,
-    },
+    180_000,
   );
 });
