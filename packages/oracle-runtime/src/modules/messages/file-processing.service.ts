@@ -45,7 +45,10 @@ const BLOCKED_HOST_PATTERNS = [
   /^192\.168\.\d+\.\d+$/,
   /^169\.254\.\d+\.\d+$/, // AWS/cloud metadata
   /^0\.0\.0\.0$/,
-  /^\[::1?\]$/, // IPv6 loopback
+  /^\[::1?\]$/, // IPv6 loopback (bracketed)
+  /^\[::ffff:[^\]]+\]$/i, // IPv4-mapped IPv6 (e.g. [::ffff:127.0.0.1])
+  /^\[f[cd][0-9a-f]{2}:.*\]$/i, // IPv6 unique-local (fc00::/7) — RFC 4193
+  /^\[fe[89ab][0-9a-f]:.*\]$/i, // IPv6 link-local (fe80::/10)
   /^metadata\.google\.internal$/i,
 ];
 

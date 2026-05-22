@@ -31,3 +31,5 @@ export {
   makeRuntimeContext,
   type TestPluginInit,
 } from '../registries/test-fixtures.js';
+
+export { makeConfig } from './nest-doubles.js';

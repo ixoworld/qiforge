@@ -261,6 +261,17 @@ export class SseStreamRunner {
           }
 
           if (!abortController.signal.aborted) {
+            // Flush any tool/action calls that started but never received a
+            // matching `on_tool_end`. Without this, the frontend keeps the
+            // tool stuck in `isRunning` forever — the run completed cleanly
+            // but the UI has no signal to clear it.
+            this.flushOrphanedToolCalls(
+              toolCallMap,
+              actionCallMap,
+              res,
+              abortController,
+            );
+
             const completeEvent = ReasoningEvent.createChunk(
               sessionId,
               requestId,
@@ -411,6 +422,39 @@ export class SseStreamRunner {
       toolCallEvent.payload,
     );
     toolCallMap.delete(runId);
+  }
+
+  /**
+   * Emit a terminal `error` event for any tool/action call that started but
+   * never received a matching `on_tool_end`. Keeps the frontend from
+   * showing a perpetually-spinning tool when the agent ends a turn with
+   * unresolved tool runs in flight.
+   */
+  private flushOrphanedToolCalls(
+    toolCallMap: Map<string, ToolCallEvent>,
+    actionCallMap: Map<string, ActionCallEvent>,
+    res: Response,
+    abortController: AbortController,
+  ): void {
+    for (const [runId, evt] of actionCallMap) {
+      evt.payload.status = 'error';
+      evt.payload.error = 'Action did not complete';
+      evt.payload.toolCallId = runId;
+      this.writeSse(res, abortController, evt.eventName, evt.payload);
+    }
+    actionCallMap.clear();
+
+    for (const [runId, evt] of toolCallMap) {
+      // `IToolCallEvent.status` only allows 'isRunning' | 'done' — there's
+      // no error variant on tool calls (unlike actions). Mark as 'done'
+      // with a sentinel output so the FE clears its spinner but the user
+      // sees the call didn't actually produce a result.
+      evt.payload.status = 'done';
+      evt.payload.output = '⏱️ Tool did not complete';
+      evt.payload.eventId = runId;
+      this.writeSse(res, abortController, evt.eventName, evt.payload);
+    }
+    toolCallMap.clear();
   }
 
   /**
