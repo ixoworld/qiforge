@@ -1,14 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelMemoryService } from './channel-memory.service.js';
 import { type Summarizer } from './channel-memory.summarizer.js';
 import { type ObservedMessage } from './channel-memory.types.js';
@@ -171,13 +164,7 @@ describe('ChannelMemoryService', () => {
 
     const DAY = 24 * 60 * 60 * 1000;
     const olderThan = Date.now() + DAY; // all chunks count as "old"
-    const rolled = await svc.rollupTier(
-      ROOM,
-      1,
-      olderThan,
-      7 * DAY,
-      2,
-    );
+    const rolled = await svc.rollupTier(ROOM, 1, olderThan, 7 * DAY, 2);
     expect(rolled).toBe(2);
     expect(summarizer.rollup).toHaveBeenCalledTimes(1);
 

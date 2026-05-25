@@ -113,8 +113,7 @@ describe('PortalPlugin', () => {
     expect(openUrlSchema?.safeParse({ url: 123 }).success).toBe(false);
     expect(openUrlSchema?.safeParse({}).success).toBe(false);
 
-    const prompt =
-      typeof sub.systemPrompt === 'string' ? sub.systemPrompt : '';
+    const prompt = typeof sub.systemPrompt === 'string' ? sub.systemPrompt : '';
     expect(prompt).toContain('Portal Agent');
     expect(prompt).toContain(OPEN_URL_TOOL.name);
     expect(prompt).toContain(CLICK_TOOL.name);

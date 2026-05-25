@@ -116,8 +116,8 @@ describe('ToolRegistry', () => {
         getTools: () => [makeTool('agui_baseline')],
         // Request-time contributes additional tools derived from state.
         getRequestTools: (rtCtx) => {
-          const actions = (rtCtx.history.state as { agActions?: string[] })
-            .agActions ?? [];
+          const actions =
+            (rtCtx.history.state as { agActions?: string[] }).agActions ?? [];
           return actions.map((name) => makeTool(`agui_${name}`));
         },
       }),

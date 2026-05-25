@@ -29,7 +29,7 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Skills',
   summary:
-    'Discover IXO skill capsules — the caller\'s published private skills first, then the public registry.',
+    "Discover IXO skill capsules — the caller's published private skills first, then the public registry.",
   whenToUse: [
     'User asks "what skills are available?" or "what can you do?".',
     'User asks the agent to find a skill for a specific task ("a skill for invoices", "is there a skill for KYC?").',

@@ -55,82 +55,79 @@ if (missingBootEnv.length > 0) {
 describe('Phase 1 — env validation (no Nest boot needed)', () => {
   // 1.1 — Plugins whose env is present load; whose env is absent get excluded
   // with the autoDetectHint as the exclusion reason.
-  test(
-    '1.1 boot with MEMORY_MCP_URL/SANDBOX_MCP_URL/SKILLS_CAPSULES_BASE_URL set loads those plugins',
-    async () => {
-      const oracle = await createIntegrationOracle({
-        plugins: [],
-        bundledPlugins: [new MemoryPlugin(), new SkillsPlugin(), new SandboxPlugin()],
-      });
-      try {
-        const status = oracle.status();
-        // Memory needs MEMORY_MCP_URL — present in .env.integration → loaded.
-        expect(status.loaded).toContain('memory');
-        // Skills has a default URL → always loads when no env probe says no.
-        expect(status.loaded).toContain('skills');
-        // Sandbox needs SANDBOX_MCP_URL — present → loaded.
-        expect(status.loaded).toContain('sandbox');
-      } finally {
-        await oracle.close();
-      }
-    },
-  );
+  test('1.1 boot with MEMORY_MCP_URL/SANDBOX_MCP_URL/SKILLS_CAPSULES_BASE_URL set loads those plugins', async () => {
+    const oracle = await createIntegrationOracle({
+      plugins: [],
+      bundledPlugins: [
+        new MemoryPlugin(),
+        new SkillsPlugin(),
+        new SandboxPlugin(),
+      ],
+    });
+    try {
+      const status = oracle.status();
+      // Memory needs MEMORY_MCP_URL — present in .env.integration → loaded.
+      expect(status.loaded).toContain('memory');
+      // Skills has a default URL → always loads when no env probe says no.
+      expect(status.loaded).toContain('skills');
+      // Sandbox needs SANDBOX_MCP_URL — present → loaded.
+      expect(status.loaded).toContain('sandbox');
+    } finally {
+      await oracle.close();
+    }
+  });
 
   // 1.2 — Remove MEMORY_MCP_URL → memory plugin excluded (autoDetect returns
   // false). Pair memory with sandbox (no inter-plugin dep) so the assertion
   // isolates "memory excluded" from "did skills get its sandbox dep too?".
-  test(
-    '1.2 without MEMORY_MCP_URL, memory is excluded — other plugins unaffected',
-    async () => {
-      const envWithoutMemory = { ...process.env };
-      delete envWithoutMemory.MEMORY_MCP_URL;
-      const oracle = await createIntegrationOracle({
-        plugins: [],
-        bundledPlugins: [new MemoryPlugin(), new SandboxPlugin()],
-        env: envWithoutMemory,
-      });
-      try {
-        const status = oracle.status();
-        expect(status.loaded).not.toContain('memory');
-        expect(status.excluded.map((e) => e.plugin)).toContain('memory');
-        // Sandbox doesn't depend on MEMORY_MCP_URL — must still be loaded.
-        expect(status.loaded).toContain('sandbox');
-      } finally {
-        await oracle.close();
-      }
-    },
-  );
+  test('1.2 without MEMORY_MCP_URL, memory is excluded — other plugins unaffected', async () => {
+    const envWithoutMemory = { ...process.env };
+    delete envWithoutMemory.MEMORY_MCP_URL;
+    const oracle = await createIntegrationOracle({
+      plugins: [],
+      bundledPlugins: [new MemoryPlugin(), new SandboxPlugin()],
+      env: envWithoutMemory,
+    });
+    try {
+      const status = oracle.status();
+      expect(status.loaded).not.toContain('memory');
+      expect(status.excluded.map((e) => e.plugin)).toContain('memory');
+      // Sandbox doesn't depend on MEMORY_MCP_URL — must still be loaded.
+      expect(status.loaded).toContain('sandbox');
+    } finally {
+      await oracle.close();
+    }
+  });
 
   // 1.3 — Without OPEN_ROUTER_API_KEY (and no NEBIUS_API_KEY), the
   // validateLlmProviderKey cross-field check throws and the error names
   // the missing field by name.
-  test(
-    '1.3 without LLM provider key, env validation fails naming OPEN_ROUTER_API_KEY',
-    async () => {
-      const envWithoutLlm = { ...process.env };
-      delete envWithoutLlm.OPEN_ROUTER_API_KEY;
-      delete envWithoutLlm.NEBIUS_API_KEY;
+  test('1.3 without LLM provider key, env validation fails naming OPEN_ROUTER_API_KEY', async () => {
+    const envWithoutLlm = { ...process.env };
+    delete envWithoutLlm.OPEN_ROUTER_API_KEY;
+    delete envWithoutLlm.NEBIUS_API_KEY;
 
-      const collectedErrors: string[] = [];
-      const logger = {
-        log: () => {},
-        warn: () => {},
-        error: (msg: unknown) =>
-          collectedErrors.push(typeof msg === 'string' ? msg : JSON.stringify(msg)),
-      };
+    const collectedErrors: string[] = [];
+    const logger = {
+      log: () => {},
+      warn: () => {},
+      error: (msg: unknown) =>
+        collectedErrors.push(
+          typeof msg === 'string' ? msg : JSON.stringify(msg),
+        ),
+    };
 
-      await expect(
-        createIntegrationOracle({
-          plugins: [],
-          bundledPlugins: [],
-          env: envWithoutLlm,
-          logger,
-        }),
-      ).rejects.toThrow(/Env validation failed/);
+    await expect(
+      createIntegrationOracle({
+        plugins: [],
+        bundledPlugins: [],
+        env: envWithoutLlm,
+        logger,
+      }),
+    ).rejects.toThrow(/Env validation failed/);
 
-      expect(collectedErrors.join('\n')).toMatch(/OPEN_ROUTER_API_KEY/);
-    },
-  );
+    expect(collectedErrors.join('\n')).toMatch(/OPEN_ROUTER_API_KEY/);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────

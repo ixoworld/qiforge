@@ -75,8 +75,7 @@ export interface SendOptions {
  * field is the last assistant message (the older response shape, kept for
  * backward-compatible test assertions).
  */
-export interface SendMessageWithTranscriptResponse
-  extends SendMessageResponse {
+export interface SendMessageWithTranscriptResponse extends SendMessageResponse {
   messages: NonNullable<SendMessageResponse['messages']>;
 }
 
@@ -239,7 +238,7 @@ export class ChatClient {
       doneReject = rej;
     });
 
-    const generator = (async function* (
+    const generator = async function* (
       this: ChatClient,
     ): AsyncGenerator<SSEEvent> {
       const res = await this.fetchImpl(
@@ -290,7 +289,7 @@ export class ChatClient {
         doneReject(error);
         throw error;
       }
-    }).call(this);
+    }.call(this);
 
     const iterable = generator as AsyncGenerator<SSEEvent> & {
       final(): Promise<StreamFinal>;

@@ -210,7 +210,8 @@ describe('sandbox plugin — integration', () => {
     // header the registry returns public capsules only — exactly what we
     // want for a deterministic Tier A invocation.
     const skillsBaseUrl =
-      process.env.SKILLS_CAPSULES_BASE_URL ?? 'https://capsules.skills.ixo.earth';
+      process.env.SKILLS_CAPSULES_BASE_URL ??
+      'https://capsules.skills.ixo.earth';
     const listRes = await fetch(`${skillsBaseUrl}/capsules?limit=1`);
     expect(
       listRes.ok,

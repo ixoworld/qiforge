@@ -1,8 +1,5 @@
 import { z } from 'zod';
-import type {
-  PluginTool,
-  RuntimeContext,
-} from '../../plugin-api/types.js';
+import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import { ChannelMemoryService } from './channel-memory.service.js';
 import type { ChannelMemoryChunk } from './channel-memory.types.js';
 

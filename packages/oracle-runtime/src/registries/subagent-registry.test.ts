@@ -41,9 +41,10 @@ describe('SubAgentRegistry', () => {
 
     const collected = await reg.collect(makeBuildCtx());
 
-    expect(
-      collected.map((c) => `${c.pluginName}:${c.subAgent.name}`),
-    ).toEqual(['memory:call_memory_agent', 'portal:call_portal_agent']);
+    expect(collected.map((c) => `${c.pluginName}:${c.subAgent.name}`)).toEqual([
+      'memory:call_memory_agent',
+      'portal:call_portal_agent',
+    ]);
     reg.assertNoCollisions();
   });
 
@@ -107,8 +108,8 @@ describe('SubAgentRegistry', () => {
         name: 'agui',
         getSubAgents: () => [makeSubAgent('call_agui_static_agent')],
         getRequestSubAgents: (rtCtx) => {
-          const actions = (rtCtx.history.state as { agActions?: string[] })
-            .agActions ?? [];
+          const actions =
+            (rtCtx.history.state as { agActions?: string[] }).agActions ?? [];
           return actions.map((a) => makeSubAgent(`call_agui_${a}_agent`));
         },
       }),

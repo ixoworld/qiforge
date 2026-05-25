@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
 import { createTestRuntime } from '../../testing/create-test-runtime.js';
-import { makeBuildCtx, makeRuntimeContext } from '../../registries/test-fixtures.js';
+import {
+  makeBuildCtx,
+  makeRuntimeContext,
+} from '../../registries/test-fixtures.js';
 import type { RuntimeContext } from '../../plugin-api/types.js';
 import {
   UserPreferencesSchema,
@@ -94,7 +97,9 @@ describe('UserPreferencesPlugin', () => {
       });
       const result = await tool.handler({ userName: 'Yousef' }, ctx);
 
-      expect(set).toHaveBeenCalledWith('!room:ixo.world', { userName: 'Yousef' });
+      expect(set).toHaveBeenCalledWith('!room:ixo.world', {
+        userName: 'Yousef',
+      });
       if (typeof result !== 'string') {
         throw new Error('expected tool to return a string');
       }

@@ -45,7 +45,9 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
   test('1.12 list_capabilities returns visibility-correct rows', async () => {
     const rt = await createIntegrationRuntime({
       plugins: [new MemoryPlugin(), new FirecrawlPlugin(), new CreditsPlugin()],
-      user: { did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user' },
+      user: {
+        did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user',
+      },
       // Empty loadedPlugins so on-demand plugins show `loaded: false`
       // (mirrors production behavior on a fresh conversation thread).
       state: { loadedPlugins: new Set<string>() },
@@ -71,7 +73,10 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
       expect(firecrawlRow!.loaded).toBe(false);
 
       // Credits is silent — meta-tool filters it out by default.
-      expect(creditsRow, 'silent plugins not in default listing').toBeUndefined();
+      expect(
+        creditsRow,
+        'silent plugins not in default listing',
+      ).toBeUndefined();
     } finally {
       await rt.close();
     }
@@ -82,19 +87,25 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
   test('1.13 load_capability binds an on-demand plugin', async () => {
     const rt = await createIntegrationRuntime({
       plugins: [new FirecrawlPlugin()],
-      user: { did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user' },
+      user: {
+        did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user',
+      },
     });
     try {
       const result1 = (await rt.invokeTool('load_capability', {
         name: 'firecrawl',
-      })) as { alreadyAvailable?: boolean; tools?: Array<{ name: string }> } | string;
+      })) as
+        | { alreadyAvailable?: boolean; tools?: Array<{ name: string }> }
+        | string;
 
       // load_capability may return a LangGraph Command on first load — its
       // `update` channel carries the LoadCapabilityResult. The string return
       // path comes from when alreadyAvailable is true. Either way, we get
       // the underlying result here.
       const payload =
-        typeof result1 === 'string' ? (JSON.parse(result1) as Record<string, unknown>) : result1;
+        typeof result1 === 'string'
+          ? (JSON.parse(result1) as Record<string, unknown>)
+          : result1;
       expect(payload).toBeDefined();
 
       // Second call must report alreadyAvailable=true now that firecrawl is loaded.
@@ -102,8 +113,12 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
         name: 'firecrawl',
       })) as { alreadyAvailable?: boolean } | string;
       const payload2 =
-        typeof result2 === 'string' ? (JSON.parse(result2) as Record<string, unknown>) : result2;
-      expect((payload2 as { alreadyAvailable?: boolean }).alreadyAvailable).toBe(true);
+        typeof result2 === 'string'
+          ? (JSON.parse(result2) as Record<string, unknown>)
+          : result2;
+      expect(
+        (payload2 as { alreadyAvailable?: boolean }).alreadyAvailable,
+      ).toBe(true);
     } finally {
       await rt.close();
     }
@@ -114,7 +129,9 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
   test('1.14 load_capability for unknown plugin throws naming the missing plugin', async () => {
     const rt = await createIntegrationRuntime({
       plugins: [new FirecrawlPlugin()],
-      user: { did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user' },
+      user: {
+        did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user',
+      },
     });
     try {
       await expect(
@@ -130,7 +147,9 @@ describe('Phase 1 — meta-tools (Tier A direct invoke)', () => {
   test('1.15 load_capability for silent plugin throws cleanly', async () => {
     const rt = await createIntegrationRuntime({
       plugins: [new CreditsPlugin()],
-      user: { did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user' },
+      user: {
+        did: process.env.TEST_USER_DID ?? 'did:ixo:integration-test-user',
+      },
     });
     try {
       await expect(

@@ -268,10 +268,7 @@ export class ChannelMemoryService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    if (
-      buffer.length < 16 ||
-      !buffer.subarray(0, 16).equals(SQLITE_MAGIC)
-    ) {
+    if (buffer.length < 16 || !buffer.subarray(0, 16).equals(SQLITE_MAGIC)) {
       logger.warn(
         `Restored DB for room=${roomId} has invalid SQLite header — starting fresh`,
       );
@@ -323,10 +320,7 @@ export class ChannelMemoryService implements OnModuleInit, OnModuleDestroy {
       try {
         await fsp.copyFile(room.dbPath, snapshotPath);
         const raw = await fsp.readFile(snapshotPath);
-        const checksum = crypto
-          .createHash('sha256')
-          .update(raw)
-          .digest('hex');
+        const checksum = crypto.createHash('sha256').update(raw).digest('hex');
         if (checksum === room.lastUploadedChecksum) {
           room.dirty = false;
           return;
@@ -658,13 +652,15 @@ export class ChannelMemoryService implements OnModuleInit, OnModuleDestroy {
           logger.warn(
             `live recent fetch failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
           );
-          return { messages: [] as Array<{
-            eventId: string;
-            sender: string;
-            body: string;
-            timestamp: number;
-            threadId?: string;
-          }> };
+          return {
+            messages: [] as Array<{
+              eventId: string;
+              sender: string;
+              body: string;
+              timestamp: number;
+              threadId?: string;
+            }>,
+          };
         }),
     ]);
 

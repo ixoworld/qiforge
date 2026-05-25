@@ -179,7 +179,9 @@ describe('MemoryPlugin', () => {
         mintInvocation,
         resolveServiceDid,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
       session: {
         id: 'sess-1',
@@ -202,7 +204,6 @@ describe('MemoryPlugin', () => {
       'x-room-id': '!room:ixo.world',
     });
   });
-
 
   it('exposes a `userProfile` shared-state accessor that reads from state.userContext', async () => {
     const plugin = new MemoryPlugin({ mcpFactory: stubFactory([]) });

@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper.js';
-import type { Logger, PluginTool, RuntimeContext } from '../../plugin-api/types.js';
+import type {
+  Logger,
+  PluginTool,
+  RuntimeContext,
+} from '../../plugin-api/types.js';
 import type { UserPreferencesWriter } from './service/user-preferences.service.js';
 
 const NOOP_LOGGER: Logger = {
@@ -52,7 +56,7 @@ const setUserPreferencesSchema = z.object({
     ])
     .optional()
     .describe(
-      "How formal the replies should be. Pick the value closest to what the user actually wants, " +
+      'How formal the replies should be. Pick the value closest to what the user actually wants, ' +
         'not what the request literally said.',
     ),
   customInstructions: z

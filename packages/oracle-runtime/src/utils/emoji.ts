@@ -14,11 +14,10 @@ function toStringSafe(input: unknown): string {
 
 export function emojify(input: unknown): string {
   if (typeof input !== 'string') {
-        logger.debug(
-          'emojify received non-string input; returning input as-is.',
-          input
-        );
-   
+    logger.debug(
+      'emojify received non-string input; returning input as-is.',
+      input,
+    );
   }
   try {
     return nodeEmojify(String(input));
@@ -27,7 +26,7 @@ export function emojify(input: unknown): string {
     logger.debug(
       `emojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
-      err
+      err,
     );
 
     return str;
@@ -42,7 +41,7 @@ export function unemojify(input: unknown): string {
     logger.debug(
       `unemojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
-      err
+      err,
     );
     return str;
   }

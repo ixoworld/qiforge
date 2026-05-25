@@ -6,6 +6,7 @@ Sessions, Messages, and WS NestJS modules copied from `apps/app/src/` into
 ## Per-module cleanup
 
 ### sessions/
+
 - `sessions.service.ts`: dropped duplicated `Logger.log("FOUND existing session…")`
   noise inside `handleMessage`-style flows (kept warning/error paths).
   Restructured `previousSession` guard to use a flat null-check instead of
@@ -24,6 +25,7 @@ Sessions, Messages, and WS NestJS modules copied from `apps/app/src/` into
   relocated by the parallel module move).
 
 ### messages/
+
 - `messages.service.ts`: ~15% LOC reduction.
   - Dropped `cleanAdditionalKwargs` import from `src/graph/nodes/chat-node/utils`
     and inlined the function locally — it's a 30-line helper used in one
@@ -62,11 +64,12 @@ Sessions, Messages, and WS NestJS modules copied from `apps/app/src/` into
   flows); was previously implicit-undefined.
 
 ### ws/
+
 - `ws.gateway.ts`: dropped duplicated handler logging
   (the per-connection `WebSocket connection established for session`
-  + `client.id` line was emitted by both the gateway and the service —
-  now only the gateway logs it; the service logs from `addClientConnection`
-  give richer connection-count context).
+  - `client.id` line was emitted by both the gateway and the service —
+    now only the gateway logs it; the service logs from `addClientConnection`
+    give richer connection-count context).
 - Stripped `import { ApiOperation, ApiResponse } from '@nestjs/swagger'` from
   `ws.gateway.ts` — wait, kept; the @SubscribeMessage handlers still annotate
   via Swagger.

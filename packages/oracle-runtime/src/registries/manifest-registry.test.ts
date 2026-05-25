@@ -62,7 +62,9 @@ describe('ManifestRegistry', () => {
       }),
     );
 
-    expect(manifests.validateAgainstTools(tools, emptySubAgents()).errors).toEqual([]);
+    expect(
+      manifests.validateAgainstTools(tools, emptySubAgents()).errors,
+    ).toEqual([]);
   });
 
   it('validateAgainstTools reports plugin + missing tool when an example references a non-existent tool', async () => {

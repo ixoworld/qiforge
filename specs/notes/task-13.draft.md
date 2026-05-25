@@ -7,11 +7,11 @@ Date: 2026-05-07
 Three modules copied (not git-mv'd) from `apps/app/src/` to
 `packages/oracle-runtime/src/modules/`:
 
-| Module    | Source                                          | Destination                         |
-| --------- | ----------------------------------------------- | ----------------------------------- |
-| secrets   | `apps/app/src/secrets/`                         | `modules/secrets/`                  |
-| ucan      | `apps/app/src/ucan/`                            | `modules/ucan/`                     |
-| auth      | `apps/app/src/middleware/auth-header.middleware.ts` | `modules/auth/auth-header.middleware.ts` (+ `auth.module.ts`) |
+| Module  | Source                                              | Destination                                                   |
+| ------- | --------------------------------------------------- | ------------------------------------------------------------- |
+| secrets | `apps/app/src/secrets/`                             | `modules/secrets/`                                            |
+| ucan    | `apps/app/src/ucan/`                                | `modules/ucan/`                                               |
+| auth    | `apps/app/src/middleware/auth-header.middleware.ts` | `modules/auth/auth-header.middleware.ts` (+ `auth.module.ts`) |
 
 apps/app's originals were intentionally left untouched — TASK-32 deletes
 them when apps/app is fully retired.
@@ -93,7 +93,7 @@ Other TASK-12/TASK-14 work-in-progress files were already present
   also has its own `declare global` augmentation including
   `userOpenIdToken: string` and reads `userOpenIdToken: matrixAccessToken`
   off `req.authData`. TASK-14 must align: drop the duplicate `declare
-  global` and switch the subscription lookup to use `req.authData.did`
+global` and switch the subscription lookup to use `req.authData.did`
   (that's already the primary key for the subscription cache).
 
 These conflicts are why a current full

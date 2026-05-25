@@ -2,15 +2,15 @@
 
 ## Event name mapping (verified against `@ixo/oracles-events` source)
 
-| ctx.emit method            | Event name                    | Class                             |
-| -------------------------- | ----------------------------- | --------------------------------- |
-| `toolCall`                 | `tool_call`                   | `ToolCallEvent`                   |
-| `actionCall`               | `action_call`                 | `ActionCallEvent`                 |
-| `renderComponent`          | `render_component`            | `RenderComponentEvent`            |
-| `reasoning`                | `reasoning`                   | `ReasoningEvent`                  |
-| `browserToolCall`          | `browser_tool_call`           | `BrowserToolCallEvent`            |
-| `router`                   | `router.update`               | `RouterEvent`                     |
-| `messageCacheInvalidation` | `message_cache_invalidation`  | `MessageCacheInvalidationEvent`   |
+| ctx.emit method            | Event name                   | Class                           |
+| -------------------------- | ---------------------------- | ------------------------------- |
+| `toolCall`                 | `tool_call`                  | `ToolCallEvent`                 |
+| `actionCall`               | `action_call`                | `ActionCallEvent`               |
+| `renderComponent`          | `render_component`           | `RenderComponentEvent`          |
+| `reasoning`                | `reasoning`                  | `ReasoningEvent`                |
+| `browserToolCall`          | `browser_tool_call`          | `BrowserToolCallEvent`          |
+| `router`                   | `router.update`              | `RouterEvent`                   |
+| `messageCacheInvalidation` | `message_cache_invalidation` | `MessageCacheInvalidationEvent` |
 
 ## Singleton wraps
 
@@ -33,4 +33,5 @@
 - `abortSignal` ← from `runConfig.signal` if present, else a fresh `AbortController().signal`.
 
 ## Logger
+
 `ambient.logger.child({ plugin })` is documented in TASK-05 notes. The Logger interface defined in plugin-api/types.ts has no `child` method. Add an optional `child` method to the Logger interface — fall back to the same logger if `child` is undefined.

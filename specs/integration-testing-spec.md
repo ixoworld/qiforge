@@ -24,16 +24,16 @@ If a test would pass when production is broken, or fail when production works fi
 
 We split into three tiers because each catches a different class of bug, costs a different amount, and runs on a different cadence.
 
-| Tier | What it answers | Cost | Cadence | Reliability |
-|---|---|---|---|---|
-| **A. Direct-invoke** | "Does our integration with the upstream service work?" | $0 (no LLM) | Every PR | Deterministic |
-| **B. Agent-loop** | "Does the agent pick the right tool for this user input?" | ~$ per run | Every PR (gated) + pre-deploy | Smart-enough cheap model |
-| **C1. Trajectory eval** | "Did the agent call the right tools in the right shape?" | $0 (no judge LLM) | Every PR | Deterministic via `agentevals` |
-| **C2. Judge eval** | "Has reasoning quality drifted vs. the reference set?" | $$ per run | Pre-deploy + nightly | Production model + LLM-as-judge |
+| Tier                    | What it answers                                           | Cost              | Cadence                       | Reliability                     |
+| ----------------------- | --------------------------------------------------------- | ----------------- | ----------------------------- | ------------------------------- |
+| **A. Direct-invoke**    | "Does our integration with the upstream service work?"    | $0 (no LLM)       | Every PR                      | Deterministic                   |
+| **B. Agent-loop**       | "Does the agent pick the right tool for this user input?" | ~$ per run        | Every PR (gated) + pre-deploy | Smart-enough cheap model        |
+| **C1. Trajectory eval** | "Did the agent call the right tools in the right shape?"  | $0 (no judge LLM) | Every PR                      | Deterministic via `agentevals`  |
+| **C2. Judge eval**      | "Has reasoning quality drifted vs. the reference set?"    | $$ per run        | Pre-deploy + nightly          | Production model + LLM-as-judge |
 
 ### Why the split matters
 
-The naive approach — only Tier B — is bad. If a Memory Engine endpoint returns 500, a Tier B test fails *because the model couldn't recall a memory*, not *because Memory Engine is down*. You spend the next hour blaming the model.
+The naive approach — only Tier B — is bad. If a Memory Engine endpoint returns 500, a Tier B test fails _because the model couldn't recall a memory_, not _because Memory Engine is down_. You spend the next hour blaming the model.
 
 Tier A invokes the plugin's tool directly (no LLM, no agent, no system prompt) with a real `RuntimeContext` and a real UCAN delegation against the real upstream. If it fails, the integration is broken — period. This catches 80% of what would otherwise be flaky Tier B failures, for ~$0.
 
@@ -46,6 +46,7 @@ Tier C is qualitative — trajectory match + LLM-as-judge — and runs pre-deplo
 ## 3. What's in scope and what isn't
 
 ### In scope
+
 - **Bundled plugins**: memory, sandbox, skills, composio, firecrawl, agui, credits, user-preferences, domain-indexer.
 - **App-level plugin**: weather (the example oracle's own).
 - **Runtime boot**: env validation, plugin loader, auto-detect gates, UCAN auth, route exclusions, SSE streaming, abort.
@@ -53,6 +54,7 @@ Tier C is qualitative — trajectory match + LLM-as-judge — and runs pre-deplo
 - **Evals**: trajectory match (deterministic) + LLM-as-judge (qualitative).
 
 ### Explicitly out of scope
+
 - **Editor plugin**: needs seeded BlockNote + Matrix room state, brittle and heavy. Defer.
 - **Portal plugin**: covered transitively by agent scenarios; no dedicated tests.
 - **Slack plugin**: needs a live workspace; manual smoke only.
@@ -70,7 +72,7 @@ Three things must hold for us to ship with confidence:
 2. **The agent picks the right tool for the right user input.** Manifests, system prompt, and the model all agree on what gets called when.
 3. **(1) and (2) keep holding as we change code, swap models, and update prompts.**
 
-We solve these in order, each with a different approach. The point of the three tiers (§2) is that each tier answers exactly one of these questions, so when a test fails we know *why*.
+We solve these in order, each with a different approach. The point of the three tiers (§2) is that each tier answers exactly one of these questions, so when a test fails we know _why_.
 
 ### 4.1 Tier A — testing plugins against real upstreams (no model involved)
 
@@ -79,6 +81,7 @@ We solve these in order, each with a different approach. The point of the three 
 **The approach:** spin up the runtime with **real** ambient services — real LLM provider config, real UCAN signer, real fetch — and build a real `RuntimeContext` for a test user DID with a real UCAN delegation. Then call the plugin's tool **directly**. No model. No agent loop. No HTTP layer. Just: `await runtime.invokeTool('memory-engine__add_memory', { content: '...' })`.
 
 This catches all the failure modes that have nothing to do with the model:
+
 - Wrong UCAN headers reaching the upstream
 - Broken `autoDetect` gates excluding the wrong plugins
 - Schema drift between the plugin and the upstream
@@ -97,17 +100,17 @@ If any of those fail, the memory plugin is broken — independent of the model, 
 
 What we test per plugin (Tier A only — Tier B is in §4.2):
 
-| Plugin | Tier A scenarios (plain language) |
-|---|---|
-| **memory** | Write a fact → upstream returns success. Search for that fact → upstream returns it. Different user can't see it. Missing capability returns a clean auth error. |
-| **sandbox** | Run `echo hello` → stdout is `hello`. Write multiline markdown via `sandbox_write_file`, then `cat` it back → byte-identical. Per-user secret seeded via `seedSecrets` is reachable inside the sandbox as an env var. `oracle_*` tools hidden by default. |
-| **skills** | `search_skills` for a known fixture capsule → returns at least one result with `cid` + `path`. `list_skills` orders private-first, then public. |
-| **firecrawl** | Scrape a stable URL → response body contains a known substring. |
-| **composio** | List Composio connections → our test Linear account shows up. Create a Linear issue → it appears in the workspace. Teardown deletes it. Missing capability → clean auth error. |
-| **user-preferences** | PUT a preference → GET reads it back. Unknown key → 400. |
-| **credits** | Authenticated request increments the Redis ledger. `DISABLE_CREDITS=true` → no writes. |
-| **domain-indexer** | Look up a known devnet entity DID → returns non-empty data. |
-| **weather** | Direct `get_current_weather` for Berlin → temperature is a number. `WEATHER_DEFAULT_UNITS=fahrenheit` → values are in Fahrenheit. |
+| Plugin               | Tier A scenarios (plain language)                                                                                                                                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **memory**           | Write a fact → upstream returns success. Search for that fact → upstream returns it. Different user can't see it. Missing capability returns a clean auth error.                                                                                          |
+| **sandbox**          | Run `echo hello` → stdout is `hello`. Write multiline markdown via `sandbox_write_file`, then `cat` it back → byte-identical. Per-user secret seeded via `seedSecrets` is reachable inside the sandbox as an env var. `oracle_*` tools hidden by default. |
+| **skills**           | `search_skills` for a known fixture capsule → returns at least one result with `cid` + `path`. `list_skills` orders private-first, then public.                                                                                                           |
+| **firecrawl**        | Scrape a stable URL → response body contains a known substring.                                                                                                                                                                                           |
+| **composio**         | List Composio connections → our test Linear account shows up. Create a Linear issue → it appears in the workspace. Teardown deletes it. Missing capability → clean auth error.                                                                            |
+| **user-preferences** | PUT a preference → GET reads it back. Unknown key → 400.                                                                                                                                                                                                  |
+| **credits**          | Authenticated request increments the Redis ledger. `DISABLE_CREDITS=true` → no writes.                                                                                                                                                                    |
+| **domain-indexer**   | Look up a known devnet entity DID → returns non-empty data.                                                                                                                                                                                               |
+| **weather**          | Direct `get_current_weather` for Berlin → temperature is a number. `WEATHER_DEFAULT_UNITS=fahrenheit` → values are in Fahrenheit.                                                                                                                         |
 
 ### 4.2 Tier B — testing agent behavior against the full oracle
 
@@ -116,6 +119,7 @@ What we test per plugin (Tier A only — Tier B is in §4.2):
 **The approach:** boot the full QiForge oracle (`createOracleApp`) on an ephemeral port with all the plugins loaded, then drive it the way a real client does — `POST /messages/:sessionId` with a real UCAN header. The harness exposes `ChatClient.send(...)` and `ChatClient.stream(...)` so tests look like a real frontend would. **Assertions are structural** — "the response message list contains an `AIMessage` with a tool call to `get_current_weather` with `city='Berlin'`." Never on exact text (the model varies output every call).
 
 This catches:
+
 - Manifest drift (the model now picks the wrong tool because we changed a `whenToUse` line)
 - Tier-1 prompt regressions
 - Broken tool-call argument schemas
@@ -135,17 +139,17 @@ If this fails, either the manifest no longer tells the model to use this tool, o
 
 Agent-behavior scenarios we run on top of Tier A (plain language):
 
-| Scenario | What it proves |
-|---|---|
-| "Weather in Berlin?" → `get_current_weather` called with Berlin | Tool routing for the simplest case |
-| "Forecast for Tokyo this week" → `get_weather_forecast` with `days=7` | Multi-arg tool selection |
-| "What's my name?" → NO weather tool called | False-positive guard |
-| "Remember I prefer dark mode" → `add_memory` called | Memory write routing |
+| Scenario                                                                                            | What it proves                     |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| "Weather in Berlin?" → `get_current_weather` called with Berlin                                     | Tool routing for the simplest case |
+| "Forecast for Tokyo this week" → `get_weather_forecast` with `days=7`                               | Multi-arg tool selection           |
+| "What's my name?" → NO weather tool called                                                          | False-positive guard               |
+| "Remember I prefer dark mode" → `add_memory` called                                                 | Memory write routing               |
 | New session, same user → "What do you remember about my preferences?" → response mentions dark mode | Memory persistence across sessions |
-| "Find a skill for X and run it" → `search_skills` then `sandbox_run` | Two-tool composition |
-| "Create a Linear issue titled Foo" → `linear_create_issue` called | Composio routing |
-| Stream a long query, abort mid-stream, send a follow-up | Streaming + abort hygiene |
-| Send a request with a UCAN scoped to memory only, ask for sandbox | Agent declines cleanly, no crash |
+| "Find a skill for X and run it" → `search_skills` then `sandbox_run`                                | Two-tool composition               |
+| "Create a Linear issue titled Foo" → `linear_create_issue` called                                   | Composio routing                   |
+| Stream a long query, abort mid-stream, send a follow-up                                             | Streaming + abort hygiene          |
+| Send a request with a UCAN scoped to memory only, ask for sandbox                                   | Agent declines cleanly, no crash   |
 
 Each is one test. None chain six LLM calls. Each fails for a specific, knowable reason.
 
@@ -155,14 +159,15 @@ Each is one test. None chain six LLM calls. Each fails for a specific, knowable 
 
 **The approach:** maintain ~10 reference conversations, each a `(user_input, expected_trajectory)` pair stored as TypeScript modules. Every release re-runs them and compares two ways:
 
-- **Trajectory match** (deterministic, free, runs on PR): does the agent call at least the same tools as the reference, in the right shape? Uses `agentevals` library's `createTrajectoryMatchEvaluator`. Catches *structural* drift.
-- **LLM-as-judge** (≈$0.20/run, pre-deploy only): does the agent's reasoning still make sense to a separate "judge" model (gpt-4o-mini) given the user input + reference? Uses `createTrajectoryLLMAsJudge`. Catches *reasoning* drift the structural matcher misses.
+- **Trajectory match** (deterministic, free, runs on PR): does the agent call at least the same tools as the reference, in the right shape? Uses `agentevals` library's `createTrajectoryMatchEvaluator`. Catches _structural_ drift.
+- **LLM-as-judge** (≈$0.20/run, pre-deploy only): does the agent's reasoning still make sense to a separate "judge" model (gpt-4o-mini) given the user input + reference? Uses `createTrajectoryLLMAsJudge`. Catches _reasoning_ drift the structural matcher misses.
 
 Both upload to LangSmith automatically (when env vars are set). Over time we get a dashboard: pass rate per case, cost/latency per release, full history. We notice "the memory-recall case went from passing to failing in release X" the moment it happens.
 
 **Walked-through example — memory-recall eval case:**
 
 The reference trajectory (stored as `golden-trajectories/memory-recall.ts`):
+
 ```
 User: "remember my name is Sara"
 Agent: [tool_call: memory-engine__add_memory with content="user name is Sara"]
@@ -176,6 +181,7 @@ Agent: "Your name is Sara."
 ```
 
 Eval run:
+
 1. Send the same user inputs through `ChatClient.send()` against the real oracle.
 2. Capture the agent's actual message list.
 3. Run trajectory-match (`superset` mode): does the actual trajectory contain at least the two tool calls in the reference? Boolean pass/fail.
@@ -229,6 +235,7 @@ apps/qiforge-example/
 ```
 
 **Naming:**
+
 - `*.int.test.ts` — Tier A + B; run via `pnpm test:integration` (vitest `--mode int`).
 - `*.eval.ts` — Tier C; run via `pnpm eval` (vitest `--mode eval`).
 - Default `pnpm test` ignores both — unit tests stay fast.
@@ -245,11 +252,11 @@ Like the existing `createTestRuntime()` but with **real ambient services** (real
 
 ```ts
 {
-  invokeTool(name, args)              // direct tool call with real RuntimeContext
-  invokeSubAgent(name, task)          // direct sub-agent call
-  invokeMiddleware(name, state)       // direct middleware fire
-  ambient                             // real ambient bag for advanced cases
-  close()
+  invokeTool(name, args); // direct tool call with real RuntimeContext
+  invokeSubAgent(name, task); // direct sub-agent call
+  invokeMiddleware(name, state); // direct middleware fire
+  ambient; // real ambient bag for advanced cases
+  close();
 }
 ```
 
@@ -261,11 +268,11 @@ Boots `createOracleApp` on an ephemeral port with `.env.integration` loaded. Ret
 
 ```ts
 {
-  baseUrl                             // http://localhost:<ephemeral>
-  app                                 // OracleApp handle
-  events                              // log of onPluginStatusChange + onError
-  status()                            // shortcut to app.plugins.status()
-  close()
+  baseUrl; // http://localhost:<ephemeral>
+  app; // OracleApp handle
+  events; // log of onPluginStatusChange + onError
+  status(); // shortcut to app.plugins.status()
+  close();
 }
 ```
 
@@ -279,7 +286,11 @@ Produces a real Ed25519-signed UCAN delegation string for `x-ucan-delegation`. C
 
 ```ts
 import {
-  memoryCap, sandboxCap, skillsCap, subscriptionsReadCap, allCaps,
+  memoryCap,
+  sandboxCap,
+  skillsCap,
+  subscriptionsReadCap,
+  allCaps,
 } from '@ixo/oracle-runtime/testing';
 ```
 
@@ -298,6 +309,7 @@ fetch(path, init?)                    // raw, for plugin HTTP routes
 ### `setup.ts` (the only test infrastructure we ship beyond the three modules above)
 
 A 3-line vitest setupFile, referenced from `vitest.config.ts`:
+
 ```ts
 import 'dotenv/config';
 import { expect } from 'vitest';
@@ -325,22 +337,22 @@ The hard constraint: tests must fail **only** when production is broken, not whe
 
 **PR tier** (Tier B on PRs) — proven smart enough to drive this codebase, cheaper than production:
 
-| Role | Production | PR-tier test |
-|---|---|---|
-| `main` | `moonshotai/kimi-k2.6` | `moonshotai/kimi-k2.5` (production *subagent* model — already proven to call tools in this codebase) |
-| `subagent` | `moonshotai/kimi-k2.5` | `openai/gpt-oss-120b` |
-| `routing` | `openai/gpt-oss-20b` | unchanged |
-| `guard` / `session-title` | `meta-llama/llama-3.1-8b-instruct` | unchanged |
-| `vision` | `gemini-2.5-flash-lite` | unchanged |
+| Role                      | Production                         | PR-tier test                                                                                         |
+| ------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `main`                    | `moonshotai/kimi-k2.6`             | `moonshotai/kimi-k2.5` (production _subagent_ model — already proven to call tools in this codebase) |
+| `subagent`                | `moonshotai/kimi-k2.5`             | `openai/gpt-oss-120b`                                                                                |
+| `routing`                 | `openai/gpt-oss-20b`               | unchanged                                                                                            |
+| `guard` / `session-title` | `meta-llama/llama-3.1-8b-instruct` | unchanged                                                                                            |
+| `vision`                  | `gemini-2.5-flash-lite`            | unchanged                                                                                            |
 
-Rationale: `gpt-oss-20b` was tempting but is known to drop tool calls on multi-step routing. `kimi-k2.5` is what production uses for sub-agents *today* — it's battle-tested in this codebase. Using it for the test `main` role gives us "cheaper than production but proven smart enough."
+Rationale: `gpt-oss-20b` was tempting but is known to drop tool calls on multi-step routing. `kimi-k2.5` is what production uses for sub-agents _today_ — it's battle-tested in this codebase. Using it for the test `main` role gives us "cheaper than production but proven smart enough."
 
 **Pre-deploy tier** (Tier B pre-release + Tier C) — production models exactly, so we catch behavior that only shows up with the production model:
 
-| Role | Model |
-|---|---|
-| `main` | `moonshotai/kimi-k2.6` |
-| `subagent` | `moonshotai/kimi-k2.5` |
+| Role           | Model                                                                                                   |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| `main`         | `moonshotai/kimi-k2.6`                                                                                  |
+| `subagent`     | `moonshotai/kimi-k2.5`                                                                                  |
 | Judge (Tier C) | `openai/gpt-4o-mini` (cheap, well-calibrated). Fallback to `openai/o3-mini` if accuracy is insufficient |
 
 ### Cost controls (apply everywhere)
@@ -402,6 +414,7 @@ What changes are caught here: env schema regressions, plugin loader bugs, auth-e
 - [ ] **1.7** `GET /health`, `GET /docs`, `GET /version`, `GET /weather/now?city=Berlin` reachable without `x-ucan-delegation`.
 
 **Error paths (small, focused — not exhaustive):**
+
 - [ ] **1.8** Upstream returns 5xx mid-tool-call → agent surfaces an error message in its response, no 500 from the runtime, no hung stream.
 - [ ] **1.9** Model emits a malformed `tool_calls[].args` (fails Zod parse) → runtime returns a structured tool error, agent gets a chance to retry, no crash.
 - [ ] **1.10** Long stream aborted mid-flight via `POST /messages/abort` → SSE connection closes cleanly, next request on the same session works.
@@ -424,6 +437,7 @@ The runtime ships two unnamespaced meta-tools used to discover and bind on-deman
 ### Phase 2 — Example app boots + Weather plugin (Tier A + Tier B; free upstream) — ~20s
 
 Files:
+
 - `apps/qiforge-example/test/integration/boot.int.test.ts` — the one boot smoke
 - `apps/qiforge-example/test/integration/weather.int.test.ts` — plugin + agent loop
 
@@ -434,11 +448,13 @@ Files:
 Open-Meteo is free + public, no UCAN, no MCP. Best first agent-loop test — proves the chat → model → tool → response loop works before we add paid services.
 
 **Tier A (no LLM):**
+
 - [ ] **2.1** Direct-invoke `get_current_weather` with `{ city: 'Berlin' }` → returns a temperature number.
 - [ ] **2.2** Direct-invoke `get_weather_forecast` with `{ city: 'Tokyo', days: 7 }` → returns 7 daily entries.
 - [ ] **2.3** `GET /weather/now?city=Berlin` with `WEATHER_DEFAULT_UNITS=fahrenheit` env → Fahrenheit values in response.
 
 **Tier B (with LLM):**
+
 - [ ] **2.4** "What's the weather in Berlin?" → agent calls `get_current_weather` with `{ city: 'Berlin' }`.
 - [ ] **2.5** "Forecast for Tokyo this week" → agent calls `get_weather_forecast` with `days: 7`.
 - [ ] **2.6** Multi-turn shared state: ask Berlin weather, then "is it warmer than what I asked last about Tokyo?" → agent reads `lastWeatherQuery` shared state.
@@ -456,12 +472,14 @@ File: `packages/oracle-runtime/src/plugins/memory/memory.plugin.int.test.ts`
 Requires: live Memory Engine on devnet, real test user mnemonic.
 
 **Tier A (no LLM):**
+
 - [ ] **3.1** Direct-invoke `memory-engine__add_memory` with a fact → upstream returns success.
 - [ ] **3.2** Direct-invoke `memory-engine__search_memory_engine` for that fact → upstream returns it.
 - [ ] **3.3** Direct-invoke with a delegation missing `memoryCap` → upstream returns 401/403; harness surfaces a clean error (not a 500 crash).
 - [ ] **3.4** Direct-invoke as a different user DID → cannot see user A's memories.
 
 **Tier B (with LLM):**
+
 - [ ] **3.5** "Remember I prefer dark mode" → calls `memory-engine__add_memory`.
 - [ ] **3.6** New session, same user → "what do you remember about my preferences?" → response mentions dark mode.
 - [ ] **3.7** First-contact flow: brand new user DID, first message → memory middleware fires the introduction path per the manifest's `whenToUse[0]`.
@@ -475,16 +493,19 @@ Requires: live Memory Engine on devnet, real test user mnemonic.
 Files: `sandbox.plugin.int.test.ts`, `skills.plugin.int.test.ts`
 
 **Sandbox Tier A:**
+
 - [ ] **4.1** Direct-invoke `sandbox_run` with `echo hello` → stdout is `hello`, `exitCode === 0`.
 - [ ] **4.2** Direct-invoke `sandbox_write_file` with multiline markdown → follow-up `sandbox_run` (`cat`) returns byte-identical content.
 - [ ] **4.3** Per-user secret seeded via `seedSecrets()` is reachable inside the sandbox as `x-us-*` → `$USER_*` env var (verify via `printenv`).
 - [ ] **4.4** `oracle_*` management tools are NOT in the tool list by default; present when `includeOracleManagementTools: true`.
 
 **Skills Tier A:**
+
 - [ ] **4.5** Direct-invoke `search_skills` with a query matching a fixture capsule → returns at least one result with `cid` and `path`.
 - [ ] **4.6** Direct-invoke `list_skills` → caller's private skills first, then public.
 
 **Sandbox + Skills Tier B (composition — the high-value test):**
+
 - [ ] **4.7** "Find a skill for X and run it" → agent calls `search_skills`, then `sandbox_run` with the returned cid; `exitCode === 0`.
 
 **Done when:** a regression where Sandbox stops injecting `x-us-*` headers (which would silently break every secret-using skill) is caught by 4.3.
@@ -494,20 +515,24 @@ Files: `sandbox.plugin.int.test.ts`, `skills.plugin.int.test.ts`
 ### Phase 5 — User-preferences, Firecrawl, Credits, Domain-Indexer — ~60s each
 
 **User-preferences:**
+
 - [ ] **5.1** [Tier A] PUT `/user-preferences` then read back → returns the same data.
 - [ ] **5.2** [Tier B] Set preference "always respond in bullet points" → next chat response is bulleted.
 - [ ] **5.3** [Tier A] Unknown preference key → 400.
 
 **Firecrawl:**
+
 - [ ] **5.4** [Tier A] Direct-invoke firecrawl scrape on a stable URL → response contains a known substring.
 - [ ] **5.5** [Tier B] "Scrape https://docs.langchain.com/llms.txt" → agent calls firecrawl, response mentions a known section.
 
 **Credits** (only if Redis is up):
+
 - [ ] **5.6** [Tier A] Direct-invoke credits middleware on a synthesized request → ledger increments by ≥ 1.
 - [ ] **5.7** [Tier A] Claim record created with correct user DID and amount.
 - [ ] **5.8** [Tier A] `DISABLE_CREDITS=true` → no ledger writes.
 
 **Domain-Indexer:**
+
 - [ ] **5.9** [Tier A] Direct-invoke indexer tool with a known devnet entity DID → returns non-empty data.
 - [ ] **5.10** [Tier B] "What is entity did:ixo:entity:X?" → agent calls indexer.
 
@@ -517,9 +542,10 @@ Files: `sandbox.plugin.int.test.ts`, `skills.plugin.int.test.ts`
 
 File: `composio.plugin.int.test.ts`
 
-**What we're testing here is different from the other plugins, and that's intentional.** Composio itself is a stable third-party service — we don't need to prove it can create Linear issues; that's their job. What we DO need to prove is that the agent behaves correctly around an unconnected toolkit: it must call the real `COMPOSIO_MANAGE_CONNECTIONS` tool to get a connection URL from Composio, then surface *that exact URL* — not hallucinate one. This is the "does the agent actually use the tool when it needs info, vs. making things up" test.
+**What we're testing here is different from the other plugins, and that's intentional.** Composio itself is a stable third-party service — we don't need to prove it can create Linear issues; that's their job. What we DO need to prove is that the agent behaves correctly around an unconnected toolkit: it must call the real `COMPOSIO_MANAGE_CONNECTIONS` tool to get a connection URL from Composio, then surface _that exact URL_ — not hallucinate one. This is the "does the agent actually use the tool when it needs info, vs. making things up" test.
 
 **Key facts from the plugin's manifest:**
+
 - Composio is `visibility: 'on-demand'` — the agent must call `load_capability('composio')` before any Composio tool is available.
 - `COMPOSIO_MANAGE_CONNECTIONS` is a single tool that both **checks auth status** and **returns a redirect URL** if not connected (one tool, not two).
 - Returns `{ redirect_url: 'https://...' }` when the user isn't connected to the requested toolkit.
@@ -529,13 +555,13 @@ File: `composio.plugin.int.test.ts`
 
 - [ ] **6.1** [Tier A] Direct-invoke flow against real Composio with a test user that's NOT connected to a chosen toolkit (e.g. `linear`). Call the plugin's `COMPOSIO_MANAGE_CONNECTIONS` tool with `{ toolkit: 'linear' }`. Assert: response shape is `{ redirect_url: <a real https URL pointing at Composio's domain> }`. No exceptions, no hallucination — it's a direct tool call, so this is just verifying the SDK contract.
 
-- [ ] **6.2** [Tier B] The behavior scenario — the one this whole phase exists for. With a fresh session, ask the agent: *"Create a Linear issue titled 'Foo'."*
-  Expected trajectory:
-    1. Agent calls `list_capabilities` OR knows composio is on-demand and calls `load_capability({ name: 'composio' })` directly.
-    2. Agent calls `COMPOSIO_MANAGE_CONNECTIONS({ toolkit: 'linear' })`.
-    3. The tool returns `{ redirect_url: <real URL> }`.
-    4. Agent's final message contains *that exact URL* — substring-match the URL from the tool response against the final AIMessage text.
-  Assertion that proves no hallucination: `expect(finalText).toContain(redirectUrlFromToolMessage)`. The URL in the final message is byte-equal to the URL in the ToolMessage above it.
+- [ ] **6.2** [Tier B] The behavior scenario — the one this whole phase exists for. With a fresh session, ask the agent: _"Create a Linear issue titled 'Foo'."_
+      Expected trajectory:
+  1. Agent calls `list_capabilities` OR knows composio is on-demand and calls `load_capability({ name: 'composio' })` directly.
+  2. Agent calls `COMPOSIO_MANAGE_CONNECTIONS({ toolkit: 'linear' })`.
+  3. The tool returns `{ redirect_url: <real URL> }`.
+  4. Agent's final message contains _that exact URL_ — substring-match the URL from the tool response against the final AIMessage text.
+     Assertion that proves no hallucination: `expect(finalText).toContain(redirectUrlFromToolMessage)`. The URL in the final message is byte-equal to the URL in the ToolMessage above it.
 
 - [ ] **6.3** [Tier B] Negative: ask the agent to create a Linear issue with a delegation **missing** the `ixo:sandbox` capability. Expected: agent surfaces the auth limitation cleanly; does NOT pretend it succeeded. No `linear_create_issue` call.
 
@@ -572,15 +598,18 @@ This is the bulletproof-agent layer. Each scenario exercises real model judgment
 ### Phase 9 — Evals pipeline — split cadence
 
 Install (requires `langsmith>=0.3.1` for the vitest integration):
+
 ```
 pnpm add -D agentevals openevals langsmith dotenv
 ```
 
 **Two evaluator packages, complementary roles:**
-- `agentevals` — judges *trajectories* (message sequences, tool-call shape/order). Used in 9A for deterministic structural match, and in 9B for trajectory-quality LLM judgment.
-- `openevals` — judges *single outputs vs. references*. Comes with prebuilt prompts (`CORRECTNESS_PROMPT`, etc.). Used in 9B for **final-answer correctness** as a separate feedback signal from the trajectory judge. This catches "agent called the right tools but the final message to the user is wrong/confusing" — a class trajectory match alone cannot catch.
+
+- `agentevals` — judges _trajectories_ (message sequences, tool-call shape/order). Used in 9A for deterministic structural match, and in 9B for trajectory-quality LLM judgment.
+- `openevals` — judges _single outputs vs. references_. Comes with prebuilt prompts (`CORRECTNESS_PROMPT`, etc.). Used in 9B for **final-answer correctness** as a separate feedback signal from the trajectory judge. This catches "agent called the right tools but the final message to the user is wrong/confusing" — a class trajectory match alone cannot catch.
 
 #### File layout
+
 ```
 apps/qiforge-example/
 ├── ls.vitest.config.ts              ← LangSmith-aware vitest config (separate from main)
@@ -605,25 +634,28 @@ apps/qiforge-example/
 ```
 
 #### `ls.vitest.config.ts` (verbatim per LangSmith docs)
+
 ```ts
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
     include: ['**/*.eval.?(c|m)[jt]s'],
-    reporters: ['langsmith/vitest/reporter'],   // pretty experiment summary in stdout
-    setupFiles: ['dotenv/config'],              // loads .env.integration via dotenv
-    testTimeout: 120_000,                       // chat + judge can be slow
+    reporters: ['langsmith/vitest/reporter'], // pretty experiment summary in stdout
+    setupFiles: ['dotenv/config'], // loads .env.integration via dotenv
+    testTimeout: 120_000, // chat + judge can be slow
   },
 });
 ```
 
 Notes:
+
 - **Separate config file, not a mode flag on the main vitest config.** Required by `langsmith/vitest/reporter` — it replaces vitest's default reporter, so we must not collide with `pnpm test`.
 - `include` glob matches the docs (`**/*.eval.?(c|m)[jt]s`) so `.eval.ts`, `.eval.mts`, `.eval.cts` all work.
 - No `environment` field → defaults to `node` (the docs explicitly warn that JSDOM is not supported).
 
 #### Run commands in `package.json`
+
 ```json
 {
   "scripts": {
@@ -634,12 +666,14 @@ Notes:
   }
 }
 ```
+
 - `pnpm eval` — full eval run; uploads to LangSmith when `LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` are set.
 - `pnpm eval:trajectory` — trajectory match only; free (no judge LLM); the PR-cadence command.
 - `pnpm eval:dry` — runs everything locally without syncing to LangSmith (the docs' `LANGSMITH_TEST_TRACKING=false` switch). Use when iterating on a new trajectory.
 - `pnpm eval:feedback:seed` — Phase 9E; one-shot create of feedback configs + annotation queue in LangSmith.
 
 #### Runner decision — vitest now, standalone `evaluate()` later (hybrid)
+
 - The codebase is already pnpm + vitest. `langsmith/vitest` (`ls.describe`, `ls.test`, `ls.logOutputs`) keeps eval cases next to test cases, one toolchain. Trajectories live as TypeScript modules — type-checked, refactor-safe.
 - `langsmith/vitest` syncs **automatically** when env vars are set: each `ls.describe` becomes a LangSmith dataset; each `ls.test` becomes an example + experiment run; the default `pass` feedback key tracks per-case pass/fail. The reporter prints a link to the LangSmith experiment after each run — that's our drift dashboard, free out of the box.
 - With env vars unset (or `LANGSMITH_TEST_TRACKING=false`), evals run locally as plain vitest with zero LangSmith dependency. PR-cadence stays self-contained.
@@ -664,7 +698,9 @@ export const referenceOutputs = {
     new HumanMessage("What's the weather in Berlin?"),
     new AIMessage({
       content: '',
-      tool_calls: [{ id: 'call_1', name: 'get_current_weather', args: { city: 'Berlin' } }],
+      tool_calls: [
+        { id: 'call_1', name: 'get_current_weather', args: { city: 'Berlin' } },
+      ],
     }),
     new ToolMessage({ content: '{"temp_c":22,...}', tool_call_id: 'call_1' }),
     new AIMessage('Berlin is currently around 22°C.'),
@@ -683,16 +719,18 @@ Concrete checklist:
 - [ ] **9.4** `unordered` mode for the multi-tool case (e.g. "what's the weather AND any events in SF" — `get_weather` + a hypothetical `get_events`). Catches missing tools while tolerating call ordering variance.
 
 - [ ] **9.5** `toolArgsMatchOverrides` for fuzzy args. Cities are case-insensitive; CIDs and DIDs must match exactly. Concrete:
+
   ```ts
   createTrajectoryMatchEvaluator({
     trajectoryMatchMode: 'superset',
     toolArgsMatchOverrides: {
-      get_current_weather: 'ignore',   // city casing/spelling variance is OK
+      get_current_weather: 'ignore', // city casing/spelling variance is OK
       get_weather_forecast: 'ignore',
       // sandbox_run / skills lookups → default 'exact'
     },
   });
   ```
+
   Exact accepted values per the `agentevals` repo: `exact` (default), `ignore`, `subset`, `superset`. (Spec confirms; pin once we read the repo at implementation time.)
 
 - [ ] **9.6** Run path: `langsmith/vitest`. Each case is `ls.test(name, { inputs, referenceOutputs }, async ({ inputs, referenceOutputs }) => {...})`. Inside the test body: invoke via `ChatClient.send()` (we test the same HTTP path real users hit, not raw `agent.invoke`), then `ls.logOutputs({ messages: result.messages })`, then call the evaluator. With LangSmith env vars set, `ls.logOutputs` syncs each run to a LangSmith experiment automatically.
@@ -706,6 +744,7 @@ Concrete checklist:
 Qualitative scoring of agent reasoning + tool-selection on a curated 10-case set. Catches behavior drift the deterministic matcher misses (e.g. "agent called the right tool but with weird reasoning that would confuse users").
 
 - [ ] **9.9** `createTrajectoryLLMAsJudge` constructed with a `ChatOpenAI` instance pointing at OpenRouter:
+
   ```ts
   import { ChatOpenAI } from '@langchain/openai';
   const judgeLLM = new ChatOpenAI({
@@ -713,8 +752,12 @@ Qualitative scoring of agent reasoning + tool-selection on a curated 10-case set
     configuration: { baseURL: 'https://openrouter.ai/api/v1' },
     apiKey: process.env.OPEN_ROUTER_API_KEY,
   });
-  const judge = createTrajectoryLLMAsJudge({ judge: judgeLLM, prompt: TRAJECTORY_ACCURACY_PROMPT });
+  const judge = createTrajectoryLLMAsJudge({
+    judge: judgeLLM,
+    prompt: TRAJECTORY_ACCURACY_PROMPT,
+  });
   ```
+
   Cost reason: `gpt-4o-mini` ≈ 10× cheaper than `openai/o3-mini`. Fallback to `openai/o3-mini` (still via OpenRouter) only if accuracy is insufficient on a 10-case spot-check. **No OpenAI direct calls anywhere.**
 
 - [ ] **9.10** Use `TRAJECTORY_ACCURACY_PROMPT` (no-reference) for **open-ended** cases where the "right" trajectory is fuzzy.
@@ -724,6 +767,7 @@ Qualitative scoring of agent reasoning + tool-selection on a curated 10-case set
 - [ ] **9.11b** **Add `openevals.createLLMAsJudge` with `CORRECTNESS_PROMPT` as a third feedback signal** scoring the final assistant message against the reference final message. Feedback key: `final_answer_correctness`. Catches the regression class where the agent picks the right tools (trajectory ✓) and reasons fine (judge ✓) but the final user-facing text drifts (wrong, confusing, hallucinated). Three feedback chips per case in LangSmith — each catches a different regression class.
 
 - [ ] **9.12** **Wrap the judge with `ls.wrapEvaluator()`.** Per the docs, this traces the judge's LLM call as a separate run linked to a feedback key (e.g. `correctness`) — keeps the main trace clean and gives us a per-case feedback chip in the LangSmith UI. Pattern:
+
   ```ts
   const judge = createTrajectoryLLMAsJudge({ model: 'openai/gpt-4o-mini (via OpenRouter)', prompt: ... });
   const wrappedJudge = ls.wrapEvaluator(judge);
@@ -731,13 +775,15 @@ Qualitative scoring of agent reasoning + tool-selection on a curated 10-case set
   ```
 
 - [ ] **9.13** **Log cost + latency as feedback via `ls.logFeedback()`.** Every test additionally records:
+
   ```ts
   ls.logFeedback({ key: 'cost_usd', score: usageToUsd(result.usage) });
   ls.logFeedback({ key: 'latency_ms', score: result.durationMs });
   ```
+
   Free metrics, shows up as feedback chips in the LangSmith experiment view, lets us spot a regression where the agent still picks the right tools but burns 3× the tokens.
 
-- [ ] **9.13b** **Hard budget assertions per case.** Each golden trajectory file additionally exports `maxCostUsd` and `maxLatencyMs`. The test fails if either is exceeded. Numbers set generously on first run (2× the observed value), tightened later. Catches "the agent still routes correctly but now uses 3× the tokens" — the regression `ls.logFeedback` only *records*.
+- [ ] **9.13b** **Hard budget assertions per case.** Each golden trajectory file additionally exports `maxCostUsd` and `maxLatencyMs`. The test fails if either is exceeded. Numbers set generously on first run (2× the observed value), tightened later. Catches "the agent still routes correctly but now uses 3× the tokens" — the regression `ls.logFeedback` only _records_.
 
 - [ ] **9.14** Scoring contract:
   - Judge returns `{ score: boolean }` (per `agentevals` docs).
@@ -788,11 +834,11 @@ When that happens:
 
 **Three org-wide feedback configs (created once via `pnpm eval:feedback:seed`):**
 
-| Key | Type | Schema | Used for |
-|---|---|---|---|
-| `accuracy` | `continuous` | `min: 0, max: 1`, `isLowerScoreBetter: false` | How factually correct is the response |
-| `correctness` | `categorical` | `[{value: 1, label: "Pass"}, {value: 0, label: "Fail"}]` | Binary did-it-work judgment |
-| `notes` | `freeform` | n/a | Open-ended reviewer observations |
+| Key           | Type          | Schema                                                   | Used for                              |
+| ------------- | ------------- | -------------------------------------------------------- | ------------------------------------- |
+| `accuracy`    | `continuous`  | `min: 0, max: 1`, `isLowerScoreBetter: false`            | How factually correct is the response |
+| `correctness` | `categorical` | `[{value: 1, label: "Pass"}, {value: 0, label: "Fail"}]` | Binary did-it-work judgment           |
+| `notes`       | `freeform`    | n/a                                                      | Open-ended reviewer observations      |
 
 **One annotation queue: `qiforge-eval-review`.** Three rubric items pointing at the configs above, with queue-specific descriptions. `accuracy` and `correctness` required; `notes` optional.
 
@@ -801,7 +847,7 @@ Concrete checklist:
 - [ ] **9.25** Implement `feedback/seed.ts` — calls `client.createFeedbackConfig()` for each of the three configs (idempotent per docs: duplicate identical config returns existing).
 - [ ] **9.26** Implement the queue creation in the same script — `client.createAnnotationQueue({ name: 'qiforge-eval-review', description: '...', rubricInstructions: 'Score the agent trace. Add notes for anything unusual.', rubricItems: [...] })`.
 - [ ] **9.27** Run `pnpm eval:feedback:seed` once per LangSmith workspace (release + PR). Safe to re-run; idempotent.
-**That's it for the initial scope.** The seeded queue and configs are enough to start reviewing manually — when a pre-deploy eval fails, a human opens the experiment in LangSmith and uses "Add to queue" to send the trace to `qiforge-eval-review` with one click. No code involved.
+      **That's it for the initial scope.** The seeded queue and configs are enough to start reviewing manually — when a pre-deploy eval fails, a human opens the experiment in LangSmith and uses "Add to queue" to send the trace to `qiforge-eval-review` with one click. No code involved.
 
 **Deferred follow-up (not in initial scope, only if manual enqueue gets tedious):** a small post-eval hook that auto-enqueues failing traces from CI. Worth building only after we've actually used the queue manually for a release cycle and confirmed the rubric works.
 
@@ -823,36 +869,42 @@ Initial scope: tests run locally via `pnpm test:integration` and `pnpm eval`. Gi
 
 ## 9. What the user provides
 
-| Item | Value (provided) | Used by |
-|---|---|---|
-| `TEST_USER_DID` | `did:ixo:ixo1gz6cly2l94j9lydlx7a4ljsh52m0jtx5cgz8na` | Tier A + B everywhere |
-| `TEST_USER_MNEMONIC` (Ed25519) | `feature brown crime aware honey warfare voyage become february orchard now broken` | Used by `mintUserDelegation()` to sign UCANs. Goes in `.env.integration`, gitignored, never committed |
-| Oracle DID + entity DID (devnet) | UCAN audience | Already in `.env.example` |
-| `OPEN_ROUTER_API_KEY` | All Tier B + C | Already supported |
-| `MEMORY_MCP_URL`, `MEMORY_ENGINE_URL` (devnet) | Phase 3 | Already in `.env.example` |
-| `SANDBOX_MCP_URL` (devnet) | Phase 4 | Already in `.env.example` |
-| `SKILLS_CAPSULES_BASE_URL` (devnet) | Phase 4 | Already in `.env.example` |
-| `FIRECRAWL_API_KEY` (or MCP URL) | Phase 5 | Optional — tests skip if absent |
-| `COMPOSIO_API_KEY` + Linear connection | Phase 6 | Composio account with Linear OAuth connected to a test workspace |
-| Linear test team ID | Phase 6 | Tests scope all writes to this team for clean teardown |
-| `REDIS_URL` (devnet) | Phase 5 credits | Optional — credits tests skip if absent |
-| Fixture skill capsule (devnet) | Phase 4.5 | One small skill we control, so search has a known result |
-| Reference conversations × 10 | Phase 9B | Will draft these together once Phases 1-7 are green |
-| `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true` | Phase 9C | Optional locally; required in CI. Without them, evals run locally; with them, every run syncs to a LangSmith dataset + experiment automatically. Two projects: `qiforge-evals` (release) and `qiforge-evals-pr` (PR cadence) |
-| `LANGSMITH_TEST_TRACKING=false` | Phase 9 dry-run | Optional. Forces local-only eval runs even when the other LangSmith env vars are set. Useful for iterating on a new trajectory without polluting the drift dashboard |
-| Judge model | Phase 9B | **Routes through OpenRouter, not OpenAI direct.** Constructed as a `ChatOpenAI` instance with `baseURL: 'https://openrouter.ai/api/v1'` and the existing `OPEN_ROUTER_API_KEY`. No separate `OPENAI_API_KEY` needed. Model id: `openai/gpt-4o-mini` (OpenRouter's identifier) |
-| Annotation queue + 3 feedback configs in LangSmith | Phase 9E | Created automatically by `pnpm eval:feedback:seed` (one-shot, idempotent). Needs a LangSmith plan that supports annotation queues |
-| `langsmith>=0.3.1` SDK | Phase 9 (vitest integration) | Required version for `langsmith/vitest` per the docs. We pin this in `package.json` |
+| Item                                               | Value (provided)                                                                    | Used by                                                                                                                                                                                                                                                                       |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TEST_USER_DID`                                    | `did:ixo:ixo1gz6cly2l94j9lydlx7a4ljsh52m0jtx5cgz8na`                                | Tier A + B everywhere                                                                                                                                                                                                                                                         |
+| `TEST_USER_MNEMONIC` (Ed25519)                     | `feature brown crime aware honey warfare voyage become february orchard now broken` | Used by `mintUserDelegation()` to sign UCANs. Goes in `.env.integration`, gitignored, never committed                                                                                                                                                                         |
+| Oracle DID + entity DID (devnet)                   | UCAN audience                                                                       | Already in `.env.example`                                                                                                                                                                                                                                                     |
+| `OPEN_ROUTER_API_KEY`                              | All Tier B + C                                                                      | Already supported                                                                                                                                                                                                                                                             |
+| `MEMORY_MCP_URL`, `MEMORY_ENGINE_URL` (devnet)     | Phase 3                                                                             | Already in `.env.example`                                                                                                                                                                                                                                                     |
+| `SANDBOX_MCP_URL` (devnet)                         | Phase 4                                                                             | Already in `.env.example`                                                                                                                                                                                                                                                     |
+| `SKILLS_CAPSULES_BASE_URL` (devnet)                | Phase 4                                                                             | Already in `.env.example`                                                                                                                                                                                                                                                     |
+| `FIRECRAWL_API_KEY` (or MCP URL)                   | Phase 5                                                                             | Optional — tests skip if absent                                                                                                                                                                                                                                               |
+| `COMPOSIO_API_KEY` + Linear connection             | Phase 6                                                                             | Composio account with Linear OAuth connected to a test workspace                                                                                                                                                                                                              |
+| Linear test team ID                                | Phase 6                                                                             | Tests scope all writes to this team for clean teardown                                                                                                                                                                                                                        |
+| `REDIS_URL` (devnet)                               | Phase 5 credits                                                                     | Optional — credits tests skip if absent                                                                                                                                                                                                                                       |
+| Fixture skill capsule (devnet)                     | Phase 4.5                                                                           | One small skill we control, so search has a known result                                                                                                                                                                                                                      |
+| Reference conversations × 10                       | Phase 9B                                                                            | Will draft these together once Phases 1-7 are green                                                                                                                                                                                                                           |
+| `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true`     | Phase 9C                                                                            | Optional locally; required in CI. Without them, evals run locally; with them, every run syncs to a LangSmith dataset + experiment automatically. Two projects: `qiforge-evals` (release) and `qiforge-evals-pr` (PR cadence)                                                  |
+| `LANGSMITH_TEST_TRACKING=false`                    | Phase 9 dry-run                                                                     | Optional. Forces local-only eval runs even when the other LangSmith env vars are set. Useful for iterating on a new trajectory without polluting the drift dashboard                                                                                                          |
+| Judge model                                        | Phase 9B                                                                            | **Routes through OpenRouter, not OpenAI direct.** Constructed as a `ChatOpenAI` instance with `baseURL: 'https://openrouter.ai/api/v1'` and the existing `OPEN_ROUTER_API_KEY`. No separate `OPENAI_API_KEY` needed. Model id: `openai/gpt-4o-mini` (OpenRouter's identifier) |
+| Annotation queue + 3 feedback configs in LangSmith | Phase 9E                                                                            | Created automatically by `pnpm eval:feedback:seed` (one-shot, idempotent). Needs a LangSmith plan that supports annotation queues                                                                                                                                             |
+| `langsmith>=0.3.1` SDK                             | Phase 9 (vitest integration)                                                        | Required version for `langsmith/vitest` per the docs. We pin this in `package.json`                                                                                                                                                                                           |
 
 ---
 
 ## 10. Test file sketches (for review only — not authoritative)
 
 **Tier A — direct invoke:**
+
 ```ts
 // memory.plugin.int.test.ts
 import { it } from 'vitest';
-import { createIntegrationRuntime, mintUserDelegation, memoryCap, requires } from '@ixo/oracle-runtime/testing';
+import {
+  createIntegrationRuntime,
+  mintUserDelegation,
+  memoryCap,
+  requires,
+} from '@ixo/oracle-runtime/testing';
 import { MemoryPlugin } from '@ixo/oracle-runtime';
 
 requires('MEMORY_MCP_URL', 'TEST_USER_MNEMONIC', 'ORACLE_DID');
@@ -868,24 +920,43 @@ it('writes a memory and reads it back', async () => {
     }),
   });
 
-  await rt.invokeTool('memory-engine__add_memory', { content: 'user prefers dark mode' });
-  const out = await rt.invokeTool('memory-engine__search_memory_engine', { query: 'dark mode' });
+  await rt.invokeTool('memory-engine__add_memory', {
+    content: 'user prefers dark mode',
+  });
+  const out = await rt.invokeTool('memory-engine__search_memory_engine', {
+    query: 'dark mode',
+  });
 
-  expect(out).toMatchObject({ memories: expect.arrayContaining([
-    expect.objectContaining({ content: expect.stringMatching(/dark mode/) }),
-  ]) });
+  expect(out).toMatchObject({
+    memories: expect.arrayContaining([
+      expect.objectContaining({ content: expect.stringMatching(/dark mode/) }),
+    ]),
+  });
 });
 ```
 
 **Tier B — agent loop:**
+
 ```ts
 // agent-scenarios.int.test.ts
-import { createIntegrationOracle, ChatClient, mintUserDelegation, runScenario, user, expectToolCall, expectFinal, newSession, allCaps } from '@ixo/oracle-runtime/testing';
+import {
+  createIntegrationOracle,
+  ChatClient,
+  mintUserDelegation,
+  runScenario,
+  user,
+  expectToolCall,
+  expectFinal,
+  newSession,
+  allCaps,
+} from '@ixo/oracle-runtime/testing';
 
 it('recalls a fact across sessions', async () => {
   const { baseUrl, close } = await createIntegrationOracle();
   const client = new ChatClient(baseUrl, {
-    delegation: await mintUserDelegation({ /* allCaps */ }),
+    delegation: await mintUserDelegation({
+      /* allCaps */
+    }),
   });
 
   await runScenario(client, [
@@ -901,12 +972,15 @@ it('recalls a fact across sessions', async () => {
 ```
 
 **Tier C — trajectory match eval (vitest path):**
+
 ```ts
 // trajectory.eval.ts
 import * as ls from 'langsmith/vitest';
 import { createTrajectoryMatchEvaluator } from 'agentevals';
-import { inputs as weatherInputs, referenceOutputs as weatherRef }
-  from './golden-trajectories/weather-berlin.js';
+import {
+  inputs as weatherInputs,
+  referenceOutputs as weatherRef,
+} from './golden-trajectories/weather-berlin.js';
 
 const evaluator = createTrajectoryMatchEvaluator({
   trajectoryMatchMode: 'superset',
@@ -918,7 +992,10 @@ ls.describe('trajectory: weather lookup', () => {
     'Berlin weather → get_current_weather',
     { inputs: weatherInputs, referenceOutputs: weatherRef },
     async ({ inputs, referenceOutputs }) => {
-      const result = await client.send('eval-weather-1', inputs.messages[0].content);
+      const result = await client.send(
+        'eval-weather-1',
+        inputs.messages[0].content,
+      );
       ls.logOutputs({ messages: result.messages });
       const evaluation = await evaluator({
         outputs: result.messages,
@@ -931,6 +1008,7 @@ ls.describe('trajectory: weather lookup', () => {
 ```
 
 **Tier C — LLM-as-judge eval (with `wrapEvaluator` + custom feedback):**
+
 ```ts
 // judge.eval.ts
 import * as ls from 'langsmith/vitest';
@@ -939,7 +1017,10 @@ import {
   createTrajectoryLLMAsJudge,
   TRAJECTORY_ACCURACY_PROMPT_WITH_REFERENCE,
 } from 'agentevals';
-import { inputs, referenceOutputs } from './golden-trajectories/memory-recall.js';
+import {
+  inputs,
+  referenceOutputs,
+} from './golden-trajectories/memory-recall.js';
 
 const judge = createTrajectoryLLMAsJudge({
   model: 'openai/gpt-4o-mini (via OpenRouter)',
@@ -951,7 +1032,10 @@ ls.describe('judge: memory recall', () => {
     'recalls name across sessions',
     { inputs, referenceOutputs },
     async ({ inputs, referenceOutputs }) => {
-      const result = await client.send('eval-memory-1', inputs.messages[0].content);
+      const result = await client.send(
+        'eval-memory-1',
+        inputs.messages[0].content,
+      );
       ls.logOutputs({ messages: result.messages });
 
       // Wrap the judge so its LLM call traces separately + auto-creates a feedback chip
@@ -972,21 +1056,27 @@ ls.describe('judge: memory recall', () => {
 ```
 
 **Tier C — parametric off-topic guard (`ls.test.each`):**
+
 ```ts
 // trajectory.eval.ts (continued)
 const OFF_TOPIC = [
-  { inputs: { userQuery: "what's up" },         referenceOutputs: { tools: [] } },
-  { inputs: { userQuery: "tell me a joke" },    referenceOutputs: { tools: [] } },
-  { inputs: { userQuery: "how are you?" },      referenceOutputs: { tools: [] } },
+  { inputs: { userQuery: "what's up" }, referenceOutputs: { tools: [] } },
+  { inputs: { userQuery: 'tell me a joke' }, referenceOutputs: { tools: [] } },
+  { inputs: { userQuery: 'how are you?' }, referenceOutputs: { tools: [] } },
 ];
 
-const offTopicEvaluator = createTrajectoryMatchEvaluator({ trajectoryMatchMode: 'subset' });
+const offTopicEvaluator = createTrajectoryMatchEvaluator({
+  trajectoryMatchMode: 'subset',
+});
 
 ls.describe('off-topic anti-false-positive', () => {
   ls.test.each(OFF_TOPIC)(
     'no tool calls for: $inputs.userQuery',
     async ({ inputs, referenceOutputs }) => {
-      const result = await client.send(`eval-offtopic-${Date.now()}`, inputs.userQuery);
+      const result = await client.send(
+        `eval-offtopic-${Date.now()}`,
+        inputs.userQuery,
+      );
       ls.logOutputs({ messages: result.messages });
       const evaluation = await offTopicEvaluator({
         outputs: result.messages,
@@ -999,6 +1089,7 @@ ls.describe('off-topic anti-false-positive', () => {
 ```
 
 **Phase 9E — seed feedback configs + queue:**
+
 ```ts
 // test/integration/evals/feedback/seed.ts
 import { Client } from 'langsmith';
@@ -1014,7 +1105,10 @@ await client.createFeedbackConfig({
   feedbackKey: 'correctness',
   feedbackConfig: {
     type: 'categorical',
-    categories: [{ value: 1, label: 'Pass' }, { value: 0, label: 'Fail' }],
+    categories: [
+      { value: 1, label: 'Pass' },
+      { value: 0, label: 'Fail' },
+    ],
   },
 });
 await client.createFeedbackConfig({
@@ -1027,9 +1121,21 @@ await client.createAnnotationQueue({
   description: 'Human review of failing pre-deploy evals',
   rubricInstructions: 'Score the agent trace. Add notes for anything unusual.',
   rubricItems: [
-    { feedback_key: 'accuracy',    description: 'How accurate is the response?', is_required: true },
-    { feedback_key: 'correctness', description: 'Did the response pass or fail?', is_required: true },
-    { feedback_key: 'notes',       description: 'Anything else worth flagging',    is_required: false },
+    {
+      feedback_key: 'accuracy',
+      description: 'How accurate is the response?',
+      is_required: true,
+    },
+    {
+      feedback_key: 'correctness',
+      description: 'Did the response pass or fail?',
+      is_required: true,
+    },
+    {
+      feedback_key: 'notes',
+      description: 'Anything else worth flagging',
+      is_required: false,
+    },
   ],
 });
 ```
@@ -1054,7 +1160,7 @@ These are calls I'm making so the spec is shippable without a back-and-forth. Ov
 10. **Upstream flakes fail loud, no retry/tolerance mode.** If Memory Engine or Sandbox is down during a CI run, the test fails — outages on devnet upstreams are rare enough that silently retrying would hide real bugs more often than it would smooth over noise. No `it.toleratesFlake()` escape hatch.
 11. **CI wiring is out of scope for this spec.** Local `pnpm test:integration` and `pnpm eval` are the canonical entrypoints. GitHub Actions wiring is a one-page follow-up added after the local commands stabilize.
 12. **The example app's tests are the reference template, not just our test suite.** They're written to be read by an oracle developer copying them as a starting point. Every test file in `apps/qiforge-example/test/integration/` gets a top-of-file comment explaining what it tests and what to change when adapting it.
-13. **Fully automated evals — no human in the critical path.** Every Tier C trajectory + judge run produces a pass/fail score programmatically. No "human reviews each run before merge." Phase 9E (human annotation queue) exists for *post-failure* review only — its absence never blocks CI. Pre-deploy gating is the judge score, deterministic, no human involved.
+13. **Fully automated evals — no human in the critical path.** Every Tier C trajectory + judge run produces a pass/fail score programmatically. No "human reviews each run before merge." Phase 9E (human annotation queue) exists for _post-failure_ review only — its absence never blocks CI. Pre-deploy gating is the judge score, deterministic, no human involved.
 14. **Composio capability mapping: composio uses `ixo:sandbox`, not a separate cap.** This is a non-obvious fact from the plugin code — composio routes through the sandbox infrastructure, so the test delegation just needs `sandboxCap`. There is no `composioCap` constant; we documented this in the cap-constants list in Phase 0.
 
 ## 12. Open questions for you

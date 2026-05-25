@@ -1,8 +1,5 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type {
-  AgentMiddleware,
-  PluginContext,
-} from '../plugin-api/types.js';
+import type { AgentMiddleware, PluginContext } from '../plugin-api/types.js';
 
 /** A collected middleware tagged with the plugin that contributed it. */
 export interface RegisteredMiddleware {

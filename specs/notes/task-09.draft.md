@@ -5,6 +5,7 @@ Source files copied COPY-style from apps/app into packages/oracle-runtime/. Orig
 ## Decisions
 
 ### dependency injection over apps/app imports
+
 oracle-runtime cannot import from apps/app (no cycle, no NestJS). The originals
 referenced `@nestjs/common` Logger, `MatrixManager`, `getProviderChatModel`,
 and `UserMatrixSqliteSyncService` directly. The cleaned copies parameterise
@@ -24,6 +25,7 @@ each external dep on the factory:
   agent tool names) is injected. Empty list = pure validation behaviour.
 
 ### summarization-middleware: replace hand-rolled logic with langchain built-in
+
 The apps/app `summarization-middleware.ts` (~345 LOC) re-implements
 `findSafeCutoff`, `partitionMessages`, `extractToolCallIds`, `cutoffSeparatesToolPair`,
 `trimMessages` orchestration, and the tool-pair safety logic that LangChain 1.4
@@ -32,6 +34,7 @@ that supplies the IXO-specific prompt + prefix and forwards trigger/keep
 options. Net delta: 345 LOC → ~85 LOC.
 
 ### subagent-as-tool: cleanup pass
+
 - Dropped `Logger.warn(...)` / `Logger.log(...)` static-style calls (NestJS
   Logger statics) in favour of an injected logger with a noop default.
 - Dropped per-message `logger.debug(...)` chatter in `filterForwardedMessages`
@@ -47,6 +50,7 @@ options. Net delta: 345 LOC → ~85 LOC.
   now `BaseMessage[]`).
 
 ### tool-validation-middleware
+
 - Replaced the hard-coded `agentsTools` list (8 names) with an injected
   `skipToolNames` option. The original list belonged to apps/app's specific
   agent inventory, not to a generic validation middleware. Keeping it inside
@@ -54,12 +58,14 @@ options. Net delta: 345 LOC → ~85 LOC.
 - Removed unused `_runtime` parameter on `beforeModel`.
 
 ### page-context-middleware
+
 - Removed `[PageContextMiddleware] wrapModelCall called, editorRoomId: ...`
   trace lines (kept the page-switch summary line — actionable).
 - Removed the `_` unused-arg pattern (no `_runtime`).
 - Tightened the no-result early return in `wrapModelCall`.
 
 ### safety-guardrail-middleware
+
 - Replaced module-level `safetyModel = getProviderChatModel('guard', ...)`
   side-effect with an injected `safetyModel` parameter. No top-level imports
   with side effects.
@@ -67,12 +73,14 @@ options. Net delta: 345 LOC → ~85 LOC.
   forks can override per call.
 
 ## What stayed identical
+
 - `filterForwardedMessages` id-prefix rewrite logic (the rationale doc-comment
   about React keys is preserved).
 - IXO-specific summary prompt + prefix.
 - Refusal pattern list + retry-with-authorisation-override flow.
 
 ## Out of scope (per task)
+
 - `tool-retry` is langchain built-in `toolRetryMiddleware` — not copied.
 - `token-limiter-middelware.ts` stays in apps/app (creditsPlugin, TASK-29).
 - `createMainAgent` wiring (TASK-10).

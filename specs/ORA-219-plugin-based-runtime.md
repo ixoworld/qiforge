@@ -14,36 +14,36 @@
 
 v2 was over-engineered. v3 cuts the plugin API down to the smallest thing that actually solves the three problems the team has: easy version updates, plug/unplug freely, dynamic loading without context bloat. The framework's internals (graph state, checkpointer, BullMQ, NestJS controllers, Matrix wiring) stay where they are. Plugins contribute the only three things they actually need to contribute: tools, sub-agents, middlewares — plus an optional shared-state read accessor and an optional config schema.
 
-| What v2 had that v3 drops | Reason |
-|---|---|
-| `contextSchema` on the plugin | State + context schemas live at mainAgent level, not per-plugin |
-| `stateAnnotations` on the plugin | Same — plugins read/write state via middlewares, not by redefining the schema |
-| `workers` (BullMQ) on the plugin | BullMQ is internal: agent schedules tasks, agent invokes them. Toggled via `features.tasks` |
-| `enrichRequestContext` | Middleware can do this; redundant |
-| `nestModules`, `controllers` on the plugin | Out of scope. Developers write their own NestJS modules and pass them at app config level |
-| `setup`, `teardown`, `healthCheck`, `failureMode` | Removed — plugins are stateless contributors. If a plugin's `getTools()` throws, runtime logs and skips (matches today's `Promise.allSettled` default for sub-agents) |
-| `WorkerContext` | No plugin workers → no need |
-| `ctx.storage` abstraction | Don't touch the checkpointer; landmine. Internal services keep using `UserMatrixSqliteSyncService` directly |
-| State-field rename + migration shim | Don't change `apps/app/src/graph/state.ts` keys — internal logic, not part of plugin spec |
-| Recorded LLM fixtures, plug-matrix property tests, contract auto-tests, coverage gates, cross-version CI | Heavy. Basic `createTestRuntime` only |
-| Stability tiers per export, codemods, structured changelog format | Defer to a separate versioning ticket |
-| Boot manifest, structured boot-error event taxonomy, full `qiforge inspect` JSON schema | Overkill. Keep `qiforge inspect` as a basic listing |
-| Fluent `plugin().chain().build()` builder | Class-based pattern (or POJO via `defineOraclePlugin`) |
+| What v2 had that v3 drops                                                                                | Reason                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contextSchema` on the plugin                                                                            | State + context schemas live at mainAgent level, not per-plugin                                                                                                       |
+| `stateAnnotations` on the plugin                                                                         | Same — plugins read/write state via middlewares, not by redefining the schema                                                                                         |
+| `workers` (BullMQ) on the plugin                                                                         | BullMQ is internal: agent schedules tasks, agent invokes them. Toggled via `features.tasks`                                                                           |
+| `enrichRequestContext`                                                                                   | Middleware can do this; redundant                                                                                                                                     |
+| `nestModules`, `controllers` on the plugin                                                               | Out of scope. Developers write their own NestJS modules and pass them at app config level                                                                             |
+| `setup`, `teardown`, `healthCheck`, `failureMode`                                                        | Removed — plugins are stateless contributors. If a plugin's `getTools()` throws, runtime logs and skips (matches today's `Promise.allSettled` default for sub-agents) |
+| `WorkerContext`                                                                                          | No plugin workers → no need                                                                                                                                           |
+| `ctx.storage` abstraction                                                                                | Don't touch the checkpointer; landmine. Internal services keep using `UserMatrixSqliteSyncService` directly                                                           |
+| State-field rename + migration shim                                                                      | Don't change `apps/app/src/graph/state.ts` keys — internal logic, not part of plugin spec                                                                             |
+| Recorded LLM fixtures, plug-matrix property tests, contract auto-tests, coverage gates, cross-version CI | Heavy. Basic `createTestRuntime` only                                                                                                                                 |
+| Stability tiers per export, codemods, structured changelog format                                        | Defer to a separate versioning ticket                                                                                                                                 |
+| Boot manifest, structured boot-error event taxonomy, full `qiforge inspect` JSON schema                  | Overkill. Keep `qiforge inspect` as a basic listing                                                                                                                   |
+| Fluent `plugin().chain().build()` builder                                                                | Class-based pattern (or POJO via `defineOraclePlugin`)                                                                                                                |
 
-| What v3 keeps from v2 | Why |
-|---|---|
-| Plugin manifests (title, summary, whenToUse, examples, visibility, category, tags) | Goal D — agent-side discovery |
-| Three visibility tiers (always / on-demand / silent) | Same |
-| Soft deps + `availablePlugins` | Goal C — plug/unplug |
-| Shared-state read accessors | You confirmed: include this |
-| `configSchema` on the plugin (env vars only) | Plugin-owned env vars merge into the runtime's Zod schema at boot |
-| `createOracleApp` entry point | You confirmed: keep it |
+| What v3 keeps from v2                                                              | Why                                                               |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Plugin manifests (title, summary, whenToUse, examples, visibility, category, tags) | Goal D — agent-side discovery                                     |
+| Three visibility tiers (always / on-demand / silent)                               | Same                                                              |
+| Soft deps + `availablePlugins`                                                     | Goal C — plug/unplug                                              |
+| Shared-state read accessors                                                        | You confirmed: include this                                       |
+| `configSchema` on the plugin (env vars only)                                       | Plugin-owned env vars merge into the runtime's Zod schema at boot |
+| `createOracleApp` entry point                                                      | You confirmed: keep it                                            |
 
-| What v3 adds (new from v2) | Why |
-|---|---|
-| Class-based `OraclePlugin` (with POJO option) | You said "no .chain pattern; class is best" |
+| What v3 adds (new from v2)                                                                                                  | Why                                                                                   |
+| --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Class-based `OraclePlugin` (with POJO option)                                                                               | You said "no .chain pattern; class is best"                                           |
 | Dynamic plugin loading via `find_capability` + `load_capability` meta-tools, persisted in a new `loadedPlugins` state field | You confirmed: dynamic loading via a tool, saved to state. Prevents context explosion |
-| `nestModules` accepted at `createOracleApp` config (NOT per-plugin) + `app.getNestApp()` for direct NestJS access | You confirmed: developers add their own NestJS modules at app level |
+| `nestModules` accepted at `createOracleApp` config (NOT per-plugin) + `app.getNestApp()` for direct NestJS access           | You confirmed: developers add their own NestJS modules at app level                   |
 
 The plugin shape is now seven fields. That's the whole API.
 
@@ -52,11 +52,13 @@ The plugin shape is now seven fields. That's the whole API.
 ## Table of Contents
 
 ### Part I — Foundations
+
 1. [Executive Summary](#1-executive-summary)
 2. [Goals and Non-Goals](#2-goals-and-non-goals)
 3. [Mental Model](#3-mental-model)
 
 ### Part II — Plugin API
+
 4. [The Plugin Class](#4-the-plugin-class)
 5. [The Plugin Manifest](#5-the-plugin-manifest)
 6. [The Two Contexts](#6-the-two-contexts)
@@ -64,31 +66,37 @@ The plugin shape is now seven fields. That's the whole API.
 8. [Config Schema](#8-config-schema)
 
 ### Part III — Dynamic Plugin Loading
+
 9. [Visibility Tiers and Token Budget](#9-visibility-tiers-and-token-budget)
 10. [Meta-Tools](#10-meta-tools)
 11. [The `loadedPlugins` State Field](#11-the-loadedplugins-state-field)
 
 ### Part IV — Runtime Integration
+
 12. [Internal Registries](#12-internal-registries)
 13. [LangGraph Composition](#13-langgraph-composition)
 14. [Boot Sequence](#14-boot-sequence)
 15. [`createOracleApp` and NestJS Access](#15-createoracleapp-and-nestjs-access)
 
 ### Part V — Bundled Plugins
+
 16. [Bundled Plugins Catalog](#16-bundled-plugins-catalog)
 17. [Environment Variables by Plugin](#17-environment-variables-by-plugin)
 
 ### Part VI — DX
+
 18. [The Starter App](#18-the-starter-app)
 19. [Worked Examples](#19-worked-examples)
 20. [Testing Harness](#20-testing-harness)
 21. [Package Layout](#21-package-layout)
 
 ### Part VII — Implementation
+
 22. [Implementation Checklist](#22-implementation-checklist)
 23. [Open Decisions](#23-open-decisions)
 
 ### Part VIII — Reference
+
 24. [Glossary](#24-glossary)
 25. [Appendix — Code grounding (current repo facts)](#25-appendix-code-grounding)
 
@@ -145,26 +153,26 @@ The plugin API does **not**:
 7. **Let plugins ship NestJS modules or controllers.** Out of scope. If a developer needs HTTP endpoints, they author a NestJS module separately and pass it via `createOracleApp({ nestModules: [...] })`.
 8. **Let plugins define BullMQ workers.** BullMQ is internal — toggled via `features.tasks`.
 9. **Define plugin lifecycle hooks** (`setup`, `teardown`, `healthCheck`). Plugins are stateless contributors. If a plugin's `getTools()` throws, the runtime logs and skips it (matching today's `Promise.allSettled` for sub-agents in `main-agent.ts:621`).
-10. **Hot-load / hot-unload plugins at runtime.** Plugins resolve at boot. Dynamic *loading into the agent's tool list* via `load_capability` is per-thread state, not plugin install/uninstall.
+10. **Hot-load / hot-unload plugins at runtime.** Plugins resolve at boot. Dynamic _loading into the agent's tool list_ via `load_capability` is per-thread state, not plugin install/uninstall.
 
 ## 3. Mental Model
 
 ### 3.1 Three levers
 
-| Lever | Owner | Purpose | Shape |
-|---|---|---|---|
-| **Feature toggle** | Fork operator | Turn bundled framework features on/off per deployment | `features: { slack: true, composio: false }` |
-| **Plugin** | Fork developer | Add new behavior on top of the framework | `plugins: [new ClimatePlugin()]` |
-| **Config** | Fork operator | 12-factor env vars, merged from framework + plugin schemas | `.env`, validated via Zod at boot |
+| Lever              | Owner          | Purpose                                                    | Shape                                        |
+| ------------------ | -------------- | ---------------------------------------------------------- | -------------------------------------------- |
+| **Feature toggle** | Fork operator  | Turn bundled framework features on/off per deployment      | `features: { slack: true, composio: false }` |
+| **Plugin**         | Fork developer | Add new behavior on top of the framework                   | `plugins: [new ClimatePlugin()]`             |
+| **Config**         | Fork operator  | 12-factor env vars, merged from framework + plugin schemas | `.env`, validated via Zod at boot            |
 
 A fork turning Slack on does not require writing a plugin. A fork adding a custom tool does not require flipping a feature. A plugin that ships a new MCP server adds a config schema entry that the fork populates in `.env`.
 
 ### 3.2 Two contexts (not three)
 
-| Context | Lifecycle | Has user? |
-|---|---|---|
-| **`PluginContext`** | Boot-time, lives once | No |
-| **`RuntimeContext`** | Per HTTP/WS request | Yes (authenticated) |
+| Context              | Lifecycle             | Has user?           |
+| -------------------- | --------------------- | ------------------- |
+| **`PluginContext`**  | Boot-time, lives once | No                  |
+| **`RuntimeContext`** | Per HTTP/WS request   | Yes (authenticated) |
 
 The `PluginContext` is what plugin builder methods (`getTools`, `getSubAgents`, `getMiddlewares`) receive. The `RuntimeContext` is what tool handlers, middleware hooks, and sub-agent handlers receive at execution time. There is no `WorkerContext` because plugins don't define BullMQ workers.
 
@@ -202,7 +210,12 @@ graph TD
 ```ts
 import type { z } from 'zod';
 import type { AgentMiddleware } from 'langchain';
-import type { PluginManifest, PluginContext, PluginTool, PluginSubAgent } from '@ixo/oracle-runtime';
+import type {
+  PluginManifest,
+  PluginContext,
+  PluginTool,
+  PluginSubAgent,
+} from '@ixo/oracle-runtime';
 
 export abstract class OraclePlugin {
   abstract readonly name: string;
@@ -232,7 +245,10 @@ export abstract class OraclePlugin {
    * Pattern: this plugin computes/owns some derived value from state; others read it.
    * Each entry is a function that reads the current graph state and returns a value.
    */
-  getSharedState?(): Record<string, (state: any, runCtx: RuntimeContext) => unknown>;
+  getSharedState?(): Record<
+    string,
+    (state: any, runCtx: RuntimeContext) => unknown
+  >;
 }
 ```
 
@@ -250,7 +266,9 @@ export default defineOraclePlugin({
     whenToUse: ['User says hello'],
   },
   getTools(ctx) {
-    return [/* ... */];
+    return [
+      /* ... */
+    ];
   },
 });
 ```
@@ -334,8 +352,15 @@ export interface PluginManifest {
   /** Categorization for grouping and filtering */
   tags?: string[];
   category?:
-    | 'data' | 'communication' | 'automation' | 'memory'
-    | 'integration' | 'ui' | 'auth' | 'observability' | 'core';
+    | 'data'
+    | 'communication'
+    | 'automation'
+    | 'memory'
+    | 'integration'
+    | 'ui'
+    | 'auth'
+    | 'observability'
+    | 'core';
 
   /**
    * Discovery and loading mode:
@@ -353,9 +378,9 @@ export interface PluginManifest {
 }
 
 export interface ManifestExample {
-  user: string;       // representative user message
-  thought?: string;   // optional reasoning
-  tool: string;       // tool the agent should call
+  user: string; // representative user message
+  thought?: string; // optional reasoning
+  tool: string; // tool the agent should call
   args?: Record<string, unknown>;
 }
 ```
@@ -386,8 +411,11 @@ const climateManifest: PluginManifest = {
   ],
   whenNotToUse: ['General weather questions'],
   examples: [
-    { user: 'Emissions for Plant 42 in Q1', tool: 'get_emissions',
-      args: { facilityId: 'plant-42', period: 'Q1-2026' } },
+    {
+      user: 'Emissions for Plant 42 in Q1',
+      tool: 'get_emissions',
+      args: { facilityId: 'plant-42', period: 'Q1-2026' },
+    },
   ],
   tags: ['climate', 'emissions', 'sustainability'],
   category: 'data',
@@ -408,7 +436,12 @@ export interface PluginContext<TConfig = MergedConfig> {
   config: TConfig;
 
   /** Identity of this oracle (set by the fork at createOracleApp) */
-  identity: { name: string; org: string; description: string; entityDid: string };
+  identity: {
+    name: string;
+    org: string;
+    description: string;
+    entityDid: string;
+  };
 
   /** Set of plugin names currently loaded — drives soft-dep branching */
   availablePlugins: ReadonlySet<string>;
@@ -429,16 +462,16 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware) */
   user: {
     did: string;
-    matrixUserId: string;            // e.g. '@did-ixo-ixo1abc:ixo.world'
+    matrixUserId: string; // e.g. '@did-ixo-ixo1abc:ixo.world'
     homeServer: string;
-    ucanDelegation: UcanDelegation;  // required — UCAN is the only auth mechanism
+    ucanDelegation: UcanDelegation; // required — UCAN is the only auth mechanism
     timezone?: string;
     currentTime?: string;
   };
 
   /** Session info from SessionsService */
   session: {
-    id: string;                       // = thread_id; thread root eventId
+    id: string; // = thread_id; thread root eventId
     client: 'portal' | 'matrix' | 'slack';
     wsId?: string;
     requestId: string;
@@ -449,8 +482,8 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   history: {
     messages: readonly BaseMessage[];
     recent: (n: number) => BaseMessage[];
-    userContext: UserContextData;     // memory enrichment from existing state.userContext
-    state: ReadonlyState;             // typed view over Annotation.Root
+    userContext: UserContextData; // memory enrichment from existing state.userContext
+    state: ReadonlyState; // typed view over Annotation.Root
   };
 
   /** Same merged Zod-validated env */
@@ -479,7 +512,10 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   ucan: {
     requireCapability: (resource: string, action: string) => void;
     hasCapability: (resource: string, action: string) => boolean;
-    mintInvocation: (target: { did: string; capability: string }) => Promise<string>;
+    mintInvocation: (target: {
+      did: string;
+      capability: string;
+    }) => Promise<string>;
   };
 
   /** LLM provider */
@@ -495,7 +531,9 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     reasoning: (payload: ReasoningEventPayload) => void;
     browserToolCall: (payload: BrowserToolCallEventPayload) => void;
     router: (payload: RouterEventPayload) => void;
-    messageCacheInvalidation: (payload: MessageCacheInvalidationPayload) => void;
+    messageCacheInvalidation: (
+      payload: MessageCacheInvalidationPayload,
+    ) => void;
   };
 
   /** Plugin-scoped logger */
@@ -511,18 +549,18 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
 ### 6.3 Mapping today's singleton reaches
 
-| Today | Tomorrow |
-|---|---|
-| `SecretsService.getInstance().getSecretIndex(roomId)` | `ctx.secrets.getIndex()` |
-| `SecretsService.getInstance().loadSecretValues(roomId, idx)` | `ctx.secrets.getValues(keys)` |
-| `MatrixManager.getInstance().getClient()` | `ctx.matrix.*` (scoped methods only) |
-| `getProviderChatModel('main', {})` | `ctx.llm.get('main')` |
-| `new Logger('MyTool')` | `ctx.logger` |
-| `rootEventEmitter.emit('tool_call', ...)` | `ctx.emit.toolCall(...)` |
-| `getConfig().get('X')` | `ctx.config.X` (typed via merged Zod schema) |
-| `req.authData.did` | `ctx.user.did` |
-| `state.userContext` | `ctx.history.userContext` |
-| `state.messages` | `ctx.history.messages` |
+| Today                                                        | Tomorrow                                     |
+| ------------------------------------------------------------ | -------------------------------------------- |
+| `SecretsService.getInstance().getSecretIndex(roomId)`        | `ctx.secrets.getIndex()`                     |
+| `SecretsService.getInstance().loadSecretValues(roomId, idx)` | `ctx.secrets.getValues(keys)`                |
+| `MatrixManager.getInstance().getClient()`                    | `ctx.matrix.*` (scoped methods only)         |
+| `getProviderChatModel('main', {})`                           | `ctx.llm.get('main')`                        |
+| `new Logger('MyTool')`                                       | `ctx.logger`                                 |
+| `rootEventEmitter.emit('tool_call', ...)`                    | `ctx.emit.toolCall(...)`                     |
+| `getConfig().get('X')`                                       | `ctx.config.X` (typed via merged Zod schema) |
+| `req.authData.did`                                           | `ctx.user.did`                               |
+| `state.userContext`                                          | `ctx.history.userContext`                    |
+| `state.messages`                                             | `ctx.history.messages`                       |
 
 Internal services (`UserMatrixSqliteSyncService`, `UserSkillsService`, `UserPreferencesService`) are **not** exposed via `RuntimeContext`. They're consumed internally by their respective bundled plugins.
 
@@ -533,8 +571,8 @@ Internal services (`UserMatrixSqliteSyncService`, `UserSkillsService`, `UserPref
 ```ts
 class ClaimProcessingPlugin extends OraclePlugin {
   readonly name = 'claim-processing';
-  readonly dependsOn = ['credits'];      // hard: boot fails if missing
-  readonly softDependsOn = ['memory'];   // soft: optional
+  readonly dependsOn = ['credits']; // hard: boot fails if missing
+  readonly softDependsOn = ['memory']; // soft: optional
 }
 ```
 
@@ -564,11 +602,11 @@ Inside a tool handler:
 ```ts
 async (args, ctx: RuntimeContext) => {
   if (ctx.availablePlugins.has('memory')) {
-    const profile = ctx.shared.userProfile;  // typed via memory plugin's sharedState
+    const profile = ctx.shared.userProfile; // typed via memory plugin's sharedState
     // use enriched profile
   }
   // do the work either way
-}
+};
 ```
 
 ### 7.3 Shared state — read-only accessors
@@ -595,10 +633,12 @@ class PortalPlugin extends OraclePlugin {
     return [
       tool(
         async (args, runCtx: RuntimeContext) => {
-          const profile = runCtx.shared.userProfile;  // undefined if memory not loaded
+          const profile = runCtx.shared.userProfile; // undefined if memory not loaded
           // ...
         },
-        { /* ... */ }
+        {
+          /* ... */
+        },
       ),
     ];
   }
@@ -614,7 +654,7 @@ The runtime's `SharedStateRegistry` collects all `getSharedState()` returns at b
 The plugin loader runs:
 
 1. **Topo sort** by `dependsOn` — error on cycles or missing.
-2. **Soft-dep logging** — single line per soft dep that is *not* present.
+2. **Soft-dep logging** — single line per soft dep that is _not_ present.
 3. **Tool name collision** — error (flat namespace; auto-prefixing hurts prompt clarity).
 4. **Sub-agent name collision** — error.
 5. **Shared-state key collision** — error if two plugins expose `ctx.shared.<key>` with the same key.
@@ -640,7 +680,9 @@ class ClimatePlugin extends OraclePlugin {
           const url = `${ctx.config.CLIMATE_API_BASE_URL}/facilities/${facilityId}`;
           // ...
         },
-        { /* ... */ }
+        {
+          /* ... */
+        },
       ),
     ];
   }
@@ -665,11 +707,11 @@ The CLI `qiforge env` prints all required env vars across currently-installed pl
 
 The agent has a finite system-prompt + tool-list token budget. Three visibility tiers manage that budget.
 
-| Visibility | Tools bound at boot? | Listed in Tier-1 prompt? | Discoverable via `find_capability`? |
-|---|---|---|---|
-| `'always'` | Yes | Yes | Yes |
-| `'on-demand'` | **No** — until `load_capability(name)` is called | No | Yes |
-| `'silent'` | Yes | No | No |
+| Visibility    | Tools bound at boot?                             | Listed in Tier-1 prompt? | Discoverable via `find_capability`? |
+| ------------- | ------------------------------------------------ | ------------------------ | ----------------------------------- |
+| `'always'`    | Yes                                              | Yes                      | Yes                                 |
+| `'on-demand'` | **No** — until `load_capability(name)` is called | No                       | Yes                                 |
+| `'silent'`    | Yes                                              | No                       | No                                  |
 
 **Default visibility: `'on-demand'`.** Be deliberate about marking a plugin `'always'`. Each `'always'` plugin costs ~80 tokens in the Tier-1 block and ~100-300 tokens for its tool schemas in the bound tool list.
 
@@ -785,20 +827,43 @@ import { Annotation, MessagesAnnotation } from '@langchain/langgraph';
 
 export const MainAgentGraphState = Annotation.Root({
   messages: MessagesAnnotation.spec.messages,
-  config: Annotation<{ wsId?: string; did: string }>({ /* unchanged */ }),
-  client: Annotation<'portal' | 'matrix' | 'slack'>({ /* unchanged */ }),
-  editorRoomId: Annotation<string | undefined>({ /* unchanged */ }),
-  spaceId: Annotation<string | undefined>({ /* unchanged */ }),
-  currentEntityDid: Annotation<string | undefined>({ /* unchanged */ }),
-  browserTools: Annotation<BrowserToolCallDto[] | undefined>({ /* unchanged */ }),
-  agActions: Annotation<AgActionDto[] | undefined>({ /* unchanged */ }),
-  userContext: Annotation<UserContextData>({ /* unchanged */ }),
-  mcpUcanContext: Annotation<{ invocations: Record<string, string> } | undefined>({ /* unchanged */ }),
-  userPreferences: Annotation<UserPreferences | undefined>({ /* unchanged */ }),
+  config: Annotation<{ wsId?: string; did: string }>({
+    /* unchanged */
+  }),
+  client: Annotation<'portal' | 'matrix' | 'slack'>({
+    /* unchanged */
+  }),
+  editorRoomId: Annotation<string | undefined>({
+    /* unchanged */
+  }),
+  spaceId: Annotation<string | undefined>({
+    /* unchanged */
+  }),
+  currentEntityDid: Annotation<string | undefined>({
+    /* unchanged */
+  }),
+  browserTools: Annotation<BrowserToolCallDto[] | undefined>({
+    /* unchanged */
+  }),
+  agActions: Annotation<AgActionDto[] | undefined>({
+    /* unchanged */
+  }),
+  userContext: Annotation<UserContextData>({
+    /* unchanged */
+  }),
+  mcpUcanContext: Annotation<
+    { invocations: Record<string, string> } | undefined
+  >({
+    /* unchanged */
+  }),
+  userPreferences: Annotation<UserPreferences | undefined>({
+    /* unchanged */
+  }),
 
   // ── NEW: dynamically loaded plugin names for this thread ──
   loadedPlugins: Annotation<string[]>({
-    reducer: (current, update) => Array.from(new Set([...(current ?? []), ...(update ?? [])])),
+    reducer: (current, update) =>
+      Array.from(new Set([...(current ?? []), ...(update ?? [])])),
     default: () => [],
   }),
 });
@@ -813,7 +878,11 @@ export const MainAgentGraphState = Annotation.Root({
 Today's `apps/app/src/graph/agents/main-agent.ts:977-1023` rebuilds the agent per request. With dynamic loading, the rebuild reads `state.loadedPlugins` and includes those plugins' tools:
 
 ```ts
-const eagerTools = await collectToolsByVisibility(registries, 'always', buildCtx);
+const eagerTools = await collectToolsByVisibility(
+  registries,
+  'always',
+  buildCtx,
+);
 const loadedLazyTools = await collectToolsForLoaded(
   registries,
   state.loadedPlugins ?? [],
@@ -841,14 +910,14 @@ Putting `loadedPlugins` in `runtime.context` (LangGraph's per-run channel) would
 
 Six registries replace the inlined arrays in today's `main-agent.ts:817-1011`.
 
-| Registry | Collects from | Consumed by |
-|---|---|---|
-| `ToolRegistry` | `plugin.getTools(buildCtx)` | `createAgent({ tools })`, filtered by visibility + loadedPlugins |
-| `SubAgentRegistry` | `plugin.getSubAgents(buildCtx)` | wrapped via `createSubagentAsTool`, fed to `createAgent({ tools })` |
-| `MiddlewareRegistry` | `plugin.getMiddlewares(buildCtx)` | `createAgent({ middleware })` |
-| `ManifestRegistry` | `plugin.manifest` | Tier-1 prompt block, all 4 meta-tools |
-| `ConfigSchemaRegistry` | `plugin.configSchema` | Merged into env Zod schema at boot |
-| `SharedStateRegistry` | `plugin.getSharedState()` | Builds `runtimeCtx.shared` accessors |
+| Registry               | Collects from                     | Consumed by                                                         |
+| ---------------------- | --------------------------------- | ------------------------------------------------------------------- |
+| `ToolRegistry`         | `plugin.getTools(buildCtx)`       | `createAgent({ tools })`, filtered by visibility + loadedPlugins    |
+| `SubAgentRegistry`     | `plugin.getSubAgents(buildCtx)`   | wrapped via `createSubagentAsTool`, fed to `createAgent({ tools })` |
+| `MiddlewareRegistry`   | `plugin.getMiddlewares(buildCtx)` | `createAgent({ middleware })`                                       |
+| `ManifestRegistry`     | `plugin.manifest`                 | Tier-1 prompt block, all 4 meta-tools                               |
+| `ConfigSchemaRegistry` | `plugin.configSchema`             | Merged into env Zod schema at boot                                  |
+| `SharedStateRegistry`  | `plugin.getSharedState()`         | Builds `runtimeCtx.shared` accessors                                |
 
 That's it. No nest module registry, no worker registry, no enricher registry, no health registry, no lifecycle registry.
 
@@ -903,7 +972,11 @@ export async function createMainAgent({
   const secrets = await loadUserSecrets(requestCtx, ambient);
 
   // ── Tools: meta-tools + eager + dynamically-loaded + sub-agents ──
-  const eagerTools = await collectToolsByVisibility(registries, 'always', buildCtx);
+  const eagerTools = await collectToolsByVisibility(
+    registries,
+    'always',
+    buildCtx,
+  );
   const loadedLazyTools = await collectToolsForLoaded(
     registries,
     state.loadedPlugins ?? [],
@@ -915,10 +988,14 @@ export async function createMainAgent({
     requestCtx,
     ambient,
   );
-  const silentTools = await collectToolsByVisibility(registries, 'silent', buildCtx);
+  const silentTools = await collectToolsByVisibility(
+    registries,
+    'silent',
+    buildCtx,
+  );
 
   const tools = [
-    ...buildMetaTools(registries.manifests),  // find_capability, load_capability, etc.
+    ...buildMetaTools(registries.manifests), // find_capability, load_capability, etc.
     ...eagerTools,
     ...loadedLazyTools,
     ...silentTools,
@@ -927,10 +1004,10 @@ export async function createMainAgent({
 
   // ── Middlewares: 4 always-on + plugin-contributed (in topo order) ──
   const middleware = [
-    createToolValidationMiddleware(),       // existing
-    toolRetryMiddleware(),                   // LangChain built-in
-    createPageContextMiddleware(),           // existing
-    createSafetyGuardrailMiddleware(),       // existing
+    createToolValidationMiddleware(), // existing
+    toolRetryMiddleware(), // LangChain built-in
+    createPageContextMiddleware(), // existing
+    createSafetyGuardrailMiddleware(), // existing
     ...(await registries.middlewares.collect(buildCtx)),
   ];
 
@@ -940,9 +1017,14 @@ export async function createMainAgent({
     oracleContext: buildOracleContext(identity),
     operationalMode: resolveOperationalMode(requestCtx),
     capabilityBlock: registries.manifests.renderTier1(eagerPluginNames),
-    loadedSection: registries.manifests.renderLoadedSection(state.loadedPlugins ?? []),
+    loadedSection: registries.manifests.renderLoadedSection(
+      state.loadedPlugins ?? [],
+    ),
     userContext: requestCtx.history.userContext,
-    timeContext: formatTimeContext(requestCtx.user.timezone, requestCtx.user.currentTime),
+    timeContext: formatTimeContext(
+      requestCtx.user.timezone,
+      requestCtx.user.currentTime,
+    ),
     userPreferences: state.userPreferences,
     editorContext: state.editorRoomId ? buildEditorContext(state) : null,
     slackFormatting: requestCtx.session.client === 'slack',
@@ -953,12 +1035,14 @@ export async function createMainAgent({
   });
 
   return createAgent({
-    stateSchema: MainAgentGraphState,    // existing schema + loadedPlugins
+    stateSchema: MainAgentGraphState, // existing schema + loadedPlugins
     tools,
     middleware,
     prompt,
     model: ambient.llm.get('main', resolveModelOverride(identity)),
-    checkpointer: await ambient.checkpointerFactory.forUser(requestCtx.user.did),
+    checkpointer: await ambient.checkpointerFactory.forUser(
+      requestCtx.user.did,
+    ),
   });
 }
 ```
@@ -980,13 +1064,19 @@ async function collectSubAgentsWithFallback(
       try {
         return wrapSubagentAsTool(subAgent, requestCtx, ambient);
       } catch (err) {
-        ambient.logger.error({ pluginName, err }, 'sub-agent init failed; skipping');
+        ambient.logger.error(
+          { pluginName, err },
+          'sub-agent init failed; skipping',
+        );
         return null;
       }
     }),
   );
   return results
-    .filter((r): r is PromiseFulfilledResult<PluginTool | null> => r.status === 'fulfilled')
+    .filter(
+      (r): r is PromiseFulfilledResult<PluginTool | null> =>
+        r.status === 'fulfilled',
+    )
     .map((r) => r.value)
     .filter((v): v is PluginTool => v !== null);
 }
@@ -1007,7 +1097,10 @@ function wrapPluginTool(toolDef: PluginToolDef, ambient: AmbientServices) {
     },
     {
       name: toolDef.name,
-      description: prefixWithPluginTitle(toolDef.description, toolDef.pluginTitle),
+      description: prefixWithPluginTitle(
+        toolDef.description,
+        toolDef.pluginTitle,
+      ),
       schema: toolDef.schema,
     },
   );
@@ -1018,16 +1111,16 @@ function wrapPluginTool(toolDef: PluginToolDef, ambient: AmbientServices) {
 
 ### 13.4 LangChain primitive mapping
 
-| Plugin capability | LangChain primitive | How it plugs in |
-|---|---|---|
-| `plugin.getTools` | `StructuredTool[]` | `createAgent({ tools })` (filtered by visibility + loaded) |
-| `plugin.getSubAgents` | `StructuredTool[]` (via `createSubagentAsTool`) | Same array as tools |
-| `plugin.getMiddlewares` | `AgentMiddleware[]` | `createAgent({ middleware })` |
-| `plugin.manifest` | Composed into prompt | `createAgent({ prompt })` |
-| `plugin.configSchema` | Zod object | Merged into env Zod schema at boot |
-| `plugin.getSharedState` | Read accessors | Wired into `RuntimeContext.shared` |
-| Built-in meta-tools | `StructuredTool[]` | Always added by runtime |
-| Checkpointer | `BaseCheckpointSaver` | Always Matrix-backed SQLite — not exposed |
+| Plugin capability       | LangChain primitive                             | How it plugs in                                            |
+| ----------------------- | ----------------------------------------------- | ---------------------------------------------------------- |
+| `plugin.getTools`       | `StructuredTool[]`                              | `createAgent({ tools })` (filtered by visibility + loaded) |
+| `plugin.getSubAgents`   | `StructuredTool[]` (via `createSubagentAsTool`) | Same array as tools                                        |
+| `plugin.getMiddlewares` | `AgentMiddleware[]`                             | `createAgent({ middleware })`                              |
+| `plugin.manifest`       | Composed into prompt                            | `createAgent({ prompt })`                                  |
+| `plugin.configSchema`   | Zod object                                      | Merged into env Zod schema at boot                         |
+| `plugin.getSharedState` | Read accessors                                  | Wired into `RuntimeContext.shared`                         |
+| Built-in meta-tools     | `StructuredTool[]`                              | Always added by runtime                                    |
+| Checkpointer            | `BaseCheckpointSaver`                           | Always Matrix-backed SQLite — not exposed                  |
 
 ## 14. Boot Sequence
 
@@ -1107,7 +1200,12 @@ The fork's `main.ts` calls `createOracleApp` to bootstrap the runtime. Two ways 
 import type { Type, INestApplication } from '@nestjs/common';
 
 export interface CreateOracleAppOptions {
-  identity: { name: string; org: string; description: string; entityDid: string };
+  identity: {
+    name: string;
+    org: string;
+    description: string;
+    entityDid: string;
+  };
   features?: Partial<Record<BundledFeatureName, boolean | 'auto'>>;
   plugins?: OraclePlugin[];
   /** Developer's own NestJS modules. Spread into AppModule.imports. */
@@ -1125,13 +1223,17 @@ export interface OracleApp {
   beforeListen(fn: (nestApp: INestApplication) => Promise<void> | void): void;
 
   /** Subscribe to plugin status changes (load/unload events) */
-  onPluginStatusChange(handler: (event: { plugin: string; from: string; to: string }) => void): void;
+  onPluginStatusChange(
+    handler: (event: { plugin: string; from: string; to: string }) => void,
+  ): void;
 
   /** Start the HTTP server */
   listen(port: number): Promise<void>;
 }
 
-export function createOracleApp(opts: CreateOracleAppOptions): Promise<OracleApp>;
+export function createOracleApp(
+  opts: CreateOracleAppOptions,
+): Promise<OracleApp>;
 ```
 
 ### 15.2 Two patterns side by side
@@ -1139,11 +1241,13 @@ export function createOracleApp(opts: CreateOracleAppOptions): Promise<OracleApp
 ```ts
 // Pattern A — pass modules at config
 const app = await createOracleApp({
-  identity: { /* ... */ },
+  identity: {
+    /* ... */
+  },
   features: { slack: false },
   plugins: [new ClimatePlugin(), webhookPlugin],
   nestModules: [
-    MyCustomModule,        // your own NestJS module
+    MyCustomModule, // your own NestJS module
     AnotherModule,
   ],
 });
@@ -1163,16 +1267,16 @@ Both patterns are supported. Most forks only need Pattern A. Pattern B is the es
 ```ts
 @Module({
   imports: [
-    SessionsModule,         // always
-    MessagesModule,         // always
-    WsModule,               // always
-    SecretsModule,          // always
-    UcanModule,             // always
-    AuthModule,             // always
-    SubscriptionModule,     // always
-    ThrottlerModule,        // always
-    ...bundledPluginModules,  // from features (e.g. TasksModule if features.tasks)
-    ...userNestModules,     // from createOracleApp({ nestModules })
+    SessionsModule, // always
+    MessagesModule, // always
+    WsModule, // always
+    SecretsModule, // always
+    UcanModule, // always
+    AuthModule, // always
+    SubscriptionModule, // always
+    ThrottlerModule, // always
+    ...bundledPluginModules, // from features (e.g. TasksModule if features.tasks)
+    ...userNestModules, // from createOracleApp({ nestModules })
   ],
   // ...
 })
@@ -1189,24 +1293,24 @@ Bundled plugin NestJS modules (Tasks, Slack, Calls, etc.) come from inside the r
 
 Every feature shipping today becomes a bundled plugin.
 
-| Plugin | Default | Toggle | Visibility | Notes |
-|---|---|---|---|---|
-| `memoryPlugin` | ON | `features.memory: false` | `always` | Memory sub-agent + userContext enrichment + Memory Engine MCP |
-| `portalPlugin` | ON | `features.portal: false` | `on-demand` | Portal sub-agent (browser tools forwarded) |
-| `firecrawlPlugin` | ON | `features.firecrawl: false` | `always` | Firecrawl sub-agent + tools + MCP |
-| `domainIndexerPlugin` | ON | `features.domainIndexer: false` | `always` | Domain indexer sub-agent |
-| `composioPlugin` | auto (`COMPOSIO_API_KEY`) | `features.composio: false` | `on-demand` | Composio tool catalog |
-| `sandboxPlugin` | ON | `features.sandbox: false` | `silent` | Sandbox MCP tools (used internally by skills) |
-| `skillsPlugin` | ON | `features.skills: false`; `dependsOn: ['sandbox']` | `always` | Skills registry + UCAN-authenticated calls |
-| `editorPlugin` | ON | `features.editor: false` | `always` | BlockNote editor sub-agent + tools |
-| `aguiPlugin` | ON | `features.agui: false` | `always` | AG-UI agent (Portal copilot) |
-| `slackPlugin` | auto (`SLACK_BOT_OAUTH_TOKEN`) | `features.slack: false` | `on-demand` | Slack transport + formatting prompt |
-| `tasksPlugin` | auto (`REDIS_URL`) | `features.tasks: false` | `always` | TasksModule + 4 BullMQ queues + task-manager sub-agent |
-| `creditsPlugin` | ON unless `DISABLE_CREDITS=true` | `features.credits: false` | `silent` | Subscription middleware + token limiter |
-| `claimProcessingPlugin` | follows credits | `dependsOn: ['credits']` | `silent` | Claim signing + BullMQ claim worker |
-| `langfusePlugin` | auto (3 env vars) | `features.langfuse: false` | `silent` | Tracing/observability |
-| `callsPlugin` | ON | `features.calls: false` | `on-demand` | LiveKit call state + endpoints |
-| `userPreferencesPlugin` | ON | `features.userPreferences: false` | `silent` | User-preferences enrichment (added in PR #189) |
+| Plugin                  | Default                          | Toggle                                             | Visibility  | Notes                                                         |
+| ----------------------- | -------------------------------- | -------------------------------------------------- | ----------- | ------------------------------------------------------------- |
+| `memoryPlugin`          | ON                               | `features.memory: false`                           | `always`    | Memory sub-agent + userContext enrichment + Memory Engine MCP |
+| `portalPlugin`          | ON                               | `features.portal: false`                           | `on-demand` | Portal sub-agent (browser tools forwarded)                    |
+| `firecrawlPlugin`       | ON                               | `features.firecrawl: false`                        | `always`    | Firecrawl sub-agent + tools + MCP                             |
+| `domainIndexerPlugin`   | ON                               | `features.domainIndexer: false`                    | `always`    | Domain indexer sub-agent                                      |
+| `composioPlugin`        | auto (`COMPOSIO_API_KEY`)        | `features.composio: false`                         | `on-demand` | Composio tool catalog                                         |
+| `sandboxPlugin`         | ON                               | `features.sandbox: false`                          | `silent`    | Sandbox MCP tools (used internally by skills)                 |
+| `skillsPlugin`          | ON                               | `features.skills: false`; `dependsOn: ['sandbox']` | `always`    | Skills registry + UCAN-authenticated calls                    |
+| `editorPlugin`          | ON                               | `features.editor: false`                           | `always`    | BlockNote editor sub-agent + tools                            |
+| `aguiPlugin`            | ON                               | `features.agui: false`                             | `always`    | AG-UI agent (Portal copilot)                                  |
+| `slackPlugin`           | auto (`SLACK_BOT_OAUTH_TOKEN`)   | `features.slack: false`                            | `on-demand` | Slack transport + formatting prompt                           |
+| `tasksPlugin`           | auto (`REDIS_URL`)               | `features.tasks: false`                            | `always`    | TasksModule + 4 BullMQ queues + task-manager sub-agent        |
+| `creditsPlugin`         | ON unless `DISABLE_CREDITS=true` | `features.credits: false`                          | `silent`    | Subscription middleware + token limiter                       |
+| `claimProcessingPlugin` | follows credits                  | `dependsOn: ['credits']`                           | `silent`    | Claim signing + BullMQ claim worker                           |
+| `langfusePlugin`        | auto (3 env vars)                | `features.langfuse: false`                         | `silent`    | Tracing/observability                                         |
+| `callsPlugin`           | ON                               | `features.calls: false`                            | `on-demand` | LiveKit call state + endpoints                                |
+| `userPreferencesPlugin` | ON                               | `features.userPreferences: false`                  | `silent`    | User-preferences enrichment (added in PR #189)                |
 
 **Total Tier-1 token cost when all 'always' plugins are loaded:** ≈ 600 tokens for the Tier-1 block + ≈ 1,500-2,500 tokens for the bound tool schemas. This is well within budget for current models.
 
@@ -1216,7 +1320,12 @@ A fork with 50 user plugins (`'on-demand'` by default) doesn't pay the cost of t
 
 ```ts
 // packages/oracle-runtime/src/plugins/memory/memory.plugin.ts
-import { OraclePlugin, type PluginContext, type RuntimeContext, tool } from '../../plugin-api';
+import {
+  OraclePlugin,
+  type PluginContext,
+  type RuntimeContext,
+  tool,
+} from '../../plugin-api';
 import { MemoryAgent } from './memory-agent';
 
 export class MemoryPlugin extends OraclePlugin {
@@ -1235,8 +1344,11 @@ export class MemoryPlugin extends OraclePlugin {
       'After learning something noteworthy about the user',
     ],
     examples: [
-      { user: 'Remember I like dark mode', tool: 'remember_fact',
-        args: { fact: 'User prefers dark mode' } },
+      {
+        user: 'Remember I like dark mode',
+        tool: 'remember_fact',
+        args: { fact: 'User prefers dark mode' },
+      },
     ],
     tags: ['memory', 'personalization'],
     category: 'memory',
@@ -1245,18 +1357,21 @@ export class MemoryPlugin extends OraclePlugin {
   };
 
   getSubAgents(ctx: PluginContext) {
-    return [{
-      name: 'call_memory_agent',
-      description: 'Recall user memory deeply (facts, relationships, history).',
-      systemPrompt: MEMORY_AGENT_PROMPT,
-      tools: getMemoryAgentTools(ctx),
-      model: 'subagent',
-      middlewares: [createSummarizationMiddleware()],
-    }];
+    return [
+      {
+        name: 'call_memory_agent',
+        description:
+          'Recall user memory deeply (facts, relationships, history).',
+        systemPrompt: MEMORY_AGENT_PROMPT,
+        tools: getMemoryAgentTools(ctx),
+        model: 'subagent',
+        middlewares: [createSummarizationMiddleware()],
+      },
+    ];
   }
 
   getMiddlewares() {
-    return [createMemoryEnrichmentMiddleware()];  // populates state.userContext
+    return [createMemoryEnrichmentMiddleware()]; // populates state.userContext
   }
 
   getSharedState() {
@@ -1288,18 +1403,18 @@ LIVE_AGENT_AUTH_API_KEY
 
 ### 17.2 Plugin-owned
 
-| Plugin | Env vars |
-|---|---|
-| `composioPlugin` | `COMPOSIO_BASE_URL`, `COMPOSIO_API_KEY` |
-| `langfusePlugin` | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST` |
-| `slackPlugin` | `SLACK_BOT_OAUTH_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_USE_SOCKET_MODE`, `SLACK_MAX_RECONNECT_ATTEMPTS`, `SLACK_RECONNECT_DELAY_MS` |
-| `memoryPlugin` | `MEMORY_MCP_URL`, `MEMORY_ENGINE_URL` |
-| `firecrawlPlugin` | `FIRECRAWL_MCP_URL` |
-| `domainIndexerPlugin` | `DOMAIN_INDEXER_URL` |
-| `sandboxPlugin` | `SANDBOX_MCP_URL`, `SKIP_LOGGING_CHAT_HISTORY_TO_MATRIX` |
-| `skillsPlugin` | `SKILLS_CAPSULES_BASE_URL` |
-| `creditsPlugin` | `DISABLE_CREDITS`, `SUBSCRIPTION_URL`, `SUBSCRIPTION_ORACLE_MCP_URL` |
-| `tasksPlugin` (also used by `creditsPlugin` for token limiter) | `REDIS_URL` |
+| Plugin                                                         | Env vars                                                                                                                        |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `composioPlugin`                                               | `COMPOSIO_BASE_URL`, `COMPOSIO_API_KEY`                                                                                         |
+| `langfusePlugin`                                               | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST`                                                                   |
+| `slackPlugin`                                                  | `SLACK_BOT_OAUTH_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_USE_SOCKET_MODE`, `SLACK_MAX_RECONNECT_ATTEMPTS`, `SLACK_RECONNECT_DELAY_MS` |
+| `memoryPlugin`                                                 | `MEMORY_MCP_URL`, `MEMORY_ENGINE_URL`                                                                                           |
+| `firecrawlPlugin`                                              | `FIRECRAWL_MCP_URL`                                                                                                             |
+| `domainIndexerPlugin`                                          | `DOMAIN_INDEXER_URL`                                                                                                            |
+| `sandboxPlugin`                                                | `SANDBOX_MCP_URL`, `SKIP_LOGGING_CHAT_HISTORY_TO_MATRIX`                                                                        |
+| `skillsPlugin`                                                 | `SKILLS_CAPSULES_BASE_URL`                                                                                                      |
+| `creditsPlugin`                                                | `DISABLE_CREDITS`, `SUBSCRIPTION_URL`, `SUBSCRIPTION_ORACLE_MCP_URL`                                                            |
+| `tasksPlugin` (also used by `creditsPlugin` for token limiter) | `REDIS_URL`                                                                                                                     |
 
 `qiforge env` prints all required vars from currently-installed plugins.
 
@@ -1340,7 +1455,8 @@ async function bootstrap() {
     identity: {
       name: 'ClimateOracle',
       org: 'Carbon DAO',
-      description: 'Oracle that analyzes facility emissions and helps manage carbon credits.',
+      description:
+        'Oracle that analyzes facility emissions and helps manage carbon credits.',
       entityDid: process.env.ORACLE_ENTITY_DID!,
     },
     features: {
@@ -1348,10 +1464,7 @@ async function bootstrap() {
       composio: false,
       domainIndexer: false,
     },
-    plugins: [
-      new ClimatePlugin(),
-      webhookPlugin,
-    ],
+    plugins: [new ClimatePlugin(), webhookPlugin],
     nestModules: [MyCustomModule],
   });
 
@@ -1384,7 +1497,12 @@ bootstrap().catch((err) => {
 
 ```ts
 // my-fork/src/plugins/climate.plugin.ts
-import { OraclePlugin, tool, type PluginContext, type RuntimeContext } from '@ixo/oracle-runtime';
+import {
+  OraclePlugin,
+  tool,
+  type PluginContext,
+  type RuntimeContext,
+} from '@ixo/oracle-runtime';
 import { z } from 'zod';
 
 export class ClimatePlugin extends OraclePlugin {
@@ -1405,8 +1523,11 @@ export class ClimatePlugin extends OraclePlugin {
       'User mentions carbon footprint or greenhouse gases',
     ],
     examples: [
-      { user: 'Emissions for Plant 42 in Q1', tool: 'get_emissions',
-        args: { facilityId: 'plant-42', period: 'Q1-2026' } },
+      {
+        user: 'Emissions for Plant 42 in Q1',
+        tool: 'get_emissions',
+        args: { facilityId: 'plant-42', period: 'Q1-2026' },
+      },
     ],
     category: 'data' as const,
     tags: ['climate', 'emissions'],
@@ -1420,7 +1541,11 @@ export class ClimatePlugin extends OraclePlugin {
           runCtx.logger.info({ facilityId, period }, 'fetching emissions');
           const res = await fetch(
             `${ctx.config.CLIMATE_API_BASE_URL}/facilities/${facilityId}/emissions?period=${period}`,
-            { headers: { Authorization: `Bearer ${ctx.config.CLIMATE_API_KEY}` } },
+            {
+              headers: {
+                Authorization: `Bearer ${ctx.config.CLIMATE_API_KEY}`,
+              },
+            },
           );
           if (!res.ok) throw new Error(`Climate API error ${res.status}`);
           return res.json();
@@ -1432,7 +1557,7 @@ export class ClimatePlugin extends OraclePlugin {
             facilityId: z.string(),
             period: z.string().describe('e.g. Q1-2026, 2025'),
           }),
-        }
+        },
       ),
       tool(
         async ({ facilityIds }, runCtx) => {
@@ -1443,7 +1568,7 @@ export class ClimatePlugin extends OraclePlugin {
           name: 'compare_facilities',
           description: 'Compare emissions across multiple facilities.',
           schema: z.object({ facilityIds: z.array(z.string()).min(2).max(10) }),
-        }
+        },
       ),
     ];
   }
@@ -1468,12 +1593,13 @@ export default defineOraclePlugin({
   getTools() {
     return [
       tool(
-        async ({ name }, ctx) => `Hi ${name ?? ctx.user.did}, from the hello plugin.`,
+        async ({ name }, ctx) =>
+          `Hi ${name ?? ctx.user.did}, from the hello plugin.`,
         {
           name: 'say_hello',
           description: 'Returns a friendly greeting.',
           schema: z.object({ name: z.string().optional() }),
-        }
+        },
       ),
     ];
   },
@@ -1496,26 +1622,30 @@ export class TasksPlugin extends OraclePlugin {
   readonly manifest = {
     title: 'Tasks',
     summary: 'Schedule background work or recurring jobs.',
-    whenToUse: [
-      'User asks to remind them later',
-      'User wants a recurring job',
-    ],
+    whenToUse: ['User asks to remind them later', 'User wants a recurring job'],
     category: 'automation' as const,
     visibility: 'always' as const,
   };
 
   getSubAgents(ctx: PluginContext) {
-    return [{
-      name: 'call_task_manager_agent',
-      description: 'Manages tasks: create, list, cancel, schedule.',
-      systemPrompt: buildTaskManagerPrompt({
-        memoryAvailable: ctx.availablePlugins.has('memory'),
-      }),
-      tools: ctx.availablePlugins.has('memory')
-        ? [createTaskTool, listTasksTool, cancelTaskTool, rememberTaskContextTool]
-        : [createTaskTool, listTasksTool, cancelTaskTool],
-      model: 'subagent',
-    }];
+    return [
+      {
+        name: 'call_task_manager_agent',
+        description: 'Manages tasks: create, list, cancel, schedule.',
+        systemPrompt: buildTaskManagerPrompt({
+          memoryAvailable: ctx.availablePlugins.has('memory'),
+        }),
+        tools: ctx.availablePlugins.has('memory')
+          ? [
+              createTaskTool,
+              listTasksTool,
+              cancelTaskTool,
+              rememberTaskContextTool,
+            ]
+          : [createTaskTool, listTasksTool, cancelTaskTool],
+        model: 'subagent',
+      },
+    ];
   }
 }
 
@@ -1526,7 +1656,7 @@ Note: the `TasksModule` (NestJS module with BullMQ queues, workers, scheduler) i
 
 ### 19.4 Agent-side flow
 
-User says: *"Compare emissions between Plant 42 and Plant 51 and remind me to follow up next week."*
+User says: _"Compare emissions between Plant 42 and Plant 51 and remind me to follow up next week."_
 
 ```
 1. Agent reads Tier-1 system prompt:
@@ -1546,7 +1676,7 @@ User says: *"Compare emissions between Plant 42 and Plant 51 and remind me to fo
 5. Agent composes a reply combining both results.
 ```
 
-User says: *"Send me a quick recap on Slack."*
+User says: _"Send me a quick recap on Slack."_
 
 ```
 1. Slack is on-demand (not in Tier-1 prompt; tools not bound at boot).
@@ -1578,11 +1708,15 @@ describe('climate plugin', () => {
   it('fetches emissions for a facility', async () => {
     const rt = await createTestRuntime({
       plugins: [new ClimatePlugin()],
-      config: { CLIMATE_API_KEY: 'fake', CLIMATE_API_BASE_URL: 'http://mock.climate' },
+      config: {
+        CLIMATE_API_KEY: 'fake',
+        CLIMATE_API_BASE_URL: 'http://mock.climate',
+      },
       user: { did: 'did:ixo:test', matrixUserId: '@did-ixo-test:matrix.org' },
       mocks: {
         fetch: (url) =>
-          url.includes('plant-42') && mockResponse({ co2: 1234, period: 'Q1-2026' }),
+          url.includes('plant-42') &&
+          mockResponse({ co2: 1234, period: 'Q1-2026' }),
       },
     });
 
@@ -1597,36 +1731,40 @@ describe('climate plugin', () => {
   });
 
   it('soft-dep branch — extra tool when memory loaded', async () => {
-    const withoutMemory = await createTestRuntime({ plugins: [new TasksPlugin()] });
-    expect(withoutMemory.listTools('tasks').map(t => t.name))
-      .not.toContain('rememberTaskContext');
+    const withoutMemory = await createTestRuntime({
+      plugins: [new TasksPlugin()],
+    });
+    expect(withoutMemory.listTools('tasks').map((t) => t.name)).not.toContain(
+      'rememberTaskContext',
+    );
 
     const withMemory = await createTestRuntime({
       plugins: [new MemoryPlugin(), new TasksPlugin()],
     });
-    expect(withMemory.listTools('tasks').map(t => t.name))
-      .toContain('rememberTaskContext');
+    expect(withMemory.listTools('tasks').map((t) => t.name)).toContain(
+      'rememberTaskContext',
+    );
   });
 });
 ```
 
 ### 20.2 What `createTestRuntime` provides
 
-| Helper | Purpose |
-|---|---|
-| `rt.invokeTool(name, args)` | Run a single tool with a stub `RuntimeContext` |
-| `rt.invokeMiddleware(name, state, runtime)` | Run a single middleware in isolation |
-| `rt.invokeSubAgent(name, task)` | Run a sub-agent with a stub task |
-| `rt.listTools(plugin?)` | List tools (filtered by plugin or all) |
-| `rt.getManifest(plugin)` | Read a plugin's manifest |
-| `rt.listCapabilities()` | Same shape as the agent's `list_capabilities` tool |
-| `rt.findCapability(query)` | Same as agent's `find_capability` |
-| `rt.loadCapability(name)` | Add to test runtime's loadedPlugins |
-| `rt.assertNoCollisions()` | Throws if any registry has a collision |
-| `rt.assertManifestValid()` | Throws on invalid manifests |
-| `rt.mocks.matrix(...)` | Mock Matrix client |
-| `rt.mocks.fetch(...)` | Intercept HTTP requests |
-| `rt.close()` | Cleanup |
+| Helper                                      | Purpose                                            |
+| ------------------------------------------- | -------------------------------------------------- |
+| `rt.invokeTool(name, args)`                 | Run a single tool with a stub `RuntimeContext`     |
+| `rt.invokeMiddleware(name, state, runtime)` | Run a single middleware in isolation               |
+| `rt.invokeSubAgent(name, task)`             | Run a sub-agent with a stub task                   |
+| `rt.listTools(plugin?)`                     | List tools (filtered by plugin or all)             |
+| `rt.getManifest(plugin)`                    | Read a plugin's manifest                           |
+| `rt.listCapabilities()`                     | Same shape as the agent's `list_capabilities` tool |
+| `rt.findCapability(query)`                  | Same as agent's `find_capability`                  |
+| `rt.loadCapability(name)`                   | Add to test runtime's loadedPlugins                |
+| `rt.assertNoCollisions()`                   | Throws if any registry has a collision             |
+| `rt.assertManifestValid()`                  | Throws on invalid manifests                        |
+| `rt.mocks.matrix(...)`                      | Mock Matrix client                                 |
+| `rt.mocks.fetch(...)`                       | Intercept HTTP requests                            |
+| `rt.close()`                                | Cleanup                                            |
 
 ### 20.3 What it does NOT provide (deferred)
 
@@ -1739,7 +1877,11 @@ packages/oracle-runtime/
 
 ```ts
 // Main entry
-export { createOracleApp, type OracleApp, type CreateOracleAppOptions } from './bootstrap';
+export {
+  createOracleApp,
+  type OracleApp,
+  type CreateOracleAppOptions,
+} from './bootstrap';
 
 // Plugin authoring
 export { OraclePlugin } from './plugin-api/oracle-plugin';
@@ -1760,10 +1902,22 @@ export type { AgentMiddleware } from 'langchain';
 
 // Bundled plugins (named, for advanced composition)
 export {
-  memoryPlugin, portalPlugin, firecrawlPlugin, domainIndexerPlugin,
-  composioPlugin, sandboxPlugin, skillsPlugin, editorPlugin,
-  aguiPlugin, slackPlugin, tasksPlugin, creditsPlugin,
-  claimProcessingPlugin, langfusePlugin, callsPlugin, userPreferencesPlugin,
+  memoryPlugin,
+  portalPlugin,
+  firecrawlPlugin,
+  domainIndexerPlugin,
+  composioPlugin,
+  sandboxPlugin,
+  skillsPlugin,
+  editorPlugin,
+  aguiPlugin,
+  slackPlugin,
+  tasksPlugin,
+  creditsPlugin,
+  claimProcessingPlugin,
+  langfusePlugin,
+  callsPlugin,
+  userPreferencesPlugin,
 } from './plugins';
 ```
 
@@ -1922,14 +2076,14 @@ Conversion order (simplest → most coupled):
 
 ### 22.14 Total estimated effort
 
-| Phase | Effort |
-|---|---|
-| Steps 1–6 (skeleton, types, registries, loader, contexts, manifests, meta-tools) | ~3 weeks |
-| Step 7 (createMainAgent rewrite) | ~1 week |
-| Step 8 (Tier-0 modules relocate) | ~0.5 weeks |
-| Step 9 (16 bundled plugins, parallelizable) | ~3 weeks |
-| Steps 10–13 (testing, starter, CLI, docs) | ~1.5 weeks |
-| **Total** | **~9 weeks** for one engineer; **~5 weeks** with two |
+| Phase                                                                            | Effort                                               |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Steps 1–6 (skeleton, types, registries, loader, contexts, manifests, meta-tools) | ~3 weeks                                             |
+| Step 7 (createMainAgent rewrite)                                                 | ~1 week                                              |
+| Step 8 (Tier-0 modules relocate)                                                 | ~0.5 weeks                                           |
+| Step 9 (16 bundled plugins, parallelizable)                                      | ~3 weeks                                             |
+| Steps 10–13 (testing, starter, CLI, docs)                                        | ~1.5 weeks                                           |
+| **Total**                                                                        | **~9 weeks** for one engineer; **~5 weeks** with two |
 
 ## 23. Open Decisions
 
@@ -1983,49 +2137,49 @@ Stick with `qiforge-cli` since it already exists.
 
 ## 24. Glossary
 
-| Term | Meaning |
-|---|---|
-| **Plugin** | Unit of behavior added to the oracle: tools, sub-agents, middlewares, optional shared state, optional config schema. Defined as a class extending `OraclePlugin`, or a POJO via `defineOraclePlugin`. |
-| **Bundled plugin** | A plugin shipped inside `@ixo/oracle-runtime`. Toggled via `features`. |
-| **User plugin** | A plugin authored by a fork, listed in `plugins: [...]`. |
-| **Manifest** | Structured agent-facing description of a plugin: title, summary, whenToUse, examples, tags, visibility. |
-| **Visibility** | Manifest field controlling discovery: `'always'` / `'on-demand'` / `'silent'`. |
-| **Tier-1 / Tier-2 / Tier-3** | Layers of agent-visible plugin info: always-on summary, dynamic load via meta-tools, tool-level descriptions. |
-| **`PluginContext`** | Boot-time context passed to plugin builder methods. No user, no session. |
-| **`RuntimeContext`** | Per-request context passed to tool handlers, sub-agent handlers, middleware hooks. |
-| **`availablePlugins`** | `ReadonlySet<string>` of currently-loaded plugin names (boot-fixed). |
-| **`loadedPlugins`** | `ReadonlySet<string>` of plugins the agent has loaded for the current thread via `load_capability`. |
-| **Hard dep (`dependsOn`)** | Plugin literally cannot run without another. Boot fails if missing. |
-| **Soft dep (`softDependsOn`)** | Plugin works either way; uses the other if present. |
-| **Shared state** | Pattern where one plugin owns a state field and exposes typed read accessors via `getSharedState()`, accessed by other plugins as `ctx.shared.<key>`. |
-| **Meta-tool** | Built-in tool the runtime always provides: `find_capability`, `load_capability`, `list_capabilities`, `list_capability_details`. |
-| **Sub-agent** | A specialized inner agent with its own state and prompt, contributed by a plugin via `getSubAgents()`. Auto-wrapped as a tool. |
-| **Feature toggle** | `features.<name>: boolean | 'auto'` controlling whether a bundled plugin loads. |
-| **Tier-0 (core)** | Always-on framework: bootstrap, sessions, messages, ws, auth, matrix, checkpointer, base prompt, subscription, throttler. |
-| **Tier-1 (bundled)** | Bundled plugins. Toggleable via `features`. |
-| **Tier-2 (user)** | Fork-authored plugins. Always on if listed. |
+| Term                           | Meaning                                                                                                                                                                                               |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| **Plugin**                     | Unit of behavior added to the oracle: tools, sub-agents, middlewares, optional shared state, optional config schema. Defined as a class extending `OraclePlugin`, or a POJO via `defineOraclePlugin`. |
+| **Bundled plugin**             | A plugin shipped inside `@ixo/oracle-runtime`. Toggled via `features`.                                                                                                                                |
+| **User plugin**                | A plugin authored by a fork, listed in `plugins: [...]`.                                                                                                                                              |
+| **Manifest**                   | Structured agent-facing description of a plugin: title, summary, whenToUse, examples, tags, visibility.                                                                                               |
+| **Visibility**                 | Manifest field controlling discovery: `'always'` / `'on-demand'` / `'silent'`.                                                                                                                        |
+| **Tier-1 / Tier-2 / Tier-3**   | Layers of agent-visible plugin info: always-on summary, dynamic load via meta-tools, tool-level descriptions.                                                                                         |
+| **`PluginContext`**            | Boot-time context passed to plugin builder methods. No user, no session.                                                                                                                              |
+| **`RuntimeContext`**           | Per-request context passed to tool handlers, sub-agent handlers, middleware hooks.                                                                                                                    |
+| **`availablePlugins`**         | `ReadonlySet<string>` of currently-loaded plugin names (boot-fixed).                                                                                                                                  |
+| **`loadedPlugins`**            | `ReadonlySet<string>` of plugins the agent has loaded for the current thread via `load_capability`.                                                                                                   |
+| **Hard dep (`dependsOn`)**     | Plugin literally cannot run without another. Boot fails if missing.                                                                                                                                   |
+| **Soft dep (`softDependsOn`)** | Plugin works either way; uses the other if present.                                                                                                                                                   |
+| **Shared state**               | Pattern where one plugin owns a state field and exposes typed read accessors via `getSharedState()`, accessed by other plugins as `ctx.shared.<key>`.                                                 |
+| **Meta-tool**                  | Built-in tool the runtime always provides: `find_capability`, `load_capability`, `list_capabilities`, `list_capability_details`.                                                                      |
+| **Sub-agent**                  | A specialized inner agent with its own state and prompt, contributed by a plugin via `getSubAgents()`. Auto-wrapped as a tool.                                                                        |
+| **Feature toggle**             | `features.<name>: boolean                                                                                                                                                                             | 'auto'` controlling whether a bundled plugin loads. |
+| **Tier-0 (core)**              | Always-on framework: bootstrap, sessions, messages, ws, auth, matrix, checkpointer, base prompt, subscription, throttler.                                                                             |
+| **Tier-1 (bundled)**           | Bundled plugins. Toggleable via `features`.                                                                                                                                                           |
+| **Tier-2 (user)**              | Fork-authored plugins. Always on if listed.                                                                                                                                                           |
 
 ## 25. Appendix — Code Grounding
 
 Numbers in this spec are grounded in the actual repo on commit `0ee7106`.
 
-| Spec claim | Code reference |
-|---|---|
-| `main-agent.ts` is 1,052 lines | `apps/app/src/graph/agents/main-agent.ts` (`wc -l`) |
-| 8 sub-agents init via `Promise.allSettled` | `apps/app/src/graph/agents/main-agent.ts:621` |
-| Sub-agents include conditional TaskManager | `apps/app/src/graph/agents/main-agent.ts:651` |
-| 11 prompt template variables | `apps/app/src/graph/agents/main-agent.ts:698-730` |
-| 4 always-on middlewares (validation, retry, page-context, safety) | `apps/app/src/graph/middlewares/*.ts` |
-| 11 state fields | `apps/app/src/graph/state.ts` |
-| 4 BullMQ queues (`task_simple`, `task_work`, `task_deliver`, `task_approval`) | `apps/app/src/tasks/scheduler/task-queues.ts:14-19` |
-| 7 event types in `@ixo/events` | `packages/events/src/events/*.ts` |
-| Matrix init runs in background | `apps/app/src/main.ts:121` |
-| HTTP listen does not wait for Matrix | `apps/app/src/main.ts:185` |
-| Vitest 3.x with `@ixo/vitest-config` | `packages/vitest-config/` |
-| 13 packages in workspace | root `pnpm-workspace.yaml` |
-| Subscription middleware throws 402 if not active/trial or credits ≤ 10 | `apps/app/src/middleware/subscription.middleware.ts:52-65` |
-| Global throttler: 10 req / 60s | `apps/app/src/app.module.ts:53-57` |
-| Per-user SQLite at `<SQLITE_DATABASE_PATH>/user_dbs/<did>/<key>.db` | `apps/app/src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service.ts` |
+| Spec claim                                                                    | Code reference                                                                            |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `main-agent.ts` is 1,052 lines                                                | `apps/app/src/graph/agents/main-agent.ts` (`wc -l`)                                       |
+| 8 sub-agents init via `Promise.allSettled`                                    | `apps/app/src/graph/agents/main-agent.ts:621`                                             |
+| Sub-agents include conditional TaskManager                                    | `apps/app/src/graph/agents/main-agent.ts:651`                                             |
+| 11 prompt template variables                                                  | `apps/app/src/graph/agents/main-agent.ts:698-730`                                         |
+| 4 always-on middlewares (validation, retry, page-context, safety)             | `apps/app/src/graph/middlewares/*.ts`                                                     |
+| 11 state fields                                                               | `apps/app/src/graph/state.ts`                                                             |
+| 4 BullMQ queues (`task_simple`, `task_work`, `task_deliver`, `task_approval`) | `apps/app/src/tasks/scheduler/task-queues.ts:14-19`                                       |
+| 7 event types in `@ixo/events`                                                | `packages/events/src/events/*.ts`                                                         |
+| Matrix init runs in background                                                | `apps/app/src/main.ts:121`                                                                |
+| HTTP listen does not wait for Matrix                                          | `apps/app/src/main.ts:185`                                                                |
+| Vitest 3.x with `@ixo/vitest-config`                                          | `packages/vitest-config/`                                                                 |
+| 13 packages in workspace                                                      | root `pnpm-workspace.yaml`                                                                |
+| Subscription middleware throws 402 if not active/trial or credits ≤ 10        | `apps/app/src/middleware/subscription.middleware.ts:52-65`                                |
+| Global throttler: 10 req / 60s                                                | `apps/app/src/app.module.ts:53-57`                                                        |
+| Per-user SQLite at `<SQLITE_DATABASE_PATH>/user_dbs/<did>/<key>.db`           | `apps/app/src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service.ts` |
 
 ---
 

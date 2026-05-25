@@ -9,7 +9,8 @@
 ## Goal
 
 Build `createTestRuntime` so plugin authors (and the bundled plugin conversion tasks) can write unit tests without booting the full app. Lightweight per §20.3 — no LLM fixtures, no plug-matrix property tests.
-Check https://docs.langchain.com/oss/javascript/langchain/test and review how they do testing adn what can we befiint from it 
+Check https://docs.langchain.com/oss/javascript/langchain/test and review how they do testing adn what can we befiint from it
+
 ## Deliverables
 
 ### Created
@@ -47,6 +48,7 @@ Per §20.2: `invokeTool`, `invokeMiddleware`, `invokeSubAgent`, `listTools`, `ge
 ## Out of scope
 
 Per §20.3:
+
 - Recorded LLM fixtures
 - Plug-matrix property tests
 - Coverage gates

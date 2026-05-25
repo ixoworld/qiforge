@@ -218,17 +218,16 @@ export class ChannelMemoryRepo {
    * tier scheduler — keeps the DB consistent if the process is interrupted
    * mid-rollup.
    */
-  replaceWithRollup(
-    sourceIds: string[],
-    rollup: ChannelMemoryChunk,
-  ): void {
-    const tx = this.db.transaction((ids: string[], chunk: ChannelMemoryChunk) => {
-      const del = this.db.prepare(
-        `DELETE FROM channel_memory_chunks WHERE id = ?`,
-      );
-      for (const id of ids) del.run(id);
-      this.insertChunk(chunk);
-    });
+  replaceWithRollup(sourceIds: string[], rollup: ChannelMemoryChunk): void {
+    const tx = this.db.transaction(
+      (ids: string[], chunk: ChannelMemoryChunk) => {
+        const del = this.db.prepare(
+          `DELETE FROM channel_memory_chunks WHERE id = ?`,
+        );
+        for (const id of ids) del.run(id);
+        this.insertChunk(chunk);
+      },
+    );
     tx(sourceIds, rollup);
   }
 

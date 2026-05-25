@@ -43,13 +43,13 @@ const manifest: PluginManifest = {
   summary:
     'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those.',
   whenToUse: [
-    'Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`\'s `skillFiles`).',
+    "Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
     'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
     'Hit a JSON/REST API — write curl or python in `sandbox_run`. Never use a web scraper for `/api/`, `/v1/`, `/v2/`, `/v3/` endpoints.',
     'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`).',
     'Re-read an attachment the user sent earlier — it was auto-archived to `/workspace/output/<filename>`; load from there.',
     'Save a large or escape-sensitive blob (multi-line markdown, structured data) byte-perfect to `/workspace/data/...` — use `sandbox_write_file` so quoting bugs do not corrupt it.',
-    'Write a scratch / throwaway file (build artefacts, temp scripts you will execute then delete) — use `sandbox_run` with a here-doc: `cat > /tmp/<name> <<\'EOF\'\\n<content>\\nEOF`. Never use `sandbox_write_file` for `/tmp` or anywhere outside `/workspace/data/` — it will be rejected.',
+    "Write a scratch / throwaway file (build artefacts, temp scripts you will execute then delete) — use `sandbox_run` with a here-doc: `cat > /tmp/<name> <<'EOF'\\n<content>\\nEOF`. Never use `sandbox_write_file` for `/tmp` or anywhere outside `/workspace/data/` — it will be rejected.",
     'Always check the result envelope: `success === true` AND `exitCode === 0` before trusting `output`. On failure, READ the `error` text and change your approach — do not retry the same call with the same args.',
   ],
   whenNotToUse: [
@@ -61,7 +61,7 @@ const manifest: PluginManifest = {
   ],
   examples: [
     {
-      user: 'Read the pptx skill\'s instructions before generating slides.',
+      user: "Read the pptx skill's instructions before generating slides.",
       thought:
         "After `load_skill`, the SKILL.md path is the absolute path the response returned (e.g. /workspace/skills/pptx/SKILL.md). Cat it directly through sandbox_run — there's no separate read tool. Pass `cid` so the same skill context is in place.",
       tool: 'sandbox_run',
@@ -86,7 +86,7 @@ const manifest: PluginManifest = {
         'The attachment is at /workspace/output/<filename>. Use uv (preferred over pip in this sandbox) to materialize pandas. Write the result so the user can reuse it next turn.',
       tool: 'sandbox_run',
       args: {
-        code: 'uv run --with pandas python -c "import pandas as pd, json; df=pd.read_csv(\'/workspace/output/sales.csv\'); out=df.groupby(\'month\').sum().reset_index(); out.to_csv(\'/workspace/data/output/monthly_totals.csv\', index=False); print(json.dumps({\'rows\': len(out)}))"',
+        code: "uv run --with pandas python -c \"import pandas as pd, json; df=pd.read_csv('/workspace/output/sales.csv'); out=df.groupby('month').sum().reset_index(); out.to_csv('/workspace/data/output/monthly_totals.csv', index=False); print(json.dumps({'rows': len(out)}))\"",
       },
     },
     {
@@ -213,9 +213,7 @@ export class SandboxPlugin extends OraclePlugin {
     return Boolean(env.SANDBOX_MCP_URL);
   }
 
-  override async getRequestTools(
-    rtCtx: RuntimeContext,
-  ): Promise<PluginTool[]> {
+  override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const parsed = configSchema.safeParse(rtCtx.config);
     if (!parsed.success) {
       throw new Error(

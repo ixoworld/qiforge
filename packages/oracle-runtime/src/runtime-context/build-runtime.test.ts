@@ -227,7 +227,7 @@ describe('buildRuntimeContext', () => {
     const ambient = makeAmbient();
     const controller = new AbortController();
     const runConfig = makeRunConfig();
-    (runConfig).signal = controller.signal;
+    runConfig.signal = controller.signal;
 
     const ctx = buildRuntimeContext(runConfig, ambient, { messages: [] });
     expect(ctx.abortSignal).toBe(controller.signal);

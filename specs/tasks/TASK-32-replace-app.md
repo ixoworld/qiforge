@@ -37,6 +37,7 @@ Delete the now-redundant contents of `apps/app/src/` and replace with the 30-lin
 ### Created
 
 - `apps/app/src/main.ts` — the 30-line starter per §18.2:
+
   ```ts
   import { createOracleApp } from '@ixo/oracle-runtime';
 
@@ -59,6 +60,7 @@ Delete the now-redundant contents of `apps/app/src/` and replace with the 30-lin
     process.exit(1);
   });
   ```
+
 - `apps/app/src/plugins/` — empty directory with `.gitkeep`. Where developer-authored plugins live in a fork.
 
 ### Modified
@@ -96,6 +98,7 @@ TASK-32 is too big for a single subagent run. Split into 5 sequential chunks tra
 Build the production factory inside `createOracleApp`. Today `AmbientServices` (matrix, ucan, llm, secrets, emit, logger) is constructed only in test fixtures. Production runtime requests can't reach `createMainAgent` with a working ambient bag.
 
 Wire:
+
 - `UcanService` → `UcanAdapter` (`mintInvocation`, `hasCapability`, `requireCapability`, `resolveServiceDid`)
 - `MatrixManager` → `MatrixAdapter` (`postToRoom`, `getRoomState`, `getEventById`)
 - `LlmAdapter` — lift `getProviderChatModel` logic, modernize against the role registry
@@ -109,6 +112,7 @@ Wire:
 The Tier-0 messages controller (`packages/oracle-runtime/src/modules/messages/messages.controller.ts` + service) was lifted from apps/app and still builds the agent the OLD monolith way.
 
 Rewire:
+
 1. On each request, build per-request `RuntimeContext` from auth headers + state + the AmbientServices from 32a
 2. Invoke `createMainAgent({ registries, ambient, identity, requestCtx })` using the booted runtime's registries
 3. Stream result via SSE/WS (existing flow shape)
@@ -120,7 +124,11 @@ Depends on 32a.
 The ~30-line entry per §18.2:
 
 ```ts
-import { createOracleApp, CreditsPlugin, EditorPlugin } from '@ixo/oracle-runtime';
+import {
+  createOracleApp,
+  CreditsPlugin,
+  EditorPlugin,
+} from '@ixo/oracle-runtime';
 import { createClient as createMatrixJsClient } from 'matrix-js-sdk';
 import Redis from 'ioredis';
 
@@ -159,6 +167,7 @@ Per the Deleted list above. Verify each path's relocation in the runtime exists,
 Real boot. Real HTTP request. Real graph invocation. Real plugin tool firing.
 
 Use curl (or oracles-client-sdk) against a locally-booted oracle. Verify:
+
 1. App starts via the new `main.ts`
 2. Plugins resolve and register correctly (status report from `app.plugins.status()`)
 3. A chat message reaches the agent

@@ -19,27 +19,31 @@ import { buildChannelMemoryTools } from './tools.js';
 const DEFAULT_ROOM_INFO_TTL_MS = 30 * 60 * 1000;
 
 const configSchema = z.object({
-  CHANNEL_MEMORY_SYNC_INTERVAL_MS: z
-    .coerce.number()
+  CHANNEL_MEMORY_SYNC_INTERVAL_MS: z.coerce
+    .number()
     .int()
     .min(1000)
     .default(60_000)
-    .describe('Debounce window between a write and the Matrix snapshot upload.'),
+    .describe(
+      'Debounce window between a write and the Matrix snapshot upload.',
+    ),
   // Group-chat gating
-  GROUP_CHAT_ACTIVE_THREAD_TTL_MS: z
-    .coerce.number()
+  GROUP_CHAT_ACTIVE_THREAD_TTL_MS: z.coerce
+    .number()
     .int()
     .min(60_000)
     .default(30 * 60 * 1000)
     .describe('How long a thread stays "active with the bot" after a reply.'),
-  GROUP_CHAT_REQUIRE_POWER_LEVEL: z
-    .coerce.number()
+  GROUP_CHAT_REQUIRE_POWER_LEVEL: z.coerce
+    .number()
     .int()
     .min(0)
     .default(0)
-    .describe('Extra minimum power level the bot must have before posting (0 = use the room default).'),
-  GROUP_CHAT_ROOM_INFO_TTL_MS: z
-    .coerce.number()
+    .describe(
+      'Extra minimum power level the bot must have before posting (0 = use the room default).',
+    ),
+  GROUP_CHAT_ROOM_INFO_TTL_MS: z.coerce
+    .number()
     .int()
     .min(60_000)
     .default(DEFAULT_ROOM_INFO_TTL_MS)
@@ -126,9 +130,7 @@ export class MatrixGroupChatsPlugin extends OraclePlugin {
    * session is in a Matrix group room (memberCount > 2). DM / portal /
    * slack sessions get an empty list so the agent never sees them.
    */
-  override async getRequestTools(
-    rtCtx: RuntimeContext,
-  ): Promise<PluginTool[]> {
+  override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     if (rtCtx.session.client !== 'matrix' || !rtCtx.session.roomId) {
       return [];
     }

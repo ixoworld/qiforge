@@ -8,7 +8,9 @@ import { vi } from 'vitest';
  * service exposes additional internal methods (`changes`, `internalConfig`,
  * etc.) that no SUT in this repo consumes.
  */
-export function makeConfig(values: Record<string, unknown> = {}): ConfigService {
+export function makeConfig(
+  values: Record<string, unknown> = {},
+): ConfigService {
   return {
     get: vi.fn(<T>(key: string): T | undefined => values[key] as T | undefined),
     getOrThrow: vi.fn(<T>(key: string): T => {

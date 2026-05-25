@@ -9,9 +9,7 @@ describe('MiddlewareRegistry', () => {
     const m3 = makeMiddleware('m3');
 
     const reg = new MiddlewareRegistry();
-    reg.register(
-      makePlugin({ name: 'first', getMiddlewares: () => [m1, m2] }),
-    );
+    reg.register(makePlugin({ name: 'first', getMiddlewares: () => [m1, m2] }));
     reg.register(makePlugin({ name: 'second', getMiddlewares: () => [m3] }));
 
     const collected = reg.collect(makeBuildCtx());
@@ -51,7 +49,10 @@ describe('MiddlewareRegistry', () => {
     reg.register(
       makePlugin({
         name: 'a',
-        getMiddlewares: () => [makeMiddleware('shared'), makeMiddleware('shared')],
+        getMiddlewares: () => [
+          makeMiddleware('shared'),
+          makeMiddleware('shared'),
+        ],
       }),
     );
     reg.collect(makeBuildCtx());

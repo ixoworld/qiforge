@@ -31,14 +31,14 @@ All six options below were checked against current docs (May 2026). Verdict at t
 
 ### 3.1 Comparison table
 
-| Framework | TS support | Hosting | Cost (entry) | Datasets | LLM-judge | Regression diff | CI story | Where results live |
-|---|---|---|---|---|---|---|---|---|
-| **LangSmith** | Native TS SDK; `langsmith/vitest` entrypoint | Hosted (BYOC + self-host on Enterprise) | Free dev (5k traces / 14d) → Plus $39/seat/mo + $2.50 / 1k traces over 10k | First-class, curate from prod traces or upload | Yes, templates + custom evaluators in TS | Yes, experiment-vs-experiment view in UI | Vitest integration + GitHub workflow examples in cookbook | LangSmith UI / dashboard, exportable |
-| **promptfoo** | TS CLI + library; custom TS providers | Self-host / local; optional sharing service | OSS (Apache-2.0) — free | YAML test files; CSV / Google Sheets import | Yes, model-graded assertions | Yes, `promptfoo eval --share`; HTML / JSON output | First-class CI: `promptfoo eval` returns non-zero on failure, GH Action available | Local filesystem + optional shared report URL |
-| **Braintrust** | Native TS SDK (`braintrust`) + OpenAI proxy | Hosted (self-host on Enterprise) | Free tier (1M spans, 10k eval scores) → Pro $249/mo, tracing $3/GB | Dataset-first product; versioned | Yes, library of scorers + custom in TS | Yes, statistical significance markers | TS SDK is the eval runner — wrap in vitest or call from CI script | Braintrust UI |
-| **DeepEval** | Python-first; `deepeval-ts` exists but thin / calls Python subprocess | Hosted (Confident AI) or local | OSS core, Confident AI is paid | Yes (Python-native, awkward from TS) | Yes, rich metric library | Yes, in Confident AI UI | Pytest-shaped; Node integration is sub-process — friction | Confident AI UI |
-| **Custom on vitest + `fakeModel`** | Native — already what we use | N/A (lives in repo) | $0 deterministic, real-model runs cost what they cost | Plain TS arrays / JSON in plugin source | Only if we wire one (one prompt call) | DIY (snapshot scores to a JSON file, diff in CI) | First-class, already runs in `pnpm test` | Vitest reporter / repo artifacts |
-| **Langfuse evaluations** | TS SDK (`langfuse`) | Self-host (MIT, no usage caps) or hosted | Self-host: free. Hosted: free dev → paid Pro | Yes, datasets + experiments | Yes, managed LLM-as-judge with templates + custom; observation-level evals as of Feb 2026 | Yes, experiment runs are diff-able in UI | SDK-driven; trigger via vitest or scheduled cron in CI | Langfuse UI (own instance) |
+| Framework                          | TS support                                                            | Hosting                                     | Cost (entry)                                                               | Datasets                                       | LLM-judge                                                                                 | Regression diff                                   | CI story                                                                          | Where results live                            |
+| ---------------------------------- | --------------------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------- |
+| **LangSmith**                      | Native TS SDK; `langsmith/vitest` entrypoint                          | Hosted (BYOC + self-host on Enterprise)     | Free dev (5k traces / 14d) → Plus $39/seat/mo + $2.50 / 1k traces over 10k | First-class, curate from prod traces or upload | Yes, templates + custom evaluators in TS                                                  | Yes, experiment-vs-experiment view in UI          | Vitest integration + GitHub workflow examples in cookbook                         | LangSmith UI / dashboard, exportable          |
+| **promptfoo**                      | TS CLI + library; custom TS providers                                 | Self-host / local; optional sharing service | OSS (Apache-2.0) — free                                                    | YAML test files; CSV / Google Sheets import    | Yes, model-graded assertions                                                              | Yes, `promptfoo eval --share`; HTML / JSON output | First-class CI: `promptfoo eval` returns non-zero on failure, GH Action available | Local filesystem + optional shared report URL |
+| **Braintrust**                     | Native TS SDK (`braintrust`) + OpenAI proxy                           | Hosted (self-host on Enterprise)            | Free tier (1M spans, 10k eval scores) → Pro $249/mo, tracing $3/GB         | Dataset-first product; versioned               | Yes, library of scorers + custom in TS                                                    | Yes, statistical significance markers             | TS SDK is the eval runner — wrap in vitest or call from CI script                 | Braintrust UI                                 |
+| **DeepEval**                       | Python-first; `deepeval-ts` exists but thin / calls Python subprocess | Hosted (Confident AI) or local              | OSS core, Confident AI is paid                                             | Yes (Python-native, awkward from TS)           | Yes, rich metric library                                                                  | Yes, in Confident AI UI                           | Pytest-shaped; Node integration is sub-process — friction                         | Confident AI UI                               |
+| **Custom on vitest + `fakeModel`** | Native — already what we use                                          | N/A (lives in repo)                         | $0 deterministic, real-model runs cost what they cost                      | Plain TS arrays / JSON in plugin source        | Only if we wire one (one prompt call)                                                     | DIY (snapshot scores to a JSON file, diff in CI)  | First-class, already runs in `pnpm test`                                          | Vitest reporter / repo artifacts              |
+| **Langfuse evaluations**           | TS SDK (`langfuse`)                                                   | Self-host (MIT, no usage caps) or hosted    | Self-host: free. Hosted: free dev → paid Pro                               | Yes, datasets + experiments                    | Yes, managed LLM-as-judge with templates + custom; observation-level evals as of Feb 2026 | Yes, experiment runs are diff-able in UI          | SDK-driven; trigger via vitest or scheduled cron in CI                            | Langfuse UI (own instance)                    |
 
 ### 3.2 Notes on each option
 
@@ -50,9 +50,9 @@ All six options below were checked against current docs (May 2026). Verdict at t
 
 **DeepEval** is the leader for metric variety (G-Eval, faithfulness, contextual precision, etc.) but Python-first. `deepeval-ts` is a thin client of the SaaS API rather than a port of the framework. We'd be running Python in CI via subprocess and version-locking two ecosystems. Hard pass given the repo is TS-only.
 
-**Custom on vitest + `fakeModel`** is what TASK-15 already lays the groundwork for. It's the only option where the eval suite *runs without any external service* and produces zero cost in CI. The ceiling is low: no LLM-judge unless we hand-roll one, no hosted dashboard, no statistical-significance machinery. Best for the foundational layer.
+**Custom on vitest + `fakeModel`** is what TASK-15 already lays the groundwork for. It's the only option where the eval suite _runs without any external service_ and produces zero cost in CI. The ceiling is low: no LLM-judge unless we hand-roll one, no hosted dashboard, no statistical-significance machinery. Best for the foundational layer.
 
-**Langfuse evaluations** is the option that *fits the existing plan* — Langfuse is already a planned plugin (TASK-16) for tracing. Self-hosted Langfuse is MIT-licensed with no event caps and runs in Docker. Datasets + experiments + LLM-as-judge are all in the OSS, including the Feb 2026 observation-level eval feature (we can score individual tool calls inside a trace without re-running the whole agent). The cost story is "the hardware running the Docker stack and the LLM calls of the judge model" — nothing else.
+**Langfuse evaluations** is the option that _fits the existing plan_ — Langfuse is already a planned plugin (TASK-16) for tracing. Self-hosted Langfuse is MIT-licensed with no event caps and runs in Docker. Datasets + experiments + LLM-as-judge are all in the OSS, including the Feb 2026 observation-level eval feature (we can score individual tool calls inside a trace without re-running the whole agent). The cost story is "the hardware running the Docker stack and the LLM calls of the judge model" — nothing else.
 
 ### 3.3 Recommendation
 
@@ -65,7 +65,7 @@ Reasoning:
 3. LangSmith and Braintrust are both better products in isolation than self-hosted Langfuse. But adopting them means a new vendor invoice and a second set of credentials in CI. Re-evaluate in 6 months if Langfuse's eval UX is a bottleneck.
 4. promptfoo stays in the back pocket for **red-team / safety** runs. Its red-teaming feature set is more mature than Langfuse's and the CLI is genuinely good for one-off "what does this prompt do across N models" experiments.
 
-What we explicitly do *not* recommend: building both layers from scratch on vitest, or paying for LangSmith / Braintrust before we have evidence the OSS layer is the bottleneck.
+What we explicitly do _not_ recommend: building both layers from scratch on vitest, or paying for LangSmith / Braintrust before we have evidence the OSS layer is the bottleneck.
 
 ## 4. Dataset strategy
 
@@ -150,11 +150,11 @@ packages/
 
 ### When to run
 
-| Trigger | What runs | Cost target | Time budget |
-|---|---|---|---|
-| Per-PR | Deterministic vitest evals for plugins touched in the diff + the central routing/safety suite | $0 (fakeModel) + ~$0.20 (one real-model smoke on changed plugin) | < 3 min |
-| Nightly | Full deterministic suite + LLM-judged response quality on all plugins | ~$5–15 (judge calls) | < 20 min |
-| Pre-release | Full suite + synthetic dataset regeneration + real-traffic replay (phase 3) | ~$20–60 | < 60 min |
+| Trigger     | What runs                                                                                     | Cost target                                                      | Time budget |
+| ----------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ----------- |
+| Per-PR      | Deterministic vitest evals for plugins touched in the diff + the central routing/safety suite | $0 (fakeModel) + ~$0.20 (one real-model smoke on changed plugin) | < 3 min     |
+| Nightly     | Full deterministic suite + LLM-judged response quality on all plugins                         | ~$5–15 (judge calls)                                             | < 20 min    |
+| Pre-release | Full suite + synthetic dataset regeneration + real-traffic replay (phase 3)                   | ~$20–60                                                          | < 60 min    |
 
 "Touched in the diff" means changed files under `packages/plugin-<name>/` or `packages/oracle-runtime/src/{graph,plugin-api,manifest}/`. The PR-time signal is what catches regressions before merge — the rest is monitoring.
 
@@ -175,11 +175,11 @@ This is the same pattern that flakey-test detectors use; it's not novel, just ne
 
 Rough sketch with current numbers (GPT-4.1-mini class judge, mid-range main model):
 
-| Run type | Cases | Cost per case (judge + agent) | Total |
-|---|---|---|---|
-| PR (touched plugin) | ~20 | $0.01 | $0.20 |
-| Nightly | ~400 | $0.02–0.04 | $8–16 |
-| Pre-release | ~1200 | $0.03–0.05 | $36–60 |
+| Run type            | Cases | Cost per case (judge + agent) | Total  |
+| ------------------- | ----- | ----------------------------- | ------ |
+| PR (touched plugin) | ~20   | $0.01                         | $0.20  |
+| Nightly             | ~400  | $0.02–0.04                    | $8–16  |
+| Pre-release         | ~1200 | $0.03–0.05                    | $36–60 |
 
 Numbers move with model choice. Worth instrumenting `ctx.llm.get()` to tag every call with `{ run: 'eval', case: 'climate-001' }` so the cost shows up in Langfuse and we can see the real number.
 
@@ -211,7 +211,7 @@ Three phases. Each has an explicit definition of done.
 
 ### Phase 2 — LLM-judged response quality
 
-**What.** Add a `judge.ts` utility under `packages/oracle-runtime/src/testing/eval/`. Each case can include `judgeCriteria` (free-form rubric). The runner calls the judge model with `{ rubric, userMessage, agentResponse }` and parses a `{ score: 0..1, reasoning: string }` response. Results stream to Langfuse via the tracing plugin so they show up in the experiment-run view. Per-PR runs only judge cases for *changed plugins*. Nightly judges everything.
+**What.** Add a `judge.ts` utility under `packages/oracle-runtime/src/testing/eval/`. Each case can include `judgeCriteria` (free-form rubric). The runner calls the judge model with `{ rubric, userMessage, agentResponse }` and parses a `{ score: 0..1, reasoning: string }` response. Results stream to Langfuse via the tracing plugin so they show up in the experiment-run view. Per-PR runs only judge cases for _changed plugins_. Nightly judges everything.
 
 **When.** After Phase 1 is in CI for two weeks and we're confident the deterministic layer is stable.
 

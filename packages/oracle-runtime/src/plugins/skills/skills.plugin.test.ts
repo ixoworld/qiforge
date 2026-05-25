@@ -34,9 +34,10 @@ function getTool(plugin: SkillsPlugin, name: string) {
  * passes `(stringUrl, init)`; we assert that and return a typed view of the
  * headers object the tool sent.
  */
-function readFetchCall(
-  call: Parameters<typeof globalThis.fetch>,
-): { url: string; headers: Record<string, string> } {
+function readFetchCall(call: Parameters<typeof globalThis.fetch>): {
+  url: string;
+  headers: Record<string, string>;
+} {
   const [input, init] = call;
   if (typeof input !== 'string') {
     throw new Error('expected fetch() to be called with a string URL');
@@ -129,7 +130,9 @@ describe('createDefaultSkillsUcanBuilder', () => {
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
 
@@ -152,7 +155,9 @@ describe('createDefaultSkillsUcanBuilder', () => {
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
     expect(await builder(SKILLS_URL, runCtxNoDid)).toBeUndefined();
@@ -288,7 +293,10 @@ describe('SkillsPlugin loads via createTestRuntime', () => {
     // the topo-sort. We import sandbox lazily to keep test imports minimal.
     const { SandboxPlugin } = await import('../sandbox/index.js');
     const rt = await createTestRuntime({
-      plugins: [new SandboxPlugin(), new SkillsPlugin({ ucanBuilder: fixedUcan })],
+      plugins: [
+        new SandboxPlugin(),
+        new SkillsPlugin({ ucanBuilder: fixedUcan }),
+      ],
       config: {
         SANDBOX_MCP_URL: 'https://sandbox.test',
         SKILLS_CAPSULES_BASE_URL: SKILLS_URL,

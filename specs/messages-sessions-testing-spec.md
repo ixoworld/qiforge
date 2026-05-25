@@ -17,12 +17,14 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
 ## 1. Goals / Non-goals
 
 **Goals**
+
 - Unit-heavy pyramid covering every dangerous branch in messages + sessions.
 - Three integration tests proving the wire works end-to-end and survives abort.
 - Match existing house style strictly (no deviations).
 - Each wave is a separate PR; reviewer signs off before next wave starts.
 
 **Non-goals**
+
 - Coverage of thin transports (`messages.controller.ts`, `sessions.controller.ts`).
   Nest framework guarantees DI wiring; tests would only re-prove framework
   behavior. If a reviewer wants them, one test per branch (stream/non-stream/abort)
@@ -35,6 +37,7 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
 ## 2. House Style + Memory Rules (binding)
 
 ### Test runner & config
+
 - **Vitest**, ESM, native Node.
 - Unit mode (default `vitest run`): excludes `*.int.test.ts`, 30s default timeout.
 - Integration mode (`vitest run --mode int`): only `*.int.test.ts`, `fileParallelism: false`, 120s timeout, 60s hook timeout.
@@ -42,6 +45,7 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
 - Integration setup: `src/testing/integration/setup.ts` (loads `.env.integration`, silences logs, adds `langchainMatchers`).
 
 ### SUT construction
+
 - Direct `new Service(mockA, mockB, …)` — **never** `Test.createTestingModule(...)`.
 - Templates to copy:
   - `src/modules/auth/auth-header.middleware.test.ts`
@@ -50,6 +54,7 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
   - `src/modules/ucan/ucan.service.test.ts`
 
 ### Mocking
+
 - Mock at the **external boundary only**. Mock `@ixo/matrix`, `@ixo/common` (selective via `importOriginal`), `@ixo/sqlite-saver`, `@ixo/oracles-chain-client` via `vi.mock(...)`.
 - **Never** mock internal helpers — instantiate them.
 - Inline factories per test file: `makeCache()`, `makeConfig()`, `makeReq()`.
@@ -57,10 +62,12 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
 - `beforeEach(() => vi.resetAllMocks())` to isolate.
 
 ### Naming
+
 - `describe('ClassName')` → nested `describe('methodName + scenario group')` → `it('imperative outcome description')`.
 - Examples: `it('clears the heartbeat interval in finally even when streamEvents throws', …)`.
 
 ### Memory rules (BINDING — re-read before each task)
+
 1. **No `as any` / type assertions ever** — find the real type mismatch.
    - For test doubles where structural typing matters (e.g., `FakeResponse`),
      `implements Pick<Response, 'set' | 'flushHeaders' | …>` instead of casting.
@@ -87,6 +94,7 @@ Sequenced into 3 waves so each is independently shippable and reviewable.
 ### messages module — `packages/oracle-runtime/src/modules/messages/`
 
 #### `messages.service.ts` (orchestrator)
+
 Owns AbortController registry, fire-and-forget Matrix replay, orchestrates
 RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
 
@@ -100,10 +108,12 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - `onModuleInit` registers Matrix bridge deliverHandler that re-enters `sendMessage` with `clientType: 'matrix'`, `msgFromMatrixRoom: true`.
 
 #### `messages.controller.ts` (thin transport — SKIP unit tests, covered by integration)
+
 - Stream branch does not return body; non-stream branch returns JSON.
 - Auth context extracted from `req.authData.{did, ucanDelegation}`.
 
 #### `agent-builder.ts` (lazy agent factory)
+
 - **Public:** `build(args, abortController?)` → `BuiltAgent`.
 - **Deps:** `OracleRuntimeBundleHolder`, `UserContextFetcher`, `Cache`.
 - **Hotspots:**
@@ -115,6 +125,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Payload `metadata.editorRoomId` wins over `priorState.editorRoomId`.
 
 #### `batch-invoker.ts` (single invoke, non-stream)
+
 - **Public:** `invoke(input)` → `BatchInvokeResult { message, sessionId, transcript? }`.
 - **Deps:** `AgentBuilder` only.
 - **Hotspots:**
@@ -123,6 +134,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - `payload.returnAllMessages = true` returns transcript.
 
 #### `sse-stream-runner.ts` (SSE orchestrator — HIGHEST RISK)
+
 - **Public:** `run({ payload, prepared, inputMessages, res, abortControllers, onComplete })`.
 - **Deps:** `AgentBuilder`.
 - **Hotspots (every `res.write` is a landmine):**
@@ -139,6 +151,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - `onComplete(assistantText)` called only on clean finish (NOT on abort/error).
 
 #### `sse.utils.ts` (pure helpers)
+
 - **Public:** `formatSSE`, `setSSEHeaders`, `startSSEHeartbeat`, `sendSSEDone`, `sendSSEError`, `runWithSSEContext`, `emitSSEEvent`, `getSSEContext`, `getSSEabortController`, `isSSEAborted`.
 - **Hotspots:**
   - `formatSSE`: emits `event: <name>\ndata: <json>\n\n`.
@@ -148,6 +161,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - `runWithSSEContext` binds res + abortController via AsyncLocalStorage. `emitSSEEvent` no-ops when called outside context.
 
 #### `request-preparer.ts` (pre-build validation + resolution)
+
 - **Public:** `prepare(payload)` → `PreparedRequest { sessionId, langchainThreadId, roomId, targetSession, runnableConfig, … }`, `validateSessionId(sessionId, did)`.
 - **Deps:** `SessionManagerService`, `UserMatrixSqliteSyncService`, `HomeServerCache`, `ConfigService`.
 - **Hotspots:**
@@ -160,6 +174,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Fresh `requestId` generated when `stream=false`.
 
 #### `file-processing.service.ts` (multi-stage attachment handler — SECURITY + COST surface)
+
 - **Public:** `processAttachments(attachments, roomId, userDid)` → `{ texts, metadata, totalUsage }`, `downloadAndProcessFile(source, hints)`, `processFileFromUrl(url, hints)`, `processFileFromEventId(roomId, eventId, hints)`.
 - **Deps:** `ConfigService`, `UcanService`, `FileProcessingCreditSink` (optional).
 - **Provider:** module-level `setFileProcessingProvider(fn)` — set in `beforeAll` of unit tests, reset in `afterAll`. Production wires this in `create-oracle-app.ts:307`.
@@ -176,6 +191,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Download abort on timeout, on size overflow mid-stream, on `content-length` over limit.
 
 #### `post-message-syncer.ts` (fire-and-forget, ref-counted)
+
 - **Public:** `run(input)` returns `void`, schedules microtask.
 - **Deps:** `UserMatrixSqliteSyncService`, `SessionManagerService`, `ConfigService`.
 - **Hotspots:**
@@ -186,6 +202,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Race window between checkpoint write and this read (extremely unlikely with same-session sequential turns).
 
 #### `matrix-listener-bridge.ts` (Matrix → chat bridge)
+
 - **Public:** `setDeliverHandler(callback)`, `onModuleInit`, `onModuleDestroy`.
 - **Deps:** `SessionManagerService`, `ConfigService`, `MatrixManager` (from `sessions.matrixManger`).
 - **Hotspots:**
@@ -198,6 +215,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - `onModuleDestroy` clears all pending timers + unsubscribes.
 
 #### `user-context-fetcher.ts` (cached Memory Engine fetch, best-effort)
+
 - **Public:** `fetch(params)` → `UserContextRecord | undefined`.
 - **Deps:** `Cache`, `MemoryEngineService` (optional), `UcanService`, `ConfigService`.
 - **Hotspots:**
@@ -209,6 +227,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - No timeout (can hang 30s+).
 
 #### `homeserver-cache.ts` (TTL cache)
+
 - **Public:** `get(userDid)` → `string`.
 - **Deps:** none (calls `getMatrixHomeServerCroppedForDid` from `@ixo/oracles-chain-client`).
 - **Hotspots:**
@@ -216,12 +235,14 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Concurrent `get()` on same DID can double-fetch (no locking). DOCUMENT as known behavior.
 
 #### `oracle-runtime-bundle.ts` (registry holder, single-shot)
+
 - **Public:** `populate(bundle)` (one-time), `get()` → `OracleRuntimeBundle`, `isReady()`.
 - **Hotspots:** `get()` throws if `populate` never called; `populate` guards double-call.
 
 ### sessions module — `packages/oracle-runtime/src/modules/sessions/`
 
 #### `sessions.service.ts`
+
 - **Public:** `createSession(data)`, `listSessions(data)`, `deleteSession(data)`, `processPreviousSessionHistory(data)` (private-ish).
 - **Deps:** `SessionManagerService`, `ConfigService`, `SessionHistoryProcessor`, `UserMatrixSqliteSyncService`, `UcanService` (optional).
 - **Hotspots:**
@@ -234,6 +255,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
 #### `sessions.controller.ts` (thin transport — SKIP unit tests)
 
 #### `session-history-processor.service.ts`
+
 - **Public:** `processSessionHistory(params)` → void.
 - **Deps:** `MessagesService`, `MemoryEngineService`, `SessionManagerService`, `ConfigService`, `Cache` (CACHE_MANAGER), `UcanService` (optional).
 - **Hotspots:**
@@ -247,6 +269,7 @@ RequestPreparer → (SseStreamRunner | BatchInvoker) → PostMessageSyncer.
   - Slice boundary: `lastProcessedCount` to end — test with boundary values 0, mid, equal-to-length.
 
 ### Related — `UserMatrixSqliteSyncService`
+
 Path: `packages/oracle-runtime/src/matrix/checkpointer/user-matrix-sqlite-sync-service.service.ts`
 
 - `markUserActive(did)`: `count = (map.get(did) ?? 0) + 1; map.set(did, count)`.
@@ -278,6 +301,7 @@ Existing reference tests: `test/integration/runtime-boot.int.test.ts`,
 (Only create if used in 3+ test files — confirmed below.)
 
 ### `fake-response.ts`
+
 A structurally-typed Express `Response` double. Used by: sse-stream-runner, messages.service, sse.utils tests.
 
 Shape (TypeScript, no `as any`):
@@ -288,8 +312,16 @@ import type { Response } from 'express';
 
 type ResponseSurface = Pick<
   Response,
-  'set' | 'flushHeaders' | 'write' | 'end' | 'on' | 'off' |
-  'headersSent' | 'writableEnded' | 'status' | 'json'
+  | 'set'
+  | 'flushHeaders'
+  | 'write'
+  | 'end'
+  | 'on'
+  | 'off'
+  | 'headersSent'
+  | 'writableEnded'
+  | 'status'
+  | 'json'
 >;
 
 export class FakeResponse extends EventEmitter implements ResponseSurface {
@@ -303,21 +335,34 @@ export class FakeResponse extends EventEmitter implements ResponseSurface {
     this.setHeaders = { ...this.setHeaders, ...field };
     return this;
   }
-  flushHeaders(): void { this.headersSent = true; }
+  flushHeaders(): void {
+    this.headersSent = true;
+  }
   write(chunk: string | Buffer): boolean {
     if (this.writableEnded) return false;
     this.writes.push(String(chunk));
     return true;
   }
-  end(): this { this.writableEnded = true; return this; }
-  status(code: number): this { this.statusCode = code; return this; }
-  json(body: unknown): this { this.jsonBody = body; this.writableEnded = true; return this; }
+  end(): this {
+    this.writableEnded = true;
+    return this;
+  }
+  status(code: number): this {
+    this.statusCode = code;
+    return this;
+  }
+  json(body: unknown): this {
+    this.jsonBody = body;
+    this.writableEnded = true;
+    return this;
+  }
 }
 ```
 
 Note: `EventEmitter.on/off` already match `Response.on/off`'s signatures structurally for our usage. The fixture must NOT use `as any`; if a structural mismatch shows up, narrow the `ResponseSurface` type instead.
 
 ### `fake-agent.ts`
+
 Drives `streamEvents` from a fixed event list. Used by: sse-stream-runner, messages.service, batch-invoker (via stateInput shape).
 
 ```ts
@@ -340,6 +385,7 @@ export function makeFakeAgent(events: StreamEvent[]) {
 For abort-mid-stream tests, expose a generator that yields with `await new Promise(r => setTimeout(r, 0))` between events so the test can call `abortController.abort()` and observe the loop break at the next iteration.
 
 ### `deps.ts`
+
 Dependency factories for `MessagesService`, `SseStreamRunner`, `PostMessageSyncer`. Used by: 3+ files.
 
 ```ts
@@ -378,7 +424,11 @@ export function makePrepared(overrides = {}) {
     sessionId: 'sess-1',
     langchainThreadId: 'sess-1',
     roomId: '!room:home',
-    targetSession: { sessionId: 'sess-1', lastProcessedCount: 0, roomId: '!room:home' },
+    targetSession: {
+      sessionId: 'sess-1',
+      lastProcessedCount: 0,
+      roomId: '!room:home',
+    },
     runnableConfig: { configurable: { thread_id: 'sess-1' } },
     requestId: 'req-1',
     homeServer: 'home.server',
@@ -435,6 +485,7 @@ describe('SseStreamRunner')
 ```
 
 **Mocks:**
+
 - `agentBuilder`: `{ build: vi.fn().mockResolvedValue({ agent: makeFakeAgent(events), stateInput: {}, langGraphConfig: { version: 'v2' } }) }`.
 - Real `sse.utils.ts` — instantiate, don't mock.
 - `FakeResponse` from fixtures.
@@ -476,6 +527,7 @@ describe('MessagesService')
 ```
 
 **Mocks:**
+
 - All deps via `vi.fn()` factories (see `deps.ts`).
 - `vi.mock('@ixo/sqlite-saver', () => ({ SqliteSaver: { fromDatabase: vi.fn(() => ({ getTuple: vi.fn() })) } }))`.
 - `vi.mock('@ixo/common', async (importOriginal) => ({ ...await importOriginal<typeof import('@ixo/common')>(), transformGraphStateMessageToListMessageResponse: vi.fn((msgs) => msgs) }))`.
@@ -509,6 +561,7 @@ describe('SessionsService')
 ```
 
 **Mocks:**
+
 - `sessionManager`: `makeSessionManagerStub()`.
 - `configService`: `makeConfig({ ORACLE_ENTITY_DID, ORACLE_NAME, ORACLE_DID })`.
 - `syncService`: `makeCheckpointSync()`.
@@ -553,6 +606,7 @@ describe('FileProcessingService')
 ```
 
 **Mocks:**
+
 - `vi.mock('@ixo/matrix', () => ({ MatrixManager: { getInstance: vi.fn(...) } }))` — mock `downloadContent`, `getEvent`, `crypto.decryptMedia`.
 - `vi.mock('@ixo/common', () => ({ loadFileFromBuffer: vi.fn() }))`.
 - `vi.spyOn(globalThis, 'fetch')` for AI/sandbox/URL downloads.
@@ -561,6 +615,7 @@ describe('FileProcessingService')
 - `beforeAll(() => setFileProcessingProvider(() => ({ apiKey: 'test', baseURL: 'https://x', headers: {}, model: 'test' })))`; `afterAll` resets.
 
 #### Shared fixtures (this wave)
+
 Create `src/modules/messages/__test-fixtures__/{fake-response.ts, fake-agent.ts, deps.ts}` as specified in §4.
 
 #### `test/integration/sse-happy-path.int.test.ts`
@@ -809,6 +864,7 @@ This spec is for a fresh session that spawns subagents to execute the waves.
 Rules for the orchestrator and subagents:
 
 ### Wave coordination (orchestrator)
+
 - **One wave at a time.** Spawn subagents for the wave's files in parallel, then
   STOP after the wave completes for user review. Do NOT auto-chain into the
   next wave.
@@ -822,7 +878,9 @@ Rules for the orchestrator and subagents:
   failures before asking for the next wave.
 
 ### Subagent task template
+
 Each subagent gets:
+
 - Path to this spec
 - The exact section to read (e.g., "§5 Wave 1, sse-stream-runner.test.ts")
 - The exact source file to test
@@ -835,6 +893,7 @@ Each subagent gets:
   case maps to a behavior that would actually fail under the bug it describes.
 
 ### Subagent self-check (run before reporting done)
+
 - Grep for `as any` / `as unknown as` / `// @ts-` — must be zero in test files.
 - Grep for `it.skip`, `describe.skip`, `xit`, `xdescribe` — must be zero.
 - Grep for `expect(.*).toBeDefined()` standalone — must justify or replace with
@@ -847,6 +906,7 @@ Each subagent gets:
 ## 7. Verification
 
 ### Per-wave
+
 ```bash
 # Unit
 pnpm --filter @ixo/oracle-runtime test
@@ -860,39 +920,42 @@ pnpm lint
 ```
 
 ### Coverage targets (informational, not enforced)
+
 - Wave 1: ~70% line / ~80% dangerous-branch coverage on messages + sessions modules.
 - Waves 1+2: ~85% line / ~95% dangerous-branch.
 - All three waves: ~95% line on everything except thin transports.
 
 ### Smoke test after each wave
+
 - Spin up the dev server (`pnpm dev`) and send one chat message via portal/CLI.
   If the message round-trips and SSE renders, the test suite hasn't regressed
   the real path.
 
 ## 8. Wave Sequencing (ordered)
 
-| Wave | Files | Tests added | Ship gate |
-|------|-------|-------------|-----------|
-| 1 | sse-stream-runner, messages.service, sessions.service, file-processing.service + 3 shared fixtures + sse-happy-path.int | ~65 | User reviews, CI green |
-| 2 | sse.utils, request-preparer, post-message-syncer, agent-builder, batch-invoker, session-history-processor + sse-abort.int | ~55 | User reviews, CI green |
-| 3 | matrix-listener-bridge, user-context-fetcher, homeserver-cache, oracle-runtime-bundle + session-lifecycle.int | ~30 | User reviews, CI green |
+| Wave | Files                                                                                                                     | Tests added | Ship gate              |
+| ---- | ------------------------------------------------------------------------------------------------------------------------- | ----------- | ---------------------- |
+| 1    | sse-stream-runner, messages.service, sessions.service, file-processing.service + 3 shared fixtures + sse-happy-path.int   | ~65         | User reviews, CI green |
+| 2    | sse.utils, request-preparer, post-message-syncer, agent-builder, batch-invoker, session-history-processor + sse-abort.int | ~55         | User reviews, CI green |
+| 3    | matrix-listener-bridge, user-context-fetcher, homeserver-cache, oracle-runtime-bundle + session-lifecycle.int             | ~30         | User reviews, CI green |
 
 Total: ~150 tests across 13 unit files + 3 integration files + 3 shared fixtures.
 
 ## 9. Open Questions / Decisions Made
 
-| # | Question | Decision |
-|---|----------|----------|
-| 1 | Scope to ship | Spec covers all 3 waves; subagents execute one wave at a time per §6 |
-| 2 | Which integration tests | SSE happy-path + SSE abort + Session lifecycle (no Matrix bridge integration) |
-| 3 | FileProcessing provider | `setFileProcessingProvider` in `beforeAll` (matches production wiring at `create-oracle-app.ts:307`) |
-| 4 | Ref-count introspection in session-lifecycle integration | Skip introspection; rely on unit-test `vi.fn().mock.calls` for ref-count balance. Revisit later if needed (would require `public getActiveCount(did)` getter). |
-| 5 | `ChatClient` vs supertest | Use existing `ChatClient.stream()` / `.send()` / `.abort()` — already typed and proven by existing integration tests. |
-| 6 | Matrix listener integration | Skipped — would need live Synapse + 2nd test user. Unit coverage in Wave 3. |
+| #   | Question                                                 | Decision                                                                                                                                                       |
+| --- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Scope to ship                                            | Spec covers all 3 waves; subagents execute one wave at a time per §6                                                                                           |
+| 2   | Which integration tests                                  | SSE happy-path + SSE abort + Session lifecycle (no Matrix bridge integration)                                                                                  |
+| 3   | FileProcessing provider                                  | `setFileProcessingProvider` in `beforeAll` (matches production wiring at `create-oracle-app.ts:307`)                                                           |
+| 4   | Ref-count introspection in session-lifecycle integration | Skip introspection; rely on unit-test `vi.fn().mock.calls` for ref-count balance. Revisit later if needed (would require `public getActiveCount(did)` getter). |
+| 5   | `ChatClient` vs supertest                                | Use existing `ChatClient.stream()` / `.send()` / `.abort()` — already typed and proven by existing integration tests.                                          |
+| 6   | Matrix listener integration                              | Skipped — would need live Synapse + 2nd test user. Unit coverage in Wave 3.                                                                                    |
 
 ## 10. Critical Files
 
 ### Source files under test
+
 - `packages/oracle-runtime/src/modules/messages/sse-stream-runner.ts`
 - `packages/oracle-runtime/src/modules/messages/messages.service.ts`
 - `packages/oracle-runtime/src/modules/messages/file-processing.service.ts`
@@ -909,6 +972,7 @@ Total: ~150 tests across 13 unit files + 3 integration files + 3 shared fixtures
 - `packages/oracle-runtime/src/modules/sessions/session-history-processor.service.ts`
 
 ### Reference / templates
+
 - House-style unit test templates:
   - `packages/oracle-runtime/src/modules/auth/auth-header.middleware.test.ts`
   - `packages/oracle-runtime/src/modules/secrets/secrets.service.test.ts`
@@ -930,6 +994,7 @@ Total: ~150 tests across 13 unit files + 3 integration files + 3 shared fixtures
   - `packages/oracle-runtime/src/testing/integration/sse-parser.ts`
 
 ### Files to create
+
 - `packages/oracle-runtime/src/modules/messages/__test-fixtures__/fake-response.ts`
 - `packages/oracle-runtime/src/modules/messages/__test-fixtures__/fake-agent.ts`
 - `packages/oracle-runtime/src/modules/messages/__test-fixtures__/deps.ts`

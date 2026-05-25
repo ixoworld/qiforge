@@ -48,5 +48,5 @@ Move the remaining Tier-0 pieces: subscription middleware, throttler, the Matrix
 ## Notes
 
 - The checkpointer is the trickiest piece in the codebase. Treat the move as `git mv` + import-path fixes, nothing more. Do NOT refactor.
-- Tier-0 env vars per §17.1: NODE_ENV, PORT, ORACLE_NAME, CORS_ORIGIN, NETWORK, MATRIX_*, SQLITE_DATABASE_PATH, MATRIX_STORE_PATH, BLOCKSYNC_GRAPHQL_URL, MATRIX_ACCOUNT_ROOM_ID, MATRIX_VALUE_PIN, ORACLE_ENTITY_DID, ORACLE_SECRETS, SECP_MNEMONIC, RPC_URL, LLM_PROVIDER, OPENAI_API_KEY, OPEN_ROUTER_API_KEY, NEBIUS_API_KEY, LIVE_AGENT_AUTH_API_KEY.
+- Tier-0 env vars per §17.1: NODE*ENV, PORT, ORACLE_NAME, CORS_ORIGIN, NETWORK, MATRIX*\*, SQLITE_DATABASE_PATH, MATRIX_STORE_PATH, BLOCKSYNC_GRAPHQL_URL, MATRIX_ACCOUNT_ROOM_ID, MATRIX_VALUE_PIN, ORACLE_ENTITY_DID, ORACLE_SECRETS, SECP_MNEMONIC, RPC_URL, LLM_PROVIDER, OPENAI_API_KEY, OPEN_ROUTER_API_KEY, NEBIUS_API_KEY, LIVE_AGENT_AUTH_API_KEY.
 - Plugin-owned vars (don't put in Tier-0): per §17.2 — Composio, Langfuse, Slack, Memory, Firecrawl, Domain Indexer, Sandbox, Skills, Credits, Tasks (`REDIS_URL`).

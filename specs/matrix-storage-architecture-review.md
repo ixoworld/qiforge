@@ -49,9 +49,9 @@ This document is the technical review. A separate Linear ticket should be create
 
 QiForge uses Matrix for two distinct purposes that have very different scaling characteristics:
 
-| Use | What's stored | Scaling model |
-|---|---|---|
-| **Message bus** | Chat messages, agent action logs, Matrix events for per-user rooms | Append-only, scales with message volume |
+| Use                 | What's stored                                                                                                                     | Scaling model                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Message bus**     | Chat messages, agent action logs, Matrix events for per-user rooms                                                                | Append-only, scales with message volume                                   |
 | **Storage backend** | Per-user SQLite blobs (gzipped, optionally E2EE) as media events; secrets as room state events; checkpoint pointers as room state | Last-write-wins (no versioning), scales with user count × checkpoint size |
 
 The transport role is what Matrix is designed for and is fine. The storage role is where the scaling pressure lives.
@@ -293,6 +293,7 @@ markUserInactive(userDid: string): void {
 ```
 
 Used by:
+
 - `calls.service.ts:115, 143` (wraps `syncCall` and `listCalls`)
 - `sessions.service.ts:46, 62, 70, 77` (wraps session creation and history processing)
 - `tasks/processors/*.ts` (wraps job handlers)
@@ -391,18 +392,18 @@ Ranked by severity. Each entry includes file:line, scaling factor, and remediati
 
 ### Severity summary
 
-| # | Bottleneck | Severity | Effort |
-|---|---|---|---|
-| B1 | Sequential upload loop | CRITICAL | 1 hour |
-| B2 | Initial Matrix /sync blocks | CRITICAL | 1 day (health endpoint); 1 week (sync token persistence) |
-| B3 | getRoomState fetches full state | HIGH | 2 hours |
-| B4 | No max-concurrent guard | HIGH | 2 hours |
-| B5 | Boolean cron lock | HIGH | 1 hour |
-| B6 | Missing markUserActive in messages | HIGH | 30 min |
-| B7 | Cold-start download penalty | MEDIUM | 1 day |
-| B8 | OLM per-room lazy init | MEDIUM | 1 day |
-| B9 | Checksum on every cron | MEDIUM | 1 hour |
-| B10 | Orphan .tmp files | LOW | 1 hour |
+| #   | Bottleneck                         | Severity | Effort                                                   |
+| --- | ---------------------------------- | -------- | -------------------------------------------------------- |
+| B1  | Sequential upload loop             | CRITICAL | 1 hour                                                   |
+| B2  | Initial Matrix /sync blocks        | CRITICAL | 1 day (health endpoint); 1 week (sync token persistence) |
+| B3  | getRoomState fetches full state    | HIGH     | 2 hours                                                  |
+| B4  | No max-concurrent guard            | HIGH     | 2 hours                                                  |
+| B5  | Boolean cron lock                  | HIGH     | 1 hour                                                   |
+| B6  | Missing markUserActive in messages | HIGH     | 30 min                                                   |
+| B7  | Cold-start download penalty        | MEDIUM   | 1 day                                                    |
+| B8  | OLM per-room lazy init             | MEDIUM   | 1 day                                                    |
+| B9  | Checksum on every cron             | MEDIUM   | 1 hour                                                   |
+| B10 | Orphan .tmp files                  | LOW      | 1 hour                                                   |
 
 ---
 
@@ -712,16 +713,16 @@ async orphanFileCleanupTask(): Promise<void> {
 
 These nine patches form a coherent batch:
 
-| Order | Patch | Reason for ordering |
-|---|---|---|
-| 1 | 7.6 (markUserActive in MessagesService) | Smallest blast radius, fixes a real correctness bug |
-| 2 | 7.3 (timestamped cron lock) | Foundational; needed before parallelization to recover from any future stuck cron |
-| 3 | 7.5 (mtime precheck) | CPU savings, reduces likelihood of cron lasting >5min |
-| 4 | 7.1 (parallelize uploads) | Biggest perf win; lock improvements from #2 give safety net |
-| 5 | 7.4 (secret index cache) | Per-request latency improvement, independent |
-| 6 | 7.2 (max-concurrent guard) | Safety against unbounded growth |
-| 7 | 7.7 (/health/matrix) | LB integration; deploy alongside infra change |
-| 8 | 7.8 (orphan cleanup) | Hygiene |
+| Order | Patch                                   | Reason for ordering                                                               |
+| ----- | --------------------------------------- | --------------------------------------------------------------------------------- |
+| 1     | 7.6 (markUserActive in MessagesService) | Smallest blast radius, fixes a real correctness bug                               |
+| 2     | 7.3 (timestamped cron lock)             | Foundational; needed before parallelization to recover from any future stuck cron |
+| 3     | 7.5 (mtime precheck)                    | CPU savings, reduces likelihood of cron lasting >5min                             |
+| 4     | 7.1 (parallelize uploads)               | Biggest perf win; lock improvements from #2 give safety net                       |
+| 5     | 7.4 (secret index cache)                | Per-request latency improvement, independent                                      |
+| 6     | 7.2 (max-concurrent guard)              | Safety against unbounded growth                                                   |
+| 7     | 7.7 (/health/matrix)                    | LB integration; deploy alongside infra change                                     |
+| 8     | 7.8 (orphan cleanup)                    | Hygiene                                                                           |
 
 Total estimated effort: **3-5 engineer-days** for all eight patches plus tests. Suggested as a single PR or stacked series, deployed behind the existing release process.
 
@@ -736,7 +737,7 @@ The quick wins buy headroom but don't change the fundamental scaling model. For 
 **What changes:**
 
 - Per-user SQLite checkpoint blobs move from Matrix media events to S3/GCS object storage.
-- Checkpoint *metadata* (object key, size, last-modified, ETag) lives in a Matrix room state event (`ixo.checkpoint.metadata`) so the existing event-listener pattern still works.
+- Checkpoint _metadata_ (object key, size, last-modified, ETag) lives in a Matrix room state event (`ixo.checkpoint.metadata`) so the existing event-listener pattern still works.
 - Matrix continues to store: chat messages (`m.room.message`), action logs (`ixo.action.log`), secrets (`ixo.room.secret.index`).
 - OLM crypto store stays in Matrix (or moves to a dedicated KMS, optional separate work).
 
@@ -749,14 +750,14 @@ The quick wins buy headroom but don't change the fundamental scaling model. For 
 
 **Why this is the right choice:**
 
-| Property | Matrix today | S3 |
-|---|---|---|
-| PUT cost | ~1-5s (sync round-trip + E2EE encrypt + media upload) | ~50-200ms |
-| GET cost | ~1-5s (sync + download + decrypt + gunzip) | ~100-500ms (with CDN, ~50ms) |
-| Concurrency | Sequential cron, ~5 parallel safe | Effectively unlimited |
-| Versioning | Last-write-wins, no rollback | Built-in, free |
-| Cost / GB / month | Matrix homeserver disk + bandwidth | $0.023 (S3 standard) |
-| Operational visibility | Matrix admin tools (limited) | CloudWatch / GCP Monitoring (rich) |
+| Property               | Matrix today                                          | S3                                 |
+| ---------------------- | ----------------------------------------------------- | ---------------------------------- |
+| PUT cost               | ~1-5s (sync round-trip + E2EE encrypt + media upload) | ~50-200ms                          |
+| GET cost               | ~1-5s (sync + download + decrypt + gunzip)            | ~100-500ms (with CDN, ~50ms)       |
+| Concurrency            | Sequential cron, ~5 parallel safe                     | Effectively unlimited              |
+| Versioning             | Last-write-wins, no rollback                          | Built-in, free                     |
+| Cost / GB / month      | Matrix homeserver disk + bandwidth                    | $0.023 (S3 standard)               |
+| Operational visibility | Matrix admin tools (limited)                          | CloudWatch / GCP Monitoring (rich) |
 
 **Migration path (zero-downtime):**
 
@@ -916,24 +917,24 @@ If we ever ship Option B (sharding), each child needs its own OLM store, which i
 
 ## 12. Appendix — Code References
 
-| Topic | File:line |
-|---|---|
-| Bootstrap & background Matrix init | `apps/app/src/main.ts:121, 185` |
-| MatrixManager init | `packages/matrix/src/utils/create-simple-matrix-client.ts:122-147` |
-| `uploadCheckpointToMatrixStorageTask` cron | `apps/app/src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service.ts:914-950` |
-| `localStorageCacheCleanUpTask` cron | same file:476-563 |
-| `markUserActive`/`markUserInactive` | same file:129-145 |
-| `getUserDatabase` lazy load | same file:241-293 |
-| `uploadCheckpointToMatrixStorage` per-user upload | same file:826-900 |
-| `syncLocalStorageFromMatrixStorage` per-user download | same file:647-780 |
-| `SecretsService.getSecretIndex` (full state fetch) | `apps/app/src/secrets/secrets.service.ts:48-78` |
-| `SecretsService.loadSecretValues` (24h cache) | same file:97-160 |
-| Subscription middleware (402 logic) | `apps/app/src/middleware/subscription.middleware.ts:52-65` |
-| Global throttler (10 req/60s) | `apps/app/src/app.module.ts:53-57` |
-| Graceful SIGTERM checkpoint upload | `apps/app/src/main.ts:206-295` |
-| `MessagesService.sendMessage` (no markUserActive guard) | `apps/app/src/messages/messages.service.ts` |
-| Calls service (uses markUserActive correctly) | `apps/app/src/calls/calls.service.ts:115, 143` |
-| Sessions service (uses markUserActive correctly) | `apps/app/src/sessions/sessions.service.ts:46, 62, 70, 77` |
+| Topic                                                   | File:line                                                                                         |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Bootstrap & background Matrix init                      | `apps/app/src/main.ts:121, 185`                                                                   |
+| MatrixManager init                                      | `packages/matrix/src/utils/create-simple-matrix-client.ts:122-147`                                |
+| `uploadCheckpointToMatrixStorageTask` cron              | `apps/app/src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service.ts:914-950` |
+| `localStorageCacheCleanUpTask` cron                     | same file:476-563                                                                                 |
+| `markUserActive`/`markUserInactive`                     | same file:129-145                                                                                 |
+| `getUserDatabase` lazy load                             | same file:241-293                                                                                 |
+| `uploadCheckpointToMatrixStorage` per-user upload       | same file:826-900                                                                                 |
+| `syncLocalStorageFromMatrixStorage` per-user download   | same file:647-780                                                                                 |
+| `SecretsService.getSecretIndex` (full state fetch)      | `apps/app/src/secrets/secrets.service.ts:48-78`                                                   |
+| `SecretsService.loadSecretValues` (24h cache)           | same file:97-160                                                                                  |
+| Subscription middleware (402 logic)                     | `apps/app/src/middleware/subscription.middleware.ts:52-65`                                        |
+| Global throttler (10 req/60s)                           | `apps/app/src/app.module.ts:53-57`                                                                |
+| Graceful SIGTERM checkpoint upload                      | `apps/app/src/main.ts:206-295`                                                                    |
+| `MessagesService.sendMessage` (no markUserActive guard) | `apps/app/src/messages/messages.service.ts`                                                       |
+| Calls service (uses markUserActive correctly)           | `apps/app/src/calls/calls.service.ts:115, 143`                                                    |
+| Sessions service (uses markUserActive correctly)        | `apps/app/src/sessions/sessions.service.ts:46, 62, 70, 77`                                        |
 
 ---
 

@@ -56,9 +56,7 @@ export class SubAgentRegistry {
    * Run every plugin's `getRequestSubAgents(rtCtx)`. Does NOT touch the boot
    * cache.
    */
-  async collectRequest(
-    rtCtx: RuntimeContext,
-  ): Promise<RegisteredSubAgent[]> {
+  async collectRequest(rtCtx: RuntimeContext): Promise<RegisteredSubAgent[]> {
     const out: RegisteredSubAgent[] = [];
     for (const plugin of this.plugins) {
       if (!plugin.getRequestSubAgents) continue;

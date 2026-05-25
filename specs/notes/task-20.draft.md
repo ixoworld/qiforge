@@ -20,7 +20,7 @@
 ## Sync constraints
 
 - `PluginSubAgent.tools` is sync — fine, because we define static schemas
-  and only the *handlers* are async.
+  and only the _handlers_ are async.
 - The MCP client lifetime ties to the plugin instance, not per-request.
   Acceptable for v1; matches `apps/app` where `getFirecrawlMcpTools()` is
   invoked per agent build.
@@ -28,6 +28,7 @@
 ## Dropped per-sub-agent LLM tuning
 
 The lifted agent sets:
+
 - `__includeRawResponse: true`
 - `modelKwargs: { include_reasoning: true }`
 - `reasoning: { effort: 'low' }`
@@ -44,6 +45,7 @@ OpenID or homeServer references to strip. UCAN-only is preserved.
 ## Tests
 
 4-5 focused tests:
+
 1. plugin shape (name/version/manifest/visibility/stability)
 2. `configSchema` requires a valid URL — empty or bad URL must fail
 3. sub-agent registers under `Firecrawl Agent`, wraps to `call_firecrawl_agent`, exposes the two tool names

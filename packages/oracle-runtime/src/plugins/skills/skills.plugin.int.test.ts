@@ -169,34 +169,28 @@ describe('skills plugin — integration', () => {
 
   // ─── Tier B ───────────────────────────────────────────────────────────
 
-  test(
-    'B1 — "I need to create a frontend page" routes to a skills tool',
-    async () => {
-      const results = await chatClient.send(
-        sharedSessionId,
-        'I need to create a nice frontend HTML page for my grocery shop check the frontend skill and make it look nice. Can you help?',
-      );
+  test('B1 — "I need to create a frontend page" routes to a skills tool', async () => {
+    const results = await chatClient.send(
+      sharedSessionId,
+      'I need to create a nice frontend HTML page for my grocery shop check the frontend skill and make it look nice. Can you help?',
+    );
 
-      const tc = results.body.messages.reduce(
-        (acc, m) => (m.toolCalls ? acc.concat(m.toolCalls) : acc),
-        [] as Array<
-          NonNullable<
-            (typeof results.body.messages)[number]['toolCalls']
-          >[number]
-        >,
-      );
+    const tc = results.body.messages.reduce(
+      (acc, m) => (m.toolCalls ? acc.concat(m.toolCalls) : acc),
+      [] as Array<
+        NonNullable<(typeof results.body.messages)[number]['toolCalls']>[number]
+      >,
+    );
 
-      const skillsCalls = tc?.filter((t) =>
-        ['search_skills', 'list_skills'].includes(t.name),
-      );
+    const skillsCalls = tc?.filter((t) =>
+      ['search_skills', 'list_skills'].includes(t.name),
+    );
 
-      expect(
-        skillsCalls.length,
-        `expected list_skills or search_skills; saw toolCalls: ${tc
-          .map((t) => t.name)
-          .join(', ')}`,
-      ).toBeGreaterThan(0);
-    },
-    180_000,
-  );
+    expect(
+      skillsCalls.length,
+      `expected list_skills or search_skills; saw toolCalls: ${tc
+        .map((t) => t.name)
+        .join(', ')}`,
+    ).toBeGreaterThan(0);
+  }, 180_000);
 });

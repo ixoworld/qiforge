@@ -63,9 +63,7 @@ export function isBotMentioned(
   botMatrixUserId: string,
 ): boolean {
   if (!content) return false;
-  const mentions = content['m.mentions'] as
-    | { user_ids?: unknown }
-    | undefined;
+  const mentions = content['m.mentions'] as { user_ids?: unknown } | undefined;
   const userIds = mentions?.user_ids;
   if (!Array.isArray(userIds)) return false;
   return userIds.some((id) => typeof id === 'string' && id === botMatrixUserId);

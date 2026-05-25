@@ -128,7 +128,9 @@ describe('createDefaultAuthBuilder', () => {
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
 
@@ -159,7 +161,9 @@ describe('createDefaultAuthBuilder', () => {
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
 

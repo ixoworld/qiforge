@@ -22,6 +22,7 @@ The simplest plugin to convert. Pure observability middleware — no agent-visib
 ### Source code to migrate
 
 Search for langfuse usage in today's `apps/app/src/`:
+
 - Likely in `apps/app/src/graph/agents/main-agent.ts` (initialization snippets) or directly in middleware setup.
 - Any `langfuse.*.ts` files: `git mv` them under the new plugin dir.
 
@@ -29,7 +30,7 @@ Search for langfuse usage in today's `apps/app/src/`:
 
 - [ ] Plugin class compiles and exports.
 - [ ] Manifest snapshot test passes.
-- [ ] When LANGFUSE_* env vars are set, plugin loads via `features.langfuse: 'auto'`.
+- [ ] When LANGFUSE\_\* env vars are set, plugin loads via `features.langfuse: 'auto'`.
 - [ ] When env vars unset, plugin is excluded (cascade off).
 - [ ] Middleware integrates into the graph (verified by `rt.assertContractsValid()`).
 - [ ] No agent-visible tools added (`rt.findCapability('langfuse')` returns empty per §16.3).

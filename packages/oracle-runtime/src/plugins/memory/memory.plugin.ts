@@ -104,9 +104,7 @@ export class MemoryPlugin extends OraclePlugin {
     return Boolean(env.MEMORY_MCP_URL);
   }
 
-  override async getRequestTools(
-    rtCtx: RuntimeContext,
-  ): Promise<PluginTool[]> {
+  override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const memoryUrl = resolveMemoryUrl(rtCtx.config);
     const factory = this.mcpFactory(memoryUrl);
     return fetchMemoryTools(rtCtx, factory, this.selectedTools);
@@ -114,7 +112,10 @@ export class MemoryPlugin extends OraclePlugin {
 
   override getSharedState(): Record<
     string,
-    (state: { userContext?: UserContextData }, runCtx: RuntimeContext) => unknown
+    (
+      state: { userContext?: UserContextData },
+      runCtx: RuntimeContext,
+    ) => unknown
   > {
     return {
       userProfile: (state) => state.userContext,

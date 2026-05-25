@@ -15,7 +15,7 @@ Convert the Slack transport into a plugin. Auto-detected via `SLACK_BOT_OAUTH_TO
 
 ### Created
 
-- `packages/oracle-runtime/src/plugins/slack/slack.plugin.ts` — class with `configSchema` (5 SLACK_* env vars per §17.2), manifest (`visibility: 'on-demand'`, category `'communication'`), `getTools(ctx)` returns slack-specific tools (e.g. `slack_send_message`).
+- `packages/oracle-runtime/src/plugins/slack/slack.plugin.ts` — class with `configSchema` (5 SLACK\_\* env vars per §17.2), manifest (`visibility: 'on-demand'`, category `'communication'`), `getTools(ctx)` returns slack-specific tools (e.g. `slack_send_message`).
 - `packages/oracle-runtime/src/plugins/slack/index.ts`
 - `packages/oracle-runtime/src/plugins/slack/slack.plugin.test.ts`
 

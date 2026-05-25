@@ -41,11 +41,11 @@ fine, don't write it. No "tool is registered" boilerplate. See spec §1.
 
 ## Three-tier model (spec §4)
 
-| Tier | Question it answers | Cost | How |
-|---|---|---|---|
-| **A** | Does our integration with the upstream service work? | $0 (no LLM) | `createIntegrationRuntime()` + `invokeTool()` direct invoke against real upstream |
-| **B** | Does the agent pick the right tool for the user input? | small (cheap model) | `createIntegrationOracle()` + `ChatClient.send/stream` — real HTTP, real model |
-| **C** | Has the agent's overall behavior drifted? | $$ pre-deploy | Trajectory match + LLM-as-judge (Phase 9; not in Wave 4) |
+| Tier  | Question it answers                                    | Cost                | How                                                                               |
+| ----- | ------------------------------------------------------ | ------------------- | --------------------------------------------------------------------------------- |
+| **A** | Does our integration with the upstream service work?   | $0 (no LLM)         | `createIntegrationRuntime()` + `invokeTool()` direct invoke against real upstream |
+| **B** | Does the agent pick the right tool for the user input? | small (cheap model) | `createIntegrationOracle()` + `ChatClient.send/stream` — real HTTP, real model    |
+| **C** | Has the agent's overall behavior drifted?              | $$ pre-deploy       | Trajectory match + LLM-as-judge (Phase 9; not in Wave 4)                          |
 
 Default to Tier A; reach for Tier B only when you specifically need to verify
 the model's routing decision. Tier C is for pre-deploy evals only.
@@ -56,16 +56,16 @@ the model's routing decision. Tier C is for pre-deploy evals only.
 
 ### Plugin integration test files
 
-| Plugin | File | Tests |
-|---|---|---|
-| sandbox | `packages/oracle-runtime/src/plugins/sandbox/sandbox.plugin.int.test.ts` | A1 `sandbox_run` echo; A2 write→read round-trip; A3 `oracle_*` hidden; A4 `oracle_*` opt-in; A5 `load_skill` against a registry-resolved public cid; A6 `sandbox_write_file` → `artifact_get_presigned_url` → `fetch(downloadUrl)` proves the URL serves the exact bytes; B1 manifest routing |
-| skills | `packages/oracle-runtime/src/plugins/skills/skills.plugin.int.test.ts` | A1 `list_skills` shape; A2 `search_skills` shape; B1 discovery routing for a topic-specific ask |
-| user-preferences | `packages/oracle-runtime/src/plugins/user-preferences/user-preferences.plugin.int.test.ts` | A1 GET `/user-preferences` HTTP route; B1 routing of behavioral preference asks |
-| firecrawl | `packages/oracle-runtime/src/plugins/firecrawl/firecrawl.plugin.int.test.ts` | A1 `firecrawl_scrape` against a stable URL; B1 on-demand discovery + sub-agent dispatch |
-| credits | `packages/oracle-runtime/src/plugins/credits/credits.plugin.int.test.ts` | A1/A2 loader contract (`DISABLE_CREDITS` bypass); A3 real-Redis ledger decrement after an LLM call; A4 zero-balance short-circuit (no spend, no ledger change) |
-| composio | `packages/oracle-runtime/src/plugins/composio/composio.plugin.int.test.ts` | B1 connect-first flow (discovery → `COMPOSIO_MANAGE_CONNECTIONS` → no `LINEAR_*` action); B2 URL-fidelity (every URL in the assistant message must appear in the tool result) — **behavior only, never creates a real Linear issue** |
-| agui | `packages/oracle-runtime/src/plugins/agui/agui.plugin.int.test.ts` | B1 declared `agActions` → SSE emits `action_call` carrying the declared toolName; B2 no `agActions` → no `action_call` for that name |
-| memory (Wave 3 retrofit) | `packages/oracle-runtime/src/plugins/memory/memory.plugin.int.test.ts` | Phase 3 tests preserved, retrofitted to throw-on-missing-env |
+| Plugin                   | File                                                                                       | Tests                                                                                                                                                                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| sandbox                  | `packages/oracle-runtime/src/plugins/sandbox/sandbox.plugin.int.test.ts`                   | A1 `sandbox_run` echo; A2 write→read round-trip; A3 `oracle_*` hidden; A4 `oracle_*` opt-in; A5 `load_skill` against a registry-resolved public cid; A6 `sandbox_write_file` → `artifact_get_presigned_url` → `fetch(downloadUrl)` proves the URL serves the exact bytes; B1 manifest routing |
+| skills                   | `packages/oracle-runtime/src/plugins/skills/skills.plugin.int.test.ts`                     | A1 `list_skills` shape; A2 `search_skills` shape; B1 discovery routing for a topic-specific ask                                                                                                                                                                                               |
+| user-preferences         | `packages/oracle-runtime/src/plugins/user-preferences/user-preferences.plugin.int.test.ts` | A1 GET `/user-preferences` HTTP route; B1 routing of behavioral preference asks                                                                                                                                                                                                               |
+| firecrawl                | `packages/oracle-runtime/src/plugins/firecrawl/firecrawl.plugin.int.test.ts`               | A1 `firecrawl_scrape` against a stable URL; B1 on-demand discovery + sub-agent dispatch                                                                                                                                                                                                       |
+| credits                  | `packages/oracle-runtime/src/plugins/credits/credits.plugin.int.test.ts`                   | A1/A2 loader contract (`DISABLE_CREDITS` bypass); A3 real-Redis ledger decrement after an LLM call; A4 zero-balance short-circuit (no spend, no ledger change)                                                                                                                                |
+| composio                 | `packages/oracle-runtime/src/plugins/composio/composio.plugin.int.test.ts`                 | B1 connect-first flow (discovery → `COMPOSIO_MANAGE_CONNECTIONS` → no `LINEAR_*` action); B2 URL-fidelity (every URL in the assistant message must appear in the tool result) — **behavior only, never creates a real Linear issue**                                                          |
+| agui                     | `packages/oracle-runtime/src/plugins/agui/agui.plugin.int.test.ts`                         | B1 declared `agActions` → SSE emits `action_call` carrying the declared toolName; B2 no `agActions` → no `action_call` for that name                                                                                                                                                          |
+| memory (Wave 3 retrofit) | `packages/oracle-runtime/src/plugins/memory/memory.plugin.int.test.ts`                     | Phase 3 tests preserved, retrofitted to throw-on-missing-env                                                                                                                                                                                                                                  |
 
 ### Wave 0–2 retrofit
 
@@ -112,15 +112,26 @@ Pick 3–5 scenarios. Each one earns its keep — see spec §1.
 ```ts
 // Internal to packages/oracle-runtime/**:
 import {
-  allCaps, ChatClient, createIntegrationOracle, createIntegrationRuntime,
-  type IntegrationOracle, type IntegrationRuntime,
-  memoryCap, sandboxCap, skillsCap, mintUserDelegation, waitForMatrixLoaded,
-  type SSEEvent, type SSEToolCallEventData,
+  allCaps,
+  ChatClient,
+  createIntegrationOracle,
+  createIntegrationRuntime,
+  type IntegrationOracle,
+  type IntegrationRuntime,
+  memoryCap,
+  sandboxCap,
+  skillsCap,
+  mintUserDelegation,
+  waitForMatrixLoaded,
+  type SSEEvent,
+  type SSEToolCallEventData,
 } from '../../testing/integration/index.js';
 
 // From apps/qiforge-example/test/integration/**:
 import {
-  allCaps, ChatClient, createIntegrationOracle, /* ... */
+  allCaps,
+  ChatClient,
+  createIntegrationOracle /* ... */,
 } from '@ixo/oracle-runtime/testing/integration';
 ```
 
@@ -128,7 +139,9 @@ import {
 
 ```ts
 const REQUIRED_ENV = [
-  'MEMORY_MCP_URL', 'ORACLE_DID', 'TEST_USER_MNEMONIC', /* … */
+  'MEMORY_MCP_URL',
+  'ORACLE_DID',
+  'TEST_USER_MNEMONIC' /* … */,
 ] as const;
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
 if (missing.length > 0) {
@@ -136,7 +149,9 @@ if (missing.length > 0) {
     `<file>.int.test.ts requires the following env vars (see packages/oracle-runtime/.env.integration): ${missing.join(', ')}`,
   );
 }
-describe('your plugin — integration', () => { /* … */ });
+describe('your plugin — integration', () => {
+  /* … */
+});
 ```
 
 NO `describe.skipIf(skipReason)`. NO `HAS_*_ENV` boolean dance. Missing env is a
@@ -147,7 +162,7 @@ test failure, not a silent pass.
 ```ts
 beforeAll(async () => {
   /* boot oracle, mint delegation, build ChatClient */
-  sharedSessionId = await chatClient.createSession();  // ONCE per file
+  sharedSessionId = await chatClient.createSession(); // ONCE per file
 }, 180_000);
 
 test('B1', async () => {
@@ -168,9 +183,11 @@ const rt = await createIntegrationRuntime({
   user: { did: process.env.TEST_USER_DID! },
   delegation,
   capabilities: [{ resource: yourCap.with, action: yourCap.can }],
-  ucan: oracle.app.ambient.ucan,  // shares signing key with the booted oracle
+  ucan: oracle.app.ambient.ucan, // shares signing key with the booted oracle
 });
-const result = await rt.invokeTool('upstream__your_tool', { /* … */ });
+const result = await rt.invokeTool('upstream__your_tool', {
+  /* … */
+});
 ```
 
 ### Critical gotchas (carry forward from Wave 3)
@@ -210,7 +227,7 @@ const result = await rt.invokeTool('upstream__your_tool', { /* … */ });
 8. **`callAgAction` waits for a client round-trip.** If you declare
    `agActions` in a Tier B test, the action_call event fires immediately but
    `callAgAction` blocks until the client responds (or times out at 15s).
-   Don't gate on the action's *result* — assert on the SSE `action_call` event
+   Don't gate on the action's _result_ — assert on the SSE `action_call` event
    instead, which arrives before the result-wait.
 
 9. **Redis-dependent tests.** Credits A3/A4 need a real local Redis at

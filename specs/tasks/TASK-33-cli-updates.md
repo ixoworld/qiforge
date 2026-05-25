@@ -20,6 +20,7 @@ In the `qiforge-cli` repo:
   - `src/plugins/<name>.fixtures/.gitkeep` — placeholder.
   - `src/plugins/README-<name>.md` — mirrors the manifest as docs.
 - `qiforge env` — runs the runtime's env compositor, prints all currently-installed plugins' env vars as a `.env` template:
+
   ```
   # Tier-0 (always required)
   NODE_ENV=
@@ -34,6 +35,7 @@ In the `qiforge-cli` repo:
   MEMORY_MCP_URL=
   MEMORY_ENGINE_URL=
   ```
+
 - `qiforge inspect` — runs the runtime's `inspect()` from TASK-04, prints in the format §14.3 shows. Variants: `--tier1`, `--plugin <name>`, `--json`.
 - (Update existing `qiforge new` (scaffolds a new oracle fork) to use the new starter shape from §18.)
 

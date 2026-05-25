@@ -1,8 +1,5 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type {
-  RuntimeContext,
-  SharedAccessors,
-} from '../plugin-api/types.js';
+import type { RuntimeContext, SharedAccessors } from '../plugin-api/types.js';
 
 /** A single read accessor, contributed by a plugin under a unique key. */
 type SharedAccessorFn = (

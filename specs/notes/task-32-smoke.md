@@ -47,12 +47,12 @@ cd apps/qiforge-example && pnpm dev
 
 ## 2. Public (no-auth) endpoints
 
-| Endpoint | Method | Expected |
-|---|---|---|
-| `/` | GET | `{ status: 'ok', message: '...' }` |
-| `/health` | GET | `{ status: 'ok', timestamp: '...' }` |
-| `/docs` | GET (browser) | Swagger UI loads, lists all endpoints + tags |
-| `/docs-json` | GET | OpenAPI JSON spec |
+| Endpoint     | Method        | Expected                                     |
+| ------------ | ------------- | -------------------------------------------- |
+| `/`          | GET           | `{ status: 'ok', message: '...' }`           |
+| `/health`    | GET           | `{ status: 'ok', timestamp: '...' }`         |
+| `/docs`      | GET (browser) | Swagger UI loads, lists all endpoints + tags |
+| `/docs-json` | GET           | OpenAPI JSON spec                            |
 
 - [ ] `curl localhost:8888/` returns 200
 - [ ] `curl localhost:8888/health` returns 200
@@ -104,6 +104,7 @@ cd apps/qiforge-example && pnpm dev
 - [ ] Stream closes cleanly (no hanging connection)
 
 **Latency targets** (rough — depend on LLM cold-start):
+
 - [ ] Time-to-first-byte (`Content-Type` header): **< 100ms** typical
 - [ ] Time-to-first-event (`Thinking...`): **< 1s** typical
 - [ ] Time-to-first-token: **dominated by LLM** (500-2000ms typical for OpenRouter)
@@ -119,6 +120,7 @@ Ask the agent to do something that triggers a plugin tool. Examples:
 - [ ] "Search the web for ..." → `firecrawl` tool fires (if FIRECRAWL_API_KEY set)
 
 **For each tool call, verify the SSE stream emits:**
+
 - [ ] A `ToolCallEvent` with `status: 'isRunning'` when the LLM begins the call
 - [ ] A `ToolCallEvent` with `status: 'done'` (or `'error'`) when the tool returns
 - [ ] The tool's `output` field is populated
@@ -277,16 +279,16 @@ Toggle one of these on the next boot and verify the error message points at the 
 
 For each metric, just record the rough range you observe — we'll use this as a baseline for future regressions.
 
-| Metric | First-time / cold | Warm cache |
-|---|---|---|
-| Auth header validate (no cache) | ___ms | < 5ms |
-| Auth header validate (cache hit) | n/a | < 5ms |
-| Subscription middleware (cache hit) | n/a | ___ms |
-| `prepareForQuery` total | ___ms | ___ms |
-| Checkpoint sync (per-user first-time) | ___ms | n/a (skipped) |
-| Agent build (createMainAgent) | ___ms | ___ms |
-| Time-to-first-token (TTFT) | ___ms | ___ms |
-| Full message turn (no tools) | ___s | ___s |
+| Metric                                | First-time / cold | Warm cache    |
+| ------------------------------------- | ----------------- | ------------- |
+| Auth header validate (no cache)       | \_\_\_ms          | < 5ms         |
+| Auth header validate (cache hit)      | n/a               | < 5ms         |
+| Subscription middleware (cache hit)   | n/a               | \_\_\_ms      |
+| `prepareForQuery` total               | \_\_\_ms          | \_\_\_ms      |
+| Checkpoint sync (per-user first-time) | \_\_\_ms          | n/a (skipped) |
+| Agent build (createMainAgent)         | \_\_\_ms          | \_\_\_ms      |
+| Time-to-first-token (TTFT)            | \_\_\_ms          | \_\_\_ms      |
+| Full message turn (no tools)          | \_\_\_s           | \_\_\_s       |
 
 ---
 
@@ -314,5 +316,4 @@ If anything in section 18 fails, **stop and revisit `agent-builder.ts`** — the
 
 (Use this section to log anything weird as you test.)
 
-- ___
-
+- ***

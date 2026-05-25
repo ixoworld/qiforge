@@ -139,6 +139,7 @@ on the test runner.
 ## Internal exports
 
 `packages/oracle-runtime/src/modules/index.ts` exports:
+
 - `SubscriptionModule` (NestJS `@Module`)
 - `SubscriptionMiddleware` (the class)
 - `SUBSCRIPTION_UCAN_PORT`, `SUBSCRIPTION_CREDIT_SINK` (DI symbols)

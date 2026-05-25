@@ -15,18 +15,18 @@ apps/app's `main-agent.ts` is untouched (TASK-32 deletes it).
 
 ## Behaviour preservation map (vs the 1,052-line monolith)
 
-| Original concern | Where it lives now |
-|---|---|
-| Sub-agent `Promise.allSettled` (lines 612-687) | `sub-agent-fallback.ts` — same semantics, plugin name in log |
-| 4 always-on middlewares (line 960) | `main-agent.ts` direct imports from `./middlewares` |
-| Token limiter (conditional) | dropped here — moves into `creditsPlugin` (TASK-29) |
-| 11-variable `AI_ASSISTANT_PROMPT.format` | `prompt-composer.ts` — typed input, single `composePrompt({...})` |
-| Tier-1 capability block | rendered by `renderTier1` from manifest registry |
-| `oracle.config.json` identity overrides | replaced by `identity` + `state.userPreferences.agentName` override |
-| Per-user SQLite checkpointer | injected via `hooks.checkpointerForUser` (apps/app supplies the actual factory) |
-| Model override priority chain | `hooks.resolveModel` (default = `ambient.llm.get('main')`) |
+| Original concern                                     | Where it lives now                                                                       |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Sub-agent `Promise.allSettled` (lines 612-687)       | `sub-agent-fallback.ts` — same semantics, plugin name in log                             |
+| 4 always-on middlewares (line 960)                   | `main-agent.ts` direct imports from `./middlewares`                                      |
+| Token limiter (conditional)                          | dropped here — moves into `creditsPlugin` (TASK-29)                                      |
+| 11-variable `AI_ASSISTANT_PROMPT.format`             | `prompt-composer.ts` — typed input, single `composePrompt({...})`                        |
+| Tier-1 capability block                              | rendered by `renderTier1` from manifest registry                                         |
+| `oracle.config.json` identity overrides              | replaced by `identity` + `state.userPreferences.agentName` override                      |
+| Per-user SQLite checkpointer                         | injected via `hooks.checkpointerForUser` (apps/app supplies the actual factory)          |
+| Model override priority chain                        | `hooks.resolveModel` (default = `ambient.llm.get('main')`)                               |
 | Conditional sub-agents (Editor / TaskManager / AGUI) | each plugin's own `getSubAgents(ctx)` returns `[]` when conditions aren't met (TASK-16+) |
-| Degraded-services notice | `hooks.degradedServicesBlock` — appended by composePrompt when supplied |
+| Degraded-services notice                             | `hooks.degradedServicesBlock` — appended by composePrompt when supplied                  |
 
 ## UCAN minting (sandbox / memory / composio)
 

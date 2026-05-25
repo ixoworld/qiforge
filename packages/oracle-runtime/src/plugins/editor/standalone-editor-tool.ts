@@ -5,7 +5,10 @@ import { z } from 'zod';
 
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
-import { type BlocknoteToolsConfig, createBlocknoteTools } from './blocknote-tools.js';
+import {
+  type BlocknoteToolsConfig,
+  createBlocknoteTools,
+} from './blocknote-tools.js';
 import { resolveEditorMatrixClient } from './editor-mx.js';
 import { createMintInvocationEditorTool } from './mint-invocation-tool.js';
 import { createPageTools } from './page-tools.js';

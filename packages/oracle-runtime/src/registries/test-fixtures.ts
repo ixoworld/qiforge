@@ -172,11 +172,12 @@ export function makeRuntimeContext(
       }),
     },
     llm: {
-      get: () => ({}) as unknown as RuntimeContext['llm'] extends {
-        get: (...a: unknown[]) => infer R;
-      }
-        ? R
-        : never,
+      get: () =>
+        ({}) as unknown as RuntimeContext['llm'] extends {
+          get: (...a: unknown[]) => infer R;
+        }
+          ? R
+          : never,
     },
     emit: {
       toolCall: () => undefined,
