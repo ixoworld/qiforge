@@ -364,31 +364,6 @@ importers:
         specifier: ^3.2.4
         version: 3.2.4(@types/debug@4.1.13)(@types/node@22.19.19)(jiti@2.6.1)(jsdom@28.1.0(@noble/hashes@1.8.0))(lightningcss@1.32.0)(terser@5.47.1)(tsx@4.21.0)(yaml@2.9.0)
 
-  packages/api-keys-manager:
-    dependencies:
-      '@types/better-sqlite3':
-        specifier: ^7.6.12
-        version: 7.6.13
-      better-sqlite3:
-        specifier: ^11.8.1
-        version: 11.10.0
-    devDependencies:
-      '@ixo/eslint-config':
-        specifier: workspace:*
-        version: link:../eslint-config
-      '@ixo/typescript-config':
-        specifier: workspace:*
-        version: link:../typescript-config
-      '@ixo/vitest-config':
-        specifier: workspace:*
-        version: link:../vitest-config
-      '@types/node':
-        specifier: ^22.10.5
-        version: 22.19.1
-      typescript:
-        specifier: ^5.5.4
-        version: 5.9.3
-
   packages/common:
     dependencies:
       '@cosmjs/proto-signing':

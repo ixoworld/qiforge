@@ -13,6 +13,7 @@ export default [
       '**/*.config.mjs',
       '**/*.config.cjs',
       '**/*.setup.js',
+      'apps/app/**',
       'packages/vitest-config/**',
       'packages/eslint-config/prettier-base.cjs',
     ],
@@ -30,7 +31,6 @@ export default [
   // NestJS app + backend packages
   {
     files: [
-      'apps/app/src/**/*.ts',
       'packages/common/src/**/*.ts',
       'packages/events/src/**/*.ts',
       'packages/matrix/src/**/*.ts',
@@ -38,7 +38,6 @@ export default [
       'packages/oracles-chain-client/src/**/*.ts',
       'packages/slack/src/**/*.ts',
       'packages/logger/src/**/*.ts',
-      'packages/api-keys-manager/src/**/*.ts',
       'packages/sqlite-saver/src/**/*.ts',
       'packages/ucan/src/**/*.ts',
     ],
