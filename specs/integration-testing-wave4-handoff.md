@@ -225,9 +225,9 @@ const result = await rt.invokeTool('upstream__your_tool', {
    (e.g. `DISABLE_CREDITS=true`), it must use `bundledPlugins`.
 
 8. **`callAgAction` waits for a client round-trip.** If you declare
-   `agActions` in a Tier B test, the action_call event fires immediately but
+   `agActions` in a Tier B test, the action*call event fires immediately but
    `callAgAction` blocks until the client responds (or times out at 15s).
-   Don't gate on the action's _result_ — assert on the SSE `action_call` event
+   Don't gate on the action's \_result* — assert on the SSE `action_call` event
    instead, which arrives before the result-wait.
 
 9. **Redis-dependent tests.** Credits A3/A4 need a real local Redis at
