@@ -16,14 +16,14 @@ See `specs/tasks/README.md` for the full status table and the dependency graph.
 
 ## Phase structure
 
-| Phase | Tasks | Owns |
-| --- | --- | --- |
-| 1 — Foundation | TASK-01 … TASK-06 | Package skeleton, types, manifest, registries, loader, contexts, plugin API entry. |
-| 2 — Discovery & Composition | TASK-07 … TASK-11 | `loadedPlugins` state field, meta-tools, agent builder, `createMainAgent`, `createOracleApp`. |
-| 3 — Tier-0 module relocation | TASK-12 … TASK-14 | Move Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Matrix checkpointer into the runtime package. |
-| 4 — Testing harness | TASK-15 | `createTestRuntime` + mocks. |
-| 5 — Bundled plugin conversion | TASK-16 … TASK-31 | Convert each `apps/app` feature into a plugin under `packages/oracle-runtime/src/plugins/`. |
-| 6 — Final integration | TASK-32 … TASK-34 | Replace `apps/app/`, update CLI, refresh docs. |
+| Phase                         | Tasks             | Owns                                                                                                                     |
+| ----------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 1 — Foundation                | TASK-01 … TASK-06 | Package skeleton, types, manifest, registries, loader, contexts, plugin API entry.                                       |
+| 2 — Discovery & Composition   | TASK-07 … TASK-11 | `loadedPlugins` state field, meta-tools, agent builder, `createMainAgent`, `createOracleApp`.                            |
+| 3 — Tier-0 module relocation  | TASK-12 … TASK-14 | Move Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Matrix checkpointer into the runtime package. |
+| 4 — Testing harness           | TASK-15           | `createTestRuntime` + mocks.                                                                                             |
+| 5 — Bundled plugin conversion | TASK-16 … TASK-31 | Convert each `apps/app` feature into a plugin under `packages/oracle-runtime/src/plugins/`.                              |
+| 6 — Final integration         | TASK-32 … TASK-34 | Replace `apps/app/`, update CLI, refresh docs.                                                                           |
 
 ## Picking up a task
 

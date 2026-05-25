@@ -37,16 +37,16 @@ When evals exist they live in `test/eval/` or `__evals__/` and run as a separate
 
 ## Which layer for what
 
-| You're changing | Right layer |
-| --- | --- |
-| The shape of `getTools` output | Layer 1 |
-| Manifest validation logic | Layer 1 |
-| A tool's input parsing | Layer 1 |
-| A middleware's `beforeModel` mutation | Layer 1 (or 2 if it interacts with Matrix) |
-| Boot resolves plugins correctly given features | Layer 1 (it has unit coverage already) |
-| End-to-end "I send a message, the agent calls Memory" | Layer 2 |
-| New bundled plugin (any plugin) | Layer 1 minimum, plus Layer 2 if it talks to upstream |
-| Behavioural change in the agent's response quality | Layer 3 (when we have it) |
+| You're changing                                       | Right layer                                           |
+| ----------------------------------------------------- | ----------------------------------------------------- |
+| The shape of `getTools` output                        | Layer 1                                               |
+| Manifest validation logic                             | Layer 1                                               |
+| A tool's input parsing                                | Layer 1                                               |
+| A middleware's `beforeModel` mutation                 | Layer 1 (or 2 if it interacts with Matrix)            |
+| Boot resolves plugins correctly given features        | Layer 1 (it has unit coverage already)                |
+| End-to-end "I send a message, the agent calls Memory" | Layer 2                                               |
+| New bundled plugin (any plugin)                       | Layer 1 minimum, plus Layer 2 if it talks to upstream |
+| Behavioural change in the agent's response quality    | Layer 3 (when we have it)                             |
 
 ## What CI runs
 

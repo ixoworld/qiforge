@@ -25,17 +25,17 @@ Each subdirectory holds the module, controller(s), service(s), DTOs, and tests.
 
 These are imported by `RuntimeAppModule` on every boot regardless of plugin set:
 
-| Module | Purpose | Public-facing routes |
-| --- | --- | --- |
-| `SessionsModule` | Chat session lifecycle (per-user, per-thread). | `/sessions` |
-| `MessagesModule` | Send + stream messages; per-request agent build. | `/messages` |
-| `WsModule` | WebSocket gateway for typed events. | WebSocket |
-| `SecretsModule` | Per-room JWE-encrypted secrets with 24h cache. | (no public routes) |
-| `UcanModule` | UCAN delegation + invocation signing. | (no public routes) |
-| `AuthModule` | `AuthHeaderMiddleware` validates UCAN + DID on every protected route. | (middleware) |
-| `SubscriptionModule` | Subscription enforcement middleware. Wired conditionally — active when `credits` plugin is loaded. | (middleware) |
-| `ThrottlerModule` | Per-user rate limiting. | (middleware) |
-| `HealthModule` | `/health` liveness probe. | `/health` |
+| Module               | Purpose                                                                                            | Public-facing routes |
+| -------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
+| `SessionsModule`     | Chat session lifecycle (per-user, per-thread).                                                     | `/sessions`          |
+| `MessagesModule`     | Send + stream messages; per-request agent build.                                                   | `/messages`          |
+| `WsModule`           | WebSocket gateway for typed events.                                                                | WebSocket            |
+| `SecretsModule`      | Per-room JWE-encrypted secrets with 24h cache.                                                     | (no public routes)   |
+| `UcanModule`         | UCAN delegation + invocation signing.                                                              | (no public routes)   |
+| `AuthModule`         | `AuthHeaderMiddleware` validates UCAN + DID on every protected route.                              | (middleware)         |
+| `SubscriptionModule` | Subscription enforcement middleware. Wired conditionally — active when `credits` plugin is loaded. | (middleware)         |
+| `ThrottlerModule`    | Per-user rate limiting.                                                                            | (middleware)         |
+| `HealthModule`       | `/health` liveness probe.                                                                          | `/health`            |
 
 ## Plugin modules
 
@@ -86,8 +86,12 @@ The Holder is the workaround:
 @Injectable()
 class OracleRuntimeBundleHolder {
   private bundle = null;
-  populate(b) { this.bundle = b; }   // called by createOracleApp post-bootstrap
-  get() { return this.bundle; }      // called by MessagesService per request
+  populate(b) {
+    this.bundle = b;
+  } // called by createOracleApp post-bootstrap
+  get() {
+    return this.bundle;
+  } // called by MessagesService per request
 }
 ```
 
@@ -107,7 +111,7 @@ Source: `modules/messages/oracle-runtime-bundle.ts`.
 
 The credits plugin's presence flips a flag on `RuntimeAppModule.register({ enableSubscriptionMiddleware: ... })`. When `true`, the module wires `SubscriptionMiddleware` ahead of the message handler. When `false`, the middleware is omitted.
 
-`SubscriptionMiddleware` lives in `modules/subscription/` (always present in the codebase). Whether it's *applied* depends on whether the credits plugin is loaded.
+`SubscriptionMiddleware` lives in `modules/subscription/` (always present in the codebase). Whether it's _applied_ depends on whether the credits plugin is loaded.
 
 ## Read next
 

@@ -34,7 +34,11 @@ export function buildCurrentWeatherTool(
   return tool(
     async (rawArgs, ctx: RuntimeContext) => {
       const { city } = z.object({ city: z.string().min(1) }).parse(rawArgs);
-      const result = await getCurrentWeather(city, defaultUnits, ctx.abortSignal);
+      const result = await getCurrentWeather(
+        city,
+        defaultUnits,
+        ctx.abortSignal,
+      );
       if (!result) {
         return `Could not find weather for "${city}". Try a more specific city name.`;
       }

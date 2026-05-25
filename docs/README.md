@@ -4,12 +4,12 @@ This directory is for people **growing the framework**. If you're building an or
 
 The structure mirrors the parts of the codebase a maintainer touches:
 
-| Folder | What it covers |
-| --- | --- |
-| `architecture/` | How the runtime is wired internally — bootstrap, registries, graph composition, Matrix/checkpointer, modules. |
-| `contributing/` | Concrete how-tos for extending the framework: adding a bundled plugin, a module, a state field, a meta-tool, an always-on middleware, plus code conventions. |
-| `spec-and-roadmap/` | Pointers to the spec, the task index, follow-up items deferred out of v1. |
-| `testing/` | The test harness, integration test patterns, CI. |
+| Folder              | What it covers                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `architecture/`     | How the runtime is wired internally — bootstrap, registries, graph composition, Matrix/checkpointer, modules.                                                |
+| `contributing/`     | Concrete how-tos for extending the framework: adding a bundled plugin, a module, a state field, a meta-tool, an always-on middleware, plus code conventions. |
+| `spec-and-roadmap/` | Pointers to the spec, the task index, follow-up items deferred out of v1.                                                                                    |
+| `testing/`          | The test harness, integration test patterns, CI.                                                                                                             |
 
 ## When to update which doc
 

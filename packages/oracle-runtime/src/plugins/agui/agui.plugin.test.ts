@@ -98,8 +98,7 @@ describe('AGUIPlugin', () => {
     ]);
     expect(tools[0]?.description).toBe(TABLE_ACTION.description);
 
-    const prompt =
-      typeof sub.systemPrompt === 'string' ? sub.systemPrompt : '';
+    const prompt = typeof sub.systemPrompt === 'string' ? sub.systemPrompt : '';
     expect(prompt).toContain('AG-UI Agent');
     expect(prompt).toContain(TABLE_ACTION.name);
     expect(prompt).toContain(CHART_ACTION.name);

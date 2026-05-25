@@ -23,7 +23,9 @@ Per-user SQLite database lifecycle:
 Used by the default checkpointer factory:
 
 ```ts
-const checkpointSync = nestApp.get(UserMatrixSqliteSyncService, { strict: false });
+const checkpointSync = nestApp.get(UserMatrixSqliteSyncService, {
+  strict: false,
+});
 const defaultHooks: MainAgentHooks = checkpointSync
   ? {
       checkpointerForUser: async (userDid: string) => {

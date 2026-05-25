@@ -62,17 +62,28 @@ const manifest: PluginManifest = {
       },
     },
     {
-      user: "Do I need an umbrella in Paris today?",
+      user: 'Do I need an umbrella in Paris today?',
       tool: 'get_current_weather',
       args: { city: 'Paris' },
     },
     {
-      user: "Is it cold in San Francisco this weekend?",
+      user: 'Is it cold in San Francisco this weekend?',
       tool: 'get_weather_forecast',
       args: { city: 'San Francisco', days: 3 },
     },
   ],
-  tags: ['weather', 'forecast', 'outfit', 'travel', 'temperature', 'rain', 'umbrella', 'jacket', 'clothing', 'recommendation'],
+  tags: [
+    'weather',
+    'forecast',
+    'outfit',
+    'travel',
+    'temperature',
+    'rain',
+    'umbrella',
+    'jacket',
+    'clothing',
+    'recommendation',
+  ],
   category: 'data',
   visibility: 'on-demand',
   stability: 'experimental',
@@ -118,7 +129,9 @@ export class WeatherPlugin extends OraclePlugin {
   }
 
   override getTools(ctx: PluginContext): PluginTool[] {
-    return [buildCurrentWeatherTool(this.units(ctx.config), this.lastBySession)];
+    return [
+      buildCurrentWeatherTool(this.units(ctx.config), this.lastBySession),
+    ];
   }
 
   override getRequestTools(rtCtx: RuntimeContext): PluginTool[] {
@@ -126,7 +139,9 @@ export class WeatherPlugin extends OraclePlugin {
   }
 
   override getSubAgents(ctx: PluginContext): PluginSubAgent[] {
-    return [buildWeatherPlannerSubAgent(this.units(ctx.config), this.lastBySession)];
+    return [
+      buildWeatherPlannerSubAgent(this.units(ctx.config), this.lastBySession),
+    ];
   }
 
   override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {

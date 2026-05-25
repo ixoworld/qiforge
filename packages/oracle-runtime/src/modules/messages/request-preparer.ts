@@ -1,7 +1,4 @@
-import {
-  SessionManagerService,
-  type ChatSession,
-} from '@ixo/common';
+import { SessionManagerService, type ChatSession } from '@ixo/common';
 import {
   BadRequestException,
   Injectable,
@@ -87,9 +84,8 @@ export class RequestPreparer {
 
     let roomId = targetSession.roomId;
     if (!roomId) {
-      const oracleEntityDid = this.config.getOrThrow<string>(
-        'ORACLE_ENTITY_DID',
-      );
+      const oracleEntityDid =
+        this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
       const roomResult =
         await this.sessions.matrixManger.getOracleRoomIdWithHomeServer({
           userDid: did,

@@ -41,7 +41,9 @@ describe('setSSEHeaders', () => {
     expect(res.setHeaders.Connection).toBe('keep-alive');
     expect(res.setHeaders['X-Accel-Buffering']).toBe('no');
     expect(res.setHeaders['X-Request-Id']).toBe('req-42');
-    expect(res.setHeaders['Access-Control-Expose-Headers']).toBe('X-Request-Id');
+    expect(res.setHeaders['Access-Control-Expose-Headers']).toBe(
+      'X-Request-Id',
+    );
   });
 
   it('omits X-Request-Id when requestId absent', () => {
@@ -123,7 +125,9 @@ describe('sendSSEDone / sendSSEError', () => {
     expect(typeof errPayload.timestamp).toBe('string');
 
     expect(strRes.writes).toHaveLength(1);
-    const strPayload = JSON.parse(strRes.writes[0]!.split('data: ')[1]!.trim()) as {
+    const strPayload = JSON.parse(
+      strRes.writes[0]!.split('data: ')[1]!.trim(),
+    ) as {
       error: string;
     };
     expect(strPayload.error).toBe('raw-string');

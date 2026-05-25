@@ -33,7 +33,9 @@ import { tool } from '../plugin-api/tool-helper.js';
 import type { PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 
-const inputSchema = z.object({ /* ... */ });
+const inputSchema = z.object({
+  /* ... */
+});
 
 export function buildYourMetaTool(
   manifestRegistry: ManifestRegistry,
@@ -86,7 +88,7 @@ export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
   return [
     buildLoadCapabilityTool(opts.manifestRegistry, opts.toolRegistry),
     buildListCapabilitiesTool(opts.manifestRegistry),
-    buildYourMetaTool(opts.manifestRegistry),    // ← add here
+    buildYourMetaTool(opts.manifestRegistry), // ← add here
   ];
 }
 ```

@@ -1,4 +1,7 @@
-export { ComposioPlugin, type ComposioPluginOptions } from './composio.plugin.js';
+export {
+  ComposioPlugin,
+  type ComposioPluginOptions,
+} from './composio.plugin.js';
 export {
   createComposioTools,
   createDefaultComposioSessionFactory,

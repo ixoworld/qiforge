@@ -19,10 +19,7 @@ import {
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
-import {
-  getModelForRole,
-  getProviderConfig,
-} from '../llm/llm-provider.js';
+import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
 import { validateManifest } from '../manifest/validator.js';
 import { UserMatrixSqliteSyncService } from '../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { setFileProcessingProvider } from '../modules/messages/file-processing.service.js';
@@ -632,9 +629,10 @@ async function wireSigningAndEncryptionKeys(args: {
     return value;
   };
 
-  const matrixRoomId = typeof config.MATRIX_ACCOUNT_ROOM_ID === 'string'
-    ? config.MATRIX_ACCOUNT_ROOM_ID
-    : '';
+  const matrixRoomId =
+    typeof config.MATRIX_ACCOUNT_ROOM_ID === 'string'
+      ? config.MATRIX_ACCOUNT_ROOM_ID
+      : '';
   const matrixAccessToken = need('MATRIX_ORACLE_ADMIN_ACCESS_TOKEN');
   const walletMnemonic = need('SECP_MNEMONIC');
   const pin = need('MATRIX_VALUE_PIN');

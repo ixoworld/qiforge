@@ -156,7 +156,11 @@ export function topoSort(plugins: OraclePlugin[]): OraclePlugin[] {
   const visiting = new Set<string>();
   const ordered: OraclePlugin[] = [];
 
-  const visit = (name: string, requiredBy: string | null, path: string[]): void => {
+  const visit = (
+    name: string,
+    requiredBy: string | null,
+    path: string[],
+  ): void => {
     if (visited.has(name)) return;
     if (visiting.has(name)) {
       const cycle = [...path.slice(path.indexOf(name)), name].join(' -> ');

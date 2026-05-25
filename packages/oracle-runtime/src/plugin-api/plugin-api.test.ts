@@ -88,14 +88,17 @@ function makeRuntimeContext(
       mintInvocation: async () => 'invocation-cid',
       resolveServiceDid: async () => 'did:web:example.com',
       hasSigningKey: () => true,
-      createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+      createInvocationFromDelegation: async () => ({
+        invocation: 'mock-invocation-car',
+      }),
     },
     llm: {
-      get: () => ({}) as unknown as RuntimeContext['llm'] extends {
-        get: (...a: unknown[]) => infer R;
-      }
-        ? R
-        : never,
+      get: () =>
+        ({}) as unknown as RuntimeContext['llm'] extends {
+          get: (...a: unknown[]) => infer R;
+        }
+          ? R
+          : never,
     },
     emit: {
       toolCall: () => undefined,

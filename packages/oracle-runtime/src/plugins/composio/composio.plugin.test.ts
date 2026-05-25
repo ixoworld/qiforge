@@ -87,7 +87,9 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
 
@@ -122,7 +124,9 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
         hasSigningKey: () => true,
-        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
+        createInvocationFromDelegation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
       },
     });
 

@@ -5,14 +5,7 @@ import {
 } from '@ixo/common';
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import type { Cache } from 'cache-manager';
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import { makeConfig } from '../../testing/nest-doubles.js';
 import { makeSessionManagerStub } from '../messages/__test-fixtures__/deps.js';
@@ -248,7 +241,11 @@ describe('SessionHistoryProcessor', () => {
 
     it('no-ops when matrix returns no roomId', async () => {
       sessionManager.matrixManger.getOracleRoomIdWithHomeServer.mockResolvedValue(
-        { roomId: undefined, roomAlias: '#a:home', oracleRoomFullAlias: '#f:home' },
+        {
+          roomId: undefined,
+          roomAlias: '#a:home',
+          oracleRoomFullAlias: '#f:home',
+        },
       );
 
       await svc.processSessionHistory({ ...baseParams });
@@ -283,9 +280,7 @@ describe('SessionHistoryProcessor', () => {
       expect(
         memoryEngine.processConversationHistory.mock.calls[0][0].messages,
       ).toHaveLength(4);
-      expect(
-        sessionManager.updateLastProcessedCount,
-      ).toHaveBeenLastCalledWith({
+      expect(sessionManager.updateLastProcessedCount).toHaveBeenLastCalledWith({
         sessionId: SESSION_ID,
         did: USER_DID,
         lastProcessedCount: 4,
@@ -299,9 +294,7 @@ describe('SessionHistoryProcessor', () => {
       expect(
         memoryEngine.processConversationHistory.mock.calls[1][0].messages,
       ).toHaveLength(2);
-      expect(
-        sessionManager.updateLastProcessedCount,
-      ).toHaveBeenLastCalledWith({
+      expect(sessionManager.updateLastProcessedCount).toHaveBeenLastCalledWith({
         sessionId: SESSION_ID,
         did: USER_DID,
         lastProcessedCount: 4,

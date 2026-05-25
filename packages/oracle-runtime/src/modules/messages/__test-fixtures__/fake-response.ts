@@ -22,13 +22,12 @@ export class FakeResponse extends EventEmitter {
 
   set(field: Record<string, string>): this;
   set(field: string, value?: string | string[]): this;
-  set(
-    field: Record<string, string> | string,
-    value?: string | string[],
-  ): this {
+  set(field: Record<string, string> | string, value?: string | string[]): this {
     if (typeof field === 'string') {
       if (value !== undefined) {
-        this.setHeaders[field] = Array.isArray(value) ? value.join(', ') : value;
+        this.setHeaders[field] = Array.isArray(value)
+          ? value.join(', ')
+          : value;
       }
       return this;
     }
@@ -42,7 +41,9 @@ export class FakeResponse extends EventEmitter {
 
   write(chunk: string | Buffer): boolean {
     if (this.writableEnded) return false;
-    this.writes.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+    this.writes.push(
+      typeof chunk === 'string' ? chunk : chunk.toString('utf8'),
+    );
     return true;
   }
 

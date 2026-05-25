@@ -3,10 +3,7 @@ import type {
   UserContextData as TypedUserContextData,
 } from '@ixo/common';
 import { PromptTemplate } from '@langchain/core/prompts';
-import type {
-  OracleIdentity,
-  UserContextData,
-} from '../plugin-api/types.js';
+import type { OracleIdentity, UserContextData } from '../plugin-api/types.js';
 import type { UserPreferences } from './state.js';
 
 /**
@@ -157,9 +154,7 @@ function formatContextSection(
     lines.push('_Topic clusters:_');
     for (const c of communities) {
       const summary = c.summary?.trim();
-      lines.push(
-        summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`,
-      );
+      lines.push(summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`);
     }
   }
 
@@ -193,8 +188,7 @@ export function formatUserPreferences(prefs?: UserPreferences): string {
   const lines: string[] = [];
   if (prefs.agentName)
     lines.push(`- **Preferred agent name:** ${prefs.agentName}`);
-  if (prefs.language)
-    lines.push(`- **Preferred language:** ${prefs.language}`);
+  if (prefs.language) lines.push(`- **Preferred language:** ${prefs.language}`);
   if (prefs.tone) lines.push(`- **Tone:** ${prefs.tone}`);
   if (prefs.formality) lines.push(`- **Formality:** ${prefs.formality}`);
   if (prefs.customInstructions)
@@ -359,7 +353,9 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
  *   - **context** — only populated memory sub-sections render; empty ones skipped.
  *   - **operational mode / composio / editor / slack** — existing plugin hooks.
  */
-export async function composePrompt(input: ComposePromptInput): Promise<string> {
+export async function composePrompt(
+  input: ComposePromptInput,
+): Promise<string> {
   const oracleName = input.oracleNameOverride ?? input.identity.name;
   const oracleSection = buildOracleSection({
     oracleName,

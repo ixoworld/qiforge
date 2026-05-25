@@ -20,8 +20,7 @@ import { SessionsService } from './sessions.service.js';
       // MEMORY_ENGINE_URL is optional — see comment in messages.module.ts.
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
-        const memoryEngineUrl =
-          configService.get<string>('MEMORY_ENGINE_URL');
+        const memoryEngineUrl = configService.get<string>('MEMORY_ENGINE_URL');
         return memoryEngineUrl
           ? new MemoryEngineService(memoryEngineUrl)
           : null;

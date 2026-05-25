@@ -181,9 +181,7 @@ describe('inspect()', () => {
       runtimeVersion: '1.0.0',
     });
     expect(out.collisions.some((c) => c.includes("tool 't'"))).toBe(true);
-    expect(out.collisions.some((c) => c.includes("sub-agent 's'"))).toBe(
-      true,
-    );
+    expect(out.collisions.some((c) => c.includes("sub-agent 's'"))).toBe(true);
     expect(out.collisions.some((c) => c.includes("shared-state key 'k'"))).toBe(
       true,
     );
@@ -211,8 +209,6 @@ describe('inspect()', () => {
       identity,
       runtimeVersion: '1.0.0',
     });
-    expect(out.excluded).toEqual([
-      { plugin: 'slack', reason: 'auto-detect' },
-    ]);
+    expect(out.excluded).toEqual([{ plugin: 'slack', reason: 'auto-detect' }]);
   });
 });

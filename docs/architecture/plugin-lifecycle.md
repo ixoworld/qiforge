@@ -8,21 +8,21 @@ Source: `packages/oracle-runtime/src/plugin-api/oracle-plugin.ts`, `bootstrap/pl
 
 These run once during `createOracleApp` and their outputs are cached for the lifetime of the process.
 
-| Hook | When | Context | Failure mode |
-| --- | --- | --- | --- |
-| `autoDetect(env)` | Plugin loader resolution (boot phase 2) | `NodeJS.ProcessEnv` | Throwing → resolver error → boot fails |
-| `getNestModules(ctx)` | Boot phase 9 | `PluginContext` | Throwing → boot fails (no Promise.allSettled here) |
-| `getAuthExcludedRoutes()` | Boot phase 10 | None | Throwing → boot fails |
+| Hook                      | When                                    | Context             | Failure mode                                       |
+| ------------------------- | --------------------------------------- | ------------------- | -------------------------------------------------- |
+| `autoDetect(env)`         | Plugin loader resolution (boot phase 2) | `NodeJS.ProcessEnv` | Throwing → resolver error → boot fails             |
+| `getNestModules(ctx)`     | Boot phase 9                            | `PluginContext`     | Throwing → boot fails (no Promise.allSettled here) |
+| `getAuthExcludedRoutes()` | Boot phase 10                           | None                | Throwing → boot fails                              |
 
 These run during the warm pass (boot phase 15) once with a synthetic `pluginName: '__runtime__'` PluginContext:
 
-| Hook | What's cached |
-| --- | --- |
-| `getTools(ctx)` | The tool list — re-used on every request build |
-| `getSubAgents(ctx)` | The sub-agent list — re-used on every request build |
-| `getMiddlewares(ctx)` | The middleware list — re-used on every request build |
-| `getSharedState()` | The accessor map — wired into the SharedStateRegistry |
-| `configSchema` (field, not a hook) | Merged into the env schema at boot phase 5 |
+| Hook                               | What's cached                                         |
+| ---------------------------------- | ----------------------------------------------------- |
+| `getTools(ctx)`                    | The tool list — re-used on every request build        |
+| `getSubAgents(ctx)`                | The sub-agent list — re-used on every request build   |
+| `getMiddlewares(ctx)`              | The middleware list — re-used on every request build  |
+| `getSharedState()`                 | The accessor map — wired into the SharedStateRegistry |
+| `configSchema` (field, not a hook) | Merged into the env schema at boot phase 5            |
 
 The cache key is the plugin name; only one cache entry exists per plugin per process.
 
@@ -30,9 +30,9 @@ The cache key is the plugin name; only one cache entry exists per plugin per pro
 
 These run on every agent build (per HTTP request that triggers a turn).
 
-| Hook | Context | Notes |
-| --- | --- | --- |
-| `getRequestTools(rtCtx)` | `RuntimeContext` | Output merges with cached `getTools` result |
+| Hook                         | Context          | Notes                                           |
+| ---------------------------- | ---------------- | ----------------------------------------------- |
+| `getRequestTools(rtCtx)`     | `RuntimeContext` | Output merges with cached `getTools` result     |
 | `getRequestSubAgents(rtCtx)` | `RuntimeContext` | Output merges with cached `getSubAgents` result |
 
 Implemented in `graph/agent-builder.ts` — the agent builder reads the cached boot snapshot plus runs these two hooks fresh.
@@ -59,11 +59,11 @@ If sub-agent init throws (e.g. an MCP client fails to construct), `collectSubAge
 
 Middlewares run on every LLM step. Hooks come from LangChain's `AgentMiddleware`:
 
-| Hook | When | Receives |
-| --- | --- | --- |
-| `beforeModel(state)` | Before the LLM is invoked | LangGraph state |
-| `afterModel(state)` | After the LLM returns | LangGraph state |
-| `onError(error, state)` | LLM call throws | error + state |
+| Hook                    | When                      | Receives        |
+| ----------------------- | ------------------------- | --------------- |
+| `beforeModel(state)`    | Before the LLM is invoked | LangGraph state |
+| `afterModel(state)`     | After the LLM returns     | LangGraph state |
+| `onError(error, state)` | LLM call throws           | error + state   |
 
 Plugin middlewares run **after** the four always-on middlewares (tool validation, retry, page context, safety guardrail) in topological dependency order across plugins.
 
@@ -94,24 +94,24 @@ graph TD
 
 `RuntimeContext` (per-request) holds the full per-request bag: `user`, `session`, `history`, `secrets`, `matrix`, `ucan`, `llm`, `emit`, `logger`, `abortSignal`, `shared`, `toolCallId`.
 
-Tool handlers receive `RuntimeContext` even if their plugin only implements `getTools` (the boot-time hook). The boot/runtime split is about *registration*, not *execution*.
+Tool handlers receive `RuntimeContext` even if their plugin only implements `getTools` (the boot-time hook). The boot/runtime split is about _registration_, not _execution_.
 
 See [runtime-context.md](runtime-context.md) for how `buildRuntimeContext` synthesises it.
 
 ## Error semantics summary
 
-| Where the error occurs | Effect |
-| --- | --- |
-| `autoDetect` throws | Boot fails (resolver error). |
-| `getNestModules` throws | Boot fails. |
-| `getAuthExcludedRoutes` throws | Boot fails. |
-| `configSchema` validation fails | Boot fails with `[boot-error] Plugin '<name>' env validation failed for '<field>'`. |
-| `manifest` validation fails | Boot fails with `Plugin manifest validation failed (N issues)`. |
-| `getTools`, `getRequestTools` throws | Logged with plugin name, plugin's contribution skipped for the request; rest of build continues. |
-| `getSubAgents`, `getRequestSubAgents` throws | Same — Promise.allSettled in `collectSubAgentsWithFallback`. |
-| `getMiddlewares` throws | Same. |
-| Tool handler throws | Tool error propagates to the agent loop; LangChain's tool retry handles one retry. |
-| Middleware hook throws | Propagates to the agent loop; surfaces as a turn error. |
+| Where the error occurs                       | Effect                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `autoDetect` throws                          | Boot fails (resolver error).                                                                     |
+| `getNestModules` throws                      | Boot fails.                                                                                      |
+| `getAuthExcludedRoutes` throws               | Boot fails.                                                                                      |
+| `configSchema` validation fails              | Boot fails with `[boot-error] Plugin '<name>' env validation failed for '<field>'`.              |
+| `manifest` validation fails                  | Boot fails with `Plugin manifest validation failed (N issues)`.                                  |
+| `getTools`, `getRequestTools` throws         | Logged with plugin name, plugin's contribution skipped for the request; rest of build continues. |
+| `getSubAgents`, `getRequestSubAgents` throws | Same — Promise.allSettled in `collectSubAgentsWithFallback`.                                     |
+| `getMiddlewares` throws                      | Same.                                                                                            |
+| Tool handler throws                          | Tool error propagates to the agent loop; LangChain's tool retry handles one retry.               |
+| Middleware hook throws                       | Propagates to the agent loop; surfaces as a turn error.                                          |
 
 ## Read next
 

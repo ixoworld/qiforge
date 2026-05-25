@@ -78,7 +78,9 @@ function makeAmbient(): AmbientServices {
       mintInvocation: vi.fn(async () => 'inv'),
       resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
       hasSigningKey: vi.fn(() => true),
-      createInvocationFromDelegation: vi.fn(async () => ({ invocation: 'mock-invocation-car' })),
+      createInvocationFromDelegation: vi.fn(async () => ({
+        invocation: 'mock-invocation-car',
+      })),
     },
     logger: {
       log: vi.fn(),
@@ -170,8 +172,7 @@ function buildHarness(
 
   const fetchMock = vi.fn(
     overrides.fetchImpl ??
-      (async () =>
-        undefined as Record<string, unknown> | undefined),
+      (async () => undefined as Record<string, unknown> | undefined),
   );
   const userContextFetcher = {
     fetch: fetchMock,
@@ -308,7 +309,10 @@ describe('AgentBuilder', () => {
     });
 
     it('falls back to priorState.userPreferences when the prefs read rejects', async () => {
-      const priorPrefs = { userName: 'PriorName', updatedAt: '2026-01-01T00:00:00Z' };
+      const priorPrefs = {
+        userName: 'PriorName',
+        updatedAt: '2026-01-01T00:00:00Z',
+      };
       const getTuple = vi.fn().mockResolvedValue({
         checkpoint: { channel_values: { userPreferences: priorPrefs } },
       });
@@ -413,4 +417,3 @@ describe('AgentBuilder', () => {
     });
   });
 });
-

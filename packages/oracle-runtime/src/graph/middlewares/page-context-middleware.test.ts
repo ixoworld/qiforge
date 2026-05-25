@@ -75,9 +75,7 @@ describe('createPageContextMiddleware', () => {
     );
 
     const passed = handler.mock.calls[0][0] as { systemMessage: SystemMessage };
-    expect(String(passed.systemMessage.content)).toContain(
-      'switched pages',
-    );
+    expect(String(passed.systemMessage.content)).toContain('switched pages');
     expect(String(passed.systemMessage.content)).toContain('!new:ixo');
     expect(String(passed.systemMessage.content)).toContain('!old:ixo');
   });

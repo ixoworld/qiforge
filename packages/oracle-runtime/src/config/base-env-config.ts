@@ -21,9 +21,7 @@ export interface BaseEnvAccessor {
     key: K,
     defaultValue?: BaseEnvWithDerived[K],
   ): BaseEnvWithDerived[K] | undefined;
-  getOrThrow<K extends keyof BaseEnvWithDerived>(
-    key: K,
-  ): BaseEnvWithDerived[K];
+  getOrThrow<K extends keyof BaseEnvWithDerived>(key: K): BaseEnvWithDerived[K];
 }
 
 /**
@@ -49,7 +47,9 @@ let _singleton: ConfigService<BaseEnvWithDerived> | undefined;
 function singletonConfigService(): ConfigService<BaseEnvWithDerived> {
   if (!_singleton) {
     const parsed = baseEnvSchema.safeParse(process.env);
-    const baseVars = parsed.success ? parsed.data : (process.env as Record<string, unknown>);
+    const baseVars = parsed.success
+      ? parsed.data
+      : (process.env as Record<string, unknown>);
 
     let oracleDid: string | undefined;
     const matrixUserId =
@@ -68,9 +68,7 @@ function singletonConfigService(): ConfigService<BaseEnvWithDerived> {
       ...baseVars,
       ...(oracleDid ? { ORACLE_DID: oracleDid } : {}),
     };
-    _singleton = new ConfigService<BaseEnvWithDerived>(
-      merged,
-    );
+    _singleton = new ConfigService<BaseEnvWithDerived>(merged);
   }
   return _singleton;
 }

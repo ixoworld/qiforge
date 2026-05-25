@@ -51,7 +51,8 @@ export function describeWeatherCode(code: number): string {
 
 async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const resp = await fetch(url, { signal });
-  if (!resp.ok) throw new Error(`Open-Meteo HTTP ${resp.status} ${resp.statusText}`);
+  if (!resp.ok)
+    throw new Error(`Open-Meteo HTTP ${resp.status} ${resp.statusText}`);
   return resp.json();
 }
 

@@ -1,8 +1,5 @@
 import type * as IxoCommon from '@ixo/common';
-import {
-  type ChatSession,
-  type SessionManagerService,
-} from '@ixo/common';
+import { type ChatSession, type SessionManagerService } from '@ixo/common';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

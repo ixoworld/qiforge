@@ -39,8 +39,7 @@ function makeFetcher(opts: {
   ucanService: ReturnType<typeof makeUcanService>;
   config?: ConfigService;
 }): UserContextFetcher {
-  const config =
-    opts.config ?? makeConfig({ MEMORY_ENGINE_URL, ORACLE_DID });
+  const config = opts.config ?? makeConfig({ MEMORY_ENGINE_URL, ORACLE_DID });
   return new UserContextFetcher(
     opts.cache as unknown as Cache,
     opts.memoryEngine as unknown as MemoryEngineService | null,

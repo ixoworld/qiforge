@@ -103,9 +103,9 @@ describe('EditorPlugin', () => {
         state: baseState,
       },
     });
-    expect((await plugin.getRequestTools(ctxNoSandbox)).map((t) => t.name)).toEqual(
-      [],
-    );
+    expect(
+      (await plugin.getRequestTools(ctxNoSandbox)).map((t) => t.name),
+    ).toEqual([]);
 
     // Sandbox available + URL configured → tool surfaces
     const ctxWithSandbox = makeRuntimeContext({
@@ -208,4 +208,3 @@ describe('EditorPlugin: standalone tool schema', () => {
     expect(badRoom.success).toBe(false);
   });
 });
-

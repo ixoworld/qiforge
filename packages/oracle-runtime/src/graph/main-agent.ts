@@ -21,10 +21,7 @@ import {
   type RunConfig,
   type RuntimeStateInput,
 } from '../runtime-context/build-runtime.js';
-import type {
-  CompiledMainAgent,
-  MainAgentArgs,
-} from './main-agent-types.js';
+import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
 import {
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
@@ -331,7 +328,6 @@ export async function createMainAgent(
     systemPrompt: prompt,
     ...(checkpointer ? { checkpointer } : {}),
     name: identity.name,
-    
   });
 }
 

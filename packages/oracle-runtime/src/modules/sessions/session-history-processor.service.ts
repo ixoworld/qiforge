@@ -1,9 +1,6 @@
 // VALUE imports required for Nest DI — `design:paramtypes` metadata needs
 // the runtime constructor, not a stripped `type`-only reference.
-import {
-  MemoryEngineService,
-  SessionManagerService,
-} from '@ixo/common';
+import { MemoryEngineService, SessionManagerService } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -324,8 +321,8 @@ export class SessionHistoryProcessor {
 
     try {
       const matrixUserId = `@did-${did.replace(/:/g, '-')}:${userHomeServer}`;
-      const displayName = await MatrixManager.getInstance()
-        .getDisplayName(matrixUserId);
+      const displayName =
+        await MatrixManager.getInstance().getDisplayName(matrixUserId);
       const trimmed = displayName?.trim();
       if (trimmed) return trimmed;
     } catch (error) {

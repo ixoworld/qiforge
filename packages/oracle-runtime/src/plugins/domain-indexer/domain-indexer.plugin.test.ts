@@ -7,7 +7,10 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
-import { makeBuildCtx, makeRuntimeContext } from '../../registries/test-fixtures.js';
+import {
+  makeBuildCtx,
+  makeRuntimeContext,
+} from '../../registries/test-fixtures.js';
 import { DomainIndexerPlugin } from './domain-indexer.plugin.js';
 
 const BASE_URL = 'https://indexer.test';
@@ -22,7 +25,10 @@ function ctxWithNetwork(
   return makeBuildCtx({ config: { NETWORK: network } });
 }
 
-function subAgentFor(plugin: DomainIndexerPlugin, ctx: PluginContext): PluginSubAgent {
+function subAgentFor(
+  plugin: DomainIndexerPlugin,
+  ctx: PluginContext,
+): PluginSubAgent {
   const [first] = plugin.getSubAgents(ctx);
   if (!first) throw new Error('expected one sub-agent');
   return first;
@@ -129,7 +135,9 @@ describe('DomainIndexerPlugin', () => {
 
     rt.assertNoCollisions();
     rt.assertManifestValid();
-    const listing = rt.listCapabilities().find((c) => c.name === 'domain-indexer');
+    const listing = rt
+      .listCapabilities()
+      .find((c) => c.name === 'domain-indexer');
     expect(listing).toBeDefined();
     expect(listing?.visibility).toBe('always');
     expect(listing?.loaded).toBe(true);

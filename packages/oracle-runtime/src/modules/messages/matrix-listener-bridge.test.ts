@@ -1,8 +1,5 @@
 import { type SessionManagerService } from '@ixo/common';
-import {
-  type MessageEvent,
-  type MessageEventContent,
-} from '@ixo/matrix';
+import { type MessageEvent, type MessageEventContent } from '@ixo/matrix';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeConfig } from '../../testing/nest-doubles.js';
 import {
@@ -27,7 +24,9 @@ type RawEvent = {
   origin_server_ts?: number;
 };
 
-function makeEvent(overrides: Partial<RawEvent> = {}): MessageEvent<MessageEventContent> {
+function makeEvent(
+  overrides: Partial<RawEvent> = {},
+): MessageEvent<MessageEventContent> {
   const base: RawEvent = {
     event_id: 'evt-1',
     sender: USER_SENDER,
@@ -59,10 +58,7 @@ interface Harness {
 async function build(): Promise<Harness> {
   const sessions = makeSessionManagerStub();
   let onMessageCallback:
-    | ((
-        roomId: string,
-        event: MessageEvent<MessageEventContent>,
-      ) => void)
+    | ((roomId: string, event: MessageEvent<MessageEventContent>) => void)
     | undefined;
   const unsubscribe = vi.fn();
   sessions.matrixManger.onMessage.mockImplementation(
@@ -272,8 +268,9 @@ describe('MatrixListenerBridge', () => {
       );
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
 
-      const secondCalls =
-        h.sessions.matrixManger.getEventById.mock.calls.map((c) => c[1]);
+      const secondCalls = h.sessions.matrixManger.getEventById.mock.calls.map(
+        (c) => c[1],
+      );
       // mid already cached -> root resolved via cache; only the
       // post-resolution getEventById(threadId='root') for langchainThreadId.
       expect(secondCalls).not.toContain('mid');
@@ -322,10 +319,9 @@ describe('MatrixListenerBridge', () => {
       // Must terminate (no infinite loop). Cycle visited set bails out.
       expect(Date.now() - startTime).toBeLessThan(2000);
       // Each cycle node visited at most once during the walk.
-      const walkCalls =
-        h.sessions.matrixManger.getEventById.mock.calls.filter(
-          ([, id]) => id === 'a' || id === 'b',
-        );
+      const walkCalls = h.sessions.matrixManger.getEventById.mock.calls.filter(
+        ([, id]) => id === 'a' || id === 'b',
+      );
       // 'a' read once (initial inReplyTo lookup), 'b' read once (parent),
       // 'a' would short-circuit via visited Set. Total walk calls: 2.
       expect(walkCalls.length).toBeLessThanOrEqual(3);
@@ -446,7 +442,8 @@ describe('MatrixListenerBridge', () => {
         for (let i = 0; i < 6; i += 1) await Promise.resolve();
 
         expect(deliverHandler).toHaveBeenCalledTimes(1);
-        const payload = deliverHandler.mock.calls[0]?.[0] as MatrixIncomingMessage;
+        const payload = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
         expect(payload.message).toBe('caption');
         expect(payload.attachments).toEqual([
           {
@@ -492,7 +489,8 @@ describe('MatrixListenerBridge', () => {
         await vi.advanceTimersByTimeAsync(500);
         for (let i = 0; i < 6; i += 1) await Promise.resolve();
 
-        const payload = deliverHandler.mock.calls[0]?.[0] as MatrixIncomingMessage;
+        const payload = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
         expect(payload.message).toBe('User shared a file: doc.pdf');
         expect(payload.attachments).toHaveLength(1);
       } finally {
@@ -527,9 +525,11 @@ describe('MatrixListenerBridge', () => {
           );
           // Reach into the private buffer to verify a fresh entry exists
           // with only the re-entry event, not the original.
-          const buffer = (h.bridge as unknown as {
-            buffer: Map<string, { events: { event: { eventId: string } }[] }>;
-          }).buffer;
+          const buffer = (
+            h.bridge as unknown as {
+              buffer: Map<string, { events: { event: { eventId: string } }[] }>;
+            }
+          ).buffer;
           const entry = buffer.get('root');
           bufferedEventIdsDuringDeliver = entry
             ? entry.events.map((e) => e.event.eventId)
@@ -713,7 +713,8 @@ describe('MatrixListenerBridge', () => {
         await vi.advanceTimersByTimeAsync(500);
         for (let i = 0; i < 6; i += 1) await Promise.resolve();
 
-        const payload = deliverHandler.mock.calls[0]?.[0] as MatrixIncomingMessage;
+        const payload = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
         expect(payload.did).toBe('did:ixo:abc');
       } finally {
         vi.useRealTimers();
@@ -750,9 +751,11 @@ describe('MatrixListenerBridge', () => {
 
         expect(deliverHandler).not.toHaveBeenCalled();
         expect(h.unsubscribe).toHaveBeenCalledTimes(1);
-        const buffer = (h.bridge as unknown as {
-          buffer: Map<string, unknown>;
-        }).buffer;
+        const buffer = (
+          h.bridge as unknown as {
+            buffer: Map<string, unknown>;
+          }
+        ).buffer;
         expect(buffer.size).toBe(0);
       } finally {
         vi.useRealTimers();

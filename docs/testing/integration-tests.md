@@ -24,8 +24,8 @@ Inside the runtime package, integration tests live next to source as `*.int.test
 // vitest.config.ts
 export default defineConfig({
   test: {
-    testTimeout: 120_000,             // real boot + LLM round-trip
-    fileParallelism: false,           // one Matrix admin user
+    testTimeout: 120_000, // real boot + LLM round-trip
+    fileParallelism: false, // one Matrix admin user
     setupFiles: ['./test/integration/setup.ts'],
     include: ['test/**/*.int.test.ts'],
   },
@@ -43,7 +43,10 @@ import { config as loadDotenv } from 'dotenv';
 import { resolve } from 'node:path';
 
 loadDotenv({ path: resolve(__dirname, '../../.env') });
-loadDotenv({ path: resolve(__dirname, '../../.env.integration'), override: true });
+loadDotenv({
+  path: resolve(__dirname, '../../.env.integration'),
+  override: true,
+});
 
 if (!process.env.TEST_USER_DID) {
   throw new Error(
@@ -67,9 +70,11 @@ let app: Awaited<ReturnType<typeof createOracleApp>>;
 let sessionId: string;
 
 beforeAll(async () => {
-  app = await createOracleApp({ /* ... */ });
+  app = await createOracleApp({
+    /* ... */
+  });
   await app.listen(0);
-  sessionId = await createTestSession(app);    // once
+  sessionId = await createTestSession(app); // once
 });
 
 afterAll(async () => {
@@ -78,7 +83,11 @@ afterAll(async () => {
 
 describe('weather tool', () => {
   it('returns current weather for Berlin', async () => {
-    const response = await chat(app, sessionId, "what's the weather in Berlin?");
+    const response = await chat(
+      app,
+      sessionId,
+      "what's the weather in Berlin?",
+    );
     expect(response).toMatch(/Berlin/i);
   });
 
@@ -90,7 +99,7 @@ describe('weather tool', () => {
 });
 ```
 
-When the test *is* about session isolation (cross-session recall, first-contact behaviour), mint per-test. Otherwise reuse.
+When the test _is_ about session isolation (cross-session recall, first-contact behaviour), mint per-test. Otherwise reuse.
 
 ## What NOT to do
 

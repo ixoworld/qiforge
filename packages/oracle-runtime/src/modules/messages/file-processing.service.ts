@@ -377,9 +377,7 @@ export class FileProcessingService {
                 mxcUri: attachment.mxcUri,
                 eventId: attachment.eventId,
                 category:
-                  category === 'unsupported'
-                    ? ('document' as const)
-                    : category,
+                  category === 'unsupported' ? ('document' as const) : category,
                 sandboxPath,
               }
             : null,

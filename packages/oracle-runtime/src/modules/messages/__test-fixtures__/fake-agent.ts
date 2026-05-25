@@ -8,14 +8,8 @@ import type { StreamEvent } from '@langchain/core/tracers/log_stream';
  * `StreamEvent[]` and replays them in order.
  */
 export interface FakeAgent {
-  streamEvents: (
-    input: unknown,
-    cfg: unknown,
-  ) => AsyncIterable<StreamEvent>;
-  invoke: (
-    input: unknown,
-    cfg: unknown,
-  ) => Promise<{ messages: unknown[] }>;
+  streamEvents: (input: unknown, cfg: unknown) => AsyncIterable<StreamEvent>;
+  invoke: (input: unknown, cfg: unknown) => Promise<{ messages: unknown[] }>;
 }
 
 /**
@@ -52,7 +46,7 @@ export function makeThrowingFakeAgent(error: Error): FakeAgent {
       return (async function* () {
         await Promise.resolve();
         throw error;
-         
+
         yield undefined as unknown as StreamEvent;
       })();
     },

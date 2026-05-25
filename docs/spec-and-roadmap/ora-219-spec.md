@@ -4,16 +4,16 @@ The full spec is at `specs/ORA-219-plugin-based-runtime.md`. ~2000 lines, struct
 
 ## What it covers
 
-| Part | Spec sections | What's in it |
-| --- | --- | --- |
-| Part I — Foundations | §1–§3 | Executive summary, goals + non-goals, the mental model (three levers, two contexts, big-picture diagram). |
-| Part II — Plugin API | §4–§8 | Plugin class shape, manifest schema, the two contexts, soft deps + shared state, config schema. |
-| Part III — Dynamic Plugin Loading | §9–§11 | Visibility tiers, the meta-tools, the `loadedPlugins` state field. |
-| Part IV — Runtime Integration | §12–§15 | Internal registries, LangGraph composition, boot sequence, `createOracleApp` and NestJS access. |
-| Part V — Bundled Plugins | §16–§17 | The bundled plugin catalog and per-plugin env vars. |
-| Part VI — DX | §18–§21 | The starter app shape, worked examples, testing harness, package layout. |
-| Part VII — Implementation | §22–§23 | Implementation checklist and open decisions. |
-| Part VIII — Reference | §24–§25 | Glossary and code-grounding appendix. |
+| Part                              | Spec sections | What's in it                                                                                              |
+| --------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------- |
+| Part I — Foundations              | §1–§3         | Executive summary, goals + non-goals, the mental model (three levers, two contexts, big-picture diagram). |
+| Part II — Plugin API              | §4–§8         | Plugin class shape, manifest schema, the two contexts, soft deps + shared state, config schema.           |
+| Part III — Dynamic Plugin Loading | §9–§11        | Visibility tiers, the meta-tools, the `loadedPlugins` state field.                                        |
+| Part IV — Runtime Integration     | §12–§15       | Internal registries, LangGraph composition, boot sequence, `createOracleApp` and NestJS access.           |
+| Part V — Bundled Plugins          | §16–§17       | The bundled plugin catalog and per-plugin env vars.                                                       |
+| Part VI — DX                      | §18–§21       | The starter app shape, worked examples, testing harness, package layout.                                  |
+| Part VII — Implementation         | §22–§23       | Implementation checklist and open decisions.                                                              |
+| Part VIII — Reference             | §24–§25       | Glossary and code-grounding appendix.                                                                     |
 
 ## How to read it
 
@@ -44,4 +44,4 @@ The biggest known divergences:
 
 The spec is treated as design history. We don't rewrite it to reflect what shipped — we leave the design as-was and note divergences in the task index and in these docs.
 
-If a *new* design decision is needed (not just clarification of an existing one), open a new spec file in `specs/` rather than editing ORA-219.
+If a _new_ design decision is needed (not just clarification of an existing one), open a new spec file in `specs/` rather than editing ORA-219.

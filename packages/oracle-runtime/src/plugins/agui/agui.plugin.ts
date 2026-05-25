@@ -15,19 +15,20 @@ import { createAguiSubAgent } from './agui-agent.js';
 const manifest: PluginManifest = {
   title: 'AG-UI',
   summary:
-    'Renders interactive UI components (tables, charts, forms) in the user\'s browser via AG-UI actions.',
+    "Renders interactive UI components (tables, charts, forms) in the user's browser via AG-UI actions.",
   whenToUse: [
     'User asks for an interactive table, chart, or form to be rendered.',
     'A response is best shown as a structured UI component rather than plain text.',
   ],
   whenNotToUse: [
     'No AG-UI actions are declared on this request (sub-agent is not built).',
-    'A plain text answer is sufficient — don\'t render UI just because you can.',
+    "A plain text answer is sufficient — don't render UI just because you can.",
   ],
   examples: [
     {
       user: 'Show me the results as a table.',
-      thought: 'Structured display — delegate to call_ag-ui_agent with the rows.',
+      thought:
+        'Structured display — delegate to call_ag-ui_agent with the rows.',
       tool: 'call_ag-ui_agent',
     },
   ],

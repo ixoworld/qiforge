@@ -24,7 +24,12 @@ describe('WeatherPlugin', () => {
     const { runtime, runtimeContext } = await createTestRuntime({
       plugins: [new WeatherPlugin()],
       mocks: {
-        fetch: async (url) => new Response(JSON.stringify({ /* ... */ })),
+        fetch: async (url) =>
+          new Response(
+            JSON.stringify({
+              /* ... */
+            }),
+          ),
       },
     });
     const tool = runtime.toolRegistry.toolByName('get_current_weather');
@@ -38,14 +43,14 @@ describe('WeatherPlugin', () => {
 
 ```ts
 interface CreateTestRuntimeOptions {
-  plugins: OraclePlugin[];                                       // required
+  plugins: OraclePlugin[]; // required
   features?: Partial<Record<string, FeatureToggle>>;
-  config?: Record<string, unknown>;                              // merged env vars
-  user?: Partial<RuntimeContext['user']>;                        // override user fields
+  config?: Record<string, unknown>; // merged env vars
+  user?: Partial<RuntimeContext['user']>; // override user fields
   session?: Partial<RuntimeContext['session']>;
   state?: Partial<ReadonlyState>;
   identity?: Partial<OracleIdentity>;
-  logger?: Logger;                                               // defaults to vi.fn() no-op
+  logger?: Logger; // defaults to vi.fn() no-op
   mocks?: {
     fetch?: FetchHandler;
     matrix?: MockMatrixOverrides;
@@ -71,7 +76,7 @@ interface TestRuntime {
   };
   runtimeContext: RuntimeContext;
   pluginContext: PluginContext;
-  ambient: AmbientServices;          // mock-backed
+  ambient: AmbientServices; // mock-backed
 }
 ```
 
@@ -81,15 +86,15 @@ interface TestRuntime {
 
 The default mocks come from `testing/mocks.ts`:
 
-| Adapter | Behaviour |
-| --- | --- |
-| `mockLogger` | `vi.fn()` for every level. No output. Calls are inspectable. |
-| `mockLlm` | Returns `'mock-response'` by default. Override via `mocks.llm.respondWith`. |
-| `mockMatrix` | All Matrix methods return empty/fixture data. Override per-method via `mocks.matrix`. |
-| `mockSecrets` | Returns a fixed `Record<string, string>` from `mocks.secrets`. Empty by default. |
-| `mockUcan` | `requireCapability` no-ops, `hasCapability` returns `true`, `mintInvocation` returns a stub. |
-| `mockEmit` | Records every event call for assertions. |
-| `fetch` | Defaults to throwing "fetch not stubbed". Pass `mocks.fetch` to handle requests. |
+| Adapter       | Behaviour                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| `mockLogger`  | `vi.fn()` for every level. No output. Calls are inspectable.                                 |
+| `mockLlm`     | Returns `'mock-response'` by default. Override via `mocks.llm.respondWith`.                  |
+| `mockMatrix`  | All Matrix methods return empty/fixture data. Override per-method via `mocks.matrix`.        |
+| `mockSecrets` | Returns a fixed `Record<string, string>` from `mocks.secrets`. Empty by default.             |
+| `mockUcan`    | `requireCapability` no-ops, `hasCapability` returns `true`, `mintInvocation` returns a stub. |
+| `mockEmit`    | Records every event call for assertions.                                                     |
+| `fetch`       | Defaults to throwing "fetch not stubbed". Pass `mocks.fetch` to handle requests.             |
 
 `MockMatrixOverrides` and `FetchHandler` are exported from `testing/mocks.ts` if you need explicit types.
 

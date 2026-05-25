@@ -419,7 +419,9 @@ export async function updatePage(
       );
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const newContentMd = await serverEditor.blocksToMarkdownLossy(newBlocks as any);
+      const newContentMd = await serverEditor.blocksToMarkdownLossy(
+        newBlocks as any,
+      );
       diff.content = { old: oldContentMd, new: newContentMd };
     }
 

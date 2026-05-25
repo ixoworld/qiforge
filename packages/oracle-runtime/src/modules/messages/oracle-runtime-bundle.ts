@@ -1,9 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { MainAgentHooks } from '../../graph/main-agent-types.js';
-import type {
-  MergedConfig,
-  OracleIdentity,
-} from '../../plugin-api/types.js';
+import type { MergedConfig, OracleIdentity } from '../../plugin-api/types.js';
 import type {
   ConfigSchemaRegistry,
   ManifestRegistry,

@@ -1,7 +1,4 @@
-export {
-  CreditsPlugin,
-  type CreditsPluginOptions,
-} from './credits.plugin.js';
+export { CreditsPlugin, type CreditsPluginOptions } from './credits.plugin.js';
 export {
   createCreditsMiddleware,
   type CreditsMiddlewareOptions,

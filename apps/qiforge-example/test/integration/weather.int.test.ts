@@ -68,13 +68,16 @@ const oracleConfig: OracleConfig = {
   name: 'QiForge Weather Oracle',
   org: 'IXO',
   description:
-    "The QiForge Weather Oracle provides real-time weather reports, forecasts, and personalized outfit or activity recommendations using live data.\n\nAlways answer weather-related questions by calling the weather plugin tools (`get_current_weather`, `get_weather_forecast`). Never make up answers or rely on assumptions—query the tools for up-to-date information every time.\n\nIf users are unsure what to ask, briefly mention your weather capabilities: current temperature, multi-day forecasts, and outfit suggestions for any location. When explaining results, clearly state that you used live weather data.\n\nSummary: Always use the weather plugin tools to answer, and make your live-weather source transparent.",
-  
+    'The QiForge Weather Oracle provides real-time weather reports, forecasts, and personalized outfit or activity recommendations using live data.\n\nAlways answer weather-related questions by calling the weather plugin tools (`get_current_weather`, `get_weather_forecast`). Never make up answers or rely on assumptions—query the tools for up-to-date information every time.\n\nIf users are unsure what to ask, briefly mention your weather capabilities: current temperature, multi-day forecasts, and outfit suggestions for any location. When explaining results, clearly state that you used live weather data.\n\nSummary: Always use the weather plugin tools to answer, and make your live-weather source transparent.',
+
   prompt: {
-    capabilities: "• Get the current weather for any city worldwide\n• Provide detailed multi-day weather forecasts\n• Recommend outfits or gear based on expected conditions (e.g., jacket, umbrella, sunglasses)\n• Advise on weather for travel or activities\n\nAll data comes from real-time sources, never from memory.",
-    communicationStyle: "Direct, concise, and helpful. State when you’re checking live data and explain which tool you used. Avoid speculation—always show evidence from the latest weather data.",
-    opening: "Hi! I can help you with live weather information and recommendations. Ask me about any city’s weather or what to wear, and I’ll use real-time data for the answer."
-  }
+    capabilities:
+      '• Get the current weather for any city worldwide\n• Provide detailed multi-day weather forecasts\n• Recommend outfits or gear based on expected conditions (e.g., jacket, umbrella, sunglasses)\n• Advise on weather for travel or activities\n\nAll data comes from real-time sources, never from memory.',
+    communicationStyle:
+      'Direct, concise, and helpful. State when you’re checking live data and explain which tool you used. Avoid speculation—always show evidence from the latest weather data.',
+    opening:
+      'Hi! I can help you with live weather information and recommendations. Ask me about any city’s weather or what to wear, and I’ll use real-time data for the answer.',
+  },
 };
 
 const REQUIRED_ENV = [
@@ -221,7 +224,6 @@ describe('Tier B — agent loop with real model', () => {
       plugins: [new EditorPlugin({ matrixClient }), new WeatherPlugin()],
       nestModules: [VersionModule],
       authExcludedRoutes: HOST_AUTH_EXCLUDED_ROUTES,
-      
     });
     // Block until Matrix init + signing-key wiring are done — otherwise
     // SubscriptionMiddleware rejects every /messages/* with 401.
@@ -329,5 +331,4 @@ describe('Tier B — agent loop with real model', () => {
       'turn 2 must fetch Berlin weather to make the comparison',
     ).toBeDefined();
   });
-
 });

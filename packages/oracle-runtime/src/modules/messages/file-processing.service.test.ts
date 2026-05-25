@@ -284,19 +284,18 @@ describe('FileProcessingService', () => {
     });
 
     it('rejects non-http/https schemes', async () => {
-      await expect(svc.processFileFromUrl('ftp://example.com/x.pdf')).rejects.toThrow(
-        /Invalid URI scheme/,
-      );
-      await expect(svc.processFileFromUrl('file:///etc/passwd')).rejects.toThrow(
-        /Invalid URI scheme/,
-      );
+      await expect(
+        svc.processFileFromUrl('ftp://example.com/x.pdf'),
+      ).rejects.toThrow(/Invalid URI scheme/);
+      await expect(
+        svc.processFileFromUrl('file:///etc/passwd'),
+      ).rejects.toThrow(/Invalid URI scheme/);
     });
 
     it('re-validates each redirect hop and rejects when one points to an internal address', async () => {
-      fetchSpy
-        .mockResolvedValueOnce(
-          redirectResponse('http://127.0.0.1/secret.pdf'),
-        );
+      fetchSpy.mockResolvedValueOnce(
+        redirectResponse('http://127.0.0.1/secret.pdf'),
+      );
       await expect(
         svc.processFileFromUrl('http://example.com/file.pdf'),
       ).rejects.toThrow(/blocked internal address/);
@@ -497,9 +496,7 @@ describe('FileProcessingService', () => {
             cost: 0.01,
           }),
         )
-        .mockResolvedValueOnce(
-          new Response('boom', { status: 500 }),
-        );
+        .mockResolvedValueOnce(new Response('boom', { status: 500 }));
 
       const result = await svc.processAttachments(
         [
@@ -536,9 +533,7 @@ describe('FileProcessingService', () => {
         .mockResolvedValueOnce(
           jsonResponse({ path: '/workspace/output/pic.png' }),
         )
-        .mockResolvedValueOnce(
-          new Response('analysis boom', { status: 500 }),
-        );
+        .mockResolvedValueOnce(new Response('analysis boom', { status: 500 }));
 
       const result = await svc.processAttachments(
         [

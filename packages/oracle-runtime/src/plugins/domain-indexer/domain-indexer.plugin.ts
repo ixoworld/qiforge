@@ -44,7 +44,8 @@ function resolveDomainIndexerUrl(config: MergedConfig): string {
 
 const manifest: PluginManifest = {
   title: 'Domain Indexer',
-  summary: 'Domain analysis and entity lookup across the IXO ecosystem — organizations, projects, DAOs, DIDs.',
+  summary:
+    'Domain analysis and entity lookup across the IXO ecosystem — organizations, projects, DAOs, DIDs.',
   whenToUse: [
     'User asks "what is X?" or "tell me about X" for an organization, project, DAO, or DID.',
     'User needs the summary, overview, or FAQ of an IXO entity.',

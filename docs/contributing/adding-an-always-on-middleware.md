@@ -20,7 +20,7 @@ If the answer is "this is needed when plugin X is loaded", build it into plugin 
 ## Checklist
 
 - [ ] Implement the middleware factory (`createMyMiddleware(...) → AgentMiddleware`) in `packages/oracle-runtime/src/graph/middlewares/`.
-- [ ] Decide the position carefully. Most middlewares slot in *after* tool validation and retry; pre-LLM middlewares go between page-context and safety-guardrail; post-LLM middlewares go after safety-guardrail.
+- [ ] Decide the position carefully. Most middlewares slot in _after_ tool validation and retry; pre-LLM middlewares go between page-context and safety-guardrail; post-LLM middlewares go after safety-guardrail.
 - [ ] Wire it into `graph/main-agent.ts`'s middleware array.
 - [ ] Document the position and rationale in `architecture/graph-and-state.md`.
 - [ ] Export from `graph/index.ts` and re-export from `packages/oracle-runtime/src/index.ts` if hosts might want to reference it.
@@ -39,7 +39,7 @@ export function createMyMiddleware(options?: MyOptions): AgentMiddleware {
     name: 'MyMiddleware',
     beforeModel: async (state) => {
       // ...
-      return undefined;     // or a state update
+      return undefined; // or a state update
     },
     afterModel: async (state) => {
       // ...

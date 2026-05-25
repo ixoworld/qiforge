@@ -34,8 +34,9 @@ import * as SubagentAsTool from './subagent-as-tool.js';
 // fallback path forwards into the wrapper. Reset between tests via the
 // top-level `vi.clearAllMocks()` in beforeEach.
 vi.mock('./subagent-as-tool.js', async () => {
-  const actual =
-    await vi.importActual<typeof SubagentAsTool>('./subagent-as-tool.js');
+  const actual = await vi.importActual<typeof SubagentAsTool>(
+    './subagent-as-tool.js',
+  );
   return {
     ...actual,
     createSubagentAsTool: vi.fn(actual.createSubagentAsTool),
@@ -55,7 +56,9 @@ const STATE: RuntimeStateInput = {
   loadedPlugins: new Set(['memory']),
 };
 
-function makeAmbient(overrides: Partial<AmbientServices> = {}): AmbientServices {
+function makeAmbient(
+  overrides: Partial<AmbientServices> = {},
+): AmbientServices {
   return {
     config: { FOO: 'bar' },
     identity: IDENTITY,
@@ -89,7 +92,7 @@ describe('collectSubAgentsWithFallback — real flow', () => {
     vi.clearAllMocks();
   });
 
-  it('runs the sub-agent\'s inner PluginTool handler with a real RuntimeContext', async () => {
+  it("runs the sub-agent's inner PluginTool handler with a real RuntimeContext", async () => {
     const captured: { args?: unknown; ctx?: RuntimeContext } = {};
 
     const doSearch: PluginTool = {
@@ -138,25 +141,22 @@ describe('collectSubAgentsWithFallback — real flow', () => {
 
     expect(subAgentTool).toBeDefined();
 
-    await subAgentTool!.invoke(
-      { task: 'find climate stuff' },
-      {
-        configurable: { thread_id: 'parent-thread' },
-        context: {
-          user: {
-            did: 'did:ixo:user1',
-            matrixUserId: '@did-ixo-user1:ixo.world',
-            ucanDelegation: { raw: 'eyJtest', capabilities: [] },
-          },
-          session: {
-            id: 'sess-1',
-            client: 'portal',
-            requestId: 'req-1',
-            roomId: '!r:ixo.world',
-          },
+    await subAgentTool!.invoke({ task: 'find climate stuff' }, {
+      configurable: { thread_id: 'parent-thread' },
+      context: {
+        user: {
+          did: 'did:ixo:user1',
+          matrixUserId: '@did-ixo-user1:ixo.world',
+          ucanDelegation: { raw: 'eyJtest', capabilities: [] },
         },
-      } as unknown as ToolRuntime,
-    );
+        session: {
+          id: 'sess-1',
+          client: 'portal',
+          requestId: 'req-1',
+          roomId: '!r:ixo.world',
+        },
+      },
+    } as unknown as ToolRuntime);
 
     // The PluginTool handler must have been invoked with the model's args
     // and observed a fully-built RuntimeContext (no NOOP).
@@ -268,20 +268,17 @@ describe('collectSubAgentsWithFallback — real flow', () => {
       passthroughTools: [passthroughWrapped],
     });
 
-    await subAgentTool!.invoke(
-      { task: 'do work' },
-      {
-        configurable: { thread_id: 'parent' },
-        context: {
-          user: {
-            did: 'did:ixo:user1',
-            matrixUserId: '@did-ixo-user1:ixo.world',
-            ucanDelegation: { raw: 'eyJtest', capabilities: [] },
-          },
-          session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
+    await subAgentTool!.invoke({ task: 'do work' }, {
+      configurable: { thread_id: 'parent' },
+      context: {
+        user: {
+          did: 'did:ixo:user1',
+          matrixUserId: '@did-ixo-user1:ixo.world',
+          ucanDelegation: { raw: 'eyJtest', capabilities: [] },
         },
-      } as unknown as ToolRuntime,
-    );
+        session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
+      },
+    } as unknown as ToolRuntime);
 
     expect(passthroughCalls).toEqual([{ content: 'note' }]);
   });

@@ -1,11 +1,5 @@
-import {
-  type ChatSession,
-  type SessionManagerService,
-} from '@ixo/common';
-import {
-  BadRequestException,
-  NotFoundException,
-} from '@nestjs/common';
+import { type ChatSession, type SessionManagerService } from '@ixo/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { Request } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';

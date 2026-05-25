@@ -62,13 +62,13 @@ graph TD
 
 ## What's different from the legacy `apps/app`
 
-| Aspect | Legacy `apps/app` | Plugin runtime |
-| --- | --- | --- |
-| Adding functionality | Edit `main-agent.ts` (1052 lines) to inline tools/sub-agents/middlewares | Author a plugin class; the runtime collects via registries |
-| Toggling features | Edit the agent | `features: { name: boolean | 'auto' }` on `createOracleApp` |
-| Env vars | One monolithic schema | Composed: base + per-plugin schemas |
-| Sub-agent init failures | `Promise.allSettled` directly in `main-agent.ts` | Same semantics, in `collectSubAgentsWithFallback` |
-| Apps-vs-framework boundary | Blurred — `apps/app` was the whole oracle | Clear — framework is `packages/oracle-runtime/`, fork is `apps/<your-app>` |
+| Aspect                     | Legacy `apps/app`                                                        | Plugin runtime                                                             |
+| -------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------- | ---------------------------- |
+| Adding functionality       | Edit `main-agent.ts` (1052 lines) to inline tools/sub-agents/middlewares | Author a plugin class; the runtime collects via registries                 |
+| Toggling features          | Edit the agent                                                           | `features: { name: boolean                                                 | 'auto' }`on`createOracleApp` |
+| Env vars                   | One monolithic schema                                                    | Composed: base + per-plugin schemas                                        |
+| Sub-agent init failures    | `Promise.allSettled` directly in `main-agent.ts`                         | Same semantics, in `collectSubAgentsWithFallback`                          |
+| Apps-vs-framework boundary | Blurred — `apps/app` was the whole oracle                                | Clear — framework is `packages/oracle-runtime/`, fork is `apps/<your-app>` |
 
 ## Read next
 

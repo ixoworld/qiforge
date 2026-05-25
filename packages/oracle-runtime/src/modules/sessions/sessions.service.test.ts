@@ -87,11 +87,13 @@ describe('SessionsService', () => {
       ORACLE_NAME,
       ORACLE_DID,
     });
-    sessionManager.matrixManger.getOracleRoomIdWithHomeServer.mockResolvedValue({
-      roomId: MAIN_ROOM_ID,
-      roomAlias: '#alias:home.server',
-      oracleRoomFullAlias: '#full:home.server',
-    });
+    sessionManager.matrixManger.getOracleRoomIdWithHomeServer.mockResolvedValue(
+      {
+        roomId: MAIN_ROOM_ID,
+        roomAlias: '#alias:home.server',
+        oracleRoomFullAlias: '#full:home.server',
+      },
+    );
     sessionManager.listSessions.mockResolvedValue({ sessions: [], total: 0 });
     sessionManager.createSession.mockResolvedValue(makeCreateResponse());
     sessionManager.deleteSession.mockResolvedValue(undefined);

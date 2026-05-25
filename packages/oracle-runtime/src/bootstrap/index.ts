@@ -10,9 +10,7 @@ export type {
 export { RuntimeAppModule } from './runtime-app-module.js';
 export type { RuntimeAppModuleOptions } from './runtime-app-module.js';
 
-export {
-  registerGracefulShutdown,
-} from './graceful-shutdown.js';
+export { registerGracefulShutdown } from './graceful-shutdown.js';
 export type { GracefulShutdownOptions } from './graceful-shutdown.js';
 
 export { resolvePlugins, topoSort } from './plugin-loader.js';

@@ -81,7 +81,9 @@ export function buildRuntimeContext(
     ucan: bindUcan(ambient.ucan, runConfig.user.ucanDelegation),
     llm: ambient.llm,
     emit: ambient.emit.forSession(runConfig.session.id),
-    logger: ambient.logger.child?.({ plugin: runConfig.pluginName }) ?? ambient.logger,
+    logger:
+      ambient.logger.child?.({ plugin: runConfig.pluginName }) ??
+      ambient.logger,
     abortSignal: runConfig.abortSignal,
     shared: buildSharedAccessors(stateInput, runConfig),
     toolCallId: runConfig.toolCallId,
@@ -101,11 +103,23 @@ The input shape:
 
 ```ts
 interface RunConfig {
-  user: { did: string; matrixUserId: string; ucanDelegation: UcanDelegation; timezone?; currentTime? };
-  session: { id: string; client: 'portal' | 'matrix' | 'slack'; wsId?; requestId; roomId? };
+  user: {
+    did: string;
+    matrixUserId: string;
+    ucanDelegation: UcanDelegation;
+    timezone?;
+    currentTime?;
+  };
+  session: {
+    id: string;
+    client: 'portal' | 'matrix' | 'slack';
+    wsId?;
+    requestId;
+    roomId?;
+  };
   abortSignal: AbortSignal;
   toolCallId?: string;
-  pluginName?: string;       // for logger child binding
+  pluginName?: string; // for logger child binding
 }
 ```
 
@@ -113,18 +127,18 @@ interface RunConfig {
 
 ## What's eager vs lazy
 
-| Field | When computed |
-| --- | --- |
-| `user`, `session` | Eager — extracted from runConfig on context build. |
-| `history.messages`, `history.state` | Eager — reference into `stateInput`. |
-| `history.userContext` | Eager — reference into `stateInput.userContext` (mutated by Memory plugin's middleware). |
-| `secrets.getIndex`, `secrets.getValues` | Lazy — round-trip to Matrix on call. |
-| `matrix.*` | Lazy — round-trip on call. |
-| `ucan.mintInvocation` | Lazy — signs on call (caches per-target). |
-| `ucan.resolveServiceDid` | Lazy — DID document fetch + cache. |
-| `llm.get` | Lazy — model construction on call. |
-| `emit.*` | Lazy — emits events on the per-session channel on call. |
-| `shared.<key>` | Lazy — each access invokes the registered accessor with the latest state. |
+| Field                                   | When computed                                                                            |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `user`, `session`                       | Eager — extracted from runConfig on context build.                                       |
+| `history.messages`, `history.state`     | Eager — reference into `stateInput`.                                                     |
+| `history.userContext`                   | Eager — reference into `stateInput.userContext` (mutated by Memory plugin's middleware). |
+| `secrets.getIndex`, `secrets.getValues` | Lazy — round-trip to Matrix on call.                                                     |
+| `matrix.*`                              | Lazy — round-trip on call.                                                               |
+| `ucan.mintInvocation`                   | Lazy — signs on call (caches per-target).                                                |
+| `ucan.resolveServiceDid`                | Lazy — DID document fetch + cache.                                                       |
+| `llm.get`                               | Lazy — model construction on call.                                                       |
+| `emit.*`                                | Lazy — emits events on the per-session channel on call.                                  |
+| `shared.<key>`                          | Lazy — each access invokes the registered accessor with the latest state.                |
 
 The eager fields are cheap (object property access). The lazy ones do real work — plugins should be aware that calling them isn't free.
 
@@ -148,7 +162,7 @@ return tool(
 );
 ```
 
-So the tool handler always sees a fresh `RuntimeContext` — even though the *tool definition* was cached at boot.
+So the tool handler always sees a fresh `RuntimeContext` — even though the _tool definition_ was cached at boot.
 
 ## Read next
 

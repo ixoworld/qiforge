@@ -197,7 +197,11 @@ describe('resolvePlugins — hard-dep cascade', () => {
       env: {},
     });
     expect(result.loaded).toEqual([]);
-    expect(result.excluded.map((e) => e.plugin).sort()).toEqual(['a', 'b', 'c']);
+    expect(result.excluded.map((e) => e.plugin).sort()).toEqual([
+      'a',
+      'b',
+      'c',
+    ]);
     expect(result.excluded.find((e) => e.plugin === 'b')?.cause).toBe(
       'cascaded',
     );

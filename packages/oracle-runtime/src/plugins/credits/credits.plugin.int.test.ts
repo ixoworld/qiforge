@@ -39,7 +39,14 @@
 import type { GetMySubscriptionsResponseDto } from '@ixo/common';
 import { CACHE_MANAGER, type Cache } from '@nestjs/cache-manager';
 import { Redis } from 'ioredis';
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'vitest';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  test,
+} from 'vitest';
 import {
   allCaps,
   ChatClient,
@@ -247,7 +254,10 @@ describe('credits plugin — live middleware against real Redis', () => {
     // exercises the full graph: SubscriptionMiddleware (cache hit) →
     // CreditsMiddleware.beforeModel (passes, balance > 0) → LLM call →
     // CreditsMiddleware.afterModel (deducts).
-    const stream = chatClient.stream(sessionId, 'Say hi in one short sentence.');
+    const stream = chatClient.stream(
+      sessionId,
+      'Say hi in one short sentence.',
+    );
     for await (const _ of stream) {
       // drain
     }

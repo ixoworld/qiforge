@@ -31,9 +31,7 @@ const VALID_UCAN_DELEGATION = {
   capabilities: [],
 };
 
-function buildRequest(
-  authData?: Record<string, unknown>,
-): Request {
+function buildRequest(authData?: Record<string, unknown>): Request {
   return {
     originalUrl: '/test',
     authData,
@@ -59,7 +57,10 @@ async function bootstrapMiddleware({
 }: {
   cache: CacheStub;
   config: Record<string, unknown>;
-  ucanPort?: { hasSigningKey: () => boolean; createServiceInvocation: ReturnType<typeof vi.fn> };
+  ucanPort?: {
+    hasSigningKey: () => boolean;
+    createServiceInvocation: ReturnType<typeof vi.fn>;
+  };
   creditSink?: {
     setSubscriptionPayload: ReturnType<typeof vi.fn>;
     overrideUserBalance: ReturnType<typeof vi.fn>;

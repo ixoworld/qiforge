@@ -36,7 +36,9 @@ async function buildRegistries(): Promise<{
     }),
     getTools: () => [
       makeTool('composio_send_email', { description: 'Send an email.' }),
-      makeTool('composio_create_card', { description: 'Create a Trello card.' }),
+      makeTool('composio_create_card', {
+        description: 'Create a Trello card.',
+      }),
     ],
   });
   const memory = makePlugin({
@@ -46,7 +48,9 @@ async function buildRegistries(): Promise<{
       summary: 'Persistent memory.',
       visibility: 'always',
     }),
-    getTools: () => [makeTool('search_memory', { description: 'Search memory.' })],
+    getTools: () => [
+      makeTool('search_memory', { description: 'Search memory.' }),
+    ],
   });
   const tracing = makePlugin({
     name: 'tracing',

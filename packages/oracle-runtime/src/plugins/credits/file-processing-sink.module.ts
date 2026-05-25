@@ -1,4 +1,9 @@
-import { type DynamicModule, Logger, Module, type Provider } from '@nestjs/common';
+import {
+  type DynamicModule,
+  Logger,
+  Module,
+  type Provider,
+} from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import {
   FILE_PROCESSING_CREDIT_SINK,

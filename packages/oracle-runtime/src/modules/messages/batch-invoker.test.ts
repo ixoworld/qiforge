@@ -68,15 +68,15 @@ function build(
   };
   const invoke = vi.fn().mockResolvedValue(invokeResult);
 
-  const langGraphConfig: Record<string, unknown> = builtAgentOverrides
-    .langGraphConfig ?? {
-    version: 'v2',
-    streamMode: ['updates', 'messages'],
-    recursionLimit: 150,
-    configurable: { thread_id: SESSION_ID },
-    context: { user: { did: USER_DID } },
-    signal: abortController.signal,
-  };
+  const langGraphConfig: Record<string, unknown> =
+    builtAgentOverrides.langGraphConfig ?? {
+      version: 'v2',
+      streamMode: ['updates', 'messages'],
+      recursionLimit: 150,
+      configurable: { thread_id: SESSION_ID },
+      context: { user: { did: USER_DID } },
+      signal: abortController.signal,
+    };
 
   const builtAgent: BuiltAgent = {
     agent: { invoke } as unknown as BuiltAgent['agent'],

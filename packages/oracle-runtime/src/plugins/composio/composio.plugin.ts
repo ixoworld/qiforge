@@ -53,8 +53,7 @@ const manifest: PluginManifest = {
     },
     {
       user: 'Send an email to the team',
-      thought:
-        'Must verify Gmail is connected before calling any Gmail tool.',
+      thought: 'Must verify Gmail is connected before calling any Gmail tool.',
       tool: 'COMPOSIO_MANAGE_CONNECTIONS',
       args: { toolkit: 'gmail' },
     },

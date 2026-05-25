@@ -1,8 +1,5 @@
 import { encodingForModel, type Tiktoken } from 'js-tiktoken';
-import type {
-  ManifestExample,
-  PluginManifest,
-} from '../plugin-api/types.js';
+import type { ManifestExample, PluginManifest } from '../plugin-api/types.js';
 
 /** A plugin manifest paired with the name of the plugin that contributed it. */
 export interface Tier1Entry {

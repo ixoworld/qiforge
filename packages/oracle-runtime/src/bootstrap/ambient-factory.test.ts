@@ -80,7 +80,10 @@ describe('buildAmbientServices', () => {
 
   it('UcanAdapter.hasCapability/requireCapability scan the delegation array', () => {
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(makeFakeUcanService(), makeFakeBlobStoreService()),
+      nestApp: makeNestAppStub(
+        makeFakeUcanService(),
+        makeFakeBlobStoreService(),
+      ),
       config: {},
       identity: IDENTITY,
       availablePlugins: new Set(),
@@ -90,12 +93,12 @@ describe('buildAmbientServices', () => {
     const delegation = {
       capabilities: [{ resource: 'ixo:memory', action: 'read' }] as const,
     };
-    expect(
-      ambient.ucan.hasCapability(delegation, 'ixo:memory', 'read'),
-    ).toBe(true);
-    expect(
-      ambient.ucan.hasCapability(delegation, 'ixo:memory', 'write'),
-    ).toBe(false);
+    expect(ambient.ucan.hasCapability(delegation, 'ixo:memory', 'read')).toBe(
+      true,
+    );
+    expect(ambient.ucan.hasCapability(delegation, 'ixo:memory', 'write')).toBe(
+      false,
+    );
     expect(() =>
       ambient.ucan.requireCapability(delegation, 'ixo:memory', 'read'),
     ).not.toThrow();
@@ -137,7 +140,10 @@ describe('buildAmbientServices', () => {
 
   it('LlmAdapter.get resolves a chat model for a known role', () => {
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(makeFakeUcanService(), makeFakeBlobStoreService()),
+      nestApp: makeNestAppStub(
+        makeFakeUcanService(),
+        makeFakeBlobStoreService(),
+      ),
       config: {},
       identity: IDENTITY,
       availablePlugins: new Set(),

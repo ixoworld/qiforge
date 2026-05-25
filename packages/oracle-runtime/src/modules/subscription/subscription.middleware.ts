@@ -115,13 +115,14 @@ export class SubscriptionMiddleware implements NestMiddleware {
     );
 
     if (!this.creditSink) {
-    this.logger.warn('No SubscriptionCreditSink configured; credits plugin is not active. Enforcing 402 policy directly based on subscription API only.');
+      this.logger.warn(
+        'No SubscriptionCreditSink configured; credits plugin is not active. Enforcing 402 policy directly based on subscription API only.',
+      );
     }
 
     try {
       // Check if authData is available (set upstream by AuthHeaderMiddleware)
-      const authData = (req as Request & { authData?: AuthDataShape })
-        .authData;
+      const authData = (req as Request & { authData?: AuthDataShape }).authData;
       if (!authData) {
         this.logger.warn('No auth data available, skipping subscription check');
         req.subscriptionData = undefined;

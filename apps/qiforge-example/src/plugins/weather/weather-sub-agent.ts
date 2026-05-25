@@ -44,7 +44,7 @@ const PROMPT = [
   '1. Call get_weather_forecast with the city (and days if specified).',
   '2. Pick the most relevant day. If temperatures are Fahrenheit, convert to',
   '   Celsius: c = (f - 32) * 5/9.',
-  '3. Call recommend_outfit with that day\'s max temp (Celsius) and conditions.',
+  "3. Call recommend_outfit with that day's max temp (Celsius) and conditions.",
   '4. Reply with ONE sentence combining the forecast and the outfit advice,',
   '   e.g. "Berlin tomorrow: 14°C with rain — wear a light jacket and bring an umbrella."',
   '',

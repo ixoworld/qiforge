@@ -19,7 +19,10 @@ import {
 } from './messages.service.js';
 import { type PostMessageSyncer } from './post-message-syncer.js';
 import { type RequestPreparer } from './request-preparer.js';
-import { type SseStreamRunner, type StreamRunInput } from './sse-stream-runner.js';
+import {
+  type SseStreamRunner,
+  type StreamRunInput,
+} from './sse-stream-runner.js';
 import { FakeResponse } from './__test-fixtures__/fake-response.js';
 import {
   makeCheckpointSync,
@@ -59,7 +62,10 @@ function makeSendPayload(
 
 interface ServiceUnderTest {
   svc: MessagesService;
-  preparer: { prepare: ReturnType<typeof vi.fn>; validateSessionId: ReturnType<typeof vi.fn> };
+  preparer: {
+    prepare: ReturnType<typeof vi.fn>;
+    validateSessionId: ReturnType<typeof vi.fn>;
+  };
   streamer: { run: ReturnType<typeof vi.fn> };
   batchInvoker: { invoke: ReturnType<typeof vi.fn> };
   fileProcessing: { processAttachments: ReturnType<typeof vi.fn> };
@@ -530,17 +536,16 @@ describe('MessagesService', () => {
     it('registered handler invokes sendMessage with clientType=matrix and msgFromMatrixRoom=true', async () => {
       const { svc, matrixBridge, batchInvoker, sessions } = build();
       svc.onModuleInit();
-      const handler = matrixBridge.setDeliverHandler.mock.calls[0]![0] as (
-        msg: {
-          did: string;
-          message: string;
-          threadId: string;
-          langchainThreadId?: string;
-          roomId: string;
-          homeServer?: string;
-          attachments?: AttachmentDto[];
-        },
-      ) => Promise<unknown>;
+      const handler = matrixBridge.setDeliverHandler.mock
+        .calls[0]![0] as (msg: {
+        did: string;
+        message: string;
+        threadId: string;
+        langchainThreadId?: string;
+        roomId: string;
+        homeServer?: string;
+        attachments?: AttachmentDto[];
+      }) => Promise<unknown>;
 
       await handler({
         did: USER_DID,

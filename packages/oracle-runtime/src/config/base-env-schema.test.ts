@@ -52,7 +52,9 @@ describe('baseEnvSchema', () => {
     // wrapping the inner expect in `if (parsed.success)`, which the lint
     // rule flags as a conditional assertion.
     if (!parsed.success) {
-      throw new Error(`expected parse to succeed, got: ${parsed.error.message}`);
+      throw new Error(
+        `expected parse to succeed, got: ${parsed.error.message}`,
+      );
     }
     expect(parsed.data.PORT).toBe(4321);
   });

@@ -1,7 +1,4 @@
-import {
-  SessionManagerService,
-  type ChatSession,
-} from '@ixo/common';
+import { SessionManagerService, type ChatSession } from '@ixo/common';
 import {
   type MatrixManager,
   type MessageEvent,
@@ -81,7 +78,9 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   private readonly threadRootCache = new Map<string, string>();
   private readonly buffer = new Map<string, BufferEntry>();
   private readonly matrixManager: MatrixManager;
-  private deliverHandler: ((msg: MatrixIncomingMessage) => Promise<unknown>) | null = null;
+  private deliverHandler:
+    | ((msg: MatrixIncomingMessage) => Promise<unknown>)
+    | null = null;
 
   constructor(
     private readonly sessions: SessionManagerService,
@@ -133,8 +132,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       msgtype === 'm.text' &&
       'body' in event.content &&
       typeof event.content.body === 'string';
-    const isFile =
-      typeof msgtype === 'string' && FILE_MSGTYPES.has(msgtype);
+    const isFile = typeof msgtype === 'string' && FILE_MSGTYPES.has(msgtype);
     if (!isText && !isFile) return;
 
     const threadId = await this.getThreadRoot(event, roomId);
@@ -278,9 +276,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         ...(mentions && { mentions }),
         ...(relatesTo && { relatesTo }),
         ...(attachments.length > 0 && { attachments }),
-      })) as
-        | undefined
-        | { message: { type: string; content: string } };
+      })) as undefined | { message: { type: string; content: string } };
 
       if (!aiResponse) {
         this.logger.warn(`No AI response returned for threadId=${threadId}`);

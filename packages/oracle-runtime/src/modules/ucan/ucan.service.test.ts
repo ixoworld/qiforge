@@ -74,7 +74,8 @@ describe('UcanService', () => {
       Math.floor(Date.now() / 1000) + 600,
     );
     expect(cache.set).toHaveBeenCalled();
-    const [key, val] = (cache.set.mock.calls[0] as unknown as [string, string]) ?? [];
+    const [key, val] =
+      (cache.set.mock.calls[0] as unknown as [string, string]) ?? [];
     expect(key).toBe('ucan_delegation_did:ixo:user1');
     expect(val).toBe('raw-delegation');
   });

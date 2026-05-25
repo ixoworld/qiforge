@@ -32,7 +32,11 @@ import {
   type ConditionConfig,
 } from './blocknote-helper.js';
 import { emojify, unemojify } from '../../utils/emoji.js';
-import { findAndReplaceInDoc, insertBlock, moveBlock } from './block-actions.js';
+import {
+  findAndReplaceInDoc,
+  insertBlock,
+  moveBlock,
+} from './block-actions.js';
 import { type AppConfig, MatrixProviderManager } from './provider.js';
 import {
   extractSurveyQuestions,
@@ -92,10 +96,11 @@ export function buildBlocknoteToolsConfig(matrix: BlocknoteToolsMatrixConfig) {
  * uses it directly; when absent, the editor falls back to constructing
  * its internal singleton from the matrix credentials.
  */
-export type BlocknoteToolsConfig =
-  ReturnType<typeof buildBlocknoteToolsConfig> & {
-    matrixClient?: MatrixClient;
-  };
+export type BlocknoteToolsConfig = ReturnType<
+  typeof buildBlocknoteToolsConfig
+> & {
+  matrixClient?: MatrixClient;
+};
 
 /**
  * Track active provider managers for cleanup

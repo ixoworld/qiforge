@@ -56,7 +56,9 @@ describe('renderTier1', () => {
     expect(result.block).toContain(
       '- **memory** — Persistent memory for users and conversations.',
     );
-    expect(result.block).toContain('- **tasks** — Create and manage tasks for users.');
+    expect(result.block).toContain(
+      '- **tasks** — Create and manage tasks for users.',
+    );
     const memoryIdx = result.block.indexOf('- **memory**');
     const tasksIdx = result.block.indexOf('- **tasks**');
     expect(memoryIdx).toBeLessThan(tasksIdx);

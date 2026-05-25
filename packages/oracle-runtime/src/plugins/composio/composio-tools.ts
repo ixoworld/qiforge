@@ -1,10 +1,7 @@
 import { Composio } from '@composio/core';
 import { LangchainProvider } from '@composio/langchain';
 import { z } from 'zod';
-import type {
-  PluginTool,
-  RuntimeContext,
-} from '../../plugin-api/types.js';
+import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 
 /**
  * Minimal shape of a LangChain `DynamicStructuredTool` the composio session

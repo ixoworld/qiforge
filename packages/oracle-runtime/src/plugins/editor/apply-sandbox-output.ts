@@ -58,7 +58,9 @@ function parseSandboxResult(raw: unknown): {
       .content;
     const textBlock = blocks.find((b) => b.type === 'text');
     if (textBlock) {
-      return JSON.parse(textBlock.text) as ReturnType<typeof parseSandboxResult>;
+      return JSON.parse(textBlock.text) as ReturnType<
+        typeof parseSandboxResult
+      >;
     }
   }
 
@@ -261,7 +263,11 @@ export function createApplySandboxOutputTool(
           }
         }
 
-        if (typeof target !== 'object' || target === null || Array.isArray(target)) {
+        if (
+          typeof target !== 'object' ||
+          target === null ||
+          Array.isArray(target)
+        ) {
           return JSON.stringify({
             success: false,
             error: `Expected a JSON object but got ${Array.isArray(target) ? 'array' : typeof target}`,

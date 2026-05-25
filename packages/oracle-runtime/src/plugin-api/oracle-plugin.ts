@@ -60,9 +60,7 @@ export abstract class OraclePlugin {
    * build. Plugins should pick whichever hook fits: boot-time when only
    * config/identity matters; request-time when state/user/session matters.
    */
-  getRequestTools?(
-    rtCtx: RuntimeContext,
-  ): PluginTool[] | Promise<PluginTool[]>;
+  getRequestTools?(rtCtx: RuntimeContext): PluginTool[] | Promise<PluginTool[]>;
 
   /**
    * Request-time sub-agent contributions. Same merge semantics as

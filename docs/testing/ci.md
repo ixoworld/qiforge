@@ -6,12 +6,12 @@ What runs where, gated by what, and what blocks merge.
 
 These run on every PR. All must pass before merge:
 
-| Job | Command | Notes |
-| --- | --- | --- |
-| Lint | `pnpm lint` | ESLint. Strict — no warnings allowed in changed files. |
-| Format | `pnpm format:check` | Prettier. Strict. Run `pnpm format` to fix. |
-| Build | `pnpm build` | Turbo-orchestrated tsc across packages. Catches typecheck errors. |
-| Unit tests | `pnpm test` | Vitest. Runs every `*.test.ts` across packages. No `.env.integration` required. |
+| Job        | Command             | Notes                                                                           |
+| ---------- | ------------------- | ------------------------------------------------------------------------------- |
+| Lint       | `pnpm lint`         | ESLint. Strict — no warnings allowed in changed files.                          |
+| Format     | `pnpm format:check` | Prettier. Strict. Run `pnpm format` to fix.                                     |
+| Build      | `pnpm build`        | Turbo-orchestrated tsc across packages. Catches typecheck errors.               |
+| Unit tests | `pnpm test`         | Vitest. Runs every `*.test.ts` across packages. No `.env.integration` required. |
 
 PRs that touch only docs (`docs/`, `*.md`, `*.mdx`) may skip the build job if configured — confirm in `.github/workflows/`.
 
@@ -25,11 +25,11 @@ Integration tests (`*.int.test.ts`) run on a separate job because they need:
 
 The job is currently:
 
-| Trigger | Behaviour |
-| --- | --- |
-| Push to main | Run all integration tests. |
-| Manual workflow dispatch | Same — used for debugging. |
-| Per-PR | Not by default — too expensive. |
+| Trigger                  | Behaviour                       |
+| ------------------------ | ------------------------------- |
+| Push to main             | Run all integration tests.      |
+| Manual workflow dispatch | Same — used for debugging.      |
+| Per-PR                   | Not by default — too expensive. |
 
 If you want integration tests to gate a PR, add the label that triggers the workflow (or the equivalent — check the repo's workflow config).
 

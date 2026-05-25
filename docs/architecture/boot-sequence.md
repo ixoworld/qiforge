@@ -74,7 +74,13 @@ Each registry runs its own collision checks. See `registries/*.ts`.
 
 ```ts
 const pluginNestModules = resolved.loaded.flatMap((p) => {
-  const ctx = buildPluginContext({ config, identity, availablePlugins, logger, pluginName: p.name });
+  const ctx = buildPluginContext({
+    config,
+    identity,
+    availablePlugins,
+    logger,
+    pluginName: p.name,
+  });
   return p.getNestModules?.(ctx) ?? [];
 });
 ```
@@ -128,7 +134,10 @@ Each registry calls every plugin's boot-time hook (`getTools`, `getSubAgents`, `
 
 ```ts
 const defaultHooks: MainAgentHooks = checkpointSync
-  ? { checkpointerForUser: async (userDid) => SqliteSaver.fromDatabase(await checkpointSync.getUserDatabase(userDid)) }
+  ? {
+      checkpointerForUser: async (userDid) =>
+        SqliteSaver.fromDatabase(await checkpointSync.getUserDatabase(userDid)),
+    }
   : {};
 const mergedHooks: MainAgentHooks = { ...defaultHooks, ...opts.hooks };
 ```

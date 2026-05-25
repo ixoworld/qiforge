@@ -98,8 +98,7 @@ export function validateEnv(
   }
 
   const errors: ValidateEnvError[] = result.error.issues.map((issue) => {
-    const topField =
-      issue.path.length > 0 ? String(issue.path[0]) : '<root>';
+    const topField = issue.path.length > 0 ? String(issue.path[0]) : '<root>';
     const fullField = issue.path.length > 0 ? issue.path.join('.') : '<root>';
     const plugin = pluginOwnership.get(topField) ?? 'unknown';
     return { plugin, field: fullField, message: issue.message };

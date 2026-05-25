@@ -217,9 +217,7 @@ export function createDomainIndexerTools(baseUrl: string): PluginTool[] {
         if (response.status === 404) {
           return { error: 'Domain card not found' };
         }
-        throw new Error(
-          `Failed to fetch domain card: ${response.statusText}`,
-        );
+        throw new Error(`Failed to fetch domain card: ${response.statusText}`);
       }
       const fullCard: unknown = await response.json();
       return projectDomainCard(fullCard);

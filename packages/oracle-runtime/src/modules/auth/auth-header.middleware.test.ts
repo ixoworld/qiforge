@@ -142,7 +142,9 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     await mw.use(req, makeRes(), next);
 
     expect(next).toHaveBeenCalledTimes(1);
-    expect((next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBeUndefined();
+    expect(
+      (next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+    ).toBeUndefined();
     expect(req.authData).toEqual({
       did: USER_DID,
       ucanDelegation: { ...cachedAuth.delegation, raw: VALID_DELEGATION_RAW },
@@ -176,7 +178,9 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     await mw.use(req, makeRes(), next);
 
     expect(next).toHaveBeenCalledTimes(1);
-    expect((next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBeUndefined();
+    expect(
+      (next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+    ).toBeUndefined();
     expect(req.authData.did).toBe(USER_DID);
     expect(req.authData.ucanDelegation.issuer).toBe(USER_DID);
     expect(req.authData.ucanDelegation.audience).toBe(ORACLE_DID);

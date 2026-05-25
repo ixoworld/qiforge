@@ -202,7 +202,8 @@ export class TokenLimiter {
 
     const markup = this.network === 'mainnet' ? 1.6 : 5;
     const divisor = this.network === 'mainnet' ? 1_000_000 : 1000;
-    const inputCost = (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
+    const inputCost =
+      (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
     const outputCost =
       (outputTokens / divisor) * pricing.outputPricePerMillionTokens;
     return Math.round((inputCost + outputCost) * markup);
@@ -285,7 +286,10 @@ export class TokenLimiter {
     return result ? parseFloat(result) : 0;
   }
 
-  async incrementUserHeldAmount(userDid: string, amount: number): Promise<void> {
+  async incrementUserHeldAmount(
+    userDid: string,
+    amount: number,
+  ): Promise<void> {
     await this.redis.zincrby(KEY_HELD_AMOUNTS, amount, userDid);
   }
 

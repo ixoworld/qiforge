@@ -110,7 +110,7 @@ export class MemoryEngineService {
 
     const gatherStart = Date.now();
     const batch = await this.executeBatch(requests, roomId, authHeaders);
-   
+
     const gatherElapsed = Date.now() - gatherStart;
 
     if (!batch) {
@@ -119,7 +119,7 @@ export class MemoryEngineService {
       );
       return {};
     }
-    
+
     // Map each slot back to the labelled field. Error slots become undefined.
     const fields: (SearchEnhancedResponse | undefined)[] = batch.results.map(
       (slot, index) => {

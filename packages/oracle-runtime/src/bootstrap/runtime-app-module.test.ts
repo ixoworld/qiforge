@@ -150,10 +150,12 @@ describe('RuntimeAppModule — auth-excluded routes', () => {
     const { consumer, recorded } = buildRecordingConsumer();
     new RuntimeAppModule().configure(consumer);
 
-    const sharedMatches = (recorded.excludeArgs as Array<{
-      path: string;
-      method: RequestMethod;
-    }>).filter((r) => r.path === 'shared/route');
+    const sharedMatches = (
+      recorded.excludeArgs as Array<{
+        path: string;
+        method: RequestMethod;
+      }>
+    ).filter((r) => r.path === 'shared/route');
     expect(sharedMatches).toHaveLength(2);
     expect(sharedMatches.map((r) => r.method).sort()).toEqual(
       [RequestMethod.GET, RequestMethod.POST].sort(),

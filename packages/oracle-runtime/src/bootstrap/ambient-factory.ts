@@ -99,7 +99,12 @@ export function buildAmbientServices(
     hasSigningKey() {
       return ucanService.hasSigningKey();
     },
-    createInvocationFromDelegation(delegationCar, serviceUrl, capability, opts) {
+    createInvocationFromDelegation(
+      delegationCar,
+      serviceUrl,
+      capability,
+      opts,
+    ) {
       return ucanService.createInvocationFromDelegation(
         delegationCar,
         serviceUrl,

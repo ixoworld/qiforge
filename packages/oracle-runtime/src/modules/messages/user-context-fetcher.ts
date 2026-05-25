@@ -54,9 +54,9 @@ export class UserContextFetcher {
   async fetch(params: {
     roomId: string;
     userDid: string;
-    sessionId:string
+    sessionId: string;
   }): Promise<UserContextRecord | undefined> {
-    const { roomId, userDid,sessionId } = params;
+    const { roomId, userDid, sessionId } = params;
     this.logger.debug(
       `[UserContextFetcher] fetch begin — room=${roomId}, user=${userDid}, sessionid=${sessionId}`,
     );

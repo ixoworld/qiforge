@@ -57,8 +57,8 @@ Patterns enforced via code review on this project. Stick to them — exceptions 
 
 ## Boot-time vs request-time
 
-- **Pick the right hook.** If your tool's *registration* depends only on config, use `getTools`. If it depends on live state, use `getRequestTools`. Don't put cheap-but-stable work in `getRequestTools` — that's a recomputation cost per turn.
-- **Tool handlers always see `RuntimeContext`.** Even when the tool was registered via boot-time `getTools`. The boot/runtime split is about *registration*, not *execution*.
+- **Pick the right hook.** If your tool's _registration_ depends only on config, use `getTools`. If it depends on live state, use `getRequestTools`. Don't put cheap-but-stable work in `getRequestTools` — that's a recomputation cost per turn.
+- **Tool handlers always see `RuntimeContext`.** Even when the tool was registered via boot-time `getTools`. The boot/runtime split is about _registration_, not _execution_.
 
 ## Auto memory rules
 

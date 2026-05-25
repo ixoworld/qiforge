@@ -64,11 +64,14 @@ if (missing.length > 0) {
 const DATA_TABLE_ACTION = {
   name: 'render_data_table',
   description:
-    'Render an interactive data table in the user\'s browser. Use when the user asks for a table view of structured data.',
+    "Render an interactive data table in the user's browser. Use when the user asks for a table view of structured data.",
   schema: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Table title shown above the grid.' },
+      title: {
+        type: 'string',
+        description: 'Table title shown above the grid.',
+      },
       rows: {
         type: 'array',
         description: 'Array of row objects to display.',
@@ -147,8 +150,8 @@ describe('agui plugin — integration', () => {
       (e): e is { event: 'tool_call'; data: SSEToolCallEventData } =>
         e.event === 'tool_call',
     );
-    const aguiInvokeIdx = toolCalls.findIndex(
-      (c) => c.data.toolName.toLowerCase().includes('ag-ui'),
+    const aguiInvokeIdx = toolCalls.findIndex((c) =>
+      c.data.toolName.toLowerCase().includes('ag-ui'),
     );
     expect(
       aguiInvokeIdx,
@@ -168,8 +171,7 @@ describe('agui plugin — integration', () => {
 
     const actionCallsForDeclared = events.filter(
       (e): e is { event: 'action_call'; data: SSEActionCallEventData } =>
-        e.event === 'action_call' &&
-        e.data.toolName === DATA_TABLE_ACTION.name,
+        e.event === 'action_call' && e.data.toolName === DATA_TABLE_ACTION.name,
     );
     expect(
       actionCallsForDeclared,

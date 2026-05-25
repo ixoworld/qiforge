@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentBuilder } from './agent-builder.js';
 import type { SendMessagePayload } from './dto/send-message.dto.js';
 import { SseStreamRunner, type StreamRunInput } from './sse-stream-runner.js';
-import { type FakeAgent, makeFakeAgent, makeThrowingFakeAgent } from './__test-fixtures__/fake-agent.js';
+import {
+  type FakeAgent,
+  makeFakeAgent,
+  makeThrowingFakeAgent,
+} from './__test-fixtures__/fake-agent.js';
 import { FakeResponse } from './__test-fixtures__/fake-response.js';
 import { makePrepared } from './__test-fixtures__/deps.js';
 
@@ -78,7 +82,10 @@ function chatStreamEvent(
   extras: { reasoning?: string; reasoning_details?: unknown } = {},
 ): StreamEvent {
   const additional_kwargs: Record<string, unknown> = {};
-  if (extras.reasoning !== undefined || extras.reasoning_details !== undefined) {
+  if (
+    extras.reasoning !== undefined ||
+    extras.reasoning_details !== undefined
+  ) {
     additional_kwargs.__raw_response = {
       choices: [
         {
@@ -106,7 +113,9 @@ function chatStreamEvent(
   } as unknown as StreamEvent;
 }
 
-function eventsFromWrites(writes: string[]): Array<{ event: string; data: unknown }> {
+function eventsFromWrites(
+  writes: string[],
+): Array<{ event: string; data: unknown }> {
   const events: Array<{ event: string; data: unknown }> = [];
   for (const chunk of writes) {
     if (chunk.startsWith(': heartbeat')) continue;
@@ -346,7 +355,10 @@ describe('SseStreamRunner', () => {
 
       const events = eventsFromWrites(res.writes);
       expect(events[0]?.event).toBe('reasoning');
-      const firstData = events[0]?.data as { reasoning: string; isComplete: boolean };
+      const firstData = events[0]?.data as {
+        reasoning: string;
+        isComplete: boolean;
+      };
       expect(typeof firstData.reasoning).toBe('string');
       expect(firstData.reasoning.length).toBeGreaterThan(0);
       expect(firstData.isComplete).toBe(false);
@@ -382,9 +394,7 @@ describe('SseStreamRunner', () => {
     it('on_tool_start matching agActions name emits ActionCallEvent isRunning', async () => {
       const res = new FakeResponse();
       const { input, runner } = makeInput(
-        makeFakeAgent([
-          toolStartEvent('run-B', 'doThing', { x: 1 }),
-        ]),
+        makeFakeAgent([toolStartEvent('run-B', 'doThing', { x: 1 })]),
         res,
         {
           payload: makePayload({
@@ -635,7 +645,9 @@ describe('SseStreamRunner', () => {
       const secondLast = events[events.length - 2]!;
       expect(last.event).toBe('done');
       expect(secondLast.event).toBe('reasoning');
-      expect((secondLast.data as { isComplete: boolean }).isComplete).toBe(true);
+      expect((secondLast.data as { isComplete: boolean }).isComplete).toBe(
+        true,
+      );
     });
 
     it('calls onComplete with assembled assistantText on clean finish', async () => {
@@ -749,10 +761,7 @@ describe('SseStreamRunner', () => {
       const res = new FakeResponse();
       const abortErr = new Error('AbortError');
       abortErr.name = 'AbortError';
-      const { input, runner } = makeInput(
-        makeThrowingFakeAgent(abortErr),
-        res,
-      );
+      const { input, runner } = makeInput(makeThrowingFakeAgent(abortErr), res);
 
       await runner.run(input);
 

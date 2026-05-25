@@ -28,7 +28,9 @@ const IDENTITY: OracleIdentity = {
   entityDid: 'did:ixo:oracle1',
 };
 
-function makeAmbient(overrides: Partial<AmbientServices> = {}): AmbientServices {
+function makeAmbient(
+  overrides: Partial<AmbientServices> = {},
+): AmbientServices {
   return {
     config: { FOO_KEY: 'foo-value' },
     identity: IDENTITY,
@@ -88,7 +90,10 @@ describe('wrapPluginTool — direct invocation', () => {
     handler: async (args, ctx) => {
       captured.args = args;
       captured.ctx = ctx;
-      return { co2: 1234, facility: (args as { facilityId: string }).facilityId };
+      return {
+        co2: 1234,
+        facility: (args as { facilityId: string }).facilityId,
+      };
     },
   };
 
@@ -277,7 +282,9 @@ describe('wrapPluginTool — end-to-end through createAgent + fakeModel', () => 
         matrixUserId: z.string(),
         ucanDelegation: z.object({
           raw: z.string(),
-          capabilities: z.array(z.object({ resource: z.string(), action: z.string() })).optional(),
+          capabilities: z
+            .array(z.object({ resource: z.string(), action: z.string() }))
+            .optional(),
         }),
         timezone: z.string().optional(),
       }),

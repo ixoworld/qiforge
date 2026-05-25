@@ -28,19 +28,17 @@ The only field the plugin runtime added since the legacy app: `loadedPlugins`.
 
 ```ts
 // Last-write-wins
-reducer: (current, update) => update ?? current
+reducer: (current, update) => update ?? current;
 
 // Set-union (loadedPlugins)
 reducer: (current, update) =>
-  Array.from(new Set([...(current ?? []), ...(update ?? [])]))
+  Array.from(new Set([...(current ?? []), ...(update ?? [])]));
 
 // Append
-reducer: (current, update) =>
-  [...(current ?? []), ...(update ?? [])]
+reducer: (current, update) => [...(current ?? []), ...(update ?? [])];
 
 // Shallow merge (object)
-reducer: (current, update) =>
-  ({ ...(current ?? {}), ...(update ?? {}) })
+reducer: (current, update) => ({ ...(current ?? {}), ...(update ?? {}) });
 
 // Deep merge
 // Don't. Implement it as a primitive field of the deep shape, or use shared state instead.
@@ -61,7 +59,7 @@ export interface ReadonlyState {
   readonly messages: readonly BaseMessage[];
   readonly userContext?: UserContextData;
   readonly loadedPlugins?: ReadonlySet<string>;
-  readonly myNewField?: MyType;       // ← add here
+  readonly myNewField?: MyType; // ← add here
   readonly [key: string]: unknown;
 }
 ```

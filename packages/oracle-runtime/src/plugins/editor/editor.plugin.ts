@@ -48,7 +48,7 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Editor',
   summary:
-    'Reads and edits BlockNote pages — collaborative documents in the user\'s workspace.',
+    "Reads and edits BlockNote pages — collaborative documents in the user's workspace.",
   whenToUse: [
     'User asks to read, summarize, or edit a page in their workspace.',
     'User wants to update specific blocks (status, properties, content) on a page.',
@@ -168,16 +168,13 @@ export class EditorPlugin extends OraclePlugin {
       });
       return [subAgent];
     } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : String(error);
+      const detail = error instanceof Error ? error.message : String(error);
       rtCtx.logger.error(`[editor] failed to build sub-agent: ${detail}`);
       return [];
     }
   }
 
-  override async getRequestTools(
-    rtCtx: RuntimeContext,
-  ): Promise<PluginTool[]> {
+  override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const tools: PluginTool[] = [];
     const editorRoomId = readEditorRoomId(rtCtx);
     const spaceId = readSpaceId(rtCtx);

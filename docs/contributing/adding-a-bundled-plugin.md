@@ -77,7 +77,9 @@ export class MyPlugin extends OraclePlugin {
 
   override getTools(ctx: PluginContext): PluginTool[] {
     const cfg = configSchema.parse(ctx.config);
-    return [/* tools */];
+    return [
+      /* tools */
+    ];
   }
 }
 ```
@@ -105,16 +107,16 @@ Key rules:
 
 ## Hooks — what to implement
 
-| Hook | Use when |
-| --- | --- |
-| `getTools` | Tools whose registration depends only on config + identity. |
-| `getRequestTools` | Tools whose registration depends on live state (`state.browserTools`, etc.). |
-| `getSubAgents` | Multi-step workflows that benefit from focused prompt and tool set. |
-| `getRequestSubAgents` | Sub-agents only constructible per request (e.g. Portal needs `state.browserTools` non-empty). |
-| `getMiddlewares` | Per-turn observation, enrichment, or guardrails. |
-| `getNestModules` | Long-lived services (sockets, BullMQ) or HTTP routes. |
-| `getAuthExcludedRoutes` | Paths from your Nest module that don't go through UCAN auth. |
-| `getSharedState` | Exposing a value other plugins might read. |
+| Hook                    | Use when                                                                                      |
+| ----------------------- | --------------------------------------------------------------------------------------------- |
+| `getTools`              | Tools whose registration depends only on config + identity.                                   |
+| `getRequestTools`       | Tools whose registration depends on live state (`state.browserTools`, etc.).                  |
+| `getSubAgents`          | Multi-step workflows that benefit from focused prompt and tool set.                           |
+| `getRequestSubAgents`   | Sub-agents only constructible per request (e.g. Portal needs `state.browserTools` non-empty). |
+| `getMiddlewares`        | Per-turn observation, enrichment, or guardrails.                                              |
+| `getNestModules`        | Long-lived services (sockets, BullMQ) or HTTP routes.                                         |
+| `getAuthExcludedRoutes` | Paths from your Nest module that don't go through UCAN auth.                                  |
+| `getSharedState`        | Exposing a value other plugins might read.                                                    |
 
 Skip hooks you don't need. The class allows everything to be optional.
 

@@ -41,8 +41,7 @@ import { UserContextFetcher } from './user-context-fetcher.js';
       // plugin still gates its OWN tool surface via `autoDetect`/`configSchema`.
       provide: MemoryEngineService,
       useFactory: (configService: ConfigService) => {
-        const memoryEngineUrl =
-          configService.get<string>('MEMORY_ENGINE_URL');
+        const memoryEngineUrl = configService.get<string>('MEMORY_ENGINE_URL');
         return memoryEngineUrl
           ? new MemoryEngineService(memoryEngineUrl)
           : null;
