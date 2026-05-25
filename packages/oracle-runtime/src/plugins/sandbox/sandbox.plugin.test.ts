@@ -219,10 +219,10 @@ describe('SandboxPlugin', () => {
           headers['X-Skills-Invocation'] = 'ucan-skills';
         }
         for (const [k, v] of Object.entries(inputs.oracleSecrets)) {
-          headers[`x-os-${k.toLowerCase()}`] = v;
+          headers[`x-os-${k.toLowerCase()}`] = v as string;
         }
         for (const [k, v] of Object.entries(inputs.userSecrets)) {
-          headers[`x-us-${k.toLowerCase()}`] = v;
+          headers[`x-us-${k.toLowerCase()}`] = v as string;
         }
         return headers;
       });
