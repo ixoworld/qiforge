@@ -14,14 +14,14 @@ import { UcanService } from '../ucan/ucan.service.js';
  */
 type UserContextRecord = Record<string, unknown>;
 
-const CACHE_TTL_MS = minutes(1);
+const CACHE_TTL_MS = minutes(5);
 
 function cacheKey(sessionId: string): string {
   return `user-context:${sessionId}`;
 }
 
 /**
- * Per-room fetcher for Memory Engine `userContext`, cached for 3 minutes.
+ * Per-room fetcher for Memory Engine `userContext`, cached for 5 minutes.
  *
  * Used by `AgentBuilder` to populate `state.userContext` BEFORE the agent is
  * compiled so the system prompt sees the value on turn 1. The previous

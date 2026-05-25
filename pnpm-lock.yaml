@@ -562,8 +562,8 @@ importers:
         specifier: workspace:*
         version: link:../vitest-config
       socket.io:
-        specifier: 4.8.0
-        version: 4.8.0
+        specifier: 4.8.3
+        version: 4.8.3
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
@@ -672,17 +672,17 @@ importers:
         specifier: workspace:*
         version: link:../oracles-chain-client
       '@ixo/oracles-events':
-        specifier: 1.0.4
-        version: 1.0.4
+        specifier: workspace:*
+        version: link:../events
       '@ixo/slack':
         specifier: 1.0.0
         version: 1.0.0(@types/express@5.0.5)
       '@ixo/sqlite-saver':
-        specifier: ^1.0.52
-        version: 1.0.52(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.0))(openai@6.39.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)
+        specifier: workspace:*
+        version: link:../sqlite-saver
       '@ixo/ucan':
-        specifier: 1.2.3
-        version: 1.2.3(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(typescript@5.9.3)
+        specifier: workspace:*
+        version: link:../ucan
       '@langchain/core':
         specifier: 1.1.48
         version: 1.1.48(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.0))(openai@6.39.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)
@@ -7372,10 +7372,6 @@ packages:
   core-util-is@1.0.3:
     resolution: {integrity: sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==}
 
-  cors@2.8.5:
-    resolution: {integrity: sha512-KIHbLJqu73RGr/hnbrO9uBeixNGuvSQjul/jdFvS/KFSIH1hWVd1ng7zOHx+YrEfInLG7q4n6GHQ9cDtxv/P6g==}
-    engines: {node: '>= 0.10'}
-
   cors@2.8.6:
     resolution: {integrity: sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw==}
     engines: {node: '>= 0.10'}
@@ -12062,10 +12058,6 @@ packages:
   socket.io-parser@4.2.4:
     resolution: {integrity: sha512-/GbIKmo8ioc+NIWIhwdecY0ge+qVBSMdgxGygevmdHj24bsfgtCmcUUcQ5ZzcylGFHsN3k4HB4Cgkl96KVnuew==}
     engines: {node: '>=10.0.0'}
-
-  socket.io@4.8.0:
-    resolution: {integrity: sha512-8U6BEgGjQOfGz3HHTYaC/L1GaxDCJ/KM0XTkJly0EhZ5U/du9uNEZy4ZgYzEzIqlx2CMm25CrCqr1ck899eLNA==}
-    engines: {node: '>=10.2.0'}
 
   socket.io@4.8.3:
     resolution: {integrity: sha512-2Dd78bqzzjE6KPkD5fHZmDAKRNe3J15q+YHDrIsy9WEkqttc7GY+kT9OBLSMaPbQaEd0x1BjcmtMtXkfpc+T5A==}
@@ -17611,19 +17603,6 @@ snapshots:
       - openai
       - ws
 
-  '@ixo/sqlite-saver@1.0.52(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.0))(openai@6.39.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)':
-    dependencies:
-      '@ixo/logger': 0.0.2
-      '@langchain/core': 1.1.48(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.0))(openai@6.39.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)
-      '@langchain/langgraph-checkpoint': 1.0.2(@langchain/core@1.1.48(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.0))(openai@6.39.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
-      better-sqlite3: 11.10.0
-    transitivePeerDependencies:
-      - '@opentelemetry/api'
-      - '@opentelemetry/exporter-trace-otlp-proto'
-      - '@opentelemetry/sdk-trace-base'
-      - openai
-      - ws
-
   '@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)':
     dependencies:
       maplibre-gl: 2.4.0
@@ -21268,7 +21247,7 @@ snapshots:
 
   accepts@2.0.0:
     dependencies:
-      mime-types: 3.0.1
+      mime-types: 3.0.2
       negotiator: 1.0.0
 
   acorn-import-attributes@1.9.5(acorn@8.15.0):
@@ -22481,11 +22460,6 @@ snapshots:
 
   core-util-is@1.0.3: {}
 
-  cors@2.8.5:
-    dependencies:
-      object-assign: 4.1.1
-      vary: 1.1.2
-
   cors@2.8.6:
     dependencies:
       object-assign: 4.1.1
@@ -23003,7 +22977,7 @@ snapshots:
       accepts: 1.3.8
       base64id: 2.0.0
       cookie: 0.7.2
-      cors: 2.8.5
+      cors: 2.8.6
       debug: 4.3.7
       engine.io-parser: 5.2.3
       ws: 8.18.2
@@ -26641,7 +26615,6 @@ snapshots:
   mime-types@3.0.2:
     dependencies:
       mime-db: 1.54.0
-    optional: true
 
   mime@1.6.0: {}
 
@@ -28476,7 +28449,7 @@ snapshots:
       etag: 1.8.1
       fresh: 2.0.0
       http-errors: 2.0.0
-      mime-types: 3.0.1
+      mime-types: 3.0.2
       ms: 2.1.3
       on-finished: 2.4.1
       range-parser: 1.2.1
@@ -28687,20 +28660,6 @@ snapshots:
       debug: 4.3.7
     transitivePeerDependencies:
       - supports-color
-
-  socket.io@4.8.0:
-    dependencies:
-      accepts: 1.3.8
-      base64id: 2.0.0
-      cors: 2.8.5
-      debug: 4.3.7
-      engine.io: 6.6.4
-      socket.io-adapter: 2.5.5
-      socket.io-parser: 4.2.4
-    transitivePeerDependencies:
-      - bufferutil
-      - supports-color
-      - utf-8-validate
 
   socket.io@4.8.3:
     dependencies:
@@ -29530,7 +29489,7 @@ snapshots:
     dependencies:
       content-type: 1.0.5
       media-typer: 1.1.0
-      mime-types: 3.0.1
+      mime-types: 3.0.2
 
   typed-array-buffer@1.0.3:
     dependencies:

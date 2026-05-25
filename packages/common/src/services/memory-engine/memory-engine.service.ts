@@ -18,9 +18,14 @@ interface MemoryEngineAuthHeaders {
 }
 
 export class MemoryEngineService {
-  // Batch covers 6 queries running in parallel server-side. Bound by the
-  // slowest query, not 6× — but we leave headroom for cold caches.
-  private readonly BATCH_TIMEOUT_MS = 15000;
+  // Soft deadline: how long the caller waits before falling back to empty
+  // context. The underlying fetch keeps running in the background up to
+  // BATCH_HARD_TIMEOUT_MS so the server-side query can still finish (and warm
+  // caches) even after the user's turn has moved on.
+  private readonly BATCH_TIMEOUT_MS = 30000;
+  // Hard cap on the underlying fetch — prevents leaking sockets if the server
+  // never responds. Anything slower than this is treated as a real failure.
+  private readonly BATCH_HARD_TIMEOUT_MS = 60000;
 
   constructor(private readonly memoryEngineUrl: string) {}
 
@@ -180,41 +185,91 @@ export class MemoryEngineService {
 
     const body: SearchEnhancedBatchRequest = { queries };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.BATCH_TIMEOUT_MS);
+    // Hard cap aborts the fetch so a hung server can't leak sockets. The soft
+    // deadline below is what the caller actually awaits.
+    const hardController = new AbortController();
+    const hardTimer = setTimeout(
+      () => hardController.abort(),
+      this.BATCH_HARD_TIMEOUT_MS,
+    );
 
-    try {
-      const response = await fetch(
-        `${this.memoryEngineUrl}/search-enhanced-batch`,
-        {
-          method: 'POST',
-          headers: this.buildHeaders(auth, roomId),
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        },
+    const start = Date.now();
+
+    const requestPromise: Promise<SearchEnhancedBatchResponse | undefined> =
+      (async () => {
+        try {
+          const response = await fetch(
+            `${this.memoryEngineUrl}/search-enhanced-batch`,
+            {
+              method: 'POST',
+              headers: this.buildHeaders(auth, roomId),
+              body: JSON.stringify(body),
+              signal: hardController.signal,
+            },
+          );
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            Logger.warn(
+              `[MemoryEngineService] Batch search failed (${response.status}): ${errorText}`,
+            );
+            return undefined;
+          }
+
+          return (await response.json()) as SearchEnhancedBatchResponse;
+        } catch (error) {
+          if ((error as Error).name === 'AbortError') {
+            Logger.warn(
+              `[MemoryEngineService] Batch search hit hard cap after ${this.BATCH_HARD_TIMEOUT_MS}ms — aborted`,
+            );
+          } else {
+            Logger.error(`[MemoryEngineService] Batch search threw:`, error);
+          }
+          return undefined;
+        } finally {
+          clearTimeout(hardTimer);
+        }
+      })();
+
+    type Outcome =
+      | { kind: 'result'; value: SearchEnhancedBatchResponse | undefined }
+      | { kind: 'timeout' };
+
+    let softTimer: ReturnType<typeof setTimeout> | undefined;
+    const softDeadline = new Promise<Outcome>((resolve) => {
+      softTimer = setTimeout(
+        () => resolve({ kind: 'timeout' }),
+        this.BATCH_TIMEOUT_MS,
       );
+    });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        Logger.warn(
-          `[MemoryEngineService] Batch search failed (${response.status}): ${errorText}`,
-        );
-        return undefined;
-      }
+    const outcome = await Promise.race<Outcome>([
+      requestPromise.then((value): Outcome => ({ kind: 'result', value })),
+      softDeadline,
+    ]);
 
-      return (await response.json()) as SearchEnhancedBatchResponse;
-    } catch (error) {
-      if ((error as Error).name === 'AbortError') {
-        Logger.warn(
-          `[MemoryEngineService] Batch search aborted after ${this.BATCH_TIMEOUT_MS}ms`,
-        );
-      } else {
-        Logger.error(`[MemoryEngineService] Batch search threw:`, error);
-      }
+    if (softTimer) clearTimeout(softTimer);
+
+    if (outcome.kind === 'timeout') {
+      Logger.warn(
+        `[MemoryEngineService] Batch search exceeded ${this.BATCH_TIMEOUT_MS}ms soft deadline — returning empty context, request continues in background (hard cap ${this.BATCH_HARD_TIMEOUT_MS}ms)`,
+      );
+      void requestPromise.then((result) => {
+        const elapsed = Date.now() - start;
+        if (result) {
+          Logger.info(
+            `[MemoryEngineService] Background batch search finished after ${elapsed}ms (caller gave up at ${this.BATCH_TIMEOUT_MS}ms)`,
+          );
+        } else {
+          Logger.warn(
+            `[MemoryEngineService] Background batch search returned no data after ${elapsed}ms`,
+          );
+        }
+      });
       return undefined;
-    } finally {
-      clearTimeout(timer);
     }
+
+    return outcome.value;
   }
 
   // ── Per-query request builders ────────────────────────────────────────────

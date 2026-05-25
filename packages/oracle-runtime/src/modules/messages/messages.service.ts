@@ -1,8 +1,10 @@
 import {
+  ChatSession,
   SessionManagerService,
   transformGraphStateMessageToListMessageResponse,
   type ListOracleMessagesResponse,
 } from '@ixo/common';
+import { MatrixManager } from '@ixo/matrix';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -51,6 +53,17 @@ export interface SendMessageRequest extends SendMessagePayload {
    * listener path — the bot acts as the oracle, not as a user.
    */
   ucanDelegation?: AuthUcanDelegation;
+  // ── Matrix-listener path metadata ──────────────────────────────────────
+  /** Sender's full Matrix user id (e.g. `@alice:matrix.example`). */
+  senderMatrixUserId?: string;
+  /** Matrix event id of the latest text event the user sent. */
+  matrixEventId?: string;
+  /** Raw `m.mentions` payload from the Matrix event, used by group-chat gating. */
+  matrixMentions?: { user_ids?: string[] };
+  /** Raw `m.relates_to` payload, used to detect reply-to-bot. */
+  matrixRelatesTo?: { 'm.in_reply_to'?: { event_id: string } };
+  /** Room id (mirrors the bridge call) — used for display-name + roomInfo lookups. */
+  matrixRoomId?: string;
 }
 
 type SendMessageReply = SendMessageResponse;
@@ -94,6 +107,11 @@ export class MessagesService implements OnModuleInit {
         overrideLangchainThreadId: msg.langchainThreadId,
         homeServer: msg.homeServer,
         msgFromMatrixRoom: true,
+        senderMatrixUserId: msg.senderMatrixUserId,
+        matrixEventId: msg.eventId,
+        matrixMentions: msg.mentions,
+        matrixRelatesTo: msg.relatesTo,
+        matrixRoomId: msg.roomId,
         ...(msg.attachments && { attachments: msg.attachments }),
       }),
     );
@@ -210,10 +228,18 @@ export class MessagesService implements OnModuleInit {
   ): Promise<BaseMessage[]> {
     const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
     const timestamp = new Date().toISOString();
+
+    const { content, additionalKwargs } = await this.buildHumanMessageParts(
+      params,
+      prepared,
+      msgFromMatrixRoom,
+      timestamp,
+    );
+
     const out: BaseMessage[] = [
       new HumanMessage({
-        content: params.message,
-        additional_kwargs: { msgFromMatrixRoom, timestamp },
+        content,
+        additional_kwargs: additionalKwargs,
       }),
     ];
 
@@ -251,13 +277,88 @@ export class MessagesService implements OnModuleInit {
     return out;
   }
 
+  /**
+   * Build the `content` and `additional_kwargs` for the HumanMessage that
+   * lands in graph state. For Matrix-originated turns this is where we:
+   *   - resolve the speaker's display name (via the existing 30-min cache
+   *     on `MatrixManager.getCachedDisplayName`)
+   *   - decide whether the room is a group (memberCount > 2) and prefix
+   *     the content with `[DisplayName]: ` if so — so the agent reads who
+   *     is speaking without any middleware mutating state mid-graph
+   *   - stash speaker + threading metadata + raw `m.mentions` /
+   *     `m.relates_to` on `additional_kwargs` for downstream consumers
+   *     (the group-chat gating middleware reads them)
+   *
+   * Non-Matrix turns (portal, slack) keep the prior behaviour: just
+   * `msgFromMatrixRoom` + `timestamp`.
+   */
+  private async buildHumanMessageParts(
+    params: SendMessageRequest,
+    prepared: { roomId: string; sessionId: string },
+    msgFromMatrixRoom: boolean,
+    timestamp: string,
+  ): Promise<{ content: string; additionalKwargs: Record<string, unknown> }> {
+    const baseKwargs: Record<string, unknown> = {
+      msgFromMatrixRoom,
+      timestamp,
+    };
+
+    if (!msgFromMatrixRoom || !params.senderMatrixUserId) {
+      return { content: params.message, additionalKwargs: baseKwargs };
+    }
+
+    const roomId = params.matrixRoomId ?? prepared.roomId;
+    const matrixManager = MatrixManager.getInstance();
+
+    const [displayName, roomInfo] = await Promise.all([
+      matrixManager
+        .getCachedDisplayName(params.senderMatrixUserId, roomId)
+        .catch((err) => {
+          this.logger.warn(
+            `getCachedDisplayName failed for ${params.senderMatrixUserId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return params.senderMatrixUserId;
+        }),
+      matrixManager.getRoomInfo(roomId).catch((err) => {
+        this.logger.warn(
+          `getRoomInfo failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return undefined;
+      }),
+    ]);
+
+    const isGroupRoom =
+      !!roomInfo && !roomInfo.isDirect && roomInfo.memberCount > 2;
+
+    const prefix = `[${displayName}]: `;
+    const content =
+      isGroupRoom && !params.message.startsWith(prefix)
+        ? `${prefix}${params.message}`
+        : params.message;
+
+    const additionalKwargs: Record<string, unknown> = {
+      ...baseKwargs,
+      senderDid: params.did,
+      senderMatrixUserId: params.senderMatrixUserId,
+      senderDisplayName: displayName,
+      threadId: prepared.sessionId,
+    };
+    if (params.matrixEventId) additionalKwargs.eventId = params.matrixEventId;
+    if (params.matrixMentions)
+      additionalKwargs['m.mentions'] = params.matrixMentions;
+    if (params.matrixRelatesTo)
+      additionalKwargs['m.relates_to'] = params.matrixRelatesTo;
+
+    return { content, additionalKwargs };
+  }
+
   private firePostSync(
     params: SendMessageRequest,
     prepared: {
       sessionId: string;
       langchainThreadId: string;
       roomId: string;
-      targetSession: import('@ixo/common').ChatSession;
+      targetSession: ChatSession;
     },
   ): void {
     // Keep the user active for the duration of the fire-and-forget sync —

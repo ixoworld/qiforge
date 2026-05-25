@@ -18,6 +18,17 @@ import { ConfigService } from '@nestjs/config';
 const FILE_MSGTYPES = new Set(['m.file', 'm.image', 'm.video', 'm.audio']);
 const DEBOUNCE_MS = 500;
 
+/**
+ * Matrix text-event content. Spec-standard fields the base
+ * `MessageEventContent` type from `@ixo/matrix` doesn't enumerate:
+ *   - `m.mentions` — explicit mention list (since MSC3952)
+ *   - `m.relates_to.m.in_reply_to` — reply chain pointer
+ */
+interface MatrixTextContent extends MessageEventContent {
+  'm.mentions'?: { user_ids?: string[] };
+  'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
+}
+
 interface BufferedEvent {
   event: MessageEvent<MessageEventContent>;
   roomId: string;
@@ -35,6 +46,14 @@ export interface MatrixIncomingMessage {
   langchainThreadId?: string;
   roomId: string;
   homeServer?: string;
+  /** Sender's full Matrix user id (e.g. `@alice:matrix.example`). */
+  senderMatrixUserId?: string;
+  /** Matrix event id of the latest text event being delivered. */
+  eventId?: string;
+  /** Raw `m.mentions` payload from the event, if present. */
+  mentions?: { user_ids?: string[] };
+  /** Raw `m.relates_to` payload from the event, if present. */
+  relatesTo?: { 'm.in_reply_to'?: { event_id: string } };
   attachments?: Array<{
     eventId: string;
     filename: string;
@@ -203,6 +222,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     const homeServer = first.event.sender.split(':')[1];
 
     let text: string | undefined;
+    let latestTextEvent: BufferedEvent['event'] | undefined;
     const attachments: NonNullable<MatrixIncomingMessage['attachments']> = [];
     for (const { event } of entry.events) {
       const msgtype = event.content.msgtype;
@@ -212,10 +232,23 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         typeof event.content.body === 'string'
       ) {
         text = event.content.body;
+        latestTextEvent = event;
       } else if (typeof msgtype === 'string' && FILE_MSGTYPES.has(msgtype)) {
         attachments.push(buildAttachment(event));
       }
     }
+
+    // Speaker + threading metadata for the downstream HumanMessage. Use the
+    // latest text event when available (so mentions / replies refer to the
+    // user-visible message), otherwise fall back to the first event in the
+    // batch (file-only sends).
+    const sourceEvent = latestTextEvent ?? first.event;
+    console.log("🚀 ~ MatrixListenerBridge ~ flush ~ sourceEvent:", sourceEvent)
+    const senderMatrixUserId = sourceEvent.sender;
+    const eventId = sourceEvent.eventId;
+    const sourceContent = sourceEvent.content as MatrixTextContent;
+    const mentions = sourceContent['m.mentions'];
+    const relatesTo = sourceContent['m.relates_to'];
 
     const message =
       text ??
@@ -238,13 +271,30 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         langchainThreadId,
         roomId: first.roomId,
         homeServer,
+        senderMatrixUserId,
+        eventId,
+        ...(mentions && { mentions }),
+        ...(relatesTo && { relatesTo }),
         ...(attachments.length > 0 && { attachments }),
       })) as
         | undefined
-        | { message: { content: string } };
+        | { message: { type: string; content: string } };
 
       if (!aiResponse) {
         this.logger.warn(`No AI response returned for threadId=${threadId}`);
+        return;
+      }
+
+      // The BatchInvoker returns whatever lives at the tail of graph state.
+      // When a `beforeAgent` middleware short-circuits with `jumpTo: 'end'`
+      // (e.g. the group-chat gate ignoring an un-mentioned room message),
+      // no AI message is produced and the tail is the user's own
+      // HumanMessage. Posting that back would echo the user to themselves
+      // with the speaker-prefix applied.
+      if (aiResponse.message.type !== 'ai') {
+        this.logger.log(
+          `Skipping Matrix reply for threadId=${threadId} — agent did not produce an AI message (tail type=${aiResponse.message.type})`,
+        );
         return;
       }
 

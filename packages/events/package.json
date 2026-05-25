@@ -38,7 +38,7 @@
     "@ixo/eslint-config": "workspace:*",
     "@ixo/typescript-config": "workspace:*",
     "@ixo/vitest-config": "workspace:*",
-    "socket.io": "4.8.0",
+    "socket.io": "4.8.3",
     "typescript": "^5.3.3"
   },
   "dependencies": {
