@@ -12,7 +12,9 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
+import { BlobStoreModule } from './blob-store/blob-store.module';
 import { CallsModule } from './calls/calls.module';
+import { ChannelMemoryModule } from './channel-memory/channel-memory.module';
 import { type ENV, EnvSchema, getConfig, isRedisEnabled } from './config';
 import { MessagesModule } from './messages/messages.module';
 import { AuthHeaderMiddleware } from './middleware/auth-header.middleware';
@@ -58,9 +60,11 @@ import { WsModule } from './ws/ws.module';
     ]),
     WsModule,
     // ChromaDbModule.forRoot(),
+    ChannelMemoryModule,
     SessionsModule,
     MessagesModule,
     UcanModule,
+    BlobStoreModule,
     // TasksModule requires Redis for BullMQ job queues
     ...(isRedisEnabled() ? [TasksModule] : []),
     // KnowledgeModule,

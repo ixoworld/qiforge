@@ -246,13 +246,22 @@ export async function createUCANValidator(
       );
     }
 
-    const keyDid = resolved.ok[0];
-    if (!keyDid) {
-      throw new Error(`No valid key found for server DID ${options.serverDid}`);
+    // DID docs may publish multiple Ed25519 verification methods; pick the
+    // first one that parses as a valid Ed25519 verifier.
+    let parseError: unknown;
+    for (const keyDid of resolved.ok) {
+      try {
+        serverVerifier = ed25519.Verifier.parse(keyDid);
+        return serverVerifier;
+      } catch (err) {
+        parseError = err;
+      }
     }
 
-    serverVerifier = ed25519.Verifier.parse(keyDid);
-    return serverVerifier;
+    throw new Error(
+      `No valid Ed25519 key found for server DID ${options.serverDid}` +
+        (parseError instanceof Error ? `: ${parseError.message}` : ''),
+    );
   }
 
   // Create DID resolver for use during validation (for issuers in delegation chain)
@@ -345,6 +354,7 @@ export async function createUCANValidator(
    */
 
   async function verifyDelegationChain(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's parsed-delegation type is internal/union-heavy; we treat it structurally
     delegation: any,
   ): Promise<ValidateResult> {
     const issuerDid: string = delegation.issuer.did();
@@ -373,33 +383,38 @@ export async function createUCANValidator(
       };
     }
 
-    const didKey = resolved.ok[0]!;
-    const realVerifier = ed25519.Verifier.parse(didKey);
-
-    // Get the UCAN View from the delegation for signature verification.
-    // delegation.data returns the @ipld/dag-ucan View which has .model and .signature
+    // A did:ixo DID document may publish multiple Ed25519 verification methods.
+    // Try each resolved key until one verifies the signature; only report failure
+    // when none of them match.
     const ucanView = delegation.data;
+    let didKey: string | undefined;
+    let sigValid = false;
 
-    // Create a wrapper verifier: uses the issuer's original DID for the
-    // DID equality check inside UCAN.verifySignature, but delegates actual
-    // cryptographic verification to the resolved did:key verifier.
-    // This is necessary because did:ixo issuers sign with Ed25519 keys but
-    // the UCAN's iss field contains did:ixo, not did:key.
-    const wrappedVerifier = {
-      did: () => issuerDid,
-      verify: (payload: Uint8Array, signature: unknown) =>
-        realVerifier.verify(
-          payload,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SigAlg type mismatch between @ipld/dag-ucan and @ucanto/principal
-          signature as any,
-        ),
-    };
+    for (const candidateKey of resolved.ok) {
+      const realVerifier = ed25519.Verifier.parse(candidateKey);
+      const wrappedVerifier = {
+        did: () => issuerDid,
+        verify: (payload: Uint8Array, signature: unknown) =>
+          realVerifier.verify(
+            payload,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SigAlg type mismatch between @ipld/dag-ucan and @ucanto/principal
+            signature as any,
+          ),
+      };
 
-    const sigValid = await UCAN.verifySignature(
-      ucanView,
-      wrappedVerifier as any,
-    );
-    if (!sigValid) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's Verifier type expects a verifier object whose structural shape varies by SignatureAlgorithm; the wrappedVerifier we build above satisfies it at runtime
+        if (await UCAN.verifySignature(ucanView, wrappedVerifier as any)) {
+          sigValid = true;
+          didKey = candidateKey;
+          break;
+        }
+      } catch {
+        // Try the next key
+      }
+    }
+
+    if (!sigValid || !didKey) {
       return {
         ok: false,
         error: {
@@ -419,12 +434,14 @@ export async function createUCANValidator(
           const proofAudResolved = await resolveDIDKey(
             proofAudience as `did:${string}:${string}`,
           );
-          const proofAudKey =
+          const proofAudKeys =
             'ok' in proofAudResolved && proofAudResolved.ok
-              ? proofAudResolved.ok[0]
-              : null;
+              ? proofAudResolved.ok
+              : [];
 
-          if (didKey !== proofAudKey) {
+          // Match if the issuer key we just verified appears anywhere in the
+          // proof audience's resolved key set (DIDs may publish multiple keys).
+          if (!proofAudKeys.some((k) => k === didKey)) {
             return {
               ok: false,
               error: {

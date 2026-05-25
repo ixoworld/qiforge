@@ -51,6 +51,7 @@ import {
 import { TasksService } from 'src/tasks/task.service';
 import { isRedisEnabled } from 'src/config';
 import { type ENV } from 'src/types';
+import { BlobStoreService } from 'src/blob-store/blob-store.service';
 import { UcanService } from 'src/ucan/ucan.service';
 import { UserMatrixSqliteSyncService } from 'src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service';
 import { normalizeDid } from 'src/utils/header.utils';
@@ -63,6 +64,14 @@ import {
   startSSEHeartbeat,
 } from 'src/utils/sse.utils';
 import { TokenLimiter } from 'src/utils/token-limit-handler';
+import { ChannelMemoryService } from 'src/channel-memory/channel-memory.service';
+import { type ObservedMessage } from 'src/channel-memory/channel-memory.types';
+import {
+  isActiveBotThread,
+  markBotThreadActive,
+  shouldAgentRespond,
+  sweepExpiredBotThreads,
+} from './group-chat.guard';
 import { type ListMessagesDto } from './dto/list-messages.dto';
 import { type SendMessagePayload } from './dto/send-message.dto';
 import {
@@ -73,10 +82,36 @@ import {
 @Injectable()
 export class MessagesService implements OnModuleInit, OnModuleDestroy {
   private cleanUpMatrixListener: () => void;
+  private cleanUpJoinListener: (() => void) | undefined;
   private threadRootCache = new Map<string, string>(); // eventId → rootEventId
   private abortControllers = new Map<string, AbortController>(); // sessionId → AbortController
   private readonly oracleOpenIdTokenProvider: OpenIdTokenProvider;
   private readonly oracleMatrixBaseUrl: string;
+
+  /**
+   * Rooms we've already greeted in this process. Stops duplicate welcomes if
+   * matrix-bot-sdk fires `room.join` more than once for the same room.
+   * Lost on restart — that's fine: room.join only fires for fresh joins, not
+   * for already-joined rooms during initial sync.
+   */
+  private readonly welcomedRooms = new Set<string>();
+  /** Brief settle delay before sending the welcome — lets Olm sessions form. */
+  private static readonly WELCOME_DELAY_MS = 1500;
+
+  /** Cached room-shape lookup so we don't hit Matrix API on every message. */
+  private readonly roomTypeCache = new Map<
+    string,
+    { isDirect: boolean; memberCount: number; expiresAt: number }
+  >();
+  private static readonly ROOM_TYPE_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  /**
+   * Active bot threads in group rooms. Key = `${roomId}:${threadId}`,
+   * value = expiresAt epoch ms. Updated when the bot responds in a thread,
+   * decayed on read. Cleared on restart.
+   */
+  private readonly activeBotThreads = new Map<string, number>();
+  private static readonly ACTIVE_THREAD_TTL_MS = 30 * 60 * 1000;
 
   /**
    * Per-thread debounce buffer for Matrix events.
@@ -104,9 +139,11 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService<ENV>,
     private readonly checkpointStorageSyncService: UserMatrixSqliteSyncService,
     private readonly fileProcessingService: FileProcessingService,
+    private readonly channelMemoryService: ChannelMemoryService,
     @Optional() private readonly tasksService?: TasksService,
     @Optional() private readonly approvalService?: ApprovalService,
     @Optional() private readonly ucanService?: UcanService,
+    @Optional() private readonly blobStore?: BlobStoreService,
   ) {
     this.matrixManager = this.sessionManagerService.matrixManger;
     this.oracleMatrixBaseUrl = this.config
@@ -131,12 +168,18 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     if (this.cleanUpMatrixListener) {
       this.cleanUpMatrixListener();
     }
+    if (this.cleanUpJoinListener) {
+      this.cleanUpJoinListener();
+      this.cleanUpJoinListener = undefined;
+    }
   }
 
   private async getThreadRoot(
     event: MessageEvent<
       MessageEventContent & {
         'm.relates_to'?: {
+          rel_type?: string;
+          event_id?: string;
           'm.in_reply_to'?: {
             event_id: string;
           };
@@ -149,8 +192,19 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     if (!eventId) {
       return undefined;
     }
-    const inReplyTo =
-      event.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+
+    const relatesTo = event.content['m.relates_to'];
+
+    // Matrix thread replies carry rel_type="m.thread" with the true root in
+    // event_id. The m.in_reply_to field is a fallback pointing at the previous
+    // message (NOT the root), so we must NOT walk it for threaded messages.
+    if (relatesTo?.rel_type === 'm.thread' && relatesTo?.event_id) {
+      const root = relatesTo.event_id;
+      this.threadRootCache.set(eventId, root);
+      return root;
+    }
+
+    const inReplyTo = relatesTo?.['m.in_reply_to']?.event_id;
 
     if (!inReplyTo) {
       // This event IS the root
@@ -195,16 +249,46 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         return rootEventId;
       }
 
-      const parentEvent = await this.matrixManager.getEventById<{
-        'm.relates_to'?: {
-          'm.in_reply_to'?: {
-            event_id: string;
+      let parentEvent: Awaited<
+        ReturnType<
+          typeof this.matrixManager.getEventById<{
+            'm.relates_to'?: {
+              rel_type?: string;
+              event_id?: string;
+              'm.in_reply_to'?: { event_id: string };
+            };
+          }>
+        >
+      >;
+      try {
+        parentEvent = await this.matrixManager.getEventById<{
+          'm.relates_to'?: {
+            rel_type?: string;
+            event_id?: string;
+            'm.in_reply_to'?: { event_id: string };
           };
-        };
-      }>(roomId, currentEventId);
+        }>(roomId, currentEventId);
+      } catch {
+        // Event not found (404) — treat currentEventId as the root
+        pathToCache.forEach((id) =>
+          this.threadRootCache.set(id, currentEventId),
+        );
+        return currentEventId;
+      }
 
-      const parentInReplyTo =
-        parentEvent.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+      const parentRelatesTo = parentEvent.content['m.relates_to'];
+
+      // If the parent is itself a thread reply, its root IS the true root
+      if (
+        parentRelatesTo?.rel_type === 'm.thread' &&
+        parentRelatesTo?.event_id
+      ) {
+        const root = parentRelatesTo.event_id;
+        pathToCache.forEach((id) => this.threadRootCache.set(id, root));
+        return root;
+      }
+
+      const parentInReplyTo = parentRelatesTo?.['m.in_reply_to']?.event_id;
       if (!parentInReplyTo) {
         // Found the root!
 
@@ -230,6 +314,39 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     'm.video',
     'm.audio',
   ]);
+
+  /**
+   * Resolve a room's shape (DM vs group) with a 5-minute cache.
+   * Cache misses fetch from Matrix; failures fall back to a "treat as DM"
+   * default to preserve current behaviour for unknown rooms.
+   */
+  private async getCachedRoomInfo(
+    roomId: string,
+  ): Promise<{ isDirect: boolean; memberCount: number }> {
+    const now = Date.now();
+    const cached = this.roomTypeCache.get(roomId);
+    if (cached && cached.expiresAt > now) {
+      return { isDirect: cached.isDirect, memberCount: cached.memberCount };
+    }
+    try {
+      const info = await this.matrixManager.getRoomInfo(roomId);
+      this.roomTypeCache.set(roomId, {
+        isDirect: info.isDirect,
+        memberCount: info.memberCount,
+        expiresAt: now + MessagesService.ROOM_TYPE_CACHE_TTL_MS,
+      });
+      return { isDirect: info.isDirect, memberCount: info.memberCount };
+    } catch (err) {
+      Logger.warn(
+        `[MessagesService] getRoomInfo failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}; defaulting to isDirect=true`,
+      );
+      return { isDirect: true, memberCount: 0 };
+    }
+  }
+
+  private invalidateRoomTypeCache(roomId: string): void {
+    this.roomTypeCache.delete(roomId);
+  }
 
   private async handleMessage(
     event: MessageEvent<MessageEventContent>,
@@ -268,7 +385,8 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     }
 
     const threadEv = await this.matrixManager.getEventById(roomId, threadId);
-    const langchainThreadId = (threadEv.content as any)?.sessionId;
+    const langchainThreadId = (threadEv.content as { sessionId?: string })
+      ?.sessionId;
     const sessionId = threadId;
     if (!isText && !isFile) {
       Logger.log(
@@ -301,6 +419,64 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         approvalService: !!this.approvalService,
         isText,
       });
+    }
+
+    // ── Group-chat gating + passive capture ────────────────────────
+    // Resolve room shape once and use it both for capture and gating.
+    const roomInfo = await this.getCachedRoomInfo(roomId);
+    const isGroup = !roomInfo.isDirect;
+
+    if (isGroup && isText) {
+      // Capture EVERY group-room text message into channel memory, even if
+      // the bot isn't going to respond. This is what gives the agent context
+      // about top-level chatter when it later does get engaged.
+      const body = 'body' in event.content ? String(event.content.body) : '';
+      if (body.length > 0) {
+        const displayName = await this.matrixManager
+          .getCachedDisplayName(event.sender, roomId)
+          .catch(() => event.sender);
+        const observed: ObservedMessage = {
+          eventId: event.eventId,
+          threadId,
+          senderDid: did,
+          senderMatrixUserId: event.sender,
+          senderDisplayName: displayName,
+          body,
+          timestamp: event.timestamp ?? Date.now(),
+        };
+        this.channelMemoryService.observeMessage(roomId, observed);
+      }
+    }
+
+    if (isGroup) {
+      let botMatrixUserId: string;
+      try {
+        botMatrixUserId = this.matrixManager.getBotMatrixUserId();
+      } catch (err) {
+        Logger.warn(
+          `[Matrix][handleMessage] Bot user id unavailable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+      const decision = await shouldAgentRespond({
+        event,
+        roomId,
+        threadId,
+        matrixManager: this.matrixManager,
+        botMatrixUserId,
+        roomInfo,
+        activeBotThreads: this.activeBotThreads,
+        activeBotThreadTtlMs: MessagesService.ACTIVE_THREAD_TTL_MS,
+      });
+      if (!decision.respond) {
+        Logger.log(
+          `[Matrix][handleMessage] Group room ${roomId}: silently ignoring eventId=${event.eventId} (reason=${decision.reason})`,
+        );
+        return;
+      }
+      Logger.log(
+        `[Matrix][handleMessage] Group room ${roomId}: responding to eventId=${event.eventId} (reason=${decision.reason})`,
+      );
     }
 
     Logger.log(
@@ -340,7 +516,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
 
       try {
         Logger.log(
-          `[Matrix][handleMessage] Creating NEW session for did=${did} sessionId=${checkSessionId} homeServer=${userHomeServer} oracleHomeServer=${oracleHomeServer}`,
+          `[Matrix][handleMessage] Creating NEW session for did=${did} sessionId=${checkSessionId} homeServer=${userHomeServer} oracleHomeServer=${oracleHomeServer} roomId=${roomId}`,
         );
         await this.sessionManagerService.createSession(
           {
@@ -353,7 +529,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
             userHomeServer,
             roomId, // Store the actual room (may be a task room, not main room)
           },
-          event.eventId,
+          checkSessionId,
         );
         Logger.log(
           `[Matrix][handleMessage] Session CREATED for did=${did} sessionId=${checkSessionId}`,
@@ -428,6 +604,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     const roomId = events[0].roomId;
     const did = normalizeDid(events[0].event.sender);
     const homeServer = events[0].event.sender.split(':')[1];
+    const lastEvent = events[events.length - 1].event;
 
     // Separate text and file events
     let textBody: string | undefined;
@@ -456,16 +633,41 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Build the message text — fall back to a description if only files were sent
-    const message =
+    // Resolve room type and speaker metadata for group-chat handling
+    const roomInfo = await this.getCachedRoomInfo(roomId);
+    const isGroup = !roomInfo.isDirect;
+
+    // Build the message text — for group rooms, prefix with display name so
+    // the agent (and the prompt prefix it sees in the HumanMessage) knows who
+    // is speaking. DMs keep their existing shape.
+    const rawText =
       textBody ??
       (attachments.length === 1
         ? `User shared a file: ${attachments[0].filename}`
         : `User shared ${attachments.length} file(s): ${attachments.map((a) => a.filename).join(', ')}`);
 
+    let speakerDisplayName: string | undefined;
+    let message = rawText;
+    if (isGroup) {
+      speakerDisplayName = await this.matrixManager
+        .getCachedDisplayName(lastEvent.sender, roomId)
+        .catch(() => lastEvent.sender);
+      message = `[${speakerDisplayName}]: ${rawText}`;
+    }
+
+    // JIT compaction so the system context block reflects all unsummarised
+    // messages, including the one we're responding to. Best-effort, capped.
+    if (isGroup) {
+      await this.channelMemoryService.compactJustInTime(roomId).catch((err) => {
+        Logger.warn(
+          `[Matrix][flushMatrixEvents] JIT compaction failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    }
+
     try {
       Logger.log(
-        `[Matrix][flushMatrixEvents] Sending message for threadId=${threadId} sessionId=${overRideSessionId ?? threadId} did=${did} attachments=${attachments.length}`,
+        `[Matrix][flushMatrixEvents] Sending message for threadId=${threadId} sessionId=${overRideSessionId ?? threadId} did=${did} attachments=${attachments.length} group=${isGroup}`,
       );
       const aiMessage = await this.sendMessage({
         clientType: 'matrix',
@@ -476,7 +678,19 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         homeServer,
         msgFromMatrixRoom: true,
         userMatrixOpenIdToken: '',
-
+        ...(isGroup && {
+          groupChat: {
+            roomId,
+            memberCount: roomInfo.memberCount,
+            speaker: {
+              did,
+              matrixUserId: lastEvent.sender,
+              displayName: speakerDisplayName ?? lastEvent.sender,
+              eventId: lastEvent.eventId,
+              threadId,
+            },
+          },
+        }),
         ...(attachments.length > 0 && { attachments }),
       });
       if (!aiMessage) {
@@ -493,8 +707,22 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
         isOracleAdmin: true,
         disablePrefix: true,
       });
+
+      // Mark the thread as actively engaged so subsequent messages from any
+      // user in this thread (within 30 min) reach the bot without needing a
+      // re-mention. Lazy sweep of expired entries keeps the map bounded.
+      if (isGroup) {
+        markBotThreadActive(
+          this.activeBotThreads,
+          roomId,
+          threadId,
+          MessagesService.ACTIVE_THREAD_TTL_MS,
+        );
+        sweepExpiredBotThreads(this.activeBotThreads);
+      }
+
       Logger.log(
-        `[Matrix][flushMatrixEvents] Message sent to Matrix roomId=${roomId} threadId=${threadId} by Oracle`,
+        `[Matrix][flushMatrixEvents] Message sent to Matrix roomId=${roomId} threadId=${threadId} by Oracle (group=${isGroup}, threadActive=${isActiveBotThread(this.activeBotThreads, roomId, threadId)})`,
       );
     } catch (error) {
       Logger.error('Failed to send message', error);
@@ -624,10 +852,89 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
             });
           });
         Logger.log('Matrix message listener registered');
+
+        // Send a welcome message every time the bot is freshly added to a
+        // room. This bootstraps Olm + Megolm sessions BEFORE the user types,
+        // which fixes the common "first messages can't be decrypted" failure
+        // mode in fresh group rooms.
+        this.cleanUpJoinListener = this.matrixManager.onBotJoinedRoom(
+          (roomId) => {
+            this.handleBotJoinedRoom(roomId).catch((err) => {
+              Logger.warn(
+                `[Welcome] Handler failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            });
+          },
+        );
+        Logger.log('Matrix room.join welcome listener registered');
       })
       .catch((err) => {
         Logger.error('Failed to set up Matrix message listener:', err);
       });
+  }
+
+  /**
+   * Send a one-time greeting when the bot joins a room. The message itself is
+   * encrypted, which is what we actually want — sending forces the bot to:
+   *   1. Establish Olm 1:1 sessions with every current member,
+   *   2. Create a Megolm group session that includes those members,
+   *   3. Distribute the Megolm key via the Olm sessions.
+   *
+   * Once that one round-trip completes, the user's next message also rotates
+   * to a fresh Megolm session that includes the bot — so it actually decrypts.
+   *
+   * Idempotent within the process via `welcomedRooms`. matrix-bot-sdk's
+   * `room.join` only fires for fresh joins so this should not re-greet on
+   * restart, but the Set guards against double-fires within a session.
+   */
+  private async handleBotJoinedRoom(roomId: string): Promise<void> {
+    if (this.welcomedRooms.has(roomId)) {
+      Logger.log(
+        `[Welcome] Skipping ${roomId}: already greeted in this session`,
+      );
+      return;
+    }
+    this.welcomedRooms.add(roomId);
+
+    // Brief settle so the device list / Olm sessions can converge before
+    // we trigger an outgoing encrypt.
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, MessagesService.WELCOME_DELAY_MS),
+    );
+
+    // Tailor the message to room shape — DMs get a friendlier greeting,
+    // group rooms get the engagement rules up front so users know what
+    // to expect.
+    let isDirect = true;
+    try {
+      const info = await this.matrixManager.getRoomInfo(roomId);
+      isDirect = info.isDirect;
+    } catch (err) {
+      Logger.warn(
+        `[Welcome] getRoomInfo failed for ${roomId}, defaulting to DM tone: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const oracleName =
+      this.config.get<string>('ORACLE_NAME', { infer: true }) ?? 'Oracle';
+    const message = isDirect
+      ? `Hi! I'm ${oracleName}. How can I help?`
+      : `${oracleName} here — I've joined this room. Mention me with @${oracleName} or reply to one of my messages whenever you'd like my help; I'll stay quiet otherwise.`;
+
+    try {
+      await this.matrixManager.sendMessage({
+        roomId,
+        message,
+        isOracleAdmin: true,
+        disablePrefix: true,
+      });
+      Logger.log(`[Welcome] Sent greeting to ${roomId} (isDirect=${isDirect})`);
+    } catch (err) {
+      // Don't unmark — re-trying could spam the room. User can reinvite.
+      Logger.warn(
+        `[Welcome] Failed to send greeting to ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
   public async listMessages(
     params: ListMessagesDto & {
@@ -670,6 +977,22 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       msgFromMatrixRoom?: boolean;
       overrideLangchainThreadId?: string;
       req?: Request;
+      /**
+       * Set when the message originates from a group Matrix room.
+       * Drives speaker attribution on HumanMessage and triggers
+       * channel-memory context injection into the system prompt.
+       */
+      groupChat?: {
+        roomId: string;
+        memberCount: number;
+        speaker: {
+          did: string;
+          matrixUserId: string;
+          displayName: string;
+          eventId: string;
+          threadId: string;
+        };
+      };
     },
   ): Promise<
     | undefined
@@ -745,12 +1068,46 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       // Build messages array: user text message + separate file messages
       const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
       const timestamp = new Date().toISOString();
+      const groupSpeaker = params.groupChat?.speaker;
       const inputMessages: HumanMessage[] = [
         new HumanMessage({
           content: params.message,
-          additional_kwargs: { msgFromMatrixRoom, timestamp },
+          additional_kwargs: {
+            msgFromMatrixRoom,
+            timestamp,
+            ...(groupSpeaker && {
+              senderDid: groupSpeaker.did,
+              senderMatrixUserId: groupSpeaker.matrixUserId,
+              senderDisplayName: groupSpeaker.displayName,
+              matrixEventId: groupSpeaker.eventId,
+              matrixThreadId: groupSpeaker.threadId,
+              isGroupChat: true,
+            }),
+          },
         }),
       ];
+
+      // If we're in a group room, build a one-shot context block from channel
+      // memory + recent room messages and stash it on runnableConfig. The
+      // graph layer (createMainAgent) will append it to the system prompt and
+      // register channel-memory tools. The roomId itself already lives on
+      // runnableConfig.configurable.configs.matrix.roomId — don't duplicate.
+      if (params.groupChat) {
+        try {
+          const contextBlock =
+            await this.channelMemoryService.buildSessionContext(
+              params.groupChat.roomId,
+              this.matrixManager,
+            );
+          (
+            runnableConfig.configurable as Record<string, unknown>
+          ).groupChatContext = contextBlock;
+        } catch (err) {
+          Logger.warn(
+            `[MessagesService] Failed to build group-chat context: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
 
       if (hasAttachments) {
         Logger.log(
@@ -838,6 +1195,14 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
                 msgFromMatrixRoom,
                 timestamp: new Date().toISOString(),
                 attachment: meta,
+                ...(groupSpeaker && {
+                  senderDid: groupSpeaker.did,
+                  senderMatrixUserId: groupSpeaker.matrixUserId,
+                  senderDisplayName: groupSpeaker.displayName,
+                  matrixEventId: groupSpeaker.eventId,
+                  matrixThreadId: groupSpeaker.threadId,
+                  isGroupChat: true,
+                }),
               },
             }),
           );
@@ -945,6 +1310,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
                   ucanService: this.ucanService,
                   mcpInvocations: params.mcpInvocations,
                 },
+                blobStore: this.blobStore,
                 fileProcessingService: this.fileProcessingService,
                 spaceId: params.metadata?.spaceId,
                 tasksService: this.tasksService,
@@ -1348,6 +1714,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
           ucanService: this.ucanService,
           mcpInvocations: params.mcpInvocations,
         },
+        blobStore: this.blobStore,
         fileProcessingService: this.fileProcessingService,
         spaceId: params.metadata?.spaceId,
         tasksService: this.tasksService,

@@ -1,7 +1,7 @@
 {
   "name": "@ixo/ucan",
   "description": "UCAN authorization for any service - built on ucanto",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": false,
   "publishConfig": {
     "access": "public"

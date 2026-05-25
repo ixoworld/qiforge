@@ -1,3 +1,4 @@
+export * from './channel-memory-tools';
 export * from './domain-indexer-tool';
 export * from './file-processing-tool';
 export * from './list-room-files-tool';

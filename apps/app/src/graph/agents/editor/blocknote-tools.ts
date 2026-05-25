@@ -33,7 +33,10 @@ import {
   type ConditionConfig,
 } from './blocknote-helper';
 import { emojify, unemojify } from 'node-emoji';
+import type { BlobStoreService } from 'src/blob-store/blob-store.service';
+import type { UcanService } from 'src/ucan/ucan.service';
 import { findAndReplaceInDoc, insertBlock, moveBlock } from './block-actions';
+import { createMintInvocationEditorTool } from './mint-invocation-tool';
 import { type AppConfig, MatrixProviderManager } from './provider';
 import {
   extractSurveyQuestions,
@@ -213,6 +216,9 @@ export const createBlocknoteTools = async (
   matrixClient: MatrixClient,
   config: AppConfig,
   readOnly: boolean = false,
+  ucanService?: UcanService,
+  blobStore?: BlobStoreService,
+  userDid?: string,
 ) => {
   logger.log(
     `🔧 Creating BlockNote tools with Matrix client: ${matrixClient.getUserId()}`,
@@ -1788,7 +1794,9 @@ Returns audit events (timestamped actions) and invocations (UCAN-authorized exec
 
 Use this to answer: "Who can execute block X?", "What permissions does user Y have?", "Show me the delegation chain."
 
-Optionally filter by audienceDid (recipient) or capability action (e.g., "flow/block/execute"). Supports wildcard matching (e.g., "flow/*" covers "flow/block/execute").`,
+Optionally filter by audienceDid (recipient) or capability action (e.g., "flow/block/execute"). Supports wildcard matching (e.g., "flow/*" covers "flow/block/execute").
+
+This tool returns delegations only. To fetch a specific UCAN invocation (signed token wrapping a delegation as proof — required when calling UCAN-gated services) use the dedicated \`read_invocations\` tool instead.`,
       schema: z.object({
         audienceDid: z
           .string()
@@ -1805,6 +1813,114 @@ Optionally filter by audienceDid (recipient) or capability action (e.g., "flow/b
       }),
     },
   );
+
+  // ============================================================================
+  // Tool: Read Invocations
+  // ============================================================================
+
+  const readInvocationsTool = tool(
+    async ({ cid = null, blockId = null }) => {
+      logger.log('🔏 read_invocations tool invoked');
+      const providerManager = new MatrixProviderManager(matrixClient, config);
+
+      try {
+        const { doc } = await providerManager.init();
+
+        const isInRoom = await checkIfInRoomAndJoinPublicRoom(
+          matrixClient,
+          roomId,
+        );
+        if (!isInRoom) {
+          return JSON.stringify({
+            success: false,
+            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          });
+        }
+
+        // Reads from Y.Map('invocations'). Stored entries follow the
+        // StoredInvocation shape: { cid, invocation (Base64 CAR), invokerDid,
+        // capability, executedAt, flowId, blockId?, result, proofCids[], ... }
+        const all = readInvocations(
+          doc,
+          typeof blockId === 'string' ? blockId : undefined,
+        );
+
+        const filtered = cid ? all.filter((i) => i['cid'] === cid) : all;
+
+        return JSON.stringify(
+          {
+            success: true,
+            invocations: filtered,
+            summary: {
+              totalReturned: filtered.length,
+              totalInStore: all.length,
+              filteredByCid: cid !== null,
+              filteredByBlockId: blockId !== null,
+            },
+          },
+          null,
+          2,
+        );
+      } catch (error) {
+        return JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        await providerManager.dispose();
+      }
+    },
+    {
+      name: 'read_invocations',
+      description: `Reads UCAN invocations recorded in this flow.
+
+A UCAN invocation is a signed token (Base64-encoded CAR) that wraps a delegation as proof and is addressed to a specific service audience. Invocations are typically minted by the editor (e.g. when a user clicks Execute on an action block) and then consumed by a skill that needs to authenticate against a UCAN-gated external service.
+
+Use this when:
+- The block's companion prompt references a specific invocation by CID (e.g. "UCAN invocation CID: bafy...") and a skill needs the actual signed token to forward as a Bearer credential.
+- You need to inspect or audit which invocations have been minted for a block.
+
+Pass \`cid\` to fetch one specific invocation (recommended — keeps response small). Pass \`blockId\` to list all invocations for a block. Pass neither to list all invocations in the flow (use sparingly — invocation history can grow large).
+
+The \`invocation\` field on each returned entry is the Base64 CAR — write that to disk if a skill expects it (e.g. \`/workspace/ucan_token\`). Do NOT confuse it with a delegation; delegations are returned by \`read_permissions\`.`,
+      schema: z.object({
+        cid: z
+          .string()
+          .optional()
+          .nullable()
+          .describe(
+            'Optional: fetch a specific invocation by its content ID. Recommended when the prompt provides one.',
+          ),
+        blockId: z
+          .string()
+          .optional()
+          .nullable()
+          .describe(
+            'Optional: filter to invocations that targeted a specific block.',
+          ),
+      }),
+    },
+  );
+
+  // ============================================================================
+  // Tool: Mint Invocation (UCAN signing primitive)
+  // ============================================================================
+  //
+  // Lives on the editor agent because minting needs Y.Doc access (to look up
+  // the user's delegation by CID) and only the editor closure has the Matrix
+  // client + roomId baked in. The main agent reaches it via call_editor_agent
+  // and `mint_invocation` is in that subagent tool's `forwardTools` list, so
+  // the call/result still surface in the main stream.
+  const mintInvocationTool = ucanService
+    ? createMintInvocationEditorTool({
+        matrixClient,
+        appConfig: config,
+        roomId,
+        ucanService,
+        blobStore,
+        userDid,
+      })
+    : null;
 
   // ============================================================================
   // Tool 12: Delete Block
@@ -2626,8 +2742,10 @@ Examples:
       readFlowStatusTool,
       readBlockHistoryTool,
       readPermissionsTool,
+      readInvocationsTool,
       readSurveyTool,
       validateSurveyAnswersTool,
+      mintInvocationTool,
     };
   }
 
@@ -2642,6 +2760,7 @@ Examples:
     readFlowStatusTool,
     readBlockHistoryTool,
     readPermissionsTool,
+    readInvocationsTool,
     readSurveyTool,
     fillSurveyAnswersTool,
     validateSurveyAnswersTool,
@@ -2649,6 +2768,7 @@ Examples:
     findAndReplaceTool,
     moveBlockTool,
     bulkEditBlocksTool,
+    mintInvocationTool,
   };
 };
 
