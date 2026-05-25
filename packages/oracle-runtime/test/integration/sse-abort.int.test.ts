@@ -1,3 +1,4 @@
+/* eslint-disable vitest/no-conditional-expect */
 /**
  * SSE abort-mid-stream integration test.
  *

@@ -1,5 +1,6 @@
 import { base } from '@ixo/eslint-config/base';
 import vitest from '@vitest/eslint-plugin';
+import tseslint from 'typescript-eslint';
 
 export default [
   // Core rules from shared preset (includes ignores, recommended presets,
@@ -58,14 +59,23 @@ export default [
     },
   },
 
-  // Test files
+  // Test files — disable type-aware linting. Tests live outside each
+  // package's tsconfig `include`, so projectService would spin up a fresh
+  // TypeScript program per file and exhaust the heap on `eslint .`.
+  // Type-checking still happens via vitest + tsc; ESLint only needs
+  // syntactic + vitest-plugin rules here.
   {
     files: [
       '**/__tests__/**/*.[jt]s?(x)',
       '**/?(*.)+(spec|test).[jt]s?(x)',
     ],
+    ...tseslint.configs.disableTypeChecked,
     plugins: { vitest },
+    languageOptions: {
+      parserOptions: { projectService: false, project: null },
+    },
     rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
       ...vitest.configs.recommended.rules,
     },
   },
