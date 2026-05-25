@@ -19,13 +19,13 @@
     "@nestjs/common": "^11.1.19",
     "dotenv": "^16.4.7",
     "ioredis": "^5.6.1",
-    "langchain": "^1.4.0",
+    "langchain": "1.4.2",
     "matrix-js-sdk": "^37.11.0",
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
     "@ixo/vitest-config": "workspace:*",
-    "@langchain/core": "^1.1.45",
+    "@langchain/core": "1.1.48",
     "@types/node": "^22.10.7",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",

@@ -1,5 +1,5 @@
-import { z } from 'zod';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 const mockNestApp = {
   listen: vi.fn(async () => undefined),
@@ -45,12 +45,12 @@ vi.mock('@ixo/matrix', () => {
   };
 });
 
-import { NestFactory } from '@nestjs/core';
 import { MatrixManager } from '@ixo/matrix';
+import { NestFactory } from '@nestjs/core';
 import { OraclePlugin } from '../plugin-api/oracle-plugin.js';
-import type { PluginManifest } from '../plugin-api/types.js';
-import { RuntimeAppModule } from './runtime-app-module.js';
+import type { PluginContext, PluginManifest } from '../plugin-api/types.js';
 import { createOracleApp } from './create-oracle-app.js';
+import { RuntimeAppModule } from './runtime-app-module.js';
 
 class TestPlugin extends OraclePlugin {
   readonly name = 'test-plugin';
@@ -261,9 +261,7 @@ describe('createOracleApp — Matrix lifecycle', () => {
       plugins: [],
       skipMatrixInit: false,
     });
-    app.onError((err, source) =>
-      errors.push({ msg: err.message, source }),
-    );
+    app.onError((err, source) => errors.push({ msg: err.message, source }));
     app.onPluginStatusChange((evt) =>
       statuses.push({ to: evt.to, reason: evt.reason }),
     );
@@ -271,9 +269,9 @@ describe('createOracleApp — Matrix lifecycle', () => {
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
 
-    expect(statuses.some((s) => s.to === 'failed' && s.reason === 'matrix boom')).toBe(
-      true,
-    );
+    expect(
+      statuses.some((s) => s.to === 'failed' && s.reason === 'matrix boom'),
+    ).toBe(true);
     expect(errors).toContainEqual({
       msg: 'matrix boom',
       source: 'matrix-init',

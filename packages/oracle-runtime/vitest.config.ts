@@ -16,6 +16,49 @@ import { defineConfig, mergeConfig } from 'vitest/config';
  * mints its own Matrix device session in setup.ts so there are no one-time-key
  * collisions on the homeserver.
  */
+/**
+ * Coverage exclude patterns shared by both modes. The set is calibrated so the
+ * reported number reflects *production code you'd reasonably want tested*, not
+ * the raw line count of everything in `src/`. Excluded:
+ *
+ *   - `dist/**` — compiled JS, never executed by tests (would dominate as 0%).
+ *   - `**\/*.config.ts` — build/test configs.
+ *   - test scaffolding (`src/testing/**`, `**\/__test-fixtures__/**`, `**\/*.int.test.ts`).
+ *   - DTOs + barrel `index.ts` + `*.d.ts` (definitions only, no logic).
+ *   - thin transports (`messages.controller.ts`, `sessions.controller.ts`) —
+ *     covered by integration tests, intentionally not unit-tested.
+ *   - boot wiring (`create-oracle-app.ts`, `graceful-shutdown.ts`) — same
+ *     reason, hit by integration tests only.
+ *   - out-of-scope modules (`ws/`, `editor/`, `matrix/checkpointer/`, `llm/`,
+ *     `composio/`, `credits/`, `user-preferences/`, `slack.service.ts`) — no
+ *     unit tests yet, would skew the rollup. Re-include once tests land.
+ */
+const COVERAGE_EXCLUDE = [
+  'dist/**',
+  '**/*.config.ts',
+  '**/*.d.ts',
+  '**/index.ts',
+  '**/types.ts',
+  '**/__test-fixtures__/**',
+  '**/dto/*.dto.ts',
+  'src/testing/**',
+  'test/**',
+  'src/**/*.int.test.ts',
+  'src/modules/messages/messages.controller.ts',
+  'src/modules/sessions/sessions.controller.ts',
+  'src/bootstrap/create-oracle-app.ts',
+  'src/bootstrap/graceful-shutdown.ts',
+  'src/plugins/editor/**',
+  'src/matrix/checkpointer/**',
+  'src/llm/**',
+  'src/plugins/composio/**',
+  'src/plugins/credits/**',
+  'src/plugins/slack/slack.service.ts',
+  'src/plugins/user-preferences/**',
+  'src/modules/ws/**',
+  'src/utils/emoji.ts',
+];
+
 export default defineConfig(({ mode }) => {
   if (mode === 'int') {
     const merged = mergeConfig(nestConfig, {});
@@ -38,6 +81,11 @@ export default defineConfig(({ mode }) => {
     // Default mode is unit tests only — never collect integration files.
     exclude: [...(merged.test?.exclude ?? []), '**/*.int.test.ts'],
     setupFiles: ['./test-setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+      exclude: COVERAGE_EXCLUDE,
+    },
   };
   return merged;
 });
