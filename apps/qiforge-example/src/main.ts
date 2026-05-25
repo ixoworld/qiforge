@@ -76,9 +76,6 @@ async function bootstrap(): Promise<void> {
   const app = await createOracleApp({
     config,
     logger: Logger,
-    features: {
-      composio: false,
-    },
     plugins: [
       // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
