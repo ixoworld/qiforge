@@ -782,10 +782,14 @@ describe('SseStreamRunner', () => {
       const res = new FakeResponse();
       let writesAtEnd = 0;
       const flipAgent: FakeAgent = {
+        // Generator throws before yielding anything — that's the whole
+        // scenario. The empty `yield` keeps the generator-shape contract
+        // satisfied (require-yield) and is unreachable past the throw.
         async *streamEvents() {
           res.end();
           writesAtEnd = res.writes.length;
           throw new Error('after-end');
+          yield;
         },
         async invoke() {
           return { messages: [] };

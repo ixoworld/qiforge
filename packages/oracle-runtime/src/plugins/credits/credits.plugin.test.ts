@@ -69,12 +69,12 @@ describe('CreditsPlugin', () => {
     expect(plugin.autoDetectHint).toBe('DISABLE_CREDITS!=true');
 
     // SUBSCRIPTION_URL/SUBSCRIPTION_ORACLE_MCP_URL are optional but URL-validated.
-    expect(plugin.configSchema!.safeParse({}).success).toBe(true);
+    expect(plugin.configSchema.safeParse({}).success).toBe(true);
     expect(
-      plugin.configSchema!.safeParse({ SUBSCRIPTION_URL: 'not-a-url' }).success,
+      plugin.configSchema.safeParse({ SUBSCRIPTION_URL: 'not-a-url' }).success,
     ).toBe(false);
     expect(
-      plugin.configSchema!.safeParse({ SUBSCRIPTION_URL: 'https://x.test' })
+      plugin.configSchema.safeParse({ SUBSCRIPTION_URL: 'https://x.test' })
         .success,
     ).toBe(true);
   });

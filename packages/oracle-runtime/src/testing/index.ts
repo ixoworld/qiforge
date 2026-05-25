@@ -10,6 +10,7 @@ export {
   mockMatrix,
   mockLlm,
   mockSecrets,
+  mockBlobStore,
   mockEmit,
   mockUcan,
   mockLogger,

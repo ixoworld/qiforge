@@ -146,6 +146,12 @@ export function makeRuntimeContext(
       getIndex: async () => ({}),
       getValues: async () => ({}),
     },
+    blobStore: {
+      put: async () => 'blob_0000000000000000',
+      get: async () => null,
+      isValidBlobId: (value): value is string =>
+        typeof value === 'string' && /^blob_[0-9a-f]{16}$/.test(value),
+    },
     matrix: {
       postToRoom: async () => 'event-id',
       getRoomState: async (roomId: string) => ({ roomId, state: [] }),
@@ -160,6 +166,10 @@ export function makeRuntimeContext(
       hasCapability: () => true,
       mintInvocation: async () => 'invocation-cid',
       resolveServiceDid: async () => 'did:web:example.com',
+      hasSigningKey: () => true,
+      createInvocationFromDelegation: async () => ({
+        invocation: 'invocation-car',
+      }),
     },
     llm: {
       get: () => ({}) as unknown as RuntimeContext['llm'] extends {

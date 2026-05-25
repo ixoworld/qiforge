@@ -1,3 +1,4 @@
+import type * as IxoCommon from '@ixo/common';
 import { type SessionManagerService } from '@ixo/common';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import type { Response } from 'express';
@@ -33,7 +34,7 @@ vi.mock('@ixo/sqlite-saver', () => ({
 }));
 
 vi.mock('@ixo/common', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@ixo/common')>()),
+  ...(await importOriginal<typeof IxoCommon>()),
   transformGraphStateMessageToListMessageResponse: vi.fn(
     (messages: BaseMessage[]) => ({ messages, total: messages.length }),
   ),

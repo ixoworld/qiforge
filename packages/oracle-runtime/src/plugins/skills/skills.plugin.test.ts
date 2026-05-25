@@ -84,14 +84,19 @@ describe('SkillsPlugin identity', () => {
     expect(plugin.manifest.category).toBe('data');
 
     // configSchema defaults SKILLS_CAPSULES_BASE_URL when absent
-    const defaulted = plugin.configSchema!.safeParse({});
-    expect(defaulted.success).toBe(true);
-    if (defaulted.success) {
-      expect(defaulted.data.SKILLS_CAPSULES_BASE_URL).toBe(DEFAULT_URL);
+    const defaulted = plugin.configSchema.safeParse({});
+    // Throw-then-assert so the discriminated union is refined for the data
+    // access on the next line — keeps the assertion unconditional (the lint
+    // rule flags a wrapping `if (defaulted.success)`).
+    if (!defaulted.success) {
+      throw new Error(
+        `expected configSchema to accept {}, got: ${defaulted.error.message}`,
+      );
     }
+    expect(defaulted.data.SKILLS_CAPSULES_BASE_URL).toBe(DEFAULT_URL);
     // Rejects non-URL values
     expect(
-      plugin.configSchema!.safeParse({ SKILLS_CAPSULES_BASE_URL: 'nope' })
+      plugin.configSchema.safeParse({ SKILLS_CAPSULES_BASE_URL: 'nope' })
         .success,
     ).toBe(false);
 
@@ -123,6 +128,8 @@ describe('createDefaultSkillsUcanBuilder', () => {
         requireCapability: () => undefined,
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
 
@@ -144,6 +151,8 @@ describe('createDefaultSkillsUcanBuilder', () => {
         requireCapability: () => undefined,
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
     expect(await builder(SKILLS_URL, runCtxNoDid)).toBeUndefined();

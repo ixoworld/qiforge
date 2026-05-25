@@ -17,24 +17,23 @@ import {
   makeTool,
 } from '../registries/test-fixtures.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
+import type * as Langchain from 'langchain';
 
 // Capture every createAgent invocation so the tests can introspect the
 // arguments without spinning up a real LangGraph runtime.
-const createAgentCalls: Parameters<
-  typeof import('langchain').createAgent
->[0][] = [];
+const createAgentCalls: Parameters<typeof Langchain.createAgent>[0][] = [];
 const fakeCompiledAgent = {
   invoke: vi.fn(),
   stream: vi.fn(),
 };
 
 vi.mock('langchain', async () => {
-  const actual = await vi.importActual<typeof import('langchain')>('langchain');
+  const actual = await vi.importActual<typeof Langchain>('langchain');
   return {
     ...actual,
     createAgent: vi.fn((args: unknown) => {
       createAgentCalls.push(
-        args as Parameters<typeof import('langchain').createAgent>[0],
+        args as Parameters<typeof Langchain.createAgent>[0],
       );
       return fakeCompiledAgent;
     }),
@@ -81,6 +80,8 @@ function makeAmbient(): AmbientServices {
       requireCapability: vi.fn(),
       mintInvocation: vi.fn(async () => 'inv'),
       resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
+      hasSigningKey: vi.fn(() => true),
+      createInvocationFromDelegation: vi.fn(async () => ({ invocation: 'mock-invocation-car' })),
     },
     logger: {
       log: vi.fn(),
@@ -163,7 +164,7 @@ describe('createMainAgent', () => {
     const safetyModel = {
       invoke: vi.fn(),
     } as unknown as Parameters<
-      typeof import('./main-agent.js').createMainAgent
+      typeof createMainAgent
     >[0]['hooks'] extends infer H
       ? H extends { safetyModel?: infer M }
         ? M

@@ -29,6 +29,7 @@ import {
 } from '../runtime-context/build-runtime.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import {
+  mockBlobStore,
   mockEmit,
   mockLlm,
   mockLogger,
@@ -171,6 +172,7 @@ export async function createTestRuntime(
   let matrixAdapter = mockMatrix(opts.mocks?.matrix);
   const llmAdapter = mockLlm(opts.mocks?.llm);
   const secretsAdapter = mockSecrets(opts.mocks?.secrets);
+  const blobStoreAdapter = mockBlobStore();
   const ucanAdapter = mockUcan();
   const emitAdapter = mockEmit();
   let fetchHandler: FetchHandler | undefined = opts.mocks?.fetch;
@@ -191,6 +193,7 @@ export async function createTestRuntime(
     identity,
     availablePlugins: loadedPluginNames,
     secrets: secretsAdapter,
+    blobStore: blobStoreAdapter,
     get matrix() {
       return matrixAdapter;
     },

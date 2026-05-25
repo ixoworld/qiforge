@@ -22,11 +22,11 @@ import {
   type SendMessageRequest,
 } from './messages.service.js';
 import {
-  OracleRuntimeBundleHolder,
+  type OracleRuntimeBundleHolder,
   type OracleRuntimeBundle,
 } from './oracle-runtime-bundle.js';
 import { makePrepared } from './__test-fixtures__/deps.js';
-import { UserContextFetcher } from './user-context-fetcher.js';
+import { type UserContextFetcher } from './user-context-fetcher.js';
 
 // Mock createMainAgent so the test never tries to compile a real LangGraph
 // runtime. We only need a sentinel return value — every assertion in this
@@ -77,6 +77,8 @@ function makeAmbient(): AmbientServices {
       requireCapability: vi.fn(),
       mintInvocation: vi.fn(async () => 'inv'),
       resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
+      hasSigningKey: vi.fn(() => true),
+      createInvocationFromDelegation: vi.fn(async () => ({ invocation: 'mock-invocation-car' })),
     },
     logger: {
       log: vi.fn(),

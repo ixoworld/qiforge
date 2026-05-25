@@ -284,6 +284,35 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     getValues: (keys: string[]) => Promise<Record<string, string>>;
   };
 
+  /**
+   * Short-TTL keyed value store for content the LLM should never relay
+   * verbatim (UCAN invocation CARs, JWTs, signed envelopes, etc.). A
+   * producing tool stores the value and returns a short hex blobId; a
+   * consuming tool looks the value up server-side and forwards it on. Blobs
+   * are namespaced by issuing user DID — cross-user reads always miss.
+   */
+  blobStore: {
+    /** Store a value and return a fresh `blob_<16 hex>` id. TTL clamped to
+     * the service's `MAX_TTL_SECONDS` (24h); defaults to `DEFAULT_TTL_SECONDS`
+     * (1h) when omitted. Pass `userDid` from a trusted source — never from
+     * LLM-supplied arguments. */
+    put: (params: {
+      userDid: string;
+      name: string;
+      value: string;
+      ttlSeconds?: number;
+    }) => Promise<string>;
+    /** Retrieve a blob by id, scoped to the requesting user. Returns `null`
+     * if the blob doesn't exist, has expired, or belongs to a different user. */
+    get: (params: {
+      userDid: string;
+      blobId: string;
+    }) => Promise<{ name: string; value: string } | null>;
+    /** Lightweight format check (`blob_<16 hex>`). Use in tool input handlers
+     * to reject malformed IDs before paying for a cache lookup. */
+    isValidBlobId: (value: unknown) => value is string;
+  };
+
   /** Matrix client, scoped operations only. */
   matrix: {
     postToRoom: (roomId: string, content: unknown) => Promise<string>;
@@ -305,6 +334,24 @@ export interface RuntimeContext<TConfig = MergedConfig> {
      * minting service-targeted UCAN invocations.
      */
     resolveServiceDid: (serviceUrl: string) => Promise<string | null>;
+    /**
+     * `true` once the oracle has loaded its Ed25519 signing mnemonic. Plugins
+     * gate registration of mint-capable tools on this — without a key, minting
+     * is a no-op and the tool should surface an error rather than pretend.
+     */
+    hasSigningKey: () => boolean;
+    /**
+     * Mint a UCAN invocation from a directly-supplied delegation CAR (rather
+     * than a per-user cached one). Used by the editor's `mint_invocation`
+     * tool: it reads the CAR from a flow's Y.Doc by CID and re-mints a fresh
+     * single-use invocation targeted at a specific service route.
+     */
+    createInvocationFromDelegation: (
+      delegationCar: string,
+      serviceUrl: string,
+      capability: { can: string; with: string },
+      options?: { maxTtlSeconds?: number },
+    ) => Promise<{ invocation: string } | { error: string }>;
   };
 
   /** LLM provider. */

@@ -229,39 +229,58 @@ describe('FileProcessingService', () => {
   });
 
   describe('processAttachments — SSRF', () => {
-    async function expectBlocked(url: string): Promise<void> {
-      await expect(svc.processFileFromUrl(url)).rejects.toThrow();
-    }
+    // Each test inlines its `await expect(...).rejects.toThrow()` so the
+    // vitest/expect-expect rule sees the assertion directly. (A shared
+    // `expectBlocked` helper hid the assertion behind a function call and
+    // the rule could no longer detect it.)
 
     it('rejects 127.0.0.1', async () => {
-      await expectBlocked('http://127.0.0.1/file.pdf');
+      await expect(
+        svc.processFileFromUrl('http://127.0.0.1/file.pdf'),
+      ).rejects.toThrow();
     });
 
     it('rejects 169.254.169.254 (cloud metadata)', async () => {
-      await expectBlocked('http://169.254.169.254/latest/meta-data/file.pdf');
+      await expect(
+        svc.processFileFromUrl(
+          'http://169.254.169.254/latest/meta-data/file.pdf',
+        ),
+      ).rejects.toThrow();
     });
 
     it('rejects ::1 (IPv6 loopback)', async () => {
-      await expectBlocked('http://[::1]/file.pdf');
+      await expect(
+        svc.processFileFromUrl('http://[::1]/file.pdf'),
+      ).rejects.toThrow();
     });
 
     it('rejects ::ffff:127.0.0.1 (IPv4-mapped IPv6 loopback bypass)', async () => {
-      await expectBlocked('http://[::ffff:127.0.0.1]/file.pdf');
+      await expect(
+        svc.processFileFromUrl('http://[::ffff:127.0.0.1]/file.pdf'),
+      ).rejects.toThrow();
     });
 
     it('rejects fc00::/7 unique-local IPv6', async () => {
-      await expectBlocked('http://[fc00::1]/file.pdf');
-      await expectBlocked('http://[fd12:3456:789a::1]/file.pdf');
+      await expect(
+        svc.processFileFromUrl('http://[fc00::1]/file.pdf'),
+      ).rejects.toThrow();
+      await expect(
+        svc.processFileFromUrl('http://[fd12:3456:789a::1]/file.pdf'),
+      ).rejects.toThrow();
     });
 
     it('rejects fe80::/10 link-local IPv6', async () => {
-      await expectBlocked('http://[fe80::1]/file.pdf');
+      await expect(
+        svc.processFileFromUrl('http://[fe80::1]/file.pdf'),
+      ).rejects.toThrow();
     });
 
     it('rejects metadata.google.internal', async () => {
-      await expectBlocked(
-        'http://metadata.google.internal/computeMetadata/v1/file.pdf',
-      );
+      await expect(
+        svc.processFileFromUrl(
+          'http://metadata.google.internal/computeMetadata/v1/file.pdf',
+        ),
+      ).rejects.toThrow();
     });
 
     it('rejects non-http/https schemes', async () => {
@@ -650,6 +669,12 @@ describe('FileProcessingService', () => {
       const promise = svc.downloadAndProcessFile({
         url: 'https://example.com/file.pdf',
       });
+      // Capture the rejection assertion as a pending promise — DON'T await
+      // it yet. Advance fake timers so the AbortSignal fires, then await
+      // the expectation. Awaiting first would deadlock against the fake
+      // clock (the timeout never fires). The lint rule sees only the
+      // capture, not the deferred await two lines down.
+      // eslint-disable-next-line vitest/valid-expect
       const expectation = expect(promise).rejects.toThrow(/aborted/i);
       await vi.advanceTimersByTimeAsync(MATRIX_DOWNLOAD_TIMEOUT_MS + 1);
       await expectation;

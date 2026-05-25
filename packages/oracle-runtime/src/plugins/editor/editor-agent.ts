@@ -7,6 +7,11 @@ import {
   createBlocknoteTools,
 } from './blocknote-tools.js';
 import { resolveEditorMatrixClient } from './editor-mx.js';
+import {
+  createMintInvocationEditorTool,
+  type BlobStoreCapable,
+  type UcanMintCapable,
+} from './mint-invocation-tool.js';
 import { createPageTools } from './page-tools.js';
 import { editorAgentPrompt, editorAgentReadOnlyPrompt } from './prompts.js';
 import type { AppConfig, MatrixRoomConfig } from './provider.js';
@@ -104,6 +109,17 @@ export interface CreateEditorSubAgentParams {
   userMatrixId?: string;
   /** Matrix space ID to nest new pages under. */
   spaceId?: string;
+  /** When provided, registers `mint_invocation` on the editor agent so skills
+   * can sign UCAN invocations against external services without round-
+   * tripping the delegation CAR through the LLM. */
+  ucanService?: UcanMintCapable;
+  /** When provided alongside `ucanService`, the minted invocation is also
+   * stored in the blob store under a fresh blobId; the tool returns that
+   * blobId so the main agent can pass it to `sandbox_write_blob` instead of
+   * relaying the CAR through the LLM. */
+  blobStore?: BlobStoreCapable;
+  /** Owner of the blob — used as the cache namespace. */
+  userDid?: string;
 }
 
 const resolveStructuredTools = (
@@ -214,6 +230,9 @@ export async function createEditorSubAgent(
     description = 'AI Agent that reads and writes pages and blocks in the BlockNote editor.',
     userMatrixId,
     spaceId,
+    ucanService,
+    blobStore,
+    userDid,
   } = params;
 
   const roomConfig = normalizeRoom(room);
@@ -250,6 +269,23 @@ export async function createEditorSubAgent(
     structuredTools.push(pageTools.updatePageTool);
   }
 
+  // mint_invocation lives on the editor (not the main agent) because the
+  // delegation CAR is read from the flow's Y.Doc by CID — only this closure
+  // has the matrixClient + roomId baked in. The main agent reaches it via
+  // call_editor_agent + the `forwardTools` list below.
+  if (ucanService && editorRoomId) {
+    structuredTools.push(
+      createMintInvocationEditorTool({
+        matrixClient,
+        appConfig,
+        roomId: editorRoomId,
+        ucanService,
+        blobStore,
+        userDid,
+      }),
+    );
+  }
+
   const tools = structuredTools.map(wrapStructuredTool);
 
   return {
@@ -262,7 +298,15 @@ export async function createEditorSubAgent(
     middlewares: [],
     // Bubble the page + block mutation events into the main chat so the FE
     // renders artifact previews and edit confirmations inline. Names absent
-    // in the read-only toolset are simply nothing-to-forward.
-    forwardTools: ['create_page', 'update_page', 'edit_block', 'create_block'],
+    // in the read-only toolset are simply nothing-to-forward. `mint_invocation`
+    // is forwarded so the main agent sees the returned `blobId` and can pass
+    // it straight to `sandbox_write_blob`.
+    forwardTools: [
+      'create_page',
+      'update_page',
+      'edit_block',
+      'create_block',
+      'mint_invocation',
+    ],
   };
 }

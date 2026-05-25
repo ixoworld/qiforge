@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { validateManifest } from '../../manifest/validator.js';
 import type { RuntimeContext } from '../../plugin-api/types.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
+import { mockBlobStore } from '../../testing/mocks.js';
 import {
   createDefaultAuthBuilder,
   parseOracleSecrets,
@@ -126,6 +127,8 @@ describe('createDefaultAuthBuilder', () => {
         requireCapability: () => undefined,
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
 
@@ -155,6 +158,8 @@ describe('createDefaultAuthBuilder', () => {
         requireCapability: () => undefined,
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
 
@@ -180,14 +185,14 @@ describe('SandboxPlugin', () => {
     expect(plugin.manifest.visibility).toBe('always');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.autoDetectHint).toBe('SANDBOX_MCP_URL');
-    expect(plugin.autoDetect!({ SANDBOX_MCP_URL: SANDBOX_URL })).toBe(true);
-    expect(plugin.autoDetect!({})).toBe(false);
+    expect(plugin.autoDetect({ SANDBOX_MCP_URL: SANDBOX_URL })).toBe(true);
+    expect(plugin.autoDetect({})).toBe(false);
 
-    const ok = plugin.configSchema!.safeParse({ SANDBOX_MCP_URL: SANDBOX_URL });
+    const ok = plugin.configSchema.safeParse({ SANDBOX_MCP_URL: SANDBOX_URL });
     expect(ok.success).toBe(true);
-    expect(plugin.configSchema!.safeParse({}).success).toBe(false);
+    expect(plugin.configSchema.safeParse({}).success).toBe(false);
     expect(
-      plugin.configSchema!.safeParse({ SANDBOX_MCP_URL: 'not-a-url' }).success,
+      plugin.configSchema.safeParse({ SANDBOX_MCP_URL: 'not-a-url' }).success,
     ).toBe(false);
   });
 
@@ -249,10 +254,14 @@ describe('SandboxPlugin', () => {
 
       const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
 
+      // `sandbox_write_blob` is appended whenever the upstream `sandbox_write_file`
+      // tool is present + the request has a user DID — it wraps that upstream
+      // tool to forward server-stored blobs without LLM relay.
       expect(tools.map((t) => t.name)).toEqual([
         'sandbox_run',
         'sandbox_write_file',
         'artifact_list',
+        'sandbox_write_blob',
       ]);
       expect(tools[1]!.description).toBe(
         'Upstream description for sandbox_write_file',
@@ -291,8 +300,7 @@ describe('SandboxPlugin', () => {
           getValues: async (keys: string[]) => {
             const out: Record<string, string> = {};
             for (const k of keys) {
-              if (k === 'DATABASE_URL')
-                out[k] = 'postgres://user:pass@host/db';
+              if (k === 'DATABASE_URL') out[k] = 'postgres://user:pass@host/db';
             }
             return out;
           },
@@ -308,16 +316,17 @@ describe('SandboxPlugin', () => {
       expect(headers['X-Skills-Invocation']).toBe('ucan-skills');
       expect(headers['x-os-openai_key']).toBe('sk-oracle');
       expect(headers['x-os-stripe_key']).toBe('stripe-oracle');
-      expect(headers['x-us-database_url']).toBe(
-        'postgres://user:pass@host/db',
-      );
+      expect(headers['x-us-database_url']).toBe('postgres://user:pass@host/db');
 
       expect(authBuilder).toHaveBeenCalledTimes(1);
       expect(authBuilder).toHaveBeenCalledWith(
         {
           sandboxMcpUrl: SANDBOX_URL,
           skillsServiceUrl: SKILLS_URL,
-          oracleSecrets: { OPENAI_KEY: 'sk-oracle', STRIPE_KEY: 'stripe-oracle' },
+          oracleSecrets: {
+            OPENAI_KEY: 'sk-oracle',
+            STRIPE_KEY: 'stripe-oracle',
+          },
           userSecrets: { DATABASE_URL: 'postgres://user:pass@host/db' },
         },
         rtCtx,
@@ -345,6 +354,7 @@ describe('SandboxPlugin', () => {
         'sandbox_run',
         'sandbox_write_file',
         'artifact_list',
+        'sandbox_write_blob',
       ]);
     });
 
@@ -392,6 +402,143 @@ describe('SandboxPlugin', () => {
       );
 
       expect(getValuesSpy).not.toHaveBeenCalled();
+    });
+
+    it('omits sandbox_write_blob when sandbox_write_file is not in the upstream toolset', async () => {
+      const upstream = [makeUpstreamTool('sandbox_run')];
+      const { factory } = makeMcpFactory(upstream);
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+
+      const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
+      expect(tools.map((t) => t.name)).toEqual(['sandbox_run']);
+    });
+  });
+
+  describe('sandbox_write_blob', () => {
+    let authBuilder: SandboxAuthBuilder;
+
+    beforeEach(() => {
+      authBuilder = vi.fn(async () => ({
+        Authorization: 'Bearer ucan-sandbox',
+        'X-Auth-Type': 'ucan',
+      }));
+    });
+
+    async function buildPluginAndBlob(
+      invokeImpl?: (input: unknown) => Promise<unknown>,
+    ) {
+      const writeFileInvoke = vi.fn(invokeImpl ?? (async () => 'written'));
+      const upstream: SandboxMcpTool[] = [
+        {
+          name: 'sandbox_write_file',
+          description: 'upstream sandbox_write_file',
+          schema: z.object({
+            path: z.string(),
+            content: z.string(),
+            encoding: z.string().optional(),
+          }),
+          invoke: writeFileInvoke,
+        },
+      ];
+      const { factory } = makeMcpFactory(upstream);
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+      // The fixed `makeRuntimeContext` blobStore stub is intentionally inert
+      // (put returns a fixed id, get always misses) — swap in the real
+      // in-memory `mockBlobStore` so put/get round-trip works.
+      const rtCtx = makeSandboxRuntimeContext({ blobStore: mockBlobStore() });
+      const blobId = await rtCtx.blobStore.put({
+        userDid: rtCtx.user.did,
+        name: 'ucan_invocation',
+        value: 'opaque-base64-car',
+        ttlSeconds: 60,
+      });
+      const tools = await plugin.getRequestTools(rtCtx);
+      const writeBlob = tools.find((t) => t.name === 'sandbox_write_blob');
+      if (!writeBlob) throw new Error('sandbox_write_blob not registered');
+      return { writeBlob, writeFileInvoke, rtCtx, blobId };
+    }
+
+    it('looks the blob up server-side and forwards its value to sandbox_write_file', async () => {
+      const { writeBlob, writeFileInvoke, rtCtx, blobId } =
+        await buildPluginAndBlob();
+
+      const raw = await writeBlob.handler(
+        { blobId, path: '/workspace/data/skill/ucan_token' },
+        rtCtx,
+      );
+      const result = JSON.parse(raw as string) as {
+        success: boolean;
+        path: string;
+        bytesWritten: number;
+        blobName: string;
+      };
+      expect(result.success).toBe(true);
+      expect(result.path).toBe('/workspace/data/skill/ucan_token');
+      expect(result.bytesWritten).toBe('opaque-base64-car'.length);
+      expect(result.blobName).toBe('ucan_invocation');
+      expect(writeFileInvoke).toHaveBeenCalledWith({
+        path: '/workspace/data/skill/ucan_token',
+        content: 'opaque-base64-car',
+        encoding: 'utf8',
+      });
+    });
+
+    it('rejects malformed blobIds without calling the upstream tool', async () => {
+      const { writeBlob, writeFileInvoke, rtCtx } = await buildPluginAndBlob();
+      const raw = await writeBlob.handler(
+        { blobId: 'not-a-blob-id', path: '/workspace/data/skill/x' },
+        rtCtx,
+      );
+      const result = JSON.parse(raw as string) as {
+        success: boolean;
+        error: string;
+      };
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/Invalid blobId format/);
+      expect(writeFileInvoke).not.toHaveBeenCalled();
+    });
+
+    it('rejects paths outside /workspace/data/', async () => {
+      const { writeBlob, writeFileInvoke, rtCtx, blobId } =
+        await buildPluginAndBlob();
+      const raw = await writeBlob.handler(
+        { blobId, path: '/tmp/elsewhere' },
+        rtCtx,
+      );
+      const result = JSON.parse(raw as string) as {
+        success: boolean;
+        error: string;
+      };
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/must be under \/workspace\/data\//);
+      expect(writeFileInvoke).not.toHaveBeenCalled();
+    });
+
+    it('returns a "not found" envelope for missing/cross-user blobs', async () => {
+      const { writeBlob, writeFileInvoke, rtCtx } = await buildPluginAndBlob();
+      const raw = await writeBlob.handler(
+        {
+          // Distinct from the freshly-put blob — the mock counter starts at
+          // zero, so this id can never have been issued by this store.
+          blobId: 'blob_ffffffffffffffff',
+          path: '/workspace/data/skill/x',
+        },
+        rtCtx,
+      );
+      const result = JSON.parse(raw as string) as {
+        success: boolean;
+        error: string;
+      };
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/not found/);
+      expect(writeFileInvoke).not.toHaveBeenCalled();
     });
   });
 });

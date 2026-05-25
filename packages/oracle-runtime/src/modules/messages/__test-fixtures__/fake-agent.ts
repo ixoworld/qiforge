@@ -52,7 +52,7 @@ export function makeThrowingFakeAgent(error: Error): FakeAgent {
       return (async function* () {
         await Promise.resolve();
         throw error;
-        // eslint-disable-next-line no-unreachable
+         
         yield undefined as unknown as StreamEvent;
       })();
     },

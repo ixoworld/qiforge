@@ -178,6 +178,8 @@ describe('MemoryPlugin', () => {
         hasCapability: () => true,
         mintInvocation,
         resolveServiceDid,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
       session: {
         id: 'sess-1',

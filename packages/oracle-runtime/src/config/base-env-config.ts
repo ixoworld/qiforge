@@ -69,7 +69,7 @@ function singletonConfigService(): ConfigService<BaseEnvWithDerived> {
       ...(oracleDid ? { ORACLE_DID: oracleDid } : {}),
     };
     _singleton = new ConfigService<BaseEnvWithDerived>(
-      merged as Record<string, unknown>,
+      merged,
     );
   }
   return _singleton;

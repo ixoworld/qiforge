@@ -9,7 +9,7 @@ import type { ConfigService } from '@nestjs/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { makeConfig } from '../../testing/nest-doubles.js';
-import { SessionHistoryProcessor } from './session-history-processor.service.js';
+import { type SessionHistoryProcessor } from './session-history-processor.service.js';
 import { SessionsService } from './sessions.service.js';
 
 vi.mock('@ixo/oracles-chain-client', () => ({

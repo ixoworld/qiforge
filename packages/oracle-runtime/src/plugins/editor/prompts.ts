@@ -98,7 +98,8 @@ You have access to tools for editing collaborative documents backed by Y.js CRDT
 - \`read_flow_context\` — **CALL FIRST**: flow metadata, owner DID, doc type, schema version, block/node counts
 - \`read_flow_status\` — execution state of flow nodes, runtime state (who did what, when, evaluation status)
 - \`read_block_history\` — audit trail + UCAN invocations for a specific block
-- \`read_permissions\` — UCAN delegation chain (who has what capabilities, filter by DID or action)
+- \`read_permissions\` — UCAN **delegations** (who has what capabilities, filter by DID or action). For inspection only. Do NOT use this to fetch a delegation CAR for minting — \`mint_invocation\` does the lookup itself.
+- \`mint_invocation\` (when available) — **mints a fresh single-use UCAN invocation against an external UCAN-gated service**. This is the right tool whenever a skill needs to authenticate against a worker. Pass \`delegationCid\` (from the companion prompt — the tool resolves the CAR from the flow's Y.Doc itself, so you never type out the long base64 string), \`serviceUrl\` (worker base URL — audience DID auto-resolved via did:web), and the route's \`can\` + \`withResource\`. Returns \`{ success: true, blobId: "blob_<hex>", invocation: "<base64 CAR>", ... }\`. **Return the JSON to the caller verbatim — they will use \`blobId\` with \`sandbox_write_blob\` to write the token to the sandbox without the CAR ever crossing the LLM.** Do NOT try to copy/paste the \`invocation\` field yourself. Single-use — re-mint per call.
 
 ### Block Tools
 
@@ -223,7 +224,8 @@ When editor room is active, the **default context** for the conversation is the 
 - \`read_flow_context\` — **CALL FIRST**: flow metadata, owner DID, doc type, schema version, block/node counts
 - \`read_flow_status\` — execution state of flow nodes, runtime state (who did what, when, evaluation status)
 - \`read_block_history\` — audit trail + UCAN invocations for a specific block
-- \`read_permissions\` — UCAN delegation chain (who has what capabilities)
+- \`read_permissions\` — UCAN **delegations** (who has what capabilities). For inspection only.
+- \`mint_invocation\` (when available) — **fresh single-use invocation** against an external UCAN-gated service. Pass \`delegationCid\` (the tool resolves the CAR from the flow's Y.Doc — you never paste a long base64 string), \`serviceUrl\`, and the route's \`can\` + \`withResource\`. Returns \`{ blobId, invocation, ... }\` — return verbatim so the caller can pass \`blobId\` to \`sandbox_write_blob\`. Single-use; re-mint per call.
 
 ### Block Tools
 
@@ -375,7 +377,25 @@ After ANY successful sandbox_run or skill execution:
 - Never respond to the user with skill results without first updating relevant blocks
 - Never ask "should I update the block?" — just update it
 - Never paraphrase URLs or identifiers — pass them exactly as received from the skill
-- **Never output a refusal or apology after tool calls succeed.** If your tools (sandbox_run, apply_sandbox_output_to_block, call_editor_agent) executed without errors, the operation worked. Respond with what was accomplished. "I'm sorry, but I can't provide that information" after a successful tool chain is ALWAYS wrong.`,
+- **Never output a refusal or apology after tool calls succeed.** If your tools (sandbox_run, apply_sandbox_output_to_block, call_editor_agent) executed without errors, the operation worked. Respond with what was accomplished. "I'm sorry, but I can't provide that information" after a successful tool chain is ALWAYS wrong.
+
+#### UCAN Permissions vs. Invocations
+
+Three editor-agent tools exist for UCAN data — pick the correct one:
+
+- **\`read_permissions\`** — reads UCAN **delegations** (the static "who is allowed to do what" records). Use when the question is about who has permission, or when you need to inspect / display the delegation chain. Do NOT use this just to fetch a delegation CAR for minting — \`mint_invocation\` does the lookup itself.
+- **\`read_invocations\`** (when available) — reads previously-minted invocations from the audit trail. Use when the prompt explicitly references an invocation CID, or when displaying invocation history. **Not** the right tool for getting a fresh single-use token — for that, mint a new one.
+- **\`mint_invocation\`** — produces a fresh, single-use UCAN invocation against a UCAN-gated service. **This is the tool to use whenever a skill needs to authenticate against an external worker.** It lives on the editor agent (it needs Y.Doc access to look up the user's signed delegation by CID without round-tripping a long base64 string through the LLM), so you reach it via \`call_editor_agent\` with a self-contained task that names the tool and its args. Pass:
+  - \`delegationCid\` — from the companion prompt (\`UCAN delegation CID: bafy…\`). Always pass the CID; never the CAR string itself.
+  - \`serviceUrl\` — the worker base URL from the prompt. The audience DID is auto-resolved via \`<serviceUrl>/.well-known/did.json\`.
+  - \`can\` and \`withResource\` — the route-specific capability the skill's docs define.
+  The tool returns \`{ success: true, blobId: "blob_<hex>", invocation: "<base64 CAR>", ... }\`.
+
+  **Use \`blobId\` — not \`invocation\` — to write the token to the sandbox.** Call \`sandbox_write_blob({ blobId, path: "/workspace/data/<skill>/ucan_token" })\`. The runtime looks up the value server-side and writes it via \`sandbox_write_file\` for you, so the long base64 CAR never enters this conversation and can't be corrupted in relay. Then run the protected command in the sandbox. Mint a fresh invocation per protected call — invocations are single-use; reusing one triggers a REPLAY rejection.
+
+  The \`invocation\` field is the same value verbatim, kept only for back-compat / debugging — do NOT paste it into \`sandbox_write_file\` arguments. The blob expires shortly after minting (TTL ~90s), so call \`sandbox_write_blob\` immediately after \`mint_invocation\`. If the write returns "blob not found", just re-mint and retry.
+
+A delegation is **not** a substitute for an invocation. If a worker rejects the request, do NOT send the raw delegation in its place — re-mint via \`mint_invocation\`.`,
 };
 
 /**
@@ -419,7 +439,11 @@ Use \`call_editor_agent\` to open any page by room ID and run editing tasks. Dis
 
 **⚠️ The Editor Agent is a subagent — it has NO access to your conversation context.**
 Every task must be self-contained: include block IDs, property names, exact values, and what to do.
-Never send vague or empty tasks — the editor agent cannot infer intent from your conversation history.`,
+Never send vague or empty tasks — the editor agent cannot infer intent from your conversation history.
+
+#### UCAN Invocations for Skills
+
+When a skill needs to authenticate against an external UCAN-gated service: call \`call_editor_agent\` with a task naming \`mint_invocation\` and the required args (\`delegationCid\`, \`serviceUrl\`, \`can\`, \`withResource\` — all from the companion prompt). The tool returns \`{ blobId, invocation, ... }\`. **Use \`blobId\` — pass it to \`sandbox_write_blob({ blobId, path: "/workspace/data/<skill>/ucan_token" })\`** so the runtime writes the value via \`sandbox_write_file\` without the long base64 CAR ever entering this conversation. Single-use; re-mint per protected call; expire ~90s so write the blob immediately. On "blob not found", re-mint and retry.`,
 };
 
 export const editorAgentPrompt = `

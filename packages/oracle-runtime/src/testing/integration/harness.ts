@@ -58,12 +58,14 @@ import {
 } from '../../registries/index.js';
 import type {
   AmbientServices,
+  BlobStoreAdapter,
   EmitAdapter,
   LlmAdapter,
   MatrixAdapter,
   SecretsAdapter,
   UcanAdapter,
 } from '../../runtime-context/ambient.js';
+import { mockBlobStore } from '../mocks.js';
 import { buildPluginContext } from '../../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -490,6 +492,16 @@ export async function createIntegrationRuntime(
     async resolveServiceDid() {
       return null;
     },
+    hasSigningKey() {
+      return false;
+    },
+    async createInvocationFromDelegation() {
+      throw new Error(
+        'createIntegrationRuntime: createInvocationFromDelegation is not wired. Pass ' +
+          '`ucan: bootedOracle.app.ambient.ucan` from a `createIntegrationOracle()` ' +
+          'boot if your test needs CAR-driven invocation minting.',
+      );
+    },
   };
 
   const emitAdapter: EmitAdapter = {
@@ -499,11 +511,14 @@ export async function createIntegrationRuntime(
     },
   };
 
+  const blobStoreAdapter: BlobStoreAdapter = mockBlobStore();
+
   const ambient: AmbientServices = {
     config,
     identity,
     availablePlugins: loadedPluginNames,
     secrets: secretsAdapter,
+    blobStore: blobStoreAdapter,
     matrix: matrixAdapter,
     llm: llmAdapter,
     emit: emitAdapter,

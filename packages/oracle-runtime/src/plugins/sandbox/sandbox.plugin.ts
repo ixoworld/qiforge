@@ -14,6 +14,7 @@ import {
   parseOracleSecrets,
   type SandboxAuthBuilder,
 } from './sandbox-mcp.js';
+import { createSandboxWriteBlobTool } from './sandbox-write-blob.js';
 
 const configSchema = z.object({
   SANDBOX_MCP_URL: z.url(),
@@ -272,11 +273,25 @@ export class SandboxPlugin extends OraclePlugin {
           (t) => !t.name.startsWith(ORACLE_MANAGEMENT_TOOL_PREFIX),
         );
 
-    return filtered.map((tool) => ({
+    const upstreamTools: PluginTool[] = filtered.map((tool) => ({
       name: tool.name,
       description: tool.description,
       schema: tool.schema,
       handler: async (args) => tool.invoke(args),
     }));
+
+    // sandbox_write_blob — companion to mint_invocation. Synthetic wrapper
+    // that takes a server-stored blobId + a sandbox path, looks the value up
+    // server-side, and forwards it to sandbox_write_file. Only registered
+    // when sandbox_write_file is present in the upstream toolset AND the
+    // request has a known user DID (the blob store is user-DID-namespaced).
+    const sandboxWriteFileTool = filtered.find(
+      (t) => t.name === 'sandbox_write_file',
+    );
+    if (sandboxWriteFileTool && rtCtx.user.did) {
+      upstreamTools.push(createSandboxWriteBlobTool({ sandboxWriteFileTool }));
+    }
+
+    return upstreamTools;
   }
 }

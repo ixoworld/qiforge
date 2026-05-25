@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import type * as IxoCommon from '@ixo/common';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type AgentBuilder, type BuiltAgent } from './agent-builder.js';
@@ -7,7 +8,7 @@ import { type SendMessagePayload } from './dto/send-message.dto.js';
 import { makePrepared } from './__test-fixtures__/deps.js';
 
 vi.mock('@ixo/common', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@ixo/common')>()),
+  ...(await importOriginal<typeof IxoCommon>()),
   transformGraphStateMessageToListMessageResponse: vi.fn(
     (messages: BaseMessage[]) => ({
       messages: messages.map((m) => ({

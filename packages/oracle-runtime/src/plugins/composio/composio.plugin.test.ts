@@ -37,10 +37,10 @@ describe('ComposioPlugin — identity & config', () => {
     expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.category).toBe('integration');
     expect(plugin.autoDetectHint).toBe('COMPOSIO_API_KEY');
-    expect(plugin.autoDetect!({ COMPOSIO_API_KEY })).toBe(true);
-    expect(plugin.autoDetect!({})).toBe(false);
+    expect(plugin.autoDetect({ COMPOSIO_API_KEY })).toBe(true);
+    expect(plugin.autoDetect({})).toBe(false);
 
-    const valid = plugin.configSchema!.safeParse({ COMPOSIO_API_KEY });
+    const valid = plugin.configSchema.safeParse({ COMPOSIO_API_KEY });
     expect(valid.success).toBe(true);
     // COMPOSIO_BASE_URL has a default
     expect(valid.success && valid.data.COMPOSIO_BASE_URL).toBe(
@@ -48,11 +48,11 @@ describe('ComposioPlugin — identity & config', () => {
     );
     // Empty COMPOSIO_API_KEY rejected
     expect(
-      plugin.configSchema!.safeParse({ COMPOSIO_API_KEY: '' }).success,
+      plugin.configSchema.safeParse({ COMPOSIO_API_KEY: '' }).success,
     ).toBe(false);
     // Invalid URL rejected
     expect(
-      plugin.configSchema!.safeParse({
+      plugin.configSchema.safeParse({
         COMPOSIO_API_KEY,
         COMPOSIO_BASE_URL: 'not-a-url',
       }).success,
@@ -86,6 +86,8 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         requireCapability: () => undefined,
         mintInvocation: mintSpy,
         resolveServiceDid: resolveSpy,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
 
@@ -119,6 +121,8 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         requireCapability: () => undefined,
         mintInvocation: vi.fn(),
         resolveServiceDid: async () => null,
+        hasSigningKey: () => true,
+        createInvocationFromDelegation: async () => ({ invocation: 'mock-invocation-car' }),
       },
     });
 

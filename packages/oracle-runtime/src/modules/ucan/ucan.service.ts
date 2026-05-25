@@ -580,6 +580,138 @@ export class UcanService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Mint a UCAN invocation from a directly-supplied delegation CAR (rather
+   * than the per-user cached one used by {@link createServiceInvocation}).
+   *
+   * Use this when the caller already holds the user's signed delegation in
+   * hand — typically because they read it from a flow's Y.Doc by CID — and
+   * wants to mint a freshly-targeted invocation against a specific service
+   * route. The delegation MUST already name this oracle as its audience; the
+   * call fails loudly if it doesn't, since a delegation pointing at someone
+   * else can't legitimately be re-used by us.
+   *
+   * Each protected service call should use a freshly minted invocation —
+   * services typically track invocation CIDs to enforce single-use replay
+   * protection. Re-call this method before every protected request.
+   *
+   * @param delegationCar Base64-encoded delegation CAR (the user → oracle
+   *   delegation signed in the editor)
+   * @param serviceUrl URL of the target service — used to resolve the did:web
+   *   audience by fetching `<serviceUrl>/.well-known/did.json`
+   * @param capability The exact capability the service requires for this
+   *   route, e.g. `{ can: 'service/action', with: 'ixo:service' }`. Defined
+   *   by the target service; must match what its requireAuth middleware
+   *   expects.
+   * @param options.maxTtlSeconds Max invocation lifetime; clamped to the
+   *   delegation's own expiration. Default 60s — invocations are typically
+   *   single-use so a long TTL is unnecessary and just widens the replay
+   *   window.
+   *
+   * @returns Base64-encoded invocation CAR, or `{ error }` describing why it
+   *   failed (so the caller can surface a useful message to the agent).
+   */
+  async createInvocationFromDelegation(
+    delegationCar: string,
+    serviceUrl: string,
+    capability: { can: string; with: string },
+    options: { maxTtlSeconds?: number } = {},
+  ): Promise<{ invocation: string } | { error: string }> {
+    if (!this.signingMnemonic || !this.oracleDid) {
+      return {
+        error:
+          'Oracle has no signing key configured — set SERVICE_ED25519_MNEMONIC',
+      };
+    }
+    if (!delegationCar || typeof delegationCar !== 'string') {
+      return { error: 'delegationCar (base64 CAR) is required' };
+    }
+    if (
+      !capability ||
+      typeof capability.can !== 'string' ||
+      typeof capability.with !== 'string'
+    ) {
+      return { error: 'capability { can, with } is required' };
+    }
+
+    const serviceDid = await this.resolveServiceDid(serviceUrl);
+    if (!serviceDid) {
+      return {
+        error: `Could not resolve worker DID via ${serviceUrl}/.well-known/did.json`,
+      };
+    }
+
+    try {
+      const { signer } = await signerFromMnemonic(
+        this.signingMnemonic,
+        this.oracleDid as `did:ixo:${string}`,
+      );
+
+      let delegation;
+      try {
+        delegation = await parseDelegation(delegationCar);
+      } catch (err) {
+        return {
+          error: `Could not parse delegation CAR: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+
+      // Validate the delegation actually targets this oracle. If the user
+      // delegated to someone else, this oracle is not the intended issuer of
+      // invocations on top of it — fail loudly rather than mint a useless
+      // invocation that the worker would reject.
+      const delegationAudience = delegation.audience?.did?.();
+      if (delegationAudience && delegationAudience !== this.oracleDid) {
+        return {
+          error: `Delegation audience (${delegationAudience}) does not match this oracle DID (${this.oracleDid})`,
+        };
+      }
+
+      // Clamp TTL: never longer than the delegation's own expiration, and
+      // capped at maxTtlSeconds (default 60s — single-use replay protection
+      // means we don't gain anything from a longer window).
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const requestedTtl = options.maxTtlSeconds ?? 60;
+      const delegationExp =
+        typeof delegation.expiration === 'number' &&
+        isFinite(delegation.expiration)
+          ? delegation.expiration
+          : null;
+      let expirationSeconds = nowSeconds + requestedTtl;
+      if (delegationExp !== null) {
+        if (delegationExp <= nowSeconds) {
+          return {
+            error: `Delegation expired at ${new Date(delegationExp * 1000).toISOString()}`,
+          };
+        }
+        expirationSeconds = Math.min(expirationSeconds, delegationExp);
+      }
+
+      const invocation = await createInvocation({
+        issuer: signer,
+        audience: serviceDid as `did:${string}:${string}`,
+        capability: {
+          can: capability.can as `${string}/${string}`,
+          with: capability.with as `${string}:${string}`,
+        },
+        proofs: [delegation],
+        expiration: expirationSeconds,
+      });
+
+      const serialized = await serializeInvocation(invocation);
+
+      this.logger.debug(
+        `[UCAN] Minted invocation iss=${this.oracleDid} aud=${serviceDid} can=${capability.can} ttl=${expirationSeconds - nowSeconds}s`,
+      );
+
+      return { invocation: serialized };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[UCAN] mint failed: ${message}`);
+      return { error: `Failed to mint invocation: ${message}` };
+    }
+  }
+
   // ============================================================================
   // MCP tool validation (existing)
   // ============================================================================

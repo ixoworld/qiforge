@@ -2,6 +2,7 @@ import { vi } from 'vitest';
 import { AIMessage } from '@langchain/core/messages';
 import { fakeModel } from 'langchain';
 import type {
+  BlobStoreAdapter,
   EmitAdapter,
   LlmAdapter,
   MatrixAdapter,
@@ -137,6 +138,35 @@ export function mockEmit(): EmitAdapter {
   return { emit: vi.fn() };
 }
 
+/**
+ * Build a `BlobStoreAdapter` backed by an in-memory Map. The same
+ * user-DID-namespaced behaviour as `BlobStoreService` — cross-user reads
+ * miss, malformed ids are rejected — without touching `cache-manager`.
+ */
+export function mockBlobStore(): BlobStoreAdapter {
+  const ID_PATTERN = /^blob_[0-9a-f]{16}$/;
+  const store = new Map<string, { name: string; value: string }>();
+  let counter = 0;
+  return {
+    put: vi.fn(async ({ userDid, name, value }) => {
+      if (!userDid) throw new Error('BlobStore.put: userDid is required');
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new Error('BlobStore.put: value must be a non-empty string');
+      }
+      const id = `blob_${(counter++).toString(16).padStart(16, '0')}`;
+      store.set(`blob:${userDid}:${id}`, { name, value });
+      return id;
+    }),
+    get: vi.fn(async ({ userDid, blobId }) => {
+      if (!userDid) return null;
+      if (typeof blobId !== 'string' || !ID_PATTERN.test(blobId)) return null;
+      return store.get(`blob:${userDid}:${blobId}`) ?? null;
+    }),
+    isValidBlobId: (value): value is string =>
+      typeof value === 'string' && ID_PATTERN.test(value),
+  };
+}
+
 /** A permissive UCAN adapter — every check passes; mintInvocation returns a stub cid. */
 export function mockUcan(): UcanAdapter {
   return {
@@ -144,6 +174,10 @@ export function mockUcan(): UcanAdapter {
     requireCapability: vi.fn(),
     mintInvocation: vi.fn(async () => 'mock-invocation-cid'),
     resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
+    hasSigningKey: vi.fn(() => true),
+    createInvocationFromDelegation: vi.fn(async () => ({
+      invocation: 'mock-invocation-car',
+    })),
   };
 }
 

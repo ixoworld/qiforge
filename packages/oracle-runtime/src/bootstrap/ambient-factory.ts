@@ -2,6 +2,7 @@ import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
 import { getProviderChatModel } from '../llm/llm-provider.js';
+import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
@@ -14,6 +15,7 @@ import type {
 } from '../plugin-api/types.js';
 import type {
   AmbientServices,
+  BlobStoreAdapter,
   EmitAdapter,
   LlmAdapter,
   MatrixAdapter,
@@ -53,6 +55,7 @@ export function buildAmbientServices(
   opts: BuildAmbientOptions,
 ): AmbientServices {
   const ucanService = opts.nestApp.get(UcanService);
+  const blobStoreService = opts.nestApp.get(BlobStoreService);
   const secretsService = SecretsService.getInstance();
 
   const ucanAdapter: UcanAdapter = {
@@ -92,6 +95,17 @@ export function buildAmbientServices(
     },
     async resolveServiceDid(serviceUrl) {
       return ucanService.resolveServiceDid(serviceUrl);
+    },
+    hasSigningKey() {
+      return ucanService.hasSigningKey();
+    },
+    createInvocationFromDelegation(delegationCar, serviceUrl, capability, opts) {
+      return ucanService.createInvocationFromDelegation(
+        delegationCar,
+        serviceUrl,
+        capability,
+        opts,
+      );
     },
   };
 
@@ -143,6 +157,13 @@ export function buildAmbientServices(
     },
   };
 
+  const blobStoreAdapter: BlobStoreAdapter = {
+    put: (params) => blobStoreService.put(params),
+    get: (params) => blobStoreService.get(params),
+    isValidBlobId: (value): value is string =>
+      blobStoreService.isValidBlobId(value),
+  };
+
   const secretsAdapter: SecretsAdapter = {
     async getIndex(roomId) {
       const entries = await secretsService.getSecretIndex(roomId);
@@ -177,6 +198,7 @@ export function buildAmbientServices(
     identity: opts.identity,
     availablePlugins: opts.availablePlugins,
     secrets: secretsAdapter,
+    blobStore: blobStoreAdapter,
     matrix: matrixAdapter,
     llm: llmAdapter,
     emit: emitAdapter,

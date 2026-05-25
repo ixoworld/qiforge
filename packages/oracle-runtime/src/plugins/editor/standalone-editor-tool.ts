@@ -7,6 +7,7 @@ import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import { type BlocknoteToolsConfig, createBlocknoteTools } from './blocknote-tools.js';
 import { resolveEditorMatrixClient } from './editor-mx.js';
+import { createMintInvocationEditorTool } from './mint-invocation-tool.js';
 import { createPageTools } from './page-tools.js';
 import { editorAgentPrompt } from './prompts.js';
 import type { AppConfig, MatrixRoomConfig } from './provider.js';
@@ -150,6 +151,24 @@ export function createStandaloneEditorTool(
           pageTools.createPageTool,
           pageTools.updatePageTool,
         ].filter((t): t is StructuredTool => Boolean(t));
+
+        // mint_invocation — only when an oracle signing key is loaded. The
+        // ephemeral agent gets it for the same reasons the long-lived editor
+        // sub-agent does: the delegation CAR is read from the flow's Y.Doc
+        // by CID, which needs the matrixClient + roomId baked into this
+        // closure.
+        if (ctx.ucan.hasSigningKey()) {
+          innerTools.push(
+            createMintInvocationEditorTool({
+              matrixClient,
+              appConfig,
+              roomId,
+              ucanService: ctx.ucan,
+              blobStore: ctx.blobStore,
+              userDid: ctx.user.did,
+            }),
+          );
+        }
 
         const agent = createAgent({
           model: ctx.llm.get('subagent'),

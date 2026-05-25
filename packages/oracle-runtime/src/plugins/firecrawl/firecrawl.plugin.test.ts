@@ -10,13 +10,13 @@ import {
   makeRuntimeContext,
 } from '../../registries/test-fixtures.js';
 import { createTestRuntime } from '../../testing/create-test-runtime.js';
-import { FirecrawlPlugin } from './firecrawl.plugin.js';
 import {
   FIRECRAWL_SCRAPE_TOOL,
   FIRECRAWL_SEARCH_TOOL,
   type FirecrawlMcpFactory,
   type FirecrawlMcpProxyTool,
 } from './firecrawl-tools.js';
+import { FirecrawlPlugin } from './firecrawl.plugin.js';
 
 const FIRECRAWL_URL = 'https://firecrawl.test/mcp';
 
@@ -66,13 +66,12 @@ describe('FirecrawlPlugin', () => {
   it('requires a valid FIRECRAWL_MCP_URL — empty or bad values are rejected', () => {
     const plugin = new FirecrawlPlugin();
     expect(plugin.configSchema).toBeDefined();
-    expect(plugin.configSchema!.safeParse({}).success).toBe(false);
+    expect(plugin.configSchema.safeParse({}).success).toBe(false);
     expect(
-      plugin.configSchema!.safeParse({ FIRECRAWL_MCP_URL: 'not-a-url' })
-        .success,
+      plugin.configSchema.safeParse({ FIRECRAWL_MCP_URL: 'not-a-url' }).success,
     ).toBe(false);
     expect(
-      plugin.configSchema!.safeParse({ FIRECRAWL_MCP_URL: FIRECRAWL_URL })
+      plugin.configSchema.safeParse({ FIRECRAWL_MCP_URL: FIRECRAWL_URL })
         .success,
     ).toBe(true);
 
@@ -107,7 +106,9 @@ describe('FirecrawlPlugin', () => {
   });
 
   it('proxies tool invocations through the injected MCP factory', async () => {
-    const searchInvoke = vi.fn(async () => ({ results: [{ url: 'https://x' }] }));
+    const searchInvoke = vi.fn(async () => ({
+      results: [{ url: 'https://x' }],
+    }));
     const scrapeInvoke = vi.fn(async () => ({ markdown: '# Hello' }));
     const mcpTools: FirecrawlMcpProxyTool[] = [
       { name: 'firecrawl__firecrawl_search', invoke: searchInvoke },

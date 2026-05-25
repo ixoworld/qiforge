@@ -126,6 +126,12 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         return ambient.secrets.getValues(session.roomId, keys);
       },
     },
+    blobStore: {
+      put: (params) => ambient.blobStore.put(params),
+      get: (params) => ambient.blobStore.get(params),
+      isValidBlobId: (value): value is string =>
+        ambient.blobStore.isValidBlobId(value),
+    },
     matrix: {
       postToRoom: (roomId, content) =>
         ambient.matrix.postToRoom(roomId, content),
@@ -143,6 +149,14 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.ucan.mintInvocation(user.did, target, opts),
       resolveServiceDid: (serviceUrl) =>
         ambient.ucan.resolveServiceDid(serviceUrl),
+      hasSigningKey: () => ambient.ucan.hasSigningKey(),
+      createInvocationFromDelegation: (car, serviceUrl, capability, opts) =>
+        ambient.ucan.createInvocationFromDelegation(
+          car,
+          serviceUrl,
+          capability,
+          opts,
+        ),
     },
     llm: {
       get: (role, params) => ambient.llm.get(role, params),

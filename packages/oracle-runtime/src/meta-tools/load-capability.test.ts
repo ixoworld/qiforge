@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Command } from '@langchain/langgraph';
-import { ToolMessage } from '@langchain/core/messages';
+import { type ToolMessage } from '@langchain/core/messages';
 import { ManifestRegistry } from '../registries/manifest-registry.js';
 import { ToolRegistry } from '../registries/tool-registry.js';
 import {

@@ -243,7 +243,9 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     // user-visible message), otherwise fall back to the first event in the
     // batch (file-only sends).
     const sourceEvent = latestTextEvent ?? first.event;
-    console.log("🚀 ~ MatrixListenerBridge ~ flush ~ sourceEvent:", sourceEvent)
+    this.logger.debug(
+      `flush sourceEvent eventId=${sourceEvent.eventId} sender=${sourceEvent.sender}`,
+    );
     const senderMatrixUserId = sourceEvent.sender;
     const eventId = sourceEvent.eventId;
     const sourceContent = sourceEvent.content as MatrixTextContent;

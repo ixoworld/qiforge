@@ -1,25 +1,39 @@
 import { describe, expect, it, vi } from 'vitest';
+import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OracleIdentity } from '../plugin-api/types.js';
 import { buildAmbientServices } from './ambient-factory.js';
 
 /**
  * The factory is wired into `createOracleApp` after Nest creates the DI
- * container. We don't spin a real Nest here — a stub `nestApp.get` that
- * returns a fake `UcanService` is enough to exercise the shape of every
- * adapter the factory builds.
+ * container. We don't spin a real Nest here — stub `nestApp.get` to return
+ * fakes for the services the factory pulls (UcanService, BlobStoreService)
+ * — enough to exercise the shape of every adapter the factory builds.
  */
 function makeFakeUcanService(): UcanService {
   return {
     resolveServiceDid: vi.fn().mockResolvedValue('did:web:service.test'),
     mintInvocationForServiceDid: vi.fn().mockResolvedValue('inv-token'),
+    hasSigningKey: vi.fn().mockReturnValue(true),
+    createInvocationFromDelegation: vi
+      .fn()
+      .mockResolvedValue({ invocation: 'inv-car' }),
   } as unknown as UcanService;
 }
 
-function makeNestAppStub(ucan: UcanService) {
+function makeFakeBlobStoreService(): BlobStoreService {
+  return {
+    put: vi.fn().mockResolvedValue('blob_0000000000000000'),
+    get: vi.fn().mockResolvedValue(null),
+    isValidBlobId: vi.fn().mockReturnValue(true),
+  } as unknown as BlobStoreService;
+}
+
+function makeNestAppStub(ucan: UcanService, blobStore: BlobStoreService) {
   return {
     get(token: unknown): unknown {
       if (token === UcanService) return ucan;
+      if (token === BlobStoreService) return blobStore;
       throw new Error(`unexpected DI lookup for ${String(token)}`);
     },
   } as Parameters<typeof buildAmbientServices>[0]['nestApp'];
@@ -36,7 +50,7 @@ describe('buildAmbientServices', () => {
   it('returns an AmbientServices bag with every adapter populated', () => {
     const ucan = makeFakeUcanService();
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(ucan),
+      nestApp: makeNestAppStub(ucan, makeFakeBlobStoreService()),
       config: { NETWORK: 'devnet' },
       identity: IDENTITY,
       availablePlugins: new Set(['memory']),
@@ -55,13 +69,18 @@ describe('buildAmbientServices', () => {
     expect(typeof ambient.matrix.getEventById).toBe('function');
     expect(typeof ambient.secrets.getIndex).toBe('function');
     expect(typeof ambient.secrets.getValues).toBe('function');
+    expect(typeof ambient.blobStore.put).toBe('function');
+    expect(typeof ambient.blobStore.get).toBe('function');
+    expect(typeof ambient.blobStore.isValidBlobId).toBe('function');
+    expect(typeof ambient.ucan.hasSigningKey).toBe('function');
+    expect(typeof ambient.ucan.createInvocationFromDelegation).toBe('function');
     expect(typeof ambient.llm.get).toBe('function');
     expect(typeof ambient.emit.emit).toBe('function');
   });
 
   it('UcanAdapter.hasCapability/requireCapability scan the delegation array', () => {
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(makeFakeUcanService()),
+      nestApp: makeNestAppStub(makeFakeUcanService(), makeFakeBlobStoreService()),
       config: {},
       identity: IDENTITY,
       availablePlugins: new Set(),
@@ -88,7 +107,7 @@ describe('buildAmbientServices', () => {
   it('UcanAdapter.mintInvocation delegates to UcanService and throws on null', async () => {
     const ucan = makeFakeUcanService();
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(ucan),
+      nestApp: makeNestAppStub(ucan, makeFakeBlobStoreService()),
       config: {},
       identity: IDENTITY,
       availablePlugins: new Set(),
@@ -118,7 +137,7 @@ describe('buildAmbientServices', () => {
 
   it('LlmAdapter.get resolves a chat model for a known role', () => {
     const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(makeFakeUcanService()),
+      nestApp: makeNestAppStub(makeFakeUcanService(), makeFakeBlobStoreService()),
       config: {},
       identity: IDENTITY,
       availablePlugins: new Set(),

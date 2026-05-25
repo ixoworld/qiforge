@@ -18,6 +18,25 @@ export interface SecretsAdapter {
   getValues(roomId: string, keys: string[]): Promise<Record<string, string>>;
 }
 
+/**
+ * Blob-store adapter — short-TTL keyed store for content that should never
+ * be relayed through the LLM. Wraps `BlobStoreService` so plugins reach
+ * it only via the narrow `rtCtx.blobStore` shape.
+ */
+export interface BlobStoreAdapter {
+  put(params: {
+    userDid: string;
+    name: string;
+    value: string;
+    ttlSeconds?: number;
+  }): Promise<string>;
+  get(params: {
+    userDid: string;
+    blobId: string;
+  }): Promise<{ name: string; value: string } | null>;
+  isValidBlobId(value: unknown): value is string;
+}
+
 /** Matrix adapter exposing only scoped operations a plugin should ever need. */
 export interface MatrixAdapter {
   postToRoom(roomId: string, content: unknown): Promise<string>;
@@ -58,6 +77,28 @@ export interface UcanAdapter {
    * instead of throwing.
    */
   resolveServiceDid(serviceUrl: string): Promise<string | null>;
+  /**
+   * `true` once the oracle has loaded its Ed25519 signing mnemonic at boot.
+   * Plugins that mint downstream invocations (e.g. the editor's
+   * `mint_invocation` tool) gate registration on this — without a signing
+   * key, minting is a no-op and the tool should advertise an error instead
+   * of pretending to work.
+   */
+  hasSigningKey(): boolean;
+  /**
+   * Mint a UCAN invocation from a directly-supplied delegation CAR — used
+   * when the caller has the user's signed delegation in hand (typically read
+   * from a flow's Y.Doc by CID) and wants a freshly-targeted invocation
+   * against a specific service route. Returns `{ invocation }` on success
+   * or `{ error }` with a surfaced-verbatim reason on failure (signing key
+   * missing, delegation audience mismatch, did:web unreachable, etc.).
+   */
+  createInvocationFromDelegation(
+    delegationCar: string,
+    serviceUrl: string,
+    capability: { can: string; with: string },
+    options?: { maxTtlSeconds?: number },
+  ): Promise<{ invocation: string } | { error: string }>;
 }
 
 /** Raw event payload — what callers pass before the scoped emitter adds session/request ids. */
@@ -77,6 +118,7 @@ export interface AmbientServices {
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
+  blobStore: BlobStoreAdapter;
   matrix: MatrixAdapter;
   llm: LlmAdapter;
   emit: EmitAdapter;

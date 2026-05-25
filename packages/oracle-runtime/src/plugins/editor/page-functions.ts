@@ -418,9 +418,8 @@ export async function updatePage(
         doc.getXmlFragment('document'),
       );
 
-      const newContentMd = await serverEditor.blocksToMarkdownLossy(
-        newBlocks as any,
-      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const newContentMd = await serverEditor.blocksToMarkdownLossy(newBlocks as any);
       diff.content = { old: oldContentMd, new: newContentMd };
     }
 

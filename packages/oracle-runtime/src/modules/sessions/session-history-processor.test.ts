@@ -167,6 +167,10 @@ describe('SessionHistoryProcessor', () => {
       sessionManager.getSession.mockRejectedValue(new Error('boom'));
       vi.useFakeTimers();
       const promise = svc.processSessionHistory({ ...baseParams });
+      // Capture as pending — don't await yet, the fake clock needs to
+      // advance through the retry delays first. Lint rule can't see the
+      // deferred `await settled` a few lines down.
+      // eslint-disable-next-line vitest/valid-expect
       const settled = expect(promise).rejects.toThrow(/boom/);
       await vi.advanceTimersByTimeAsync(10_000);
       await vi.advanceTimersByTimeAsync(10_000);
@@ -195,6 +199,10 @@ describe('SessionHistoryProcessor', () => {
       sessionManager.getSession.mockRejectedValue(new Error('transient'));
       vi.useFakeTimers();
       const promise = svc.processSessionHistory({ ...baseParams });
+      // Capture as pending — don't await yet, the fake clock needs to
+      // advance through the retry delays first. Lint rule can't see the
+      // deferred `await settled` a few lines down.
+      // eslint-disable-next-line vitest/valid-expect
       const settled = expect(promise).rejects.toThrow(/transient/);
 
       // Attempt 1 fails -> wait 10s -> attempt 2 fails -> wait 10s -> attempt 3 fails -> throw.
@@ -395,6 +403,10 @@ describe('SessionHistoryProcessor', () => {
       });
       vi.useFakeTimers();
       const promise = svc.processSessionHistory({ ...baseParams });
+      // Capture as pending — don't await yet, the fake clock needs to
+      // advance through the retry delays first. Lint rule can't see the
+      // deferred `await settled` a few lines down.
+      // eslint-disable-next-line vitest/valid-expect
       const settled = expect(promise).rejects.toThrow(/memory engine/i);
       await vi.advanceTimersByTimeAsync(10_000);
       await vi.advanceTimersByTimeAsync(10_000);

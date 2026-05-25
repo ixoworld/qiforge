@@ -67,14 +67,14 @@ describe('DomainIndexerPlugin', () => {
     const plugin = new DomainIndexerPlugin();
     expect(plugin.configSchema).toBeDefined();
     // Empty config is valid — the runtime falls back to NETWORK.
-    expect(plugin.configSchema!.safeParse({}).success).toBe(true);
+    expect(plugin.configSchema.safeParse({}).success).toBe(true);
     // A valid URL is accepted.
     expect(
-      plugin.configSchema!.safeParse({ DOMAIN_INDEXER_URL: BASE_URL }).success,
+      plugin.configSchema.safeParse({ DOMAIN_INDEXER_URL: BASE_URL }).success,
     ).toBe(true);
     // A garbage value is still rejected so misconfig is caught early.
     expect(
-      plugin.configSchema!.safeParse({ DOMAIN_INDEXER_URL: 'not-a-url' })
+      plugin.configSchema.safeParse({ DOMAIN_INDEXER_URL: 'not-a-url' })
         .success,
     ).toBe(false);
   });

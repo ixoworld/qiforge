@@ -1,3 +1,4 @@
+import type * as IxoCommon from '@ixo/common';
 import {
   type ChatSession,
   type SessionManagerService,
@@ -23,7 +24,7 @@ vi.mock('@ixo/sqlite-saver', () => ({
 }));
 
 vi.mock('@ixo/common', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@ixo/common')>()),
+  ...(await importOriginal<typeof IxoCommon>()),
   transformGraphStateMessageToListMessageResponse: vi.fn(
     (messages: BaseMessage[]) => ({
       messages: messages.map((m) => ({

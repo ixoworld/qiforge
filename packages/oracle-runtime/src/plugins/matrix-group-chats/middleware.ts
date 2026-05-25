@@ -72,7 +72,6 @@ export const createGroupChatMiddleware = (
           ? (state.messages as BaseMessage[])
           : [];
         const lastHuman = findLastHuman(messages);
-        console.log("🚀 ~ createGroupChatMiddleware ~ lastHuman:", lastHuman)
         if (!lastHuman) return;
 
         const kwargs: Record<string, unknown> = lastHuman.additional_kwargs

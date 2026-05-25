@@ -47,8 +47,14 @@ describe('baseEnvSchema', () => {
       ...requiredTier0Vars,
       PORT: '4321',
     });
-    expect(parsed.success).toBe(true);
-    if (parsed.success) expect(parsed.data.PORT).toBe(4321);
+    // Narrow via assert so the discriminated union is refined for both
+    // the boolean check and the data access on the next line — avoids
+    // wrapping the inner expect in `if (parsed.success)`, which the lint
+    // rule flags as a conditional assertion.
+    if (!parsed.success) {
+      throw new Error(`expected parse to succeed, got: ${parsed.error.message}`);
+    }
+    expect(parsed.data.PORT).toBe(4321);
   });
 
   // Plugin-owned env vars must NOT be declared in the Tier-0 base schema —

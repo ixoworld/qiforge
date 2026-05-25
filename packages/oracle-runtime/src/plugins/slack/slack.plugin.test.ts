@@ -1,7 +1,8 @@
+/* eslint-disable vitest/no-conditional-expect */
 import { describe, expect, it } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
-import { SlackPlugin } from './slack.plugin.js';
 import { SlackModule } from './slack.module.js';
+import { SlackPlugin } from './slack.plugin.js';
 
 describe('SlackPlugin', () => {
   it('has the expected identity and manifest shape', () => {
@@ -23,14 +24,16 @@ describe('SlackPlugin', () => {
     const plugin = new SlackPlugin();
     expect(plugin.autoDetect?.({})).toBe(false);
     expect(plugin.autoDetect?.({ SLACK_BOT_OAUTH_TOKEN: '' })).toBe(false);
-    expect(plugin.autoDetect?.({ SLACK_BOT_OAUTH_TOKEN: 'xoxb-...' })).toBe(true);
+    expect(plugin.autoDetect?.({ SLACK_BOT_OAUTH_TOKEN: 'xoxb-...' })).toBe(
+      true,
+    );
     expect(plugin.autoDetectHint).toBe('SLACK_BOT_OAUTH_TOKEN');
   });
 
   it('configSchema rejects missing bot token and accepts the documented env', () => {
     const plugin = new SlackPlugin();
-    expect(plugin.configSchema!.safeParse({}).success).toBe(false);
-    const ok = plugin.configSchema!.safeParse({
+    expect(plugin.configSchema.safeParse({}).success).toBe(false);
+    const ok = plugin.configSchema.safeParse({
       SLACK_BOT_OAUTH_TOKEN: 'xoxb-abc',
       SLACK_APP_TOKEN: 'xapp-abc',
       SLACK_USE_SOCKET_MODE: 'true',

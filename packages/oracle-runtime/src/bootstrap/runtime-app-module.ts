@@ -14,6 +14,7 @@ import { ThrottlerGuard } from '@nestjs/throttler';
 import type { AuthExcludedRoute } from '../plugin-api/types.js';
 import { AuthHeaderMiddleware } from '../modules/auth/auth-header.middleware.js';
 import { AuthModule } from '../modules/auth/auth.module.js';
+import { BlobStoreModule } from '../modules/blob-store/blob-store.module.js';
 import { HealthModule } from '../modules/health/health.module.js';
 import { MessagesModule } from '../modules/messages/messages.module.js';
 import { SessionsModule } from '../modules/sessions/sessions.module.js';
@@ -106,6 +107,7 @@ export class RuntimeAppModule implements NestModule {
       ScheduleModule.forRoot(),
       ThrottlerModule,
       UcanModule,
+      BlobStoreModule,
       AuthModule,
       SubscriptionModule,
       SessionsModule,

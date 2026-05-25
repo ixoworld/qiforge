@@ -158,6 +158,13 @@ export class EditorPlugin extends OraclePlugin {
         toolsConfig,
         userMatrixId: buildUserMatrixId(rtCtx),
         spaceId: readSpaceId(rtCtx),
+        // Gate mint_invocation on whether the oracle has a signing key. Without
+        // one, the tool can't mint anything — better to omit it than register
+        // a tool that returns "Oracle has no UCAN signing key configured" on
+        // every call.
+        ucanService: rtCtx.ucan.hasSigningKey() ? rtCtx.ucan : undefined,
+        blobStore: rtCtx.blobStore,
+        userDid: rtCtx.user.did,
       });
       return [subAgent];
     } catch (error) {

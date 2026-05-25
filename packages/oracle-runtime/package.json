@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:integration": "vitest run --mode int",
-    "test:cov": "vitest run --coverage"
+    "test:cov": "vitest run --coverage",
+    "lint": "eslint src",
+    "lint:fix": "eslint src --fix"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
