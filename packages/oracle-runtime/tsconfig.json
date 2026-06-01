@@ -1,0 +1,19 @@
+{
+  "extends": "@ixo/typescript-config/base.json",
+  "compilerOptions": {
+    "baseUrl": "./",
+    "outDir": "dist",
+    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "esModuleInterop": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "noEmit": true,
+    "paths": {
+      "src/*": ["./src/*"]
+    }
+  },
+  "include": ["src", "test"],
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts", "src/**/*.spec.ts"]
+}

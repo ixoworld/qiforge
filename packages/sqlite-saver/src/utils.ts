@@ -295,6 +295,18 @@ export interface CleanAdditionalKwargs {
     text: string;
   }>;
   attachment?: AttachmentMeta;
+  // Group-chat speaker + threading metadata. The Matrix transport stashes
+  // these so the group-chat gating middleware can find them across turns —
+  // without this allowlist entry, the saver would strip them and the gate
+  // would silently let every message through.
+  senderDid?: string;
+  senderMatrixUserId?: string;
+  senderDisplayName?: string;
+  threadId?: string;
+  eventId?: string;
+  isGroupChat?: boolean;
+  'm.mentions'?: { user_ids?: string[] };
+  'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
   [key: string]: unknown; // Allow additional properties for LangChain compatibility
 }
 
@@ -331,6 +343,35 @@ export function cleanAdditionalKwargs(
     ...(additionalKwargs.attachment && {
       attachment: additionalKwargs.attachment as AttachmentMeta,
     }),
+    // Preserve group-chat speaker + threading metadata when present —
+    // the group-chat gating middleware needs these to decide whether
+    // the bot should reply, and they're cheap to keep.
+    ...(typeof additionalKwargs.senderDid === 'string' && {
+      senderDid: additionalKwargs.senderDid,
+    }),
+    ...(typeof additionalKwargs.senderMatrixUserId === 'string' && {
+      senderMatrixUserId: additionalKwargs.senderMatrixUserId,
+    }),
+    ...(typeof additionalKwargs.senderDisplayName === 'string' && {
+      senderDisplayName: additionalKwargs.senderDisplayName,
+    }),
+    ...(typeof additionalKwargs.threadId === 'string' && {
+      threadId: additionalKwargs.threadId,
+    }),
+    ...(typeof additionalKwargs.eventId === 'string' && {
+      eventId: additionalKwargs.eventId,
+    }),
+    ...(typeof additionalKwargs.isGroupChat === 'boolean' && {
+      isGroupChat: additionalKwargs.isGroupChat,
+    }),
+    ...(additionalKwargs['m.mentions'] &&
+      typeof additionalKwargs['m.mentions'] === 'object' && {
+        'm.mentions': additionalKwargs['m.mentions'],
+      }),
+    ...(additionalKwargs['m.relates_to'] &&
+      typeof additionalKwargs['m.relates_to'] === 'object' && {
+        'm.relates_to': additionalKwargs['m.relates_to'],
+      }),
   };
 
   // Add reasoning fields only if they exist

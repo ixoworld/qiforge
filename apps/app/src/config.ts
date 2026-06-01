@@ -12,10 +12,6 @@ export const EnvSchema = z.object({
   CORS_ORIGIN: z.string().default('*'),
   COMPOSIO_BASE_URL: z.url().default('https://composio.ixo.earth'),
   COMPOSIO_API_KEY: z.string().optional(),
-  // Langfuse
-  LANGFUSE_SECRET_KEY: z.string().optional(),
-  LANGFUSE_PUBLIC_KEY: z.string().optional(),
-  LANGFUSE_HOST: z.string().optional(),
 
   // Slack
   SLACK_BOT_OAUTH_TOKEN: z.string().optional(),
@@ -34,7 +30,6 @@ export const EnvSchema = z.object({
   MATRIX_SECRET_STORAGE_KEYS_PATH: z
     .string()
     .default('./matrix-secret-storage-keys-new2'),
-  SKIP_LOGGING_CHAT_HISTORY_TO_MATRIX: z.string().optional(),
 
   // LLM Provider selection: 'openrouter' (default) or 'nebius'
   LLM_PROVIDER: z.enum(['openrouter', 'nebius']).default('openrouter'),

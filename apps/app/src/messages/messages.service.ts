@@ -951,13 +951,19 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     try {
       const db = await this.checkpointStorageSyncService.getUserDatabase(did);
       const saver = SqliteSaver.fromDatabase(db);
-      const tuple = await saver.getTuple({
-        configurable: { thread_id: sessionId },
-      });
-      const messages =
-        (tuple?.checkpoint?.channel_values?.messages as
-          | BaseMessage[]
-          | undefined) ?? [];
+
+      const rows = db
+        .prepare(
+          `SELECT message FROM messages
+           WHERE thread_id = ? AND checkpoint_ns = ?
+           ORDER BY created_at ASC, rowid ASC`,
+        )
+        .all(sessionId, '') as { message: Buffer | string }[];
+
+      const messages: BaseMessage[] = await Promise.all(
+        rows.map((row) => saver.serde.loadsTyped('json', row.message)),
+      );
+
       return transformGraphStateMessageToListMessageResponse(messages);
     } finally {
       this.checkpointStorageSyncService.markUserInactive(did);

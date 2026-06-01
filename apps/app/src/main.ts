@@ -18,7 +18,6 @@ import { AppModule } from './app.module';
 import { type ENV, isRedisEnabled } from './config';
 import { UcanService } from './ucan/ucan.service';
 import { EditorMatrixClient } from './graph/agents/editor/editor-mx';
-import { initModelPricingCache } from './graph/llm-provider';
 import { SecretsService } from './secrets/secrets.service';
 import { UserMatrixSqliteSyncService } from './user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service';
 import { UserPreferencesService } from './user-preferences/user-preferences.service';
@@ -173,11 +172,6 @@ async function bootstrap(): Promise<void> {
   const cache = app.get<Cache>(CACHE_MANAGER);
   SecretsService.getInstance().setCacheManager(cache);
   UserPreferencesService.getInstance().setCacheManager(cache);
-
-  // Load per-model pricing from provider APIs (non-blocking)
-  initModelPricingCache().catch((err) =>
-    Logger.warn('Failed to init model pricing cache', err),
-  );
 
   // Fire Matrix init in background (don't await — let server start for health checks).
   // MessagesService.onModuleInit defers its listener until this completes.

@@ -1,10 +1,15 @@
 import { Logger } from '@ixo/logger';
 import { DocxLoader } from '@langchain/community/document_loaders/fs/docx';
-import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf';
 import { HtmlToTextTransformer } from '@langchain/community/document_transformers/html_to_text';
 import { Document } from '@langchain/core/documents';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 import fs from 'node:fs/promises';
+// `@langchain/community`'s `PDFLoader` / `WebPDFLoader` both import
+// `pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js` — a subpath that pdf-parse 2.x
+// no longer exposes in its `exports` field, throwing `ERR_PACKAGE_PATH_NOT_EXPORTED`
+// at runtime. We use pdfjs-dist (the same engine LangChain wraps) directly
+// and keep one Document per page so callers can preserve page boundaries.
+import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 type SupportedFileType = 'pdf' | 'markdown' | 'html' | 'text' | 'doc';
 const splitter = new RecursiveCharacterTextSplitter({
@@ -130,8 +135,7 @@ const processFile = async (
 ): Promise<Document[]> => {
   switch (fileType) {
     case 'pdf': {
-      const pdfLoader = new PDFLoader(blob);
-      return pdfLoader.load();
+      return loadPdf(blob);
     }
 
     case 'markdown': {
@@ -167,6 +171,52 @@ const processFile = async (
 const loadMarkdown = async (blob: Blob): Promise<Document[]> => {
   const markdown = await blobToString(blob);
   return splitter.createDocuments([markdown]);
+};
+
+const loadPdf = async (blob: Blob): Promise<Document[]> => {
+  const data = new Uint8Array(await blob.arrayBuffer());
+  // Mirror the parser options LangChain's WebPDFLoader used — disable worker
+  // fetch / eval so this runs cleanly in a Node server context.
+  const pdf = await getDocument({
+    data,
+    useWorkerFetch: false,
+    isEvalSupported: false,
+    useSystemFonts: true,
+  }).promise;
+  const meta = await pdf.getMetadata().catch(() => null);
+  const documents: Document[] = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    if (content.items.length === 0) continue;
+    let lastY: number | undefined;
+    const parts: string[] = [];
+    for (const item of content.items) {
+      if (!('str' in item)) continue;
+      // Insert a newline when the y-coordinate changes — preserves visual
+      // line breaks instead of running text together.
+      if (lastY !== undefined && lastY !== item.transform[5]) {
+        parts.push('\n');
+      }
+      parts.push(item.str);
+      lastY = item.transform[5];
+    }
+    documents.push(
+      new Document({
+        pageContent: parts.join(''),
+        metadata: {
+          pdf: {
+            version: (pdf as unknown as { _pdfInfo?: { fingerprint?: string } })
+              ._pdfInfo?.fingerprint,
+            info: meta?.info,
+            totalPages: pdf.numPages,
+          },
+          loc: { pageNumber: i },
+        },
+      }),
+    );
+  }
+  return documents;
 };
 
 const blobToString = async (blob: Blob): Promise<string> => {

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
 import { useOraclesConfig } from '../use-oracles-config.js';
-import { getCachedDelegation } from '../../utils/delegation-cache.js';
 import {
   type ConnectionStatus,
   type IUseWebSocketEventsReturn,
@@ -20,7 +19,7 @@ export function useWebSocketEvents(
     props.oracleDid,
     props.overrides,
   );
-  const { wallet } = useOraclesContext();
+  const { wallet, getDelegation } = useOraclesContext();
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -57,171 +56,195 @@ export function useWebSocketEvents(
     setConnectionStatus('connecting');
     setError(null);
 
-    // Get cached UCAN delegation for this oracle (sync — already in localStorage)
-    const delegation = getCachedDelegation(wallet.did, props.oracleDid);
+    // The server REQUIRES a valid UCAN delegation on the WS handshake and
+    // derives the user identity from it. Resolve the delegation (minting one
+    // if it isn't cached yet) before opening the socket so the connection is
+    // never rejected for a missing delegation. The async gap means we guard
+    // the effect with `cancelled` and disconnect via the captured socket.
+    let cancelled = false;
+    let activeSocket: Socket | null = null;
 
-    // Create WebSocket connection
-    const newSocket = io(apiUrl, {
-      query: { sessionId, userDid: wallet.did },
-      auth: { ucanDelegation: delegation ?? undefined },
-      transports: ['websocket'],
-    });
+    const connect = async () => {
+      const delegation = await getDelegation(props.oracleDid);
+      if (cancelled) return;
 
-    socketRef.current = newSocket;
+      if (!delegation) {
+        setConnectionStatus('error');
+        setError(
+          new Error(
+            'Missing UCAN delegation — cannot open authenticated WebSocket connection',
+          ),
+        );
+        return;
+      }
 
-    // Connection event handlers
-    newSocket.on('connect', () => {
-      setIsConnected(true);
-      setConnectionStatus('connected');
-      setLastActivity(new Date().toISOString());
-      setError(null);
-    });
+      // Create WebSocket connection
+      const newSocket = io(apiUrl, {
+        query: { sessionId, userDid: wallet.did },
+        auth: { ucanDelegation: delegation },
+        transports: ['websocket'],
+      });
 
-    newSocket.on('disconnect', () => {
-      setIsConnected(false);
-      setConnectionStatus('disconnected');
-      setLastActivity(new Date().toISOString());
-    });
+      activeSocket = newSocket;
+      socketRef.current = newSocket;
 
-    newSocket.on('connect_error', (err) => {
-      setIsConnected(false);
-      setConnectionStatus('error');
-      setError(err);
-      setLastActivity(new Date().toISOString());
-    });
+      // Connection event handlers
+      newSocket.on('connect', () => {
+        setIsConnected(true);
+        setConnectionStatus('connected');
+        setLastActivity(new Date().toISOString());
+        setError(null);
+      });
 
-    const handleEvent = (event: AllEvents) => {
-      props.handleNewEvent?.(event);
-    };
+      newSocket.on('disconnect', () => {
+        setIsConnected(false);
+        setConnectionStatus('disconnected');
+        setLastActivity(new Date().toISOString());
+      });
 
-    newSocket.on(evNames.ToolCall, handleEvent);
-    newSocket.on(evNames.RenderComponent, handleEvent);
-    newSocket.on(
-      evNames.MessageCacheInvalidation,
-      handleInvalidateCacheRef.current ?? (() => {}),
-    );
+      newSocket.on('connect_error', (err) => {
+        setIsConnected(false);
+        setConnectionStatus('error');
+        setError(err);
+        setLastActivity(new Date().toISOString());
+      });
 
-    if (
-      browserToolsRef.current &&
-      Object.keys(browserToolsRef.current).length > 0
-    ) {
-      // Listen for browser tool calls
+      const handleEvent = (event: AllEvents) => {
+        props.handleNewEvent?.(event);
+      };
+
+      newSocket.on(evNames.ToolCall, handleEvent);
+      newSocket.on(evNames.RenderComponent, handleEvent);
       newSocket.on(
-        'browser_tool_call',
+        evNames.MessageCacheInvalidation,
+        handleInvalidateCacheRef.current ?? (() => {}),
+      );
+
+      if (
+        browserToolsRef.current &&
+        Object.keys(browserToolsRef.current).length > 0
+      ) {
+        // Listen for browser tool calls
+        newSocket.on(
+          'browser_tool_call',
+          async (data: {
+            toolCallId: string;
+            toolName: string;
+            args: Record<string, unknown>;
+          }) => {
+            await executeToolAndEmitResult(
+              {
+                socket: newSocket,
+                toolId: data.toolCallId,
+                eventName: 'tool_result',
+              },
+              async () => {
+                const tool = browserToolsRef.current?.[data.toolName];
+                if (!tool) {
+                  throw new Error(`Tool ${data.toolName} not found`);
+                }
+                return await tool.fn(data.args);
+              },
+            );
+          },
+        );
+      }
+
+      // Listen for AG-UI action calls (always register listener, even if no tools yet)
+      // The listener will check actionToolsRef at execution time
+      newSocket.on(
+        'action_call',
         async (data: {
-          toolCallId: string;
+          sessionId: string;
+          requestId: string;
           toolName: string;
+          toolCallId: string;
           args: Record<string, unknown>;
+          status: string;
         }) => {
+          const tool = actionToolsRef.current?.[data.toolName];
+          if (!tool) {
+            console.error(
+              `[SDK WS] Action tool ${data.toolName} not found in registry`,
+              'Available tools:',
+              Object.keys(actionToolsRef.current || {}),
+            );
+            // Send error back to server
+            newSocket.emit('action_call_result', {
+              toolCallId: data.toolCallId,
+              sessionId: data.sessionId,
+              result: {
+                success: false,
+                error: `Action tool ${data.toolName} not found`,
+              },
+              error: `Action tool ${data.toolName} not found`,
+            });
+            return;
+          }
+
           await executeToolAndEmitResult(
             {
               socket: newSocket,
               toolId: data.toolCallId,
-              eventName: 'tool_result',
+              eventName: 'action_call_result',
+              sessionId: data.sessionId,
             },
             async () => {
-              const tool = browserToolsRef.current?.[data.toolName];
-              if (!tool) {
-                throw new Error(`Tool ${data.toolName} not found`);
-              }
-              return await tool.fn(data.args);
+              return await tool.handler(data.args);
             },
           );
+
+          // Call render function immediately after successful handler execution
+          // This provides immediate UI feedback without waiting for SSE status update
+          if (tool.render) {
+            try {
+              tool.render({
+                status: 'done',
+                args: data.args,
+              });
+            } catch (renderError) {
+              console.error(
+                `[SDK WS] Error calling render for ${data.toolName}:`,
+                renderError,
+              );
+            }
+          }
         },
       );
-    }
 
-    // Listen for AG-UI action calls (always register listener, even if no tools yet)
-    // The listener will check actionToolsRef at execution time
-    newSocket.on(
-      'action_call',
-      async (data: {
-        sessionId: string;
-        requestId: string;
-        toolName: string;
-        toolCallId: string;
-        args: Record<string, unknown>;
-        status: string;
-      }) => {
-        const tool = actionToolsRef.current?.[data.toolName];
-        if (!tool) {
-          console.error(
-            `[SDK WS] Action tool ${data.toolName} not found in registry`,
-            'Available tools:',
-            Object.keys(actionToolsRef.current || {}),
-          );
-          // Send error back to server
-          newSocket.emit('action_call_result', {
-            toolCallId: data.toolCallId,
-            sessionId: data.sessionId,
-            result: {
-              success: false,
-              error: `Action tool ${data.toolName} not found`,
-            },
-            error: `Action tool ${data.toolName} not found`,
-          });
+      // Listen for all events from the server
+      newSocket.onAny((_, ev: unknown) => {
+        const event = isWebSocketEvent(ev) ? ev : null;
+        if (!event) {
+          return;
+        }
+        // Skip browser_tool_call and action_call events as they're handled above
+        if (
+          event.eventName === 'browser_tool_call' ||
+          event.eventName === 'action_call'
+        ) {
           return;
         }
 
-        await executeToolAndEmitResult(
-          {
-            socket: newSocket,
-            toolId: data.toolCallId,
-            eventName: 'action_call_result',
-            sessionId: data.sessionId,
-          },
-          async () => {
-            return await tool.handler(data.args);
-          },
-        );
+        props.handleNewEvent?.(event);
+        setLastActivity(new Date().toISOString());
 
-        // Call render function immediately after successful handler execution
-        // This provides immediate UI feedback without waiting for SSE status update
-        if (tool.render) {
-          try {
-            tool.render({
-              status: 'done',
-              args: data.args,
-            });
-          } catch (renderError) {
-            console.error(
-              `[SDK WS] Error calling render for ${data.toolName}:`,
-              renderError,
-            );
-          }
+        // Handle cache invalidation using ref
+        if (
+          event.eventName === 'message_cache_invalidation' &&
+          handleInvalidateCacheRef.current
+        ) {
+          handleInvalidateCacheRef.current();
         }
-      },
-    );
+      });
+    };
 
-    // Listen for all events from the server
-    newSocket.onAny((_, ev: unknown) => {
-      const event = isWebSocketEvent(ev) ? ev : null;
-      if (!event) {
-        return;
-      }
-      // Skip browser_tool_call and action_call events as they're handled above
-      if (
-        event.eventName === 'browser_tool_call' ||
-        event.eventName === 'action_call'
-      ) {
-        return;
-      }
-
-      props.handleNewEvent?.(event);
-      setLastActivity(new Date().toISOString());
-
-      // Handle cache invalidation using ref
-      if (
-        event.eventName === 'message_cache_invalidation' &&
-        handleInvalidateCacheRef.current
-      ) {
-        handleInvalidateCacheRef.current();
-      }
-    });
+    void connect();
 
     // Cleanup on unmount
     return () => {
-      newSocket.disconnect();
+      cancelled = true;
+      activeSocket?.disconnect();
       socketRef.current = null;
       setIsConnected(false);
       setConnectionStatus('disconnected');

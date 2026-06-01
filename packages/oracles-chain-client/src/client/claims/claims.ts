@@ -141,6 +141,7 @@ export class Claims {
     matrixValuePin,
     oracleDid,
     network,
+    decryptedSigningMnemonic: precomputedSigningMnemonic,
   }: SubmitAndSaveSignedClaimParams) {
     const credentialArgs: ICreateVerifiableCredentialArgs = {
       credential: {
@@ -161,14 +162,20 @@ export class Claims {
       getOpenIdToken,
       oracleDid,
     );
-    const decryptedSigningMnemonic = await setupClaimSigningMnemonics({
-      matrixRoomId,
-      matrixAccessToken: accessToken,
-      walletMnemonic: secpMnemonic,
-      pin: matrixValuePin,
-      signerDid: oracleDid,
-      network,
-    });
+    // Callers that already resolved the signing mnemonic at boot pass it in
+    // here so we skip the per-claim HTTP GET + AES decrypt against the
+    // oracle's Matrix account room state. Falls back to the original lookup
+    // when the caller didn't provide one.
+    const decryptedSigningMnemonic =
+      precomputedSigningMnemonic ??
+      (await setupClaimSigningMnemonics({
+        matrixRoomId,
+        matrixAccessToken: accessToken,
+        walletMnemonic: secpMnemonic,
+        pin: matrixValuePin,
+        signerDid: oracleDid,
+        network,
+      }));
 
     const agent = await createVeramoAgent(network);
     if (!agent || !agent.verifyCredential) {
@@ -223,6 +230,14 @@ type SubmitAndSaveSignedClaimParams = {
   matrixValuePin: string;
   oracleDid: string;
   network: 'devnet' | 'testnet' | 'mainnet';
+  /**
+   * Pre-decrypted Ed25519 signing mnemonic. When provided, the function
+   * skips `setupClaimSigningMnemonics` and uses this directly to sign the
+   * verifiable credential. Hosts that already resolve the mnemonic once at
+   * boot (e.g. oracle-runtime via `UcanService`) should pass it so the
+   * per-claim Matrix state-event GET + AES decrypt is avoided.
+   */
+  decryptedSigningMnemonic?: string;
 };
 
 export const claimsClient = Claims.getInstance();

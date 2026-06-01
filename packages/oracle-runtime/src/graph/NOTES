@@ -1,0 +1,17 @@
+1- Oracle-config.json need to be validated with proper schema ( handled)
+2- need to pass custom prompt and allow oracle developer to pass custom prompt to their oracle(handled)
+3- for all AgentMiddleware u need to pass `contextSchema: mainAgentRequestContextSchema` so u can access the runtime context 
+4- review the load plugins on demand and subAgents for example portal agent and firecrwal is in the context even though we didnt call load cap for it (handled)
+5- pdf handling Error (Review the whole cycle for handling the files and that shit ha) (handled)
+
+6- review the image read setup and how it works u can pass dirct the image since Kimi can handle that for u and files if possible but try to parse first? 
+
+7- pass tools from subAgents to mainAgent context so we can see on UI (done)
+8- explore using the sqliteDB messages list for listing messages (done)
+
+9-saveSignedClaimToMatrix review this is not broken as it might be breaking the matrix flow (done)
+
+
+__ NEW 
+
+Check find capabilty 

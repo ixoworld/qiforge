@@ -9,7 +9,7 @@ on:
       packages:
         description: 'Comma-separated list of packages to publish (default: all app and root dependencies)'
         required: false
-        default: "@ixo/logger,@ixo/oracles-chain-client,@ixo/oracles-client-sdk,@ixo/oracles-events,@ixo/common,@ixo/matrix,@ixo/slack,@ixo/sqlite-saver,@ixo/ucan,@ixo/eslint-config,@ixo/typescript-config,@ixo/vitest-config"
+        default: "@ixo/logger,@ixo/oracles-chain-client,@ixo/oracles-client-sdk,@ixo/oracles-events,@ixo/common,@ixo/matrix,@ixo/slack,@ixo/sqlite-saver,@ixo/ucan,@ixo/eslint-config,@ixo/typescript-config,@ixo/vitest-config,@ixo/oracle-runtime"
         type: string
 
 jobs:

@@ -2,6 +2,11 @@
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": ["**/.env"],
   "globalEnv": [
+    "TEST_USER_MNEMONIC",
+    "SQLITE_DATABASE_PATH",
+    "FIRECRAWL_MCP_URL",
+    "SKILLS_CAPSULES_BASE_URL",
+    "TEST_USER_DID",
     "NODE_ENV",
     "PORT",
     "LOG_LEVEL",
@@ -70,6 +75,7 @@
     "UCAN_PROTECTED_MCP_SERVERS",
     "UCAN_ROOT_ISSUERS",
     "USER_CLAIM_COLLECTION_ID",
+    "WEATHER_DEFAULT_UNITS",
     "ENABLE_PERF_LOGS"
   ],
 

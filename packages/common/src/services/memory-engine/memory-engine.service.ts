@@ -18,9 +18,14 @@ interface MemoryEngineAuthHeaders {
 }
 
 export class MemoryEngineService {
-  // Batch covers 6 queries running in parallel server-side. Bound by the
-  // slowest query, not 6× — but we leave headroom for cold caches.
-  private readonly BATCH_TIMEOUT_MS = 15000;
+  // Soft deadline: how long the caller waits before falling back to empty
+  // context. The underlying fetch keeps running in the background up to
+  // BATCH_HARD_TIMEOUT_MS so the server-side query can still finish (and warm
+  // caches) even after the user's turn has moved on.
+  private readonly BATCH_TIMEOUT_MS = 30000;
+  // Hard cap on the underlying fetch — prevents leaking sockets if the server
+  // never responds. Anything slower than this is treated as a real failure.
+  private readonly BATCH_HARD_TIMEOUT_MS = 60000;
 
   constructor(private readonly memoryEngineUrl: string) {}
 
@@ -105,6 +110,7 @@ export class MemoryEngineService {
 
     const gatherStart = Date.now();
     const batch = await this.executeBatch(requests, roomId, authHeaders);
+
     const gatherElapsed = Date.now() - gatherStart;
 
     if (!batch) {
@@ -179,41 +185,91 @@ export class MemoryEngineService {
 
     const body: SearchEnhancedBatchRequest = { queries };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.BATCH_TIMEOUT_MS);
+    // Hard cap aborts the fetch so a hung server can't leak sockets. The soft
+    // deadline below is what the caller actually awaits.
+    const hardController = new AbortController();
+    const hardTimer = setTimeout(
+      () => hardController.abort(),
+      this.BATCH_HARD_TIMEOUT_MS,
+    );
 
-    try {
-      const response = await fetch(
-        `${this.memoryEngineUrl}/search-enhanced-batch`,
-        {
-          method: 'POST',
-          headers: this.buildHeaders(auth, roomId),
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        },
+    const start = Date.now();
+
+    const requestPromise: Promise<SearchEnhancedBatchResponse | undefined> =
+      (async () => {
+        try {
+          const response = await fetch(
+            `${this.memoryEngineUrl}/search-enhanced-batch`,
+            {
+              method: 'POST',
+              headers: this.buildHeaders(auth, roomId),
+              body: JSON.stringify(body),
+              signal: hardController.signal,
+            },
+          );
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            Logger.warn(
+              `[MemoryEngineService] Batch search failed (${response.status}): ${errorText}`,
+            );
+            return undefined;
+          }
+
+          return (await response.json()) as SearchEnhancedBatchResponse;
+        } catch (error) {
+          if ((error as Error).name === 'AbortError') {
+            Logger.warn(
+              `[MemoryEngineService] Batch search hit hard cap after ${this.BATCH_HARD_TIMEOUT_MS}ms — aborted`,
+            );
+          } else {
+            Logger.error(`[MemoryEngineService] Batch search threw:`, error);
+          }
+          return undefined;
+        } finally {
+          clearTimeout(hardTimer);
+        }
+      })();
+
+    type Outcome =
+      | { kind: 'result'; value: SearchEnhancedBatchResponse | undefined }
+      | { kind: 'timeout' };
+
+    let softTimer: ReturnType<typeof setTimeout> | undefined;
+    const softDeadline = new Promise<Outcome>((resolve) => {
+      softTimer = setTimeout(
+        () => resolve({ kind: 'timeout' }),
+        this.BATCH_TIMEOUT_MS,
       );
+    });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        Logger.warn(
-          `[MemoryEngineService] Batch search failed (${response.status}): ${errorText}`,
-        );
-        return undefined;
-      }
+    const outcome = await Promise.race<Outcome>([
+      requestPromise.then((value): Outcome => ({ kind: 'result', value })),
+      softDeadline,
+    ]);
 
-      return (await response.json()) as SearchEnhancedBatchResponse;
-    } catch (error) {
-      if ((error as Error).name === 'AbortError') {
-        Logger.warn(
-          `[MemoryEngineService] Batch search aborted after ${this.BATCH_TIMEOUT_MS}ms`,
-        );
-      } else {
-        Logger.error(`[MemoryEngineService] Batch search threw:`, error);
-      }
+    if (softTimer) clearTimeout(softTimer);
+
+    if (outcome.kind === 'timeout') {
+      Logger.warn(
+        `[MemoryEngineService] Batch search exceeded ${this.BATCH_TIMEOUT_MS}ms soft deadline — returning empty context, request continues in background (hard cap ${this.BATCH_HARD_TIMEOUT_MS}ms)`,
+      );
+      void requestPromise.then((result) => {
+        const elapsed = Date.now() - start;
+        if (result) {
+          Logger.info(
+            `[MemoryEngineService] Background batch search finished after ${elapsed}ms (caller gave up at ${this.BATCH_TIMEOUT_MS}ms)`,
+          );
+        } else {
+          Logger.warn(
+            `[MemoryEngineService] Background batch search returned no data after ${elapsed}ms`,
+          );
+        }
+      });
       return undefined;
-    } finally {
-      clearTimeout(timer);
     }
+
+    return outcome.value;
   }
 
   // ── Per-query request builders ────────────────────────────────────────────
@@ -221,14 +277,35 @@ export class MemoryEngineService {
   // via the batch endpoint. Order matches the labels array in
   // gatherUserContext — keep the two in sync.
 
+  // Design notes for the query builders:
+  //
+  // 1. Queries are natural-language sentences, not keyword bags. Embedding
+  //    search ranks by semantic similarity — a sentence that names both the
+  //    abstract concept ("what the user works on") and concrete examples
+  //    ("tools, projects, people they collaborate with") aligns far better
+  //    with how real memories are phrased than a thesaurus of synonyms.
+  //
+  // 2. `edge_types` is deliberately not used. It is AND-ed with node_labels
+  //    before scoring, and the extractor's edge choices vary too much to
+  //    predict (a work mention may produce WorksWith, Mentions, Discusses,
+  //    RelatesTo). One filter miss drops the whole fact. Semantic scoring
+  //    handles discrimination better than guessing edge types.
+  //
+  // 3. `node_labels` is kept where it's discriminating but broadened to cover
+  //    the EntityType variants the extractor actually emits (Event/Experience/
+  //    Procedure/Task all show up for work episodes, for example).
+  //
+  // 4. `invalid_at IS NULL` filters out facts that have been superseded —
+  //    kept everywhere except `recent`, which already constrains on created_at.
+
   private buildIdentityRequest(oracleDid: string): SearchEnhancedRequest {
     return {
       oracle_dids: [oracleDid],
       query:
-        'username and nickname and age user identity traits values personality characteristics communication style beliefs preferences',
+        'Who is the user — their name, age, background, personality traits, communication style, beliefs, values, and the core attributes that define how they see themselves and how they like to be addressed.',
       strategy: 'balanced',
-      max_facts: 10,
-      max_entities: 6,
+      max_facts: 12,
+      max_entities: 8,
       max_episodes: 3,
       max_communities: 2,
       knowledge_level: 'both',
@@ -239,9 +316,9 @@ export class MemoryEngineService {
           'Value',
           'Identity',
           'Attribute',
-          'Emotion',
           'Belief',
           'CommunicationStyle',
+          'Language',
         ],
         invalid_at: [[{ date: null, comparison_operator: 'IS NULL' }]],
       },
@@ -252,31 +329,14 @@ export class MemoryEngineService {
     return {
       oracle_dids: [oracleDid],
       query:
-        'work job career projects skills organization employment role responsibilities expertise',
+        'What the user works on — their job and role, current and past projects, the tools and technologies they use, code or systems they build, technical problems they solve (migrations, refactors, bug fixes, integrations), and the people they collaborate with at work.',
       strategy: 'balanced',
-      max_facts: 10,
-      max_entities: 6,
-      max_episodes: 3,
+      max_facts: 15,
+      max_entities: 10,
+      max_episodes: 5,
       max_communities: 2,
       knowledge_level: 'both',
       search_filters: {
-        node_labels: [
-          'Job',
-          'Project',
-          'Organization',
-          'Skill',
-          'Tool',
-          'Expertise',
-          'Task',
-        ],
-        edge_types: [
-          'EmployedAt',
-          'WorksOn',
-          'Manages',
-          'Uses',
-          'ExpertiseIn',
-          'WorksWith',
-        ],
         invalid_at: [[{ date: null, comparison_operator: 'IS NULL' }]],
       },
     };
@@ -286,23 +346,14 @@ export class MemoryEngineService {
     return {
       oracle_dids: [oracleDid],
       query:
-        'goals aspirations objectives milestones habits routines patterns achievements progress',
+        'What the user is trying to achieve or improve — goals and aspirations they have stated, things they are learning, habits and routines they are building, milestones they are working toward, and causes they care about.',
       strategy: 'balanced',
-      max_facts: 8,
-      max_entities: 4,
+      max_facts: 10,
+      max_entities: 6,
       max_episodes: 3,
       max_communities: 1,
       knowledge_level: 'both',
       search_filters: {
-        node_labels: [
-          'Goal',
-          'Milestone',
-          'Habit',
-          'Routine',
-          'Pattern',
-          'LearningGoal',
-        ],
-        edge_types: ['Pursuing', 'Achieved', 'Practices', 'Motivates'],
         invalid_at: [[{ date: null, comparison_operator: 'IS NULL' }]],
       },
     };
@@ -312,30 +363,14 @@ export class MemoryEngineService {
     return {
       oracle_dids: [oracleDid],
       query:
-        'interests hobbies passions preferences likes dislikes expertise topics content',
+        'What the user enjoys, cares about, or finds interesting — hobbies, favorite topics, preferences, products and content they engage with, things they like and dislike, and areas they have built expertise in outside of work.',
       strategy: 'balanced',
-      max_facts: 8,
-      max_entities: 4,
+      max_facts: 10,
+      max_entities: 6,
       max_episodes: 3,
       max_communities: 1,
       knowledge_level: 'both',
       search_filters: {
-        node_labels: [
-          'Interest',
-          'Hobby',
-          'Preference',
-          'Product',
-          'Content',
-          'Expertise',
-          'Resource',
-        ],
-        edge_types: [
-          'Prefers',
-          'Likes',
-          'Dislikes',
-          'InterestedIn',
-          'ExpertiseIn',
-        ],
         invalid_at: [[{ date: null, comparison_operator: 'IS NULL' }]],
       },
     };
@@ -345,23 +380,14 @@ export class MemoryEngineService {
     return {
       oracle_dids: [oracleDid],
       query:
-        'relationships people connections social network colleagues friends family contacts',
+        'People the user interacts with or has mentioned — colleagues they work with, collaborators on projects, friends and family members, and any named individuals or groups they have brought up in conversation.',
       strategy: 'balanced',
-      max_facts: 6,
-      max_entities: 6,
-      max_episodes: 2,
+      max_facts: 8,
+      max_entities: 10,
+      max_episodes: 3,
       max_communities: 1,
       knowledge_level: 'both',
       search_filters: {
-        node_labels: ['Person', 'Group'],
-        edge_types: [
-          'Knows',
-          'WorksWith',
-          'MemberOf',
-          'Influences',
-          'Supports',
-          'RelatesTo',
-        ],
         invalid_at: [[{ date: null, comparison_operator: 'IS NULL' }]],
       },
     };
@@ -371,6 +397,8 @@ export class MemoryEngineService {
     // Server-side `recent_memory` strategy auto-injects a created_at >= now-90d
     // filter. We still pass it explicitly as defense-in-depth — the server's
     // merge logic respects an existing lower bound and won't double-apply.
+    // No node_labels filter: recent activity can be of any type, and the
+    // created_at window is already doing the heavy filtering.
     const ninetyDaysAgo = new Date();
     ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
     const dateString = ninetyDaysAgo.toISOString();
@@ -378,11 +406,11 @@ export class MemoryEngineService {
     return {
       oracle_dids: [oracleDid],
       query:
-        'recent conversations messages discussions activities updates interactions',
+        'What the user has been doing, focusing on, or talking about recently — current activities, decisions they have made, ongoing problems they are working through, and topics that have come up in recent conversations.',
       strategy: 'recent_memory',
-      max_facts: 8,
-      max_entities: 4,
-      max_episodes: 6,
+      max_facts: 10,
+      max_entities: 6,
+      max_episodes: 8,
       max_communities: 2,
       knowledge_level: 'both',
       search_filters: {
@@ -397,10 +425,10 @@ export class MemoryEngineService {
   async processConversationHistory({
     messages,
     roomId,
-    oracleToken,
-    userToken,
-    oracleHomeServer,
-    userHomeServer,
+    oracleToken = '',
+    userToken = '',
+    oracleHomeServer = '',
+    userHomeServer = '',
     ucanInvocation,
   }: {
     messages: Array<{
@@ -411,11 +439,15 @@ export class MemoryEngineService {
       source_description?: string;
     }>;
     roomId: string;
-    oracleToken: string;
-    userToken: string;
-    oracleHomeServer: string;
-    userHomeServer: string;
-    /** When set, uses UCAN auth instead of Matrix tokens */
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    oracleToken?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    userToken?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    oracleHomeServer?: string;
+    /** Deprecated — Matrix bearer auth. Use `ucanInvocation` instead. */
+    userHomeServer?: string;
+    /** Required under UCAN-only auth. */
     ucanInvocation?: string;
   }): Promise<{ success: boolean }> {
     if (!roomId) {
