@@ -1,6 +1,6 @@
 {
   "name": "@ixo/sqlite-saver",
-  "version": "1.0.52",
+  "version": "1.0.53",
   "private": false,
   "publishConfig": {
     "access": "public"

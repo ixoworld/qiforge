@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracles-events",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Events for QiForge",
   "private": false,
   "main": "./dist/server.js",
