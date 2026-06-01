@@ -3,6 +3,7 @@ import { createAgent, type StructuredTool } from 'langchain';
 import { emojify } from '../../utils/emoji.js';
 import { z } from 'zod';
 
+import { isUserInRoom } from '../../matrix/room-membership.js';
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import {
@@ -98,6 +99,17 @@ export function createStandaloneEditorTool(
   return pluginTool(
     async (rawArgs, ctx: RuntimeContext) => {
       const { room_id: roomId, task } = standaloneEditorSchema.parse(rawArgs);
+
+      // The agent supplies `room_id` per call and the editor operates on it
+      // with the oracle's admin Matrix identity. Verify the authenticated user
+      // is a member of the room before touching it — without this an agent
+      // could be steered to read or edit any room id.
+      if (!(await isUserInRoom(roomId, ctx.user.matrixUserId))) {
+        ctx.logger.warn(
+          `[StandaloneEditorTool] user ${ctx.user.did} is not a member of room ${roomId} — refusing access`,
+        );
+        return `You do not have access to room ${roomId}.`;
+      }
 
       try {
         const roomConfig: MatrixRoomConfig = { type: 'id', value: roomId };

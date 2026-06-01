@@ -1,5 +1,6 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import { z } from 'zod';
+import { isUserInRoom } from '../../matrix/room-membership.js';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   PluginManifest,
@@ -149,6 +150,17 @@ export class EditorPlugin extends OraclePlugin {
     const editorRoomId = readEditorRoomId(rtCtx);
     if (!editorRoomId) return [];
 
+    // The editor operates on `editorRoomId` with the oracle's admin Matrix
+    // identity. `editorRoomId` came from the request, so verify the
+    // authenticated user is actually a member of that room before binding the
+    // sub-agent to it — otherwise a user could read/edit any room id they pass.
+    if (!(await isUserInRoom(editorRoomId, rtCtx.user.matrixUserId))) {
+      rtCtx.logger.warn(
+        `[editor] user ${rtCtx.user.did} is not a member of room ${editorRoomId} — refusing to bind editor sub-agent`,
+      );
+      return [];
+    }
+
     const toolsConfig = parseToolsConfig(rtCtx.config, this.matrixClient);
 
     try {
@@ -199,7 +211,14 @@ export class EditorPlugin extends OraclePlugin {
 
     // apply_sandbox_output_to_block — only with both an editor session AND
     // a loaded sandbox plugin (it brokers UCAN headers for the MCP call).
-    if (editorRoomId && rtCtx.availablePlugins.has(SandboxPlugin.NAME)) {
+    // Same room-ownership guard as the sub-agent path: the tool writes to
+    // `editorRoomId` with the admin identity, so the requesting user must be
+    // a member of it.
+    if (
+      editorRoomId &&
+      rtCtx.availablePlugins.has(SandboxPlugin.NAME) &&
+      (await isUserInRoom(editorRoomId, rtCtx.user.matrixUserId))
+    ) {
       const siblings = siblingEnvSchema.safeParse(rtCtx.config);
       const sandboxMcpUrl = siblings.success
         ? siblings.data.SANDBOX_MCP_URL

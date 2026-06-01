@@ -111,11 +111,20 @@ export async function createMainAgent(
 
   // ── 2. Request-time runtime context (drives getRequestTools/...SubAgents) ─
   const loadedSet = new Set<string>(state.loadedPlugins ?? []);
+  // Carry the prior request state (editorRoomId, spaceId, browserTools,
+  // agActions, …) into the per-request RuntimeContext and the tool-wrapper
+  // closures, but NOT the message history: nothing reads
+  // `history.messages`/`recent()` from this context — only specific channels —
+  // and keeping the full `messages` array here pinned the entire history by
+  // reference inside every tool closure for the whole run. The LLM still
+  // receives full history via the agent's own `stateInput`. Explicit fields
+  // come last so they win over the spread (notably `loadedPlugins`, which must
+  // be the de-duped Set, not the raw state array).
   const wrapState: RuntimeStateInput = {
-    messages: state.messages ?? [],
+    ...state,
+    messages: [],
     userContext: state.userContext,
     loadedPlugins: loadedSet,
-    ...(state as Record<string, unknown>),
   };
 
   const runConfig: RunConfig = {

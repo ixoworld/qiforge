@@ -1,4 +1,3 @@
-import { createIxoDIDResolver, createUCANValidator } from '@ixo/ucan';
 import { Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import {
   HttpException,
@@ -13,6 +12,7 @@ import { minutes } from '@nestjs/throttler';
 import { type NextFunction, type Request, type Response } from 'express';
 import * as crypto from 'node:crypto';
 import { UcanService } from '../ucan/ucan.service.js';
+import { validateUcanDelegation } from './validate-ucan-delegation.js';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Required for declaration merging
@@ -84,36 +84,22 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       'BLOCKSYNC_GRAPHQL_URL',
     );
 
-    const validator = await createUCANValidator({
-      serverDid: oracleDid,
-      rootIssuers: [],
-      didResolver: createIxoDIDResolver({
-        indexerUrl: blocksyncUri,
-      }),
+    const outcome = await validateUcanDelegation(ucanHeader, {
+      oracleDid,
+      blocksyncUri,
     });
 
-    const result = await validator.validateDelegation(ucanHeader);
-
-    if (!result.ok) {
-      this.logger.warn(
-        `[UCAN] Delegation validation failed: [${result.error?.code}] ${result.error?.message}`,
-      );
+    if (!outcome.ok) {
+      this.logger.warn(`[UCAN] Delegation validation failed: ${outcome.error}`);
       return null;
     }
 
+    const { delegation } = outcome.result;
     this.logger.log(
-      `[UCAN] Delegation validated: iss=${result.invoker} aud=${oracleDid} exp=${result.expiration ? new Date(result.expiration * 1000).toISOString() : 'none'}`,
+      `[UCAN] Delegation validated: iss=${outcome.result.userDid} aud=${oracleDid} exp=${delegation.expiration ? new Date(delegation.expiration * 1000).toISOString() : 'none'}`,
     );
 
-    return {
-      userDid: result.invoker!,
-      delegation: {
-        issuer: result.invoker!,
-        audience: oracleDid,
-        capabilities: result.capability ? [result.capability] : [],
-        expiration: result.expiration,
-      },
-    };
+    return outcome.result;
   }
 
   async use(req: Request, _res: Response, next: NextFunction): Promise<void> {

@@ -73,7 +73,9 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
         const oracleEntityDid =
           this.configService.getOrThrow('ORACLE_ENTITY_DID');
 
-        const did = socket.handshake.query.userDid as string;
+        // Use the DID validated at handshake time (stashed on `socket.data`),
+        // never the untrusted `handshake.query.userDid`.
+        const did: string | undefined = socket.data?.userDid;
         if (!did) {
           this.logger.warn(
             `User DID not found for session ${sessionId}, skipping processing on disconnect`,

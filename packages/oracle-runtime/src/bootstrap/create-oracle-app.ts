@@ -7,6 +7,7 @@ import { SqliteSaver } from '@ixo/sqlite-saver';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   Logger,
+  ValidationPipe,
   type DynamicModule,
   type INestApplication,
   type Type,
@@ -315,6 +316,23 @@ export async function createOracleApp(
     bufferLogs: false,
   });
 
+  // Global validation — enforce every controller's `class-validator` DTO
+  // decorators. Without this, decorators like `@Matches`, `@ArrayMaxSize`,
+  // and `@IsNotEmpty` are inert and arbitrary body fields flow straight into
+  // graph state. `whitelist` strips unknown props, `forbidNonWhitelisted`
+  // rejects them outright, `transform` instantiates nested `@Type` DTOs so
+  // `@ValidateNested` actually runs. Guarded for the same reason as Swagger
+  // (lightweight test runtimes stub `NestFactory.create`).
+  if (typeof nestApp.useGlobalPipes === 'function') {
+    nestApp.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+  }
+
   // CORS — auth flows from the browser need `x-ucan-delegation` allowed.
   // `credentials: true` requires a specific origin (not `*`); when the
   // host configures a wildcard we disable credentials so the browser
@@ -400,6 +418,17 @@ export async function createOracleApp(
   await registries.tools.collectBoot(warmBuildCtx);
   registries.subAgents.collectBoot(warmBuildCtx);
   registries.middlewares.collect(warmBuildCtx);
+
+  // Fail the boot if two plugins contribute the same tool name, sub-agent
+  // name, or shared-state key. Without this, a collision is silently
+  // resolved last-write-wins: the agent binds duplicate tools and the
+  // capability gate mis-attributes one of them, leaving it unreachable.
+  // Only the boot-time contributions are checked here — request-time tools
+  // (`getRequestTools`) are per-user and dynamic, so a static cross-plugin
+  // assertion can't cover them.
+  registries.tools.assertNoCollisions();
+  registries.subAgents.assertNoCollisions();
+  registries.sharedState.assertNoCollisions();
 
   // 10. Build the merged hooks the agent build will use:
   //   - default: per-user SQLite checkpointer backed by

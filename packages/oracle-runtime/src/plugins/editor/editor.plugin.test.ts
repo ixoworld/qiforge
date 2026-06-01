@@ -1,8 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
+import { isUserInRoom } from '../../matrix/room-membership.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import { SandboxPlugin } from '../sandbox/index.js';
 import { EditorPlugin } from './editor.plugin.js';
+
+// The editor now guards every room it touches behind a membership check. The
+// real check hits Matrix (`MatrixManager.getRoomInfo`); in unit tests we model
+// the precondition directly — default to "user is a member" and override
+// per-test to exercise the denial path.
+vi.mock('../../matrix/room-membership.js', () => ({
+  isUserInRoom: vi.fn().mockResolvedValue(true),
+  invalidateRoomMembership: vi.fn(),
+}));
 
 // Avoid the ~2.7s matrix-js-sdk module load in test runs. Editor tools only
 // need a MatrixClient shape — never actually hit the wire — so a minimal
@@ -120,6 +130,29 @@ describe('EditorPlugin', () => {
     });
     const tools = await plugin.getRequestTools(ctxWithSandbox);
     expect(tools.map((t) => t.name)).toEqual(['apply_sandbox_output_to_block']);
+  });
+
+  it('refuses the editor sub-agent and apply_sandbox tool when the user is not a member of editorRoomId', async () => {
+    vi.mocked(isUserInRoom)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
+    const plugin = new EditorPlugin();
+    const ctx = makeRuntimeContext({
+      config: { ...MATRIX_CONFIG, SANDBOX_MCP_URL: 'https://sandbox.test.ixo' },
+      availablePlugins: new Set([SandboxPlugin.NAME]),
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: {
+          messages: [],
+          editorRoomId: '!someone-elses-room:matrix.test.ixo.world',
+        },
+      },
+    });
+
+    expect(await plugin.getRequestSubAgents(ctx)).toEqual([]);
+    expect((await plugin.getRequestTools(ctx)).map((t) => t.name)).toEqual([]);
   });
 
   it('omits apply_sandbox_output_to_block when sandbox is loaded but SANDBOX_MCP_URL is missing', async () => {

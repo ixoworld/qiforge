@@ -311,7 +311,13 @@ export class SseStreamRunner {
     } finally {
       clearInterval(heartbeat);
       res.off('close', onClose);
-      abortControllers.delete(sessionId);
+      // Only clear the map entry if it still points at *our* controller. A
+      // newer same-session request replaces the entry at the top of `run()`
+      // (aborting us first); deleting unconditionally here would drop that
+      // newer request's controller and make it un-abortable.
+      if (abortControllers.get(sessionId) === abortController) {
+        abortControllers.delete(sessionId);
+      }
       if (!res.writableEnded) res.end();
     }
   }

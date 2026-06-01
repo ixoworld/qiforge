@@ -1,5 +1,6 @@
 import { GraphEventEmitter, rootEventEmitter } from '@ixo/oracles-events';
 import { Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { ApiOperation, ApiResponse } from '@nestjs/swagger';
 import {
   ConnectedSocket,
@@ -13,6 +14,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 
+import { validateUcanDelegation } from '../auth/validate-ucan-delegation.js';
 import { UcanService } from '../ucan/ucan.service.js';
 import { WsService } from './ws.service.js';
 
@@ -32,6 +34,7 @@ export class WsGateway
 
   constructor(
     private readonly wsService: WsService,
+    private readonly configService: ConfigService,
     @Optional() private readonly ucanService?: UcanService,
   ) {}
 
@@ -42,32 +45,79 @@ export class WsGateway
 
   async handleConnection(client: Socket): Promise<void> {
     const sessionId = client.handshake.query.sessionId;
-    const userDid = client.handshake.query.userDid;
 
-    if (!sessionId || !userDid) {
+    if (!sessionId || typeof sessionId !== 'string') {
       this.logger.error(
-        `WebSocket connection attempt without ${sessionId ? 'sessionId' : ''} and ${userDid ? 'userDid' : ''} from ${client.id}`,
+        `WebSocket connection attempt without sessionId from ${client.id}`,
       );
       client.disconnect();
       return;
     }
 
-    this.logger.log(
-      `WebSocket connection established for session: ${sessionId}, client: ${client.id}`,
-    );
-
-    // Cache UCAN delegation from the client for use on disconnect (memory engine auth).
+    // Authenticate the handshake the same way HTTP requests are authenticated:
+    // a valid UCAN delegation is required, and the user identity is the
+    // *validated invoker* — never the `userDid` the client put in the query.
+    // Trusting the query (the previous behaviour) let any client impersonate
+    // another user and poison the per-DID delegation cache.
     const ucanDelegation = client.handshake.auth?.ucanDelegation as
       | string
       | undefined;
-    if (ucanDelegation && this.ucanService) {
-      await this.ucanService.cacheDelegation(userDid as string, ucanDelegation);
+
+    if (!ucanDelegation) {
+      this.logger.warn(
+        `WebSocket connection rejected for session ${sessionId}: missing UCAN delegation (client: ${client.id})`,
+      );
+      client.disconnect();
+      return;
+    }
+
+    const oracleDid = this.configService.get<string>('ORACLE_DID');
+    if (!oracleDid) {
+      this.logger.error(
+        'WebSocket auth unavailable: ORACLE_DID not configured — rejecting connection',
+      );
+      client.disconnect();
+      return;
+    }
+    const blocksyncUri = this.configService.getOrThrow<string>(
+      'BLOCKSYNC_GRAPHQL_URL',
+    );
+
+    const outcome = await validateUcanDelegation(ucanDelegation, {
+      oracleDid,
+      blocksyncUri,
+    });
+    if (!outcome.ok) {
+      this.logger.warn(
+        `WebSocket connection rejected for session ${sessionId}: ${outcome.error} (client: ${client.id})`,
+      );
+      client.disconnect();
+      return;
+    }
+
+    const userDid = outcome.result.userDid;
+    // Stash the validated identity on the socket so disconnect-time history
+    // processing reads the authenticated DID rather than the untrusted query.
+    client.data.userDid = userDid;
+
+    this.logger.log(
+      `WebSocket connection established for session: ${sessionId}, did: ${userDid}, client: ${client.id}`,
+    );
+
+    // Cache the (now-validated) delegation for downstream invocations, keyed
+    // by the validated invoker DID and bounded by the delegation's lifetime.
+    if (this.ucanService) {
+      await this.ucanService.cacheDelegation(
+        userDid,
+        ucanDelegation,
+        outcome.result.delegation.expiration,
+      );
     }
 
     // Join the sessionId room (channel) — this is the key integration!
     await client.join(sessionId);
 
-    this.wsService.addClientConnection(sessionId as string, client);
+    this.wsService.addClientConnection(sessionId, client);
 
     client.emit('connected', {
       message: 'Connected successfully',
