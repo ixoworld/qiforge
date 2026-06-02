@@ -273,6 +273,7 @@ describe('DomainIndexerPlugin', () => {
         name: 'IXO World',
         description: 'desc',
         summary: 'sum',
+        entity_verified: null,
         overview: 'ov',
         faq: [{ q: 'what?', a: 'this' }],
         url: 'https://ixo.world',

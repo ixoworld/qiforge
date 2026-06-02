@@ -95,8 +95,6 @@
       "ssh2",
       "unrs-resolver"
     ],
-    "patchedDependencies": {
-      "@veramo/credential-ld@6.0.0": "patches/@veramo__credential-ld@6.0.0.patch"
-    }
+    "patchedDependencies": {}
   }
 }
