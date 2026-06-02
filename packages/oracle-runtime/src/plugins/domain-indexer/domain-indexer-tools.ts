@@ -36,8 +36,9 @@ const searchSchema = z.object({
     ),
   filters: z.record(z.string(), z.string()).optional()
     .describe(`Optional filters as key-value pairs. Examples:
+- {"dc.entity_type": "dao/pod"} - Filter by exact chain entity type (e.g. dao/pod, dao/protocol, dao — compound types are preserved, not split)
+- {"dc.entity_verified": "true"} - Only verified entities (chain-sourced: true/false/omit for all)
 - {"dc.categories": "dao,project"} - Filter by categories
-- {"dc.entity_type": "dao"} - Filter by entity type
 - {"dc.has_url": "true"} - Only entities with URLs
 - {"dc.keywords": "blockchain,web3"} - Filter by keywords
 - {"agent.domain_card_id": "did:ixo:entity:ixoworld"} - Agents for specific entity
@@ -99,10 +100,26 @@ WORKFLOW:
 5. If you need more complete information, use get_domain_card with the entity's DID (found in record.id)
 
 FILTERS (optional):
-- Domain cards: dc.categories (comma-separated), dc.entity_type, dc.keywords, dc.issuer, dc.has_url (true/false), dc.has_logo (true/false), dc.valid_from_gte (ISO date), dc.valid_from_lte (ISO date), dc.bbox (minLng,minLat,maxLng,maxLat), dc.near (lng,lat), dc.radius (meters)
+- Domain cards:
+  - dc.entity_type: exact chain entity type — "dao/pod" for pods, "dao/protocol" for protocol DAOs, "dao" for plain DAOs. Compound types are never split; "dao/pod" and "dao" are distinct values.
+  - dc.entity_verified: "true" or "false" — chain-verified status. Omit to include both.
+  - dc.categories: comma-separated category values
+  - dc.keywords: comma-separated keywords
+  - dc.issuer: DID of the issuer
+  - dc.has_url: "true"/"false" — whether entity has a URL
+  - dc.has_logo: "true"/"false" — whether entity has a logo
+  - dc.valid_from_gte / dc.valid_from_lte: ISO datetime bounds
+  - dc.bbox: minLng,minLat,maxLng,maxLat (geo bounding box)
+  - dc.near + dc.radius: lng,lat and radius in km (geo proximity)
 - Agents: agent.domain_card_id, agent.has_url (true/false)
 - Compositions: comp.domain_card_id, comp.creator, comp.has_url (true/false)
 - Events: event.domain_card_id, event.from (ISO date), event.to (ISO date), event.location
+
+ENTITY TYPE EXAMPLES:
+- Find all pods: {"dc.entity_type": "dao/pod"}
+- Find protocol DAOs: {"dc.entity_type": "dao/protocol"}
+- Find verified entities of type protocol/dao: {"dc.entity_type": "dao/protocol", "dc.entity_verified": "true"}
+- "verified entities of type protocol/dao relevant to mining" → query: "mining", filters: {"dc.entity_type": "dao/protocol", "dc.entity_verified": "true"}
 
 IMPORTANT: Always check the 'record' field in results for summary, overview, and faq data. These fields contain the curated information about the entity.`;
 
@@ -135,7 +152,8 @@ WHAT IT RETURNS (filtered to essential fields only):
 - faq: Array of FAQ objects with question and answer fields
 - url: Entity website URL
 - keywords: Array of keywords
-- entity_type: Array of entity types
+- entity_type: Array containing the chain entity type (e.g. ["dao/pod"], ["dao/protocol"], ["dao"])
+- entity_verified: boolean or null — whether the entity is verified on-chain (null means not yet determined)
 
 WORKFLOW:
 1. First use domain_indexer_search to find entities
@@ -156,6 +174,7 @@ interface DomainCardSummary {
   url: unknown;
   keywords: unknown;
   entity_type: unknown;
+  entity_verified: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -174,6 +193,7 @@ function projectDomainCard(card: unknown): DomainCardSummary {
     url: c.url,
     keywords: c.keywords ?? [],
     entity_type: c.entity_type ?? [],
+    entity_verified: c.entity_verified ?? null,
   };
 }
 

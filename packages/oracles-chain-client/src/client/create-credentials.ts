@@ -15,12 +15,11 @@ import {
   createAgent,
 } from '@veramo/core';
 import {
-  CredentialIssuerLD,
+  CredentialProviderLD,
   LdDefaultContexts,
   VeramoEd25519Signature2018,
   VeramoEd25519Signature2020,
 } from '@veramo/credential-ld';
-// Using dynamic imports for @veramo/credential-ld to avoid build-time import assertions
 import {
   CredentialPlugin,
   type ICredentialIssuer,
@@ -161,14 +160,15 @@ export const createVeramoAgent = async (
           }),
         }),
       }),
-      new CredentialPlugin(),
-      new CredentialIssuerLD({
-        contextMaps: [LdDefaultContexts],
-        suites: [
-          new VeramoEd25519Signature2018(),
-          new VeramoEd25519Signature2020(),
-        ],
-      }),
+      new CredentialPlugin([
+        new CredentialProviderLD({
+          contextMaps: [LdDefaultContexts],
+          suites: [
+            new VeramoEd25519Signature2018(),
+            new VeramoEd25519Signature2020(),
+          ],
+        }),
+      ]),
     ],
   });
 };
