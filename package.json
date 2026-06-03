@@ -45,6 +45,10 @@
     "node": ">=22",
     "pnpm": ">=10.0.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
   "pnpm": {
     "peerDependencyRules": {
       "ignoreMissing": [
