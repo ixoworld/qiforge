@@ -144,11 +144,6 @@ export class ClaimProcessingService {
       );
     }
 
-    // `@ixo/sqlite-saver` and `@langchain/langgraph` end up referencing two
-    // structurally-identical `BaseCheckpointSaver` instances from
-    // separately-resolved `@langchain/langgraph-checkpoint` copies (one via
-    // core@1.1.42, one via core@1.1.45). Bridge once at construction so the
-    // rest of the service sees a single langgraph-native type.
     const sqliteSaver = SqliteSaver.fromConnString(this.claimProcessingDbPath);
     this.claimProcessingCheckpointer =
       sqliteSaver as unknown as BaseCheckpointSaver;

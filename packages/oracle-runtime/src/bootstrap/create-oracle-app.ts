@@ -444,11 +444,6 @@ export async function createOracleApp(
     ? {
         checkpointerForUser: async (userDid: string) => {
           const db = await checkpointSync.getUserDatabase(userDid);
-          // Cross-package interop: SqliteSaver extends BaseCheckpointSaver
-          // from `@langchain/langgraph-checkpoint`; the hook return type
-          // pulls from `@langchain/langgraph`. pnpm hoists these into
-          // separate type identities even at the same version — they are
-          // structurally identical at runtime.
           return SqliteSaver.fromDatabase(db) as unknown as BaseCheckpointSaver;
         },
       }

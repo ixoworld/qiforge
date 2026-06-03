@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion */
-
 /**
  * Page management functions — reusable from services, API routes, and tests.
  */
@@ -398,7 +396,7 @@ export async function updatePage(
       const oldBlocks = serverEditor.yXmlFragmentToBlocks(
         doc.getXmlFragment('document'),
       );
-      oldContentMd = await serverEditor.blocksToMarkdownLossy(oldBlocks as any);
+      oldContentMd = await serverEditor.blocksToMarkdownLossy(oldBlocks);
     }
 
     doc.transact(() => {
@@ -436,7 +434,7 @@ export async function updatePage(
         doc.getXmlFragment('document'),
       );
 
-      const newContentMd = await serverEditor.blocksToMarkdownLossy(newBlocks as any);
+      const newContentMd = await serverEditor.blocksToMarkdownLossy(newBlocks);
       diff.content = { old: oldContentMd, new: newContentMd };
     }
 

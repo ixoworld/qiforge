@@ -127,11 +127,7 @@ export const resolveUIComponent = (
       isLoading: isRunning,
       key: `${component.name}${component.props.id}`,
     };
-    return createElement(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      AgActionComponent as React.FC<any>,
-      agActionComponentProps,
-    );
+    return createElement(AgActionComponent, agActionComponentProps);
   }
 
   // For other components, use generic props
