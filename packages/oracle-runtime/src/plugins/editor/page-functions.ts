@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion */
+
 /**
  * Page management functions — reusable from services, API routes, and tests.
  */
