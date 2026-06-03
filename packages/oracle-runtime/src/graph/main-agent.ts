@@ -15,6 +15,14 @@ import {
   MEMORY_CLEAR_MCP_NAME,
   MemoryPlugin,
 } from '../plugins/memory/index.js';
+import { isUserInRoom } from '../matrix/room-membership.js';
+import { createEditorAccessDeniedTool } from '../plugins/editor/editor-access-denied-tool.js';
+import { EDITOR_AGENT_TOOL_NAME } from '../plugins/editor/editor-agent.js';
+import {
+  EDITOR_MODE_PROMPTS,
+  editorUnavailableMode,
+  STANDALONE_EDITOR_PROMPTS,
+} from '../plugins/editor/prompts.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -110,6 +118,11 @@ export async function createMainAgent(
   });
 
   // ── 2. Request-time runtime context (drives getRequestTools/...SubAgents) ─
+  ambient.logger.debug?.(
+    `[MainAgent] state.loadedPlugins:`,
+    state.loadedPlugins,
+  );
+
   const loadedSet = new Set<string>(state.loadedPlugins ?? []);
   // Carry the prior request state (editorRoomId, spaceId, browserTools,
   // agActions, …) into the per-request RuntimeContext and the tool-wrapper
@@ -299,11 +312,71 @@ export async function createMainAgent(
   const tier1 = renderTier1({ manifests: eagerEntries });
   for (const warning of tier1.warnings) ambient.logger.warn(warning);
 
+  // Editor mode is selected per-request from the live state (the static
+  // `hooks` from the bundle can't carry request-scoped editorRoomId/spaceId).
+  // When a page is open (`editorRoomId`) the editor prompt is the "richer mode"
+  // that overrides the fork's operationalMode; with only a `spaceId` the
+  // standalone variant applies. Falls back to hooks/defaults otherwise.
+  //
+  // Gated on `call_editor_agent` actually being bound: the editor plugin can
+  // refuse to contribute its surface even when the state fields are set (room
+  // membership check failed, Matrix unavailable, sub-agent build error).
+  // Injecting "EDITOR MODE ACTIVE — use the Editor Agent tool" without the
+  // tool bound makes the model emit its sub-agent task as user-facing text
+  // instead of calling anything.
+  const editorToolBound = tools.some((t) => t.name === EDITOR_AGENT_TOOL_NAME);
+
+  // A page is open but the editor refused to bind. Tell the model WHY via a
+  // dedicated operational mode AND bind a stub `call_editor_agent` that
+  // returns the same denial — so even a model that ignores the prompt and
+  // calls the editor learns the truth from the tool result. The membership
+  // re-check hits the cache the editor plugin's own guard just populated
+  // (60s TTL), so this costs no extra Matrix round-trip; `isUserInRoom`
+  // fails closed, matching the plugin's decision.
+  let editorUnavailableBlock: string | null = null;
+  if (!editorToolBound && state.editorRoomId) {
+    const isMember = await isUserInRoom(
+      state.editorRoomId,
+      requestCtx.user.matrixUserId,
+    );
+    const reason = isMember ? 'bind-error' : 'not-member';
+    editorUnavailableBlock = editorUnavailableMode({
+      editorRoomId: state.editorRoomId,
+      reason,
+    });
+    tools.push(
+      createEditorAccessDeniedTool({
+        editorRoomId: state.editorRoomId,
+        reason,
+      }),
+    );
+    ambient.logger.warn(
+      `[main-agent] editorRoomId=${state.editorRoomId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind (reason: ${reason}, user: ${requestCtx.user.matrixUserId}) — ` +
+        `binding access-denied stub and injecting the unavailable notice`,
+    );
+  } else if (!editorToolBound && state.spaceId) {
+    ambient.logger.warn(
+      `[main-agent] spaceId=${state.spaceId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind — suppressing editor prompts; ` +
+        `see preceding [editor] log lines for the refusal reason`,
+    );
+  }
+
+  const editorPrompts =
+    editorToolBound && state.editorRoomId
+      ? EDITOR_MODE_PROMPTS
+      : editorToolBound && state.spaceId
+        ? STANDALONE_EDITOR_PROMPTS
+        : null;
+
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
-    operationalMode: hooks?.operationalMode ?? DEFAULT_OPERATIONAL_MODE,
-    editorSection: hooks?.editorSection ?? '',
+    operationalMode:
+      editorPrompts?.operationalMode ??
+      editorUnavailableBlock ??
+      hooks?.operationalMode ??
+      DEFAULT_OPERATIONAL_MODE,
+    editorSection: editorPrompts?.editorSection ?? hooks?.editorSection ?? '',
     composioContext: hooks?.composioContext ?? '',
     slackFormattingConstraints:
       requestCtx.session.client === 'slack'

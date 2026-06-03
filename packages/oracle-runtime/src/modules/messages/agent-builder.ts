@@ -7,6 +7,7 @@ import type {
 } from '../../graph/main-agent-types.js';
 import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
+import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import type { SendMessageRequest } from './messages.service.js';
@@ -192,7 +193,7 @@ export class AgentBuilder {
     const requestCtx: MainAgentRequestContext = {
       user: {
         did: payload.did,
-        matrixUserId: `@did-${payload.did.replace(/:/g, '-')}:${prepared.homeServerName}`,
+        matrixUserId: didToMatrixUserId(payload.did, prepared.homeServerName),
         ucanDelegation,
         timezone: prepared.timezone,
         currentTime: prepared.currentTime,

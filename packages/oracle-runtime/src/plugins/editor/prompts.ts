@@ -311,7 +311,7 @@ For read-only operations (reading, listing, summarizing), always proceed without
 confirmation — only pause when about to write or edit.
 
 **Page Management:**
-- **Create page:** Delegate to the Editor Agent — it has the \`create_page\` tool. Example: call_editor_agent with "Create a new page titled 'Meeting Notes' with the following content: ..."
+- **Create page:** Delegate to the Editor Agent — it has the \`create_page\` tool, which creates a **brand-new page room under the user's space automatically**. You do NOT supply, look up, or know a room ID to create a page — \`create_page\` generates the room and returns the new \`roomId\`. Example: call_editor_agent with "Create a new page titled 'Meeting Notes' with the following content: ..."
 - **List pages:** Use the \`list_workspace_pages\` browser tool to list all pages in the user's workspace. This runs on the client side and returns page names, room IDs, and types.
 - **Edit/read a specific page by name:** When the user asks to edit or read a page and you don't have its room ID:
   1. Call \`list_workspace_pages\` (browser tool) to find the page by name and get its room ID
@@ -409,22 +409,26 @@ You have \`call_editor_agent\` which starts an Editor Agent subagent for any pag
 
 **⚠️ Pages are BlockNote documents — NOT entities.** Pages are collaborative documents in the user's workspace. They are completely separate from IXO blockchain entities. NEVER use the Domain Indexer Agent for page operations — it has no knowledge of pages. ALL page operations (list, read, edit, create, update) go through \`list_workspace_pages\` and \`call_editor_agent\`.
 
-**Workflow for ANY page-related request (read, edit, update, create, list):**
+**Creating a NEW page:**
+- To create a new page, call \`call_editor_agent\` with ONLY a \`task\` and **NO \`room_id\`**. \`create_page\` makes a fresh page room under the user's space automatically and returns the new \`roomId\` — you never provide, look up, or guess a room ID to create a page.
+- Example: \`call_editor_agent({ task: "Create a new page titled 'Meeting Notes' with a short agenda" })\`
+
+**Workflow for reading/editing an EXISTING page:**
 1. Use \`list_workspace_pages\` (browser tool) to discover pages and their room IDs
-2. Call \`call_editor_agent\` with the \`room_id\` and your editing \`task\`
-3. The editor agent has full capabilities: list/edit/create/delete blocks, read/update/create pages, surveys, find-and-replace, bulk edits
+2. Call \`call_editor_agent\` with the \`room_id\` AND your editing \`task\`
+3. The editor agent has full capabilities: list/edit/create/delete blocks, read/update pages, surveys, find-and-replace, bulk edits
 
 **⚠️ Parameter format — room_id and task are SEPARATE fields:**
-- \`room_id\`: ONLY the Matrix room ID string (starts with "!", contains ":"). Nothing else.
+- \`room_id\`: the Matrix room ID of an EXISTING page (starts with "!", contains ":"). **OMIT it entirely to CREATE a new page.**
 - \`task\`: ONLY the detailed, self-contained instruction. No room IDs here.
 
 **Examples (correct):**
-- \`call_editor_agent({ room_id: "!abc:server.example", task: "Read this page and summarize its content" })\`
-- \`call_editor_agent({ room_id: "!abc:server.example", task: "Find the status block and set it to completed" })\`
-- \`call_editor_agent({ room_id: "!abc:server.example", task: "Create a new page titled 'Meeting Notes'" })\`
-- \`call_editor_agent({ room_id: "!abc:server.example", task: "Shorten the content by 50% while keeping key points" })\`
+- Create (no room_id): \`call_editor_agent({ task: "Create a new page titled 'Meeting Notes'" })\`
+- Read: \`call_editor_agent({ room_id: "!abc:server.example", task: "Read this page and summarize its content" })\`
+- Edit: \`call_editor_agent({ room_id: "!abc:server.example", task: "Find the status block and set it to completed" })\`
+- Rewrite: \`call_editor_agent({ room_id: "!abc:server.example", task: "Shorten the content by 50% while keeping key points" })\`
 
-**Important:** Always get the room ID from \`list_workspace_pages\` first — never guess room IDs.
+**Important:** When editing an existing page, get the room ID from \`list_workspace_pages\` first — never guess room IDs. Creating a page needs no room ID.
 
 **Page Context Switches:**
 The user may switch pages mid-conversation. When tool results (read_page, list_blocks)
@@ -445,6 +449,48 @@ Never send vague or empty tasks — the editor agent cannot infer intent from yo
 
 When a skill needs to authenticate against an external UCAN-gated service: call \`call_editor_agent\` with a task naming \`mint_invocation\` and the required args (\`delegationCid\`, \`serviceUrl\`, \`can\`, \`withResource\` — all from the companion prompt). The tool returns \`{ blobId, invocation, ... }\`. **Use \`blobId\` — pass it to \`sandbox_write_blob({ blobId, path: "/workspace/data/<skill>/ucan_token" })\`** so the runtime writes the value via \`sandbox_write_file\` without the long base64 CAR ever entering this conversation. Single-use; re-mint per protected call; expire ~90s so write the blob immediately. On "blob not found", re-mint and retry.`,
 };
+
+/** Why the editor surface could not be attached to this request. */
+export type EditorUnavailableReason = 'not-member' | 'bind-error';
+
+/**
+ * Operational-mode block injected when a page is open in the client
+ * (`editorRoomId`) but the editor surface refused to bind — the user is not
+ * a verified member of the page's room, or the sub-agent build failed.
+ *
+ * Paired with the stub `call_editor_agent` tool (see
+ * `createEditorAccessDeniedTool`): even a model that skips this block and
+ * calls the editor anyway learns the denial from the tool result instead of
+ * narrating its sub-agent task as user-facing text.
+ */
+export function editorUnavailableMode(options: {
+  editorRoomId: string;
+  reason: EditorUnavailableReason;
+}): string {
+  const { editorRoomId, reason } = options;
+  // The membership lookup runs with the oracle's admin identity, so a failure
+  // can mean EITHER side is missing from the room: the user isn't a member,
+  // or the oracle itself isn't (the lookup is forbidden and fails closed).
+  // The check can't tell those apart — the wording stays unified.
+  const why =
+    reason === 'not-member'
+      ? `membership of the page's room (\`${editorRoomId}\`) could not be verified — either the user's account or this oracle is not a member of it, and BOTH must be members for the editor to attach`
+      : `the editor service failed to attach to the page's room (\`${editorRoomId}\`)`;
+  const tellUser =
+    reason === 'not-member'
+      ? "the page room membership could not be verified — either their account or this oracle is not a member of the page's room, and both must be. Inviting this oracle to the page (or opening a page they own) fixes it"
+      : 'the editor service is currently unavailable for this page — they can retry shortly';
+
+  return `**⚠️ PAGE OPEN BUT NOT ACCESSIBLE**
+
+A page is open in the client, but the editor could not be attached to this request: ${why}.
+
+- If the user asks about "the page" / "this page" / "the current page", tell them plainly that you cannot access it because ${tellUser}. Do not guess at the page's content.
+- Calling \`call_editor_agent\` will only return this same denial — do not retry it in a loop.
+- Do NOT call \`list_capabilities\` or \`load_capability\` hunting for editor tools — the editor cannot attach during this request regardless of what is loaded.
+- Never claim to have read or edited the page.
+- Everything unrelated to the page works normally.`;
+}
 
 export const editorAgentPrompt = `
 ${sharedExpectations}

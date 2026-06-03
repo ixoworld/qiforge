@@ -1,10 +1,11 @@
 import type { StructuredTool } from 'langchain';
 
+import { computeSubAgentToolName } from '../../graph/subagent-as-tool.js';
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
 import type { PluginSubAgent, PluginTool } from '../../plugin-api/types.js';
 import {
-  type BlocknoteToolsConfig,
   createBlocknoteTools,
+  type BlocknoteToolsConfig,
 } from './blocknote-tools.js';
 import { resolveEditorMatrixClient } from './editor-mx.js';
 import {
@@ -15,6 +16,20 @@ import {
 import { createPageTools } from './page-tools.js';
 import { editorAgentPrompt, editorAgentReadOnlyPrompt } from './prompts.js';
 import type { AppConfig, MatrixRoomConfig } from './provider.js';
+
+/** Default sub-agent name surfaced to the main agent. */
+export const EDITOR_AGENT_NAME = 'Editor Agent';
+
+/**
+ * The tool name the main agent sees for the editor surface — identical for
+ * the room-bound sub-agent (derived via `computeSubAgentToolName`) and the
+ * standalone tool (which sets it directly). The prompt composer checks this
+ * name to decide whether the editor-mode prompts may be injected: telling the
+ * model "EDITOR MODE ACTIVE — use the Editor Agent tool" without this tool
+ * bound makes it narrate its sub-agent task as user-facing text.
+ */
+export const EDITOR_AGENT_TOOL_NAME =
+  computeSubAgentToolName(EDITOR_AGENT_NAME);
 
 const normalizeRoom = (room: string | MatrixRoomConfig): MatrixRoomConfig => {
   if (typeof room === 'string') {
@@ -226,7 +241,7 @@ export async function createEditorSubAgent(
     mode = 'edit',
     toolsConfig,
     configOverrides,
-    name = 'Editor Agent',
+    name = EDITOR_AGENT_NAME,
     description = 'AI Agent that reads and writes pages and blocks in the BlockNote editor.',
     userMatrixId,
     spaceId,
@@ -296,17 +311,10 @@ export async function createEditorSubAgent(
     tools,
     model: 'subagent',
     middlewares: [],
-    // Bubble the page + block mutation events into the main chat so the FE
-    // renders artifact previews and edit confirmations inline. Names absent
-    // in the read-only toolset are simply nothing-to-forward. `mint_invocation`
-    // is forwarded so the main agent sees the returned `blobId` and can pass
-    // it straight to `sandbox_write_blob`.
-    forwardTools: [
-      'create_page',
-      'update_page',
-      'edit_block',
-      'create_block',
-      'mint_invocation',
-    ],
+    // Forward EVERY tool call (reads and writes) into the main chat so the
+    // FE renders page/block activity inline and the main agent sees results
+    // directly — e.g. `mint_invocation`'s `blobId`, which it passes straight
+    // to `sandbox_write_blob`.
+    forwardTools: true,
   };
 }

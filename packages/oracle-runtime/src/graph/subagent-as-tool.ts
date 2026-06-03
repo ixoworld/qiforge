@@ -130,8 +130,12 @@ function lastMessageContent(messages: BaseMessage[]): string {
  * LangChain-generated ids like `functions.create_data_table:0` starting at
  * 0, and two invocations in one chat collide — the frontend uses these
  * ids as React keys and picks the wrong artifact.
+ *
+ * Exported so ad-hoc sub-agent runners (e.g. the editor's standalone tool,
+ * which spins up its own inner agent instead of going through
+ * `createSubagentAsTool`) forward with identical semantics.
  */
-function filterForwardedMessages(
+export function filterForwardedMessages(
   messages: BaseMessage[],
   forwardTools: Set<string>,
   idPrefix: string,

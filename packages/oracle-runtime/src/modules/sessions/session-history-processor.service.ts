@@ -7,6 +7,7 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type Cache } from 'cache-manager';
+import { didToMatrixUserId } from '../../matrix/user-id.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import { MessagesService } from '../messages/messages.service.js';
 import { UcanService } from '../ucan/ucan.service.js';
@@ -320,7 +321,7 @@ export class SessionHistoryProcessor {
     if (fromPrefs) return fromPrefs;
 
     try {
-      const matrixUserId = `@did-${did.replace(/:/g, '-')}:${userHomeServer}`;
+      const matrixUserId = didToMatrixUserId(did, userHomeServer);
       const displayName =
         await MatrixManager.getInstance().getDisplayName(matrixUserId);
       const trimmed = displayName?.trim();

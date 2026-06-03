@@ -11,19 +11,13 @@
 
 import { SessionManagerService } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 
 import type { ENV } from 'src/types';
 
-import { QUEUE_NAMES } from './scheduler/task-queues';
-import { TasksScheduler } from './scheduler/tasks-scheduler.service';
-import type { ApprovalTimeoutJobData } from './scheduler/types';
-import { appendOutputToPage, appendRejectionToPage } from './task-doc-helpers';
-import type { TaskMeta } from './task-meta';
-import { TasksService } from './task.service';
 import {
   APPROVAL_EXPIRY_MS,
   APPROVAL_REMINDER_MS,
@@ -32,14 +26,20 @@ import {
   APPROVAL_RESULT_TTL_SECONDS,
   APPROVAL_ROOM_PREFIX,
   APPROVAL_ROOMREF_PREFIX,
-  TASK_RUN_EVENT_TYPE,
   formatApprovalRequestMessage,
   sendTaskNotification,
+  TASK_RUN_EVENT_TYPE,
   truncateText,
   type ApprovalRequestEventContent,
   type TaskRunEventContent,
   type WorkResult,
 } from './processors/processor-utils';
+import { QUEUE_NAMES } from './scheduler/task-queues';
+import { TasksScheduler } from './scheduler/tasks-scheduler.service';
+import type { ApprovalTimeoutJobData } from './scheduler/types';
+import { appendOutputToPage, appendRejectionToPage } from './task-doc-helpers';
+import type { TaskMeta } from './task-meta';
+import { TasksService } from './task.service';
 
 @Injectable()
 export class ApprovalService {
@@ -89,22 +89,17 @@ export class ApprovalService {
     await client.set(
       redisKey,
       JSON.stringify({ workResult, title: params.title }),
-      'EX',
-      APPROVAL_RESULT_TTL_SECONDS,
+      {
+        EX: APPROVAL_RESULT_TTL_SECONDS,
+      },
     );
     // Store room→task and task→room lookup keys for fast approval checks
-    await client.set(
-      `${APPROVAL_ROOM_PREFIX}${roomId}`,
-      taskId,
-      'EX',
-      APPROVAL_RESULT_TTL_SECONDS,
-    );
-    await client.set(
-      `${APPROVAL_ROOMREF_PREFIX}${taskId}`,
-      roomId,
-      'EX',
-      APPROVAL_RESULT_TTL_SECONDS,
-    );
+    await client.set(`${APPROVAL_ROOM_PREFIX}${roomId}`, taskId, {
+      EX: APPROVAL_RESULT_TTL_SECONDS,
+    });
+    await client.set(`${APPROVAL_ROOMREF_PREFIX}${taskId}`, roomId, {
+      EX: APPROVAL_RESULT_TTL_SECONDS,
+    });
     this.logger.debug(
       `Stored work result in Redis: key=${redisKey}, TTL=${APPROVAL_RESULT_TTL_SECONDS}s`,
     );
@@ -184,7 +179,10 @@ export class ApprovalService {
     // Atomicity guard: use Redis SETNX to prevent concurrent handling.
     // Only one caller can acquire the lock — duplicates are silently dropped.
     const lockKey = `task:approval-lock:${taskId}`;
-    const acquired = await client.set(lockKey, '1', 'EX', 60, 'NX');
+    // FIX: Redis v4+ node-redis client: SET options must be an object, not multiple arguments
+    const acquired = await client.set(lockKey, '1', {
+      EX: 60,
+    });
     if (!acquired) {
       this.logger.warn(
         `Task ${taskId} approval response already being processed, ignoring duplicate`,
