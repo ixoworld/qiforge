@@ -68,7 +68,7 @@ export class ChannelMemorySummarizer implements Summarizer {
       const llm = getProviderChatModel('session-title', {
         temperature: 0.2,
         maxTokens: 800,
-      } as Parameters<typeof getProviderChatModel>[1]);
+      });
 
       const prompt = formatMessagesForPrompt(messages);
       const response = await llm.invoke([
@@ -104,7 +104,7 @@ export class ChannelMemorySummarizer implements Summarizer {
       const llm = getProviderChatModel('session-title', {
         temperature: 0.2,
         maxTokens: 800,
-      } as Parameters<typeof getProviderChatModel>[1]);
+      });
 
       const body = summaries
         .map((s, i) => `--- chunk ${i + 1} ---\n${s}`)

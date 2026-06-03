@@ -184,7 +184,7 @@ export async function* parseSSEStream(
             try {
               const parsedData = JSON.parse(data);
               if (isValidSSEEventType(event)) {
-                yield { event, data: parsedData } as SSEEvent;
+                yield { event, data: parsedData };
               }
             } catch (parseError) {
               console.warn('Failed to parse SSE data:', data, parseError);
@@ -220,7 +220,7 @@ export async function* parseSSEStream(
         try {
           const parsedData = JSON.parse(data);
           if (isValidSSEEventType(event)) {
-            yield { event, data: parsedData } as SSEEvent;
+            yield { event, data: parsedData };
           }
         } catch (parseError) {
           console.warn('Failed to parse final SSE data:', data, parseError);

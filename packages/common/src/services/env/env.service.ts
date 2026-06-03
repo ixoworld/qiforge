@@ -11,7 +11,7 @@ export class EnvService<T extends z.ZodType> {
   private constructor(schema: T, onError?: (error: z.ZodError) => void) {
     try {
       // Parse and validate environment variables
-      this.validatedEnv = schema.parse(process.env) as unknown as z.infer<T>;
+      this.validatedEnv = schema.parse(process.env);
     } catch (error) {
       if (error instanceof z.ZodError) {
         if (onError) {
@@ -33,7 +33,7 @@ export class EnvService<T extends z.ZodType> {
     if (EnvService.instance === null) {
       EnvService.instance = new EnvService(schema);
     }
-    return EnvService.instance as EnvService<S>;
+    return EnvService.instance;
   }
 
   /**
@@ -44,7 +44,7 @@ export class EnvService<T extends z.ZodType> {
     if (EnvService.instance === null) {
       throw new Error('EnvService must be initialized with a schema first');
     }
-    return EnvService.instance as EnvService<S>;
+    return EnvService.instance;
   }
 
   /**

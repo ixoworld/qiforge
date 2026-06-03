@@ -279,12 +279,12 @@ export function useChat({
               ? [
                   {
                     id: event.payload.requestId,
-                    args: event.payload.args as Record<string, unknown>,
+                    args: event.payload.args,
                     name: event.payload.toolName,
-                    status: event.payload.status as 'isRunning' | 'done',
+                    status: event.payload.status,
                     output:
                       'output' in event.payload
-                        ? (event.payload.output as string)
+                        ? event.payload.output
                         : undefined,
                   },
                 ]

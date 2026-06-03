@@ -122,7 +122,7 @@ export class MatrixStateManager {
 
       const stateEvent = await this.client.getStateEvent(
         roomId,
-        'ixo.room.state' as keyof StateEvents,
+        'ixo.room.state',
         stateKey,
       );
 

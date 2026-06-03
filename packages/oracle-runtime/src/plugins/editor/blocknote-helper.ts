@@ -545,16 +545,16 @@ export function readDelegations(doc: Y.Doc): {
         const parsed = JSON.parse(value) as Record<string, unknown>;
         delegations.push({
           ...parsed,
-          cid: (parsed.id as string) || key,
-          issuerDid: (parsed.issuer as string) || '',
-          audienceDid: (parsed.audience as string) || '',
+          cid: parsed.id || key,
+          issuerDid: parsed.issuer || '',
+          audienceDid: parsed.audience || '',
           capabilities: parsed.capabilities || [],
           expiration: parsed.expiration,
           createdAt: parsed.issuedAt
             ? new Date(parsed.issuedAt as string).getTime()
             : 0,
           format: 'legacy',
-          proofCids: (parsed.proofs as string[]) || [],
+          proofCids: parsed.proofs || [],
         });
       } catch {
         /* skip malformed entries */

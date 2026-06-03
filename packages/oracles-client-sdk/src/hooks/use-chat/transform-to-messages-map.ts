@@ -1,9 +1,5 @@
 import { type UIComponents } from './resolve-ui-component.js';
-import {
-  type IComponentMetadata,
-  type IMessage,
-  type MessageContent,
-} from './v2/types.js';
+import { type IComponentMetadata, type IMessage } from './v2/types.js';
 
 export type MessagesMap = Record<string, IMessage>;
 
@@ -86,7 +82,7 @@ export default function transformToMessagesMap({
 
     messagesMap[message.id] = {
       ...message,
-      content: content.filter(Boolean) as MessageContent,
+      content: content.filter(Boolean),
     };
   });
   return messagesMap;

@@ -124,8 +124,8 @@ interface CacheMetrics {
 }
 
 export class MatrixCheckpointSaver<
-  _GraphState extends
-    IGraphStateWithRequiredFields = IGraphStateWithRequiredFields,
+  _GraphState extends IGraphStateWithRequiredFields =
+    IGraphStateWithRequiredFields,
 > extends BaseCheckpointSaver {
   private stateManager = matrixStateManager;
 
@@ -613,7 +613,7 @@ export class MatrixCheckpointSaver<
         error != null &&
         typeof error === 'object' &&
         'errcode' in error &&
-        (error as { errcode: unknown }).errcode === 'M_NOT_FOUND'
+        error.errcode === 'M_NOT_FOUND'
       ) {
         Logger.debug(
           `No writes found for checkpoint ${checkpointId} (expected for checkpoints with writesCount=0)`,

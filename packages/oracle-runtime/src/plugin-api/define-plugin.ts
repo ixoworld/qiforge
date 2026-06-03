@@ -41,5 +41,5 @@ export function defineOraclePlugin(
       'defineOraclePlugin(spec): `manifest` is required and must be an object.',
     );
   }
-  return spec as OraclePlugin;
+  return spec;
 }

@@ -39,7 +39,7 @@ export const OraclesProvider = ({
   transactSignX,
   createDelegation,
 }: PropsWithChildren<IOraclesProviderProps>) => {
-  if ((!initialWallet as unknown) || (!transactSignX as unknown)) {
+  if ((!initialWallet as unknown) || !transactSignX) {
     throw new Error('initialWallet and transactSignX are required');
   }
 

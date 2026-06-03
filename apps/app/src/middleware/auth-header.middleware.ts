@@ -146,9 +146,8 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       return null;
     }
 
-    const { createUCANValidator, createIxoDIDResolver } = await import(
-      '@ixo/ucan'
-    );
+    const { createUCANValidator, createIxoDIDResolver } =
+      await import('@ixo/ucan');
     const blocksyncUri = this.configService.get('BLOCKSYNC_GRAPHQL_URL');
 
     const validator = await createUCANValidator({

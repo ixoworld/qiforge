@@ -399,7 +399,7 @@ export class FileProcessingService {
             eventId: attachment.eventId,
             category:
               category === 'unsupported' ? ('document' as const) : category,
-          } as ProcessedAttachment,
+          },
         });
       }
     }
