@@ -46,6 +46,4 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             FILTERS="$FILTERS --filter=$pkg"
           done
-          pnpm publish $FILTERS --access public --no-git-checks
-        env:
-          NODE_AUTH_TOKEN: ${{secrets.npm_token}}
+          pnpm publish $FILTERS --access public --no-git-checks --provenance
