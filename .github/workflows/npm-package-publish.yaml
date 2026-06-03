@@ -46,4 +46,4 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             FILTERS="$FILTERS --filter=$pkg"
           done
-          pnpm publish $FILTERS --access public --no-git-checks --provenance
+          pnpm publish $FILTERS --access public --no-git-checks
