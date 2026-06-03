@@ -381,13 +381,13 @@ function validateAnswerValue(
         issues.push({
           field: question.name,
           message: `${question.title || question.name} is required`,
-        } as ValidationWarning);
+        });
       } else {
         issues.push({
           field: question.name,
           message: `${question.title || question.name} is required`,
           type: 'required',
-        } as ValidationError);
+        });
       }
       return issues; // Don't check other validations if required is missing
     }
@@ -397,13 +397,13 @@ function validateAnswerValue(
   if (value !== undefined && value !== null && value !== '') {
     const addIssue = (message: string, type?: 'type' | 'choice' | 'format') => {
       if (options.returnAsWarnings) {
-        issues.push({ field: question.name, message } as ValidationWarning);
+        issues.push({ field: question.name, message });
       } else {
         issues.push({
           field: question.name,
           message,
           type: type || 'type',
-        } as ValidationError);
+        });
       }
     };
 

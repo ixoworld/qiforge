@@ -17,7 +17,6 @@ import {
 import {
   CredentialProviderLD,
   LdDefaultContexts,
-  VeramoEd25519Signature2018,
   VeramoEd25519Signature2020,
 } from '@veramo/credential-ld';
 import {
@@ -163,10 +162,7 @@ export const createVeramoAgent = async (
       new CredentialPlugin([
         new CredentialProviderLD({
           contextMaps: [LdDefaultContexts],
-          suites: [
-            new VeramoEd25519Signature2018(),
-            new VeramoEd25519Signature2020(),
-          ],
+          suites: [new VeramoEd25519Signature2020()],
         }),
       ]),
     ],

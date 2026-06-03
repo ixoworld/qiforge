@@ -152,7 +152,7 @@ const TEST_MODEL_OVERRIDES: Partial<Record<string, string>> = {
  */
 function buildTestResolveModel(): NonNullable<MainAgentHooks['resolveModel']> {
   return (role: ModelRole, params?: ChatOpenAIFields) => {
-    const override = TEST_MODEL_OVERRIDES[role as string];
+    const override = TEST_MODEL_OVERRIDES[role];
     if (override === undefined) {
       return getProviderChatModel(role, params);
     }
@@ -381,7 +381,7 @@ export async function createIntegrationRuntime(
     error: () => undefined,
     debug: () => undefined,
   };
-  const config = opts.config ?? (process.env as Record<string, unknown>);
+  const config = opts.config ?? process.env;
 
   // Stringify the config for plugin-loader autoDetect probes — `process.env`
   // values are strings, so the test config must look the same to keep the

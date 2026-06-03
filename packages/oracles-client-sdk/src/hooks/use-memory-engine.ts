@@ -39,9 +39,9 @@ export const useMemoryEngine = (oracleDid: string) => {
     },
     enabled: Boolean(
       wallet?.did &&
-        authzConfig?.granteeAddress &&
-        wallet.matrix.accessToken &&
-        oracleDid,
+      authzConfig?.granteeAddress &&
+      wallet.matrix.accessToken &&
+      oracleDid,
     ),
   });
 

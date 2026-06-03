@@ -197,9 +197,9 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
     },
     enabled: Boolean(
       wallet?.did &&
-        params.oracleDid &&
-        oracleRoomId &&
-        authzConfig?.granteeAddress,
+      params.oracleDid &&
+      oracleRoomId &&
+      authzConfig?.granteeAddress,
     ),
   });
 

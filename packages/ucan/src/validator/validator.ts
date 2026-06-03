@@ -609,7 +609,7 @@ export async function createUCANValidator(
           capability: validatedCap
             ? {
                 can: validatedCap.can,
-                with: validatedCap.with as string,
+                with: validatedCap.with,
                 nb: validatedCap.nb as Record<string, unknown> | undefined,
               }
             : undefined,
@@ -704,7 +704,7 @@ export async function createUCANValidator(
           capability: cap
             ? {
                 can: cap.can,
-                with: cap.with as string,
+                with: cap.with,
                 nb: cap.nb as Record<string, unknown> | undefined,
               }
             : undefined,

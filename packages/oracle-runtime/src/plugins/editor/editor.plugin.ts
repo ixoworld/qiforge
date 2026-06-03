@@ -14,7 +14,10 @@ import {
   buildBlocknoteToolsConfig,
   type BlocknoteToolsConfig,
 } from './blocknote-tools.js';
-import { createEditorSubAgent } from './editor-agent.js';
+import {
+  createEditorSubAgent,
+  EDITOR_AGENT_TOOL_NAME,
+} from './editor-agent.js';
 import { createStandaloneEditorTool } from './standalone-editor-tool.js';
 
 /**
@@ -66,18 +69,18 @@ const manifest: PluginManifest = {
       user: 'Summarize the current page.',
       thought:
         'Delegate to the Editor sub-agent with the active room. It will read the page and return a summary.',
-      tool: 'call_editor_agent',
+      tool: EDITOR_AGENT_TOOL_NAME,
     },
     {
       user: 'Set the status block to completed.',
       thought:
         'Page edit — delegate with explicit block target + new value. Never paraphrase block IDs or status names.',
-      tool: 'call_editor_agent',
+      tool: EDITOR_AGENT_TOOL_NAME,
     },
   ],
   tags: ['editor', 'blocknote', 'pages', 'documents'],
   category: 'data',
-  visibility: 'on-demand',
+  visibility: 'always',
   stability: 'stable',
 };
 

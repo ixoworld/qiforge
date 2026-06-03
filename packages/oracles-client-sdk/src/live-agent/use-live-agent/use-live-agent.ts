@@ -57,9 +57,9 @@ export const useLiveAgent = (
     },
     enabled: Boolean(
       wallet?.did &&
-        authzConfig?.granteeAddress &&
-        wallet.matrix.accessToken &&
-        oracleDid,
+      authzConfig?.granteeAddress &&
+      wallet.matrix.accessToken &&
+      oracleDid,
     ),
   });
 

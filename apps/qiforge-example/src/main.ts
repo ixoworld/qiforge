@@ -68,10 +68,10 @@ async function bootstrap(): Promise<void> {
     accessToken: matrixAccessToken,
   });
 
-  const network = (process.env.NETWORK ?? 'devnet') as
-    | 'mainnet'
-    | 'testnet'
-    | 'devnet';
+  // const network = (process.env.NETWORK ?? 'devnet') as
+  //   | 'mainnet'
+  //   | 'testnet'
+  //   | 'devnet';
 
   const app = await createOracleApp({
     config,

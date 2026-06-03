@@ -90,14 +90,12 @@ export function getBaseEnvConfig(
       key: K,
       defaultValue?: BaseEnvWithDerived[K],
     ): BaseEnvWithDerived[K] | undefined {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return svc.get(key as any, defaultValue);
+      return svc.get(key, defaultValue);
     },
     getOrThrow<K extends keyof BaseEnvWithDerived>(
       key: K,
     ): BaseEnvWithDerived[K] {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return svc.getOrThrow(key as any);
+      return svc.getOrThrow(key);
     },
   };
 }

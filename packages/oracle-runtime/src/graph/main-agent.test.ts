@@ -305,6 +305,79 @@ describe('createMainAgent', () => {
     }
   });
 
+  it('binds the access-denied stub and the unavailable notice when editorRoomId is set but the editor did not bind', async () => {
+    // Regression: the editor plugin can refuse to contribute its sub-agent
+    // even when `state.editorRoomId` is set (membership check failed, Matrix
+    // down, build error). Injecting "EDITOR MODE ACTIVE — use the Editor
+    // Agent tool" without the tool bound makes the model emit its sub-agent
+    // task as user-facing text instead of calling anything. The runtime now
+    // (a) swaps the editor-mode prompt for an explicit unavailable notice and
+    // (b) binds a stub `call_editor_agent` that returns the denial reason.
+    const ambient = makeAmbient();
+    await createMainAgent(
+      baseArgs({
+        ambient,
+        state: { editorRoomId: '!room:ixo.world' },
+      }),
+    );
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+
+    const prompt = params.systemPrompt as string;
+    expect(prompt).not.toContain('EDITOR MODE ACTIVE');
+    expect(prompt).toContain('PAGE OPEN BUT NOT ACCESSIBLE');
+    // MatrixManager is not initialised in unit tests, so the membership
+    // re-check fails closed — same as the plugin's own guard. The wording is
+    // unified (user OR oracle missing) because the lookup runs with the
+    // oracle's admin identity and can't tell which side is absent.
+    expect(prompt).toContain('could not be verified');
+    expect(prompt).toContain('BOTH must be members');
+
+    // The stub is bound under the real tool name and answers with the denial.
+    const boundTools = params.tools as {
+      name: string;
+      invoke: (args: { task: string }) => Promise<string>;
+    }[];
+    const stub = boundTools.find((t) => t.name === 'call_editor_agent');
+    if (!stub) throw new Error('access-denied stub was not bound');
+    const denial = await stub.invoke({ task: 'read the current page' });
+    expect(denial).toContain('could not be verified');
+    expect(denial).toContain('!room:ixo.world');
+
+    // The desync is loud, not silent.
+    expect(ambient.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('call_editor_agent did not bind'),
+    );
+  });
+
+  it('renders the editor-mode prompt when editorRoomId is set and call_editor_agent is bound', async () => {
+    const registries = emptyRegistries();
+    const editorPlugin = makePlugin({
+      name: 'editor',
+      manifest: makeManifest({ title: 'Editor', visibility: 'always' }),
+      // 'Editor Agent' → computeSubAgentToolName → 'call_editor_agent'.
+      getSubAgents: () => [makeSubAgent('Editor Agent')],
+    });
+    registries.subAgents.register(editorPlugin);
+    registries.manifests.register(editorPlugin);
+
+    await createMainAgent(
+      baseArgs({
+        registries,
+        state: { editorRoomId: '!room:ixo.world' },
+      }),
+    );
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const toolNames = (params.tools as { name: string }[]).map((t) => t.name);
+    expect(toolNames).toContain('call_editor_agent');
+
+    const prompt = params.systemPrompt as string;
+    expect(prompt).toContain('EDITOR MODE ACTIVE');
+  });
+
   it('renders the Tier-1 capability block in the prompt for visibility=always plugins', async () => {
     const registries = emptyRegistries();
 

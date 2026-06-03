@@ -123,7 +123,7 @@ export const createSemanticRouter = <
         message.parsed,
       );
 
-      return nextRoute as keyof R;
+      return nextRoute;
     }
 
     Logger.error('Error parsing the response from the semantic router');

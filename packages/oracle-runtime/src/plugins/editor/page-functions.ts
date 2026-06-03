@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-unnecessary-type-assertion */
+
 /**
  * Page management functions — reusable from services, API routes, and tests.
  */
@@ -199,9 +201,22 @@ export async function createPage(
   const roomId = createRoomResponse.room_id;
   logger.log(`Page room created: ${roomId}`);
 
-  // If parent space exists, add the room as a child of the space
+  // Link the page under its space by writing m.space.child INTO the space room.
+  // The oracle admin (this matrixClient) must be a member of the space with
+  // permission to send that state event. It may have been invited during space
+  // provisioning but not yet joined, so try to join first. If the admin has no
+  // access to the user's space this is expected to fail (M_FORBIDDEN) — the page
+  // still carries its m.space.parent claim (set in initial_state) and the
+  // returned spaceId, so a client acting as the user (who IS in the space) can
+  // complete the link.
   if (parentSpaceId) {
     try {
+      const adminInSpace =
+        matrixClient.getRoom(parentSpaceId)?.getMember(creatorId)
+          ?.membership === 'join';
+      if (!adminInSpace) {
+        await matrixClient.joinRoom(parentSpaceId);
+      }
       await matrixClient.sendStateEvent(
         parentSpaceId,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -209,9 +224,13 @@ export async function createPage(
         { via: [homeserver] },
         roomId,
       );
+      logger.log(`Linked page ${roomId} under space ${parentSpaceId}`);
     } catch (error) {
       logger.warn(
-        `Failed to add page as child of space ${parentSpaceId}: ${error}`,
+        `Could not link page ${roomId} under space ${parentSpaceId}: the oracle ` +
+          `admin lacks membership/permission in that space. The page keeps its ` +
+          `m.space.parent claim and the returned spaceId — a user-authorized ` +
+          `client can complete the m.space.child link. (${error})`,
       );
     }
   }
@@ -379,7 +398,6 @@ export async function updatePage(
       const oldBlocks = serverEditor.yXmlFragmentToBlocks(
         doc.getXmlFragment('document'),
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       oldContentMd = await serverEditor.blocksToMarkdownLossy(oldBlocks as any);
     }
 
@@ -418,10 +436,7 @@ export async function updatePage(
         doc.getXmlFragment('document'),
       );
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const newContentMd = await serverEditor.blocksToMarkdownLossy(
-        newBlocks as any,
-      );
+      const newContentMd = await serverEditor.blocksToMarkdownLossy(newBlocks as any);
       diff.content = { old: oldContentMd, new: newContentMd };
     }
 

@@ -547,7 +547,7 @@ export class UcanService implements OnModuleDestroy {
 
       const invocation = await createInvocation({
         issuer: signer,
-        audience: serviceDid as `did:${string}:${string}`,
+        audience: serviceDid,
         capability: { can: '*', with: resource as `${string}:${string}` },
         proofs: [delegation],
         expiration: expirationSeconds,
@@ -689,7 +689,7 @@ export class UcanService implements OnModuleDestroy {
 
       const invocation = await createInvocation({
         issuer: signer,
-        audience: serviceDid as `did:${string}:${string}`,
+        audience: serviceDid,
         capability: {
           can: capability.can as `${string}/${string}`,
           with: capability.with as `${string}:${string}`,

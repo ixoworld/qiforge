@@ -4,9 +4,7 @@ import { CallId } from './types';
 
 type TOraclesCallMatrixEventContent = OraclesCallMatrixEvent['content'];
 
-export class OraclesCallMatrixEventContent
-  implements TOraclesCallMatrixEventContent
-{
+export class OraclesCallMatrixEventContent implements TOraclesCallMatrixEventContent {
   @ApiProperty({
     description: 'Matrix event type identifier',
     example: 'm.ixo.oracles_call',

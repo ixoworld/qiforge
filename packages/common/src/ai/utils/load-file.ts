@@ -180,7 +180,6 @@ const loadPdf = async (blob: Blob): Promise<Document[]> => {
   const pdf = await getDocument({
     data,
     useWorkerFetch: false,
-    isEvalSupported: false,
     useSystemFonts: true,
   }).promise;
   const meta = await pdf.getMetadata().catch(() => null);
