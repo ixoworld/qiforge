@@ -3,6 +3,9 @@
 
 name: NPM Package Release
 
+permissions:
+  id-token: write
+
 on:
   workflow_dispatch:
     inputs:
