@@ -5,6 +5,10 @@
   "private": false,
   "description": "Client SDK for interacting with QiForge oracles, designed for React applications",
   "main": "dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {

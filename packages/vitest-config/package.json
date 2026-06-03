@@ -6,6 +6,10 @@
   "publishConfig": {
     "access": "public"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
   "type": "module",
   "exports": {
     "./base": "./base.js",
