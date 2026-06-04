@@ -32,6 +32,7 @@ import {
   parseDelegation,
   createInvocation,
   serializeInvocation,
+  type SupportedDID,
 } from '@ixo/ucan';
 
 // ============================================================================
@@ -528,7 +529,7 @@ export class UcanService implements OnModuleDestroy {
     try {
       const { signer } = await signerFromMnemonic(
         this.signingMnemonic,
-        this.oracleDid as `did:ixo:${string}`,
+        this.oracleDid as SupportedDID,
       );
 
       const delegation = await parseDelegation(rawDelegation);
@@ -644,7 +645,7 @@ export class UcanService implements OnModuleDestroy {
     try {
       const { signer } = await signerFromMnemonic(
         this.signingMnemonic,
-        this.oracleDid as `did:ixo:${string}`,
+        this.oracleDid as SupportedDID,
       );
 
       let delegation;

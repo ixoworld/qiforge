@@ -1,5 +1,5 @@
 # This workflow will run tests using node and then publish a package to GitHub Packages when a release is created
-# For 7447k,=o=o=/o*= see: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
+# For details, see: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
 
 name: NPM Package Release
 
