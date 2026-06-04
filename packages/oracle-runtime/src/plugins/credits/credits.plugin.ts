@@ -38,12 +38,20 @@ export interface CreditsPluginOptions {
 const CreditsConfigSchema = z.object({
   SUBSCRIPTION_URL: z.url().optional(),
   SUBSCRIPTION_ORACLE_MCP_URL: z.url().optional(),
+  // Env vars are strings — coerce here so consumers get a real boolean
+  // (`Boolean('false')` is true; only the literal 'true' disables credits).
+  DISABLE_CREDITS: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
 });
 
 type CreditsConfig = z.infer<typeof CreditsConfigSchema>;
 
-interface AppliedConfig extends CreditsConfig {
+interface AppliedConfig extends Omit<CreditsConfig, 'DISABLE_CREDITS'> {
   NETWORK?: CreditsNetwork;
+  // Optional at the type level: `ctx.config` is a plain merged-env bag, the
+  // key is only present once the composed schema has run.
   DISABLE_CREDITS?: boolean;
 }
 
@@ -112,7 +120,7 @@ export class CreditsPlugin extends OraclePlugin {
     const limiter = new TokenLimiter({
       redis,
       network: config.NETWORK ?? 'devnet',
-      disableCredits: config.DISABLE_CREDITS ?? false,
+      disableCredits: config.DISABLE_CREDITS,
       modelPricingLookup: this.modelPricingLookup,
       logger: ctx.logger,
     });
