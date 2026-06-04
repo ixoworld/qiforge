@@ -48,7 +48,7 @@ const SESSION_INJECT_LAST_MESSAGES = 15;
 
 const MATRIX_STORAGE_KEY = 'qiforge.channel_memory.v1';
 const DEFAULT_SYNC_DEBOUNCE_MS = 60 * 1000;
-const DEFAULT_DB_PATH = './data/channel_memory';
+const DEFAULT_DB_PATH = `${process.env.SQLITE_DATABASE_PATH}/channel_memory';`;
 
 export interface ChannelMemoryServiceConfig {
   dbPath?: string;

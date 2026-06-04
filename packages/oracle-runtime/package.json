@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracle-runtime",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Plugin-based runtime for QiForge oracles",
   "private": false,
   "publishConfig": {

@@ -52,7 +52,9 @@ interface ClaimProcessingConfig {
   MATRIX_VALUE_PIN: string;
   SECP_MNEMONIC: string;
   SUBSCRIPTION_URL?: string;
-  DISABLE_CREDITS?: boolean;
+  // Raw env string — ConfigService reads process.env before the validated
+  // (coerced) config, so this is never a boolean here.
+  DISABLE_CREDITS?: string;
 }
 
 interface ProcessClaimParams {
@@ -380,12 +382,16 @@ export class ClaimProcessingService {
     const matrixAccountRoomId = this.configService.get(
       'MATRIX_ACCOUNT_ROOM_ID',
     );
+    // The env var is a string — `Boolean('false')` is true, so compare
+    // against the literal instead of truthiness.
     const disableCredits =
-      Boolean(this.configService.get('DISABLE_CREDITS')) ||
+      this.configService.get('DISABLE_CREDITS') === 'true' ||
       !matrixAccountRoomId;
     if (disableCredits) {
       this.logger.debug(
-        'Claims task submission skipped (DISABLE_CREDITS=true)',
+        matrixAccountRoomId
+          ? 'Claims task submission skipped (DISABLE_CREDITS=true)'
+          : 'Claims task submission skipped (MATRIX_ACCOUNT_ROOM_ID not set)',
       );
       return;
     }
