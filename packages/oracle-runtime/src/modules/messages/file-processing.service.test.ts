@@ -127,8 +127,18 @@ describe('FileProcessingService', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     fetchSpy = vi.spyOn(globalThis, 'fetch');
+    // Sandbox archival is mandatory — every accepted attachment is uploaded.
+    // Default fetch handles the upload endpoint; AI calls are mocked
+    // per-test with mockResolvedValueOnce (once-mocks take precedence).
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('/artifacts/upload')) {
+        return jsonResponse({ path: '/workspace/output/uploaded' });
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    });
     ucanService = {
-      createServiceInvocation: vi.fn().mockResolvedValue(null),
+      createServiceInvocation: vi.fn().mockResolvedValue('ucan-token'),
     } satisfies Partial<UcanService>;
     creditSink = {
       deductForFileProcessing: vi.fn().mockResolvedValue(undefined),
@@ -143,7 +153,7 @@ describe('FileProcessingService', () => {
       }),
     });
     svc = new FileProcessingService(
-      makeConfig({}),
+      makeConfig({ SANDBOX_MCP_URL: 'https://sandbox.test/mcp' }),
       ucanService as unknown as UcanService,
       creditSink,
     );
@@ -395,33 +405,6 @@ describe('FileProcessingService', () => {
       expect(creditSink.deductForFileProcessing).toHaveBeenCalledTimes(1);
       expect(result.texts).toHaveLength(1);
     });
-
-    it('skips credit deduction when userDid is undefined', async () => {
-      const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-      matrixDownloadContent.mockResolvedValue({ data: pngHeader });
-      fetchSpy.mockResolvedValueOnce(
-        aiResponse('photo', {
-          prompt_tokens: 1,
-          completion_tokens: 1,
-          cost: 0.001,
-        }),
-      );
-
-      await svc.processAttachments(
-        [
-          makeAttachment({
-            filename: 'a.png',
-            mxcUri: 'mxc://h/a',
-            mimetype: 'image/png',
-          }),
-        ],
-        ROOM_ID,
-        undefined,
-      );
-
-      expect(creditSink.deductForFileProcessing).not.toHaveBeenCalled();
-      expect(ucanService.createServiceInvocation).not.toHaveBeenCalled();
-    });
   });
 
   describe('processAttachments — sandbox upload', () => {
@@ -436,30 +419,31 @@ describe('FileProcessingService', () => {
       } satisfies Partial<UcanService>;
       ucanService = ucan;
       return new FileProcessingService(
-        makeConfig({
-          SANDBOX_MCP_URL: opts.sandboxUrl,
-        }),
+        makeConfig(opts.sandboxUrl ? { SANDBOX_MCP_URL: opts.sandboxUrl } : {}),
         ucan as unknown as UcanService,
         creditSink,
       );
     }
 
-    it('returns undefined sandbox config when SANDBOX_MCP_URL is unset', async () => {
+    it('rejects the whole request when SANDBOX_MCP_URL is unset', async () => {
       svc = svcWithSandbox({ sandboxUrl: undefined });
       matrixDownloadContent.mockResolvedValue({
         data: Buffer.from('hi', 'utf-8'),
       });
 
-      await svc.processAttachments(
-        [makeAttachment({ mxcUri: 'mxc://h/a' })],
-        ROOM_ID,
-        USER_DID,
-      );
+      await expect(
+        svc.processAttachments(
+          [makeAttachment({ mxcUri: 'mxc://h/a' })],
+          ROOM_ID,
+          USER_DID,
+        ),
+      ).rejects.toThrow(/SANDBOX_MCP_URL/);
 
       expect(ucanService.createServiceInvocation).not.toHaveBeenCalled();
+      expect(matrixDownloadContent).not.toHaveBeenCalled();
     });
 
-    it('returns undefined sandbox config when UCAN invocation is null', async () => {
+    it('rejects the whole request when UCAN invocation is null', async () => {
       svc = svcWithSandbox({
         sandboxUrl: 'https://sandbox.test/mcp',
         invocation: null,
@@ -468,16 +452,65 @@ describe('FileProcessingService', () => {
         data: Buffer.from('hi', 'utf-8'),
       });
 
-      await svc.processAttachments(
-        [makeAttachment({ mxcUri: 'mxc://h/a' })],
+      await expect(
+        svc.processAttachments(
+          [makeAttachment({ mxcUri: 'mxc://h/a' })],
+          ROOM_ID,
+          USER_DID,
+        ),
+      ).rejects.toThrow(/UCAN invocation unavailable/);
+
+      expect(ucanService.createServiceInvocation).toHaveBeenCalledTimes(1);
+      // Failure happens before any download or upload.
+      expect(matrixDownloadContent).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('archives HTTP image URLs to the sandbox even when AI URL passthrough succeeds', async () => {
+      svc = svcWithSandbox({
+        sandboxUrl: 'https://sandbox.test/mcp',
+        invocation: 'ucan-token',
+      });
+      const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+      // 1: download the file. 2: AI passthrough. Uploads (file + analysis.md)
+      // fall through to the default /artifacts/upload handler.
+      fetchSpy
+        .mockResolvedValueOnce(
+          streamResponse([new Uint8Array(pngHeader)], {
+            headers: { 'content-type': 'image/png' },
+          }),
+        )
+        .mockResolvedValueOnce(
+          aiResponse('a sunset', {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cost: 0.01,
+          }),
+        );
+
+      const result = await svc.processAttachments(
+        [
+          makeAttachment({
+            filename: 'pic.png',
+            mimetype: 'image/png',
+            mxcUri: 'https://example.com/pic.png',
+          }),
+        ],
         ROOM_ID,
         USER_DID,
       );
 
-      expect(ucanService.createServiceInvocation).toHaveBeenCalledTimes(1);
-      // No fetch to /artifacts/upload happened — only the AI call path would
-      // have fired fetch, and plain text doesn't trigger AI either.
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(result.texts[0]).toContain('a sunset');
+      expect(result.texts[0]).toContain('saved to sandbox at');
+      expect(result.metadata[0]?.sandboxPath).toBe('/workspace/output/pic.png');
+      // download → AI passthrough → file upload → analysis.md upload
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
+      expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(
+        'https://example.com/pic.png',
+      );
+      expect(String(fetchSpy.mock.calls[2]?.[0])).toBe(
+        'https://sandbox.test/artifacts/upload',
+      );
     });
 
     it('returns primary text even when sandbox upload fails after AI spend', async () => {

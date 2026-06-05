@@ -190,10 +190,11 @@ export class FileProcessingService {
   }
 
   /**
-   * Build the sandbox upload config for the current user. Returns `undefined`
-   * when sandbox archival isn't possible — `SANDBOX_MCP_URL` unset, the user
-   * has no cached UCAN delegation, or the oracle has no signing key. The
-   * caller treats `undefined` as "skip upload"; processing still happens.
+   * Build the sandbox upload config for the current user. Sandbox archival
+   * is mandatory — every accepted attachment is uploaded so the agent can
+   * keep working with the original file. Throws when the sandbox is
+   * unreachable: `SANDBOX_MCP_URL` unset, the user has no cached UCAN
+   * delegation, or the oracle has no signing key.
    *
    * Auth header shape matches `plugins/sandbox/sandbox-mcp.ts`
    * (`createDefaultAuthBuilder`) exactly — same `Authorization: Bearer <ucan>`
@@ -201,9 +202,8 @@ export class FileProcessingService {
    */
   private async buildSandboxConfig(
     userDid: string,
-  ): Promise<SandboxUploadConfig | undefined> {
-    const sandboxMcpUrl = this.config.get<string>('SANDBOX_MCP_URL');
-    if (!sandboxMcpUrl) return undefined;
+  ): Promise<SandboxUploadConfig> {
+    const sandboxMcpUrl = this.config.getOrThrow<string>('SANDBOX_MCP_URL');
 
     const invocation = await this.ucanService.createServiceInvocation(
       sandboxMcpUrl,
@@ -211,10 +211,12 @@ export class FileProcessingService {
       'ixo:sandbox',
     );
     if (!invocation) {
-      this.logger.debug(
-        `[FileProcessing] Skipping sandbox archive for ${userDid} — UCAN invocation unavailable`,
+      this.logger.warn(
+        `[FileProcessing] Cannot archive attachments for ${userDid} — UCAN invocation unavailable`,
       );
-      return undefined;
+      throw new Error(
+        'Cannot process attachments — sandbox UCAN invocation unavailable',
+      );
     }
 
     return {
@@ -296,7 +298,7 @@ export class FileProcessingService {
   async processAttachments(
     attachments: AttachmentDto[],
     roomId: string,
-    userDid?: string,
+    userDid: string,
   ): Promise<{
     texts: string[];
     metadata: ProcessedAttachment[];
@@ -322,14 +324,10 @@ export class FileProcessingService {
 
     // Mint the sandbox UCAN once per request — the cached invocation is reused
     // for every attachment so we don't re-resolve did:web or re-sign per file.
-    const sandboxConfig = userDid
-      ? await this.buildSandboxConfig(userDid)
-      : undefined;
-    if (sandboxConfig) {
-      this.logger.log(
-        `[FileProcessing] Sandbox archival enabled for this request → ${sandboxConfig.sandboxMcpUrl}`,
-      );
-    }
+    const sandboxConfig = await this.buildSandboxConfig(userDid);
+    this.logger.log(
+      `[FileProcessing] Sandbox archival enabled for this request → ${sandboxConfig.sandboxMcpUrl}`,
+    );
 
     // Process sequentially so the running download total is enforced *before*
     // the next attachment is fetched. Parallel `Promise.all` would let N
@@ -444,7 +442,7 @@ export class FileProcessingService {
     attachment: AttachmentDto,
     currentTotalSize: number,
     roomId: string,
-    sandboxConfig?: SandboxUploadConfig,
+    sandboxConfig: SandboxUploadConfig,
   ): Promise<{
     text: string | null;
     downloadedSize: number;
@@ -481,34 +479,9 @@ export class FileProcessingService {
       };
     }
 
-    // For HTTP image/video URLs, try AI URL passthrough first (no download needed).
-    const isHttpUrl =
-      attachment.mxcUri &&
-      !attachment.eventId &&
-      /^https?:\/\//i.test(attachment.mxcUri);
-    if (isHttpUrl && (category === 'image' || category === 'video')) {
-      try {
-        const { content, usage } = await this.aiProcessFromUrl(
-          attachment.mxcUri!,
-          attachment.mimetype,
-          category,
-          attachment.filename,
-        );
-        if (content && content.trim().length > 0) {
-          const text = this.formatContent(
-            'Description',
-            this.sanitizeFilename(attachment.filename),
-            content,
-          );
-          return { text, downloadedSize: 0, usage };
-        }
-      } catch (error) {
-        this.logger.warn(
-          `URL passthrough failed for "${attachment.filename}", falling back to download: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-
+    // Every accepted attachment is downloaded so the original bytes can be
+    // archived to the sandbox below — the agent works with the file from
+    // there, not just the extracted text.
     let buffer: Buffer;
     if (attachment.eventId) {
       buffer = await this.downloadFromMatrixEvent(roomId, attachment.eventId);
@@ -525,111 +498,140 @@ export class FileProcessingService {
 
     this.verifyMagicBytes(buffer, category, attachment);
 
-    let text: string;
+    // For HTTP image/video URLs, prefer AI URL passthrough for extraction —
+    // the provider fetches the URL itself instead of receiving a base64
+    // re-upload. The downloaded buffer is still archived to the sandbox.
+    const isHttpUrl =
+      attachment.mxcUri &&
+      !attachment.eventId &&
+      /^https?:\/\//i.test(attachment.mxcUri);
+
+    let text: string | undefined;
     let usage: AiProcessUsage | undefined;
-    switch (category) {
-      case 'document':
-        ({ text, usage } = await this.processDocument(buffer, attachment));
-        break;
-      case 'image':
-        ({ text, usage } = await this.processImage(buffer, attachment));
-        break;
-      case 'audio':
-        ({ text, usage } = await this.processAudio(buffer, attachment));
-        break;
-      case 'video':
-        ({ text, usage } = await this.processVideo(buffer, attachment));
-        break;
+    if (isHttpUrl && (category === 'image' || category === 'video')) {
+      try {
+        const passthrough = await this.aiProcessFromUrl(
+          attachment.mxcUri!,
+          attachment.mimetype,
+          category,
+          attachment.filename,
+        );
+        if (passthrough.content && passthrough.content.trim().length > 0) {
+          text = this.formatContent(
+            'Description',
+            this.sanitizeFilename(attachment.filename),
+            passthrough.content,
+          );
+          usage = passthrough.usage;
+        }
+      } catch (error) {
+        this.logger.warn(
+          `URL passthrough failed for "${attachment.filename}", falling back to buffer processing: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
-    if (sandboxConfig) {
-      const safeName = this.sanitizeFilename(attachment.filename);
-      const destPath = `${SANDBOX_OUTPUT_PREFIX}/${safeName}`;
-      try {
-        await this.uploadToSandbox(
-          buffer,
+    if (text === undefined) {
+      switch (category) {
+        case 'document':
+          ({ text, usage } = await this.processDocument(buffer, attachment));
+          break;
+        case 'image':
+          ({ text, usage } = await this.processImage(buffer, attachment));
+          break;
+        case 'audio':
+          ({ text, usage } = await this.processAudio(buffer, attachment));
+          break;
+        case 'video':
+          ({ text, usage } = await this.processVideo(buffer, attachment));
+          break;
+      }
+    }
+
+    const safeName = this.sanitizeFilename(attachment.filename);
+    const destPath = `${SANDBOX_OUTPUT_PREFIX}/${safeName}`;
+    try {
+      await this.uploadToSandbox(
+        buffer,
+        safeName,
+        destPath,
+        sandboxConfig,
+        attachment.mimetype,
+      );
+      const actualPath = this.sanitizeSandboxPath(destPath);
+
+      this.logger.log(
+        `Attachment "${attachment.filename}" uploaded to sandbox at ${actualPath}`,
+      );
+
+      // For AI-processed files (image/video/audio), save analysis as .md
+      let analysisPath: string | undefined;
+      if (
+        category === 'image' ||
+        category === 'video' ||
+        category === 'audio'
+      ) {
+        const analysisContent = this.buildAnalysisMarkdown(
           safeName,
-          destPath,
-          sandboxConfig,
           attachment.mimetype,
+          buffer.length,
+          category,
+          text,
         );
-        const actualPath = this.sanitizeSandboxPath(destPath);
-
-        this.logger.log(
-          `Attachment "${attachment.filename}" uploaded to sandbox at ${actualPath}`,
-        );
-
-        // For AI-processed files (image/video/audio), save analysis as .md
-        let analysisPath: string | undefined;
-        if (
-          category === 'image' ||
-          category === 'video' ||
-          category === 'audio'
-        ) {
-          const analysisContent = this.buildAnalysisMarkdown(
-            safeName,
-            attachment.mimetype,
-            buffer.length,
-            category,
-            text,
+        const analysisBuf = Buffer.from(analysisContent, 'utf-8');
+        const analysisFilename = `${safeName.replace(/\.[^.]+$/, '')}-analysis.md`;
+        const analysisDestPath = `${SANDBOX_OUTPUT_PREFIX}/${analysisFilename}`;
+        try {
+          await this.uploadToSandbox(
+            analysisBuf,
+            analysisFilename,
+            analysisDestPath,
+            sandboxConfig,
+            'text/markdown',
           );
-          const analysisBuf = Buffer.from(analysisContent, 'utf-8');
-          const analysisFilename = `${safeName.replace(/\.[^.]+$/, '')}-analysis.md`;
-          const analysisDestPath = `${SANDBOX_OUTPUT_PREFIX}/${analysisFilename}`;
-          try {
-            await this.uploadToSandbox(
-              analysisBuf,
-              analysisFilename,
-              analysisDestPath,
-              sandboxConfig,
-              'text/markdown',
-            );
-            analysisPath = this.sanitizeSandboxPath(analysisDestPath);
-            this.logger.log(
-              `Analysis for "${attachment.filename}" saved to sandbox at ${analysisPath}`,
-            );
-          } catch (error) {
-            this.logger.warn(
-              `Analysis .md upload failed for "${attachment.filename}": ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
+          analysisPath = this.sanitizeSandboxPath(analysisDestPath);
+          this.logger.log(
+            `Analysis for "${attachment.filename}" saved to sandbox at ${analysisPath}`,
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Analysis .md upload failed for "${attachment.filename}": ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
+      }
 
-        if (text.length > SANDBOX_TRUNCATE_LIMIT) {
-          const paths = analysisPath
-            ? `\n\n[Full analysis saved to sandbox at ${analysisPath}]\n[Original file saved to sandbox at ${actualPath}]`
-            : `\n\n[Full file saved to sandbox at ${actualPath}]`;
-          return {
-            text: text.slice(0, SANDBOX_TRUNCATE_LIMIT) + paths,
-            downloadedSize: buffer.length,
-            sandboxPath: actualPath,
-            usage,
-          };
-        }
-        const suffix = analysisPath
-          ? `\n\n[Analysis saved to sandbox at ${analysisPath}]\n[File also saved to sandbox at ${actualPath}]`
-          : `\n\n[File also saved to sandbox at ${actualPath}]`;
+      if (text.length > SANDBOX_TRUNCATE_LIMIT) {
+        const paths = analysisPath
+          ? `\n\n[Full analysis saved to sandbox at ${analysisPath}]\n[Original file saved to sandbox at ${actualPath}]`
+          : `\n\n[Full file saved to sandbox at ${actualPath}]`;
         return {
-          text: text + suffix,
+          text: text.slice(0, SANDBOX_TRUNCATE_LIMIT) + paths,
           downloadedSize: buffer.length,
           sandboxPath: actualPath,
           usage,
         };
-      } catch (error) {
-        this.logger.warn(
-          `Sandbox upload failed for "${attachment.filename}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return {
-          text:
-            text +
-            `\n\n[Warning: sandbox upload failed — file content is included above]`,
-          downloadedSize: buffer.length,
-          usage,
-        };
       }
+      const suffix = analysisPath
+        ? `\n\n[Analysis saved to sandbox at ${analysisPath}]\n[File also saved to sandbox at ${actualPath}]`
+        : `\n\n[File also saved to sandbox at ${actualPath}]`;
+      return {
+        text: text + suffix,
+        downloadedSize: buffer.length,
+        sandboxPath: actualPath,
+        usage,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Sandbox upload failed for "${attachment.filename}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {
+        text:
+          text +
+          `\n\n[Warning: sandbox upload failed — file content is included above]`,
+        downloadedSize: buffer.length,
+        usage,
+      };
     }
-
-    return { text, downloadedSize: buffer.length, usage };
   }
 
   private async downloadFromMatrix(mxcUri: string): Promise<Buffer> {
