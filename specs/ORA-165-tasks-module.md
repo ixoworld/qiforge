@@ -1,5 +1,8 @@
 # ORA Scheduled Tasks System — Technical Specification
 
+> **SUPERSEDED by `specs/tasks-async-system.md` (2026-06-08).**
+> Kept for historical context. The active design is a clean-sheet rebuild; the six task types, Y.Doc task pages, chunked state-event index, and 700-line task-manager prompt described below are retired.
+
 **Version:** 3.0  
 **Author:** Yousef / QiForge  
 **Date:** 2026-03-16  

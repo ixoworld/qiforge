@@ -1,8 +1,11 @@
 # TASK-31: Convert `tasksPlugin` (TasksModule + 4 BullMQ queues + sub-agent)
 
+> **SUPERSEDED — port-as-is plan retired.**
+> This task's original plan (1:1 port of `apps/app/src/tasks/` into a plugin folder) has been replaced by a clean-sheet rebuild. See **`specs/tasks-async-system.md`** for the active spec and phase plan. The notes below are kept only for historical context.
+
 **Phase:** 5 — Bundled plugin conversion
-**Spec:** §16.1, §19.3
-**Effort:** 5 days
+**Spec:** ~~§16.1, §19.3~~ → `specs/tasks-async-system.md`
+**Effort:** ~~5 days~~ → ~8.5 days (per rebuild spec)
 **Depends on:** TASK-11, TASK-15
 **Blocks:** TASK-32
 **Parallel with:** other plugin conversion tasks
