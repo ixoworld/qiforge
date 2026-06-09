@@ -12,6 +12,7 @@ import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
 import { SkillsPlugin } from './skills/index.js';
 import { SlackPlugin } from './slack/index.js';
+import { TasksPlugin } from './tasks/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
@@ -43,10 +44,7 @@ export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = new EditorPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = new SlackPlugin();
-export const tasksPlugin = stub('tasks', 'Tasks', {
-  autoDetect: (env) => Boolean(env.REDIS_URL),
-  autoDetectHint: 'REDIS_URL',
-});
+export const tasksPlugin = new TasksPlugin();
 export const creditsPlugin = new CreditsPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
