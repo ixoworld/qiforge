@@ -6,6 +6,7 @@
 
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { DelegationStore } from './delegation-store.js';
 import { UcanService } from './ucan.service.js';
 
 /**
@@ -32,7 +33,7 @@ import { UcanService } from './ucan.service.js';
 @Global()
 @Module({
   imports: [ConfigModule],
-  providers: [UcanService],
+  providers: [DelegationStore, UcanService],
   exports: [UcanService],
 })
 export class UcanModule {}

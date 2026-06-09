@@ -13,6 +13,7 @@ import type {
   RoomStateSnapshot,
   SecretIndex,
 } from '../plugin-api/types.js';
+import { UcanMintUnavailableError } from '../plugin-api/ucan-errors.js';
 import type {
   AmbientServices,
   BlobStoreAdapter,
@@ -86,7 +87,7 @@ export function buildAmbientServices(
         opts,
       );
       if (!result) {
-        throw new Error(
+        throw new UcanMintUnavailableError(
           `UCAN invocation mint returned null for user='${userDid}' service='${target.did}' capability='${target.capability}'. ` +
             `Likely cause: no signing key loaded, no cached delegation, or service DID unreachable.`,
         );

@@ -22,6 +22,13 @@ export type { SendMessageResponse } from '../../modules/messages/dto/send-messag
 export interface ChatClientOptions {
   /** Base64 UCAN delegation, forwarded as `x-ucan-delegation`. */
   delegation?: string;
+  /**
+   * Base64 UCAN auth invocation — the primary auth artifact. Forwarded as
+   * `Authorization: Bearer <invocation>` + `X-Auth-Type: ucan`. Sent in
+   * addition to the delegation, which remains required for downstream
+   * authorization.
+   */
+  invocation?: string;
   /** IANA timezone string — sent in the request BODY (matches SDK). */
   timezone?: string;
   /** Per-request timeout (ms). Default 60_000. */
@@ -38,6 +45,8 @@ export interface SendOptions {
   timezone?: string;
   /** Per-call override of the constructor's `delegation`. */
   delegation?: string;
+  /** Per-call override of the constructor's auth `invocation`. */
+  invocation?: string;
   /** Optional metadata forwarded to the server (matches SDK). */
   metadata?: Record<string, unknown>;
   /** Optional attachments — same shape the SDK sends. */
@@ -102,6 +111,7 @@ export interface StreamFinal {
 export class ChatClient {
   private readonly baseUrl: string;
   private readonly delegation: string | undefined;
+  private readonly invocation: string | undefined;
   private readonly timezone: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof globalThis.fetch;
@@ -109,21 +119,33 @@ export class ChatClient {
   constructor(baseUrl: string, opts: ChatClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.delegation = opts.delegation;
+    this.invocation = opts.invocation;
     this.timezone = opts.timezone ?? 'UTC';
     this.timeoutMs = opts.timeoutMs ?? 60_000;
     this.fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
-  /** Headers shared by every request. `timezone` is NOT here — it's in the body. */
+  /**
+   * Headers shared by every request. `timezone` is NOT here — it's in the body.
+   *
+   * The auth invocation (primary) goes out as `Authorization: Bearer` +
+   * `X-Auth-Type: ucan`; the delegation (fallback + downstream authorization)
+   * goes out as `x-ucan-delegation`. Both are sent when available so the
+   * harness exercises the real production auth path.
+   */
   private authHeaders(extra: Record<string, string> = {}): HeadersInit {
     const out: Record<string, string> = {
       'content-type': 'application/json',
-      ...extra,
     };
     if (this.delegation && this.delegation.length > 0) {
       out['x-ucan-delegation'] = this.delegation;
     }
-    return out;
+    if (this.invocation && this.invocation.length > 0) {
+      out.authorization = `Bearer ${this.invocation}`;
+      out['x-auth-type'] = 'ucan';
+    }
+    // `extra` last so per-call overrides win over the instance defaults above.
+    return { ...out, ...extra };
   }
 
   /**
@@ -178,9 +200,7 @@ export class ChatClient {
     opts: SendOptions = {},
   ): Promise<SendResult<SendMessageWithTranscriptResponse>> {
     const start = Date.now();
-    const headers = this.authHeaders(
-      opts.delegation ? { 'x-ucan-delegation': opts.delegation } : {},
-    );
+    const headers = this.authHeaders(perCallAuthHeaders(opts));
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -224,7 +244,7 @@ export class ChatClient {
   ): AsyncIterable<SSEEvent> & { final(): Promise<StreamFinal> } {
     const headers = this.authHeaders({
       accept: 'text/event-stream',
-      ...(opts.delegation ? { 'x-ucan-delegation': opts.delegation } : {}),
+      ...perCallAuthHeaders(opts),
     });
 
     const start = Date.now();
@@ -369,6 +389,24 @@ export class ChatClient {
       requestId: res.headers.get('x-request-id') ?? undefined,
     };
   }
+}
+
+/**
+ * Build per-call auth header overrides from a `SendOptions`/`StreamOptions`.
+ * Mirrors the instance defaults in `authHeaders`: a delegation override sets
+ * `x-ucan-delegation`; an invocation override sets `Authorization: Bearer` +
+ * `X-Auth-Type: ucan`. Returns only the keys the caller actually overrode.
+ */
+function perCallAuthHeaders(opts: SendOptions): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (opts.delegation) {
+    out['x-ucan-delegation'] = opts.delegation;
+  }
+  if (opts.invocation) {
+    out.authorization = `Bearer ${opts.invocation}`;
+    out['x-auth-type'] = 'ucan';
+  }
+  return out;
 }
 
 /** Merge a timeout signal with a caller-supplied one. */

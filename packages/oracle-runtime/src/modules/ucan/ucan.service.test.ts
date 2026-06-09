@@ -1,7 +1,37 @@
 import type { Cache } from 'cache-manager';
 import type { ConfigService } from '@nestjs/config';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DelegationStore, StoredDelegation } from './delegation-store.js';
 import { UcanService } from './ucan.service.js';
+
+const { getOracleRoomIdMock, getMatrixHomeServerMock } = vi.hoisted(() => ({
+  getOracleRoomIdMock: vi.fn(),
+  getMatrixHomeServerMock: vi.fn(),
+}));
+
+vi.mock('@ixo/matrix', () => ({
+  MatrixManager: {
+    getInstance: () => ({
+      getOracleRoomIdWithHomeServer: getOracleRoomIdMock,
+    }),
+  },
+}));
+
+vi.mock('@ixo/oracles-chain-client', () => ({
+  getMatrixHomeServerCroppedForDid: getMatrixHomeServerMock,
+}));
+
+interface DelegationStoreMock {
+  read: ReturnType<typeof vi.fn>;
+  write: ReturnType<typeof vi.fn>;
+}
+
+function makeDelegationStore(): DelegationStoreMock {
+  return {
+    read: vi.fn(async () => null as StoredDelegation | null),
+    write: vi.fn(async () => undefined),
+  };
+}
 
 interface CacheMock extends Partial<Cache> {
   store: Map<string, unknown>;
@@ -38,6 +68,7 @@ describe('UcanService', () => {
   let svc: UcanService;
   let cache: CacheMock;
   let cfg: ConfigService;
+  let delegationStore: DelegationStoreMock;
 
   beforeEach(() => {
     cache = makeCache();
@@ -45,7 +76,16 @@ describe('UcanService', () => {
       ORACLE_ENTITY_DID: ORACLE_DID,
       BLOCKSYNC_GRAPHQL_URL: 'https://blocksync.example/graphql',
     });
-    svc = new UcanService(cfg, cache as unknown as Cache);
+    delegationStore = makeDelegationStore();
+    // The canonical user↔oracle room is resolved inside UcanService now; mock
+    // the resolution so read/write still target a known room (`!room:home`).
+    getMatrixHomeServerMock.mockResolvedValue('home');
+    getOracleRoomIdMock.mockResolvedValue({ roomId: '!room:home' });
+    svc = new UcanService(
+      cfg,
+      cache as unknown as Cache,
+      delegationStore as unknown as DelegationStore,
+    );
   });
 
   afterEach(() => {
@@ -127,5 +167,83 @@ describe('UcanService', () => {
     const second = await svc.validateMCPInvocation('srv', 'tool', data);
     expect(second.valid).toBe(false);
     expect(second.error).toMatch(/replay/i);
+  });
+
+  describe('getDelegationForUser', () => {
+    const USER = 'did:ixo:user1';
+    const ROOM = '!room:home';
+
+    it('returns the cached delegation without touching the store (fast path)', async () => {
+      cache.store.set(`ucan_delegation_${USER}`, 'cached-raw');
+
+      const result = await svc.getDelegationForUser(USER);
+
+      expect(result).toBe('cached-raw');
+      expect(delegationStore.read).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the store on cache miss, re-warms the cache, and returns raw', async () => {
+      const expiration = Math.floor(Date.now() / 1000) + 600;
+      delegationStore.read.mockResolvedValue({
+        raw: 'stored-raw',
+        issuer: 'did:ixo:user1',
+        audience: ORACLE_DID,
+        expiration,
+        updatedAt: new Date().toISOString(),
+      });
+
+      const result = await svc.getDelegationForUser(USER);
+
+      expect(delegationStore.read).toHaveBeenCalledWith(ROOM);
+      expect(result).toBe('stored-raw');
+      // Re-warmed so mintInvocationForServiceDid finds it downstream.
+      expect(await svc.getCachedDelegation(USER)).toBe('stored-raw');
+    });
+
+    it('returns null when the store has nothing', async () => {
+      delegationStore.read.mockResolvedValue(null);
+
+      expect(await svc.getDelegationForUser(USER)).toBeNull();
+    });
+
+    it('returns null (and does not re-warm) when the stored delegation is expired', async () => {
+      delegationStore.read.mockResolvedValue({
+        raw: 'expired-raw',
+        expiration: Math.floor(Date.now() / 1000) - 60,
+        updatedAt: new Date().toISOString(),
+      });
+
+      expect(await svc.getDelegationForUser(USER)).toBeNull();
+      expect(await svc.getCachedDelegation(USER)).toBeNull();
+    });
+
+    it('returns null when the store read throws (non-throwing contract)', async () => {
+      delegationStore.read.mockRejectedValue(new Error('matrix down'));
+
+      expect(await svc.getDelegationForUser(USER)).toBeNull();
+    });
+  });
+
+  describe('storeDelegationForUser', () => {
+    const USER = 'did:ixo:user1';
+    const ROOM = '!room:home';
+
+    it('writes to the store AND warms the in-memory cache', async () => {
+      const expiration = Math.floor(Date.now() / 1000) + 600;
+
+      await svc.storeDelegationForUser(USER, 'fresh-raw', {
+        issuer: USER,
+        audience: ORACLE_DID,
+        expiration,
+      });
+
+      expect(delegationStore.write).toHaveBeenCalledWith(ROOM, {
+        raw: 'fresh-raw',
+        issuer: USER,
+        audience: ORACLE_DID,
+        expiration,
+      });
+      expect(await svc.getCachedDelegation(USER)).toBe('fresh-raw');
+    });
   });
 });

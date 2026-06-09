@@ -49,7 +49,7 @@ export function useSendMessage({
     overrides,
   );
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
-  const { wallet, authedRequest, agActions, getDelegation } =
+  const { wallet, authedRequest, agActions, getDelegation, getInvocation } =
     useOraclesContext();
 
   // Abort controller for canceling requests
@@ -141,6 +141,11 @@ export function useSendMessage({
           );
         }
 
+        // Get UCAN invocation (treated like a bearer token). Migration-safe:
+        // if no createInvocation callback is provided this is null and we
+        // proceed with delegation only.
+        const invocation = oracleDid ? await getInvocation(oracleDid) : null;
+
         // Create abort controller for this request
         abortControllerRef.current = new AbortController();
 
@@ -148,6 +153,7 @@ export function useSendMessage({
           apiURL: apiUrl,
           message,
           delegation,
+          invocation,
           sessionId,
           metadata,
           attachments,
@@ -269,6 +275,7 @@ const askOracleStream = async (props: {
   message: string;
   sessionId: string;
   delegation: string;
+  invocation?: string | null;
   metadata?: Record<string, unknown>;
   attachments?: Attachment[];
   browserTools?: {
@@ -311,6 +318,10 @@ const askOracleStream = async (props: {
     headers: {
       'Content-Type': 'application/json',
       'x-ucan-delegation': props.delegation,
+      ...(props.invocation && {
+        Authorization: `Bearer ${props.invocation}`,
+        'X-Auth-Type': 'ucan',
+      }),
     },
     body: JSON.stringify({
       message: props.message,

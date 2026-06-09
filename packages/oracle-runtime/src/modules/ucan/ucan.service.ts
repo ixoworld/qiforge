@@ -34,6 +34,9 @@ import {
   serializeInvocation,
   type SupportedDID,
 } from '@ixo/ucan';
+import { MatrixManager } from '@ixo/matrix';
+import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
+import { DelegationStore } from './delegation-store.js';
 
 // ============================================================================
 // Inline implementations (can be replaced with @ixo/ucan imports once built)
@@ -282,6 +285,7 @@ export class UcanService implements OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly delegationStore: DelegationStore,
   ) {
     this.config = this.loadConfig();
 
@@ -407,6 +411,159 @@ export class UcanService implements OnModuleDestroy {
       `${DELEGATION_CACHE_PREFIX}${userDid}`,
     );
     return cached ?? null;
+  }
+
+  /**
+   * Read-through resolution of a user's delegation, used by ingress paths
+   * (e.g. Matrix turns) that don't carry a per-request delegation header.
+   *
+   * 1. Fast path: in-memory cache (`getCachedDelegation`).
+   * 2. On miss: durable Matrix room state (`delegationStore.read`).
+   * 3. Drop expired stored delegations (`expiration` is unix seconds).
+   * 4. Re-warm the in-memory cache so the existing
+   *    `mintInvocationForServiceDid` (which looks up by
+   *    `getCachedDelegation(userDid)`) works downstream with no further
+   *    plumbing.
+   *
+   * Non-throwing: any store error logs and returns null so the turn can
+   * proceed without UCAN tooling rather than failing.
+   */
+  async getDelegationForUser(userDid: string): Promise<string | null> {
+    const cached = await this.getCachedDelegation(userDid);
+    if (cached) {
+      return cached;
+    }
+
+    const roomId = await this.resolveUserOracleRoomId(userDid);
+    if (!roomId) {
+      return null;
+    }
+
+    let stored: Awaited<ReturnType<DelegationStore['read']>>;
+    try {
+      stored = await this.delegationStore.read(roomId);
+    } catch (error) {
+      this.logger.warn(
+        `[UCAN] Failed to read stored delegation for ${userDid} (room ${roomId}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+
+    if (!stored) {
+      return null;
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (
+      typeof stored.expiration === 'number' &&
+      stored.expiration <= nowSeconds
+    ) {
+      this.logger.debug(
+        `[UCAN] Stored delegation for ${userDid} expired at ${stored.expiration}`,
+      );
+      return null;
+    }
+
+    await this.cacheDelegation(userDid, stored.raw, stored.expiration);
+    return stored.raw;
+  }
+
+  /**
+   * Durably persist a user's delegation (Matrix room state) AND warm the
+   * in-memory cache. Called by the `POST /delegation` endpoint when the
+   * client posts a freshly-signed delegation. Throws if the canonical
+   * user↔oracle room can't be resolved (the controller maps that to a 404).
+   */
+  async storeDelegationForUser(
+    userDid: string,
+    raw: string,
+    meta?: { issuer?: string; audience?: string; expiration?: number },
+  ): Promise<void> {
+    const roomId = await this.resolveUserOracleRoomId(userDid);
+    if (!roomId) {
+      throw new Error(
+        `Could not resolve the user↔oracle Matrix room for ${userDid}`,
+      );
+    }
+    await this.delegationStore.write(roomId, {
+      raw,
+      issuer: meta?.issuer,
+      audience: meta?.audience,
+      expiration: meta?.expiration,
+    });
+    await this.cacheDelegation(userDid, raw, meta?.expiration);
+  }
+
+  /**
+   * Whether the user currently has a valid stored delegation for this oracle —
+   * used by the connect page to show "authorize" vs. "authorized". Reads the
+   * canonical room's durable state (authoritative + carries the expiry).
+   */
+  async getDelegationStatus(
+    userDid: string,
+  ): Promise<{ authorized: boolean; expiration?: number }> {
+    const roomId = await this.resolveUserOracleRoomId(userDid);
+    if (!roomId) {
+      return { authorized: false };
+    }
+    const stored = await this.delegationStore.read(roomId);
+    if (!stored) {
+      return { authorized: false };
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (
+      typeof stored.expiration === 'number' &&
+      stored.expiration <= nowSeconds
+    ) {
+      return { authorized: false };
+    }
+    return { authorized: true, expiration: stored.expiration };
+  }
+
+  /**
+   * Revoke (delete) the user's stored delegation for this oracle AND clear the
+   * in-memory cache, so downstream minting stops immediately rather than after
+   * the cache TTL.
+   */
+  async revokeDelegationForUser(userDid: string): Promise<void> {
+    const roomId = await this.resolveUserOracleRoomId(userDid);
+    if (roomId) {
+      await this.delegationStore.delete(roomId);
+    }
+    await this.cacheManager.del(`${DELEGATION_CACHE_PREFIX}${userDid}`);
+  }
+
+  /**
+   * Resolve the canonical per-(user,oracle) Matrix room — the single room a
+   * user's delegation is stored in and read from, regardless of which room
+   * they happen to chat in. Both the read path (Matrix turns) and the write
+   * path (`POST /delegation`) go through here so they can never target
+   * different rooms. Non-throwing: logs + returns null on failure.
+   */
+  private async resolveUserOracleRoomId(
+    userDid: string,
+  ): Promise<string | null> {
+    try {
+      const oracleEntityDid =
+        this.configService.getOrThrow<string>('ORACLE_ENTITY_DID');
+      const userHomeServer = await getMatrixHomeServerCroppedForDid(userDid);
+      const { roomId } =
+        await MatrixManager.getInstance().getOracleRoomIdWithHomeServer({
+          userDid,
+          oracleEntityDid,
+          userHomeServer,
+        });
+      return roomId ?? null;
+    } catch (error) {
+      this.logger.warn(
+        `[UCAN] Failed to resolve user↔oracle room for ${userDid}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
   }
 
   // ============================================================================

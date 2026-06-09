@@ -7,6 +7,7 @@ import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matr
 import { UcanModule } from '../ucan/ucan.module.js';
 import { AgentBuilder } from './agent-builder.js';
 import { BatchInvoker } from './batch-invoker.js';
+import { DelegationController } from './delegation.controller.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { HomeServerCache } from './homeserver-cache.js';
 import { MatrixListenerBridge } from './matrix-listener-bridge.js';
@@ -20,7 +21,7 @@ import { UserContextFetcher } from './user-context-fetcher.js';
 
 @Module({
   imports: [CheckpointStorageSyncModule, UcanModule],
-  controllers: [MessagesController],
+  controllers: [MessagesController, DelegationController],
   providers: [
     MessagesService,
     FileProcessingService,

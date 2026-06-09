@@ -111,6 +111,8 @@ describe('baseEnvSchema', () => {
       'ORACLE_SECRETS',
       'SECP_MNEMONIC',
       'RPC_URL',
+      'UCAN_AUTH_MAX_TTL_SECONDS',
+      'UCAN_REAUTH_PROMPT_THROTTLE_SECONDS',
       'LLM_PROVIDER',
       'OPENAI_API_KEY',
       'OPEN_ROUTER_API_KEY',

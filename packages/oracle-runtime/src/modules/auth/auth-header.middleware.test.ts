@@ -4,6 +4,7 @@ import type { ConfigService } from '@nestjs/config';
 import type { Request, Response, NextFunction } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createUCANValidator } from '@ixo/ucan';
+import type { UCANValidator, ValidateResult } from '@ixo/ucan';
 import { AuthHeaderMiddleware } from './auth-header.middleware.js';
 import type { UcanService } from '../ucan/ucan.service.js';
 
@@ -13,6 +14,7 @@ import type { UcanService } from '../ucan/ucan.service.js';
 vi.mock('@ixo/ucan', () => ({
   createUCANValidator: vi.fn(),
   createIxoDIDResolver: vi.fn(() => ({})),
+  defineCapability: vi.fn(() => ({})),
 }));
 
 const mockedCreateUCANValidator = vi.mocked(createUCANValidator);
@@ -66,6 +68,32 @@ function makeRes(): Response {
 const VALID_DELEGATION_RAW = 'eyJ.delegation.raw';
 const ORACLE_DID = 'did:ixo:oracle123';
 const USER_DID = 'did:ixo:user456';
+const OTHER_DID = 'did:ixo:other789';
+
+const FAIL_RESULT: ValidateResult = {
+  ok: false,
+  error: { code: 'INVALID_FORMAT', message: 'not mocked' },
+};
+
+/**
+ * Build a fully-typed `UCANValidator` mock. `validate` backs invocation auth,
+ * `validateDelegation` backs delegation auth — set whichever a test needs.
+ */
+function makeValidator(opts: {
+  delegation?: ValidateResult;
+  invocation?: ValidateResult;
+}): UCANValidator {
+  return {
+    serverDid: ORACLE_DID,
+    validateDelegation: async () => opts.delegation ?? FAIL_RESULT,
+    validate: async () => opts.invocation ?? FAIL_RESULT,
+  };
+}
+
+/** Headers carrying a bearer auth invocation (`X-Auth-Type: ucan`). */
+function bearer(token: string): Record<string, string> {
+  return { authorization: `Bearer ${token}`, 'x-auth-type': 'ucan' };
+}
 
 describe('AuthHeaderMiddleware (UCAN-only)', () => {
   let cache: CacheMock;
@@ -81,6 +109,7 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     });
     ucan = makeUcanService();
     mw = new AuthHeaderMiddleware(cache as unknown as Cache, cfg, ucan);
+    mockedCreateUCANValidator.mockReset();
   });
 
   afterEach(() => {
@@ -215,5 +244,145 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
     expect(err).toBeInstanceOf(HttpException);
     expect(err.getStatus()).toBe(HttpStatus.UNAUTHORIZED);
     expect((req as unknown as { authData?: unknown }).authData).toBeUndefined();
+  });
+
+  it('authenticates via invocation (no delegation) and leaves ucanDelegation empty', async () => {
+    const expiration = Math.floor(Date.now() / 1000) + 300;
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({
+        invocation: { ok: true, invoker: USER_DID, expiration },
+      }),
+    );
+
+    const req = makeReq(bearer('INV_TOKEN'));
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(
+      (next as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0],
+    ).toBeUndefined();
+    expect(req.authData.did).toBe(USER_DID);
+    expect(req.authData.ucanDelegation.raw).toBe('');
+    expect(ucan.cacheDelegation).not.toHaveBeenCalled();
+  });
+
+  it('invocation + matching delegation caches the delegation for downstream', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const delExp = now + 600;
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({
+        delegation: {
+          ok: true,
+          invoker: USER_DID,
+          capability: { can: 'a', with: 'r' },
+          expiration: delExp,
+        },
+        invocation: { ok: true, invoker: USER_DID, expiration: now + 300 },
+      }),
+    );
+
+    const req = makeReq({
+      ...bearer('INV_TOKEN'),
+      'x-ucan-delegation': VALID_DELEGATION_RAW,
+    });
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    expect(req.authData.did).toBe(USER_DID);
+    expect(req.authData.ucanDelegation.raw).toBe(VALID_DELEGATION_RAW);
+    expect(ucan.cacheDelegation).toHaveBeenCalledWith(
+      USER_DID,
+      VALID_DELEGATION_RAW,
+      delExp,
+    );
+  });
+
+  it('ignores a delegation issued by someone other than the authenticated user', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({
+        delegation: {
+          ok: true,
+          invoker: OTHER_DID,
+          capability: { can: 'a', with: 'r' },
+          expiration: now + 600,
+        },
+        invocation: { ok: true, invoker: USER_DID, expiration: now + 300 },
+      }),
+    );
+
+    const req = makeReq({
+      ...bearer('INV_TOKEN'),
+      'x-ucan-delegation': VALID_DELEGATION_RAW,
+    });
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    // Auth still succeeds (identity = invocation signer), but the mismatched
+    // delegation is NOT trusted for downstream use.
+    expect(req.authData.did).toBe(USER_DID);
+    expect(req.authData.ucanDelegation.raw).toBe('');
+    expect(ucan.cacheDelegation).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid invocation with 401', async () => {
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({
+        invocation: {
+          ok: false,
+          error: { code: 'INVALID_SIGNATURE', message: 'bad sig' },
+        },
+      }),
+    );
+
+    const req = makeReq(bearer('INV_TOKEN'));
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    const err = (next as unknown as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as HttpException;
+    expect(err).toBeInstanceOf(HttpException);
+    expect(err.getStatus()).toBe(HttpStatus.UNAUTHORIZED);
+    expect((req as unknown as { authData?: unknown }).authData).toBeUndefined();
+  });
+
+  it('rejects an invocation whose TTL exceeds the server maximum with 401', async () => {
+    const farFuture = Math.floor(Date.now() / 1000) + 100_000; // > 900s max
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({
+        invocation: { ok: true, invoker: USER_DID, expiration: farFuture },
+      }),
+    );
+
+    const req = makeReq(bearer('INV_TOKEN'));
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    const err = (next as unknown as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as HttpException;
+    expect(err).toBeInstanceOf(HttpException);
+    expect(err.getStatus()).toBe(HttpStatus.UNAUTHORIZED);
+  });
+
+  it('rejects an invocation with no expiration with 401', async () => {
+    mockedCreateUCANValidator.mockResolvedValue(
+      makeValidator({ invocation: { ok: true, invoker: USER_DID } }),
+    );
+
+    const req = makeReq(bearer('INV_TOKEN'));
+    const next = vi.fn() as unknown as NextFunction;
+
+    await mw.use(req, makeRes(), next);
+
+    const err = (next as unknown as ReturnType<typeof vi.fn>).mock
+      .calls[0]?.[0] as HttpException;
+    expect(err).toBeInstanceOf(HttpException);
+    expect(err.getStatus()).toBe(HttpStatus.UNAUTHORIZED);
   });
 });

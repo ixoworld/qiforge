@@ -15,6 +15,10 @@ import {
 import { Server, Socket } from 'socket.io';
 
 import { validateUcanDelegation } from '../auth/validate-ucan-delegation.js';
+import {
+  DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS,
+  validateUcanInvocation,
+} from '../auth/validate-ucan-invocation.js';
 import { UcanService } from '../ucan/ucan.service.js';
 import { WsService } from './ws.service.js';
 
@@ -54,18 +58,20 @@ export class WsGateway
       return;
     }
 
-    // Authenticate the handshake the same way HTTP requests are authenticated:
-    // a valid UCAN delegation is required, and the user identity is the
-    // *validated invoker* — never the `userDid` the client put in the query.
-    // Trusting the query (the previous behaviour) let any client impersonate
-    // another user and poison the per-DID delegation cache.
+    // Authenticate the handshake the same way HTTP requests are: a user-signed
+    // UCAN invocation is the primary auth (a bare delegation is accepted as a
+    // migration fallback), and the identity is the *validated invoker* — never
+    // the `userDid` the client put in the query. Trusting the query (the old
+    // behaviour) let any client impersonate another user and poison the per-DID
+    // delegation cache.
+    const invocation = client.handshake.auth?.invocation as string | undefined;
     const ucanDelegation = client.handshake.auth?.ucanDelegation as
       | string
       | undefined;
 
-    if (!ucanDelegation) {
+    if (!invocation && !ucanDelegation) {
       this.logger.warn(
-        `WebSocket connection rejected for session ${sessionId}: missing UCAN delegation (client: ${client.id})`,
+        `WebSocket connection rejected for session ${sessionId}: missing UCAN auth (client: ${client.id})`,
       );
       client.disconnect();
       return;
@@ -83,19 +89,55 @@ export class WsGateway
       'BLOCKSYNC_GRAPHQL_URL',
     );
 
-    const outcome = await validateUcanDelegation(ucanDelegation, {
-      oracleDid,
-      blocksyncUri,
-    });
-    if (!outcome.ok) {
+    // Validate the delegation once (if sent): used for downstream authorization
+    // and as the auth fallback for pre-invocation clients.
+    const delegationOutcome = ucanDelegation
+      ? await validateUcanDelegation(ucanDelegation, {
+          oracleDid,
+          blocksyncUri,
+        })
+      : null;
+    if (delegationOutcome && !delegationOutcome.ok) {
       this.logger.warn(
-        `WebSocket connection rejected for session ${sessionId}: ${outcome.error} (client: ${client.id})`,
+        `WebSocket delegation invalid for session ${sessionId}: ${delegationOutcome.error} (client: ${client.id})`,
+      );
+    }
+    const validDelegation =
+      delegationOutcome && delegationOutcome.ok
+        ? delegationOutcome.result
+        : null;
+
+    // Authenticated identity: invocation (primary) → delegation (fallback).
+    let userDid: string | null = null;
+    if (invocation) {
+      const maxTtlSeconds =
+        Number(this.configService.get('UCAN_AUTH_MAX_TTL_SECONDS')) ||
+        DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS;
+      const invOutcome = await validateUcanInvocation(invocation, {
+        oracleDid,
+        blocksyncUri,
+        maxTtlSeconds,
+      });
+      if (!invOutcome.ok) {
+        this.logger.warn(
+          `WebSocket connection rejected for session ${sessionId}: ${invOutcome.error} (client: ${client.id})`,
+        );
+        client.disconnect();
+        return;
+      }
+      userDid = invOutcome.result.userDid;
+    } else if (validDelegation) {
+      userDid = validDelegation.userDid;
+    }
+
+    if (!userDid) {
+      this.logger.warn(
+        `WebSocket connection rejected for session ${sessionId}: no valid UCAN auth (client: ${client.id})`,
       );
       client.disconnect();
       return;
     }
 
-    const userDid = outcome.result.userDid;
     // Stash the validated identity on the socket so disconnect-time history
     // processing reads the authenticated DID rather than the untrusted query.
     client.data.userDid = userDid;
@@ -104,13 +146,22 @@ export class WsGateway
       `WebSocket connection established for session: ${sessionId}, did: ${userDid}, client: ${client.id}`,
     );
 
-    // Cache the (now-validated) delegation for downstream invocations, keyed
-    // by the validated invoker DID and bounded by the delegation's lifetime.
-    if (this.ucanService) {
+    // Cache the delegation for downstream invocations — but only when it was
+    // issued by the authenticated user (delegations are public; never act on
+    // someone else's just because a client presented it).
+    if (
+      this.ucanService &&
+      validDelegation &&
+      validDelegation.userDid === userDid
+    ) {
       await this.ucanService.cacheDelegation(
         userDid,
-        ucanDelegation,
-        outcome.result.delegation.expiration,
+        ucanDelegation as string,
+        validDelegation.delegation.expiration,
+      );
+    } else if (validDelegation && validDelegation.userDid !== userDid) {
+      this.logger.warn(
+        `WebSocket ignoring delegation for downstream: issuer ${validDelegation.userDid} != authenticated ${userDid}`,
       );
     }
 

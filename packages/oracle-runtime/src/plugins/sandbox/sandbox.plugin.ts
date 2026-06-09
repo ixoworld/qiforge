@@ -250,6 +250,17 @@ export class SandboxPlugin extends OraclePlugin {
       rtCtx,
     );
 
+    // No UCAN invocation could be minted (the user hasn't authorized) → the
+    // sandbox MCP server would reject us with 401. Skip connecting entirely
+    // and contribute no tools, rather than letting the auth error crash the
+    // turn. Mirrors composio/memory's graceful degradation.
+    if (!headers.Authorization) {
+      rtCtx.logger.log(
+        '[sandbox] skipping — no UCAN invocation (user not authorized); not connecting to the sandbox MCP server.',
+      );
+      return [];
+    }
+
     const client = this.mcpClientFactory({
       mcpServers: {
         sandbox: {

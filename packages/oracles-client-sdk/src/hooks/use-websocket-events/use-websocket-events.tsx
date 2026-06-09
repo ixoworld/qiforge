@@ -19,7 +19,7 @@ export function useWebSocketEvents(
     props.oracleDid,
     props.overrides,
   );
-  const { wallet, getDelegation } = useOraclesContext();
+  const { wallet, getDelegation, getInvocation } = useOraclesContext();
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -78,10 +78,19 @@ export function useWebSocketEvents(
         return;
       }
 
+      // Resolve the UCAN invocation (treated like a bearer token) alongside
+      // the delegation. Migration-safe: if no createInvocation callback is
+      // provided this is null and the handshake behaves as before.
+      const invocation = await getInvocation(props.oracleDid);
+      if (cancelled) return;
+
       // Create WebSocket connection
       const newSocket = io(apiUrl, {
         query: { sessionId, userDid: wallet.did },
-        auth: { ucanDelegation: delegation },
+        auth: {
+          ucanDelegation: delegation,
+          ...(invocation && { invocation }),
+        },
         transports: ['websocket'],
       });
 

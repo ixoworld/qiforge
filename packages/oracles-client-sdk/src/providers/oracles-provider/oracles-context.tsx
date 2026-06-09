@@ -15,6 +15,10 @@ import {
   getCachedDelegation,
   setCachedDelegation,
 } from '../../utils/delegation-cache.js';
+import {
+  getCachedInvocation,
+  setCachedInvocation,
+} from '../../utils/invocation-cache.js';
 import type { AgAction } from '../../hooks/use-ag-action.js';
 import {
   type IOraclesContextProps,
@@ -38,6 +42,7 @@ export const OraclesProvider = ({
   initialWallet,
   transactSignX,
   createDelegation,
+  createInvocation,
 }: PropsWithChildren<IOraclesProviderProps>) => {
   if ((!initialWallet as unknown) || !transactSignX) {
     throw new Error('initialWallet and transactSignX are required');
@@ -78,6 +83,32 @@ export const OraclesProvider = ({
     [initialWallet.did, createDelegation],
   );
 
+  const getInvocation = useCallback(
+    async (oracleDid: string): Promise<string | null> => {
+      // Check cache first
+      const cached = getCachedInvocation(initialWallet.did, oracleDid);
+      if (cached) return cached;
+
+      // No callback provided — skip invocation (migration-safe)
+      if (!createInvocation) return null;
+
+      try {
+        const result = await createInvocation(oracleDid);
+        setCachedInvocation(
+          initialWallet.did,
+          oracleDid,
+          result.serialized,
+          result.expiresAt,
+        );
+        return result.serialized;
+      } catch (error) {
+        console.warn('Failed to create UCAN invocation:', error);
+        return null;
+      }
+    },
+    [initialWallet.did, createInvocation],
+  );
+
   const authedRequest = useCallback(
     async (
       url: string,
@@ -94,6 +125,12 @@ export const OraclesProvider = ({
         if (delegation) {
           headers['x-ucan-delegation'] = delegation;
         }
+
+        const invocation = await getInvocation(oracleDid);
+        if (invocation) {
+          headers['Authorization'] = `Bearer ${invocation}`;
+          headers['X-Auth-Type'] = 'ucan';
+        }
       }
 
       return request(url, method, {
@@ -101,7 +138,7 @@ export const OraclesProvider = ({
         headers,
       });
     },
-    [getDelegation],
+    [getDelegation, getInvocation],
   );
 
   // AG-UI action management functions
@@ -159,6 +196,7 @@ export const OraclesProvider = ({
         oracleDid?: string,
       ) => Promise<T>,
       getDelegation,
+      getInvocation,
       agActions,
       registerAgAction,
       unregisterAgAction,
@@ -170,6 +208,7 @@ export const OraclesProvider = ({
       transactSignX,
       authedRequest,
       getDelegation,
+      getInvocation,
       agActions,
       registerAgAction,
       unregisterAgAction,
