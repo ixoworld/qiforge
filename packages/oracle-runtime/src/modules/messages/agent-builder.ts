@@ -170,14 +170,12 @@ export class AgentBuilder {
           return undefined;
         }),
         needsMatrixDelegation
-          ? this.ucan
-              .getDelegationForUser(payload.did)
-              .catch((err) => {
-                this.logger.warn(
-                  `[AgentBuilder] delegation read-through failed: ${err instanceof Error ? err.message : String(err)}`,
-                );
-                return null;
-              })
+          ? this.ucan.getDelegationForUser(payload.did).catch((err) => {
+              this.logger.warn(
+                `[AgentBuilder] delegation read-through failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return null;
+            })
           : Promise.resolve(null),
       ]);
 

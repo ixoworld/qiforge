@@ -459,9 +459,7 @@ describe('AgentBuilder', () => {
     it('does NOT read-through a delegation on the portal path (delegation absent)', async () => {
       const { builder, getDelegationMock } = buildHarness();
 
-      await builder.build(
-        makeArgs({ payload: { ucanDelegation: undefined } }),
-      );
+      await builder.build(makeArgs({ payload: { ucanDelegation: undefined } }));
 
       expect(getDelegationMock).not.toHaveBeenCalled();
       expect(sendMatrixEventMock).not.toHaveBeenCalled();

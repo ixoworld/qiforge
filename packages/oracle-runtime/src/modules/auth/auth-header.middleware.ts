@@ -86,7 +86,8 @@ export class AuthHeaderMiddleware implements NestMiddleware {
   private extractInvocation(req: Request): string | undefined {
     if (req.headers['x-auth-type'] !== 'ucan') return undefined;
     const auth = req.headers['authorization'];
-    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return undefined;
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer '))
+      return undefined;
     const token = auth.slice('Bearer '.length).trim();
     return token.length > 0 ? token : undefined;
   }
@@ -251,7 +252,12 @@ export class AuthHeaderMiddleware implements NestMiddleware {
         }
         req.authData = {
           did: authedDid,
-          ucanDelegation: { raw: '', issuer: '', audience: '', capabilities: [] },
+          ucanDelegation: {
+            raw: '',
+            issuer: '',
+            audience: '',
+            capabilities: [],
+          },
         };
       }
 

@@ -249,7 +249,9 @@ describe('AuthHeaderMiddleware (UCAN-only)', () => {
   it('authenticates via invocation (no delegation) and leaves ucanDelegation empty', async () => {
     const expiration = Math.floor(Date.now() / 1000) + 300;
     mockedCreateUCANValidator.mockResolvedValue(
-      makeValidator({ invocation: { ok: true, invoker: USER_DID, expiration } }),
+      makeValidator({
+        invocation: { ok: true, invoker: USER_DID, expiration },
+      }),
     );
 
     const req = makeReq(bearer('INV_TOKEN'));

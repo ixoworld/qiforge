@@ -92,7 +92,10 @@ export class WsGateway
     // Validate the delegation once (if sent): used for downstream authorization
     // and as the auth fallback for pre-invocation clients.
     const delegationOutcome = ucanDelegation
-      ? await validateUcanDelegation(ucanDelegation, { oracleDid, blocksyncUri })
+      ? await validateUcanDelegation(ucanDelegation, {
+          oracleDid,
+          blocksyncUri,
+        })
       : null;
     if (delegationOutcome && !delegationOutcome.ok) {
       this.logger.warn(
@@ -100,7 +103,9 @@ export class WsGateway
       );
     }
     const validDelegation =
-      delegationOutcome && delegationOutcome.ok ? delegationOutcome.result : null;
+      delegationOutcome && delegationOutcome.ok
+        ? delegationOutcome.result
+        : null;
 
     // Authenticated identity: invocation (primary) → delegation (fallback).
     let userDid: string | null = null;
