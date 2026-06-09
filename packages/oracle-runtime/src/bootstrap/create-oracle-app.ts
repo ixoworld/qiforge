@@ -357,6 +357,7 @@ export async function createOracleApp(
         'x-matrix-homeserver',
         'x-did',
         'x-request-id',
+        "x-auth-type",
         'x-timezone',
       ],
       exposedHeaders: ['X-Request-Id'],

@@ -1,2 +1,2 @@
-export { OraclesProvider } from './oracles-context.js';
+export { OraclesProvider, useOraclesContext } from './oracles-context.js';
 export * from './types.js';

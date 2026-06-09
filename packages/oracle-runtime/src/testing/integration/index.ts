@@ -27,12 +27,14 @@ export {
 
 export {
   mintUserDelegation,
+  mintAuthInvocation,
   memoryCap,
   sandboxCap,
   skillsCap,
   subscriptionsReadCap,
   allCaps,
   type MintUserDelegationOptions,
+  type MintAuthInvocationOptions,
 } from './ucan.js';
 
 export { waitForMatrixLoaded } from './wait-for-matrix-loaded.js';

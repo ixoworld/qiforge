@@ -1,5 +1,8 @@
+import { MatrixManager } from '@ixo/matrix';
+import { type Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { type BaseMessage } from 'langchain';
 import type {
   CompiledMainAgent,
@@ -9,6 +12,7 @@ import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
 import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
+import { UcanService } from '../ucan/ucan.service.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
@@ -70,9 +74,18 @@ export interface BuiltAgent {
 export class AgentBuilder {
   private readonly logger = new Logger(AgentBuilder.name);
 
+  /**
+   * Default throttle window for the Matrix re-auth prompt: one prompt per
+   * user per 6 hours. Overridable via `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`.
+   */
+  private static readonly DEFAULT_REAUTH_THROTTLE_SECONDS = 6 * 60 * 60;
+
   constructor(
     private readonly bundleHolder: OracleRuntimeBundleHolder,
     private readonly userContextFetcher: UserContextFetcher,
+    private readonly ucan: UcanService,
+    private readonly config: ConfigService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   async build(
@@ -124,30 +137,59 @@ export class AgentBuilder {
       `[AgentBuilder] resolving prompt enrichments — roomId=${prepared.roomId}, did=${payload.did}`,
     );
 
+    const clientType: 'portal' | 'matrix' | 'slack' =
+      payload.clientType ?? 'portal';
+
+    // On the Matrix ingress path the request carries no per-user UCAN
+    // delegation header (the bot acts as the user's agent, not as the user).
+    // Read the durably-stored delegation through so Matrix turns get UCAN
+    // tooling. Folded into the same `Promise.all` so it adds no serial
+    // round-trip; best-effort (falls back to no delegation on failure).
+    const needsMatrixDelegation =
+      clientType === 'matrix' && !payload.ucanDelegation;
+
     const userPrefsService = UserPreferencesService.getInstance();
-    const [freshUserContext, freshUserPreferences] = await Promise.all([
-      this.userContextFetcher
-        .fetch({
-          roomId: prepared.roomId,
-          userDid: payload.did,
-          sessionId: prepared.sessionId,
-        })
-        .catch((err) => {
+    const [freshUserContext, freshUserPreferences, matrixDelegationRaw] =
+      await Promise.all([
+        this.userContextFetcher
+          .fetch({
+            roomId: prepared.roomId,
+            userDid: payload.did,
+            sessionId: prepared.sessionId,
+          })
+          .catch((err) => {
+            this.logger.warn(
+              `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return undefined;
+          }),
+        userPrefsService.get(prepared.roomId).catch((err) => {
           this.logger.warn(
-            `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+            `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
           );
           return undefined;
         }),
-      userPrefsService.get(prepared.roomId).catch((err) => {
-        this.logger.warn(
-          `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        return undefined;
-      }),
-    ]);
+        needsMatrixDelegation
+          ? this.ucan
+              .getDelegationForUser(payload.did)
+              .catch((err) => {
+                this.logger.warn(
+                  `[AgentBuilder] delegation read-through failed: ${err instanceof Error ? err.message : String(err)}`,
+                );
+                return null;
+              })
+          : Promise.resolve(null),
+      ]);
 
     const userContext = freshUserContext ?? priorState.userContext;
     const userPreferences = freshUserPreferences ?? priorState.userPreferences;
+
+    // No valid stored delegation on a Matrix turn → emit a throttled
+    // delegation-required event (the web app opens the authorize modal) and
+    // proceed without UCAN tooling.
+    if (needsMatrixDelegation && !matrixDelegationRaw) {
+      await this.maybePromptReauth(payload.did, prepared.roomId);
+    }
 
     this.logger.log(
       `[AgentBuilder] prompt enrichments resolved — userContext: ${
@@ -165,9 +207,6 @@ export class AgentBuilder {
       }`,
     );
 
-    const clientType: 'portal' | 'matrix' | 'slack' =
-      payload.clientType ?? 'portal';
-
     const ucanDelegation: UcanDelegation = payload.ucanDelegation
       ? {
           raw: payload.ucanDelegation.raw,
@@ -184,10 +223,11 @@ export class AgentBuilder {
             })),
         }
       : {
-          // Matrix listener path has no per-user UCAN — the bot acts as
-          // the oracle, not as a user. Plugins that need a delegation
-          // should branch on `raw.length === 0` and skip the mint.
-          raw: '',
+          // Matrix path has no per-request delegation header. We read the
+          // durably-stored one through above; when present the plugins get
+          // UCAN tooling, otherwise `raw: ''` and they branch on
+          // `raw.length === 0` to skip the mint.
+          raw: matrixDelegationRaw ?? '',
         };
 
     const requestCtx: MainAgentRequestContext = {
@@ -266,5 +306,55 @@ export class AgentBuilder {
     };
 
     return { agent, stateInput, langGraphConfig };
+  }
+
+  /**
+   * Emit a single throttled `ixo.oracle.delegation_required` event into the
+   * user's Matrix room when a Matrix turn finds no valid delegation. The web
+   * app listens for this event and opens the "authorize for Matrix" modal
+   * in-place; the payload is self-contained (carries the oracle entity DID the
+   * FE needs to mint + store a delegation), so the listener's location doesn't
+   * matter. Throttled per user via the cache manager (key
+   * `ucan_reauth_prompt_${userDid}`, TTL from
+   * `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`, default 6h). Best-effort — never
+   * throws, so a Matrix-send failure can't break the turn.
+   */
+  private async maybePromptReauth(
+    userDid: string,
+    roomId: string,
+  ): Promise<void> {
+    try {
+      const throttleKey = `ucan_reauth_prompt_${userDid}`;
+      const already = await this.cacheManager.get(throttleKey);
+      if (already) {
+        this.logger.debug(
+          `[AgentBuilder] delegation-required event throttled for ${userDid} (already prompted within the window)`,
+        );
+        return;
+      }
+
+      const throttleSeconds =
+        this.config.get<number>('UCAN_REAUTH_PROMPT_THROTTLE_SECONDS') ??
+        AgentBuilder.DEFAULT_REAUTH_THROTTLE_SECONDS;
+
+      await this.cacheManager.set(throttleKey, true, throttleSeconds * 1000);
+
+      await MatrixManager.getInstance().sendMatrixEvent(
+        roomId,
+        'ixo.oracle.delegation_required',
+        {
+          oracleEntityDid: this.config.get<string>('ORACLE_ENTITY_DID'),
+          oracleDid: this.config.get<string>('ORACLE_DID'),
+        },
+      );
+
+      this.logger.log(
+        `[AgentBuilder] sent ixo.oracle.delegation_required to room ${roomId} for ${userDid}`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[AgentBuilder] delegation-required event failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }

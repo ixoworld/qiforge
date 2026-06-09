@@ -13,6 +13,10 @@ import { type NextFunction, type Request, type Response } from 'express';
 import * as crypto from 'node:crypto';
 import { UcanService } from '../ucan/ucan.service.js';
 import { validateUcanDelegation } from './validate-ucan-delegation.js';
+import {
+  DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS,
+  validateUcanInvocation,
+} from './validate-ucan-invocation.js';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Required for declaration merging
@@ -24,7 +28,9 @@ declare global {
           /**
            * Raw base64-encoded delegation header as sent by the client.
            * Plugin code reads this from `runCtx.user.ucanDelegation.raw`
-           * to mint downstream service invocations.
+           * to mint downstream service invocations. Empty string when the
+           * request authenticated via an invocation but carried no (or an
+           * unbound) delegation — plugins branch on `raw.length === 0`.
            */
           raw: string;
           issuer: string;
@@ -39,7 +45,7 @@ declare global {
 
 const THREE_MINUTES = minutes(3);
 
-interface CachedUcanAuth {
+interface CachedDelegationAuth {
   userDid: string;
   delegation: {
     issuer: string;
@@ -49,6 +55,19 @@ interface CachedUcanAuth {
   };
 }
 
+interface CachedInvocationAuth {
+  userDid: string;
+  expiration: number;
+}
+
+/**
+ * Authenticates every request. Primary auth is a user-signed UCAN *invocation*
+ * (JWT-style bearer, `Authorization: Bearer <inv>` + `X-Auth-Type: ucan`); a
+ * bare `x-ucan-delegation` is accepted only as a migration fallback. The
+ * delegation, when present, is cached for downstream service invocations — but
+ * only when it was issued by the authenticated user (delegations are public, so
+ * we never act on someone else's just because a client presented it).
+ */
 @Injectable()
 export class AuthHeaderMiddleware implements NestMiddleware {
   private readonly logger = new Logger(AuthHeaderMiddleware.name);
@@ -63,15 +82,75 @@ export class AuthHeaderMiddleware implements NestMiddleware {
     return crypto.createHash('sha256').update(token, 'utf8').digest('hex');
   }
 
-  private async validateUcanDelegation(ucanHeader: string): Promise<{
-    userDid: string;
-    delegation: {
-      issuer: string;
-      audience: string;
-      capabilities: unknown[];
-      expiration?: number;
+  /** Pull the bearer invocation out of the request, if present and well-formed. */
+  private extractInvocation(req: Request): string | undefined {
+    if (req.headers['x-auth-type'] !== 'ucan') return undefined;
+    const auth = req.headers['authorization'];
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return undefined;
+    const token = auth.slice('Bearer '.length).trim();
+    return token.length > 0 ? token : undefined;
+  }
+
+  /**
+   * Validate a user auth invocation. Caches the result by token hash with TTL =
+   * the invocation's own expiry, so the same token (reused by the client until
+   * it expires, JWT-style) doesn't re-hit Blocksync on every request.
+   */
+  private async validateInvocation(
+    invocation: string,
+  ): Promise<CachedInvocationAuth | null> {
+    const oracleDid = this.configService.get<string>('ORACLE_DID');
+    if (!oracleDid) {
+      this.logger.warn(
+        '[UCAN] ORACLE_DID not configured, cannot validate invocation',
+      );
+      return null;
+    }
+
+    const cacheKey = `ucan_inv_${this.hashToken(invocation)}`;
+    const cached = await this.cacheManager.get<CachedInvocationAuth>(cacheKey);
+    if (cached && cached.expiration * 1000 > Date.now()) {
+      return cached;
+    }
+
+    const blocksyncUri = this.configService.getOrThrow<string>(
+      'BLOCKSYNC_GRAPHQL_URL',
+    );
+    const maxTtlSeconds =
+      Number(this.configService.get('UCAN_AUTH_MAX_TTL_SECONDS')) ||
+      DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS;
+
+    const outcome = await validateUcanInvocation(invocation, {
+      oracleDid,
+      blocksyncUri,
+      maxTtlSeconds,
+    });
+    if (!outcome.ok) {
+      this.logger.warn(`[UCAN] Invocation validation failed: ${outcome.error}`);
+      return null;
+    }
+
+    const result: CachedInvocationAuth = {
+      userDid: outcome.result.userDid,
+      expiration: outcome.result.expiration,
     };
-  } | null> {
+    // TTL = the token's own remaining lifetime, so we never serve a cached
+    // result past the point the token itself would have expired.
+    const ttl = result.expiration * 1000 - Date.now();
+    if (ttl > 0) {
+      await this.cacheManager.set(cacheKey, result, ttl);
+    }
+    this.logger.debug(`[UCAN] Invocation auth for DID: ${result.userDid}`);
+    return result;
+  }
+
+  /**
+   * Validate a delegation header (cached by hash). Returns the validated
+   * invoker + delegation metadata, or null on failure.
+   */
+  private async validateDelegation(
+    ucanHeader: string,
+  ): Promise<CachedDelegationAuth | null> {
     const oracleDid = this.configService.get<string>('ORACLE_DID');
     if (!oracleDid) {
       this.logger.warn(
@@ -79,6 +158,10 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       );
       return null;
     }
+
+    const cacheKey = `ucan_auth_${this.hashToken(ucanHeader)}`;
+    const cached = await this.cacheManager.get<CachedDelegationAuth>(cacheKey);
+    if (cached) return cached;
 
     const blocksyncUri = this.configService.getOrThrow<string>(
       'BLOCKSYNC_GRAPHQL_URL',
@@ -88,18 +171,17 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       oracleDid,
       blocksyncUri,
     });
-
     if (!outcome.ok) {
       this.logger.warn(`[UCAN] Delegation validation failed: ${outcome.error}`);
       return null;
     }
 
-    const { delegation } = outcome.result;
-    this.logger.log(
-      `[UCAN] Delegation validated: iss=${outcome.result.userDid} aud=${oracleDid} exp=${delegation.expiration ? new Date(delegation.expiration * 1000).toISOString() : 'none'}`,
-    );
-
-    return outcome.result;
+    const result: CachedDelegationAuth = outcome.result;
+    const ttl = result.delegation.expiration
+      ? Math.max(0, result.delegation.expiration * 1000 - Date.now())
+      : THREE_MINUTES;
+    await this.cacheManager.set(cacheKey, result, ttl);
+    return result;
   }
 
   async use(req: Request, _res: Response, next: NextFunction): Promise<void> {
@@ -107,73 +189,72 @@ export class AuthHeaderMiddleware implements NestMiddleware {
       `AuthHeaderMiddleware processing request for: ${req.originalUrl}`,
     );
     try {
-      const ucanHeader = req.headers['x-ucan-delegation'] as string | undefined;
-      if (!ucanHeader) {
-        throw new HttpException(
-          'Missing x-ucan-delegation header',
-          HttpStatus.UNAUTHORIZED,
-        );
-      }
+      const invocation = this.extractInvocation(req);
+      const delegationHeader = req.headers['x-ucan-delegation'] as
+        | string
+        | undefined;
 
-      const ucanHash = this.hashToken(ucanHeader);
-      const cachedUcan = await this.cacheManager.get<CachedUcanAuth>(
-        `ucan_auth_${ucanHash}`,
-      );
+      // Validate the delegation once (if sent). Reused below for downstream
+      // authorization and, for pre-invocation clients, as the auth fallback.
+      const delegationResult = delegationHeader
+        ? await this.validateDelegation(delegationHeader)
+        : null;
 
-      if (cachedUcan) {
-        req.authData = {
-          did: cachedUcan.userDid,
-          ucanDelegation: { ...cachedUcan.delegation, raw: ucanHeader },
-        };
-
-        // Re-cache raw delegation for downstream invocations
-        await this.ucanService.cacheDelegation(
-          cachedUcan.userDid,
-          ucanHeader,
-          cachedUcan.delegation.expiration,
-        );
-
+      // Authenticated identity: a user-signed invocation is the primary auth.
+      // A bare delegation is accepted only as a migration fallback.
+      let authedDid: string | null = null;
+      if (invocation) {
+        const inv = await this.validateInvocation(invocation);
+        if (!inv) {
+          throw new HttpException(
+            'Invalid UCAN invocation',
+            HttpStatus.UNAUTHORIZED,
+          );
+        }
+        authedDid = inv.userDid;
+      } else if (delegationResult) {
+        authedDid = delegationResult.userDid;
         this.logger.debug(
-          `[UCAN] Auth from cache for DID: ${cachedUcan.userDid}`,
+          '[UCAN] Authenticated via delegation fallback (no invocation)',
         );
-        next();
-        return;
       }
 
-      const ucanResult = await this.validateUcanDelegation(ucanHeader);
-      if (!ucanResult) {
+      if (!authedDid) {
         throw new HttpException(
-          'Invalid UCAN delegation',
+          'Missing UCAN authentication: provide Authorization: Bearer <invocation> with X-Auth-Type: ucan, or an x-ucan-delegation header',
           HttpStatus.UNAUTHORIZED,
         );
       }
 
-      req.authData = {
-        did: ucanResult.userDid,
-        ucanDelegation: { ...ucanResult.delegation, raw: ucanHeader },
-      };
+      // Downstream authorization: a delegation is public/shareable, so only
+      // trust it when it was issued BY the authenticated user. Otherwise a
+      // client could pair their own invocation with someone else's delegation
+      // and make the oracle act on that person's behalf downstream.
+      if (delegationResult && delegationResult.userDid === authedDid) {
+        req.authData = {
+          did: authedDid,
+          ucanDelegation: {
+            ...delegationResult.delegation,
+            raw: delegationHeader as string,
+          },
+        };
+        await this.ucanService.cacheDelegation(
+          authedDid,
+          delegationHeader as string,
+          delegationResult.delegation.expiration,
+        );
+      } else {
+        if (delegationResult && delegationResult.userDid !== authedDid) {
+          this.logger.warn(
+            `[UCAN] Ignoring delegation for downstream: issuer ${delegationResult.userDid} != authenticated ${authedDid}`,
+          );
+        }
+        req.authData = {
+          did: authedDid,
+          ucanDelegation: { raw: '', issuer: '', audience: '', capabilities: [] },
+        };
+      }
 
-      // Cache auth result
-      const ttl = ucanResult.delegation.expiration
-        ? Math.max(0, ucanResult.delegation.expiration * 1000 - Date.now())
-        : THREE_MINUTES;
-      await this.cacheManager.set(
-        `ucan_auth_${ucanHash}`,
-        {
-          userDid: ucanResult.userDid,
-          delegation: ucanResult.delegation,
-        } satisfies CachedUcanAuth,
-        ttl,
-      );
-
-      // Cache raw delegation for downstream service invocations
-      await this.ucanService.cacheDelegation(
-        ucanResult.userDid,
-        ucanHeader,
-        ucanResult.delegation.expiration,
-      );
-
-      this.logger.debug(`[UCAN] Auth completed for DID: ${ucanResult.userDid}`);
       next();
     } catch (error) {
       if (error instanceof HttpException) {

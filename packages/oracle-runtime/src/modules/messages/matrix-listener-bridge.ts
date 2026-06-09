@@ -250,11 +250,16 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     const mentions = sourceContent['m.mentions'];
     const relatesTo = sourceContent['m.relates_to'];
 
-    const message =
+    const messageRAW =
       text ??
       (attachments.length === 1
         ? `User shared a file: ${attachments[0]?.filename ?? 'file'}`
         : `User shared ${attachments.length} file(s): ${attachments.map((a) => a.filename).join(', ')}`);
+
+    const message = messageRAW.replace(
+      this.config.getOrThrow('MATRIX_ORACLE_ADMIN_USER_ID'),
+      '(USER MENTIONED YOU @AI_AGENT)',
+    );
 
     if (!this.deliverHandler) {
       this.logger.warn(
@@ -264,6 +269,9 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
+      await this.matrixManager
+        .getClient()
+        ?.mxClient.setTyping(first.roomId, true);
       const aiResponse = (await this.deliverHandler({
         did,
         message,
@@ -305,6 +313,10 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       });
     } catch (error) {
       this.logger.error('Failed to handle Matrix message', error);
+    } finally {
+      await this.matrixManager
+        .getClient()
+        ?.mxClient.setTyping(first.roomId, false);
     }
   }
 

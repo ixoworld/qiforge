@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracles-client-sdk",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "private": false,
   "description": "Client SDK for interacting with QiForge oracles, designed for React applications",

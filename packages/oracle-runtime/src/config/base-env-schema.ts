@@ -52,6 +52,22 @@ export const baseEnvSchema = z.object({
   SECP_MNEMONIC: z.string(),
   RPC_URL: z.string(),
 
+  /**
+   * Max lifetime (seconds) the oracle will accept for a user *auth* invocation
+   * (the short-lived, JWT-style bearer token the client signs to authenticate).
+   * Bounds the replay window server-side regardless of the TTL the client
+   * declares — a tampered client can't mint a long-lived auth token. Default
+   * 15 minutes.
+   */
+  UCAN_AUTH_MAX_TTL_SECONDS: z.coerce.number().default(900),
+
+  /**
+   * Throttle window (seconds) between "please re-authorize" prompts posted into
+   * a user's Matrix room when their stored delegation is missing/expired, so a
+   * de-authorized user isn't nagged on every message. Default 6 hours.
+   */
+  UCAN_REAUTH_PROMPT_THROTTLE_SECONDS: z.coerce.number().default(21600),
+
   // LLM provider selection (provider-specific keys are optional so a fork
   // can choose between OpenRouter and Nebius without setting both).
   LLM_PROVIDER: z.enum(['openrouter', 'nebius']).default('openrouter'),

@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 
 /**
  * Always-on health surface. Both routes are excluded from the auth
@@ -11,6 +12,12 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 @Controller()
 export class HealthController {
   @Get()
+  @Throttle({
+    default: {
+      ttl: 60000, // 1 minute
+      limit: 30, // 30 requests
+    },
+  })
   @ApiOperation({ summary: 'Root — oracle landing.' })
   root() {
     return {
