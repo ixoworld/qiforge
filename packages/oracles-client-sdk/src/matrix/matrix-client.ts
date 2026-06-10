@@ -1,7 +1,10 @@
 /* eslint-disable no-console */
 import { request } from '../utils/request.js';
 import { decryptAndRetrieve, encryptAndStore } from '../utils/token-cache.js';
-import { getMatrixUrlsForDid } from '@ixo/oracles-chain-client/react';
+import {
+  getMatrixUrlsForDid,
+  normalizeMatrixHomeServerUrl,
+} from '@ixo/oracles-chain-client/react';
 import {
   type IOpenIDToken,
   type SourceSpaceResponse,
@@ -51,7 +54,10 @@ class MatrixClient {
       const matrixUrls = await getMatrixUrlsForDid(userDid);
       return matrixUrls.homeServer;
     }
-    return this.params.homeserverUrl!;
+    return (
+      normalizeMatrixHomeServerUrl(this.params.homeserverUrl) ||
+      this.params.homeserverUrl!
+    );
   }
 
   private async resolveRoomsBotUrl(userDid?: string): Promise<string> {
