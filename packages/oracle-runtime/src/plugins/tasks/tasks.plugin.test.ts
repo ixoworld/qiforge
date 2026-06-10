@@ -26,7 +26,6 @@ const sampleSpec = (): TaskSpec => ({
     delivery: { roomId: 'main' },
     approval: 'never',
     status: 'active',
-    sessionId: '$thread-root:ixo.world',
     stats: { nextRunAt: '2026-06-11T05:00:00.000Z' },
   },
   body: '## What to do\nSummarise BTC, ETH, SOL.\n\n## Constraints\n- Under 300 words.',

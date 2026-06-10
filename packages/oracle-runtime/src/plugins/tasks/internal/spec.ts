@@ -52,13 +52,6 @@ export const TaskFrontmatterSchema = z.object({
   }),
   approval: z.enum(['never', 'before-delivery']).default('never'),
   status: z.enum(TASK_STATUSES).default('active'),
-  /**
-   * The task's persistent agent session (LangGraph thread). Created once at
-   * `create_task` time; every run continues this thread, so the task keeps
-   * conversational memory across runs ("compare to what you reported
-   * yesterday").
-   */
-  sessionId: z.string().min(1),
   stats: z.object({ nextRunAt: z.string().datetime().nullable() }),
 });
 

@@ -58,7 +58,9 @@ export class ApprovalService implements ApprovalGatePort {
       args.output.length > PREVIEW_CHARS
         ? `${args.output.slice(0, PREVIEW_CHARS)}\n…`
         : args.output;
-    await this.delivery.post(
+    // `safePost`: a posting hiccup here shouldn't undo the state we just
+    // wrote — the 24h reminder will re-post if Matrix was the issue.
+    await this.delivery.safePost(
       args.roomId,
       `✋ **Approval needed** — task \`${args.taskId}\`\n\n${preview}\n\nReply **yes** to deliver this result, or **no** to discard.`,
     );
@@ -68,7 +70,7 @@ export class ApprovalService implements ApprovalGatePort {
   async approve(taskId: string): Promise<boolean> {
     const pending = await this.takePending(taskId);
     if (!pending) return false;
-    await this.delivery.post(pending.roomId, pending.output);
+    await this.delivery.safePost(pending.roomId, pending.output);
     await this.state.resetFailures(taskId);
     return true;
   }
@@ -77,7 +79,7 @@ export class ApprovalService implements ApprovalGatePort {
   async reject(taskId: string, reason?: string): Promise<boolean> {
     const pending = await this.takePending(taskId);
     if (!pending) return false;
-    await this.delivery.post(
+    await this.delivery.safePost(
       pending.roomId,
       `❌ Result discarded${reason ? ` — ${reason}` : ''}.`,
     );
@@ -97,7 +99,7 @@ export class ApprovalService implements ApprovalGatePort {
   }): Promise<void> {
     if (args.phase === 'reminder') {
       if (await this.state.getPendingApproval(args.taskId)) {
-        await this.delivery.post(
+        await this.delivery.safePost(
           args.roomId,
           `🔔 Task \`${args.taskId}\` is still waiting on your approval. Reply yes / no.`,
         );
@@ -106,7 +108,7 @@ export class ApprovalService implements ApprovalGatePort {
     }
     const pending = await this.takePending(args.taskId);
     if (!pending) return;
-    await this.delivery.post(
+    await this.delivery.safePost(
       args.roomId,
       '⌛ Approval window expired — the pending result was discarded.',
     );
@@ -121,7 +123,10 @@ export class ApprovalService implements ApprovalGatePort {
   private async takePending(taskId: string) {
     const pending = await this.state.getPendingApproval(taskId);
     if (!pending) return null;
-    if (!(await this.state.claimApprovalResolution(taskId))) return null;
+    // Claim TTL = approval TTL so a crash mid-resolution can't expire the
+    // claim before the pending payload and let a stale resolver win again.
+    if (!(await this.state.claimApprovalResolution(taskId, APPROVAL_TTL_SEC)))
+      return null;
     await this.state.clearPendingApproval(pending);
     await this.scheduler.cancelApprovalTimeouts(taskId);
     return pending;
@@ -144,7 +149,7 @@ export class ApprovalService implements ApprovalGatePort {
     await this.scheduler.cancelRuns(taskId);
     const roomId = await this.delivery.resolveRoom(spec);
     if (roomId) {
-      await this.delivery.post(
+      await this.delivery.safePost(
         roomId,
         `🛑 Task \`${taskId}\` was rejected ${count} times in a row and is paused for review. Ask me to **suggest a fix** when you're ready.`,
       );

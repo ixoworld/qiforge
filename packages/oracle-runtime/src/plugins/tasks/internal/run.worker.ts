@@ -65,20 +65,26 @@ export class TaskRunWorker extends WorkerHost {
     }
 
     try {
-      const output = await this.invoker.run({
-        did: owner,
-        sessionId: spec.frontmatter.sessionId,
-        message: spec.body,
-      });
-
       const roomId = await this.delivery.resolveRoom(spec);
       if (!roomId) {
         throw new Error('Could not resolve a delivery room');
       }
 
+      const output = await this.invoker.runOnce({
+        did: owner,
+        message: spec.body,
+        // Anchor the throwaway session in the task's delivery room so
+        // `RequestPreparer` skips its own Matrix room-resolution lookup.
+        roomId:
+          spec.frontmatter.delivery.roomId === 'main' ? undefined : roomId,
+      });
+
       if (spec.frontmatter.approval === 'before-delivery') {
         await this.approval.request({ taskId, owner, roomId, output });
       } else {
+        // `post` throws on Matrix failure → the run fails → BullMQ retries.
+        // A silent log-and-continue here would mean "task succeeded" while
+        // the user never saw the result.
         await this.delivery.post(roomId, output);
       }
 
@@ -148,7 +154,7 @@ export class TaskRunWorker extends WorkerHost {
     await this.scheduler.cancelRuns(taskId);
     const roomId = await this.delivery.resolveRoom(spec);
     if (roomId) {
-      await this.delivery.post(
+      await this.delivery.safePost(
         roomId,
         `🛑 Task \`${taskId}\` failed ${count} times in a row and is paused for review. Ask me to **suggest a fix** when you're ready.`,
       );

@@ -74,20 +74,13 @@ function previewTask(getRuntime: GetTasksRuntime): PluginTool {
       const rt = requireRuntime(getRuntime);
       const body = renderIntentBody(args.intent);
 
-      // A real session, a real agent turn, then the session row is removed.
-      const sessionId = await rt.invoker.createSession(ctx.user.did);
-      let output: string;
-      try {
-        output = await rt.invoker.run({
-          did: ctx.user.did,
-          sessionId,
-          message: body,
-        });
-      } finally {
-        await rt.invoker
-          .deleteSession(ctx.user.did, sessionId)
-          .catch(() => undefined);
-      }
+      // `runOnce` creates a synthetic session that Matrix never sees, runs
+      // one agent turn, and deletes the session. No "New Conversation
+      // Started" gets posted into the user's main room.
+      const output = await rt.invoker.runOnce({
+        did: ctx.user.did,
+        message: body,
+      });
 
       const previewToken = randomBytes(12).toString('hex');
       await rt.state.putPreview(
@@ -127,7 +120,12 @@ function createTask(getRuntime: GetTasksRuntime): PluginTool {
       const owner = ctx.user.did;
       const body = renderIntentBody(args.intent);
 
-      const claim = await rt.state.consumePreview(args.previewToken);
+      // ── Validate everything BEFORE doing anything destructive ────────
+      // The preview token is checked non-destructively (`peek`); we only
+      // delete it once the spec is saved, so a validation failure here
+      // doesn't burn the user's preview.
+
+      const claim = await rt.state.peekPreview(args.previewToken);
       if (!claim || claim.owner !== owner) {
         return {
           ok: false,
@@ -142,8 +140,7 @@ function createTask(getRuntime: GetTasksRuntime): PluginTool {
         };
       }
 
-      const existing = await rt.store.list(owner);
-      const live = existing.filter(
+      const live = (await rt.store.list(owner)).filter(
         (t) =>
           t.frontmatter.status !== 'cancelled' &&
           t.frontmatter.status !== 'completed',
@@ -163,6 +160,8 @@ function createTask(getRuntime: GetTasksRuntime): PluginTool {
         };
       }
 
+      // ── Commit ───────────────────────────────────────────────────────
+
       const taskId = newTaskId();
       const spec: TaskSpec = {
         frontmatter: {
@@ -173,7 +172,6 @@ function createTask(getRuntime: GetTasksRuntime): PluginTool {
           delivery: { roomId: 'main' },
           approval: args.approval,
           status: 'active',
-          sessionId: '', // set below — room first, session anchored in it
           stats: { nextRunAt },
         },
         body,
@@ -186,22 +184,18 @@ function createTask(getRuntime: GetTasksRuntime): PluginTool {
           explicit: args.dedicatedRoom,
         })
       ) {
-        const roomId = await rt.delivery.createDedicatedRoom(
+        const dedicatedRoomId = await rt.delivery.createDedicatedRoom(
           spec,
           ctx.user.matrixUserId,
         );
-        if (roomId) spec.frontmatter.delivery.roomId = roomId;
+        if (dedicatedRoomId) spec.frontmatter.delivery.roomId = dedicatedRoomId;
       }
-
-      spec.frontmatter.sessionId = await rt.invoker.createSession(
-        owner,
-        spec.frontmatter.delivery.roomId === 'main'
-          ? undefined
-          : spec.frontmatter.delivery.roomId,
-      );
 
       await rt.store.save(spec);
       await rt.scheduler.enqueueRun(taskId, owner, nextRunAt);
+      // Only now consume the token — every preceding step that could fail
+      // has succeeded.
+      await rt.state.deletePreview(args.previewToken);
 
       return {
         ok: true,
@@ -265,8 +259,15 @@ function getTask(getRuntime: GetTasksRuntime): PluginTool {
       const failures = await rt.state.getFailures(taskId);
       return {
         ok: true,
-        ...spec.frontmatter,
+        // Curated — internal fields (owner, raw trigger) aren't useful to
+        // the agent and only inflate the response.
+        taskId: spec.frontmatter.id,
+        title: spec.frontmatter.title,
+        status: spec.frontmatter.status,
         trigger: summarizeTrigger(spec.frontmatter.trigger),
+        nextRunAt: spec.frontmatter.stats.nextRunAt,
+        approval: spec.frontmatter.approval,
+        roomId: spec.frontmatter.delivery.roomId,
         body: spec.body,
         lastError: failures
           ? {

@@ -14,7 +14,7 @@ A clean-sheet design for the bundled `tasks` plugin in `@ixo/oracle-runtime`. Th
 
 The previous attempt — `ORA-165` — designed an elaborate system around six task types, a Y.Doc + BlockNote "task page", chunked Matrix state-event indexes, a 700-line task-manager sub-agent prompt, and approval plumbing buried inside `MessagesService`. It worked, but creating a task felt like filing a tax return and editing the agent's behaviour required editing a wall of prose.
 
-This rebuild collapses tasks down to a single primitive expressed in plain markdown, runs them out of one BullMQ queue, exposes a small set of tools directly on the main agent (no sub-agent), and stores the user-readable artifact (`spec.md`) behind a 4-method filesystem port (`TaskFs`). Today the port is Redis-backed; when the runtime grows a UCAN per-user filesystem (same auth model as `sandbox`), we swap one DI binding. Workers do **not** rebuild a `RuntimeContext` — each task owns a real session and workers call `MessagesService.sendMessage` on it, inheriting credits, auth, and checkpointer plumbing for free (plus per-task memory across runs).
+This rebuild collapses tasks down to a single primitive expressed in plain markdown, runs them out of one BullMQ queue, exposes a small set of tools directly on the main agent (no sub-agent), and stores the user-readable artifact (`spec.md`) behind a 4-method filesystem port (`TaskFs`). Today the port is Redis-backed; when the runtime grows a UCAN per-user filesystem (same auth model as `sandbox`), we swap one DI binding. Workers do **not** rebuild a `RuntimeContext` — each run creates a synthetic session that Matrix never sees, calls `MessagesService.sendMessage` on it, deletes the session — so credits, auth, and the checkpointer all apply unchanged, and nothing leaks into the user's main room or session list.
 
 ## Goals
 
@@ -39,7 +39,7 @@ This rebuild collapses tasks down to a single primitive expressed in plain markd
 | N5  | Token encryption (`apps/app/src/tasks/token-encryption.ts`). | UCAN handles per-call auth via `SecretsService`. The encryption shim is deleted.                                                                      |
 | N6  | Chunked task-index Matrix state events.                      | A single Redis hash per user is the index. Browsable via `list_my_tasks`.                                                                             |
 | N7  | Migrating live production tasks.                             | If any survive on `apps/app`, the team will recreate them post-cutover. No migration tooling.                                                         |
-| N8  | Building a parallel "background `RuntimeContext`" path.      | The worker calls `MessagesService.sendMessage` on the task's own session. Whatever exists for `/messages` exists for tasks. §10.                      |
+| N8  | Building a parallel "background `RuntimeContext`" path.      | The worker calls `MessagesService.sendMessage` on a synthetic per-run session. Whatever exists for `/messages` exists for tasks. §10.                 |
 | N9  | Webhook / chain triggers in this rebuild.                    | Deferred to FOLLOWUP-2. Cron + one-shot cover the actual MVP demand.                                                                                  |
 | N10 | A bespoke `TaskSpecStore` god-object with 15 methods.        | The port is a 4-method filesystem (`TaskFs`). Ephemeral state (locks, pending approvals) lives directly on Redis and never goes through the port. §6. |
 
@@ -145,7 +145,6 @@ delivery:
   roomId: '!XYZ:matrix.ixo.earth' # dedicated task room (or "main")
 approval: never # or "before-delivery"
 status: active # active | paused | failed-pending-review | completed | cancelled
-sessionId: '$threadRoot:ixo.world' # the task's persistent agent session
 stats:
   nextRunAt: '2026-06-09T05:00:00Z' # the only run bookkeeping kept on disk
 ---
@@ -186,15 +185,11 @@ const TaskFrontmatterSchema = z.object({
       'cancelled',
     ])
     .default('active'),
-  // The task's persistent agent session (LangGraph thread). Created once at
-  // create_task; every run continues this thread, so the task keeps memory
-  // across runs ("compare to what you reported yesterday").
-  sessionId: z.string(),
   stats: z.object({ nextRunAt: z.string().datetime().nullable() }),
 });
 ```
 
-Deliberately absent: `modelTier` (the `MessagesService` path has no per-call model override, so storing one would be a lie — model selection is a follow-up) and `delivery.format` (the `## How to report` body section is the format contract).
+Deliberately absent: `modelTier` (the `MessagesService` path has no per-call model override, so storing one would be a lie — model selection is a follow-up); `delivery.format` (the `## How to report` body section is the format contract); and `sessionId` (every run uses a synthetic session that's created and deleted inside the run — see §10).
 
 **Body shape:** three optional `##` sections, free markdown. The worker passes the body verbatim into the user-message slot of the agent invocation; the frontmatter never reaches the LLM.
 
@@ -475,14 +470,13 @@ We ship Option A. The Tasks plugin's worker injects `MessagesService` and that's
 
 It turned out the runtime needs **zero new surface**. `MessagesService.sendMessage` already accepts a non-HTTP shape — the Matrix listener path uses it (`msgFromMatrixRoom: true`, which also suppresses the Matrix replay of input and output, exactly what Tasks wants since it owns delivery). The only hard requirement is that `sessionId` refers to a **real session**: `RequestPreparer.prepare()` throws `NotFoundException` for unknown ids.
 
-So `AgentInvoker` (the plugin's thin wrapper) does:
+So `AgentInvoker.runOnce({ did, message, roomId? })` does:
 
-- **`createSession(did, roomId?)`** — `SessionManagerService.createSession({ did, roomId, ... })`. The session anchors in the task's dedicated room when there is one, otherwise the user's main oracle room (resolved inside `createSession`). Called **once per task** at `create_task`; the id is stored in the spec's `sessionId` frontmatter field.
-- **`run({ did, sessionId, message })`** — `messages.sendMessage({ did, sessionId, message, stream: false, msgFromMatrixRoom: true, clientType: 'matrix' })`, returning the assistant's text.
+1. **Create a synthetic session.** `SessionManagerService.createSession(dto, overrideEventId)` — when the second arg is supplied, it skips the `"New Conversation Started"` Matrix post that normally accompanies session creation. The session row lives only in SQLite for a fraction of a second, long enough for `RequestPreparer.prepare()` to look it up. The user's main Matrix room stays clean; the user's session list stays clean.
+2. **Run one agent turn.** `messages.sendMessage({ did, sessionId, message, stream: false, msgFromMatrixRoom: true, clientType: 'matrix' })`, returning the assistant's text.
+3. **Delete the session.** Best-effort `deleteSession` in a `finally`.
 
-Because every run continues the same LangGraph thread, **a task has memory across runs** — the url-monitor template's "compare to what you reported last time" works out of the box via the checkpointer, no extra storage.
-
-`preview_task` uses the same path with a throwaway session (created, run once, deleted), so previews exercise the real agent with the real toolset.
+`preview_task` and every scheduled run use the same `runOnce`. Tasks are stateless across runs (each fires fresh) — memory across runs, if ever needed, is FOLLOWUP-11.
 
 ### 10.3 What this kills
 
@@ -514,15 +508,16 @@ export class TaskRunWorker extends WorkerHost {
       return; // duplicate delivery — already running
 
     try {
-      // The whole "invoke the main agent" call — on the task's own session.
-      const output = await this.invoker.run({
-        did: owner,
-        sessionId: spec.frontmatter.sessionId,
-        message: spec.body,
-      });
-
       const roomId = await this.delivery.resolveRoom(spec);
       if (!roomId) throw new Error('Could not resolve a delivery room');
+
+      // The whole "invoke the main agent" call — fresh synthetic session.
+      const output = await this.invoker.runOnce({
+        did: owner,
+        message: spec.body,
+        roomId:
+          spec.frontmatter.delivery.roomId === 'main' ? undefined : roomId,
+      });
 
       if (spec.frontmatter.approval === 'before-delivery') {
         await this.approval.request({ taskId, owner, roomId, output });
@@ -617,8 +612,8 @@ output: z.object({
 2. Enforce `TASKS_MAX_PER_USER` against the user's live (non-cancelled, non-completed) tasks.
 3. Compute `nextRunAt`; reject triggers with no future fire time.
 4. Resolve `dedicatedRoom` policy (§8); create the `[Task]` room (spec posted as opening message) when it applies.
-5. Create the task's persistent session, anchored in the dedicated room when there is one (§10.2).
-6. `TaskStore.save(spec)` + `SchedulerService.enqueueRun(taskId, owner, nextRunAt)`.
+5. `TaskStore.save(spec)` + `SchedulerService.enqueueRun(taskId, owner, nextRunAt)`.
+6. `state.deletePreview(previewToken)` — only now is the token destroyed. Anything that could have failed already succeeded, so a token destroyed here means a task is genuinely committed; a failure before step 5 leaves the token usable so the user can retry without re-previewing.
 
 ### 13.3 `list_my_tasks`
 
@@ -748,18 +743,18 @@ These are deliberately **not** in scope. Filed here so they aren't lost. Most ar
 
 ## 20. Glossary
 
-| Term                | Meaning                                                                                                                                                              |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **TaskSpec**        | The whole task expressed as YAML frontmatter + markdown body. Stored as one string.                                                                                  |
-| **`spec.md`**       | The on-disk filename for a TaskSpec at `/users/<did>/tasks/<id>/spec.md`. Today backed by Redis; tomorrow by the UCAN per-user filesystem.                           |
-| **`TaskFs`**        | The 4-method filesystem port (`read/write/delete/list`) that decouples the plugin from its storage backend. §6.                                                      |
-| **Dedicated room**  | A Matrix room created per-task for tasks whose frequency or complexity warrants isolation. §8.                                                                       |
-| **Approval gate**   | A `wrapModelCall` middleware that intercepts user replies when a pending approval exists for the room. Replaces deleted `tryHandleApprovalResponse`. §9.             |
-| **`AgentInvoker`**  | The plugin's thin wrapper over `MessagesService.sendMessage` + real per-task sessions — how workers run the agent off-request with zero new runtime surface. §10.    |
-| **Task session**    | The persistent LangGraph thread (stored as `sessionId` in the frontmatter) every run of a task continues — tasks have memory across runs. §10.2.                     |
-| **Preview token**   | A short-lived single-use Redis key proving a `preview_task` ran against a specific spec hash. Required by `create_task`. §13.1.                                      |
-| **Run lock**        | Redis SETNX on `tasks:lock:<taskId>` preventing concurrent execution of the same task. §11.                                                                          |
-| **Failure counter** | Redis hash `tasks:failures:<taskId>` holding `{ count, lastError, lastFailedAt }`. Drives the `failed-pending-review` transition and feeds `suggest_spec_fix`. §6.4. |
+| Term                | Meaning                                                                                                                                                                       |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TaskSpec**        | The whole task expressed as YAML frontmatter + markdown body. Stored as one string.                                                                                           |
+| **`spec.md`**       | The on-disk filename for a TaskSpec at `/users/<did>/tasks/<id>/spec.md`. Today backed by Redis; tomorrow by the UCAN per-user filesystem.                                    |
+| **`TaskFs`**        | The 4-method filesystem port (`read/write/delete/list`) that decouples the plugin from its storage backend. §6.                                                               |
+| **Dedicated room**  | A Matrix room created per-task for tasks whose frequency or complexity warrants isolation. §8.                                                                                |
+| **Approval gate**   | A `wrapModelCall` middleware that intercepts user replies when a pending approval exists for the room. Replaces deleted `tryHandleApprovalResponse`. §9.                      |
+| **`AgentInvoker`**  | The plugin's thin wrapper over `MessagesService.sendMessage` + real per-task sessions — how workers run the agent off-request with zero new runtime surface. §10.             |
+| **`runOnce`**       | The plugin's thin invoker — creates a synthetic Matrix-invisible session, runs one agent turn, deletes the session. Used by `preview_task` and by every scheduled run. §10.2. |
+| **Preview token**   | A short-lived single-use Redis key proving a `preview_task` ran against a specific spec hash. Required by `create_task`. §13.1.                                               |
+| **Run lock**        | Redis SETNX on `tasks:lock:<taskId>` preventing concurrent execution of the same task. §11.                                                                                   |
+| **Failure counter** | Redis hash `tasks:failures:<taskId>` holding `{ count, lastError, lastFailedAt }`. Drives the `failed-pending-review` transition and feeds `suggest_spec_fix`. §6.4.          |
 
 ---
 
@@ -801,7 +796,6 @@ delivery:
   roomId: main
 approval: never
 status: active
-sessionId: '$abc123:ixo.world'
 stats:
   nextRunAt: '2026-06-09T05:00:00Z'
 ---

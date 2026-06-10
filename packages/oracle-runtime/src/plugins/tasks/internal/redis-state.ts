@@ -98,10 +98,19 @@ export class RedisState {
     );
   }
 
-  /** Read-and-delete — a preview token is single-use. */
-  async consumePreview(token: string): Promise<PreviewClaim | null> {
-    const raw = await this.redis.getdel(KEY.preview(token));
+  /**
+   * Non-destructive — `create_task` peeks to validate before doing any
+   * persisting work, so a validation failure (task limit, bad trigger)
+   * doesn't burn the user's token.
+   */
+  async peekPreview(token: string): Promise<PreviewClaim | null> {
+    const raw = await this.redis.get(KEY.preview(token));
     return raw ? (JSON.parse(raw) as PreviewClaim) : null;
+  }
+
+  /** Destructive — call once `create_task` has fully committed. */
+  async deletePreview(token: string): Promise<void> {
+    await this.redis.del(KEY.preview(token));
   }
 
   // ── pending approvals ───────────────────────────────────────────────────
@@ -132,14 +141,21 @@ export class RedisState {
     );
   }
 
-  /** SETNX claim so duplicate replies / redeliveries resolve exactly once. */
-  async claimApprovalResolution(taskId: string): Promise<boolean> {
+  /**
+   * SETNX claim so duplicate replies / redeliveries resolve exactly once.
+   * TTL matches the pending-approval TTL so a crash that loses the clear
+   * step can't let a stale resolver win a second time inside the window.
+   */
+  async claimApprovalResolution(
+    taskId: string,
+    ttlSec: number,
+  ): Promise<boolean> {
     return (
       (await this.redis.set(
         KEY.approvalClaim(taskId),
         '1',
         'EX',
-        300,
+        ttlSec,
         'NX',
       )) === 'OK'
     );
