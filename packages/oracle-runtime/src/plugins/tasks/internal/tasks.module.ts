@@ -1,78 +1,45 @@
-import { BullModule, getQueueToken } from '@nestjs/bullmq';
-import {
-  Global,
-  Inject,
-  Module,
-  OnModuleDestroy,
-  OnModuleInit,
-  type DynamicModule,
-  type Provider,
-} from '@nestjs/common';
+import { BullModule } from '@nestjs/bullmq';
+import { Inject, Module, type DynamicModule } from '@nestjs/common';
+import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
-import {
-  ApprovalService,
-  APPROVAL_GATE_PORT,
-} from './approval/approval.service.js';
-import { IntentClassifier } from './approval/intent-classifier.js';
-import { TASKS_CONFIG, type TasksConfig } from './config.token.js';
-import { DedicatedRoomService } from './delivery/dedicated-room.service.js';
-import { PostResultService } from './delivery/post-result.js';
-import { RoomResolver } from './delivery/room-resolver.js';
-import { AutomationInvoker } from './runtime/automation-invoker.js';
-import { QUEUE_DEFAULT_OPTIONS, QUEUE_NAMES } from './scheduler/queues.js';
-import { SchedulerService } from './scheduler/scheduler.service.js';
-import { EphemeralStateService } from './store/ephemeral-state.js';
-import { RedisTaskFs } from './store/redis-task-fs.js';
-import { TASKS_REDIS } from './store/redis.token.js';
-import { TASK_FS } from './store/task-fs.js';
-import { bindTasksTools } from './tools/shared.js';
-import { ApprovalEventsWorker } from './worker/approval-events.worker.js';
-import { TaskRunWorker } from './worker/task-run.worker.js';
 import { MessagesModule } from '../../../modules/messages/messages.module.js';
 import { SessionsModule } from '../../../modules/sessions/sessions.module.js';
+import { ApprovalService, APPROVAL_GATE_PORT } from './approval.js';
+import { DeliveryService } from './delivery.js';
+import { AgentInvoker } from './invoker.js';
+import { RedisState, TASKS_REDIS } from './redis-state.js';
+import { TaskRunWorker } from './run.worker.js';
+import {
+  TASKS_RUNTIME_CONFIG,
+  type TasksRuntime,
+  type TasksRuntimeConfig,
+} from './runtime.js';
+import {
+  APPROVAL_QUEUE,
+  APPROVAL_QUEUE_OPTIONS,
+  RUN_QUEUE,
+  RUN_QUEUE_OPTIONS,
+  SchedulerService,
+} from './scheduler.js';
+import { RedisTaskFs, TASK_FS } from './task-fs.js';
+import { TaskStore } from './task-store.js';
+import { ApprovalTimeoutWorker } from './timeout.worker.js';
 
-function configProvider(): Provider {
-  return {
-    provide: TASKS_CONFIG,
-    inject: [ConfigService],
-    useFactory: (config: ConfigService): TasksConfig => ({
-      redisUrl: config.getOrThrow<string>('REDIS_URL'),
-      defaultTimezone: config.get<string>('TASKS_DEFAULT_TIMEZONE') ?? 'UTC',
-      maxPerUser: Number(config.get('TASKS_MAX_PER_USER') ?? 50),
-      runLockTtlSec: Number(config.get('TASKS_RUN_LOCK_TTL_SEC') ?? 600),
-      maxConsecutiveFailures: 3,
-    }),
-  };
+export interface TasksModuleOptions {
+  /**
+   * Called from `onModuleInit` with the wired service bundle. The plugin
+   * instance stores it so its tools and middleware (created at boot, before
+   * Nest initialises) can reach the module's services lazily.
+   */
+  onReady: (runtime: TasksRuntime) => void;
 }
 
-function redisProvider(): Provider {
-  return {
-    provide: TASKS_REDIS,
-    inject: [TASKS_CONFIG],
-    useFactory: (cfg: TasksConfig): Redis => {
-      return new Redis(cfg.redisUrl, {
-        maxRetriesPerRequest: null,
-        enableReadyCheck: true,
-      });
-    },
-  };
-}
+const OPTIONS = Symbol('TASKS_MODULE_OPTIONS');
 
-const fsProvider: Provider = {
-  provide: TASK_FS,
-  useClass: RedisTaskFs,
-};
-
-const approvalPortProvider: Provider = {
-  provide: APPROVAL_GATE_PORT,
-  useExisting: ApprovalService,
-};
-
-@Global()
 @Module({})
 export class TasksModule implements OnModuleInit, OnModuleDestroy {
-  static register(): DynamicModule {
+  static register(options: TasksModuleOptions): DynamicModule {
     return {
       module: TasksModule,
       imports: [
@@ -80,80 +47,80 @@ export class TasksModule implements OnModuleInit, OnModuleDestroy {
         MessagesModule,
         SessionsModule,
         BullModule.forRootAsync({
-          inject: [TASKS_CONFIG],
-          useFactory: (cfg: TasksConfig) => ({
+          imports: [ConfigModule],
+          inject: [ConfigService],
+          useFactory: (config: ConfigService) => ({
             connection: {
-              url: cfg.redisUrl,
+              url: config.getOrThrow<string>('REDIS_URL'),
               maxRetriesPerRequest: null,
               enableReadyCheck: true,
             },
           }),
         }),
-        BullModule.registerQueue({
-          name: QUEUE_NAMES.RUN,
-          defaultJobOptions: QUEUE_DEFAULT_OPTIONS[QUEUE_NAMES.RUN],
-        }),
-        BullModule.registerQueue({
-          name: QUEUE_NAMES.APPROVAL,
-          defaultJobOptions: QUEUE_DEFAULT_OPTIONS[QUEUE_NAMES.APPROVAL],
-        }),
+        BullModule.registerQueue(
+          { name: RUN_QUEUE, defaultJobOptions: RUN_QUEUE_OPTIONS },
+          { name: APPROVAL_QUEUE, defaultJobOptions: APPROVAL_QUEUE_OPTIONS },
+        ),
       ],
       providers: [
-        configProvider(),
-        redisProvider(),
-        fsProvider,
-        EphemeralStateService,
+        { provide: OPTIONS, useValue: options },
+        {
+          provide: TASKS_RUNTIME_CONFIG,
+          inject: [ConfigService],
+          useFactory: (config: ConfigService): TasksRuntimeConfig => ({
+            maxTasksPerUser: Number(config.get('TASKS_MAX_PER_USER') ?? 50),
+            runLockTtlSec: Number(config.get('TASKS_RUN_LOCK_TTL_SEC') ?? 600),
+          }),
+        },
+        {
+          provide: TASKS_REDIS,
+          inject: [ConfigService],
+          useFactory: (config: ConfigService) =>
+            new Redis(config.getOrThrow<string>('REDIS_URL'), {
+              maxRetriesPerRequest: null,
+              enableReadyCheck: true,
+            }),
+        },
+        { provide: TASK_FS, useClass: RedisTaskFs },
+        RedisState,
+        TaskStore,
         SchedulerService,
-        IntentClassifier,
-        PostResultService,
-        RoomResolver,
-        DedicatedRoomService,
-        AutomationInvoker,
+        DeliveryService,
+        AgentInvoker,
         ApprovalService,
-        approvalPortProvider,
+        { provide: APPROVAL_GATE_PORT, useExisting: ApprovalService },
         TaskRunWorker,
-        ApprovalEventsWorker,
+        ApprovalTimeoutWorker,
       ],
-      exports: [
-        TASKS_REDIS,
-        TASK_FS,
-        TASKS_CONFIG,
-        ApprovalService,
-        APPROVAL_GATE_PORT,
-        getQueueToken(QUEUE_NAMES.RUN),
-        getQueueToken(QUEUE_NAMES.APPROVAL),
-      ],
+      exports: [APPROVAL_GATE_PORT],
     };
   }
 
   constructor(
-    @Inject(TASK_FS) private readonly fs: RedisTaskFs,
-    private readonly scheduler: SchedulerService,
-    private readonly state: EphemeralStateService,
-    private readonly approval: ApprovalService,
-    private readonly roomResolver: RoomResolver,
-    private readonly dedicatedRoom: DedicatedRoomService,
-    private readonly post: PostResultService,
-    private readonly invoker: AutomationInvoker,
+    @Inject(OPTIONS) private readonly options: TasksModuleOptions,
+    @Inject(TASKS_RUNTIME_CONFIG) private readonly config: TasksRuntimeConfig,
     @Inject(TASKS_REDIS) private readonly redis: Redis,
+    private readonly store: TaskStore,
+    private readonly state: RedisState,
+    private readonly scheduler: SchedulerService,
+    private readonly delivery: DeliveryService,
+    private readonly approval: ApprovalService,
+    private readonly invoker: AgentInvoker,
   ) {}
 
   onModuleInit(): void {
-    bindTasksTools({
-      fs: this.fs,
-      scheduler: this.scheduler,
+    this.options.onReady({
+      config: this.config,
+      store: this.store,
       state: this.state,
+      scheduler: this.scheduler,
+      delivery: this.delivery,
       approval: this.approval,
-      roomResolver: this.roomResolver,
-      dedicatedRoom: this.dedicatedRoom,
-      post: this.post,
       invoker: this.invoker,
     });
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.redis.quit().catch(() => {
-      /* ignore */
-    });
+    await this.redis.quit().catch(() => undefined);
   }
 }

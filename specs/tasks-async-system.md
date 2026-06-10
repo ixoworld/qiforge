@@ -14,7 +14,7 @@ A clean-sheet design for the bundled `tasks` plugin in `@ixo/oracle-runtime`. Th
 
 The previous attempt — `ORA-165` — designed an elaborate system around six task types, a Y.Doc + BlockNote "task page", chunked Matrix state-event indexes, a 700-line task-manager sub-agent prompt, and approval plumbing buried inside `MessagesService`. It worked, but creating a task felt like filing a tax return and editing the agent's behaviour required editing a wall of prose.
 
-This rebuild collapses tasks down to a single primitive expressed in plain markdown, runs them out of one BullMQ queue, exposes a small set of tools directly on the main agent (no sub-agent), and stores the user-readable artifacts (`spec.md`, `runs.jsonl`) behind a 4-method filesystem port (`TaskFs`). Today the port is Redis-backed; when the runtime grows a UCAN per-user filesystem (same auth model as `sandbox`), we swap one DI binding. Workers do **not** rebuild a `RuntimeContext` — they call `MessagesService.invokeForAutomation` and inherit credits, auth, and checkpointer plumbing for free.
+This rebuild collapses tasks down to a single primitive expressed in plain markdown, runs them out of one BullMQ queue, exposes a small set of tools directly on the main agent (no sub-agent), and stores the user-readable artifact (`spec.md`) behind a 4-method filesystem port (`TaskFs`). Today the port is Redis-backed; when the runtime grows a UCAN per-user filesystem (same auth model as `sandbox`), we swap one DI binding. Workers do **not** rebuild a `RuntimeContext` — each task owns a real session and workers call `MessagesService.sendMessage` on it, inheriting credits, auth, and checkpointer plumbing for free (plus per-task memory across runs).
 
 ## Goals
 
@@ -39,7 +39,7 @@ This rebuild collapses tasks down to a single primitive expressed in plain markd
 | N5  | Token encryption (`apps/app/src/tasks/token-encryption.ts`). | UCAN handles per-call auth via `SecretsService`. The encryption shim is deleted.                                                                      |
 | N6  | Chunked task-index Matrix state events.                      | A single Redis hash per user is the index. Browsable via `list_my_tasks`.                                                                             |
 | N7  | Migrating live production tasks.                             | If any survive on `apps/app`, the team will recreate them post-cutover. No migration tooling.                                                         |
-| N8  | Building a parallel "background `RuntimeContext`" path.      | The worker calls `MessagesService.invokeForAutomation`. Whatever exists for `/messages` exists for tasks. §10.                                        |
+| N8  | Building a parallel "background `RuntimeContext`" path.      | The worker calls `MessagesService.sendMessage` on the task's own session. Whatever exists for `/messages` exists for tasks. §10.                      |
 | N9  | Webhook / chain triggers in this rebuild.                    | Deferred to FOLLOWUP-2. Cron + one-shot cover the actual MVP demand.                                                                                  |
 | N10 | A bespoke `TaskSpecStore` god-object with 15 methods.        | The port is a 4-method filesystem (`TaskFs`). Ephemeral state (locks, pending approvals) lives directly on Redis and never goes through the port. §6. |
 
@@ -100,7 +100,7 @@ graph LR
     Create --> Store[(TaskFs: spec.md)]
     Create --> Enqueue[BullMQ: task_run]
     Enqueue --> Worker[task_run worker]
-    Worker --> Invoke[MessagesService.invokeForAutomation]
+    Worker --> Invoke[MessagesService.sendMessage on the task's session]
     Invoke --> Tools2[Composio / Firecrawl / Memory / ...]
     Invoke --> Out[output + tokens + cost]
     Out --> Approval{approval before delivery?}
@@ -134,7 +134,7 @@ There is no `taskType`. The job is always the same: invoke the main agent agains
 
 ```markdown
 ---
-id: task_a1b2c3d4
+id: task_a1b2c3d4e5f6
 owner: did:ixo:abc...
 title: Morning Crypto Brief
 trigger:
@@ -143,12 +143,11 @@ trigger:
   tz: Africa/Cairo
 delivery:
   roomId: '!XYZ:matrix.ixo.earth' # dedicated task room (or "main")
-  format: report
 approval: never # or "before-delivery"
-modelTier: medium
-status: active # draft | active | paused | failed-pending-review | completed | cancelled
+status: active # active | paused | failed-pending-review | completed | cancelled
+sessionId: '$threadRoot:ixo.world' # the task's persistent agent session
 stats:
-  nextRunAt: '2026-06-09T05:00:00Z' # the only field maintained on disk
+  nextRunAt: '2026-06-09T05:00:00Z' # the only run bookkeeping kept on disk
 ---
 
 ## What to do
@@ -169,30 +168,33 @@ Concise paragraph + bullet list of movers. Link sources.
 **Frontmatter schema:**
 
 ```ts
-const TaskSpecFrontmatter = z.object({
+const TaskFrontmatterSchema = z.object({
   id: z.string().regex(/^task_[a-f0-9]{12}$/),
   owner: z.string(), // user DID
   title: z.string().min(1).max(120),
   trigger: TriggerSchema, // discriminated union — §7
   delivery: z.object({
     roomId: z.union([z.literal('main'), z.string()]),
-    format: z.enum(['message', 'report', 'json']).default('message'),
   }),
   approval: z.enum(['never', 'before-delivery']).default('never'),
-  modelTier: z.enum(['low', 'medium', 'high']).default('medium'),
   status: z
     .enum([
-      'draft',
       'active',
       'paused',
       'failed-pending-review',
       'completed',
       'cancelled',
     ])
-    .default('draft'),
-  stats: z.object({ nextRunAt: z.string().nullable() }),
+    .default('active'),
+  // The task's persistent agent session (LangGraph thread). Created once at
+  // create_task; every run continues this thread, so the task keeps memory
+  // across runs ("compare to what you reported yesterday").
+  sessionId: z.string(),
+  stats: z.object({ nextRunAt: z.string().datetime().nullable() }),
 });
 ```
+
+Deliberately absent: `modelTier` (the `MessagesService` path has no per-call model override, so storing one would be a lie — model selection is a follow-up) and `delivery.format` (the `## How to report` body section is the format contract).
 
 **Body shape:** three optional `##` sections, free markdown. The worker passes the body verbatim into the user-message slot of the agent invocation; the frontmatter never reaches the LLM.
 
@@ -230,7 +232,6 @@ export class TasksPlugin extends OraclePlugin {
 
   configSchema = z.object({
     REDIS_URL: z.string(),
-    TASKS_DEFAULT_TIMEZONE: z.string().default('UTC'),
     TASKS_MAX_PER_USER: z.coerce.number().int().positive().default(50),
     TASKS_RUN_LOCK_TTL_SEC: z.coerce.number().int().positive().default(600),
   });
@@ -240,91 +241,57 @@ export class TasksPlugin extends OraclePlugin {
 
   softDependsOn = ['memory']; // memory enriches but is not required
 
-  getTools(ctx: PluginContext): PluginTool[] {
-    return [
-      previewTaskTool(ctx),
-      createTaskTool(ctx),
-      listMyTasksTool(ctx),
-      getTaskTool(ctx),
-      updateTaskTool(ctx),
-      pauseTaskTool(ctx),
-      resumeTaskTool(ctx),
-      cancelTaskTool(ctx),
-      suggestSpecFixTool(ctx),
-    ];
+  // The module's services only exist once Nest initialises, but tools and
+  // the middleware are created at boot. `TasksModule.register({ onReady })`
+  // hands the wired service bundle back; everything reads it lazily.
+  private runtime: TasksRuntime | undefined;
+
+  getTools(): PluginTool[] {
+    return createTaskTools(() => this.runtime); // the 10 tools — §13
   }
 
   getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
-    return [approvalGateMiddleware(ctx)];
+    return [
+      createApprovalGateMiddleware({
+        getRuntime: () => this.runtime,
+        logger: ctx.logger,
+      }),
+    ];
   }
 
-  getNestModules(): Type<unknown>[] {
-    return [TasksModule];
-  }
-
-  getSharedState() {
-    return {
-      myTasks: (_state, rt: RuntimeContext) => this.indexFor(rt.user.did),
-      pendingApprovals: (_state, rt: RuntimeContext) =>
-        this.pendingFor(rt.user.did),
-    };
+  getNestModules(): DynamicModule[] {
+    return [TasksModule.register({ onReady: (rt) => (this.runtime = rt) })];
   }
 }
 ```
 
-The whole plugin surface is: 9 tools, 1 middleware, 1 Nest module, 2 shared-state accessors. No sub-agent.
+The whole plugin surface is: 10 tools, 1 middleware, 1 Nest module. No sub-agent, no service locator, no plugin-owned Redis connections — the module owns the wiring and hands it back through `onReady`.
 
 ## 5. Folder layout
 
+Flat — one file per concern, no nested sub-trees:
+
 ```
 packages/oracle-runtime/src/plugins/tasks/
-├── tasks.plugin.ts
-├── manifest.ts
-├── index.ts
+├── tasks.plugin.ts          # plugin class; owns the lazy TasksRuntime ref
+├── manifest.ts              # PluginManifest + few-shot examples
+├── index.ts                 # TasksPlugin, tasksManifest, APPROVAL_GATE_PORT
 ├── tasks.plugin.test.ts
 └── internal/
-    ├── tasks.module.ts                   # Nest module wired into RuntimeAppModule
-    │
-    ├── domain/
-    │   ├── spec.ts                       # TaskSpec Zod + markdown ↔ object
-    │   └── trigger.ts                    # Trigger discriminated union
-    │
-    ├── store/                            # The TaskFs port (§6)
-    │   ├── task-fs.ts                    # 4-method interface + DI token
-    │   └── redis-task-fs.ts              # Phase-1 Redis implementation
-    │
-    ├── scheduler/
-    │   ├── scheduler.service.ts          # BullMQ wrapper (enqueue/cancel/reschedule)
-    │   ├── queues.ts                     # task_run + task_approval definitions
-    │   └── triggers/
-    │       ├── time.ts                   # cron + delay
-    │       ├── webhook.ts                # Phase 2 — not in MVP
-    │       └── chain.ts                  # Phase 2 — not in MVP
-    │
-    ├── worker/
-    │   ├── task-run.worker.ts            # Thin: load spec → MessagesService → deliver
-    │   └── approval-timeout.worker.ts    # Reminder + expiry of pending approvals
-    │
-    ├── delivery/
-    │   ├── room-resolver.ts              # main room vs dedicated room policy
-    │   ├── dedicated-room.service.ts     # create + invite + post spec.md
-    │   └── post-result.ts                # render-and-post the agent's output
-    │
-    ├── approval/
-    │   ├── approval.service.ts           # Redis state + reminder/expiry scheduling
-    │   ├── approval-gate.middleware.ts   # Pre-LLM intercept on user messages
-    │   └── intent-classifier.ts          # Fast keyword path → tiny-LLM fallback
-    │
-    ├── tools/                            # One tool per file
-    │   ├── preview-task.ts
-    │   ├── create-task.ts
-    │   ├── list-my-tasks.ts
-    │   ├── get-task.ts
-    │   ├── update-task.ts
-    │   ├── pause-resume-cancel.ts
-    │   └── suggest-spec-fix.ts
-    │
-    └── templates/                        # Sample spec.md the agent can copy + fill (Phase 4)
+    ├── spec.ts              # Trigger + TaskSpec Zod, markdown ↔ object, paths, hash
+    ├── task-fs.ts           # TaskFs port (4 methods) + RedisTaskFs adapter
+    ├── task-store.ts        # spec CRUD on top of TaskFs (load/save/list/setStatus)
+    ├── redis-state.ts       # locks, failure counters, preview tokens, pending approvals
+    ├── scheduler.ts         # queue defs + nextRunAtFor() + SchedulerService
+    ├── delivery.ts          # room heuristic + Matrix posting + dedicated rooms
+    ├── approval.ts          # ApprovalService + APPROVAL_GATE_PORT
+    ├── invoker.ts           # AgentInvoker — sessions + MessagesService calls
+    ├── middleware.ts        # approval gate (wrapModelCall) + classifyReplyFast()
+    ├── run.worker.ts        # task_run processor
+    ├── timeout.worker.ts    # task_approval processor (reminder + expiry)
+    ├── runtime.ts           # TasksRuntime bundle type + config token + constants
+    ├── tasks.module.ts      # DynamicModule: BullMQ root + queues + providers
+    └── templates/           # Sample spec.md the agent can copy + fill
         ├── morning-brief.md
         ├── url-monitor.md
         └── weekly-report.md
@@ -456,23 +423,19 @@ This re-implements the plumbing deleted in TASK-32b — and it lives entirely in
 
 ### 9.1 Where the gate plugs in
 
-The plugin registers `approvalGateMiddleware` via `getMiddlewares()`. The middleware is invoked **before** the LLM step in the main agent's graph for every user message.
+The plugin registers `createApprovalGateMiddleware` via `getMiddlewares()`. It's a single `wrapModelCall` hook — it wraps every model invocation in the main agent's graph and can either skip the model entirely (fast path) or call it with extra context (ambiguous path).
 
 ### 9.2 Flow
 
-1. **Pre-check.** Pull the inbound user message text. `GET tasks:approval-room:<roomId>` directly from Redis (1 op — this key is ephemeral state, not a file, so it doesn't go through `TaskFs`; §6.4). If no pending approval exists for this room, return early — no-op.
-2. **Fast classification (keywords).** Lowercase + trim the message; match against:
-   - approve: `yes`, `y`, `ok`, `approve`, `approved`, `do it`, `go`, `ship`, `send`
-   - reject: `no`, `n`, `cancel`, `reject`, `rejected`, `stop`, `don't`, `dont`
-   - If a fast match hits, classification is decided. No LLM call.
-3. **Slow classification (cheap LLM).** Only if the message is ambiguous, call the runtime's `low`-tier model with a tight prompt: _"Classify this reply to a pending approval as `approved`, `rejected`, or `other` (anything else). Return only the label."_ Output is parsed; `other` falls through to the normal agent path (the user is talking about something else).
-4. **Approved** → call `ApprovalService.approve(taskId)`: clear the Redis pending keys, look up the cached output, post it to the room via `delivery/post-result.ts`, reset the failure counter.
-5. **Rejected** → call `ApprovalService.reject(taskId, reasonOptional)`: clear pending keys, log a rejection summary, and re-enqueue the task (counted toward the Redis failure counter — §6.4). If the counter reaches the configurable threshold (default 3), set status to `failed-pending-review` and have `suggest_spec_fix` (§15) propose an edit.
-6. **In all of approved/rejected**, the middleware **swallows the user's message** — it does not propagate to the LLM. The user sees a single confirmation message from the plugin.
+1. **Pre-check.** `GET tasks:approval-room:<roomId>` (1 Redis op — ephemeral state, not a file; §6.4). No pending approval for this room → pass the model call through untouched.
+2. **Fast classification (keywords, no LLM).** Normalize the last user message and match against approve (`yes`, `y`, `ok`, `approve`, `do it`, `go`, `ship`, `send`, …) and reject (`no`, `n`, `cancel`, `reject`, `stop`, `don't`, …) sets, including short two-word prefixes ("yes please", "ok do it").
+3. **Approved** → `ApprovalService.approve(taskId)`: claim the resolution (SETNX), clear pending keys, cancel the timeout jobs, post the cached output to the room, reset the failure counter. The middleware returns a short acknowledgement `AIMessage` directly — **the model is never called**.
+4. **Rejected** → `ApprovalService.reject(taskId)`: same claim/clear/cancel, post a "discarded" notice, record the rejection on the failure counter (§6.4). Threshold (3) reached → status `failed-pending-review` + a "suggest a fix" prompt in the room.
+5. **Ambiguous** ("send it but include volume next time") → the model IS called, with a system-prompt hint appended for this call only: _"a task result is pending approval here; if the reply addresses it, call `resolve_pending_approval`."_ The main agent resolves the nuance itself through that tool — approving, rejecting with a reason, or doing both an approval and a follow-up `update_task`. **There is no bespoke LLM classifier** — the agent that's already running is the classifier.
 
 ### 9.3 Idempotency
 
-The gate sets a one-shot Redis SETNX key `tasks:approval-resolved:<taskId>` with the same TTL as the pending payload. Late duplicates (BullMQ redelivery, Portal-vs-Matrix double ingress) hit this key and short-circuit.
+`ApprovalService` claims each resolution with a one-shot Redis SETNX (`tasks:approval-resolved:<taskId>`) before acting. Late duplicates — double ingress, a fast-path race with the `resolve_pending_approval` tool, BullMQ redelivery of the expiry job — lose the claim and no-op.
 
 ### 9.4 Approval request location
 
@@ -486,9 +449,9 @@ The plugin exports `APPROVAL_GATE_PORT` as a public Nest DI token so other plugi
 interface ApprovalGatePort {
   request(args: {
     taskId: string;
+    owner: string;
     roomId: string;
-    preview: string;
-    ttlSec?: number;
+    output: string;
   }): Promise<void>;
 }
 ```
@@ -508,138 +471,101 @@ The worker does not rebuild `RuntimeContext`, does not call `createMainAgent` di
 
 We ship Option A. The Tasks plugin's worker injects `MessagesService` and that's the whole "background invocation" story.
 
-### 10.2 The entry point we need on `MessagesService`
+### 10.2 The entry point — `sendMessage` as-is, with real sessions
 
-The existing controller path (`POST /messages`) constructs request-scoped state from HTTP. The worker has no HTTP request. So either:
+It turned out the runtime needs **zero new surface**. `MessagesService.sendMessage` already accepts a non-HTTP shape — the Matrix listener path uses it (`msgFromMatrixRoom: true`, which also suppresses the Matrix replay of input and output, exactly what Tasks wants since it owns delivery). The only hard requirement is that `sessionId` refers to a **real session**: `RequestPreparer.prepare()` throws `NotFoundException` for unknown ids.
 
-1. The existing sync batch path on `MessagesService` already accepts a non-HTTP shape — discover this in Phase 1 and use it as-is, **or**
-2. The runtime gains **one** thin entry point:
+So `AgentInvoker` (the plugin's thin wrapper) does:
 
-```ts
-// packages/oracle-runtime/src/modules/messages/messages.service.ts
-async invokeForAutomation(args: {
-  userDid: string;
-  sessionId?: string;             // synthesised if absent
-  message: string;                // the TaskSpec body
-  source: { type: 'task'; taskId: string };
-  deliverToRoomId?: string;       // if set, posts the LLM output to this room
-}): Promise<AutomationResult>;
-```
+- **`createSession(did, roomId?)`** — `SessionManagerService.createSession({ did, roomId, ... })`. The session anchors in the task's dedicated room when there is one, otherwise the user's main oracle room (resolved inside `createSession`). Called **once per task** at `create_task`; the id is stored in the spec's `sessionId` frontmatter field.
+- **`run({ did, sessionId, message })`** — `messages.sendMessage({ did, sessionId, message, stream: false, msgFromMatrixRoom: true, clientType: 'matrix' })`, returning the assistant's text.
 
-`AutomationResult = { output: string; durationMs: number }`. (Token + cost numbers are deducted by the credits middleware as a side effect; surfacing them in the return is FOLLOWUP-2.)
+Because every run continues the same LangGraph thread, **a task has memory across runs** — the url-monitor template's "compare to what you reported last time" works out of the box via the checkpointer, no extra storage.
 
-This is the smallest possible surface to add to the runtime. It reuses every internal helper the controller path uses (`agent-builder`, `BatchInvoker`, checkpointer reads, credits middleware) — it's just a different ingress that builds the `RunConfig` from `{ userDid, sessionId }` instead of from `Request`.
+`preview_task` uses the same path with a throwaway session (created, run once, deleted), so previews exercise the real agent with the real toolset.
 
 ### 10.3 What this kills
 
 - ❌ `BackgroundContextBuilder` — gone.
 - ❌ Manual `buildRuntimeContext(runConfig, ambient, {...})` from the plugin — gone.
-- ❌ Plugin-side DI of `UcanService`, `SecretsService`, `MatrixService`, `LlmAdapter`, `AMBIENT` — gone.
+- ❌ Plugin-side DI of `UcanService`, `SecretsService`, `LlmAdapter`, `AMBIENT` — gone.
+- ❌ A new `invokeForAutomation` method on `MessagesService` — not needed; `sendMessage` + real sessions already cover it.
 - ❌ Concerns about which adapters are `@Global()` — gone.
 
-The Tasks plugin's Nest module needs three injections only: `MessagesService`, `MatrixService` (for posting deliveries to dedicated rooms and run-summary messages), and `TASK_FS`. That's it.
+Outside its own services, the Tasks module injects only `MessagesService`, `SessionManagerService`, and `ConfigService`. Matrix posting goes through the `MatrixManager` singleton, same as every other off-request consumer.
 
 ## 11. The worker pipeline
 
-`task-run.worker.ts` — the hot path. One handler, ~80 LOC. The worker is deliberately dumb: it loads the spec, calls `MessagesService.invokeForAutomation`, handles the result. All agent plumbing lives where it always lived.
+`run.worker.ts` — the hot path. One handler, ~80 LOC. The worker is deliberately dumb: it loads the spec, calls `AgentInvoker.run` (= `MessagesService.sendMessage` on the task's session), handles the result. All agent plumbing lives where it always lived.
 
 ```ts
-@Processor(TASK_RUN_QUEUE)
-export class TaskRunWorker {
-  constructor(
-    @Inject(TASK_FS) private fs: TaskFs,
-    private messages: MessagesService, // §10 — invokes the agent
-    private matrix: MatrixService, // posts deliveries + run summaries
-    private scheduler: SchedulerService, // reschedules recurring tasks
-    private approval: ApprovalService, // owns the approval gate state
-    private roomResolver: RoomResolver,
-    @Inject(REDIS) private redis: Redis, // ephemeral state (§6.4)
-    private cfg: TasksConfig,
-  ) {}
+@Processor(RUN_QUEUE, { concurrency: 5 })
+export class TaskRunWorker extends WorkerHost {
+  // store (spec CRUD), state (locks + failure counter), scheduler,
+  // delivery (rooms + posting), approval, invoker (§10) — all via Nest DI.
 
-  @Process()
-  async handle(
-    job: Job<{ taskId: string; runId: string; chain?: ChainContext }>,
-  ) {
-    const { taskId, runId, chain } = job.data;
-    const ownerPath = await findOwnerPath(this.fs, taskId); // /users/<did>/tasks/<id>/
-    if (!ownerPath) return logSkip('owner gone', taskId);
+  async process(job: Job<RunJobData>) {
+    const { taskId, owner } = job.data;
 
-    const acquired = await acquireLock(
-      this.redis,
-      taskId,
-      this.cfg.runLockTtlSec,
-    );
-    if (!acquired) return logSkip('locked', taskId);
+    const spec = await this.store.load(owner, taskId);
+    if (!spec || spec.frontmatter.status !== 'active') return; // skip silently
+
+    if (!(await this.state.acquireRunLock(taskId, this.config.runLockTtlSec)))
+      return; // duplicate delivery — already running
 
     try {
-      const md = await this.fs.read(`${ownerPath}spec.md`);
-      const spec = parseSpec(md); // §3
-      if (!isRunnable(spec.status)) return;
-
-      const deliveryRoom = await this.roomResolver.resolve(spec, spec.owner);
-
-      // The whole "invoke the main agent" call.
-      const result = await this.messages.invokeForAutomation({
-        userDid: spec.owner,
-        message: composeAgentInput(spec, chain), // spec body + optional chain context
-        source: { type: 'task', taskId },
+      // The whole "invoke the main agent" call — on the task's own session.
+      const output = await this.invoker.run({
+        did: owner,
+        sessionId: spec.frontmatter.sessionId,
+        message: spec.body,
       });
 
-      if (spec.approval === 'before-delivery') {
-        await this.approval.request({
-          taskId,
-          roomId: deliveryRoom,
-          preview: previewOf(result.output),
-          fullPayload: result,
-        });
+      const roomId = await this.delivery.resolveRoom(spec);
+      if (!roomId) throw new Error('Could not resolve a delivery room');
+
+      if (spec.frontmatter.approval === 'before-delivery') {
+        await this.approval.request({ taskId, owner, roomId, output });
       } else {
-        await this.matrix.postToRoom(
-          deliveryRoom,
-          renderDelivery(result, spec),
-        );
+        await this.delivery.post(roomId, output);
       }
 
-      await resetFailureCount(this.redis, taskId); // success → clear lastError
-      await updateNextRunAndReschedule(
-        this.fs,
-        this.scheduler,
-        spec,
-        ownerPath,
-      );
-    } catch (err) {
-      await onRunError(this.redis, this.scheduler, taskId, err); // increments tasks:failures:<id>
+      await this.state.resetFailures(taskId);
+      await this.finishRun(spec); // once → completed; cron → persist + enqueue next
     } finally {
-      await releaseLock(this.redis, taskId);
+      await this.state.releaseRunLock(taskId);
     }
+    // Errors are NOT caught here — they propagate so BullMQ retries with
+    // backoff. Failure bookkeeping lives in onJobFailed (below).
+  }
+
+  @OnWorkerEvent('failed')
+  onJobFailed(job, error) {
+    if (job.attemptsMade < job.opts.attempts) return; // BullMQ will retry — not final
+    // Final attempt exhausted: record ONE failure for the whole run,
+    // reschedule the next cron occurrence (a transient failure must not kill
+    // the task), and at the threshold flip to failed-pending-review + notify.
   }
 }
 ```
 
-Three things to note:
+Things to note:
 
-1. **No `createMainAgent`, no `buildRuntimeContext`, no AMBIENT injection.** Just `MessagesService.invokeForAutomation`.
-2. **No `TaskSpecStore` god-object.** The worker reads `spec.md` via `TaskFs.read`, manipulates ephemeral state on Redis directly (because locks and failure counts are not files), and lets `ApprovalService` own its own Redis keys.
+1. **No `createMainAgent`, no `buildRuntimeContext`, no AMBIENT injection.** One call into `AgentInvoker.run`, which is one call into `MessagesService.sendMessage` (§10.2).
+2. **Failure counting is per-run, not per-attempt.** `process()` throws; BullMQ retries up to 3 times with backoff; only when the final attempt fails does `onJobFailed` increment the consecutive-failure counter. One flaky morning can't burn the whole threshold.
 3. **No run history written to disk.** Matrix is the run log — every delivery is a message in the task's room. Queryable `runs.jsonl` storage is FOLLOWUP-3.
-4. **`MatrixService` is injected only because we still need to post the result somewhere.** Could be folded into `invokeForAutomation` via the optional `deliverToRoomId` parameter (§10.2) — equivalent, choose at implementation time.
+4. **`TaskStore` owns every parse/render/path concern** — the worker never touches raw markdown; `RedisState` owns every ephemeral key — the worker never touches raw Redis.
 
 Two queues, one worker each:
 
-| Queue           | Concurrency            | Retries                                            | Notes                                 |
-| --------------- | ---------------------- | -------------------------------------------------- | ------------------------------------- |
-| `task_run`      | 5 (rate-limited 3/min) | 3 attempts, exponential backoff (30s base, max 5m) | The lock means redeliveries are safe. |
-| `task_approval` | 10                     | 3 attempts, fixed 10s                              | Carries reminder + expiry jobs only.  |
-
-Two queues, one worker each:
-
-| Queue           | Concurrency            | Retries                                            | Notes                                 |
-| --------------- | ---------------------- | -------------------------------------------------- | ------------------------------------- |
-| `task_run`      | 5 (rate-limited 3/min) | 3 attempts, exponential backoff (30s base, max 5m) | The lock means redeliveries are safe. |
-| `task_approval` | 10                     | 3 attempts, fixed 10s                              | Carries reminder + expiry jobs only.  |
+| Queue           | Concurrency | Retries                               | Notes                                                                              |
+| --------------- | ----------- | ------------------------------------- | ---------------------------------------------------------------------------------- |
+| `task_run`      | 5           | 3 attempts, exponential backoff (30s) | Run lock + per-fire-time job ids (`taskId:runAtIso`) make redeliveries no-ops.     |
+| `task_approval` | 10          | 3 attempts, fixed 10s                 | Carries reminder + expiry jobs only — resolution happens inline (middleware/tool). |
 
 ## 12. Credits, Composio, Firecrawl — what we inherit
 
-**Credits.** Already confirmed: the credits plugin installs a LangGraph middleware on the compiled main agent. The worker calls `MessagesService.invokeForAutomation`, which compiles and invokes the same main agent the HTTP path does, so the middleware applies unchanged. `beforeModel` aborts if `remaining ≤ 0`; `afterModel` deducts via `TokenLimiter.limit()`. **Nothing for the Tasks plugin to do.** A preview run is also a normal agent invocation, so it's metered just like any other LLM call.
+**Credits.** Already confirmed: the credits plugin installs a LangGraph middleware on the compiled main agent. The worker calls `MessagesService.sendMessage`, which compiles and invokes the same main agent the HTTP path does, so the middleware applies unchanged. `beforeModel` aborts if `remaining ≤ 0`; `afterModel` deducts via `TokenLimiter.limit()`. **Nothing for the Tasks plugin to do.** A preview run is also a normal agent invocation, so it's metered just like any other LLM call.
 
 **Composio.** The Composio plugin is `visibility: 'on-demand'`. When the work job's agent decides to send a Gmail or create a Linear issue, it calls `load_capability('composio')` and the toolkit becomes available for the rest of that invocation. Crucially, **the user's UCAN delegation must be cached** at run time for Composio to mint per-call invocations — same as for sandbox. If it isn't, Composio tools degrade gracefully (zero tools exposed).
 
@@ -651,7 +577,7 @@ Two queues, one worker each:
 
 ## 13. Main-agent tools
 
-All nine tools are registered via `getTools(ctx)` and are `visibility: 'always'`. There is no sub-agent. The agent sees them in its Tier-1 prompt.
+All ten tools are registered via `getTools()` and inherit the manifest's `visibility: 'always'`. There is no sub-agent. The agent sees them in its Tier-1 prompt.
 
 ### 13.1 `preview_task` — the safety rail
 
@@ -667,99 +593,64 @@ input: z.object({
     howToReport: z.string().optional(),
     constraints: z.array(z.string()).optional(),
   }),
-  modelTier: z.enum(['low', 'medium', 'high']).default('medium'),
 });
 output: z.object({
   previewToken: z.string(), // returned to create_task to prove a preview happened
-  output: z.string(), // the actual LLM output
-  durationMs: z.number(),
+  output: z.string(), // the actual agent output
 });
 ```
 
 **Behaviour:**
 
-1. Build a temporary `TaskSpec` shell with `id = 'preview_<uuid>'`, `status = 'draft'`, trigger left blank.
-2. Call the same agent path the worker uses — `MessagesService.invokeForAutomation` — with `source: { type: 'task', taskId: '<preview-id>' }`. Because we're inside an HTTP request, streaming tokens to the user's WebSocket session via `WsService` works naturally.
-3. Capture final output + usage + cost from the result.
-4. Store a short-lived `previewToken` in Redis (`tasks:preview:<token>` → `{ owner, hash(spec), expiresAt }`, TTL 10m). Return the token to the agent.
+1. Render the intent body. Create a **throwaway session** (`AgentInvoker.createSession`), run one real agent turn on it — full toolset, credits metered — then delete the session row.
+2. Store a short-lived single-use `previewToken` in Redis (`tasks:preview:<token>` → `{ owner, hash(title, body) }`, TTL 10m). Return the token + the output to the agent.
 
-**Why a token?** `create_task` requires the previewToken from a preview whose spec-hash matches what's being committed. This makes "preview then immediately schedule something completely different" impossible. If the user edits the spec after preview, the hash changes, and `create_task` will reject with `"please re-preview"`.
+**Why a token?** `create_task` requires a previewToken from a preview whose `specHash(title, body)` matches what's being committed. This makes "preview then immediately schedule something completely different" impossible. If the user edits the spec after preview, the hash changes, and `create_task` rejects with `"please re-preview"`.
 
 ### 13.2 `create_task` — only after preview
 
-**Schema:**
-
-```ts
-input: z.object({
-  previewToken: z.string(),
-  title: z.string(),
-  trigger: TriggerSchema,
-  intent: IntentSchema,
-  delivery: z
-    .object({
-      roomId: z.union([z.literal('main'), z.string()]).optional(),
-      format: z.enum(['message', 'report', 'json']).optional(),
-    })
-    .optional(),
-  approval: z.enum(['never', 'before-delivery']).default('never'),
-  modelTier: z.enum(['low', 'medium', 'high']).optional(),
-  dedicatedRoom: z.enum(['auto', 'yes', 'no']).default('auto'),
-});
-output: z.object({
-  taskId: z.string(),
-  roomId: z.string(),
-  nextRunAt: z.string().nullable(),
-  triggerSummary: z.string(), // "every day at 7am Africa/Cairo"
-});
-```
+**Schema:** `{ previewToken, title, trigger, intent, approval?, dedicatedRoom?: 'auto' | 'yes' | 'no' }` → `{ taskId, title, trigger, nextRunAt, roomId, approval }`.
 
 **Behaviour:**
 
-1. Validate the `previewToken` — hash, owner, freshness.
-2. Resolve `dedicatedRoom` policy (§8). If `'yes'`, create the room and post `spec.md` as the opening message.
-3. Render `spec.md` from inputs. Validate against the frontmatter Zod.
-4. `taskFs.write('/users/<did>/tasks/<id>/spec.md', md)`.
-5. Enqueue the first `task_run` job through `SchedulerService`. For `time.cron`, this is the next-occurring time.
-6. Return a confirmation summary the agent can paraphrase.
+1. Consume the `previewToken` (single-use) — verify owner + spec hash.
+2. Enforce `TASKS_MAX_PER_USER` against the user's live (non-cancelled, non-completed) tasks.
+3. Compute `nextRunAt`; reject triggers with no future fire time.
+4. Resolve `dedicatedRoom` policy (§8); create the `[Task]` room (spec posted as opening message) when it applies.
+5. Create the task's persistent session, anchored in the dedicated room when there is one (§10.2).
+6. `TaskStore.save(spec)` + `SchedulerService.enqueueRun(taskId, owner, nextRunAt)`.
 
 ### 13.3 `list_my_tasks`
 
-**Schema:** `{ filter?: { status?: TaskStatus[] } }` → `TaskIndexRow[]`. One Redis HGETALL. ~ms.
+`{ status?: TaskStatus[] }` → compact rows (id, title, status, trigger summary, nextRunAt), sorted by next run.
 
 ### 13.4 `get_task`
 
-**Schema:** `{ taskId }` → `{ spec: TaskSpecFrontmatter; body: string; lastError?: { message: string; failedAt: string; consecutiveCount: number } }`. Used to show the user "what does this task look like / is it healthy?". Past-run output lives in the Matrix room — `get_task` returns a Matrix room link so the agent can point the user there. (Queryable per-run history is FOLLOWUP-3.)
+`{ taskId }` → full frontmatter + body + `lastError` (message, failedAt, consecutiveCount) when the task has been failing. Past-run output lives in the task's Matrix room. (Queryable per-run history is FOLLOWUP-3.)
 
 ### 13.5 `update_task`
 
-**Schema:** `{ taskId, patch: { title?, trigger?, intent?, delivery?, approval?, budget?, modelTier? } }`. Returns the diff applied + the new `nextRunAt`.
-
-**Behaviour:** load spec → apply patch → re-validate → `putSpec`. If `trigger` changed, cancel the active `task_run` job via `SchedulerService.cancel(taskId)` and re-enqueue.
+`{ taskId, title?, trigger?, body?, approval? }`. Changing `trigger` cancels pending runs and re-enqueues from the new schedule.
 
 ### 13.6 `pause_task` / `resume_task` / `cancel_task`
 
-Three thin tools, one Redis update each + a BullMQ remove or add. Status transitions are gated (cannot resume a `cancelled` task).
+One shared status-transition helper, three thin tools. Cancelled tasks can't be resumed; resuming recomputes `nextRunAt` from the trigger and resets the failure counter.
 
 ### 13.7 `suggest_spec_fix`
 
-Used by `pause` of last resort: after `consecutiveFailures` ≥ threshold, the task is set to `failed-pending-review`. `suggest_spec_fix` reads the last N run summaries, asks the cheap-tier model to propose a markdown diff against `spec.md`, posts it in the conversation with `"Apply this fix?"`. On user approval, the agent calls `update_task` with the patch.
+Returns `{ currentBody, lastError, consecutiveFailures }` plus an instruction telling the agent to propose a revised body, explain it, and only apply via `update_task` after the user confirms. **The agent does the diffing** — no extra LLM call inside the tool. The user is always in the loop; no auto-apply.
 
-**The user is always in the loop.** No auto-apply.
+### 13.8 `resolve_pending_approval`
 
-### 13.8 Few-shot examples in the manifest
+`{ decision: 'approve' | 'reject', reason? }`. The agent's half of the approval gate (§9.2 step 5): when a user's reply to a pending approval is nuanced, the gate hints the model and the model calls this. Looks up the pending task by the session's room, resolves through the same `ApprovalService` path as the fast keywords.
 
-The manifest ships ~6 worked examples drawn from real use cases (remind me, recurring brief, watch a URL, weekly digest, one-shot research, chain). These do the prompt-engineering work that the legacy 700-line task-manager-prompt used to do.
+### 13.9 Few-shot examples in the manifest
+
+The manifest ships worked examples (preview → create flow, list, pause, a nuanced approval reply). These do the prompt-engineering work that the legacy 700-line task-manager-prompt used to do.
 
 ## 14. Shared state
 
-Two read accessors exposed via `getSharedState()`:
-
-| Key                | Reads                                                         | Consumers                                                  |
-| ------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
-| `myTasks`          | `taskFs.list('/users/<did>/tasks/')` + parse spec frontmatter | Other plugins surfacing "what's the user automating?"      |
-| `pendingApprovals` | Iterate the user's tasks, filter by pending in Redis          | UI widgets, future user-preferences "do not disturb" hooks |
-
-Both are lazy. Failure of one accessor does not affect the other.
+**Deferred (FOLLOWUP-9).** Earlier drafts exposed `myTasks` / `pendingApprovals` accessors via `getSharedState()`, but nothing consumes them today — shipping unused surface is how plugins rot. The data is one `list_my_tasks` call away for the agent and one `TaskStore.list` away for any future plugin via `APPROVAL_GATE_PORT`-style wiring. Add accessors when a real consumer exists.
 
 ---
 
@@ -783,17 +674,18 @@ Three layers. Vitest throughout.
 
 ### 16.1 Unit
 
-- `spec.ts` — round-trip markdown ↔ object, edge cases (missing sections, malformed cron, bad TZ).
-- `redis-task-fs.ts` — happy path + lock contention via fakeredis.
-- `intent-classifier.ts` — fast-path keyword table covered exhaustively, slow-path stubbed.
-- `room-resolver.ts` — dedicated-room heuristic truth table.
+- `spec.ts` — round-trip markdown ↔ object, malformed frontmatter rejection, canonical ids/paths, hash determinism.
+- `task-store.ts` — CRUD + status transitions against an in-memory `TaskFs` fake; unparseable specs skipped on list.
+- `scheduler.ts` — `nextRunAtFor` truth table (future one-shot, past one-shot, cron, bad pattern).
+- `middleware.ts` — `classifyReplyFast` keyword table covered exhaustively.
+- `delivery.ts` — `shouldCreateDedicatedRoom` heuristic truth table.
 
 ### 16.2 Plugin-level
 
 - Plugin loads when `REDIS_URL` is set; absent when not.
-- `getTools` returns 9 tools.
-- Middleware registered; integration with main-agent `getMiddlewares` chain.
-- `approvalGateMiddleware` swallows + classifies + acts correctly using a mocked `ApprovalService` (Redis-backed).
+- `getTools` returns the 10 documented tools.
+- Tool handlers fail soft (clear error) before the Nest module attaches the runtime.
+- `getNestModules` returns the dynamic `TasksModule`.
 
 ### 16.3 Integration
 
@@ -813,13 +705,13 @@ We do **not** spin up real Redis or real BullMQ in unit tests; we use the test-r
 
 ## 17. Build phases
 
-| Phase                    | Scope                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Effort | Acceptance highlights                                                                                                                                                 |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **0. Scaffold**          | Plugin folder, manifest, empty Nest module, config schema, auto-detect on `REDIS_URL`, smoke test.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 0.5d   | `tasks.plugin.test.ts` passes; plugin shows up in `app.plugins.status()` when `REDIS_URL` set.                                                                        |
-| **1. MVP**               | Spec format + Zod; `TaskFs` port + `RedisTaskFs` for `spec.md` only (§6); `task_run` + `task_approval` queues + worker; `MessagesService.invokeForAutomation` entry point (§10) if it doesn't already exist; `time.once` + `time.cron` only; 9 main-agent tools including `preview_task` (live dry-run, WS streaming) and `create_task` (preview-token gated); conditional dedicated room creation; approval gate middleware + `ApprovalService` + `APPROVAL_GATE_PORT`; delivery to main or dedicated room; Redis-backed failure counter feeding `failed-pending-review`. | **4d** | End-to-end: "every day at 7am summarize crypto" → preview → confirm → scheduled → fires → delivers. "Yes/no" replies handled. Three errors → `failed-pending-review`. |
-| **2. Self-healing**      | `suggest_spec_fix` polished — reads `tasks:failures:<id>.lastError`, prompts low-tier model for a diff, posts via the room, awaits user approval.                                                                                                                                                                                                                                                                                                                                                                                                                          | 0.5d   | After 3 errors, agent volunteers a fix and applies on user "yes".                                                                                                     |
-| **3. Templates**         | `templates/*.md` shipped; few-shot in manifest so agent picks + fills automatically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 0.5d   | "Set up my morning brief" → one-turn template → preview → schedule.                                                                                                   |
-| **4. Cleanup + cutover** | Delete `apps/app/src/tasks/`; delete `token-encryption.ts`; remove stale references; carry forward any tests that still apply (most won't); update `specs/tasks/TASK-31-tasks-plugin.md` to point at this spec.                                                                                                                                                                                                                                                                                                                                                            | 0.5d   | `pnpm lint`, `pnpm format:check`, `pnpm test` green across packages.                                                                                                  |
+| Phase                    | Scope                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Effort | Acceptance highlights                                                                                                                                                                                                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **0. Scaffold**          | Plugin folder, manifest, empty Nest module, config schema, auto-detect on `REDIS_URL`, smoke test.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 0.5d   | `tasks.plugin.test.ts` passes; plugin shows up in `app.plugins.status()` when `REDIS_URL` set.                                                                                                                                       |
+| **1. MVP**               | Spec format + Zod; `TaskFs` port + `RedisTaskFs` for `spec.md` only (§6); `task_run` + `task_approval` queues + workers; `AgentInvoker` over the existing `MessagesService.sendMessage` with real per-task sessions (§10 — no new runtime surface); `time.once` + `time.cron` only; 10 main-agent tools including `preview_task` (real dry-run) and `create_task` (preview-token gated); conditional dedicated room creation; approval gate as a `wrapModelCall` middleware + `ApprovalService` + `APPROVAL_GATE_PORT` + `resolve_pending_approval`; delivery to main or dedicated room; Redis-backed per-run failure counter feeding `failed-pending-review`. | **4d** | End-to-end: "every day at 7am summarize crypto" → preview → confirm → scheduled → fires → delivers. "Yes/no" replies handled without an LLM call; nuanced replies handled by the agent. Three failed runs → `failed-pending-review`. |
+| **2. Self-healing**      | `suggest_spec_fix` — returns the current body + `tasks:failures:<id>.lastError` so the main agent proposes the diff itself, posts it, and awaits user approval.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | 0.5d   | After 3 errors, agent volunteers a fix and applies on user "yes".                                                                                                                                                                    |
+| **3. Templates**         | `templates/*.md` shipped; few-shot in manifest so agent picks + fills automatically.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | 0.5d   | "Set up my morning brief" → one-turn template → preview → schedule.                                                                                                                                                                  |
+| **4. Cleanup + cutover** | Delete `apps/app/src/tasks/`; delete `token-encryption.ts`; remove stale references; carry forward any tests that still apply (most won't); update `specs/tasks/TASK-31-tasks-plugin.md` to point at this spec.                                                                                                                                                                                                                                                                                                                                                                                                                                                | 0.5d   | `pnpm lint`, `pnpm format:check`, `pnpm test` green across packages.                                                                                                                                                                 |
 
 **Total: ~5.5 days.** All wow features (preview, approval, conditional rooms) ship in Phase 1. Webhook + chain triggers, cost meter, per-task budget, queryable run history, REST surface — all deferred to follow-ups (§19).
 
@@ -838,33 +730,36 @@ No live-task migration. If production has running tasks on the legacy system at 
 
 These are deliberately **not** in scope. Filed here so they aren't lost. Most are "good to have" — the system works without them, they sharpen specific edges.
 
-| ID          | Item                                                                                                                                                                                          | Why deferred                                                                                                                                                                       |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| FOLLOWUP-1  | `UcanFsAdapter` — implement `TaskFs` (§6) against the runtime's eventual UCAN per-user filesystem (same auth model as `sandbox`).                                                             | The FS API doesn't exist yet. Swap is one DI binding when it does.                                                                                                                 |
-| FOLLOWUP-2  | **Per-run cost & token meter.** Surface `tokens` and `costUsd` from `MessagesService.invokeForAutomation` so the worker can store them in the run history or use them for budget enforcement. | The credits middleware already deducts via `afterModel`, but exposing the numbers from the return is implementation work that hasn't been verified. Confirm feasibility, then add. |
-| FOLLOWUP-3  | **Queryable run history** — `runs.jsonl` per task on `TaskFs`, last N retained, plus a `list_runs(taskId)` tool.                                                                              | Matrix is the natural log for MVP. Add the file-backed history when there's a real use case for queries beyond scrolling. Depends partially on FOLLOWUP-2 for tokens/cost.         |
-| FOLLOWUP-4  | **Per-task monthly budget** — `budget.monthlyUsd` in the spec, enforced by the worker before each run.                                                                                        | Depends on FOLLOWUP-2 (need a reliable per-run cost number).                                                                                                                       |
-| FOLLOWUP-5  | **REST surface** for tasks (list/get/patch/pause/resume/cancel).                                                                                                                              | Tasks are agent-managed by design; external HTTP isn't needed today. Add only when a non-agent consumer (admin tool, mobile UI) actually wants it.                                 |
-| FOLLOWUP-6  | `webhook` and `chain.after` triggers.                                                                                                                                                         | Needs concrete external consumers driving HMAC distribution + chain context shape.                                                                                                 |
-| FOLLOWUP-7  | Composio triggers as a first-class `Trigger` type.                                                                                                                                            | Composio plugin doesn't expose its trigger model yet. When it does, add `{ type: 'composio'; triggerId: string }`.                                                                 |
-| FOLLOWUP-8  | L1–L4 autonomy ladder replacing the binary `approval` field.                                                                                                                                  | MVP keeps `'never' \| 'before-delivery'`. The spectrum (silent / notify / approval / collab) is a UX enhancement once the gate is proven.                                          |
-| FOLLOWUP-9  | Replies-in-task-room as edit suggestions.                                                                                                                                                     | When a user replies in a dedicated task room with "next time include sources", the agent should propose a `spec.md` diff.                                                          |
-| FOLLOWUP-10 | Cross-user task sharing (`export_template`, `import_template`).                                                                                                                               | Library/marketplace shape.                                                                                                                                                         |
-| FOLLOWUP-11 | Quiet hours / DND windows in `delivery`.                                                                                                                                                      | Trivial to add but requires UX decisions on what "DND" means (delay vs. drop).                                                                                                     |
+| ID          | Item                                                                                                                                                                            | Why deferred                                                                                                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| FOLLOWUP-1  | `UcanFsAdapter` — implement `TaskFs` (§6) against the runtime's eventual UCAN per-user filesystem (same auth model as `sandbox`).                                               | The FS API doesn't exist yet. Swap is one DI binding when it does.                                                                                                                 |
+| FOLLOWUP-2  | **Per-run cost & token meter.** Surface `tokens` and `costUsd` from the `sendMessage` reply so the worker can store them in the run history or use them for budget enforcement. | The credits middleware already deducts via `afterModel`, but exposing the numbers from the return is implementation work that hasn't been verified. Confirm feasibility, then add. |
+| FOLLOWUP-3  | **Queryable run history** — `runs.jsonl` per task on `TaskFs`, last N retained, plus a `list_runs(taskId)` tool.                                                                | Matrix is the natural log for MVP. Add the file-backed history when there's a real use case for queries beyond scrolling. Depends partially on FOLLOWUP-2 for tokens/cost.         |
+| FOLLOWUP-4  | **Per-task monthly budget** — `budget.monthlyUsd` in the spec, enforced by the worker before each run.                                                                          | Depends on FOLLOWUP-2 (need a reliable per-run cost number).                                                                                                                       |
+| FOLLOWUP-5  | **REST surface** for tasks (list/get/patch/pause/resume/cancel).                                                                                                                | Tasks are agent-managed by design; external HTTP isn't needed today. Add only when a non-agent consumer (admin tool, mobile UI) actually wants it.                                 |
+| FOLLOWUP-6  | `webhook` and `chain.after` triggers.                                                                                                                                           | Needs concrete external consumers driving HMAC distribution + chain context shape.                                                                                                 |
+| FOLLOWUP-7  | Composio triggers as a first-class `Trigger` type.                                                                                                                              | Composio plugin doesn't expose its trigger model yet. When it does, add `{ type: 'composio'; triggerId: string }`.                                                                 |
+| FOLLOWUP-8  | L1–L4 autonomy ladder replacing the binary `approval` field.                                                                                                                    | MVP keeps `'never' \| 'before-delivery'`. The spectrum (silent / notify / approval / collab) is a UX enhancement once the gate is proven.                                          |
+| FOLLOWUP-9  | `getSharedState()` accessors (`myTasks`, `pendingApprovals`).                                                                                                                   | No consumer exists today (§14). Add when one does.                                                                                                                                 |
+| FOLLOWUP-10 | **Per-task model selection** (`modelTier` in the spec frontmatter).                                                                                                             | `MessagesService.sendMessage` has no per-call model override, so the field would be decorative. Needs a runtime hook first.                                                        |
+| FOLLOWUP-11 | Replies-in-task-room as edit suggestions.                                                                                                                                       | When a user replies in a dedicated task room with "next time include sources", the agent should propose a `spec.md` diff.                                                          |
+| FOLLOWUP-12 | Cross-user task sharing (`export_template`, `import_template`).                                                                                                                 | Library/marketplace shape.                                                                                                                                                         |
+| FOLLOWUP-13 | Quiet hours / DND windows in `delivery`.                                                                                                                                        | Trivial to add but requires UX decisions on what "DND" means (delay vs. drop).                                                                                                     |
 
 ## 20. Glossary
 
-| Term                      | Meaning                                                                                                                                                              |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **TaskSpec**              | The whole task expressed as YAML frontmatter + markdown body. Stored as one string.                                                                                  |
-| **`spec.md`**             | The on-disk filename for a TaskSpec at `/users/<did>/tasks/<id>/spec.md`. Today backed by Redis; tomorrow by the UCAN per-user filesystem.                           |
-| **`TaskFs`**              | The 4-method filesystem port (`read/write/delete/list`) that decouples the plugin from its storage backend. §6.                                                      |
-| **Dedicated room**        | A Matrix room created per-task for tasks whose frequency or complexity warrants isolation. §8.                                                                       |
-| **Approval gate**         | A middleware on the main agent that intercepts user messages when a pending approval exists for the room. Replaces deleted `tryHandleApprovalResponse`. §9.          |
-| **`invokeForAutomation`** | The single entry point on `MessagesService` the worker uses to run the agent off-request — the alternative to rebuilding `RuntimeContext`. §10.                      |
-| **Preview token**         | A short-lived Redis key proving a `preview_task` ran against a specific spec hash. Required by `create_task`. §13.1.                                                 |
-| **Run lock**              | Redis SETNX on `tasks:lock:<taskId>` preventing concurrent execution of the same task. §11.                                                                          |
-| **Failure counter**       | Redis hash `tasks:failures:<taskId>` holding `{ count, lastError, lastFailedAt }`. Drives the `failed-pending-review` transition and feeds `suggest_spec_fix`. §6.4. |
+| Term                | Meaning                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **TaskSpec**        | The whole task expressed as YAML frontmatter + markdown body. Stored as one string.                                                                                  |
+| **`spec.md`**       | The on-disk filename for a TaskSpec at `/users/<did>/tasks/<id>/spec.md`. Today backed by Redis; tomorrow by the UCAN per-user filesystem.                           |
+| **`TaskFs`**        | The 4-method filesystem port (`read/write/delete/list`) that decouples the plugin from its storage backend. §6.                                                      |
+| **Dedicated room**  | A Matrix room created per-task for tasks whose frequency or complexity warrants isolation. §8.                                                                       |
+| **Approval gate**   | A `wrapModelCall` middleware that intercepts user replies when a pending approval exists for the room. Replaces deleted `tryHandleApprovalResponse`. §9.             |
+| **`AgentInvoker`**  | The plugin's thin wrapper over `MessagesService.sendMessage` + real per-task sessions — how workers run the agent off-request with zero new runtime surface. §10.    |
+| **Task session**    | The persistent LangGraph thread (stored as `sessionId` in the frontmatter) every run of a task continues — tasks have memory across runs. §10.2.                     |
+| **Preview token**   | A short-lived single-use Redis key proving a `preview_task` ran against a specific spec hash. Required by `create_task`. §13.1.                                      |
+| **Run lock**        | Redis SETNX on `tasks:lock:<taskId>` preventing concurrent execution of the same task. §11.                                                                          |
+| **Failure counter** | Redis hash `tasks:failures:<taskId>` holding `{ count, lastError, lastFailedAt }`. Drives the `failed-pending-review` transition and feeds `suggest_spec_fix`. §6.4. |
 
 ---
 
@@ -904,10 +799,9 @@ trigger:
   tz: Africa/Cairo
 delivery:
   roomId: main
-  format: report
 approval: never
-modelTier: medium
 status: active
+sessionId: '$abc123:ixo.world'
 stats:
   nextRunAt: '2026-06-09T05:00:00Z'
 ---

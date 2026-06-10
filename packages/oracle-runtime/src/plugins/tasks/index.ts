@@ -3,4 +3,4 @@ export { tasksManifest } from './manifest.js';
 export {
   APPROVAL_GATE_PORT,
   type ApprovalGatePort,
-} from './internal/approval/approval.service.js';
+} from './internal/approval.js';

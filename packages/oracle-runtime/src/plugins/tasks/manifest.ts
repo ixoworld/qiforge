@@ -28,12 +28,12 @@ export const tasksManifest: PluginManifest = {
             'Concise paragraph + bullet list of movers. Link sources.',
           constraints: ['Under 300 words.', 'No trade recommendations.'],
         },
-        modelTier: 'medium',
       },
     },
     {
       user: 'Looks good, schedule it.',
-      thought: 'Preview was shown. Commit the same spec with the previewToken.',
+      thought:
+        'Preview was shown. Commit the SAME title/intent with the previewToken.',
       tool: 'create_task',
       args: {
         previewToken: '<token-from-preview_task>',
@@ -44,9 +44,9 @@ export const tasksManifest: PluginManifest = {
             'Summarize BTC, ETH, SOL movement over the last 24h. Highlight any moves > 5%.',
           howToReport:
             'Concise paragraph + bullet list of movers. Link sources.',
+          constraints: ['Under 300 words.', 'No trade recommendations.'],
         },
         approval: 'never',
-        modelTier: 'medium',
         dedicatedRoom: 'auto',
       },
     },
@@ -59,6 +59,13 @@ export const tasksManifest: PluginManifest = {
       user: 'Pause the crypto brief.',
       tool: 'pause_task',
       args: { taskId: 'task_a1b2c3d4e5f6' },
+    },
+    {
+      user: "Send it, but next time include Solana's volume too.",
+      thought:
+        'A nuanced reply to a pending approval — approve now, then offer to update the task body.',
+      tool: 'resolve_pending_approval',
+      args: { decision: 'approve' },
     },
   ],
   category: 'automation',

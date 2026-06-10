@@ -1,27 +1,62 @@
 import { describe, expect, it } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
+import { shouldCreateDedicatedRoom } from './internal/delivery.js';
+import { classifyReplyFast } from './internal/middleware.js';
+import { nextRunAtFor } from './internal/scheduler.js';
 import {
-  buildSpec,
+  newTaskId,
   parseSpec,
   renderSpec,
   specHash,
-  TaskSpecFrontmatterSchema,
-  userTasksPrefix,
   specPath,
-  newTaskId,
-} from './internal/domain/spec.js';
-import { TriggerSchema, summarizeTrigger } from './internal/domain/trigger.js';
-import { IntentClassifier } from './internal/approval/intent-classifier.js';
-import { RoomResolver } from './internal/delivery/room-resolver.js';
+  TaskFrontmatterSchema,
+  userTasksPrefix,
+  type TaskSpec,
+} from './internal/spec.js';
+import { TaskStore } from './internal/task-store.js';
+import type { TaskFs } from './internal/task-fs.js';
 import { TasksPlugin } from './tasks.plugin.js';
 
+const sampleSpec = (): TaskSpec => ({
+  frontmatter: {
+    id: 'task_a1b2c3d4e5f6',
+    owner: 'did:ixo:abc',
+    title: 'Morning Brief',
+    trigger: { type: 'time.cron', pattern: '0 7 * * *', tz: 'Africa/Cairo' },
+    delivery: { roomId: 'main' },
+    approval: 'never',
+    status: 'active',
+    sessionId: '$thread-root:ixo.world',
+    stats: { nextRunAt: '2026-06-11T05:00:00.000Z' },
+  },
+  body: '## What to do\nSummarise BTC, ETH, SOL.\n\n## Constraints\n- Under 300 words.',
+});
+
+class MemoryFs implements TaskFs {
+  private files = new Map<string, string>();
+
+  async read(path: string): Promise<string | null> {
+    return this.files.get(path) ?? null;
+  }
+
+  async write(path: string, content: string): Promise<void> {
+    this.files.set(path, content);
+  }
+
+  async delete(path: string): Promise<void> {
+    this.files.delete(path);
+  }
+
+  async list(prefix: string): Promise<string[]> {
+    return [...this.files.keys()].filter((p) => p.startsWith(prefix));
+  }
+}
+
 describe('TasksPlugin', () => {
-  it('has the expected identity and manifest', () => {
+  it('has the expected identity and a valid manifest', () => {
     const plugin = new TasksPlugin();
     expect(plugin.name).toBe('tasks');
-    expect(plugin.name).toBe(TasksPlugin.NAME);
-    expect(plugin.version).toBe('1.0.0');
-    expect(plugin.manifest.title).toBe('Scheduled Tasks');
+    expect(plugin.version).toBe('2.0.0');
     expect(plugin.manifest.visibility).toBe('always');
     expect(plugin.manifest.category).toBe('automation');
     expect(plugin.softDependsOn).toEqual(['memory']);
@@ -41,223 +76,217 @@ describe('TasksPlugin', () => {
     expect(plugin.autoDetectHint).toBe('REDIS_URL');
   });
 
-  it('configSchema validates the documented env', () => {
+  it('configSchema requires REDIS_URL and coerces the numeric knobs', () => {
     const plugin = new TasksPlugin();
     expect(plugin.configSchema!.safeParse({}).success).toBe(false);
-    const ok = plugin.configSchema!.safeParse({
+    const parsed = plugin.configSchema!.parse({
       REDIS_URL: 'redis://localhost:6379',
-      TASKS_DEFAULT_TIMEZONE: 'Africa/Cairo',
       TASKS_MAX_PER_USER: '25',
-      TASKS_RUN_LOCK_TTL_SEC: '300',
     });
-    expect(ok.success).toBe(true);
+    expect(parsed.TASKS_MAX_PER_USER).toBe(25);
+    expect(parsed.TASKS_RUN_LOCK_TTL_SEC).toBe(600);
   });
 
-  it('exposes the 9 documented tools', () => {
-    const plugin = new TasksPlugin();
-    const tools = plugin.getTools!();
-    const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(
-      [
-        'cancel_task',
-        'create_task',
-        'get_task',
-        'list_my_tasks',
-        'pause_task',
-        'preview_task',
-        'resume_task',
-        'suggest_spec_fix',
-        'update_task',
-      ].sort(),
-    );
+  it('exposes the 10 documented tools', () => {
+    const tools = new TasksPlugin().getTools!();
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      'cancel_task',
+      'create_task',
+      'get_task',
+      'list_my_tasks',
+      'pause_task',
+      'preview_task',
+      'resolve_pending_approval',
+      'resume_task',
+      'suggest_spec_fix',
+      'update_task',
+    ]);
   });
 
-  it('returns the TasksModule via getNestModules', () => {
-    const plugin = new TasksPlugin();
-    const modules = plugin.getNestModules!();
+  it('tool handlers fail soft before the Nest module attaches the runtime', async () => {
+    const tools = new TasksPlugin().getTools!();
+    const list = tools.find((t) => t.name === 'list_my_tasks')!;
+    await expect(
+      list.handler({}, { user: { did: 'did:ixo:abc' } } as never),
+    ).rejects.toThrow(/starting up/);
+  });
+
+  it('registers the TasksModule dynamically', () => {
+    const modules = new TasksPlugin().getNestModules!();
     expect(modules).toHaveLength(1);
-    // DynamicModule
     expect(modules[0]).toMatchObject({ module: expect.any(Function) });
   });
 });
 
-describe('TaskSpec serialization', () => {
-  it('round-trips markdown ↔ object via gray-matter', () => {
-    const spec = buildSpec(
-      {
-        owner: 'did:ixo:abc',
-        title: 'Morning Brief',
-        trigger: { type: 'time.cron', pattern: '0 7 * * *', tz: 'UTC' },
-        intent: {
-          whatToDo: 'Summarise BTC ETH SOL',
-          howToReport: 'One paragraph',
-          constraints: ['Under 300 words.'],
-        },
-      },
-      '2026-06-09T05:00:00.000Z',
-    );
-    const md = renderSpec(spec);
-    expect(md).toContain('## What to do');
-    expect(md).toContain('Summarise BTC ETH SOL');
-    expect(md).toContain('Under 300 words');
+describe('TaskSpec', () => {
+  it('round-trips markdown ↔ object', () => {
+    const spec = sampleSpec();
+    const markdown = renderSpec(spec);
+    expect(markdown).toContain('## What to do');
+    expect(markdown).toContain('title: Morning Brief');
 
-    const parsed = parseSpec(md);
-    expect(parsed.frontmatter.id).toBe(spec.frontmatter.id);
-    expect(parsed.frontmatter.title).toBe('Morning Brief');
-    expect(parsed.frontmatter.trigger).toEqual(spec.frontmatter.trigger);
-    expect(parsed.body).toContain('Summarise BTC ETH SOL');
+    const parsed = parseSpec(markdown);
+    expect(parsed.frontmatter).toEqual(spec.frontmatter);
+    expect(parsed.body).toBe(spec.body);
   });
 
-  it('validates frontmatter via Zod and rejects bad cron / bad status', () => {
+  it('rejects malformed frontmatter', () => {
     expect(() =>
-      TaskSpecFrontmatterSchema.parse({
+      TaskFrontmatterSchema.parse({
+        ...sampleSpec().frontmatter,
         id: 'not-a-task-id',
-        owner: 'did:ixo:abc',
-        title: 'X',
-        trigger: { type: 'time.cron', pattern: '0 7 * * *', tz: 'UTC' },
-        delivery: { roomId: 'main', format: 'message' },
-        approval: 'never',
-        modelTier: 'medium',
-        status: 'active',
-        stats: { nextRunAt: null },
+      }),
+    ).toThrow();
+    expect(() =>
+      TaskFrontmatterSchema.parse({
+        ...sampleSpec().frontmatter,
+        status: 'draft',
       }),
     ).toThrow();
   });
 
-  it('builds canonical paths', () => {
-    const did = 'did:ixo:abc';
-    const id = 'task_aaaaaaaaaaaa';
-    expect(userTasksPrefix(did)).toBe('/users/did:ixo:abc/tasks/');
-    expect(specPath(did, id)).toBe(
+  it('builds canonical ids and paths', () => {
+    expect(newTaskId()).toMatch(/^task_[a-f0-9]{12}$/);
+    expect(userTasksPrefix('did:ixo:abc')).toBe('/users/did:ixo:abc/tasks/');
+    expect(specPath('did:ixo:abc', 'task_aaaaaaaaaaaa')).toBe(
       '/users/did:ixo:abc/tasks/task_aaaaaaaaaaaa/spec.md',
     );
   });
 
-  it('newTaskId returns a canonical-shape id', () => {
-    expect(newTaskId()).toMatch(/^task_[a-f0-9]{12}$/);
-  });
-
-  it('specHash is deterministic and changes with content', () => {
-    const a = specHash({ title: 'X', body: 'body-1', modelTier: 'medium' });
-    const b = specHash({ title: 'X', body: 'body-1', modelTier: 'medium' });
-    const c = specHash({ title: 'X', body: 'body-2', modelTier: 'medium' });
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
+  it('specHash is deterministic and content-sensitive', () => {
+    expect(specHash('T', 'body')).toBe(specHash('T', 'body'));
+    expect(specHash('T', 'body')).not.toBe(specHash('T', 'other'));
   });
 });
 
-describe('Trigger schema + summary', () => {
-  it('parses both trigger types', () => {
+describe('TaskStore', () => {
+  it('saves, loads, lists, and transitions status through the TaskFs port', async () => {
+    const store = new TaskStore(new MemoryFs());
+    const spec = sampleSpec();
+
+    await store.save(spec);
+    expect(await store.load('did:ixo:abc', spec.frontmatter.id)).toEqual(spec);
+    expect(await store.load('did:ixo:abc', 'task_000000000000')).toBeNull();
+    expect(await store.list('did:ixo:abc')).toHaveLength(1);
+    expect(await store.list('did:ixo:other')).toHaveLength(0);
+
+    const paused = await store.setStatus(
+      'did:ixo:abc',
+      spec.frontmatter.id,
+      'paused',
+      null,
+    );
+    expect(paused?.frontmatter.status).toBe('paused');
+    expect(paused?.frontmatter.stats.nextRunAt).toBeNull();
+  });
+
+  it('skips unparseable specs when listing', async () => {
+    const fs = new MemoryFs();
+    const store = new TaskStore(fs);
+    await store.save(sampleSpec());
+    await fs.write('/users/did:ixo:abc/tasks/task_bad/spec.md', 'not a spec');
+    expect(await store.list('did:ixo:abc')).toHaveLength(1);
+  });
+});
+
+describe('nextRunAtFor', () => {
+  it('returns the future time for a one-shot, null when past', () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();
     expect(
-      TriggerSchema.safeParse({
+      nextRunAtFor({ type: 'time.once', runAtIso: future, tz: 'UTC' }),
+    ).toBe(future);
+    expect(
+      nextRunAtFor({
         type: 'time.once',
-        runAtIso: '2026-06-09T07:00:00.000Z',
+        runAtIso: '2020-01-01T00:00:00.000Z',
         tz: 'UTC',
-      }).success,
-    ).toBe(true);
-    expect(
-      TriggerSchema.safeParse({
-        type: 'time.cron',
-        pattern: '0 7 * * *',
-        tz: 'UTC',
-      }).success,
-    ).toBe(true);
+      }),
+    ).toBeNull();
   });
 
-  it('renders a human-readable summary', () => {
+  it('computes the next cron occurrence and rejects bad patterns', () => {
+    const from = new Date('2026-06-10T12:00:00.000Z');
     expect(
-      summarizeTrigger({
-        type: 'time.cron',
-        pattern: '0 7 * * *',
-        tz: 'Africa/Cairo',
-      }),
-    ).toContain('cron');
+      nextRunAtFor(
+        { type: 'time.cron', pattern: '0 7 * * *', tz: 'UTC' },
+        from,
+      ),
+    ).toBe('2026-06-11T07:00:00.000Z');
     expect(
-      summarizeTrigger({
-        type: 'time.once',
-        runAtIso: '2026-06-09T07:00:00.000Z',
-        tz: 'UTC',
-      }),
-    ).toContain('once at');
+      nextRunAtFor(
+        { type: 'time.cron', pattern: 'not a cron', tz: 'UTC' },
+        from,
+      ),
+    ).toBeNull();
   });
 });
 
-describe('IntentClassifier (fast path)', () => {
-  const c = new IntentClassifier();
+describe('classifyReplyFast', () => {
+  it.each(['yes', 'YES.', 'ok, do it', 'approved', 'ship'])(
+    'approves %j',
+    (text) => {
+      expect(classifyReplyFast(text)).toBe('approved');
+    },
+  );
 
-  it('matches obvious approvals', () => {
-    expect(c.fastPath('yes')).toBe('approved');
-    expect(c.fastPath('YES.')).toBe('approved');
-    expect(c.fastPath('ok, do it')).toBe('approved');
+  it.each(['no', 'cancel.', "don't", 'reject it'])('rejects %j', (text) => {
+    expect(classifyReplyFast(text)).toBe('rejected');
   });
 
-  it('matches obvious rejections', () => {
-    expect(c.fastPath('no')).toBe('rejected');
-    expect(c.fastPath('cancel.')).toBe('rejected');
-    expect(c.fastPath('dont')).toBe('rejected');
-  });
-
-  it('returns "other" for free-form text', () => {
-    expect(c.fastPath('something completely different')).toBe('other');
-    expect(c.fastPath('actually can you change the schedule?')).toBe('other');
+  it.each([
+    'actually can you change the schedule first?',
+    'looks good but include volume next time',
+    '',
+  ])('passes %j to the agent', (text) => {
+    expect(classifyReplyFast(text)).toBe('other');
   });
 });
 
-describe('RoomResolver heuristic', () => {
-  const r = new RoomResolver();
+describe('shouldCreateDedicatedRoom', () => {
+  const onceTrigger = {
+    type: 'time.once',
+    runAtIso: '2099-01-01T00:00:00.000Z',
+    tz: 'UTC',
+  } as const;
 
-  it('forces a dedicated room when explicit=yes', () => {
+  it('honours explicit yes/no over the heuristic', () => {
     expect(
-      r.shouldCreateDedicatedRoom({
-        trigger: {
-          type: 'time.once',
-          runAtIso: '2099-01-01T00:00:00.000Z',
-          tz: 'UTC',
-        },
-        intentBody: 'short',
+      shouldCreateDedicatedRoom({
+        trigger: onceTrigger,
+        intentBody: 'x',
         explicit: 'yes',
       }),
     ).toBe(true);
-  });
-
-  it('respects explicit=no', () => {
     expect(
-      r.shouldCreateDedicatedRoom({
+      shouldCreateDedicatedRoom({
         trigger: { type: 'time.cron', pattern: '*/5 * * * *', tz: 'UTC' },
-        intentBody: 'short',
+        intentBody: 'x',
         explicit: 'no',
       }),
     ).toBe(false);
   });
 
-  it('auto-creates for sub-day cron', () => {
+  it('auto-creates for sub-day cron but not daily', () => {
     expect(
-      r.shouldCreateDedicatedRoom({
+      shouldCreateDedicatedRoom({
         trigger: { type: 'time.cron', pattern: '*/30 * * * *', tz: 'UTC' },
-        intentBody: 'short',
+        intentBody: 'x',
         explicit: 'auto',
       }),
     ).toBe(true);
-  });
-
-  it('does not auto-create for daily cron', () => {
     expect(
-      r.shouldCreateDedicatedRoom({
+      shouldCreateDedicatedRoom({
         trigger: { type: 'time.cron', pattern: '0 7 * * *', tz: 'UTC' },
-        intentBody: 'short',
+        intentBody: 'x',
         explicit: 'auto',
       }),
     ).toBe(false);
   });
 
-  it('auto-creates when intent mentions monitor / track', () => {
+  it('auto-creates for monitoring-style intents', () => {
     expect(
-      r.shouldCreateDedicatedRoom({
-        trigger: {
-          type: 'time.once',
-          runAtIso: '2099-01-01T00:00:00.000Z',
-          tz: 'UTC',
-        },
+      shouldCreateDedicatedRoom({
+        trigger: onceTrigger,
         intentBody: 'Track the BTC price and report when it moves.',
         explicit: 'auto',
       }),
