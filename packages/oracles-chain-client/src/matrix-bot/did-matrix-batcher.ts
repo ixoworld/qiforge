@@ -84,6 +84,35 @@ function extractUrlDomain(url: string): string {
   }
 }
 
+/**
+ * Normalizes a Matrix home-server base URL so it can be safely concatenated
+ * with request paths (`${url}/_matrix/...`) without producing double slashes.
+ *
+ * On-chain `serviceEndpoint` values are user/registration-supplied and have
+ * been observed carrying trailing slashes and stray whitespace/CRLF
+ * (`"https://mx.ixo.earth/\r\n"`), which break Synapse routing (`//_matrix`
+ * returns 404).
+ *
+ * - strips all whitespace
+ * - prepends "https://" when no protocol is present (bare domains)
+ * - strips ALL trailing slashes
+ *
+ * Returns "" for empty/nullish input so callers can fall back to a default.
+ */
+export function normalizeMatrixHomeServerUrl(
+  url: string | null | undefined,
+): string {
+  if (!url) return '';
+
+  const trimmed = url.replace(/\s+/g, '');
+  if (trimmed === '') return '';
+
+  const withProtocol = /^https?:\/\//.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+  return withProtocol.replace(/\/+$/, '');
+}
+
 export function deriveMatrixBotUrls(homeServerUrl: string): MatrixBotUrls {
   const domain = extractUrlDomain(homeServerUrl);
   return {
@@ -97,10 +126,12 @@ export function deriveMatrixBotUrls(homeServerUrl: string): MatrixBotUrls {
 export function buildMatrixUrlsFromHomeServer(
   homeServerUrl: string,
 ): MatrixUrls {
-  const botUrls = deriveMatrixBotUrls(homeServerUrl);
+  const normalized =
+    normalizeMatrixHomeServerUrl(homeServerUrl) || homeServerUrl;
+  const botUrls = deriveMatrixBotUrls(normalized);
   return {
-    homeServer: homeServerUrl,
-    homeServerCropped: extractUrlDomain(homeServerUrl),
+    homeServer: normalized,
+    homeServerCropped: extractUrlDomain(normalized),
     ...botUrls,
   };
 }
@@ -206,11 +237,10 @@ async function queryIidServices(
       const matrixService = node.service?.find(
         (s) => s.type === MATRIX_SERVICE_TYPE,
       );
-      if (matrixService?.serviceEndpoint) {
-        results.set(did, matrixService.serviceEndpoint);
-      } else {
-        results.set(did, null);
-      }
+      const normalized = normalizeMatrixHomeServerUrl(
+        matrixService?.serviceEndpoint,
+      );
+      results.set(did, normalized || null);
     }
   } catch (error) {
     // eslint-disable-next-line no-console
@@ -259,11 +289,10 @@ async function queryEntityServices(
       const matrixService = node.service?.find(
         (s) => s.type === MATRIX_SERVICE_TYPE,
       );
-      if (matrixService?.serviceEndpoint) {
-        results.set(did, matrixService.serviceEndpoint);
-      } else {
-        results.set(did, null);
-      }
+      const normalized = normalizeMatrixHomeServerUrl(
+        matrixService?.serviceEndpoint,
+      );
+      results.set(did, normalized || null);
     }
   } catch (error) {
     // eslint-disable-next-line no-console
