@@ -17,7 +17,7 @@ sub‑agents and no create path yet, so later tasks have a place to land.
 ### Created
 
 - `packages/oracle-runtime/src/plugins/pod-creator/pod-creator.plugin.ts` — `class PodCreatorPlugin
-  extends OraclePlugin`: `name = 'pod-creator'`, `version`, `manifest` (`category: 'automation'`,
+extends OraclePlugin`: `name = 'pod-creator'`, `version`, `manifest` (`category: 'automation'`,
   `visibility: 'on-demand'`, `whenToUse` / `examples` that teach the conductor to drive POD
   creation), `dependsOn: ['agui']`, `softDependsOn: ['editor', 'domain-indexer', 'memory']`,
   `configSchema` per §10 (marketplace endpoint, per‑stage toggles, `mainnet` opt‑in; reuse

@@ -120,6 +120,19 @@ describe('computeReadiness', () => {
     expect(r.complete).toBe(false);
     expect(r.blockers.some((b) => b.includes('missing demo'))).toBe(true);
   });
+
+  it('does not satisfy a gate role recorded without a pass verdict', () => {
+    const sections = sectionsThrough('gate').filter(
+      (s) => s.role !== 'qa_launch_readiness_oracle',
+    );
+    sections.push(section('qa_launch_readiness_oracle'));
+    const r = computeReadiness(blueprint(sections));
+    expect(r.complete).toBe(false);
+    expect(r.stage).toBe('gate');
+    expect(
+      r.blockers.some((b) => b.includes('qa_launch_readiness_oracle')),
+    ).toBe(true);
+  });
 });
 
 describe('assembleServicePodBlueprint', () => {

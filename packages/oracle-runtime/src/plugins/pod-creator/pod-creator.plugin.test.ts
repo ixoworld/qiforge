@@ -72,7 +72,7 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
       capsuleContentFetcher: async () => '# Intent\n\nScore the request.',
     });
     const subs = await plugin.getRequestSubAgents(makeRuntimeContext());
-    expect(subs.map((s) => s.name)).toEqual(['call_service_intent_scorer']);
+    expect(subs.map((s) => s.name)).toEqual(['service_intent_scorer']);
     const prompt = subs[0]?.systemPrompt;
     if (typeof prompt !== 'string') {
       throw new Error('expected a string systemPrompt');

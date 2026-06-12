@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { computeSubAgentToolName } from '../../graph/subagent-as-tool.js';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import type { BlueprintSection } from './blueprint-types.js';
@@ -70,7 +71,9 @@ export function createOrchestrationTools(store: BlueprintStore): PluginTool[] {
         started: true,
         threadId: bp.threadId,
         stage: readiness.stage,
-        nextSpecialists: SPECIALISTS_FOR_STAGE[readiness.stage],
+        nextSpecialists: SPECIALISTS_FOR_STAGE[readiness.stage].map((id) =>
+          computeSubAgentToolName(id),
+        ),
       };
     },
     {

@@ -112,7 +112,7 @@ async function buildSubAgent(
   capsules: CapsuleContentClient,
 ): Promise<PluginSubAgent> {
   return {
-    name: `call_${role.id}`,
+    name: role.id,
     description: role.description,
     systemPrompt: await resolvePrompt(role, rt, capsules),
     tools: roleTools(role, store),

@@ -34,9 +34,18 @@ function groupRolesByStage(): Record<DesignPodStage, string[]> {
 export const SPECIALISTS_FOR_STAGE: Record<DesignPodStage, readonly string[]> =
   groupRolesByStage();
 
-/** A section counts toward readiness iff it exists and did not fail a gate. */
+/**
+ * A section counts toward readiness when it exists — and, for gate-bearing
+ * roles (the evaluate oracles and the launch-readiness gate), only when it
+ * carries an explicit `'pass'` verdict. This stops a gate role that submitted
+ * content without a verdict from silently satisfying the launch gate.
+ */
 function sectionSatisfies(section: BlueprintSection | undefined): boolean {
-  return section !== undefined && section.verdict !== 'fail';
+  if (section === undefined) {
+    return false;
+  }
+  const isGateRole = section.stage === 'evaluate' || section.stage === 'gate';
+  return isGateRole ? section.verdict === 'pass' : section.verdict !== 'fail';
 }
 
 /**
@@ -89,9 +98,11 @@ export function computeReadiness(bp: PodBlueprint): Readiness {
         stageComplete = false;
         if (section === undefined) {
           blockers.push(`${stage}: ${roleId} not recorded`);
-        } else {
+        } else if (section.verdict === 'fail') {
           const detail = (section.blockers ?? []).join('; ') || 'no detail';
           blockers.push(`${stage}: ${roleId} failed (${detail})`);
+        } else {
+          blockers.push(`${stage}: ${roleId} awaiting a pass verdict`);
         }
       }
     }

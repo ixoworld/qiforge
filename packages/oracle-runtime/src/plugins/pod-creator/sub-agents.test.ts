@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { computeSubAgentToolName } from '../../graph/subagent-as-tool.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import { InMemoryBlueprintStore } from './blueprint-store.js';
 import {
@@ -33,7 +34,11 @@ describe('buildStageSubAgents', () => {
       clientWith(SKILL_MD),
     );
 
-    expect(subs.map((s) => s.name)).toEqual(['call_service_intent_scorer']);
+    expect(subs.map((s) => s.name)).toEqual(['service_intent_scorer']);
+    // The runtime wraps the raw name into the callable specialist tool.
+    expect(subs[0] ? computeSubAgentToolName(subs[0].name) : undefined).toBe(
+      'call_service_intent_scorer_agent',
+    );
     expect(subs[0]?.model).toBe('subagent');
     expect(subs[0]?.forwardTools).toBe(true);
 
@@ -61,9 +66,9 @@ describe('buildStageSubAgents', () => {
       clientWith(SKILL_MD),
     );
     expect(subs.map((s) => s.name).sort()).toEqual([
-      'call_claims_architect',
-      'call_service_architect',
-      'call_ucan_rights_architect',
+      'claims_architect',
+      'service_architect',
+      'ucan_rights_architect',
     ]);
   });
 
