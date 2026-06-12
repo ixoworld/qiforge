@@ -1,11 +1,22 @@
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
-import type { PluginManifest, PluginTool } from '../../plugin-api/types.js';
+import type {
+  PluginManifest,
+  PluginSubAgent,
+  PluginTool,
+  RuntimeContext,
+} from '../../plugin-api/types.js';
 import {
   InMemoryBlueprintStore,
   type BlueprintStore,
 } from './blueprint-store.js';
+import {
+  CapsuleContentClient,
+  type CapsuleContentClientOptions,
+  type CapsuleContentFetcher,
+} from './capsule-content-client.js';
 import { createOrchestrationTools } from './orchestration-tools.js';
+import { buildStageSubAgents } from './sub-agents.js';
 
 /**
  * Plugin-owned env vars. The capsules registry URL and `NETWORK` are read as
@@ -27,6 +38,17 @@ const configSchema = z.object({
       z.enum(['true', 'false']).transform((value) => value === 'true'),
     ])
     .default(false),
+});
+
+/**
+ * Sibling env read at request time to configure the capsule client. The
+ * registry URL is owned by the skills plugin's configSchema and `NETWORK` by
+ * the base env schema; pod-creator reads them without redeclaring (which would
+ * collide in the config-schema registry).
+ */
+const capsuleEnvSchema = z.object({
+  SKILLS_CAPSULES_BASE_URL: z.url().optional(),
+  NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).optional(),
 });
 
 const manifest: PluginManifest = {
@@ -56,6 +78,16 @@ const manifest: PluginManifest = {
   stability: 'experimental',
 };
 
+export interface PodCreatorPluginOptions {
+  /**
+   * Registry retrieval for capsule `SKILL.md` text. Injected by tests, and the
+   * seam where the confirmed production content path is wired. When omitted,
+   * specialist sub-agents fall back to built-in prompts until a fetcher is
+   * configured.
+   */
+  capsuleContentFetcher?: CapsuleContentFetcher;
+}
+
 /**
  * POD-creator plugin.
  *
@@ -65,9 +97,9 @@ const manifest: PluginManifest = {
  * are loaded from the ai-skills capsule registry per stage via the
  * `CapsuleContentClient`.
  *
- * Exposes the conductor's orchestration tools (the blueprint lifecycle). The
- * stage-gated specialist sub-agents and the on-chain create path are wired in
- * subsequent slices.
+ * Exposes the conductor's orchestration tools (the blueprint lifecycle) and the
+ * stage-gated specialist sub-agents. The on-chain create path is wired in a
+ * subsequent slice.
  */
 export class PodCreatorPlugin extends OraclePlugin {
   readonly name = 'pod-creator';
@@ -89,7 +121,46 @@ export class PodCreatorPlugin extends OraclePlugin {
   private readonly blueprintStore: BlueprintStore =
     new InMemoryBlueprintStore();
 
+  private readonly capsuleContentFetcher?: CapsuleContentFetcher;
+
+  /**
+   * Built lazily from request config; cached so the per-thread prompt cache
+   * survives across requests.
+   */
+  private capsuleContent?: CapsuleContentClient;
+
+  constructor(options: PodCreatorPluginOptions = {}) {
+    super();
+    this.capsuleContentFetcher = options.capsuleContentFetcher;
+  }
+
   override getTools(): PluginTool[] {
     return createOrchestrationTools(this.blueprintStore);
+  }
+
+  override async getRequestSubAgents(
+    rt: RuntimeContext,
+  ): Promise<PluginSubAgent[]> {
+    return buildStageSubAgents(rt, this.blueprintStore, this.capsuleClient(rt));
+  }
+
+  private capsuleClient(rt: RuntimeContext): CapsuleContentClient {
+    if (!this.capsuleContent) {
+      const env = capsuleEnvSchema.safeParse(rt.config);
+      const options: CapsuleContentClientOptions = {};
+      if (env.success) {
+        if (env.data.SKILLS_CAPSULES_BASE_URL !== undefined) {
+          options.baseUrl = env.data.SKILLS_CAPSULES_BASE_URL;
+        }
+        if (env.data.NETWORK !== undefined) {
+          options.network = env.data.NETWORK;
+        }
+      }
+      if (this.capsuleContentFetcher !== undefined) {
+        options.fetcher = this.capsuleContentFetcher;
+      }
+      this.capsuleContent = new CapsuleContentClient(options);
+    }
+    return this.capsuleContent;
   }
 }

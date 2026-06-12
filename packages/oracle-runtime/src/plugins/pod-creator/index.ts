@@ -1,4 +1,7 @@
-export { PodCreatorPlugin } from './pod-creator.plugin.js';
+export {
+  PodCreatorPlugin,
+  type PodCreatorPluginOptions,
+} from './pod-creator.plugin.js';
 export {
   CapsuleContentClient,
   DEFAULT_CAPSULES_BASE_URL,
@@ -30,3 +33,4 @@ export {
   type Readiness,
 } from './stage.js';
 export { createOrchestrationTools } from './orchestration-tools.js';
+export { buildStageSubAgents } from './sub-agents.js';

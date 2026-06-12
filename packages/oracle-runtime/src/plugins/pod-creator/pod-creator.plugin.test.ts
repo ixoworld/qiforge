@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
+import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import { createTestRuntime } from '../../testing/create-test-runtime.js';
 import { PodCreatorPlugin } from './pod-creator.plugin.js';
 
@@ -62,5 +63,20 @@ describe('PodCreatorPlugin loads via createTestRuntime', () => {
     }
     expect(cap.visibility).toBe('on-demand');
     await rt.close();
+  });
+});
+
+describe('PodCreatorPlugin getRequestSubAgents', () => {
+  it('exposes the current stage specialist with a registry-loaded prompt', async () => {
+    const plugin = new PodCreatorPlugin({
+      capsuleContentFetcher: async () => '# Intent\n\nScore the request.',
+    });
+    const subs = await plugin.getRequestSubAgents(makeRuntimeContext());
+    expect(subs.map((s) => s.name)).toEqual(['call_service_intent_scorer']);
+    const prompt = subs[0]?.systemPrompt;
+    if (typeof prompt !== 'string') {
+      throw new Error('expected a string systemPrompt');
+    }
+    expect(prompt).toContain('Score the request.');
   });
 });
