@@ -37,6 +37,9 @@ export function makeSessionManagerStub() {
       getEventById: vi.fn(),
       onMessage: vi.fn(() => () => undefined),
       init: vi.fn().mockResolvedValue(undefined),
+      // The bridge calls `getClient()?.mxClient.setTyping(...)` around each
+      // delivery; `undefined` makes the optional chain a no-op in tests.
+      getClient: vi.fn(() => undefined),
     },
   };
 }

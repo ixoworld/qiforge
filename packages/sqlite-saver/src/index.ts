@@ -175,6 +175,8 @@ export class SqliteSaver extends BaseCheckpointSaver {
 
   protected deleteWritesStmt: Statement;
 
+  protected deleteMessagesStmt: Statement;
+
   constructor(db: DatabaseType, serde?: SerializerProtocol) {
     super(serde);
     this.db = db;
@@ -401,6 +403,10 @@ ON writes(thread_id, checkpoint_id, channel);
 
     this.getMessageStmt = this.db.prepare(
       `SELECT * FROM messages WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`,
+    );
+
+    this.deleteMessagesStmt = this.db.prepare(
+      `DELETE FROM messages WHERE thread_id = ?`,
     );
 
     this.isSetup = true;
@@ -857,9 +863,11 @@ ON writes(thread_id, checkpoint_id, channel);
   }
 
   async deleteThread(threadId: string) {
+    this.setup();
     const transaction = this.db.transaction(() => {
       this.deleteCheckpointsStmt.run(threadId);
       this.deleteWritesStmt.run(threadId);
+      this.deleteMessagesStmt.run(threadId);
     });
 
     transaction();

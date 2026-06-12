@@ -81,6 +81,9 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   private deliverHandler:
     | ((msg: MatrixIncomingMessage) => Promise<unknown>)
     | null = null;
+  private roomSessionResolver:
+    | ((roomId: string) => Promise<string | undefined>)
+    | null = null;
 
   constructor(
     private readonly sessions: SessionManagerService,
@@ -94,6 +97,19 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     handler: (msg: MatrixIncomingMessage) => Promise<unknown>,
   ): void {
     this.deliverHandler = handler;
+  }
+
+  /**
+   * Optionally pin every message in a room to a single session, bypassing
+   * reply-chain thread resolution. A plugin that owns a room (e.g. the tasks
+   * plugin's dedicated task rooms) registers this so a plainly-typed reply
+   * continues that room's bound session — no quote-reply required. Returning
+   * `undefined` for a room falls back to normal thread-root resolution.
+   */
+  setRoomSessionResolver(
+    resolver: (roomId: string) => Promise<string | undefined>,
+  ): void {
+    this.roomSessionResolver = resolver;
   }
 
   onModuleInit(): void {
@@ -135,7 +151,18 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     const isFile = typeof msgtype === 'string' && FILE_MSGTYPES.has(msgtype);
     if (!isText && !isFile) return;
 
-    const threadId = await this.getThreadRoot(event, roomId);
+    // A plugin that owns this room can pin it to one session — every message
+    // there continues that bound session, skipping reply-chain resolution.
+    const boundSession = this.roomSessionResolver
+      ? await this.roomSessionResolver(roomId).catch((err) => {
+          this.logger.warn(
+            `roomSessionResolver failed for ${roomId}: ${(err as Error).message}`,
+          );
+          return undefined;
+        })
+      : undefined;
+
+    const threadId = boundSession ?? (await this.getThreadRoot(event, roomId));
     if (!threadId) {
       this.logger.warn(
         `No thread root for eventId=${event.eventId} roomId=${roomId}`,
@@ -143,9 +170,15 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const threadEv = await this.matrixManager.getEventById(roomId, threadId);
-    const langchainThreadId = (threadEv.content as { sessionId?: string })
-      ?.sessionId;
+    // The bound session id IS the langchain thread; only read the thread-root
+    // event's `sessionId` when we resolved via the reply chain.
+    const langchainThreadId = boundSession
+      ? undefined
+      : (
+          (await this.matrixManager.getEventById(roomId, threadId)).content as {
+            sessionId?: string;
+          }
+        )?.sessionId;
     const sessionId = threadId;
 
     await this.ensureSession(did, sessionId, event, roomId);
@@ -197,7 +230,13 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
           homeServer: userHomeServer,
           roomId,
         },
-        event.eventId,
+        // Anchor the session at the THREAD ROOT, not this event. They're the
+        // same for a plain message, but when the user quote-replies to a
+        // message that isn't itself a session root (e.g. a worker-posted task
+        // approval prompt), the root differs — and `prepare()` looks the
+        // session up by the root, so creating it under `event.eventId` here
+        // would 404 with "Session not found".
+        sessionId,
       );
     } catch (err) {
       this.logger.error(`createSession failed did=${did}`, err);

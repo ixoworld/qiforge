@@ -25,7 +25,12 @@ export function shouldCreateDedicatedRoom(args: {
   return /\b(monitor|ongoing|watch|track)\b/i.test(args.intentBody);
 }
 
-function cronIntervalMs(pattern: string, tz: string): number | null {
+/**
+ * Milliseconds between two consecutive fires of a cron pattern, or null when
+ * the pattern doesn't parse. Used for the dedicated-room heuristic above and
+ * the minimum-frequency check on task creation.
+ */
+export function cronIntervalMs(pattern: string, tz: string): number | null {
   try {
     const it = CronExpressionParser.parse(pattern, { tz });
     const a = it.next().toDate().getTime();

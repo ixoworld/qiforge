@@ -1,4 +1,3 @@
-import type { ApprovalService } from './approval.js';
 import type { DeliveryService } from './delivery.js';
 import type { AgentInvoker } from './invoker.js';
 import type { RedisState } from './redis-state.js';
@@ -8,20 +7,27 @@ import type { TaskStore } from './task-store.js';
 /** Consecutive failed/rejected runs before a task pauses for review. */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+/**
+ * Session-id prefix for the synthetic sessions task runs execute on. The
+ * leading `$` matches Matrix event-id syntax, and the prefix is what shows up
+ * as the LangSmith thread id for those runs.
+ */
+export const TASK_SESSION_PREFIX = '$task-';
+
 /** DI token for the parsed plugin config (`TasksModule` provides it). */
 export const TASKS_RUNTIME_CONFIG = Symbol('TASKS_RUNTIME_CONFIG');
 
 export interface TasksRuntimeConfig {
   maxTasksPerUser: number;
   runLockTtlSec: number;
+  minCronIntervalSec: number;
 }
 
 /**
  * The service bundle the Nest module hands back to the plugin instance once
  * DI has initialised (`TasksModule` calls `onReady` from `onModuleInit`).
- * Tool handlers and the approval-gate middleware run long after boot, so
- * they read it lazily via the plugin's getter and fail soft when the module
- * isn't up yet.
+ * Tool handlers run long after boot, so they read it lazily via the plugin's
+ * getter and fail soft when the module isn't up yet.
  */
 export interface TasksRuntime {
   config: TasksRuntimeConfig;
@@ -29,7 +35,6 @@ export interface TasksRuntime {
   state: RedisState;
   scheduler: SchedulerService;
   delivery: DeliveryService;
-  approval: ApprovalService;
   invoker: AgentInvoker;
 }
 

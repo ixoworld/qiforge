@@ -1,13 +1,7 @@
 import type { DynamicModule } from '@nestjs/common';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
-import type {
-  AgentMiddleware,
-  PluginContext,
-  PluginManifest,
-  PluginTool,
-} from '../../plugin-api/types.js';
-import { createApprovalGateMiddleware } from './internal/middleware.js';
+import type { PluginManifest, PluginTool } from '../../plugin-api/types.js';
 import type { TasksRuntime } from './internal/runtime.js';
 import { TasksModule } from './internal/tasks.module.js';
 import { createTaskTools } from './internal/tools.js';
@@ -17,21 +11,25 @@ const configSchema = z.object({
   REDIS_URL: z.string(),
   TASKS_MAX_PER_USER: z.coerce.number().int().positive().default(50),
   TASKS_RUN_LOCK_TTL_SEC: z.coerce.number().int().positive().default(600),
+  TASKS_MIN_CRON_INTERVAL_SEC: z.coerce.number().int().positive().default(300),
 });
 
 /**
  * Scheduled-tasks plugin. Auto-detects on `REDIS_URL`. When loaded:
  *
- *   - 10 always-on tools (preview / create / list / get / update / pause /
- *     resume / cancel / suggest_spec_fix / resolve_pending_approval)
- *   - one model-call middleware — the approval gate — that intercepts user
- *     replies to pending approval requests
- *   - a NestJS module with two BullMQ queues (`task_run`, `task_approval`)
- *     and their workers
+ *   - 9 always-on tools (preview / create / list / get / update / pause /
+ *     resume / cancel / suggest_spec_fix)
+ *   - a NestJS module with the `task_run` BullMQ queue and its worker
  *
- * Tools and the middleware are built at boot, but the module's services only
- * exist once Nest initialises — so the module hands the wired bundle back via
- * `onReady` and everything reads it lazily through `this.runtime`.
+ * Tools are built at boot, but the module's services only exist once Nest
+ * initialises — so the module hands the wired bundle back via `onReady` and
+ * the tools read it lazily through `this.runtime`.
+ *
+ * A `before-action` task drafts its action in a dedicated room and asks the
+ * user to approve by replying there; on approval the agent performs the
+ * action on the follow-up turn. There is no Redis approval gate — the task
+ * module registers a room→session resolver on the Matrix bridge so the user's
+ * plainly-typed reply continues the run's own conversation.
  */
 export class TasksPlugin extends OraclePlugin {
   static readonly NAME = 'tasks';
@@ -56,15 +54,6 @@ export class TasksPlugin extends OraclePlugin {
 
   override getTools(): PluginTool[] {
     return createTaskTools(() => this.runtime);
-  }
-
-  override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
-    return [
-      createApprovalGateMiddleware({
-        getRuntime: () => this.runtime,
-        logger: ctx.logger,
-      }),
-    ];
   }
 
   override getNestModules(): DynamicModule[] {

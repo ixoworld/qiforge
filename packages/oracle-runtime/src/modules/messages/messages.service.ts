@@ -47,6 +47,16 @@ export interface SendMessageRequest extends SendMessagePayload {
   msgFromMatrixRoom?: boolean;
   overrideLangchainThreadId?: string;
   /**
+   * Throwaway-session callers (e.g. the tasks plugin's `AgentInvoker`, which
+   * creates a synthetic session, runs one turn, then deletes it) set this so
+   * the fire-and-forget post-message sync does NOT persist the session row.
+   * Without it, the sync races the caller's own `deleteSession` and
+   * re-inserts the synthetic session as an orphan in the user's main room —
+   * which then poisons the session list and makes later Matrix thread-relay
+   * sends fail with `M_UNKNOWN: Can't send relation to unknown event`.
+   */
+  skipPostSync?: boolean;
+  /**
    * Authenticated UCAN delegation from `req.authData.ucanDelegation`.
    * Threaded through to `requestCtx.user.ucanDelegation` so plugins can
    * mint downstream invocations from the raw header. Absent on the Matrix
@@ -167,7 +177,10 @@ export class MessagesService implements OnModuleInit {
             isOracleAdmin: false,
           })
           .catch((err) =>
-            this.logger.error('Matrix replay (user message) failed', err),
+            this.logger.error(
+              `Matrix replay (user message) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
+              err,
+            ),
           );
       }
 
@@ -188,10 +201,13 @@ export class MessagesService implements OnModuleInit {
                   isOracleAdmin: true,
                 })
                 .catch((err) =>
-                  this.logger.error('Matrix replay (AI response) failed', err),
+                  this.logger.error(
+                    `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
+                    err,
+                  ),
                 );
             }
-            this.firePostSync(params, prepared);
+            if (!params.skipPostSync) this.firePostSync(params, prepared);
           },
         });
         return undefined;
@@ -212,10 +228,13 @@ export class MessagesService implements OnModuleInit {
             isOracleAdmin: true,
           })
           .catch((err) =>
-            this.logger.error('Matrix replay (AI response) failed', err),
+            this.logger.error(
+              `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
+              err,
+            ),
           );
       }
-      this.firePostSync(params, prepared);
+      if (!params.skipPostSync) this.firePostSync(params, prepared);
       return result;
     } finally {
       this.checkpointSync.markUserInactive(params.did);

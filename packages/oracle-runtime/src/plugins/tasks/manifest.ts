@@ -3,7 +3,7 @@ import type { PluginManifest } from '../../plugin-api/types.js';
 export const tasksManifest: PluginManifest = {
   title: 'Scheduled Tasks',
   summary:
-    'Schedule the main agent to run on time-based triggers and deliver the result.',
+    "Schedule the main agent to run on time-based triggers and deliver the result to the user's oracle chat room (or a dedicated task room) — runs happen in the background, not inline in the current conversation.",
   whenToUse: [
     "User wants to set up a reminder or recurring report ('every morning at 7', 'tomorrow at 5pm', 'remind me to …')",
     'User wants the agent to monitor or track something on a schedule',
@@ -51,6 +51,40 @@ export const tasksManifest: PluginManifest = {
       },
     },
     {
+      user: 'Every weekday at 9am post a LinkedIn update about our latest blog, but let me approve it before it goes out.',
+      thought:
+        'An action task. Preview first. Use approval: before-action so each run drafts the post in its own [Task] room and asks the user to approve there before publishing — the agent only publishes once the user replies "yes".',
+      tool: 'preview_task',
+      args: {
+        title: 'Daily LinkedIn Update',
+        intent: {
+          whatToDo:
+            "Draft a short LinkedIn post about the company's latest blog article and propose it for approval before publishing.",
+          howToReport: 'The ready-to-post text, with the article link.',
+          constraints: ['Under 120 words.'],
+        },
+      },
+    },
+    {
+      user: 'Looks good — schedule it and ask me before each one goes out.',
+      thought:
+        'Action task confirmed. Commit with approval: before-action so every run drafts in the [Task] room and waits for the user to approve by replying there.',
+      tool: 'create_task',
+      args: {
+        previewToken: '<token-from-preview_task>',
+        title: 'Daily LinkedIn Update',
+        trigger: { type: 'time.cron', pattern: '0 9 * * 1-5', tz: 'UTC' },
+        intent: {
+          whatToDo:
+            "Draft a short LinkedIn post about the company's latest blog article and propose it for approval before publishing.",
+          howToReport: 'The ready-to-post text, with the article link.',
+          constraints: ['Under 120 words.'],
+        },
+        approval: 'before-action',
+        dedicatedRoom: 'auto',
+      },
+    },
+    {
       user: 'What tasks do I have?',
       tool: 'list_my_tasks',
       args: {},
@@ -58,18 +92,11 @@ export const tasksManifest: PluginManifest = {
     {
       user: 'Pause the crypto brief.',
       tool: 'pause_task',
-      args: { taskId: 'task_a1b2c3d4e5f6' },
-    },
-    {
-      user: "Send it, but next time include Solana's volume too.",
-      thought:
-        'A nuanced reply to a pending approval — approve now, then offer to update the task body.',
-      tool: 'resolve_pending_approval',
-      args: { decision: 'approve' },
+      args: { taskId: 'task_morning-crypto-brief_a1b2c3d4' },
     },
   ],
   category: 'automation',
-  visibility: 'always',
+  visibility: 'on-demand',
   stability: 'beta',
-  tags: ['scheduler', 'cron', 'automation', 'approval-gate'],
+  tags: ['scheduler', 'cron', 'automation', 'approval'],
 };

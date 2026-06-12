@@ -27,7 +27,11 @@ export const UserPreferencesSchema = z.object({
 });
 export type UserPreferences = z.infer<typeof UserPreferencesSchema>;
 
-const SIXTY_SECONDS_MS = 60 * 1000;
+// Room-state prefs change rarely and every write through this service
+// invalidates the cache (`set` → `invalidate`), so a 5-minute TTL trims the
+// recurring ~50-100ms Matrix state read off the hot path without serving
+// stale prefs for edits that go through the normal path.
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Stores per-room user preferences in Matrix room state, with an optional
@@ -93,7 +97,7 @@ export class UserPreferencesService {
       return undefined;
     }
 
-    await this.cacheManager?.set(key, parsed.data, SIXTY_SECONDS_MS);
+    await this.cacheManager?.set(key, parsed.data, CACHE_TTL_MS);
     return parsed.data;
   }
 

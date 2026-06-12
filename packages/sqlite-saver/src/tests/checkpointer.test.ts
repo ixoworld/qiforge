@@ -1,3 +1,4 @@
+import { HumanMessage } from '@langchain/core/messages';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   type Checkpoint,
@@ -169,6 +170,52 @@ describe('SqliteSaver', () => {
     expect(
       await saver.getTuple({ configurable: { thread_id: '2' } }),
     ).toBeDefined();
+  });
+
+  it('should delete messages rows when deleting a thread', async () => {
+    const saver = SqliteSaver.fromConnString(':memory:');
+
+    const checkpointWithMessages = (id: string): Checkpoint => ({
+      ...emptyCheckpoint(),
+      id: uuid6(-1),
+      channel_values: {
+        messages: [new HumanMessage({ id, content: `message ${id}` })],
+      },
+    });
+
+    await saver.put(
+      { configurable: { thread_id: '1' } },
+      checkpointWithMessages('msg-thread-1'),
+      { source: 'update', step: -1, parents: {} },
+    );
+    await saver.put(
+      { configurable: { thread_id: '2' } },
+      checkpointWithMessages('msg-thread-2'),
+      { source: 'update', step: -1, parents: {} },
+    );
+
+    const countMessages = (threadId: string): number => {
+      const row = saver.db
+        .prepare<[string], { count: number }>(
+          'SELECT COUNT(*) as count FROM messages WHERE thread_id = ?',
+        )
+        .get(threadId);
+      return row?.count ?? 0;
+    };
+
+    expect(countMessages('1')).toBe(1);
+    expect(countMessages('2')).toBe(1);
+
+    await saver.deleteThread('1');
+
+    expect(countMessages('1')).toBe(0);
+    expect(countMessages('2')).toBe(1);
+  });
+
+  it('should delete thread on a fresh saver without prior reads or writes', async () => {
+    const saver = SqliteSaver.fromConnString(':memory:');
+
+    await expect(saver.deleteThread('never-existed')).resolves.toBeUndefined();
   });
 
   it('pending sends migration', async () => {

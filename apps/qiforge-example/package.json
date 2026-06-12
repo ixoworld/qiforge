@@ -24,9 +24,14 @@
     "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
+    "@bull-board/api": "^7.2.1",
+    "@bull-board/express": "^7.2.1",
+    "@bull-board/nestjs": "^7.2.1",
     "@ixo/vitest-config": "workspace:*",
     "@langchain/core": "1.1.48",
+    "@nestjs/bullmq": "^11.0.4",
     "@types/node": "^22.10.7",
+    "bullmq": "^5.78.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^3.2.4"

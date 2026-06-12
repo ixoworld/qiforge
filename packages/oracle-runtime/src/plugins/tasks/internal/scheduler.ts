@@ -1,12 +1,10 @@
-import { randomUUID } from 'node:crypto';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { JobsOptions, Queue } from 'bullmq';
 import { CronExpressionParser } from 'cron-parser';
 import type { Trigger } from './spec.js';
 
 export const RUN_QUEUE = 'task_run';
-export const APPROVAL_QUEUE = 'task_approval';
 
 export const RUN_QUEUE_OPTIONS: JobsOptions = {
   attempts: 3,
@@ -15,23 +13,9 @@ export const RUN_QUEUE_OPTIONS: JobsOptions = {
   removeOnFail: { count: 200, age: 7 * 24 * 3600 },
 };
 
-export const APPROVAL_QUEUE_OPTIONS: JobsOptions = {
-  attempts: 3,
-  backoff: { type: 'fixed', delay: 10_000 },
-  removeOnComplete: { count: 100, age: 24 * 3600 },
-  removeOnFail: { count: 100, age: 7 * 24 * 3600 },
-};
-
 export interface RunJobData {
   taskId: string;
   owner: string;
-}
-
-export interface ApprovalTimeoutJobData {
-  taskId: string;
-  owner: string;
-  roomId: string;
-  phase: 'reminder' | 'expiry';
 }
 
 /**
@@ -59,12 +43,23 @@ export function nextRunAtFor(
   }
 }
 
+/**
+ * Job id for a task's run, unique per task+fire-time: re-enqueueing the same
+ * slot is a no-op, while the next slot of a cron task gets a fresh id even if
+ * BullMQ still remembers the completed previous job. BullMQ rejects custom
+ * job ids containing `:`, so the ISO timestamp's colons become dots and `@`
+ * separates the parts.
+ */
+export function runJobId(taskId: string, runAtIso: string): string {
+  return `${taskId}@${runAtIso.replaceAll(':', '.')}`;
+}
+
 @Injectable()
 export class SchedulerService {
+  private readonly logger = new Logger(SchedulerService.name);
+
   constructor(
     @InjectQueue(RUN_QUEUE) private readonly runQueue: Queue<RunJobData>,
-    @InjectQueue(APPROVAL_QUEUE)
-    private readonly approvalQueue: Queue<ApprovalTimeoutJobData>,
   ) {}
 
   /** Enqueue the next run. A task has at most one pending run job at a time. */
@@ -77,45 +72,20 @@ export class SchedulerService {
     await this.runQueue.add(
       'run',
       { taskId, owner },
-      // Unique per task+fire-time: re-enqueueing the same slot is a no-op,
-      // while the next slot of a cron task gets a fresh id even if BullMQ
-      // still remembers the completed previous job.
-      { jobId: `${taskId}:${runAtIso}`, delay },
+      { jobId: runJobId(taskId, runAtIso), delay },
+    );
+    this.logger.log(
+      `Enqueued run for ${taskId} at ${runAtIso} (delay ${delay}ms)`,
     );
   }
 
   /** Remove every pending (delayed/waiting) run for a task. */
   async cancelRuns(taskId: string): Promise<void> {
     const jobs = await this.runQueue.getJobs(['delayed', 'waiting', 'paused']);
-    await Promise.allSettled(
-      jobs.filter((j) => j.data.taskId === taskId).map((j) => j.remove()),
-    );
-  }
-
-  async scheduleApprovalTimeouts(
-    data: Omit<ApprovalTimeoutJobData, 'phase'>,
-    reminderDelayMs: number,
-    expiryDelayMs: number,
-  ): Promise<void> {
-    await this.approvalQueue.add(
-      'timeout',
-      { ...data, phase: 'reminder' },
-      {
-        jobId: `${data.taskId}:reminder:${randomUUID()}`,
-        delay: reminderDelayMs,
-      },
-    );
-    await this.approvalQueue.add(
-      'timeout',
-      { ...data, phase: 'expiry' },
-      { jobId: `${data.taskId}:expiry:${randomUUID()}`, delay: expiryDelayMs },
-    );
-  }
-
-  async cancelApprovalTimeouts(taskId: string): Promise<void> {
-    const jobs = await this.approvalQueue.getJobs(['delayed', 'waiting']);
-    await Promise.allSettled(
-      jobs.filter((j) => j.data.taskId === taskId).map((j) => j.remove()),
-    );
+    const mine = jobs.filter((j) => j.data.taskId === taskId);
+    await Promise.allSettled(mine.map((j) => j.remove()));
+    if (mine.length > 0) {
+      this.logger.log(`Cancelled ${mine.length} pending run(s) for ${taskId}`);
+    }
   }
 }

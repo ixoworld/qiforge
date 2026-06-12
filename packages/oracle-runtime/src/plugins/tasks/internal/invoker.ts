@@ -3,6 +3,7 @@ import { SessionManagerService } from '@ixo/common';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MessagesService } from '../../../modules/messages/messages.service.js';
+import { TASK_SESSION_PREFIX } from './runtime.js';
 
 /**
  * Runs the main agent off-request by calling `MessagesService.sendMessage` —
@@ -16,10 +17,12 @@ import { MessagesService } from '../../../modules/messages/messages.service.js';
  * never sees the task's internal session in their session list, and the
  * main Matrix room stays clean.
  *
- * Each run gets its own session, so there's no persistent task thread —
- * tasks are stateless across runs. That's fine: the spec body controls
- * what each run does, and the LLM has no need to recall a previous run.
- * (Memory across runs, if ever needed, is FOLLOWUP-11.)
+ * A `never` task uses `runOnce`: a throwaway session, deleted right after,
+ * so there's no persistent thread. A `before-action` task uses
+ * `runConversational`: a persistent session the worker binds to the task's
+ * room, so the user's reply continues the same thread and the agent — with
+ * its own draft in the checkpointer history — performs (or revises) the
+ * action on the follow-up turn.
  */
 @Injectable()
 export class AgentInvoker {
@@ -46,10 +49,12 @@ export class AgentInvoker {
     message: string;
     roomId?: string;
   }): Promise<string> {
+    const startedAt = Date.now();
     const oracleEntityDid = this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
     // Synthetic session id — Matrix never sees it. The leading `$` matches
-    // Matrix event-id syntax so any sloppy consumer treats it as an event id.
-    const sessionId = `$task-${randomUUID()}`;
+    // Matrix event-id syntax so any sloppy consumer treats it as an event id,
+    // and the prefix is what shows up as the LangSmith thread id for the run.
+    const sessionId = `${TASK_SESSION_PREFIX}${randomUUID()}`;
     await this.sessionManager.createSession(
       {
         did: args.did,
@@ -68,23 +73,96 @@ export class AgentInvoker {
         stream: false,
         // Tasks own delivery — suppress Matrix replay of input and reply.
         msgFromMatrixRoom: true,
+        // This session is deleted in the `finally` below; without this the
+        // fire-and-forget post-sync races that delete and re-inserts the
+        // synthetic session as an orphan in the user's main room.
+        skipPostSync: true,
         clientType: 'matrix',
       });
-      const content = reply?.message.content;
-      if (typeof content !== 'string' || content.length === 0) {
+      // When a middleware short-circuits the graph (e.g. the group-chat
+      // gate), the tail of state is the input HumanMessage itself —
+      // delivering that would post the spec body back as the "result".
+      if (!reply || reply.message.type !== 'ai') {
+        throw new Error('Agent did not produce a reply');
+      }
+      const content = reply.message.content;
+      if (content.length === 0) {
         throw new Error('Agent returned no output');
       }
+      this.logger.log(
+        `runOnce completed for ${args.did} (session ${sessionId}) in ${Date.now() - startedAt}ms`,
+      );
       return content;
     } finally {
-      // Best-effort cleanup: an orphaned SQLite row is harmless (filtered
-      // out of session lists by roomId) but we want to leave nothing.
-      await this.sessionManager
-        .deleteSession({ did: args.did, sessionId, oracleEntityDid })
-        .catch((err) =>
-          this.logger.warn(
-            `Failed to delete task session ${sessionId}: ${(err as Error).message}`,
-          ),
-        );
+      // Best-effort cleanup. This synthetic session lives in the user's main
+      // room, so a leaked row would surface in their session list — delete it
+      // (and its checkpointer thread, handled by deleteSession).
+      await this.deleteSession(args.did, sessionId);
     }
+  }
+
+  /**
+   * Run the main agent on a fresh, PERSISTENT session anchored in `roomId` and
+   * return both its id and the agent's output. Unlike `runOnce`, the session
+   * is NOT deleted: the worker binds the dedicated task room to it so the
+   * user's plainly-typed reply continues this exact thread (the draft sits in
+   * the checkpointer history, so the follow-up turn can act on it).
+   */
+  async runConversational(args: {
+    did: string;
+    roomId: string;
+    message: string;
+  }): Promise<{ sessionId: string; output: string }> {
+    const startedAt = Date.now();
+    // Synthetic id with the same `$task-` prefix and `$`-leading event-id
+    // shape as `runOnce`. The `overrideEventId` skips the "New Conversation
+    // Started" Matrix post.
+    const sessionId = `${TASK_SESSION_PREFIX}${randomUUID()}`;
+    await this.sessionManager.createSession(
+      {
+        did: args.did,
+        roomId: args.roomId,
+        oracleName: this.config.getOrThrow<string>('ORACLE_NAME'),
+        oracleDid: this.config.getOrThrow<string>('ORACLE_DID'),
+        oracleEntityDid: this.config.getOrThrow<string>('ORACLE_ENTITY_DID'),
+      },
+      sessionId,
+    );
+    const reply = await this.messages.sendMessage({
+      did: args.did,
+      sessionId,
+      message: args.message,
+      stream: false,
+      // The worker owns delivery (it posts the draft+ask itself) — suppress
+      // Matrix replay of the spec body and the agent's reply.
+      msgFromMatrixRoom: true,
+      // This persistent session stays in the room; post-sync would re-anchor
+      // it in the user's main room, so skip it.
+      skipPostSync: true,
+      clientType: 'matrix',
+    });
+    if (!reply || reply.message.type !== 'ai') {
+      throw new Error('Agent did not produce a reply');
+    }
+    const output = reply.message.content;
+    if (output.length === 0) {
+      throw new Error('Agent returned no output');
+    }
+    this.logger.log(
+      `runConversational completed for ${args.did} (session ${sessionId}) in ${Date.now() - startedAt}ms`,
+    );
+    return { sessionId, output };
+  }
+
+  /** Best-effort session teardown — warns on failure rather than throwing. */
+  async deleteSession(did: string, sessionId: string): Promise<void> {
+    const oracleEntityDid = this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
+    await this.sessionManager
+      .deleteSession({ did, sessionId, oracleEntityDid })
+      .catch((err) =>
+        this.logger.warn(
+          `Failed to delete task session ${sessionId}: ${(err as Error).message}`,
+        ),
+      );
   }
 }

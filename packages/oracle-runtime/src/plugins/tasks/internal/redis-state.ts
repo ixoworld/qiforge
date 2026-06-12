@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -8,10 +9,28 @@ const KEY = {
   lock: (taskId: string) => `tasks:lock:${taskId}`,
   failures: (taskId: string) => `tasks:failures:${taskId}`,
   preview: (token: string) => `tasks:preview:${token}`,
-  approval: (taskId: string) => `tasks:approval:${taskId}`,
-  approvalByRoom: (roomId: string) => `tasks:approval-room:${roomId}`,
-  approvalClaim: (taskId: string) => `tasks:approval-resolved:${taskId}`,
+  roomSession: (roomId: string) => `tasks:room-session:${roomId}`,
 };
+
+/** A dedicated task room is pinned to its latest run's session for this long. */
+const ROOM_SESSION_TTL_SEC = 7 * 24 * 3600;
+
+// Compare-and-mutate scripts so only the current lock holder can extend or
+// release: a worker whose lock already expired (and was re-acquired by a
+// parallel worker) must not delete or prolong the new holder's lock.
+const EXTEND_LOCK_SCRIPT = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('expire', KEYS[1], ARGV[2])
+else
+  return 0
+end`;
+
+const RELEASE_LOCK_SCRIPT = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+else
+  return 0
+end`;
 
 export interface FailureInfo {
   count: number;
@@ -22,19 +41,18 @@ export interface FailureInfo {
 export interface PreviewClaim {
   owner: string;
   hash: string;
-}
-
-export interface PendingApproval {
-  taskId: string;
-  owner: string;
-  roomId: string;
-  output: string;
+  /**
+   * The request (turn) the preview ran in. `create_task` refuses a token
+   * minted in the same turn so the agent is forced to surface the preview
+   * and wait for the user to confirm in a new message.
+   */
+  requestId?: string;
 }
 
 /**
  * Operational state on direct Redis: run locks, consecutive-failure counters,
- * preview tokens, and pending approvals. None of it is a user-readable
- * artifact, so none of it goes through `TaskFs`.
+ * preview tokens, and dedicated-room session bindings. None of it is a
+ * user-readable artifact, so none of it goes through `TaskFs`.
  */
 @Injectable()
 export class RedisState {
@@ -42,14 +60,37 @@ export class RedisState {
 
   // ── run lock ────────────────────────────────────────────────────────────
 
-  async acquireRunLock(taskId: string, ttlSec: number): Promise<boolean> {
-    return (
-      (await this.redis.set(KEY.lock(taskId), '1', 'EX', ttlSec, 'NX')) === 'OK'
+  /** @returns the holder token to extend/release with, or null when taken. */
+  async acquireRunLock(taskId: string, ttlSec: number): Promise<string | null> {
+    const token = randomUUID();
+    const result = await this.redis.set(
+      KEY.lock(taskId),
+      token,
+      'EX',
+      ttlSec,
+      'NX',
     );
+    return result === 'OK' ? token : null;
   }
 
-  async releaseRunLock(taskId: string): Promise<void> {
-    await this.redis.del(KEY.lock(taskId));
+  /** @returns false when the lock is no longer held with `token`. */
+  async extendRunLock(
+    taskId: string,
+    token: string,
+    ttlSec: number,
+  ): Promise<boolean> {
+    const result = await this.redis.eval(
+      EXTEND_LOCK_SCRIPT,
+      1,
+      KEY.lock(taskId),
+      token,
+      ttlSec,
+    );
+    return Number(result) === 1;
+  }
+
+  async releaseRunLock(taskId: string, token: string): Promise<void> {
+    await this.redis.eval(RELEASE_LOCK_SCRIPT, 1, KEY.lock(taskId), token);
   }
 
   // ── consecutive-failure counter (reset on every successful run) ─────────
@@ -113,51 +154,24 @@ export class RedisState {
     await this.redis.del(KEY.preview(token));
   }
 
-  // ── pending approvals ───────────────────────────────────────────────────
+  // ── room → session binding (dedicated task rooms) ───────────────────────
 
-  async putPendingApproval(
-    pending: PendingApproval,
-    ttlSec: number,
-  ): Promise<void> {
-    const tx = this.redis.multi();
-    tx.set(KEY.approval(pending.taskId), JSON.stringify(pending), 'EX', ttlSec);
-    tx.set(KEY.approvalByRoom(pending.roomId), pending.taskId, 'EX', ttlSec);
-    await tx.exec();
-  }
-
-  async getPendingApproval(taskId: string): Promise<PendingApproval | null> {
-    const raw = await this.redis.get(KEY.approval(taskId));
-    return raw ? (JSON.parse(raw) as PendingApproval) : null;
-  }
-
-  async getPendingTaskForRoom(roomId: string): Promise<string | null> {
-    return this.redis.get(KEY.approvalByRoom(roomId));
-  }
-
-  async clearPendingApproval(pending: PendingApproval): Promise<void> {
-    await this.redis.del(
-      KEY.approval(pending.taskId),
-      KEY.approvalByRoom(pending.roomId),
+  /** Pin a dedicated room to the session of its latest run. */
+  async setRoomSession(roomId: string, sessionId: string): Promise<void> {
+    await this.redis.set(
+      KEY.roomSession(roomId),
+      sessionId,
+      'EX',
+      ROOM_SESSION_TTL_SEC,
     );
   }
 
-  /**
-   * SETNX claim so duplicate replies / redeliveries resolve exactly once.
-   * TTL matches the pending-approval TTL so a crash that loses the clear
-   * step can't let a stale resolver win a second time inside the window.
-   */
-  async claimApprovalResolution(
-    taskId: string,
-    ttlSec: number,
-  ): Promise<boolean> {
-    return (
-      (await this.redis.set(
-        KEY.approvalClaim(taskId),
-        '1',
-        'EX',
-        ttlSec,
-        'NX',
-      )) === 'OK'
-    );
+  /** The session a dedicated room is currently bound to, if any. */
+  async getRoomSession(roomId: string): Promise<string | undefined> {
+    return (await this.redis.get(KEY.roomSession(roomId))) ?? undefined;
+  }
+
+  async clearRoomSession(roomId: string): Promise<void> {
+    await this.redis.del(KEY.roomSession(roomId));
   }
 }

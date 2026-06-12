@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
 import { shouldCreateDedicatedRoom } from './internal/delivery.js';
-import { classifyReplyFast } from './internal/middleware.js';
-import { nextRunAtFor } from './internal/scheduler.js';
+import { nextRunAtFor, runJobId } from './internal/scheduler.js';
 import {
   newTaskId,
   parseSpec,
@@ -13,13 +12,13 @@ import {
   userTasksPrefix,
   type TaskSpec,
 } from './internal/spec.js';
-import { TaskStore } from './internal/task-store.js';
 import type { TaskFs } from './internal/task-fs.js';
+import { TaskStore } from './internal/task-store.js';
 import { TasksPlugin } from './tasks.plugin.js';
 
 const sampleSpec = (): TaskSpec => ({
   frontmatter: {
-    id: 'task_a1b2c3d4e5f6',
+    id: 'task_morning-brief_a1b2c3d4',
     owner: 'did:ixo:abc',
     title: 'Morning Brief',
     trigger: { type: 'time.cron', pattern: '0 7 * * *', tz: 'Africa/Cairo' },
@@ -56,7 +55,7 @@ describe('TasksPlugin', () => {
     const plugin = new TasksPlugin();
     expect(plugin.name).toBe('tasks');
     expect(plugin.version).toBe('2.0.0');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.category).toBe('automation');
     expect(plugin.softDependsOn).toEqual(['memory']);
 
@@ -84,9 +83,10 @@ describe('TasksPlugin', () => {
     });
     expect(parsed.TASKS_MAX_PER_USER).toBe(25);
     expect(parsed.TASKS_RUN_LOCK_TTL_SEC).toBe(600);
+    expect(parsed.TASKS_MIN_CRON_INTERVAL_SEC).toBe(300);
   });
 
-  it('exposes the 10 documented tools', () => {
+  it('exposes the 9 documented tools', () => {
     const tools = new TasksPlugin().getTools!();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'cancel_task',
@@ -95,7 +95,6 @@ describe('TasksPlugin', () => {
       'list_my_tasks',
       'pause_task',
       'preview_task',
-      'resolve_pending_approval',
       'resume_task',
       'suggest_spec_fix',
       'update_task',
@@ -144,11 +143,40 @@ describe('TaskSpec', () => {
     ).toThrow();
   });
 
+  it('accepts the before-action approval mode and rejects the old before-delivery', () => {
+    expect(
+      TaskFrontmatterSchema.parse({
+        ...sampleSpec().frontmatter,
+        approval: 'before-action',
+      }).approval,
+    ).toBe('before-action');
+    expect(() =>
+      TaskFrontmatterSchema.parse({
+        ...sampleSpec().frontmatter,
+        approval: 'before-delivery',
+      }),
+    ).toThrow();
+  });
+
   it('builds canonical ids and paths', () => {
-    expect(newTaskId()).toMatch(/^task_[a-f0-9]{12}$/);
+    expect(newTaskId('Morning Brief')).toMatch(
+      /^task_morning-brief_[a-f0-9]{8}$/,
+    );
+    expect(newTaskId('  Watch BTC!! (hourly)  ')).toMatch(
+      /^task_watch-btc-hourly_[a-f0-9]{8}$/,
+    );
+    expect(newTaskId('!!!')).toMatch(/^task_untitled_[a-f0-9]{8}$/);
+
+    const longId = newTaskId(
+      'A very long title that keeps going well past the slug budget',
+    );
+    const slug = longId.slice('task_'.length, longId.lastIndexOf('_'));
+    expect(slug.length).toBeLessThanOrEqual(24);
+    expect(longId).not.toContain(':');
+
     expect(userTasksPrefix('did:ixo:abc')).toBe('/users/did:ixo:abc/tasks/');
-    expect(specPath('did:ixo:abc', 'task_aaaaaaaaaaaa')).toBe(
-      '/users/did:ixo:abc/tasks/task_aaaaaaaaaaaa/spec.md',
+    expect(specPath('did:ixo:abc', 'task_demo_aaaaaaaa')).toBe(
+      '/users/did:ixo:abc/tasks/task_demo_aaaaaaaa/spec.md',
     );
   });
 
@@ -165,7 +193,7 @@ describe('TaskStore', () => {
 
     await store.save(spec);
     expect(await store.load('did:ixo:abc', spec.frontmatter.id)).toEqual(spec);
-    expect(await store.load('did:ixo:abc', 'task_000000000000')).toBeNull();
+    expect(await store.load('did:ixo:abc', 'task_missing_00000000')).toBeNull();
     expect(await store.list('did:ixo:abc')).toHaveLength(1);
     expect(await store.list('did:ixo:other')).toHaveLength(0);
 
@@ -185,6 +213,51 @@ describe('TaskStore', () => {
     await store.save(sampleSpec());
     await fs.write('/users/did:ixo:abc/tasks/task_bad/spec.md', 'not a spec');
     expect(await store.list('did:ixo:abc')).toHaveLength(1);
+  });
+
+  it('setStatus with onlyIfStatus refuses to clobber another status', async () => {
+    const store = new TaskStore(new MemoryFs());
+    const spec = sampleSpec();
+    await store.save(spec);
+    await store.setStatus('did:ixo:abc', spec.frontmatter.id, 'paused', null);
+
+    const result = await store.setStatus(
+      'did:ixo:abc',
+      spec.frontmatter.id,
+      'completed',
+      null,
+      { onlyIfStatus: ['active'] },
+    );
+    expect(result).toBeNull();
+    const reloaded = await store.load('did:ixo:abc', spec.frontmatter.id);
+    expect(reloaded?.frontmatter.status).toBe('paused');
+  });
+
+  it('updateNextRun only touches nextRunAt and only while active', async () => {
+    const store = new TaskStore(new MemoryFs());
+    const spec = sampleSpec();
+    await store.save(spec);
+
+    const updated = await store.updateNextRun(
+      'did:ixo:abc',
+      spec.frontmatter.id,
+      '2026-07-01T00:00:00.000Z',
+    );
+    expect(updated?.frontmatter.status).toBe('active');
+    expect(updated?.frontmatter.stats.nextRunAt).toBe(
+      '2026-07-01T00:00:00.000Z',
+    );
+
+    await store.setStatus('did:ixo:abc', spec.frontmatter.id, 'paused', null);
+    expect(
+      await store.updateNextRun(
+        'did:ixo:abc',
+        spec.frontmatter.id,
+        '2026-08-01T00:00:00.000Z',
+      ),
+    ).toBeNull();
+    const reloaded = await store.load('did:ixo:abc', spec.frontmatter.id);
+    expect(reloaded?.frontmatter.stats.nextRunAt).toBeNull();
   });
 });
 
@@ -220,24 +293,14 @@ describe('nextRunAtFor', () => {
   });
 });
 
-describe('classifyReplyFast', () => {
-  it.each(['yes', 'YES.', 'ok, do it', 'approved', 'ship'])(
-    'approves %j',
-    (text) => {
-      expect(classifyReplyFast(text)).toBe('approved');
-    },
-  );
-
-  it.each(['no', 'cancel.', "don't", 'reject it'])('rejects %j', (text) => {
-    expect(classifyReplyFast(text)).toBe('rejected');
-  });
-
-  it.each([
-    'actually can you change the schedule first?',
-    'looks good but include volume next time',
-    '',
-  ])('passes %j to the agent', (text) => {
-    expect(classifyReplyFast(text)).toBe('other');
+describe('runJobId', () => {
+  it('contains no colons (BullMQ rejects them in custom job ids)', () => {
+    const id = runJobId(
+      'task_morning-brief_a1b2c3d4',
+      '2026-06-11T05:00:00.000Z',
+    );
+    expect(id).not.toContain(':');
+    expect(id).toBe('task_morning-brief_a1b2c3d4@2026-06-11T05.00.00.000Z');
   });
 });
 

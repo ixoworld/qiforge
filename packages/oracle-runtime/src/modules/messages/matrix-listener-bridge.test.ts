@@ -74,6 +74,9 @@ async function build(): Promise<Harness> {
     ORACLE_DID,
     ORACLE_ENTITY_DID,
     ORACLE_NAME,
+    // flush() reads this to rewrite bot mentions; the config double throws
+    // on unstubbed keys, which would kill every flush.
+    MATRIX_ORACLE_ADMIN_USER_ID: '@oracle-admin:home.server',
   });
 
   const bridge = new MatrixListenerBridge(
@@ -596,6 +599,72 @@ describe('MatrixListenerBridge', () => {
     });
   });
 
+  describe('room-bound session resolver', () => {
+    it('pins every message in the room to the resolved session, bypassing thread resolution', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.bridge.setRoomSessionResolver(async () => 'bound-session');
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'bound-session' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        // A plainly-typed reply (no m.in_reply_to) still routes to the bound
+        // session — and the bound path never consults getEventById.
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'plain-reply',
+            content: { msgtype: 'm.text', body: 'yes' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        expect(deliverHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ threadId: 'bound-session' }),
+        );
+        expect(h.sessions.matrixManger.getEventById).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to thread-root resolution when the resolver returns undefined', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.bridge.setRoomSessionResolver(async () => undefined);
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'evt-x' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'evt-x',
+            content: { msgtype: 'm.text', body: 'hi' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        expect(deliverHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ threadId: 'evt-x' }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('ensureSession', () => {
     it('createSession called when sessions.getSession returns undefined', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -631,6 +700,49 @@ describe('MatrixListenerBridge', () => {
             roomId: ROOM_ID,
           }),
           'root',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('creates the session under the THREAD ROOT, not the reply event, when quote-replying a non-session message', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        // Reply ('leaf') to a worker-posted approval prompt ('approval-evt')
+        // that is itself the chain root and has no session.
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: {},
+        });
+        h.sessions.getSession.mockResolvedValue(undefined);
+        h.sessions.createSession.mockResolvedValue({
+          sessionId: 'approval-evt',
+        });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'leaf',
+            content: {
+              msgtype: 'm.text',
+              body: 'yes',
+              'm.relates_to': { 'm.in_reply_to': { event_id: 'approval-evt' } },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        // The bug created the session under 'leaf' (the reply's own id), so the
+        // later lookup by the thread root 'approval-evt' 404'd.
+        expect(h.sessions.createSession).toHaveBeenCalledWith(
+          expect.objectContaining({ did: USER_DID, roomId: ROOM_ID }),
+          'approval-evt',
         );
       } finally {
         vi.useRealTimers();

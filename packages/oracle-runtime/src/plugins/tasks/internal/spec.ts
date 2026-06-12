@@ -42,7 +42,7 @@ export const TASK_STATUSES = [
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
 export const TaskFrontmatterSchema = z.object({
-  id: z.string().regex(/^task_[a-f0-9]{12}$/),
+  id: z.string().regex(/^task_[a-z0-9][a-z0-9-]*_[a-f0-9]{8}$/),
   owner: z.string().min(1),
   title: z.string().min(1).max(120),
   trigger: TriggerSchema,
@@ -50,7 +50,7 @@ export const TaskFrontmatterSchema = z.object({
     /** `'main'` = the user's main oracle room, resolved at delivery time. */
     roomId: z.union([z.literal('main'), z.string().min(1)]),
   }),
-  approval: z.enum(['never', 'before-delivery']).default('never'),
+  approval: z.enum(['never', 'before-action']).default('never'),
   status: z.enum(TASK_STATUSES).default('active'),
   stats: z.object({ nextRunAt: z.string().datetime().nullable() }),
 });
@@ -62,8 +62,19 @@ export interface TaskSpec {
   body: string;
 }
 
-export function newTaskId(): string {
-  return `task_${randomBytes(6).toString('hex')}`;
+/**
+ * Self-describing id: `task_<title-slug>_<hex>`. Strictly colon-free — task
+ * ids are embedded in BullMQ job ids, and BullMQ rejects custom job ids
+ * containing `:`.
+ */
+export function newTaskId(title: string): string {
+  const slug =
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 24) || 'untitled';
+  return `task_${slug}_${randomBytes(4).toString('hex')}`;
 }
 
 export function userTasksPrefix(owner: string): string {

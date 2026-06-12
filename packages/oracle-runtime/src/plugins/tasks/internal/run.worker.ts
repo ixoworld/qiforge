@@ -1,7 +1,6 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, Logger } from '@nestjs/common';
 import type { Job } from 'bullmq';
-import { ApprovalService } from './approval.js';
 import { DeliveryService } from './delivery.js';
 import { AgentInvoker } from './invoker.js';
 import { RedisState } from './redis-state.js';
@@ -20,9 +19,29 @@ import { TaskStore } from './task-store.js';
 import type { TaskSpec } from './spec.js';
 
 /**
- * The hot path. Per run: load spec → run the agent on the task's persistent
- * session → deliver (or stage for approval) → persist next-run bookkeeping →
- * enqueue the next cron occurrence.
+ * Prepended to a `before-action` run's instructions. It tells the agent to do
+ * the work and PREPARE the irreversible action, then post a draft and ask the
+ * user to approve — without performing the action. The user replies in the
+ * task's room (the room is bound to this run's session), and that reply flows
+ * back through the normal Matrix chat path so the agent acts on approval.
+ */
+function buildApprovalGuardedMessage(body: string): string {
+  return [
+    '[Scheduled task — approval required before any action]',
+    'You are running a scheduled task that performs an action the user must approve first. Do the work and PREPARE the action, then reply with the draft/result and ask the user to approve — e.g. end with "Reply **yes** to proceed, or tell me what to change." Do NOT post, send, publish, create, or otherwise perform the irreversible action yet. The user will reply in this room:',
+    '- If they approve (e.g. "yes", "go ahead"), perform the action now and confirm what you did.',
+    '- If they ask for changes, revise and ask again.',
+    '- If they decline, stop and acknowledge.',
+    '',
+    'Task instructions:',
+    body,
+  ].join('\n');
+}
+
+/**
+ * The hot path. Per run: load spec → run the agent → deliver (or, for a
+ * `before-action` task, draft and ask the user to approve in the task's room)
+ * → persist next-run bookkeeping → enqueue the next cron occurrence.
  *
  * Errors are thrown so BullMQ retries with backoff; the consecutive-failure
  * counter only moves when a run exhausts its final attempt (see
@@ -37,7 +56,6 @@ export class TaskRunWorker extends WorkerHost {
     private readonly state: RedisState,
     private readonly scheduler: SchedulerService,
     private readonly delivery: DeliveryService,
-    private readonly approval: ApprovalService,
     private readonly invoker: AgentInvoker,
     @Inject(TASKS_RUNTIME_CONFIG) private readonly config: TasksRuntimeConfig,
   ) {
@@ -46,6 +64,10 @@ export class TaskRunWorker extends WorkerHost {
 
   async process(job: Job<RunJobData>): Promise<void> {
     const { taskId, owner } = job.data;
+    const startedAt = Date.now();
+    this.logger.log(
+      `Run start: ${taskId} (job ${job.id ?? '?'}, attempt ${job.attemptsMade + 1})`,
+    );
 
     const spec = await this.store.load(owner, taskId);
     if (!spec) {
@@ -59,10 +81,36 @@ export class TaskRunWorker extends WorkerHost {
       return;
     }
 
-    if (!(await this.state.acquireRunLock(taskId, this.config.runLockTtlSec))) {
+    const lockToken = await this.state.acquireRunLock(
+      taskId,
+      this.config.runLockTtlSec,
+    );
+    if (!lockToken) {
       this.logger.warn(`Task ${taskId} already running — duplicate skipped`);
       return;
     }
+
+    // Agent runs can outlive the lock TTL — keep extending while we hold it
+    // so a parallel worker can't start a duplicate mid-run.
+    const heartbeat = setInterval(
+      () => {
+        this.state
+          .extendRunLock(taskId, lockToken, this.config.runLockTtlSec)
+          .then((extended) => {
+            if (!extended) {
+              this.logger.warn(
+                `Run-lock extension failed for ${taskId} — lock lost or expired`,
+              );
+            }
+          })
+          .catch((err: unknown) =>
+            this.logger.warn(
+              `Run-lock heartbeat errored for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+      },
+      Math.max(this.config.runLockTtlSec / 3, 10) * 1000,
+    );
 
     try {
       const roomId = await this.delivery.resolveRoom(spec);
@@ -70,28 +118,50 @@ export class TaskRunWorker extends WorkerHost {
         throw new Error('Could not resolve a delivery room');
       }
 
-      const output = await this.invoker.runOnce({
-        did: owner,
-        message: spec.body,
-        // Anchor the throwaway session in the task's delivery room so
-        // `RequestPreparer` skips its own Matrix room-resolution lookup.
-        roomId:
-          spec.frontmatter.delivery.roomId === 'main' ? undefined : roomId,
-      });
-
-      if (spec.frontmatter.approval === 'before-delivery') {
-        await this.approval.request({ taskId, owner, roomId, output });
+      let output: string;
+      const beforeAction = spec.frontmatter.approval === 'before-action';
+      if (beforeAction) {
+        // A `before-action` task always has a dedicated room. Each run is a
+        // persistent conversation: the agent drafts the action and asks for
+        // approval, the room is bound to the run's session, and the user's
+        // plainly-typed reply continues that thread via the normal chat path.
+        const prev = await this.state.getRoomSession(roomId);
+        const result = await this.invoker.runConversational({
+          did: owner,
+          roomId,
+          message: buildApprovalGuardedMessage(spec.body),
+        });
+        output = result.output;
+        await this.state.setRoomSession(roomId, result.sessionId);
+        // The previous run's session/thread is stale now the room points at
+        // the new one — tear it down (best-effort) so it can't accumulate.
+        if (prev && prev !== result.sessionId) {
+          await this.invoker.deleteSession(owner, prev);
+        }
       } else {
-        // `post` throws on Matrix failure → the run fails → BullMQ retries.
-        // A silent log-and-continue here would mean "task succeeded" while
-        // the user never saw the result.
-        await this.delivery.post(roomId, output);
+        output = await this.invoker.runOnce({
+          did: owner,
+          message: spec.body,
+          // Anchor the throwaway session in the task's delivery room so
+          // `RequestPreparer` skips its own Matrix room-resolution lookup.
+          roomId:
+            spec.frontmatter.delivery.roomId === 'main' ? undefined : roomId,
+        });
       }
+
+      // `post` throws on Matrix failure → the run fails → BullMQ retries. A
+      // silent log-and-continue here would mean "task succeeded" while the
+      // user never saw the result (or the draft+ask).
+      await this.delivery.post(roomId, output);
 
       await this.state.resetFailures(taskId);
       await this.finishRun(spec);
+      this.logger.log(
+        `Run end: ${taskId} in ${Date.now() - startedAt}ms (${output.length} chars, ${beforeAction ? 'draft-for-approval' : 'delivered'})`,
+      );
     } finally {
-      await this.state.releaseRunLock(taskId);
+      clearInterval(heartbeat);
+      await this.state.releaseRunLock(taskId, lockToken);
     }
   }
 
@@ -99,12 +169,19 @@ export class TaskRunWorker extends WorkerHost {
   private async finishRun(spec: TaskSpec): Promise<void> {
     const { id, owner, trigger } = spec.frontmatter;
     if (trigger.type === 'time.once') {
-      await this.store.setStatus(owner, id, 'completed', null);
+      // Conditional: a pause/cancel issued while the run was in flight must
+      // not be clobbered with 'completed'.
+      await this.store.setStatus(owner, id, 'completed', null, {
+        onlyIfStatus: ['active'],
+      });
       return;
     }
     const next = nextRunAtFor(trigger);
-    await this.store.setStatus(owner, id, 'active', next);
-    if (next) await this.scheduler.enqueueRun(id, owner, next);
+    // `updateNextRun` preserves the live status and refuses non-active
+    // tasks — if the user paused/cancelled mid-run, nothing is written or
+    // enqueued; resume recomputes the schedule.
+    const updated = await this.store.updateNextRun(owner, id, next);
+    if (updated && next) await this.scheduler.enqueueRun(id, owner, next);
   }
 
   @OnWorkerEvent('failed')
@@ -119,6 +196,16 @@ export class TaskRunWorker extends WorkerHost {
     );
   }
 
+  @OnWorkerEvent('error')
+  onWorkerError(error: Error): void {
+    this.logger.error(`Run worker error: ${error.message}`);
+  }
+
+  @OnWorkerEvent('stalled')
+  onJobStalled(jobId: string): void {
+    this.logger.warn(`Run job stalled: ${jobId}`);
+  }
+
   private async recordFinalFailure(
     data: RunJobData,
     error: Error,
@@ -128,35 +215,40 @@ export class TaskRunWorker extends WorkerHost {
     this.logger.warn(
       `Task ${taskId} run failed (${count} consecutive): ${error.message}`,
     );
-    if (count < MAX_CONSECUTIVE_FAILURES) {
+
+    const spec = await this.store.load(owner, taskId);
+    if (!spec) return;
+
+    const oneShot = spec.frontmatter.trigger.type === 'time.once';
+    if (!oneShot && count < MAX_CONSECUTIVE_FAILURES) {
       // The next cron occurrence was never enqueued (the run aborted before
       // finishRun) — reschedule so a transient failure doesn't kill the task.
-      const spec = await this.store.load(owner, taskId);
-      if (
-        spec?.frontmatter.status === 'active' &&
-        spec.frontmatter.trigger.type === 'time.cron'
-      ) {
-        const next = nextRunAtFor(spec.frontmatter.trigger);
-        if (next) {
-          await this.store.setStatus(owner, taskId, 'active', next);
-          await this.scheduler.enqueueRun(taskId, owner, next);
-        }
+      const next = nextRunAtFor(spec.frontmatter.trigger);
+      if (next && (await this.store.updateNextRun(owner, taskId, next))) {
+        await this.scheduler.enqueueRun(taskId, owner, next);
       }
       return;
     }
-    const spec = await this.store.setStatus(
+
+    // A one-shot has no next occurrence to silently retry into — the user
+    // is waiting on a result that will never come, so any final failure is
+    // loud. Cron tasks get here only at the consecutive-failure threshold.
+    const updated = await this.store.setStatus(
       owner,
       taskId,
       'failed-pending-review',
       null,
+      { onlyIfStatus: ['active'] },
     );
-    if (!spec) return;
+    if (!updated) return;
     await this.scheduler.cancelRuns(taskId);
-    const roomId = await this.delivery.resolveRoom(spec);
+    const roomId = await this.delivery.resolveRoom(updated);
     if (roomId) {
       await this.delivery.safePost(
         roomId,
-        `🛑 Task \`${taskId}\` failed ${count} times in a row and is paused for review. Ask me to **suggest a fix** when you're ready.`,
+        oneShot
+          ? `🛑 Your scheduled task \`${taskId}\` failed and is paused for review: ${error.message.slice(0, 200)}\n\nAsk me to **suggest a fix** when you're ready.`
+          : `🛑 Task \`${taskId}\` failed ${count} times in a row and is paused for review. Ask me to **suggest a fix** when you're ready.`,
       );
     }
   }
