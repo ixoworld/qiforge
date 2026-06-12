@@ -37,14 +37,25 @@ describe('PodCreatorPlugin identity', () => {
 });
 
 describe('PodCreatorPlugin loads via createTestRuntime', () => {
-  it('registers cleanly, lists as an on-demand capability, and exposes no tools yet', async () => {
+  it('registers cleanly, lists as an on-demand capability, and exposes the orchestration tools', async () => {
     const rt = await createTestRuntime({
       plugins: [new PodCreatorPlugin()],
       config: {},
     });
     rt.assertNoCollisions();
     rt.assertManifestValid();
-    expect(rt.listTools('pod-creator')).toEqual([]);
+    expect(
+      rt
+        .listTools('pod-creator')
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual([
+      'assemble_blueprint',
+      'compute_readiness',
+      'get_blueprint',
+      'record_blueprint_section',
+      'start_pod_design',
+    ]);
     const cap = rt.listCapabilities().find((c) => c.name === 'pod-creator');
     if (!cap) {
       throw new Error('pod-creator capability not listed');

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
-import type { PluginManifest } from '../../plugin-api/types.js';
+import type { PluginManifest, PluginTool } from '../../plugin-api/types.js';
+import {
+  InMemoryBlueprintStore,
+  type BlueprintStore,
+} from './blueprint-store.js';
+import { createOrchestrationTools } from './orchestration-tools.js';
 
 /**
  * Plugin-owned env vars. The capsules registry URL and `NETWORK` are read as
@@ -36,6 +41,15 @@ const manifest: PluginManifest = {
     'Operating or supporting an already-live POD — out of scope for now.',
     'Generic on-chain entity creation unrelated to POD design.',
   ],
+  examples: [
+    {
+      user: 'Help me create a POD for a community solar monitoring service.',
+      thought:
+        'A POD creation request — open the design session, then drive the specialists stage by stage.',
+      tool: 'start_pod_design',
+      args: { brief: 'Community solar monitoring service' },
+    },
+  ],
   tags: ['pod', 'domain', 'design', 'orchestration', 'on-chain'],
   category: 'automation',
   visibility: 'on-demand',
@@ -51,8 +65,8 @@ const manifest: PluginManifest = {
  * are loaded from the ai-skills capsule registry per stage via the
  * `CapsuleContentClient`.
  *
- * This is the plugin shell — identity, manifest, config, soft dependencies.
- * The orchestration tools, specialist sub-agents, and create path are wired in
+ * Exposes the conductor's orchestration tools (the blueprint lifecycle). The
+ * stage-gated specialist sub-agents and the on-chain create path are wired in
  * subsequent slices.
  */
 export class PodCreatorPlugin extends OraclePlugin {
@@ -66,4 +80,16 @@ export class PodCreatorPlugin extends OraclePlugin {
     'memory',
   ];
   override readonly configSchema = configSchema;
+
+  /**
+   * Process-local blueprint store, held on the plugin instance so a design
+   * session persists across requests. A cross-restart durable backend is a
+   * swappable implementation of `BlueprintStore`.
+   */
+  private readonly blueprintStore: BlueprintStore =
+    new InMemoryBlueprintStore();
+
+  override getTools(): PluginTool[] {
+    return createOrchestrationTools(this.blueprintStore);
+  }
 }
