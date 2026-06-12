@@ -53,8 +53,11 @@ describe('PodCreatorPlugin loads via createTestRuntime', () => {
     ).toEqual([
       'assemble_blueprint',
       'compute_readiness',
+      'confirm_pod_creation',
       'get_blueprint',
+      'prepare_pod_transaction',
       'record_blueprint_section',
+      'request_pod_signature',
       'start_pod_design',
     ]);
     const cap = rt.listCapabilities().find((c) => c.name === 'pod-creator');

@@ -15,6 +15,11 @@ import {
   type CapsuleContentClientOptions,
   type CapsuleContentFetcher,
 } from './capsule-content-client.js';
+import {
+  notConfiguredChainGateway,
+  type ChainGateway,
+} from './chain-gateway.js';
+import { createCreateTools } from './create-tools.js';
 import { createOrchestrationTools } from './orchestration-tools.js';
 import { buildStageSubAgents } from './sub-agents.js';
 
@@ -86,6 +91,12 @@ export interface PodCreatorPluginOptions {
    * configured.
    */
   capsuleContentFetcher?: CapsuleContentFetcher;
+  /**
+   * Chain gateway for the create path. Injected by tests; the real
+   * `@ixo/oracles-chain-client`-backed gateway wires in here. When omitted, the
+   * create tools error until a gateway is configured.
+   */
+  chainGateway?: ChainGateway;
 }
 
 /**
@@ -97,9 +108,9 @@ export interface PodCreatorPluginOptions {
  * are loaded from the ai-skills capsule registry per stage via the
  * `CapsuleContentClient`.
  *
- * Exposes the conductor's orchestration tools (the blueprint lifecycle) and the
- * stage-gated specialist sub-agents. The on-chain create path is wired in a
- * subsequent slice.
+ * Exposes the conductor's orchestration tools (the blueprint lifecycle), the
+ * stage-gated specialist sub-agents, and the on-chain create path
+ * (prepare → sign → confirm) behind an injectable chain gateway.
  */
 export class PodCreatorPlugin extends OraclePlugin {
   readonly name = 'pod-creator';
@@ -123,6 +134,8 @@ export class PodCreatorPlugin extends OraclePlugin {
 
   private readonly capsuleContentFetcher?: CapsuleContentFetcher;
 
+  private readonly chainGateway: ChainGateway;
+
   /**
    * Built lazily from request config; cached so the per-thread prompt cache
    * survives across requests.
@@ -132,10 +145,14 @@ export class PodCreatorPlugin extends OraclePlugin {
   constructor(options: PodCreatorPluginOptions = {}) {
     super();
     this.capsuleContentFetcher = options.capsuleContentFetcher;
+    this.chainGateway = options.chainGateway ?? notConfiguredChainGateway;
   }
 
   override getTools(): PluginTool[] {
-    return createOrchestrationTools(this.blueprintStore);
+    return [
+      ...createOrchestrationTools(this.blueprintStore),
+      ...createCreateTools(this.blueprintStore, this.chainGateway),
+    ];
   }
 
   override async getRequestSubAgents(
