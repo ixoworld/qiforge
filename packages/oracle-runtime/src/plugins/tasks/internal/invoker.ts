@@ -107,17 +107,22 @@ export class AgentInvoker {
    * is NOT deleted: the worker binds the dedicated task room to it so the
    * user's plainly-typed reply continues this exact thread (the draft sits in
    * the checkpointer history, so the follow-up turn can act on it).
+   *
+   * The session id IS `anchorEventId` — the real Matrix event the worker
+   * posted as the run marker — exactly like a normal chat session rooted at a
+   * real event. Replies and replays thread under it natively; nothing about
+   * this session needs special-casing downstream.
    */
   async runConversational(args: {
     did: string;
     roomId: string;
+    anchorEventId: string;
     message: string;
   }): Promise<{ sessionId: string; output: string }> {
     const startedAt = Date.now();
-    // Synthetic id with the same `$task-` prefix and `$`-leading event-id
-    // shape as `runOnce`. The `overrideEventId` skips the "New Conversation
-    // Started" Matrix post.
-    const sessionId = `${TASK_SESSION_PREFIX}${randomUUID()}`;
+    // The override skips the "New Conversation Started" post — the worker's
+    // run marker already plays that role.
+    const sessionId = args.anchorEventId;
     await this.sessionManager.createSession(
       {
         did: args.did,
@@ -136,8 +141,9 @@ export class AgentInvoker {
       // The worker owns delivery (it posts the draft+ask itself) — suppress
       // Matrix replay of the spec body and the agent's reply.
       msgFromMatrixRoom: true,
-      // This persistent session stays in the room; post-sync would re-anchor
-      // it in the user's main room, so skip it.
+      // Skip the post-turn session sync for the run itself: it would spend an
+      // LLM call titling the thread on every scheduled fire. The user's later
+      // turns on this session sync normally.
       skipPostSync: true,
       clientType: 'matrix',
     });

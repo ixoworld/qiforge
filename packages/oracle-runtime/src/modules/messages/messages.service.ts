@@ -23,6 +23,7 @@ import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
+import { isSyntheticSessionId } from './synthetic-session.js';
 
 /**
  * Express-side auth shape (as set by `AuthHeaderMiddleware`). Mirrors the
@@ -167,13 +168,20 @@ export class MessagesService implements OnModuleInit {
       const prepared = await this.preparer.prepare(params);
       const inputMessages = await this.assembleInput(params, prepared);
       const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
+      // A synthetic (background-task) session id is not a real Matrix event:
+      // using it as a thread-relation target 400s, and post-sync would try to
+      // edit the nonexistent root event for the title. Replays post top-level
+      // and the session sync is skipped — see synthetic-session.ts.
+      const synthetic = isSyntheticSessionId(prepared.sessionId);
+      const replayThreadId = synthetic ? undefined : prepared.sessionId;
+      const skipPostSync = params.skipPostSync || synthetic;
 
       if (!msgFromMatrixRoom) {
         this.sessions.matrixManger
           .sendMessage({
             message: params.message,
             roomId: prepared.roomId,
-            threadId: prepared.sessionId,
+            threadId: replayThreadId,
             isOracleAdmin: false,
           })
           .catch((err) =>
@@ -197,7 +205,7 @@ export class MessagesService implements OnModuleInit {
                 .sendMessage({
                   message: assistantText,
                   roomId: prepared.roomId,
-                  threadId: prepared.sessionId,
+                  threadId: replayThreadId,
                   isOracleAdmin: true,
                 })
                 .catch((err) =>
@@ -207,7 +215,7 @@ export class MessagesService implements OnModuleInit {
                   ),
                 );
             }
-            if (!params.skipPostSync) this.firePostSync(params, prepared);
+            if (!skipPostSync) this.firePostSync(params, prepared);
           },
         });
         return undefined;
@@ -224,7 +232,7 @@ export class MessagesService implements OnModuleInit {
           .sendMessage({
             message: result.message.content,
             roomId: prepared.roomId,
-            threadId: prepared.sessionId,
+            threadId: replayThreadId,
             isOracleAdmin: true,
           })
           .catch((err) =>
@@ -234,7 +242,7 @@ export class MessagesService implements OnModuleInit {
             ),
           );
       }
-      if (!params.skipPostSync) this.firePostSync(params, prepared);
+      if (!skipPostSync) this.firePostSync(params, prepared);
       return result;
     } finally {
       this.checkpointSync.markUserInactive(params.did);

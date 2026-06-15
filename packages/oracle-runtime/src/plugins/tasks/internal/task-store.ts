@@ -32,22 +32,31 @@ export class TaskStore {
     );
   }
 
-  /** All of a user's tasks. Specs that fail to parse are skipped with a warning. */
-  async list(owner: string): Promise<TaskSpec[]> {
+  /**
+   * All of a user's tasks. Specs that fail to parse are skipped with a
+   * warning, but reported in `unreadable` so callers can surface "you have N
+   * broken tasks" instead of letting them silently vanish from lists.
+   */
+  async list(
+    owner: string,
+  ): Promise<{ specs: TaskSpec[]; unreadable: string[] }> {
     const paths = await this.fs.list(userTasksPrefix(owner));
     const specs: TaskSpec[] = [];
+    const unreadable: string[] = [];
     for (const path of paths.filter((p) => p.endsWith('/spec.md'))) {
       const markdown = await this.fs.read(path);
       if (!markdown) continue;
       try {
         specs.push(parseSpec(markdown));
       } catch (err) {
+        // Path shape: /users/<owner>/tasks/<taskId>/spec.md
+        unreadable.push(path.split('/').at(-2) ?? path);
         this.logger.warn(
           `Skipping unparseable spec at ${path}: ${(err as Error).message}`,
         );
       }
     }
-    return specs;
+    return { specs, unreadable };
   }
 
   /**

@@ -53,7 +53,7 @@ export const tasksManifest: PluginManifest = {
     {
       user: 'Every weekday at 9am post a LinkedIn update about our latest blog, but let me approve it before it goes out.',
       thought:
-        'An action task. Preview first. Use approval: before-action so each run drafts the post in its own [Task] room and asks the user to approve there before publishing — the agent only publishes once the user replies "yes".',
+        'An action task. Preview first. Use approval: before-action so each run drafts the post in its own [Task] room and asks the user to approve there before publishing — intent.requiresApproval names the guarded action.',
       tool: 'preview_task',
       args: {
         title: 'Daily LinkedIn Update',
@@ -62,13 +62,14 @@ export const tasksManifest: PluginManifest = {
             "Draft a short LinkedIn post about the company's latest blog article and propose it for approval before publishing.",
           howToReport: 'The ready-to-post text, with the article link.',
           constraints: ['Under 120 words.'],
+          requiresApproval: 'publishing the post to LinkedIn',
         },
       },
     },
     {
       user: 'Looks good — schedule it and ask me before each one goes out.',
       thought:
-        'Action task confirmed. Commit with approval: before-action so every run drafts in the [Task] room and waits for the user to approve by replying there.',
+        'Action task confirmed. Commit with approval: before-action — every run drafts in the [Task] room and the user approves by replying there; a plain "yes" is recorded automatically.',
       tool: 'create_task',
       args: {
         previewToken: '<token-from-preview_task>',
@@ -79,9 +80,20 @@ export const tasksManifest: PluginManifest = {
             "Draft a short LinkedIn post about the company's latest blog article and propose it for approval before publishing.",
           howToReport: 'The ready-to-post text, with the article link.',
           constraints: ['Under 120 words.'],
+          requiresApproval: 'publishing the post to LinkedIn',
         },
         approval: 'before-action',
         dedicatedRoom: 'auto',
+      },
+    },
+    {
+      user: '(in the task room) Perfect, but fix the typo first then send.',
+      thought:
+        'Nuanced approval — act on it (fix the typo, publish), then record the decision.',
+      tool: 'resolve_task_approval',
+      args: {
+        taskId: 'task_daily-linkedin-update_a1b2c3d4',
+        outcome: 'approved',
       },
     },
     {

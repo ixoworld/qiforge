@@ -7,16 +7,24 @@ import { z } from 'zod';
 // ---------------------------------------------------------------------------
 
 export const TriggerSchema = z.discriminatedUnion('type', [
-  z.object({
-    type: z.literal('time.once'),
-    runAtIso: z.string().datetime(),
-    tz: z.string().min(1),
-  }),
-  z.object({
-    type: z.literal('time.cron'),
-    pattern: z.string().min(1),
-    tz: z.string().min(1),
-  }),
+  z
+    .object({
+      type: z.literal('time.once'),
+      runAtIso: z.string().datetime(),
+      tz: z.string().min(1),
+    })
+    .describe(
+      'A single future moment. ALWAYS use this for one-time requests — "in 10 minutes", "after an hour", "tomorrow at 5pm" — computing runAtIso from the current time. Never express a one-time request as cron.',
+    ),
+  z
+    .object({
+      type: z.literal('time.cron'),
+      pattern: z.string().min(1),
+      tz: z.string().min(1),
+    })
+    .describe(
+      'A repeating schedule, ONLY for genuinely recurring intents ("every morning at 7"). Note `*/10 * * * *` means "every 10 minutes forever", NOT "once in 10 minutes" — use time.once for that.',
+    ),
 ]);
 
 export type Trigger = z.infer<typeof TriggerSchema>;
@@ -33,6 +41,7 @@ export function summarizeTrigger(trigger: Trigger): string {
 
 export const TASK_STATUSES = [
   'active',
+  'pending-approval',
   'paused',
   'failed-pending-review',
   'completed',
@@ -87,8 +96,16 @@ export function specPath(owner: string, taskId: string): string {
 
 export function parseSpec(markdown: string): TaskSpec {
   const parsed = matter(markdown);
+  // Legacy alias: specs written before the conversational approval model used
+  // `before-delivery`. Map it on read so existing tasks stay parseable; the
+  // next save persists the current value.
+  const data: Record<string, unknown> =
+    typeof parsed.data === 'object' && parsed.data !== null
+      ? { ...parsed.data }
+      : {};
+  if (data.approval === 'before-delivery') data.approval = 'before-action';
   return {
-    frontmatter: TaskFrontmatterSchema.parse(parsed.data),
+    frontmatter: TaskFrontmatterSchema.parse(data),
     body: parsed.content.trim(),
   };
 }
@@ -105,6 +122,20 @@ export const IntentSchema = z.object({
   whatToDo: z.string().min(1),
   howToReport: z.string().optional(),
   constraints: z.array(z.string()).optional(),
+  context: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Everything a run needs that lives only in this conversation: IDs (team/project UUIDs, entity DIDs), URLs, names, account references. Scheduled runs are FRESH sessions with no memory of this chat — anything not written here does not exist for the run.',
+    ),
+  requiresApproval: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'The exact action that must NOT be performed without the user\'s sign-off, e.g. "publishing the post to LinkedIn". Required when approval is before-action.',
+    ),
 });
 
 export type Intent = z.infer<typeof IntentSchema>;
@@ -120,6 +151,12 @@ export function renderIntentBody(intent: Intent): string {
       '## Constraints',
       ...intent.constraints.map((c) => `- ${c}`),
     );
+  }
+  if (intent.context?.trim()) {
+    parts.push('', '## Context', intent.context.trim());
+  }
+  if (intent.requiresApproval?.trim()) {
+    parts.push('', '## Requires approval', intent.requiresApproval.trim());
   }
   return parts.join('\n');
 }

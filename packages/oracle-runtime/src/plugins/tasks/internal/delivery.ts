@@ -113,15 +113,23 @@ export class DeliveryService {
   }
 
   /**
-   * Post a message — throws on failure so callers can decide how to handle
-   * it. The worker turns a delivery failure into a run failure (BullMQ
-   * retries; consecutive-failure counter advances on final attempt).
+   * Post a message and return its Matrix event id — throws on failure so
+   * callers can decide how to handle it. The worker turns a delivery failure
+   * into a run failure (BullMQ retries; consecutive-failure counter advances
+   * on final attempt). Pass `threadId` to thread the post under an existing
+   * event (a run's draft threads under its run-marker anchor, so replies to
+   * either resolve to the same session).
    */
-  async post(roomId: string, message: string): Promise<void> {
-    await MatrixManager.getInstance().sendMessage({
+  async post(
+    roomId: string,
+    message: string,
+    threadId?: string,
+  ): Promise<string> {
+    return MatrixManager.getInstance().sendMessage({
       roomId,
       message,
       isOracleAdmin: true,
+      ...(threadId && { threadId }),
     });
   }
 

@@ -1,16 +1,22 @@
+import { Redis } from 'ioredis';
 import { describe, expect, it } from 'vitest';
 import { validateManifest } from '../../manifest/validator.js';
+import { ApprovalFlow, nextStatusFor } from './internal/approval-flow.js';
 import { shouldCreateDedicatedRoom } from './internal/delivery.js';
+import { classifyReplyFast } from './internal/middleware.js';
+import { RedisState } from './internal/redis-state.js';
 import { nextRunAtFor, runJobId } from './internal/scheduler.js';
 import {
   newTaskId,
   parseSpec,
+  renderIntentBody,
   renderSpec,
   specHash,
   specPath,
   TaskFrontmatterSchema,
   userTasksPrefix,
   type TaskSpec,
+  type Trigger,
 } from './internal/spec.js';
 import type { TaskFs } from './internal/task-fs.js';
 import { TaskStore } from './internal/task-store.js';
@@ -86,7 +92,7 @@ describe('TasksPlugin', () => {
     expect(parsed.TASKS_MIN_CRON_INTERVAL_SEC).toBe(300);
   });
 
-  it('exposes the 9 documented tools', () => {
+  it('exposes the 10 documented tools', () => {
     const tools = new TasksPlugin().getTools!();
     expect(tools.map((t) => t.name).sort()).toEqual([
       'cancel_task',
@@ -95,6 +101,7 @@ describe('TasksPlugin', () => {
       'list_my_tasks',
       'pause_task',
       'preview_task',
+      'resolve_task_approval',
       'resume_task',
       'suggest_spec_fix',
       'update_task',
@@ -158,6 +165,58 @@ describe('TaskSpec', () => {
     ).toThrow();
   });
 
+  it('accepts pending-approval as a persisted status', () => {
+    expect(
+      TaskFrontmatterSchema.parse({
+        ...sampleSpec().frontmatter,
+        status: 'pending-approval',
+      }).status,
+    ).toBe('pending-approval');
+  });
+
+  it('maps the legacy before-delivery approval to before-action on parse', () => {
+    const spec = sampleSpec();
+    const legacyMarkdown = renderSpec(spec).replace(
+      'approval: never',
+      'approval: before-delivery',
+    );
+    expect(legacyMarkdown).toContain('approval: before-delivery');
+    expect(parseSpec(legacyMarkdown).frontmatter.approval).toBe(
+      'before-action',
+    );
+  });
+
+  it('renders ## Context with the run-scoped identifiers when set', () => {
+    const body = renderIntentBody({
+      whatToDo: 'Draft the ticket.',
+      context: 'Linear team Oracles — id a0dbdaaf-2c77-4f93-b933-39766e75c8f1',
+      requiresApproval: 'creating the ticket in Linear',
+    });
+    expect(body).toContain(
+      '## Context\nLinear team Oracles — id a0dbdaaf-2c77-4f93-b933-39766e75c8f1',
+    );
+    expect(body.indexOf('## Context')).toBeLessThan(
+      body.indexOf('## Requires approval'),
+    );
+  });
+
+  it('renders ## Requires approval after Constraints when set', () => {
+    const body = renderIntentBody({
+      whatToDo: 'Draft the post.',
+      constraints: ['Under 120 words.'],
+      requiresApproval: 'publishing the post to LinkedIn',
+    });
+    expect(body).toContain(
+      '## Requires approval\npublishing the post to LinkedIn',
+    );
+    expect(body.indexOf('## Requires approval')).toBeGreaterThan(
+      body.indexOf('## Constraints'),
+    );
+    expect(renderIntentBody({ whatToDo: 'Draft the post.' })).not.toContain(
+      '## Requires approval',
+    );
+  });
+
   it('builds canonical ids and paths', () => {
     expect(newTaskId('Morning Brief')).toMatch(
       /^task_morning-brief_[a-f0-9]{8}$/,
@@ -194,8 +253,8 @@ describe('TaskStore', () => {
     await store.save(spec);
     expect(await store.load('did:ixo:abc', spec.frontmatter.id)).toEqual(spec);
     expect(await store.load('did:ixo:abc', 'task_missing_00000000')).toBeNull();
-    expect(await store.list('did:ixo:abc')).toHaveLength(1);
-    expect(await store.list('did:ixo:other')).toHaveLength(0);
+    expect((await store.list('did:ixo:abc')).specs).toHaveLength(1);
+    expect((await store.list('did:ixo:other')).specs).toHaveLength(0);
 
     const paused = await store.setStatus(
       'did:ixo:abc',
@@ -207,12 +266,14 @@ describe('TaskStore', () => {
     expect(paused?.frontmatter.stats.nextRunAt).toBeNull();
   });
 
-  it('skips unparseable specs when listing', async () => {
+  it('skips unparseable specs when listing but reports their ids', async () => {
     const fs = new MemoryFs();
     const store = new TaskStore(fs);
     await store.save(sampleSpec());
     await fs.write('/users/did:ixo:abc/tasks/task_bad/spec.md', 'not a spec');
-    expect(await store.list('did:ixo:abc')).toHaveLength(1);
+    const { specs, unreadable } = await store.list('did:ixo:abc');
+    expect(specs).toHaveLength(1);
+    expect(unreadable).toEqual(['task_bad']);
   });
 
   it('setStatus with onlyIfStatus refuses to clobber another status', async () => {
@@ -290,6 +351,170 @@ describe('nextRunAtFor', () => {
         from,
       ),
     ).toBeNull();
+  });
+});
+
+describe('classifyReplyFast', () => {
+  it.each([
+    ['yes', 'approved'],
+    ['Yes!', 'approved'],
+    ['y', 'approved'],
+    ['yes please', 'approved'],
+    ['I approve', 'approved'],
+    ['OK, do it', 'approved'],
+    ['go ahead', 'approved'],
+    ['Send it.', 'approved'],
+    ['SHIP IT', 'approved'],
+    ['lgtm', 'approved'],
+    ['looks good', 'approved'],
+    ['proceed', 'approved'],
+    ['no', 'rejected'],
+    ['Nope.', 'rejected'],
+    ['no, thanks', 'rejected'],
+    ['cancel it', 'rejected'],
+    ["Don't send", 'rejected'],
+    ['dont send', 'rejected'],
+    ["don't send it!", 'rejected'],
+    ['discard it', 'rejected'],
+    ['abort', 'rejected'],
+  ] as const)('exact match: %j → %s', (text, expected) => {
+    expect(classifyReplyFast(text)).toBe(expected);
+  });
+
+  it.each([
+    'ok so what does this do',
+    'no idea what this is',
+    'yes, but change the title first',
+    'can you send it tomorrow instead',
+    'approve the other one',
+    '',
+    '   ',
+  ])('anything that is not an exact match is other: %j', (text) => {
+    expect(classifyReplyFast(text)).toBe('other');
+  });
+});
+
+describe('ApprovalFlow', () => {
+  const owner = 'did:ixo:abc';
+  const taskId = 'task_morning-brief_a1b2c3d4';
+  const cron: Trigger = {
+    type: 'time.cron',
+    pattern: '0 9 * * 1-5',
+    tz: 'UTC',
+  };
+  const once: Trigger = {
+    type: 'time.once',
+    runAtIso: '2099-01-01T00:00:00.000Z',
+    tz: 'UTC',
+  };
+
+  // Genuine RedisState (no casts) whose only method ApprovalFlow touches is
+  // overridden to record calls; the lazyConnect client never opens a socket.
+  class StubRedisState extends RedisState {
+    readonly resetCalls: string[] = [];
+
+    constructor() {
+      super(new Redis({ lazyConnect: true }));
+    }
+
+    override async resetFailures(id: string): Promise<void> {
+      this.resetCalls.push(id);
+    }
+  }
+
+  const pendingSpec = (trigger: Trigger): TaskSpec => ({
+    frontmatter: {
+      ...sampleSpec().frontmatter,
+      trigger,
+      approval: 'before-action',
+      status: 'pending-approval',
+      stats: { nextRunAt: '2026-06-13T09:00:00.000Z' },
+    },
+    body: '## What to do\nDraft the post.\n\n## Requires approval\npublishing the post',
+  });
+
+  function make() {
+    const store = new TaskStore(new MemoryFs());
+    const state = new StubRedisState();
+    return { store, state, flow: new ApprovalFlow(store, state) };
+  }
+
+  it('nextStatusFor covers the full outcome × trigger table', () => {
+    expect(nextStatusFor('approved', 'time.cron')).toBe('active');
+    expect(nextStatusFor('declined', 'time.cron')).toBe('active');
+    expect(nextStatusFor('approved', 'time.once')).toBe('completed');
+    expect(nextStatusFor('declined', 'time.once')).toBe('cancelled');
+  });
+
+  it('approved cron → active, keeps nextRunAt, resets failures', async () => {
+    const { store, state, flow } = make();
+    await store.save(pendingSpec(cron));
+    expect(await flow.resolve(owner, taskId, 'approved')).toEqual({
+      ok: true,
+      status: 'active',
+    });
+    const reloaded = await store.load(owner, taskId);
+    expect(reloaded?.frontmatter.status).toBe('active');
+    expect(reloaded?.frontmatter.stats.nextRunAt).toBe(
+      '2026-06-13T09:00:00.000Z',
+    );
+    expect(state.resetCalls).toEqual([taskId]);
+  });
+
+  it('approved one-shot → completed with no next run', async () => {
+    const { store, state, flow } = make();
+    await store.save(pendingSpec(once));
+    expect(await flow.resolve(owner, taskId, 'approved')).toEqual({
+      ok: true,
+      status: 'completed',
+    });
+    const reloaded = await store.load(owner, taskId);
+    expect(reloaded?.frontmatter.status).toBe('completed');
+    expect(reloaded?.frontmatter.stats.nextRunAt).toBeNull();
+    expect(state.resetCalls).toEqual([taskId]);
+  });
+
+  it('declined one-shot → cancelled, failure counter untouched', async () => {
+    const { store, state, flow } = make();
+    await store.save(pendingSpec(once));
+    expect(await flow.resolve(owner, taskId, 'declined')).toEqual({
+      ok: true,
+      status: 'cancelled',
+    });
+    expect((await store.load(owner, taskId))?.frontmatter.status).toBe(
+      'cancelled',
+    );
+    expect(state.resetCalls).toEqual([]);
+  });
+
+  it('declined cron → active (cadence continues, draft dropped)', async () => {
+    const { store, state, flow } = make();
+    await store.save(pendingSpec(cron));
+    expect(await flow.resolve(owner, taskId, 'declined')).toEqual({
+      ok: true,
+      status: 'active',
+    });
+    const reloaded = await store.load(owner, taskId);
+    expect(reloaded?.frontmatter.status).toBe('active');
+    expect(reloaded?.frontmatter.stats.nextRunAt).toBe(
+      '2026-06-13T09:00:00.000Z',
+    );
+    expect(state.resetCalls).toEqual([]);
+  });
+
+  it('refuses when nothing is pending or the task is missing', async () => {
+    const { store, flow } = make();
+    await store.save(sampleSpec()); // status: active
+    expect(await flow.resolve(owner, taskId, 'approved')).toEqual({
+      ok: false,
+      error: 'No approval is pending for this task.',
+    });
+    expect((await store.load(owner, taskId))?.frontmatter.status).toBe(
+      'active',
+    );
+    expect(
+      await flow.resolve(owner, 'task_missing_00000000', 'approved'),
+    ).toEqual({ ok: false, error: 'Task not found.' });
   });
 });
 

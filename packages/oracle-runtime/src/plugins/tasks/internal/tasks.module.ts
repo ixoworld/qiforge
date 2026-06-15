@@ -6,6 +6,7 @@ import { Redis } from 'ioredis';
 import { MatrixListenerBridge } from '../../../modules/messages/matrix-listener-bridge.js';
 import { MessagesModule } from '../../../modules/messages/messages.module.js';
 import { SessionsModule } from '../../../modules/sessions/sessions.module.js';
+import { ApprovalFlow } from './approval-flow.js';
 import { DeliveryService } from './delivery.js';
 import { AgentInvoker } from './invoker.js';
 import { RedisState, TASKS_REDIS } from './redis-state.js';
@@ -86,6 +87,7 @@ export class TasksModule implements OnModuleInit, OnModuleDestroy {
         SchedulerService,
         DeliveryService,
         AgentInvoker,
+        ApprovalFlow,
         TaskRunWorker,
       ],
     };
@@ -100,6 +102,7 @@ export class TasksModule implements OnModuleInit, OnModuleDestroy {
     private readonly scheduler: SchedulerService,
     private readonly delivery: DeliveryService,
     private readonly invoker: AgentInvoker,
+    private readonly approvalFlow: ApprovalFlow,
     private readonly bridge: MatrixListenerBridge,
   ) {}
 
@@ -111,12 +114,14 @@ export class TasksModule implements OnModuleInit, OnModuleDestroy {
       scheduler: this.scheduler,
       delivery: this.delivery,
       invoker: this.invoker,
+      approvalFlow: this.approvalFlow,
     });
     // Pin every message in a dedicated task room to that room's bound run
     // session, so a user's plainly-typed approval reply continues the run's
-    // thread instead of starting a fresh one.
-    this.bridge.setRoomSessionResolver((roomId) =>
-      this.state.getRoomSession(roomId),
+    // thread instead of starting a fresh one. The bridge only needs the
+    // session id; the rest of the binding is for the approval gate.
+    this.bridge.setRoomSessionResolver(
+      async (roomId) => (await this.state.getRoomSession(roomId))?.sessionId,
     );
   }
 

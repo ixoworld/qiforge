@@ -15,28 +15,9 @@ import {
   SchedulerService,
   type RunJobData,
 } from './scheduler.js';
+import { buildApprovalGuardedMessage } from './prompts.js';
 import { TaskStore } from './task-store.js';
 import type { TaskSpec } from './spec.js';
-
-/**
- * Prepended to a `before-action` run's instructions. It tells the agent to do
- * the work and PREPARE the irreversible action, then post a draft and ask the
- * user to approve — without performing the action. The user replies in the
- * task's room (the room is bound to this run's session), and that reply flows
- * back through the normal Matrix chat path so the agent acts on approval.
- */
-function buildApprovalGuardedMessage(body: string): string {
-  return [
-    '[Scheduled task — approval required before any action]',
-    'You are running a scheduled task that performs an action the user must approve first. Do the work and PREPARE the action, then reply with the draft/result and ask the user to approve — e.g. end with "Reply **yes** to proceed, or tell me what to change." Do NOT post, send, publish, create, or otherwise perform the irreversible action yet. The user will reply in this room:',
-    '- If they approve (e.g. "yes", "go ahead"), perform the action now and confirm what you did.',
-    '- If they ask for changes, revise and ask again.',
-    '- If they decline, stop and acknowledge.',
-    '',
-    'Task instructions:',
-    body,
-  ].join('\n');
-}
 
 /**
  * The hot path. Per run: load spec → run the agent → deliver (or, for a
@@ -74,7 +55,14 @@ export class TaskRunWorker extends WorkerHost {
       this.logger.warn(`Task ${taskId} not found — skipping run`);
       return;
     }
-    if (spec.frontmatter.status !== 'active') {
+    // A fresh `before-action` run SUPERSEDES an unanswered draft: the run
+    // below re-binds the room to the new session and deletes the old one, so
+    // the stale draft simply stops being continuable. Everything else
+    // (paused, cancelled, completed, failed-pending-review) skips.
+    const supersedesPendingDraft =
+      spec.frontmatter.status === 'pending-approval' &&
+      spec.frontmatter.approval === 'before-action';
+    if (spec.frontmatter.status !== 'active' && !supersedesPendingDraft) {
       this.logger.log(
         `Task ${taskId} is ${spec.frontmatter.status} — skipping run`,
       );
@@ -119,6 +107,7 @@ export class TaskRunWorker extends WorkerHost {
       }
 
       let output: string;
+      let anchorEventId: string | undefined;
       const beforeAction = spec.frontmatter.approval === 'before-action';
       if (beforeAction) {
         // A `before-action` task always has a dedicated room. Each run is a
@@ -126,17 +115,29 @@ export class TaskRunWorker extends WorkerHost {
         // approval, the room is bound to the run's session, and the user's
         // plainly-typed reply continues that thread via the normal chat path.
         const prev = await this.state.getRoomSession(roomId);
+        // The run-marker is a REAL Matrix event and IS the run's session id —
+        // the session is rooted at a real event like any normal chat session,
+        // so threaded replies resolve to it natively (no binding required).
+        anchorEventId = await this.delivery.post(
+          roomId,
+          `🕒 **${spec.frontmatter.title}** — run started`,
+        );
         const result = await this.invoker.runConversational({
           did: owner,
           roomId,
-          message: buildApprovalGuardedMessage(spec.body),
+          anchorEventId,
+          message: buildApprovalGuardedMessage(taskId, spec.body),
         });
         output = result.output;
-        await this.state.setRoomSession(roomId, result.sessionId);
+        await this.state.setRoomSession(roomId, {
+          sessionId: result.sessionId,
+          taskId,
+          owner,
+        });
         // The previous run's session/thread is stale now the room points at
         // the new one — tear it down (best-effort) so it can't accumulate.
-        if (prev && prev !== result.sessionId) {
-          await this.invoker.deleteSession(owner, prev);
+        if (prev && prev.sessionId !== result.sessionId) {
+          await this.invoker.deleteSession(owner, prev.sessionId);
         }
       } else {
         output = await this.invoker.runOnce({
@@ -151,8 +152,9 @@ export class TaskRunWorker extends WorkerHost {
 
       // `post` throws on Matrix failure → the run fails → BullMQ retries. A
       // silent log-and-continue here would mean "task succeeded" while the
-      // user never saw the result (or the draft+ask).
-      await this.delivery.post(roomId, output);
+      // user never saw the result (or the draft+ask). Drafts thread under the
+      // run marker so quote-replies to them resolve to the run's session.
+      await this.delivery.post(roomId, output, anchorEventId);
 
       await this.state.resetFailures(taskId);
       await this.finishRun(spec);
@@ -165,9 +167,37 @@ export class TaskRunWorker extends WorkerHost {
     }
   }
 
-  /** One-shot → completed. Cron → persist + enqueue the next occurrence. */
+  /**
+   * `never` tasks: one-shot → completed, cron → persist + enqueue the next
+   * occurrence. `before-action` tasks instead land on `pending-approval` —
+   * the draft was posted and the task now waits on the user. A cron task's
+   * cadence keeps going regardless: the next run is enqueued and, if the
+   * draft is still unanswered when it fires, supersedes it.
+   */
   private async finishRun(spec: TaskSpec): Promise<void> {
-    const { id, owner, trigger } = spec.frontmatter;
+    const { id, owner, trigger, approval } = spec.frontmatter;
+
+    if (approval === 'before-action') {
+      // Conditional on active/pending-approval: a pause/cancel issued while
+      // the run was in flight must not be clobbered.
+      if (trigger.type === 'time.once') {
+        await this.store.setStatus(owner, id, 'pending-approval', null, {
+          onlyIfStatus: ['active', 'pending-approval'],
+        });
+        return;
+      }
+      const next = nextRunAtFor(trigger);
+      const updated = await this.store.setStatus(
+        owner,
+        id,
+        'pending-approval',
+        next,
+        { onlyIfStatus: ['active', 'pending-approval'] },
+      );
+      if (updated && next) await this.scheduler.enqueueRun(id, owner, next);
+      return;
+    }
+
     if (trigger.type === 'time.once') {
       // Conditional: a pause/cancel issued while the run was in flight must
       // not be clobbered with 'completed'.

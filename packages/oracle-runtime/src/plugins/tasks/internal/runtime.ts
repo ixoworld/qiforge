@@ -1,3 +1,5 @@
+import { SYNTHETIC_SESSION_PREFIX } from '../../../modules/messages/synthetic-session.js';
+import type { ApprovalFlow } from './approval-flow.js';
 import type { DeliveryService } from './delivery.js';
 import type { AgentInvoker } from './invoker.js';
 import type { RedisState } from './redis-state.js';
@@ -8,11 +10,13 @@ import type { TaskStore } from './task-store.js';
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
- * Session-id prefix for the synthetic sessions task runs execute on. The
- * leading `$` matches Matrix event-id syntax, and the prefix is what shows up
- * as the LangSmith thread id for those runs.
+ * Session-id prefix for the synthetic sessions task runs execute on. Sourced
+ * from the core constant so the messages layer (replay threading, post-sync,
+ * session listing) recognizes task sessions by the same prefix. The leading
+ * `$` matches Matrix event-id syntax, and the prefix is what shows up as the
+ * LangSmith thread id for those runs.
  */
-export const TASK_SESSION_PREFIX = '$task-';
+export const TASK_SESSION_PREFIX = SYNTHETIC_SESSION_PREFIX;
 
 /** DI token for the parsed plugin config (`TasksModule` provides it). */
 export const TASKS_RUNTIME_CONFIG = Symbol('TASKS_RUNTIME_CONFIG');
@@ -36,6 +40,7 @@ export interface TasksRuntime {
   scheduler: SchedulerService;
   delivery: DeliveryService;
   invoker: AgentInvoker;
+  approvalFlow: ApprovalFlow;
 }
 
 export type GetTasksRuntime = () => TasksRuntime | undefined;

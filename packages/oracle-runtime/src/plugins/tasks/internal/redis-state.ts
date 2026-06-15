@@ -38,6 +38,17 @@ export interface FailureInfo {
   lastFailedAt: string;
 }
 
+/**
+ * What a dedicated task room is currently pinned to: the latest run's
+ * session, plus enough identity (taskId + owner) for the approval gate to
+ * load the task without any reverse lookup.
+ */
+export interface RoomSessionBinding {
+  sessionId: string;
+  taskId: string;
+  owner: string;
+}
+
 export interface PreviewClaim {
   owner: string;
   hash: string;
@@ -156,19 +167,50 @@ export class RedisState {
 
   // ── room → session binding (dedicated task rooms) ───────────────────────
 
-  /** Pin a dedicated room to the session of its latest run. */
-  async setRoomSession(roomId: string, sessionId: string): Promise<void> {
+  /** Pin a dedicated room to the session of its task's latest run. */
+  async setRoomSession(
+    roomId: string,
+    binding: RoomSessionBinding,
+  ): Promise<void> {
     await this.redis.set(
       KEY.roomSession(roomId),
-      sessionId,
+      JSON.stringify(binding),
       'EX',
       ROOM_SESSION_TTL_SEC,
     );
   }
 
-  /** The session a dedicated room is currently bound to, if any. */
-  async getRoomSession(roomId: string): Promise<string | undefined> {
-    return (await this.redis.get(KEY.roomSession(roomId))) ?? undefined;
+  /**
+   * The binding a dedicated room currently carries, if any. A corrupt or
+   * legacy (non-JSON) value reads as "no binding" — the next run rewrites it.
+   */
+  async getRoomSession(
+    roomId: string,
+  ): Promise<RoomSessionBinding | undefined> {
+    const raw = await this.redis.get(KEY.roomSession(roomId));
+    if (!raw) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        'sessionId' in parsed &&
+        typeof parsed.sessionId === 'string' &&
+        'taskId' in parsed &&
+        typeof parsed.taskId === 'string' &&
+        'owner' in parsed &&
+        typeof parsed.owner === 'string'
+      ) {
+        return {
+          sessionId: parsed.sessionId,
+          taskId: parsed.taskId,
+          owner: parsed.owner,
+        };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   async clearRoomSession(roomId: string): Promise<void> {
