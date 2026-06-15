@@ -196,9 +196,10 @@ describe('SqliteSaver', () => {
 
     const countMessages = (threadId: string): number => {
       const row = saver.db
-        .prepare<[string], { count: number }>(
-          'SELECT COUNT(*) as count FROM messages WHERE thread_id = ?',
-        )
+        .prepare<
+          [string],
+          { count: number }
+        >('SELECT COUNT(*) as count FROM messages WHERE thread_id = ?')
         .get(threadId);
       return row?.count ?? 0;
     };

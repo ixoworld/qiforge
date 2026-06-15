@@ -11,7 +11,9 @@ const loadCapabilitySchema = z.object({
   names: z
     .array(z.string())
     .min(1)
-    .describe('One or more capability names to load, as returned by list_capabilities.'),
+    .describe(
+      'One or more capability names to load, as returned by list_capabilities.',
+    ),
 });
 
 interface ToolDetail {

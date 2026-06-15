@@ -143,7 +143,9 @@ describe('load_capability', () => {
         visibility: 'on-demand',
         whenToUse: ['Track events'],
       }),
-      getTools: () => [makeTool('track_event', { description: 'Track an event.' })],
+      getTools: () => [
+        makeTool('track_event', { description: 'Track an event.' }),
+      ],
     });
     manifests.register(analytics);
     tools.register(analytics);
@@ -163,9 +165,14 @@ describe('load_capability', () => {
       messages: ToolMessage[];
     };
     expect(update.loadedPlugins.sort()).toEqual(['analytics', 'composio']);
-    const payload = JSON.parse(String(update.messages[0]!.content)) as LoadResult[];
+    const payload = JSON.parse(
+      String(update.messages[0]!.content),
+    ) as LoadResult[];
     expect(payload).toHaveLength(2);
-    expect(payload.map((r) => r.title).sort()).toEqual(['Analytics', 'Composio']);
+    expect(payload.map((r) => r.title).sort()).toEqual([
+      'Analytics',
+      'Composio',
+    ]);
     expect(payload.every((r) => !r.alreadyAvailable)).toBe(true);
   });
 
