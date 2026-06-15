@@ -118,6 +118,7 @@ export {
   creditsPlugin,
   callsPlugin,
   userPreferencesPlugin,
+  ixoTransactionPlugin,
   BUNDLED_PLUGINS,
 } from './plugins/index.js';
 
@@ -131,6 +132,7 @@ export * from './plugins/credits/index.js';
 export * from './plugins/domain-indexer/index.js';
 export * from './plugins/editor/index.js';
 export * from './plugins/firecrawl/index.js';
+export * from './plugins/ixo-transaction/index.js';
 export * from './plugins/matrix-group-chats/index.js';
 export * from './plugins/memory/index.js';
 export * from './plugins/portal/index.js';
