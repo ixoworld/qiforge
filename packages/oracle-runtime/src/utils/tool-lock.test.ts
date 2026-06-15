@@ -24,7 +24,7 @@ describe('acquireToolLock', () => {
     release();
     // Should not throw — lock was released
     const release2 = acquireToolLock('test:reacquire-key');
-    release2();
+    expect(() => release2()).not.toThrow();
   });
 
   it('isolates locks by key — different keys do not block each other', () => {
@@ -32,6 +32,8 @@ describe('acquireToolLock', () => {
     try {
       // key-b is independent; should not throw
       const releaseB = acquireToolLock('test:key-b');
+      expect(() => releaseB()).not.toThrow();
+
       releaseB();
     } finally {
       releaseA();
@@ -51,6 +53,6 @@ describe('acquireToolLock', () => {
     }
     // Lock must be free now
     const release = acquireToolLock('test:throw-key');
-    release();
+    expect(() => release()).not.toThrow();
   });
 });
