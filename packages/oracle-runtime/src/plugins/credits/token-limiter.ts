@@ -180,7 +180,7 @@ export class TokenLimiter {
   llmTokenToCredits(tokenCount: number): number {
     const markup = this.network === 'mainnet' ? 1.6 : 5;
     const costPerMillionTokens = 0.75 * markup;
-    const tokensPerMillion = this.network === 'mainnet' ? 1_000_000 : 1000;
+    const tokensPerMillion = 1_000_000;
     return Math.round((tokenCount / tokensPerMillion) * costPerMillionTokens);
   }
 
@@ -201,7 +201,7 @@ export class TokenLimiter {
     }
 
     const markup = this.network === 'mainnet' ? 1.6 : 5;
-    const divisor = this.network === 'mainnet' ? 1_000_000 : 1000;
+    const divisor = 1_000_000;
     const inputCost =
       (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
     const outputCost =

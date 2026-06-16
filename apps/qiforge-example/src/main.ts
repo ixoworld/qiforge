@@ -1,12 +1,21 @@
 import 'dotenv/config';
 
 import {
+  CreditsPlugin,
   EditorPlugin,
   createOracleApp,
   type AuthExcludedRoute,
 } from '@ixo/oracle-runtime';
-// import Redis from 'ioredis';
-import { Controller, Get, Logger, Module, RequestMethod } from '@nestjs/common';
+import Redis from 'ioredis';
+import {
+  Controller,
+  Get,
+  Logger,
+  Module,
+  RequestMethod,
+  type DynamicModule,
+  type Type,
+} from '@nestjs/common';
 import * as sdk from 'matrix-js-sdk';
 import { config } from './config.js';
 import { WeatherPlugin } from './plugins/weather/index.js';
@@ -50,8 +59,8 @@ const HOST_AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
  * import them without triggering this file's top-level `bootstrap()` call.
  */
 async function bootstrap(): Promise<void> {
-  // const redisUrl = process.env.REDIS_URL;
-  // const redis = redisUrl ? new Redis(redisUrl) : null;
+  const redisUrl = process.env.REDIS_URL;
+  const redis = redisUrl ? new Redis(redisUrl) : null;
 
   const matrixBaseUrl = process.env.MATRIX_BASE_URL;
   const matrixUserId = process.env.MATRIX_ORACLE_ADMIN_USER_ID;
@@ -68,10 +77,39 @@ async function bootstrap(): Promise<void> {
     accessToken: matrixAccessToken,
   });
 
-  // const network = (process.env.NETWORK ?? 'devnet') as
-  //   | 'mainnet'
-  //   | 'testnet'
-  //   | 'devnet';
+  const network = (process.env.NETWORK ?? 'devnet') as
+    | 'mainnet'
+    | 'testnet'
+    | 'devnet';
+
+  const nestModules: Array<Type | DynamicModule> = [VersionModule];
+  const authExcludedRoutes: AuthExcludedRoute[] = [
+    ...HOST_AUTH_EXCLUDED_ROUTES,
+  ];
+
+  // Dev-only BullMQ dashboard (bull-board) for the tasks plugin's queues.
+  // The dynamic import means dist builds still compile the module (devDeps
+  // are present at build time in CI), but production never loads it: the
+  // NODE_ENV guard skips the import, and production installs (`pnpm install
+  // --prod`) don't even ship the @bull-board/* packages.
+  const dashboardRedisUrl = process.env.REDIS_URL;
+  if (process.env.NODE_ENV !== 'production' && dashboardRedisUrl) {
+    const { TasksDashboardModule, TASKS_DASHBOARD_ROUTE } =
+      await import('./dev/tasks-dashboard.module.js');
+    nestModules.push(TasksDashboardModule.register(dashboardRedisUrl));
+    // Without these exclusions `AuthHeaderMiddleware` would 401 the dashboard
+    // (no UCAN header on browser requests). The bare entry covers the route
+    // itself; `{*path}` is the path-to-regexp v8 wildcard — the same form
+    // Nest 11 converts the runtime's legacy `/docs/(.*)` exclusion into — and
+    // covers the UI's API + static-asset sub-paths.
+    authExcludedRoutes.push(
+      { path: TASKS_DASHBOARD_ROUTE, method: RequestMethod.ALL },
+      { path: `${TASKS_DASHBOARD_ROUTE}/{*path}`, method: RequestMethod.ALL },
+    );
+    Logger.log(
+      `[dev] BullMQ dashboard mounted at http://localhost:${process.env.PORT ?? '3000'}${TASKS_DASHBOARD_ROUTE}`,
+    );
+  }
 
   const app = await createOracleApp({
     config,
@@ -81,12 +119,13 @@ async function bootstrap(): Promise<void> {
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
     ],
-    // Host-supplied Nest modules — see VersionController above.
-    nestModules: [VersionModule],
+    // Host-supplied Nest modules — see VersionController above (plus the
+    // dev-only tasks dashboard when mounted).
+    nestModules,
     // Opt host routes out of `AuthHeaderMiddleware`. Symmetric with the
     // plugin-side `getAuthExcludedRoutes()` hook used by the Weather plugin
     // for `/weather/now`. Both merge onto the runtime's built-in exclusions.
-    authExcludedRoutes: HOST_AUTH_EXCLUDED_ROUTES,
+    authExcludedRoutes,
   });
 
   app.onPluginStatusChange((event) => {

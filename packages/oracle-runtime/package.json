@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracle-runtime",
-  "version": "1.0.32",
+  "version": "1.1.0",
   "description": "Plugin-based runtime for QiForge oracles",
   "private": false,
   "publishConfig": {
@@ -91,6 +91,8 @@
     "cache-manager": "^7.2.4",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "cron-parser": "^5.5.0",
+    "gray-matter": "^4.0.3",
     "ioredis": "^5.10.1",
     "js-tiktoken": "^1.0.21",
     "langchain": "1.4.2",

@@ -487,7 +487,7 @@ A page is open in the client, but the editor could not be attached to this reque
 
 - If the user asks about "the page" / "this page" / "the current page", tell them plainly that you cannot access it because ${tellUser}. Do not guess at the page's content.
 - Calling \`call_editor_agent\` will only return this same denial — do not retry it in a loop.
-- Do NOT call \`list_capabilities\` or \`load_capability\` hunting for editor tools — the editor cannot attach during this request regardless of what is loaded.
+- Do NOT call \`list_capabilities\` or \`load_capability({ names: [...] })\` hunting for editor tools — the editor cannot attach during this request regardless of what is loaded.
 - Never claim to have read or edited the page.
 - Everything unrelated to the page works normally.`;
 }

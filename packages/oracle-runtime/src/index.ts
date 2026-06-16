@@ -10,6 +10,7 @@ export type {
 export { OraclePlugin } from './plugin-api/oracle-plugin.js';
 export { defineOraclePlugin } from './plugin-api/define-plugin.js';
 export { tool } from './plugin-api/tool-helper.js';
+export { acquireToolLock } from './utils/tool-lock.js';
 
 export type {
   PluginManifest,

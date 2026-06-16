@@ -438,8 +438,25 @@ ___________________________________________________________
     deleteSessionDto: DeleteChatSessionDto,
   ): Promise<void> {
     const db = await this.syncService.getUserDatabase(deleteSessionDto.did);
-    db.prepare('DELETE FROM sessions WHERE session_id = ?').run(
-      deleteSessionDto.sessionId,
-    );
+    const { sessionId } = deleteSessionDto;
+
+    // The session id doubles as the LangGraph thread id, so clear the
+    // thread's checkpointer rows too (mirrors `SqliteSaver.deleteThread`).
+    // The checkpointer creates its tables on the first graph turn — a user
+    // who created a session but never sent a message has none yet, so only
+    // the checkpointer tables need an existence check.
+    const checkpointerTables = db
+      .prepare<
+        [],
+        { name: string }
+      >(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('checkpoints', 'writes', 'messages')`)
+      .all();
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId);
+      for (const { name } of checkpointerTables) {
+        db.prepare(`DELETE FROM ${name} WHERE thread_id = ?`).run(sessionId);
+      }
+    })();
   }
 }

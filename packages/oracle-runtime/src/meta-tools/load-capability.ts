@@ -5,13 +5,15 @@ import { tool } from '../plugin-api/tool-helper.js';
 import type { PluginManifest, PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import type { ToolRegistry } from '../registries/tool-registry.js';
+import { acquireToolLock } from '../utils/tool-lock.js';
 
-/**
- * Schema accepted by `load_capability`. The agent supplies the plugin name
- * returned by `list_capabilities`.
- */
 const loadCapabilitySchema = z.object({
-  name: z.string(),
+  names: z
+    .array(z.string())
+    .min(1)
+    .describe(
+      'One or more capability names to load, as returned by list_capabilities.',
+    ),
 });
 
 interface ToolDetail {
@@ -22,8 +24,7 @@ interface ToolDetail {
 interface LoadCapabilityResult extends PluginManifest {
   /**
    * `true` when the plugin was already loaded (or has `visibility: 'always'`),
-   * `false` when this call moved it into the loaded set. Useful as a hint to
-   * the agent — repeated `load_capability` calls are cheap but redundant.
+   * `false` when this call moved it into the loaded set.
    */
   alreadyAvailable: boolean;
   /** One entry per tool the plugin contributes. */
@@ -33,21 +34,24 @@ interface LoadCapabilityResult extends PluginManifest {
 /**
  * Build the `load_capability` meta-tool.
  *
- * Marks a plugin as loaded for the current thread AND returns its full
- * manifest (whenToUse, examples, …) plus a per-tool description + arg-shape
- * summary. This is the single discovery+load entry point — the agent does
- * not need a separate `list_capability_details` call.
+ * Accepts an array of plugin names so the agent can batch all needed
+ * capabilities into a single call. A per-session lock ensures the tool
+ * cannot be invoked in parallel — concurrent calls throw immediately.
  *
- * Behavior:
+ * Behavior per name:
  *  - Unknown plugin → throws, instructing the agent to call
  *    `list_capabilities` first.
  *  - `silent` plugin → throws (silent plugins are not agent-loadable).
- *  - Plugin already loaded, or visibility is `always` → returns
- *    `LoadCapabilityResult` directly (no state change).
- *  - Otherwise → returns a LangGraph `Command` whose update both appends the
- *    plugin to `loadedPlugins` AND emits a matching `ToolMessage` carrying
- *    the JSON-encoded `LoadCapabilityResult` so the agent sees the manifest
- *    in conversation history on the same turn.
+ *  - Plugin already loaded, or visibility is `always` → included in result
+ *    with `alreadyAvailable: true` (no state change for that plugin).
+ *  - Otherwise → added to the `loadedPlugins` state update.
+ *
+ * Return value:
+ *  - If all requested plugins were already available: returns the result
+ *    array directly (no state change).
+ *  - If any are new: returns a LangGraph `Command` whose update appends
+ *    all new plugins to `loadedPlugins` AND emits a `ToolMessage` carrying
+ *    the full result array so the agent sees it on the same turn.
  */
 export function buildLoadCapabilityTool(
   manifestRegistry: ManifestRegistry,
@@ -55,67 +59,72 @@ export function buildLoadCapabilityTool(
 ): PluginTool {
   return tool(
     async (args, ctx) => {
-      const { name } = loadCapabilitySchema.parse(args);
+      const { names } = loadCapabilitySchema.parse(args);
 
-      const entry = manifestRegistry
-        .collect()
-        .find((m) => m.pluginName === name);
+      const releaseLock = acquireToolLock(`${ctx.session.id}:load_capability`);
+      try {
+        const results: LoadCapabilityResult[] = [];
+        const newToLoad: string[] = [];
 
-      if (!entry) {
-        throw new Error(
-          `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
-        );
+        for (const name of names) {
+          const entry = manifestRegistry
+            .collect()
+            .find((m) => m.pluginName === name);
+
+          if (!entry) {
+            throw new Error(
+              `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
+            );
+          }
+
+          if (entry.manifest.visibility === 'silent') {
+            throw new Error(
+              `Capability "${name}" is internal and cannot be loaded by the agent. Call list_capabilities first to discover loadable plugins.`,
+            );
+          }
+
+          const tools: ToolDetail[] = toolRegistry
+            .toolsForPlugin(name)
+            .map((t) => ({
+              name: t.name,
+              description: t.description,
+            }));
+
+          const alreadyLoaded = ctx.loadedPlugins?.has(name) === true;
+          const alwaysVisible = entry.manifest.visibility === 'always';
+          const alreadyAvailable = alreadyLoaded || alwaysVisible;
+
+          results.push({ ...entry.manifest, alreadyAvailable, tools });
+
+          if (!alreadyAvailable) {
+            newToLoad.push(name);
+          }
+        }
+
+        if (newToLoad.length === 0) {
+          return results;
+        }
+
+        const update: Record<string, unknown> = {
+          loadedPlugins: newToLoad,
+        };
+        if (ctx.toolCallId) {
+          update.messages = [
+            new ToolMessage({
+              content: JSON.stringify(results),
+              tool_call_id: ctx.toolCallId,
+            }),
+          ];
+        }
+        return new Command({ update });
+      } finally {
+        releaseLock();
       }
-
-      if (entry.manifest.visibility === 'silent') {
-        throw new Error(
-          `Capability "${name}" is internal and cannot be loaded by the agent. Call list_capabilities first to discover loadable plugins.`,
-        );
-      }
-
-      const tools: ToolDetail[] = toolRegistry
-        .toolsForPlugin(name)
-        .map((t) => ({
-          name: t.name,
-          description: t.description,
-        }));
-
-      const alreadyLoaded = ctx.loadedPlugins?.has(name) === true;
-      const alwaysVisible = entry.manifest.visibility === 'always';
-      const alreadyAvailable = alreadyLoaded || alwaysVisible;
-
-      const detail: LoadCapabilityResult = {
-        ...entry.manifest,
-        alreadyAvailable,
-        tools,
-      };
-
-      if (alreadyAvailable) {
-        return detail;
-      }
-
-      // New load — update state AND emit a ToolMessage so the agent sees the
-      // manifest on the same turn. Without a matching tool_call_id LangChain
-      // can't satisfy the model's tool-result expectation, so when we don't
-      // have one (direct/test invocation) we skip the message and rely on the
-      // caller to read state.
-      const update: Record<string, unknown> = {
-        loadedPlugins: [name],
-      };
-      if (ctx.toolCallId) {
-        update.messages = [
-          new ToolMessage({
-            content: JSON.stringify(detail),
-            tool_call_id: ctx.toolCallId,
-          }),
-        ];
-      }
-      return new Command({ update });
     },
     {
       name: 'load_capability',
       description:
-        "Load a capability for the rest of this conversation. The response is the plugin's full manifest plus a tool list — after this call, the capability's tools are usable on the next model step.",
+        "Load one or more capabilities for the rest of this conversation. Pass all capabilities you need in a single call — batching is preferred over multiple calls. The response is an array of plugin manifests plus tool lists; after this call, the new capabilities' tools are usable on the next model step.",
       schema: loadCapabilitySchema,
     },
   );

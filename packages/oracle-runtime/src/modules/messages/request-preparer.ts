@@ -66,14 +66,16 @@ export class RequestPreparer {
         ? (payload.requestId as string)
         : crypto.randomUUID();
 
-    const homeServerName =
-      payload.homeServer ?? (await this.homeServerCache.get(did));
-
-    // Per-process sync-once is owned by `UserMatrixSqliteSyncService` — the
+    // Home-server lookup, SQLite warm-up, and session read are mutually
+    // independent, so run them concurrently — a cold home-server cache is a
+    // 50-200ms chain lookup that should overlap the DB sync, not precede it.
+    // Per-process sync-once is owned by `UserMatrixSqliteSyncService`: the
     // first request per user warms the SQLite, subsequent requests reuse it.
-    // We still kick the warm-up in parallel with the session lookup so the
-    // first-time path stays as fast as possible.
-    const [, targetSession] = await Promise.all([
+    // `payload.homeServer`, when supplied, short-circuits the cache call.
+    const [homeServerName, , targetSession] = await Promise.all([
+      payload.homeServer
+        ? Promise.resolve(payload.homeServer)
+        : this.homeServerCache.get(did),
       this.checkpointSync.getUserDatabase(did),
       this.sessions.getSession(sessionId, did, false),
     ]);

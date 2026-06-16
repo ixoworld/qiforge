@@ -65,6 +65,7 @@ import { UserContextFetcher } from './user-context-fetcher.js';
     MemoryEngineService,
     SessionManagerService,
     OracleRuntimeBundleHolder,
+    MatrixListenerBridge,
   ],
 })
 export class MessagesModule {}

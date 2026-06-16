@@ -93,6 +93,49 @@ function toolSchema(schema: unknown): z.ZodType {
   return schema instanceof z.ZodType ? schema : FALLBACK_ARGS_SCHEMA;
 }
 
+/** Composio tool-router meta-tool that batches one or more tool executions. */
+const MULTI_EXECUTE_TOOL = 'COMPOSIO_MULTI_EXECUTE_TOOL';
+
+/**
+ * Coerce the model's `COMPOSIO_MULTI_EXECUTE_TOOL` input to the exact envelope
+ * Composio's (strict) schema accepts: `{ tools, sync_response_to_workbench }`.
+ *
+ * The multi-execute meta-tool is the one piece of the tool-router flow the
+ * model keeps malforming — across runs it has dropped the required
+ * `sync_response_to_workbench` control flag and hallucinated extra top-level
+ * keys (e.g. a spurious `session`). Prompt guidance reduces but doesn't
+ * eliminate this. Rebuilding the envelope here is deterministic:
+ *
+ *   - keep the model's `tools` payload verbatim — the only part it must
+ *     genuinely author (a genuinely-empty call still fails upstream because
+ *     `tools` is required, which is correct: there is nothing to run);
+ *   - default `sync_response_to_workbench` to `false` (return each result
+ *     inline rather than offloading to the remote workbench) unless the model
+ *     set it explicitly;
+ *   - drop every other top-level key.
+ *
+ * This pins the envelope *shape* — a stable meta-tool contract — not any tool
+ * slugs, which live in Composio's registry and must not be hardcoded here.
+ */
+function normalizeArgs(toolName: string, args: unknown): unknown {
+  if (
+    toolName !== MULTI_EXECUTE_TOOL ||
+    typeof args !== 'object' ||
+    args === null ||
+    Array.isArray(args)
+  ) {
+    return args;
+  }
+  const input = args as Record<string, unknown>;
+  return {
+    tools: input.tools,
+    sync_response_to_workbench:
+      typeof input.sync_response_to_workbench === 'boolean'
+        ? input.sync_response_to_workbench
+        : false,
+  };
+}
+
 /**
  * Wrap a single composio session tool as a {@link PluginTool}. The handler
  * forwards the args through the underlying `invoke` and propagates errors so
@@ -105,7 +148,7 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
     schema: toolSchema(sessionTool.schema),
     handler: async (args, ctx: RuntimeContext) => {
       try {
-        return await sessionTool.invoke(args);
+        return await sessionTool.invoke(normalizeArgs(sessionTool.name, args));
       } catch (error) {
         const detail =
           error instanceof Error

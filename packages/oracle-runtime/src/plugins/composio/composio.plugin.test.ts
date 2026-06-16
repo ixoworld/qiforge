@@ -175,6 +175,95 @@ describe('ComposioPlugin.getRequestTools — wrapped tool semantics', () => {
     expect(sessionTool.invoke).toHaveBeenCalledWith({ value: 'hi' });
   });
 
+  it('defaults sync_response_to_workbench to false for COMPOSIO_MULTI_EXECUTE_TOOL when the model omits it', async () => {
+    const sessionTool = fakeSessionTool('COMPOSIO_MULTI_EXECUTE_TOOL');
+    const sessionFactory: ComposioSessionFactory = async () => [sessionTool];
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-mx',
+    });
+    const rtCtx = makeRuntimeContext({ config: buildConfig() });
+
+    const tools = await plugin.getRequestTools(rtCtx);
+    const tool = tools[0]!;
+
+    await tool.handler(
+      { tools: [{ tool_slug: 'COMPOSIO_SEARCH_FINANCE', arguments: {} }] },
+      rtCtx,
+    );
+
+    expect(sessionTool.invoke).toHaveBeenCalledWith({
+      tools: [{ tool_slug: 'COMPOSIO_SEARCH_FINANCE', arguments: {} }],
+      sync_response_to_workbench: false,
+    });
+  });
+
+  it('preserves an explicit sync_response_to_workbench and never injects it for other tools', async () => {
+    const multiExec = fakeSessionTool('COMPOSIO_MULTI_EXECUTE_TOOL');
+    const other = fakeSessionTool('COMPOSIO_SEARCH_TOOLS');
+    const sessionFactory: ComposioSessionFactory = async () => [
+      multiExec,
+      other,
+    ];
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-mx2',
+    });
+    const rtCtx = makeRuntimeContext({ config: buildConfig() });
+
+    const [multiTool, otherTool] = await plugin.getRequestTools(rtCtx);
+
+    // Explicit true is left untouched.
+    await multiTool!.handler(
+      { tools: [], sync_response_to_workbench: true },
+      rtCtx,
+    );
+    expect(multiExec.invoke).toHaveBeenCalledWith({
+      tools: [],
+      sync_response_to_workbench: true,
+    });
+
+    // A different tool's args pass through verbatim — no injection.
+    await otherTool!.handler({ query: 'find a tool' }, rtCtx);
+    expect(other.invoke).toHaveBeenCalledWith({ query: 'find a tool' });
+  });
+
+  it('strips hallucinated envelope keys (e.g. session) from COMPOSIO_MULTI_EXECUTE_TOOL', async () => {
+    const sessionTool = fakeSessionTool('COMPOSIO_MULTI_EXECUTE_TOOL');
+    const sessionFactory: ComposioSessionFactory = async () => [sessionTool];
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-mx3',
+    });
+    const rtCtx = makeRuntimeContext({ config: buildConfig() });
+    const [tool] = await plugin.getRequestTools(rtCtx);
+
+    // Exact shape from a real failure: a spurious `session` key alongside a
+    // valid `tools` array. The envelope must be rebuilt to drop `session`.
+    await tool!.handler(
+      {
+        session: { id: 'must' },
+        tools: [
+          {
+            tool_slug: 'COMPOSIO_SEARCH_FINANCE',
+            arguments: { query: 'GOOGL:NASDAQ', hl: 'en' },
+          },
+        ],
+      },
+      rtCtx,
+    );
+
+    expect(sessionTool.invoke).toHaveBeenCalledWith({
+      tools: [
+        {
+          tool_slug: 'COMPOSIO_SEARCH_FINANCE',
+          arguments: { query: 'GOOGL:NASDAQ', hl: 'en' },
+        },
+      ],
+      sync_response_to_workbench: false,
+    });
+  });
+
   it('logs and returns no tools when the session factory throws (e.g. composio API outage)', async () => {
     const sessionFactory: ComposioSessionFactory = async () => {
       throw new Error('composio: 503 service unavailable');
