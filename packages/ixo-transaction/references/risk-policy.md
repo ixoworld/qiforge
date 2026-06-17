@@ -1,6 +1,6 @@
 # Risk Policy
 
-Before rendering a signing payload, disclose concrete risks and get explicit confirmation from the user. A confirmation must say that the user accepts the listed risks.
+Before dispatching a wallet signing action, disclose concrete risks and get explicit confirmation from the user. A confirmation must say that the user accepts the listed risks.
 
 ## High-Risk Categories
 
@@ -14,11 +14,11 @@ Before rendering a signing payload, disclose concrete risks and get explicit con
 | Claims              | Submit, evaluate, dispute, adjudicate          | Claim status and payment effects can trigger external workflows.                           |
 | Tokens and credits  | Mint, transfer, retire, cancel, pause, stop    | Funds or impact credits can move or burn permanently. Amounts must be integer micro-units. |
 | Bonds and staking   | Bonds, liquidstake                             | Economic positions and staking state can change. Confirm pool, validator, and amount.      |
-| Mainnet             | Any mainnet signing payload                    | Pandora testnet should succeed first unless explicitly overridden.                         |
+| Mainnet             | Any mainnet wallet signing action              | Pandora testnet should succeed first unless explicitly overridden.                         |
 
 ## Required Confirmation
 
-Rendering a signing payload requires:
+Dispatching a wallet signing action requires:
 
 ```json
 {

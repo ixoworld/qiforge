@@ -5,8 +5,12 @@ export default mergeConfig(
   defineConfig({
     resolve: {
       alias: {
-        '@ixo/oracle-runtime': new URL(
-          './tests/fixtures/oracle-runtime-stub.ts',
+        '@ixo/oracle-runtime/plugin-api': new URL(
+          '../oracle-runtime/src/plugin-api/index.ts',
+          import.meta.url,
+        ).pathname,
+        '@ixo/common/ai/tools/action-caller': new URL(
+          '../common/src/ai/tools/action-caller.ts',
           import.meta.url,
         ).pathname,
       },

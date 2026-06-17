@@ -175,29 +175,6 @@ export const ITrxMsgSchema = z
 
 export type ITrxMsg = z.infer<typeof ITrxMsgSchema>;
 
-export const SignxTransactionPayloadSchema = z
-  .object({
-    type: z.literal('signxTransaction'),
-    messages: z.array(ITrxMsgSchema).min(1),
-    memo: z.string().optional(),
-  })
-  .strict();
-
-export type SignxTransactionPayload = z.infer<
-  typeof SignxTransactionPayloadSchema
->;
-
-export const IframeEventSchema = z
-  .object({
-    protocol: z.literal('ixo.portal.iframe.v1'),
-    version: z.literal('1.0'),
-    type: z.literal('EVENT'),
-    payload: SignxTransactionPayloadSchema,
-  })
-  .strict();
-
-export type IframeEvent = z.infer<typeof IframeEventSchema>;
-
 export const RiskConfirmationSchema = z
   .object({
     confirmed: z.literal(true),

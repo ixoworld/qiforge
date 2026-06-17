@@ -67,7 +67,7 @@ function assertRiskGate(
   if (!risky || !options.requireRiskConfirmation) return;
   if (draft.riskConfirmation?.confirmed === true) return;
   throw new Error(
-    `Risk confirmation required before rendering ${spec.messageName}`,
+    `Risk confirmation required before signing ${spec.messageName}`,
   );
 }
 

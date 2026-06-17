@@ -540,6 +540,9 @@ importers:
 
   packages/ixo-transaction:
     dependencies:
+      '@ixo/common':
+        specifier: workspace:*
+        version: link:../common
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -547,6 +550,9 @@ importers:
       '@ixo/oracle-runtime':
         specifier: workspace:*
         version: link:../oracle-runtime
+      '@ixo/oracles-client-sdk':
+        specifier: workspace:*
+        version: link:../oracles-client-sdk
       '@ixo/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config

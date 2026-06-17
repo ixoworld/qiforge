@@ -3,7 +3,7 @@ import {
   type PluginContext,
   type PluginManifest,
   type PluginTool,
-} from '@ixo/oracle-runtime';
+} from '@ixo/oracle-runtime/plugin-api';
 
 import { createIxoTransactionTools } from './tools.js';
 
@@ -13,7 +13,7 @@ export class IxoTransactionPlugin extends OraclePlugin {
   readonly manifest: PluginManifest = {
     title: 'IXO Transaction',
     summary:
-      'Configure, validate, risk-gate, and render IXO Portal signxTransaction payloads.',
+      'Configure, validate, risk-gate, and dispatch IXO transactions to the Portal wallet.',
     whenToUse: [
       'The user asks to prepare an IXO chain transaction for Portal signing.',
       'The user provides a slash command such as /ixo entity create or /ixo token retire.',
@@ -21,14 +21,14 @@ export class IxoTransactionPlugin extends OraclePlugin {
     ],
     whenNotToUse: [
       'The user only wants to query chain state or inspect account balances.',
-      'The user asks the agent to sign, broadcast, or custody keys directly.',
+      'The user asks the oracle to sign, broadcast, or custody keys directly.',
       'The transaction module is query-only, such as epochs or mint.',
     ],
     examples: [
       {
         user: '/ixo entity create',
         thought:
-          'Resolve the slash command, collect required fields, validate the draft, report risks, then render after confirmation.',
+          'Resolve the slash command, collect required fields, validate the draft, report risks, then dispatch to the Portal wallet after confirmation.',
         tool: 'list_ixo_transaction_routes',
         args: { messageType: 'entity' },
       },
@@ -40,13 +40,33 @@ export class IxoTransactionPlugin extends OraclePlugin {
         args: { input: 'I want to create a new domain' },
       },
       {
-        user: 'Render the mainnet signing payload after this Pandora testnet tx succeeded.',
+        user: 'Sign the mainnet transfer after this Pandora testnet tx succeeded.',
         thought:
-          'Validate the mainnet draft with the testnet receipt and risk confirmation before rendering signxTransaction.',
-        tool: 'render_ixo_transaction_payload',
+          'Validate the mainnet draft with the testnet receipt and risk confirmation before dispatching the sign_transaction wallet action.',
+        tool: 'sign_ixo_transaction',
+        args: {
+          command: '/ixo entity transfer',
+          network: 'mainnet',
+          value: {
+            id: 'did:ixo:entity:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            ownerDid: 'did:ixo:ixo1qwertyuiopasdfghjklzxcvbnmqwerty12345',
+            ownerAddress: 'ixo1qwertyuiopasdfghjklzxcvbnmqwerty12345',
+            recipientDid: 'did:ixo:ixo1zxcvbnmqwertyuiopasdfghjkl1234567890ab',
+          },
+          riskConfirmation: {
+            confirmed: true,
+            acceptedRisks: ['Entity ownership will transfer to the recipient.'],
+          },
+          testnetReceipt: {
+            network: 'testnet',
+            transactionHash:
+              'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            code: 0,
+          },
+        },
       },
     ],
-    tags: ['ixo', 'portal', 'transaction', 'signx', 'cosmos', 'zod'],
+    tags: ['ixo', 'portal', 'transaction', 'wallet', 'cosmos', 'zod'],
     category: 'integration',
     visibility: 'on-demand',
     stability: 'experimental',

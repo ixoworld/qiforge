@@ -1,45 +1,26 @@
-import { tool, z, type PluginTool } from '@ixo/oracle-runtime';
+import { callAgAction } from '@ixo/common/ai/tools/action-caller';
+import {
+  tool,
+  z,
+  type PluginTool,
+  type RuntimeContext,
+} from '@ixo/oracle-runtime/plugin-api';
+import { randomUUID } from 'node:crypto';
 
 import { MESSAGE_CATALOG, QUERY_ONLY_MODULES } from '../catalog.js';
-import { renderIframeEvent } from '../iframe.js';
 import { classifyIntent } from '../intent.js';
-import { renderSigningPayload } from '../render.js';
+import {
+  SIGN_TRANSACTION_ACTION_NAME,
+  SignTransactionActionResultSchema,
+  buildSignTransactionActionArgs,
+  normalizeWalletSignResult,
+} from '../action.js';
+import { TransactionDraftSchema } from '../schemas.js';
 import { validateTransactionDraft } from '../validate.js';
 
-const JsonRecordSchema = z.record(z.string(), z.unknown());
+const ACTION_TIMEOUT_MS = 120_000;
 
-const RiskConfirmationToolSchema = z
-  .object({
-    confirmed: z.literal(true),
-    acceptedRisks: z.array(z.string().min(1)).min(1),
-  })
-  .strict();
-
-const TestnetReceiptToolSchema = z
-  .object({
-    network: z.literal('testnet'),
-    transactionHash: z.string().min(32).max(128),
-    code: z.literal(0),
-    height: z.union([z.string(), z.number().int().nonnegative()]).optional(),
-  })
-  .strict();
-
-const TransactionDraftToolSchema = z
-  .object({
-    input: z.string().optional(),
-    command: z.string().optional(),
-    messageType: z.string().optional(),
-    action: z.string().optional(),
-    typeUrl: z.string().optional(),
-    value: JsonRecordSchema.default({}),
-    memo: z.string().optional(),
-    network: z.enum(['devnet', 'testnet', 'mainnet']).default('testnet'),
-    riskConfirmation: RiskConfirmationToolSchema.optional(),
-    testnetReceipt: TestnetReceiptToolSchema.optional(),
-    overrideMainnet: z.boolean().optional(),
-    overrideReason: z.string().min(1).optional(),
-  })
-  .strict();
+const TransactionDraftToolSchema = TransactionDraftSchema;
 
 const IntentInputToolSchema = z
   .object({
@@ -52,10 +33,6 @@ const RouteListToolSchema = z
     messageType: z.string().optional(),
   })
   .strict();
-
-const RenderToolSchema = TransactionDraftToolSchema.extend({
-  iframe: z.boolean().default(false),
-}).strict();
 
 function summarizeRoutes(messageType?: string): unknown {
   const normalized = messageType?.trim().toLowerCase();
@@ -78,6 +55,33 @@ function summarizeRoutes(messageType?: string): unknown {
     queryOnlyModules: QUERY_ONLY_MODULES,
     routes,
   };
+}
+
+function buildToolCallId(ctx: RuntimeContext): string {
+  const requestId = ctx.session.requestId ?? 'noreq';
+  return `ixo_tx_${requestId}_${randomUUID().slice(0, 8)}`;
+}
+
+async function dispatchSignTransactionAction(
+  input: unknown,
+  ctx: RuntimeContext,
+): Promise<unknown> {
+  const actionArgs = buildSignTransactionActionArgs(input);
+  const sessionId = ctx.session.id;
+  if (!sessionId) {
+    throw new Error('sessionId is required to dispatch wallet signing');
+  }
+
+  const result = await callAgAction({
+    sessionId,
+    toolCallId: buildToolCallId(ctx),
+    toolName: SIGN_TRANSACTION_ACTION_NAME,
+    args: actionArgs,
+    timeout: ACTION_TIMEOUT_MS,
+  });
+
+  const parsed = SignTransactionActionResultSchema.safeParse(result);
+  return parsed.success ? parsed.data : normalizeWalletSignResult(result);
 }
 
 export function createIxoTransactionTools(): PluginTool[] {
@@ -118,26 +122,11 @@ export function createIxoTransactionTools(): PluginTool[] {
         schema: TransactionDraftToolSchema,
       },
     ),
-    tool(
-      async (args: unknown) => {
-        const { iframe, ...draft } = RenderToolSchema.parse(args);
-        if (iframe) {
-          return {
-            transport: 'ixo.portal.iframe.v1',
-            event: renderIframeEvent(draft),
-          };
-        }
-        return {
-          transport: 'portal.signxTransaction',
-          payload: renderSigningPayload(draft),
-        };
-      },
-      {
-        name: 'render_ixo_transaction_payload',
-        description:
-          'Render the validated Portal signxTransaction payload for signing, or an optional IXO Portal iframe EVENT wrapper when iframe is true.',
-        schema: RenderToolSchema,
-      },
-    ),
+    tool(dispatchSignTransactionAction, {
+      name: 'sign_ixo_transaction',
+      description:
+        'Validate, risk-gate, and dispatch the IXO transaction to the Portal frontend sign_transaction wallet action. Requires the Portal frontend to register the hidden ixo-transaction/react signing action.',
+      schema: TransactionDraftToolSchema,
+    }),
   ];
 }

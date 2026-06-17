@@ -20,7 +20,7 @@ export const verification = [
 
 export const riskConfirmation = {
   confirmed: true as const,
-  acceptedRisks: ['User confirmed transaction risks before rendering.'],
+  acceptedRisks: ['User confirmed transaction risks before signing.'],
 };
 
 export function draft(

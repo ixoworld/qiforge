@@ -1,7 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { renderIframeEvent } from '../src/iframe.js';
-import { renderSigningPayload } from '../src/render.js';
+import {
+  buildSignTransactionActionArgs,
+  signIxoTransactionWithWallet,
+} from '../src/action.js';
 import { validateTransactionDraft } from '../src/validate.js';
 import {
   ADDRESS,
@@ -14,9 +16,9 @@ import {
   verification,
 } from './fixtures.js';
 
-describe('validation and rendering', () => {
-  it('renders MsgCreateEntity as a Portal signxTransaction payload', () => {
-    const payload = renderSigningPayload(
+describe('validation and signing action args', () => {
+  it('builds MsgCreateEntity as validated sign_transaction action args', () => {
+    const actionArgs = buildSignTransactionActionArgs(
       draft('/ixo entity create', {
         entityType: 'protocol',
         verification,
@@ -27,8 +29,9 @@ describe('validation and rendering', () => {
       }),
     );
 
-    expect(payload).toEqual({
-      type: 'signxTransaction',
+    expect(actionArgs).toEqual({
+      action: 'sign_transaction',
+      network: 'testnet',
       messages: [
         {
           typeUrl: '/ixo.entity.v1beta1.MsgCreateEntity',
@@ -42,6 +45,21 @@ describe('validation and rendering', () => {
           },
         },
       ],
+      intent: {
+        source: 'slash-command',
+        module: 'entity',
+        action: 'create',
+        messageName: 'MsgCreateEntity',
+        typeUrl: '/ixo.entity.v1beta1.MsgCreateEntity',
+        confidence: 1,
+        ambiguities: [],
+      },
+      risks: [
+        'Creates a new entity, admin account, DID document, and ownership NFT. The entity DID is chain-derived and cannot be chosen.',
+      ],
+      riskLevel: 'high',
+      requiresConfirmation: true,
+      riskConfirmation,
     });
   });
 
@@ -89,19 +107,6 @@ describe('validation and rendering', () => {
     expect(validateTransactionDraft(fixture).message.typeUrl).toMatch(
       /^\/ixo\./,
     );
-  });
-
-  it('wraps iframe output only when explicitly requested', () => {
-    const event = renderIframeEvent(
-      draft('/ixo entity transfer', {
-        id: ENTITY_DID,
-        ownerDid: DID,
-        ownerAddress: ADDRESS,
-        recipientDid: DID_2,
-      }),
-    );
-    expect(event.protocol).toBe('ixo.portal.iframe.v1');
-    expect(event.payload.type).toBe('signxTransaction');
   });
 
   it('rejects conflicting typeUrl', () => {
@@ -262,7 +267,43 @@ describe('validation and rendering', () => {
     expect(validated.network).toBe('mainnet');
   });
 
-  it('requires risk confirmation before rendering', () => {
+  it('calls transactSignX with validated action messages and memo', async () => {
+    const actionArgs = buildSignTransactionActionArgs(
+      draft(
+        '/ixo token retire',
+        {
+          owner: ADDRESS,
+          tokens: [{ id: 'CREDIT-1', amount: '10' }],
+          jurisdiction: 'Global',
+          reason: 'offset',
+        },
+        { memo: 'retire credits' },
+      ),
+    );
+    const transactSignX = vi.fn().mockResolvedValue({
+      transactionHash: 'B'.repeat(64),
+      code: 0,
+      height: 123,
+    });
+
+    const result = await signIxoTransactionWithWallet(
+      actionArgs,
+      transactSignX,
+    );
+
+    expect(transactSignX).toHaveBeenCalledWith(
+      actionArgs.messages,
+      'retire credits',
+    );
+    expect(result).toMatchObject({
+      success: true,
+      transactionHash: 'B'.repeat(64),
+      code: 0,
+      height: 123,
+    });
+  });
+
+  it('requires risk confirmation before signing action dispatch', () => {
     const noConfirmation = {
       command: '/ixo entity transfer',
       network: 'testnet',
@@ -273,7 +314,7 @@ describe('validation and rendering', () => {
         recipientDid: DID_2,
       },
     };
-    expect(() => renderSigningPayload(noConfirmation)).toThrow(
+    expect(() => buildSignTransactionActionArgs(noConfirmation)).toThrow(
       /Risk confirmation required/,
     );
   });

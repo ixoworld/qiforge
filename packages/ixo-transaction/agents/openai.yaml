@@ -1,4 +1,4 @@
 interface:
-  display_name: "IXO Transaction"
-  short_description: "Build validated IXO transaction messages"
-  default_prompt: "Use $ixo-transaction to configure an IXO transaction message for Portal signing."
+  display_name: 'IXO Transaction'
+  short_description: 'Validate IXO transactions and dispatch Portal wallet signing'
+  default_prompt: 'Use $ixo-transaction to configure an IXO transaction message and dispatch Portal wallet signing after validation.'

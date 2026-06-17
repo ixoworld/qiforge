@@ -8,15 +8,27 @@ export {
 export type { FieldSpec, MessageSpec, RiskLevel } from './catalog.js';
 export { classifyIntent, parseSlashCommand, resolveIntent } from './intent.js';
 export type { IntentResult } from './intent.js';
-export { renderIframeEvent } from './iframe.js';
-export { renderSigningPayload } from './render.js';
+export {
+  IntentActionMetadataSchema,
+  SIGN_TRANSACTION_ACTION_DESCRIPTION,
+  SIGN_TRANSACTION_ACTION_NAME,
+  SignTransactionActionArgsSchema,
+  SignTransactionActionResultSchema,
+  buildSignTransactionActionArgs,
+  normalizeWalletSignResult,
+  signIxoTransactionWithWallet,
+} from './action.js';
+export type {
+  SignTransactionActionArgs,
+  SignTransactionActionResult,
+  WalletSignTransactionFn,
+} from './action.js';
 export {
   AccordedRightSchema,
   AnySchema,
   AuthzGrantSchema,
   CoinSchema,
   ContextSchema,
-  IframeEventSchema,
   IntegerStringSchema,
   ITrxMsgSchema,
   IxoAddressSchema,
@@ -27,7 +39,6 @@ export {
   NetworkSchema,
   RiskConfirmationSchema,
   ServiceSchema,
-  SignxTransactionPayloadSchema,
   TestnetReceiptSchema,
   TimestampSchema,
   TokenBatchSchema,
@@ -38,11 +49,9 @@ export {
 } from './schemas.js';
 export type {
   FieldKind,
-  IframeEvent,
   ITrxMsg,
   Network,
   RiskConfirmation,
-  SignxTransactionPayload,
   TestnetReceipt,
   TransactionDraft,
 } from './schemas.js';

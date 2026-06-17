@@ -105,20 +105,16 @@
     ]
   },
   "coreOutput": {
-    "type": "signxTransaction",
+    "action": "sign_transaction",
+    "network": "testnet",
     "messages": [
       { "typeUrl": "/ixo.entity.v1beta1.MsgCreateEntity", "value": {} }
     ],
-    "memo": "optional memo"
-  },
-  "optionalIframeEnvelope": {
-    "protocol": "ixo.portal.iframe.v1",
-    "version": "1.0",
-    "type": "EVENT",
-    "payload": {
-      "type": "signxTransaction",
-      "messages": [],
-      "memo": "optional memo"
+    "memo": "optional memo",
+    "riskLevel": "high",
+    "riskConfirmation": {
+      "confirmed": true,
+      "acceptedRisks": ["Human-readable risk accepted by the user"]
     }
   }
 }

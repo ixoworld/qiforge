@@ -2,11 +2,10 @@ import { readFileSync } from 'node:fs';
 import { inspect } from 'node:util';
 import { ZodError } from 'zod';
 
-import { renderIframeEvent } from './iframe.js';
-import { renderSigningPayload } from './render.js';
+import { buildSignTransactionActionArgs } from './action.js';
 import { validateTransactionDraft } from './validate.js';
 
-export type CliMode = 'validate' | 'render' | 'iframe';
+export type CliMode = 'validate' | 'render';
 
 function readJsonArgument(): unknown {
   const inline = process.argv.slice(2).join(' ').trim();
@@ -30,10 +29,9 @@ export function runCli(mode: CliMode): void {
       return;
     }
     if (mode === 'render') {
-      printJson(renderSigningPayload(input));
+      printJson(buildSignTransactionActionArgs(input));
       return;
     }
-    printJson(renderIframeEvent(input));
   } catch (error) {
     const message =
       error instanceof ZodError
