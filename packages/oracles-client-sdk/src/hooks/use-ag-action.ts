@@ -7,6 +7,7 @@ export interface AgActionConfig<TSchema extends z.ZodTypeAny = z.ZodTypeAny> {
   description: string;
   parameters: TSchema;
   handler: (args: z.infer<TSchema>) => Promise<unknown> | unknown;
+  exposeToAgent?: boolean;
   render?: (props: {
     status?: 'isRunning' | 'done';
     args?: z.infer<TSchema>;
@@ -20,6 +21,7 @@ export interface AgAction {
   description: string;
   parameters: z.ZodTypeAny;
   hasRender: boolean;
+  exposeToAgent: boolean;
 }
 
 /**
@@ -61,6 +63,7 @@ export function useAgAction<TSchema extends z.ZodTypeAny>(
       description: config.description,
       parameters: config.parameters,
       hasRender: !!config.render,
+      exposeToAgent: config.exposeToAgent ?? true,
     };
 
     registerAgAction(

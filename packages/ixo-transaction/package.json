@@ -1,0 +1,67 @@
+{
+  "name": "ixo-transaction",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Qiforge plugin and typed schemas for validating IXO transactions and dispatching Portal wallet signing",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./qiforge": {
+      "types": "./dist/qiforge/index.d.ts",
+      "import": "./dist/qiforge/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "SKILL.md",
+    "agents",
+    "references"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "validate": "tsx scripts/validate-ixo-tx.ts",
+    "render": "tsx scripts/render-signing-action.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ixo/common": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@ixo/oracle-runtime": "^1.0.32",
+    "@ixo/oracles-client-sdk": "^1.2.2"
+  },
+  "peerDependenciesMeta": {
+    "@ixo/oracles-client-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ixo/oracle-runtime": "workspace:*",
+    "@ixo/oracles-client-sdk": "workspace:*",
+    "@ixo/typescript-config": "workspace:*",
+    "@ixo/vitest-config": "workspace:*",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  }
+}

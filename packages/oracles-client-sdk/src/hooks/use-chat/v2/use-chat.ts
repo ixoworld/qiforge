@@ -84,8 +84,13 @@ export function useChat({
     oracleDid,
     overrides,
   );
-  const { authedRequest, executeAgAction, getAgActionRender, agActions } =
-    useOraclesContext();
+  const {
+    authedRequest,
+    executeAgAction,
+    getAgActionRender,
+    agActions,
+    registeredAgActions,
+  } = useOraclesContext();
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
 
   // React Query for initial data fetch
@@ -321,7 +326,7 @@ export function useChat({
   // Build actionTools from registered AG-UI actions
   const actionTools = useMemo(() => {
     const tools: IActionTools = {};
-    agActions.forEach((action) => {
+    registeredAgActions.forEach((action) => {
       tools[action.name] = {
         toolName: action.name,
         description: action.description,
@@ -333,7 +338,7 @@ export function useChat({
       };
     });
     return tools;
-  }, [agActions, executeAgAction, getAgActionRender]);
+  }, [registeredAgActions, executeAgAction, getAgActionRender]);
 
   const { isConnected: isWebSocketConnected } = useWebSocketEvents({
     oracleDid,
