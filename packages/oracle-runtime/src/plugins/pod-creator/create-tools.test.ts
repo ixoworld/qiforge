@@ -173,9 +173,9 @@ describe('create-path tools', () => {
       );
     expect(out.created).toBe(true);
     expect(out.podDid).toBe('did:ixo:entity:pod123');
-    expect(confirmSpy).toHaveBeenCalledWith({
-      txHash: '0xabc',
-      network: 'testnet',
-    });
+    expect(confirmSpy).toHaveBeenCalledWith(
+      { txHash: '0xabc', network: 'testnet' },
+      expect.anything(),
+    );
   });
 });

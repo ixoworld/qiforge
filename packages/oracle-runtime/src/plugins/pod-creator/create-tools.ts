@@ -63,11 +63,10 @@ export function createCreateTools(
         };
       }
       const blueprint = assembleServicePodBlueprint(bp);
-      const batch = await gateway.prepareUnsignedPodBatch({
-        blueprint,
-        userDid: ctx.user.did,
-        network: networkOf(ctx),
-      });
+      const batch = await gateway.prepareUnsignedPodBatch(
+        { blueprint, network: networkOf(ctx) },
+        ctx,
+      );
       const blobId = await ctx.blobStore.put({
         userDid: ctx.user.did,
         name: 'pod-unsigned-tx',
@@ -127,10 +126,10 @@ export function createCreateTools(
   const confirm = tool(
     async (args, ctx) => {
       const { txHash } = confirmSchema.parse(args);
-      const created = await gateway.confirmPodCreation({
-        txHash,
-        network: networkOf(ctx),
-      });
+      const created = await gateway.confirmPodCreation(
+        { txHash, network: networkOf(ctx) },
+        ctx,
+      );
       return {
         created: true,
         podDid: created.podDid,
