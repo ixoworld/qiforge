@@ -39,6 +39,7 @@ const ACTION_ALIASES: Record<string, string> = {
   'add-entity': 'add-linked-entity',
   createentity: 'create',
   msgcreateentity: 'create',
+  megcreateentity: 'create',
   verify: 'update-verified',
   verified: 'update-verified',
   grant: 'grant-account-authz',
@@ -56,7 +57,7 @@ const NATURAL_LANGUAGE_RULES: Array<{
   confidence: number;
 }> = [
   {
-    pattern: /\b(msgcreateentity|createentity)\b/i,
+    pattern: /\b(megcreateentity|msgcreateentity|createentity)\b/i,
     module: 'entity',
     action: 'create',
     confidence: 0.98,

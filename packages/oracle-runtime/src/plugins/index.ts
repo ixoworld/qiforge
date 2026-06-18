@@ -6,7 +6,6 @@ import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
-import { IxoTransactionPlugin } from './ixo-transaction/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
@@ -52,7 +51,6 @@ export const creditsPlugin = new CreditsPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
-export const ixoTransactionPlugin = new IxoTransactionPlugin();
 
 /**
  * The canonical bundled-plugin set used by `createOracleApp` when the
@@ -78,5 +76,4 @@ export const BUNDLED_PLUGINS = [
   callsPlugin,
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
-  ixoTransactionPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

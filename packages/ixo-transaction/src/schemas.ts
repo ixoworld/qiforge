@@ -161,8 +161,12 @@ export const TokenBatchSchema = z
   })
   .strict();
 
-/** Canonical Cosmos `EncodeObject` — the shape the frontend wallet signs. */
-export const EncodeObjectSchema = z
+/**
+ * Canonical Cosmos `EncodeObject` — `{ typeUrl, value }`. The proto-JSON `value`
+ * is what crosses to the frontend; the Portal `sign_transaction` handler runs it
+ * through the IXO SDK's `fromJSON` before signing.
+ */
+export const ITrxMsgSchema = z
   .object({
     typeUrl: z
       .string()
@@ -174,7 +178,7 @@ export const EncodeObjectSchema = z
   })
   .strict();
 
-export type EncodeObject = z.infer<typeof EncodeObjectSchema>;
+export type ITrxMsg = z.infer<typeof ITrxMsgSchema>;
 
 export const RiskConfirmationSchema = z
   .object({
@@ -241,7 +245,8 @@ export type TransactionDraft = z.infer<typeof TransactionDraftSchema>;
  * IXO `Msg`s (verified against `@ixo/impactxclient-sdk`). Singular `*` kinds
  * map to a single nested message; `*Array` kinds map to a repeated field.
  * Deeply-nested protobuf structures we do not model field-by-field use
- * `json`/`jsonArray` (validated as present, encoded by the frontend registry).
+ * `json`/`jsonArray` (validated as present, encoded by the frontend via the
+ * SDK's `fromJSON`).
  */
 export type FieldKind =
   | 'string'

@@ -7,16 +7,16 @@ import {
 } from './catalog.js';
 import { resolveIntent, type IntentResult } from './intent.js';
 import {
-  EncodeObjectSchema,
+  ITrxMsgSchema,
   TransactionDraftSchema,
   schemaForFieldKind,
-  type EncodeObject,
+  type ITrxMsg,
   type TransactionDraft,
 } from './schemas.js';
 
 export type ValidatedTransaction = {
   intent: IntentResult;
-  message: EncodeObject;
+  message: ITrxMsg;
   risks: string[];
   riskLevel: MessageSpec['riskLevel'];
   requiresConfirmation: boolean;
@@ -93,7 +93,7 @@ export function validateTransactionDraft(
   assertRiskGate(spec, draft, options);
 
   const value = buildValueSchema(spec.fields).parse(draft.value);
-  const message = EncodeObjectSchema.parse({ typeUrl: spec.typeUrl, value });
+  const message = ITrxMsgSchema.parse({ typeUrl: spec.typeUrl, value });
 
   return {
     intent,

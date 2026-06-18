@@ -80,55 +80,60 @@ sequenceDiagram
 
 ## 6. Frontend contract
 
-The Portal frontend registers an AG-UI action handler named `sign_transaction`:
+The Portal frontend mounts one hook from `ixo-transaction/react`, which registers
+a **hidden** `sign_transaction` AG-UI action and wires it to the wallet:
 
 ```ts
-registerAgAction(
-  {
-    name: 'sign_transaction',
-    description: '…',
-    schema: SignTransactionArgsSchema,
-  },
-  async ({ messages, memo }) => {
-    const res = await transactSignX(messages, memo); // EncodeObject[] -> DeliverTxResponse
-    return {
-      transactionHash: res?.transactionHash,
-      height: res?.height,
-      code: res?.code,
-    };
-  },
-);
-```
+import { useIxoTransactionSigningAction } from 'ixo-transaction/react';
 
-Action args dispatched by the plugin:
-
-```ts
-{
-  messages: Array<{ typeUrl: string; value: Record<string, unknown> }>; // EncodeObject[]
-  memo?: string;
-  network: 'devnet' | 'testnet' | 'mainnet';
-  metadata: { messageName: string; typeUrl: string; riskLevel: string; risks: string[] };
+function OraclePortalChat() {
+  useIxoTransactionSigningAction();
+  return <Chat />;
 }
 ```
 
-`messages` is `EncodeObject[]` — exactly what `transactSignX` / `signAndBroadcast`
-consume today. Encoding happens on the frontend via the existing chain-client
-registry (the same path every Portal transaction uses).
+The hook registers the action with `exposeToAgent: false` — so it is executable
+over the websocket but is **not** advertised to the agent as a tool. The agent
+can only reach the wallet through the validated `sign_ixo_transaction` server
+tool, never by calling `sign_transaction` directly.
+
+Action args dispatched by the plugin (proto-JSON on the wire):
+
+```ts
+{
+  action: 'sign_transaction';
+  network: 'devnet' | 'testnet' | 'mainnet';
+  messages: Array<{ typeUrl: string; value: Record<string, unknown> }>;
+  memo?: string;
+  intent: { source; module; action; messageName; typeUrl; confidence; ambiguities };
+  risks: string[];
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  requiresConfirmation: boolean;
+  riskConfirmation?; testnetReceipt?; overrideMainnet?; overrideReason?;
+}
+```
+
+**Proto encoding (BE → FE).** Messages cross as proto-JSON `{ typeUrl, value }`.
+The hook converts each one into a wallet-ready Cosmos `EncodeObject` via the IXO
+SDK's generated `fromJSON` (`packages/ixo-transaction/src/react/proto.ts`) right
+before calling `transactSignX`. `fromJSON` decodes the lossy fields (`bytes` from
+base64, `Long`, `Timestamp`) into their real runtime types, so the wallet
+encodes them correctly. Heavy proto codecs stay on the FE only.
 
 Result contract (`action_call_result.result`): `{ success: boolean, error?, ... }`.
 `callAgAction` rejects when `success === false`, when an `error` is present, or on
-timeout; the plugin catches and maps to a structured status.
+timeout; the server tool catches and maps to a structured status.
 
 ## 7. Plugin design
 
-| Aspect       | Decision                                                                                     |
-| ------------ | -------------------------------------------------------------------------------------------- |
-| Location     | Bundled plugin: `packages/oracle-runtime/src/plugins/ixo-transaction/`                       |
-| Name         | `ixo-transaction`                                                                            |
-| Visibility   | `on-demand` — bundled but deliberately loaded via `load_capability`, never always-on         |
-| Category     | `integration`                                                                                |
-| Dependencies | None hard. Uses `callAgAction` directly; requires the FE to register `sign_transaction`      |
-| Config       | `IXO_TRANSACTION_SIGN_TIMEOUT_MS` (optional, default 120000) — wallet signing is human-paced |
+| Aspect       | Decision                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Location     | Standalone package `packages/ixo-transaction` with `/qiforge` (server plugin) and `/react` (FE hook) subpaths           |
+| Name         | `ixo-transaction`                                                                                                       |
+| Visibility   | `on-demand` — opted into per-oracle via `plugins: [new IxoTransactionPlugin()]`; loaded via `load_capability`           |
+| Category     | `integration`                                                                                                           |
+| Dependencies | `@ixo/oracle-runtime/plugin-api` (peer), `@ixo/common` (`callAgAction`); FE: `@ixo/oracles-client-sdk` + the SDK codecs |
+| Signing      | Dispatches the hidden `sign_transaction` AG-UI action; 120s timeout (wallet signing is human-paced)                     |
 
 ### Tools
 
