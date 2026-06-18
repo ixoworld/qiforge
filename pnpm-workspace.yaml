@@ -39,6 +39,7 @@ overrides:
 
 minimumReleaseAgeExclude:
   - '@ixo/matrix-crdt@1.2.5'
+  - '@ixo/editor@5.31.0'
 
 # Packages allowed to run install/build scripts. Replaces onlyBuiltDependencies,
 # which pnpm v11 removed. These are native/postinstall-heavy deps we trust.

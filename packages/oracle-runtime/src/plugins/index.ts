@@ -6,6 +6,7 @@ import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
+import { FlowsPlugin } from './flows/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
@@ -42,6 +43,7 @@ export const composioPlugin = new ComposioPlugin();
 export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = new EditorPlugin();
+export const flowsPlugin = new FlowsPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = new SlackPlugin();
 export const tasksPlugin = new TasksPlugin();
@@ -67,6 +69,7 @@ export const BUNDLED_PLUGINS = [
   sandboxPlugin,
   skillsPlugin,
   editorPlugin,
+  flowsPlugin,
   aguiPlugin,
   slackPlugin,
   tasksPlugin,
