@@ -6,6 +6,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
+import { InMemoryApprovalStore, type ApprovalStore } from './approval-store.js';
 import {
   InMemoryBlueprintStore,
   type BlueprintStore,
@@ -132,6 +133,9 @@ export class PodCreatorPlugin extends OraclePlugin {
   private readonly blueprintStore: BlueprintStore =
     new InMemoryBlueprintStore();
 
+  /** Per-thread record of which prepared batch the user has approved to sign. */
+  private readonly approvalStore: ApprovalStore = new InMemoryApprovalStore();
+
   private readonly capsuleContentFetcher?: CapsuleContentFetcher;
 
   private readonly chainGateway: ChainGateway;
@@ -151,7 +155,11 @@ export class PodCreatorPlugin extends OraclePlugin {
   override getTools(): PluginTool[] {
     return [
       ...createOrchestrationTools(this.blueprintStore),
-      ...createCreateTools(this.blueprintStore, this.chainGateway),
+      ...createCreateTools(
+        this.blueprintStore,
+        this.chainGateway,
+        this.approvalStore,
+      ),
     ];
   }
 

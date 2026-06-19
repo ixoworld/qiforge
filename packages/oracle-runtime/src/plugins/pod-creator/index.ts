@@ -41,3 +41,4 @@ export {
   type CreatedPod,
   type PreparedPodBatch,
 } from './chain-gateway.js';
+export { InMemoryApprovalStore, type ApprovalStore } from './approval-store.js';

@@ -51,6 +51,7 @@ describe('PodCreatorPlugin loads via createTestRuntime', () => {
         .map((t) => t.name)
         .sort(),
     ).toEqual([
+      'approve_pod_transaction',
       'assemble_blueprint',
       'compute_readiness',
       'confirm_pod_creation',
