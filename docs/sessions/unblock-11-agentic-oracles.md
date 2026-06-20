@@ -116,18 +116,33 @@ Two paths. Same oracle. The routing is the manifest.
 
 ---
 
-## 5. The three tools
+## 5. The four tools
 
 **`create_ticket`**
-Files a new issue in Linear via the Linear plugin. Takes a title, description, and priority. Returns the ticket identifier and URL. Called on every case — a ticket is always created before any other action.
+Files a new issue in Linear. Takes a title, description, and priority. Returns the ticket identifier and URL. Called on every case — a ticket is always created before any other action.
 
-**`update_ticket`**
-Updates an existing ticket status or appends a comment. Used when a case continues across multiple turns.
+**`comment_on_ticket`**
+Appends a comment to an existing ticket — used to log what the oracle did or what it is waiting on.
+
+**`get_ticket`**
+Looks up an existing ticket by its identifier (e.g. `SUP-42`). Returns title, status, priority, and URL.
 
 **`escalate_to_human`**
-Posts a structured message to a Matrix room. The full escalation logic is five lines — because `ctx.matrix.postToRoom` is already available on every tool's context, provided by the framework. No Matrix client setup. No credentials in the plugin code.
+Posts a structured message to a Matrix room with the ticket link. The full escalation logic is five lines — because `ctx.matrix.postToRoom` is already available on every tool's context, provided by the framework. No Matrix client setup. No credentials in the plugin code.
 
 > **The reveal moment.** The escalation is not infrastructure you build. Matrix is already in every tool's hands. You write the policy that decides when to call it.
+
+### Three ways to connect an oracle to Linear
+
+The Unblock builds **custom tools** (above) because they are deterministic and narrow — the right fit for a client-facing oracle. Two other paths exist:
+
+| Path | What it is | Best for |
+|---|---|---|
+| **Custom tools** | You write the tools against Linear's GraphQL API. | Client-facing — narrow, audited, deterministic. |
+| **Linear MCP** | Linear hosts an MCP server (`mcp.linear.app`); connect it and the agent gets Linear tools with zero client code. See https://linear.app/docs/mcp | Fast setup, still a focused tool set. |
+| **Composio** | The bundled Composio plugin reaches Linear + hundreds of SaaS apps through one integration. | Internal copilot — a human is in the loop. |
+
+The choice follows the trust boundary, not the technology.
 
 ---
 
