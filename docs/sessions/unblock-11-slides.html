@@ -3,463 +3,407 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Unblock 11 — Building Agentic Oracles with QiForge</title>
+    <title>QiForge — Build an Agentic Oracle (Unblock 11)</title>
     <style>
       :root {
-        --bg: #0d1117;
-        --panel: #161b22;
-        --panel-2: #1c2330;
-        --ink: #e6edf3;
-        --muted: #8b949e;
-        --accent: #2dd4bf;
-        --accent-2: #38bdf8;
-        --warn: #f0883e;
-        --good: #3fb950;
-        --bad: #f85149;
-        --border: #30363d;
-        --code: #0b0f14;
+        --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330;
+        --ink: #e6edf3; --muted: #8b949e; --accent: #2dd4bf; --accent-2: #38bdf8;
+        --warn: #f0883e; --good: #3fb950; --bad: #f85149; --border: #30363d; --code: #0b0f14;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
         --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       }
       * { box-sizing: border-box; margin: 0; padding: 0; }
       html, body { height: 100%; }
-      body {
-        background: var(--bg);
-        color: var(--ink);
-        font-family: var(--sans);
-        overflow: hidden;
-      }
+      body { background: var(--bg); color: var(--ink); font-family: var(--sans); overflow: hidden; }
       #deck { height: 100vh; width: 100vw; position: relative; }
-      .slide {
-        position: absolute;
-        inset: 0;
-        display: none;
-        flex-direction: column;
-        justify-content: center;
-        padding: 5vh 8vw;
-        animation: fade 0.35s ease;
-      }
+      .slide { position: absolute; inset: 0; display: none; flex-direction: column; justify-content: center; padding: 5vh 8vw; animation: fade 0.35s ease; }
       .slide.active { display: flex; }
       @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
       h1 { font-size: clamp(2rem, 5vw, 3.6rem); line-height: 1.05; letter-spacing: -0.02em; }
       h2 { font-size: clamp(1.5rem, 3.6vw, 2.6rem); letter-spacing: -0.01em; margin-bottom: 0.6em; }
-      h2 .accent { color: var(--accent); }
-      p, li { font-size: clamp(1rem, 1.7vw, 1.4rem); line-height: 1.5; color: var(--ink); }
+      h2 .accent, h1 .accent { color: var(--accent); }
+      p, li { font-size: clamp(1rem, 1.7vw, 1.4rem); line-height: 1.5; }
       .muted { color: var(--muted); }
-      .kicker {
-        text-transform: uppercase; letter-spacing: 0.18em; font-size: 0.85rem;
-        color: var(--accent); font-weight: 600; margin-bottom: 1.2rem;
-      }
-      ul { margin: 0.4em 0 0 1.1em; }
-      li { margin: 0.45em 0; }
-      li::marker { color: var(--accent); }
-      .lead { font-size: clamp(1.15rem, 2.1vw, 1.7rem); color: var(--muted); max-width: 60ch; }
-      strong { color: #fff; }
-      em { color: var(--accent-2); font-style: normal; }
+      .kicker { text-transform: uppercase; letter-spacing: 0.18em; font-size: 0.85rem; color: var(--accent); font-weight: 600; margin-bottom: 1.2rem; }
+      .step { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin-bottom: 1rem; }
+      .step b { color: var(--accent); }
+      ul { margin: 0.4em 0 0 1.1em; } li { margin: 0.45em 0; } li::marker { color: var(--accent); }
+      .lead { font-size: clamp(1.15rem, 2.1vw, 1.7rem); color: var(--muted); max-width: 62ch; }
+      strong { color: #fff; } em { color: var(--accent-2); font-style: normal; }
 
       .grid { display: grid; gap: 1.2rem; }
-      .cols-2 { grid-template-columns: 1fr 1fr; }
-      .cols-3 { grid-template-columns: repeat(3, 1fr); }
-      .card {
-        background: var(--panel); border: 1px solid var(--border);
-        border-radius: 14px; padding: 1.2rem 1.3rem;
-      }
+      .cols-2 { grid-template-columns: 1fr 1fr; } .cols-3 { grid-template-columns: repeat(3, 1fr); }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 1.2rem 1.3rem; }
       .card h3 { font-size: 1.15rem; margin-bottom: 0.4rem; color: #fff; }
       .card.accent { border-color: var(--accent); }
       .card .num { font-family: var(--mono); color: var(--accent); font-size: 0.95rem; }
 
-      pre {
-        background: var(--code); border: 1px solid var(--border); border-radius: 12px;
-        padding: 1.1rem 1.3rem; overflow: auto; font-family: var(--mono);
-        font-size: clamp(0.78rem, 1.25vw, 1.05rem); line-height: 1.55;
-        color: #c9d1d9;
-      }
-      pre .c { color: #6e7781; } /* comment */
-      pre .k { color: #ff7b72; } /* keyword */
-      pre .s { color: #a5d6ff; } /* string */
-      pre .f { color: #d2a8ff; } /* function/type */
-      pre .n { color: #79c0ff; } /* name */
-      .filename {
-        font-family: var(--mono); font-size: 0.8rem; color: var(--muted);
-        margin-bottom: 0.4rem; display: block;
-      }
+      pre { background: var(--code); border: 1px solid var(--border); border-radius: 12px; padding: 1.1rem 1.3rem; overflow: auto; font-family: var(--mono); font-size: clamp(0.78rem, 1.25vw, 1.05rem); line-height: 1.55; color: #c9d1d9; }
+      pre .c { color: #6e7781; } pre .k { color: #ff7b72; } pre .s { color: #a5d6ff; } pre .f { color: #d2a8ff; } pre .n { color: #79c0ff; }
+      .filename { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin-bottom: 0.4rem; display: block; }
 
-      /* flow diagram */
+      .term { background: var(--code); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem 1.4rem; font-family: var(--mono); font-size: clamp(0.85rem, 1.4vw, 1.15rem); line-height: 1.9; }
+      .term .pmt { color: var(--good); } .term .cmd { color: #fff; } .term .out { color: var(--muted); }
+
       .flow { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; margin-top: 1.4rem; }
-      .node {
-        background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
-        padding: 0.7rem 1rem; font-size: clamp(0.85rem, 1.4vw, 1.15rem); white-space: nowrap;
-      }
-      .node.decision { border-color: var(--accent); }
-      .node.good { border-color: var(--good); }
-      .node.bad { border-color: var(--warn); }
+      .node { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 1rem; font-size: clamp(0.85rem, 1.4vw, 1.15rem); white-space: nowrap; }
+      .node.decision { border-color: var(--accent); } .node.good { border-color: var(--good); } .node.bad { border-color: var(--warn); }
       .arrow { color: var(--muted); font-size: 1.4rem; }
       .branch { display: flex; flex-direction: column; gap: 0.6rem; }
       .lbl { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); }
 
-      .pill {
-        display: inline-block; padding: 0.2em 0.7em; border-radius: 999px;
-        font-size: 0.8rem; font-family: var(--mono); border: 1px solid var(--border);
-        color: var(--muted);
-      }
-      .pill.good { color: var(--good); border-color: var(--good); }
-      .pill.bad { color: var(--warn); border-color: var(--warn); }
-
-      .big-quote { font-size: clamp(1.6rem, 4vw, 3rem); line-height: 1.15; letter-spacing: -0.02em; max-width: 24ch; }
+      .pill { display: inline-block; padding: 0.2em 0.7em; border-radius: 999px; font-size: 0.8rem; font-family: var(--mono); border: 1px solid var(--border); color: var(--muted); }
+      .pill.good { color: var(--good); border-color: var(--good); } .pill.bad { color: var(--warn); border-color: var(--warn); }
+      .big-quote { font-size: clamp(1.6rem, 4vw, 3rem); line-height: 1.15; letter-spacing: -0.02em; max-width: 26ch; }
       .big-quote .accent { color: var(--accent); }
-
-      .footer {
-        position: fixed; bottom: 1.1rem; left: 0; right: 0;
-        display: flex; justify-content: space-between; align-items: center;
-        padding: 0 8vw; font-size: 0.8rem; color: var(--muted); font-family: var(--mono);
-        pointer-events: none;
-      }
-      .progress {
-        position: fixed; top: 0; left: 0; height: 3px; background: var(--accent);
-        transition: width 0.3s ease; z-index: 10;
-      }
       .tag { font-family: var(--mono); color: var(--accent); }
-      .two-col-list { columns: 2; column-gap: 2.5rem; }
-      .chk { color: var(--good); } .x { color: var(--bad); }
+      .x { color: var(--bad); } .chk { color: var(--good); }
       a { color: var(--accent-2); }
-      kbd {
-        font-family: var(--mono); background: var(--panel); border: 1px solid var(--border);
-        border-bottom-width: 2px; border-radius: 6px; padding: 0.1em 0.45em; font-size: 0.85em;
-      }
+      kbd { font-family: var(--mono); background: var(--panel); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px; padding: 0.1em 0.45em; font-size: 0.85em; }
+
+      .feat-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem 2rem; margin-top: 1rem; }
+      .feat { display: flex; gap: 0.7rem; align-items: baseline; font-size: clamp(0.85rem, 1.4vw, 1.15rem); }
+      .feat .nm { font-family: var(--mono); color: var(--accent); min-width: 12ch; }
+      .feat.own .nm { color: var(--accent-2); }
+
+      .footer { position: fixed; bottom: 1.1rem; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center; padding: 0 8vw; font-size: 0.8rem; color: var(--muted); font-family: var(--mono); pointer-events: none; }
+      .progress { position: fixed; top: 0; left: 0; height: 3px; background: var(--accent); transition: width 0.3s ease; z-index: 10; }
     </style>
   </head>
   <body>
     <div class="progress" id="progress"></div>
     <div id="deck">
-      <!-- 1 — TITLE -->
-      <section class="slide active">
+
+      <!-- ============ ACT 1 — WHAT IS QIFORGE ============ -->
+
+      <!-- 1 TITLE -->
+      <section class="slide">
         <div class="kicker">Unblock 11 · Solutioneer Programme</div>
-        <h1>Building Agentic Oracles<br />with <span style="color: var(--accent)">QiForge</span></h1>
+        <h1>What the heck is <span class="accent">QiForge?</span></h1>
         <p class="lead" style="margin-top: 1.4rem">
-          From concept to a running agent: we build a Customer Support Oracle that
-          triages cases, files tickets in Linear, and escalates the hard ones to a human.
+          And how do you use it to build a real AI agent — one that triages customer
+          support, files tickets, and pulls in a human when it's out of its depth.
         </p>
         <p class="muted" style="margin-top: 2rem; font-family: var(--mono); font-size: 0.9rem">
-          Companion to <span class="tag">docs.ixo.world</span> · use <kbd>←</kbd> <kbd>→</kbd> to navigate
+          Companion to <span class="tag">docs.ixo.world</span> · <kbd>←</kbd> <kbd>→</kbd> to navigate · <kbd>f</kbd> fullscreen
         </p>
       </section>
 
-      <!-- 2 — WHERE WE ARE -->
+      <!-- 2 THE PROBLEM -->
       <section class="slide">
-        <div class="kicker">Where we are</div>
-        <h2>Unblock 10 told you <span class="accent">what</span> an oracle does.<br />Unblock 11 is where you <span class="accent">build one.</span></h2>
-        <div class="grid cols-2" style="margin-top: 1rem">
-          <div class="card">
-            <h3>Unblock 10 — the concept</h3>
-            <p class="muted">An Agentic Oracle resolves authority, turns evidence into typed facts, scores them against a rubric, and issues a signed decision. You traced it.</p>
-          </div>
+        <div class="kicker">The problem</div>
+        <h2>Building an AI agent <span class="accent">properly</span> is a mountain of plumbing</h2>
+        <p class="lead">Before your agent says a single useful word, you need:</p>
+        <div class="grid cols-3" style="margin-top: 1.4rem">
+          <div class="card"><p class="muted">Auth & identity</p></div>
+          <div class="card"><p class="muted">Memory that survives restarts</p></div>
+          <div class="card"><p class="muted">Per-user state</p></div>
+          <div class="card"><p class="muted">Safety / loop-breaking</p></div>
+          <div class="card"><p class="muted">Tool wiring & validation</p></div>
+          <div class="card"><p class="muted">Web · Matrix · Slack channels</p></div>
+        </div>
+        <p style="margin-top: 1.6rem">Most teams spend weeks here and <strong>never get to the actual agent.</strong></p>
+      </section>
+
+      <!-- 3 WHAT IS QIFORGE -->
+      <section class="slide">
+        <div class="kicker">The answer</div>
+        <h2>QiForge is a <span class="accent">framework</span> for building agents</h2>
+        <p class="lead">You write ~30 lines. It hands you a production-grade AI agent — an <em>Oracle</em>.</p>
+        <div class="grid cols-2" style="margin-top: 1.5rem">
           <div class="card accent">
-            <h3>Unblock 11 — the build</h3>
-            <p class="muted">Same pattern, simpler domain. An input arrives → a policy is consulted → a bounded action fires → the result is recorded. You build it.</p>
+            <h3>You bring</h3>
+            <p class="muted">An identity, a prompt, and your custom capabilities.</p>
+          </div>
+          <div class="card">
+            <h3>QiForge brings</h3>
+            <p class="muted">Everything else — the whole plumbing mountain, already wired.</p>
           </div>
         </div>
-        <p style="margin-top: 1.4rem" class="muted">Support ticket or carbon credential — <strong>the architecture is identical.</strong></p>
+        <p style="margin-top: 1.5rem" class="muted">An <strong>Oracle</strong> = a bounded AI agent with a declared identity, explicit capabilities, and a written policy. It can only do what you gave it.</p>
       </section>
 
-      <!-- 3 — WHAT IS AN ORACLE -->
+      <!-- 4 FREE STUFF -->
       <section class="slide">
-        <div class="kicker">Concept</div>
-        <h2>An Agentic Oracle is a <span class="accent">bounded agent</span></h2>
-        <p class="lead">Not a general-purpose AI assistant. Not a chatbot with a bigger context window.</p>
-        <div class="grid cols-3" style="margin-top: 1.6rem">
-          <div class="card"><h3>Declared identity</h3><p class="muted">Who it is and how it behaves.</p></div>
-          <div class="card"><h3>Explicit capabilities</h3><p class="muted">It can <em>only</em> do what you gave it — nothing more.</p></div>
-          <div class="card"><h3>Written policy</h3><p class="muted">When to act, when not to, when to call a human.</p></div>
+        <div class="kicker">What you get for free</div>
+        <h2>The runtime hands you…</h2>
+        <ul style="columns: 2; column-gap: 3rem; margin-top: 0.5rem">
+          <li>A wired NestJS app — HTTP + WebSocket, validation, rate limiting, Swagger</li>
+          <li>UCAN auth on every request</li>
+          <li>An on-chain identity for the oracle</li>
+          <li>Encrypted per-user storage, synced via Matrix</li>
+          <li>A LangGraph agent rebuilt per request</li>
+          <li>Always-on safety middlewares</li>
+          <li>15 bundled plugins behind simple toggles</li>
+          <li>A typed plugin API for everything custom</li>
+        </ul>
+        <p style="margin-top: 1.6rem"><strong>You focus on what makes your agent special.</strong> The framework does the rest.</p>
+      </section>
+
+      <!-- 5 SHAPE -->
+      <section class="slide">
+        <div class="kicker">The shape of an oracle</div>
+        <h2>This is a working agent</h2>
+        <pre><span class="k">const</span> app = <span class="k">await</span> <span class="f">createOracleApp</span>({
+  config,    <span class="c">// name, org, personality, features</span>
+  plugins: [ <span class="f">new</span> <span class="f">WeatherPlugin</span>() ],  <span class="c">// your plugins + 15 bundled</span>
+});
+
+<span class="k">await</span> app.<span class="f">listen</span>();</pre>
+        <p style="margin-top: 1.3rem"><strong>Two inputs:</strong> a <span class="tag">config</span> (who it is) and a list of <span class="tag">plugins</span> (what it can do). That's the whole mental model.</p>
+      </section>
+
+      <!-- ============ ACT 2 — WHAT IS A PLUGIN ============ -->
+
+      <!-- 6 WHAT IS A PLUGIN -->
+      <section class="slide">
+        <div class="step">Part <b>2</b> · What is a plugin?</div>
+        <h2>Plugins give the agent its <span class="accent">powers</span></h2>
+        <p class="lead">15 ship in the box. You add your own next to them, with the same typed API.</p>
+        <div class="grid cols-3" style="margin-top: 1.3rem">
+          <div class="card"><p class="muted"><span class="tag">memory</span> · never forgets</p></div>
+          <div class="card"><p class="muted"><span class="tag">sandbox</span> · runs real code</p></div>
+          <div class="card"><p class="muted"><span class="tag">composio</span> · Gmail, Linear, Slack…</p></div>
+          <div class="card"><p class="muted"><span class="tag">firecrawl</span> · web search + reading</p></div>
+          <div class="card"><p class="muted"><span class="tag">skills</span> · packaged abilities</p></div>
+          <div class="card accent"><p class="muted"><span class="tag" style="color: var(--accent-2)">linear</span> · ← we build this</p></div>
         </div>
-        <p style="margin-top: 1.6rem"><strong>The value comes from the bounds being explicit, auditable, and honest</strong> — not from the model being powerful.</p>
       </section>
 
-      <!-- 4 — TRUST BOUNDARY -->
+      <!-- 7 PLUGIN = 3 THINGS -->
       <section class="slide">
-        <div class="kicker">The core idea</div>
-        <h2>The <span class="accent">trust boundary</span></h2>
-        <p class="lead">The line between what the oracle decides on its own, and what a human must handle.</p>
-        <div class="grid cols-2" style="margin-top: 1.6rem">
-          <div class="card good" style="border-color: var(--good)">
-            <h3 style="color: var(--good)">Inside the boundary</h3>
-            <p class="muted">Routine, resolvable, low-risk. The oracle acts and records.</p>
-          </div>
-          <div class="card" style="border-color: var(--warn)">
-            <h3 style="color: var(--warn)">Outside the boundary</h3>
-            <p class="muted">Refunds, legal, security, angry customers, anything ambiguous. The oracle escalates.</p>
-          </div>
-        </div>
-        <p style="margin-top: 1.5rem" class="muted">QiForge enforces this <strong>structurally</strong> — the oracle can only call tools that exist. It can't do what you never gave it.</p>
-      </section>
-
-      <!-- 5 — ORACLE IS THIN -->
-      <section class="slide">
-        <div class="kicker">Architecture</div>
-        <h2>An oracle is <span class="accent">thin</span></h2>
-        <p class="lead">Identity, a prompt, a list of plugins. The runtime does the rest — auth, sessions, Matrix, state, routing.</p>
-        <span class="filename" style="margin-top: 1.4rem">apps/qiforge-example/src/main.ts</span>
-        <pre><span class="k">await</span> <span class="f">createOracleApp</span>({
-  config,            <span class="c">// who the oracle is + how it behaves</span>
-  plugins: [         <span class="c">// what it can do</span>
-    <span class="k">new</span> <span class="f">EditorPlugin</span>({ matrixClient }),
-    <span class="k">new</span> <span class="f">WeatherPlugin</span>(),
-    <span class="k">new</span> <span class="f">LinearPlugin</span>(),   <span class="c">// ← we add ONE line</span>
-  ],
-});</pre>
-      </section>
-
-      <!-- 6 — WHAT IS A PLUGIN -->
-      <section class="slide">
-        <div class="kicker">The mental model</div>
+        <div class="step">Part <b>2</b> · What is a plugin?</div>
         <h2>A plugin is <span class="accent">three things</span></h2>
         <div class="grid cols-3" style="margin-top: 1rem">
-          <div class="card accent">
-            <span class="num">01</span>
-            <h3>Tools</h3>
-            <p class="muted">The actions the oracle can take. Typed input, a handler. The <strong>hands.</strong></p>
-          </div>
-          <div class="card accent">
-            <span class="num">02</span>
-            <h3>Manifest</h3>
-            <p class="muted">When to act, when not to, when to escalate. Compiled into the prompt. The <strong>judgment.</strong></p>
-          </div>
-          <div class="card accent">
-            <span class="num">03</span>
-            <h3>Config schema</h3>
-            <p class="muted">Env vars it needs, validated at boot. Missing = boot fails loudly. The <strong>safety.</strong></p>
-          </div>
+          <div class="card accent"><span class="num">01</span><h3>Tools</h3><p class="muted">The actions the agent can take. Typed input, a handler. The <strong>hands.</strong></p></div>
+          <div class="card accent"><span class="num">02</span><h3>Manifest</h3><p class="muted">When to act, when not to, when to escalate. Becomes part of the prompt. The <strong>judgment.</strong></p></div>
+          <div class="card accent"><span class="num">03</span><h3>Config schema</h3><p class="muted">Env vars it needs, validated at boot. Missing = boot fails loudly. The <strong>safety.</strong></p></div>
         </div>
-        <p style="margin-top: 1.6rem">That's the whole API. An identity + one plugin + a few tools is a <strong>complete, deployable oracle.</strong></p>
+        <p style="margin-top: 1.6rem">That's the entire API surface. Learn these three and you can build anything.</p>
       </section>
 
-      <!-- 7 — REFERENCE -->
+      <!-- 8 MANIFEST IS JUDGMENT -->
       <section class="slide">
-        <div class="kicker">Your reference</div>
-        <h2>The <span class="accent">Weather plugin</span> is your worked example</h2>
-        <p class="lead">It exercises every plugin hook against a real API — read it before you write your own.</p>
-        <div class="grid cols-2" style="margin-top: 1.4rem">
-          <div class="card">
-            <h3>What to copy</h3>
-            <ul>
-              <li><span class="tag">*-client.ts</span> — pure <span class="tag">fetch</span> + Zod, no SDK</li>
-              <li><span class="tag">*-tools.ts</span> — the agent-facing tools</li>
-              <li><span class="tag">*.plugin.ts</span> — manifest + config + getTools</li>
-            </ul>
-          </div>
-          <div class="card">
-            <h3>Where it lives</h3>
-            <p class="muted"><span class="tag">apps/qiforge-example/src/plugins/weather/</span></p>
-            <p class="muted" style="margin-top: 0.6rem">Walkthrough: <span class="tag">WEATHER-PLUGIN.md</span></p>
-          </div>
+        <div class="step">Part <b>2</b> · What is a plugin?</div>
+        <h2>The manifest <span class="accent">is</span> the judgment</h2>
+        <p class="lead">The agent reasons over plain-English rules. No routing <span class="tag">if</span> statements anywhere.</p>
+        <pre><span class="c">// the plugin tells the agent WHEN to reach for it</span>
+whenToUse:    [ <span class="s">"A customer reports a problem — file a ticket first."</span> ]
+whenNotToUse: [ <span class="s">"Refunds or billing disputes — escalate, never decide."</span> ]</pre>
+        <p style="margin-top: 1.2rem"><strong>You tune the agent's behaviour by editing English</strong> — then re-running the case. The tools stay dumb and auditable.</p>
+      </section>
+
+      <!-- ============ ACT 3 — BUILD THE LINEAR PLUGIN ============ -->
+
+      <!-- 9 BUILD INTRO -->
+      <section class="slide">
+        <div class="step">Part <b>3</b> · Let's build a plugin</div>
+        <h2>The <span class="accent">Linear</span> support plugin</h2>
+        <p class="lead">Four tools that let the agent run a support desk:</p>
+        <div class="grid cols-2" style="margin-top: 1.2rem">
+          <div class="card"><h3><span class="tag">create_ticket</span></h3><p class="muted">File a Linear issue — on every case.</p></div>
+          <div class="card"><h3><span class="tag">comment_on_ticket</span></h3><p class="muted">Log progress on a ticket.</p></div>
+          <div class="card"><h3><span class="tag">get_ticket</span></h3><p class="muted">Look a ticket up by id.</p></div>
+          <div class="card accent"><h3><span class="tag" style="color: var(--accent-2)">escalate_to_human</span></h3><p class="muted">Ping a human via Matrix.</p></div>
         </div>
       </section>
 
-      <!-- 8 — WHAT WE BUILD -->
+      <!-- 10 CLIENT -->
       <section class="slide">
-        <div class="kicker">Today's build</div>
-        <h2>The <span class="accent">Customer Support Oracle</span></h2>
-        <div class="flow">
-          <div class="node">Customer pastes case</div>
-          <span class="arrow">→</span>
-          <div class="node decision">Manifest policy check</div>
-          <span class="arrow">→</span>
-          <div class="branch">
-            <div><span class="lbl">can resolve</span><div class="node good">create_ticket → reply</div></div>
-            <div><span class="lbl">too hard</span><div class="node bad">create_ticket → escalate_to_human</div></div>
-          </div>
-        </div>
-        <p style="margin-top: 1.8rem"><strong>Same oracle. Same tools. Different decision.</strong> The routing is the manifest — not an <span class="tag">if</span> statement.</p>
-      </section>
-
-      <!-- 9 — THREE WAYS TO LINEAR -->
-      <section class="slide">
-        <div class="kicker">Design choice</div>
-        <h2>Three ways to give an oracle <span class="accent">Linear</span></h2>
-        <div class="grid cols-3" style="margin-top: 1rem">
-          <div class="card accent">
-            <h3>1 · Custom tools</h3>
-            <p class="muted">Write the tools yourself. Narrow, deterministic, audited.</p>
-            <p style="margin-top: 0.6rem"><span class="pill good">client-facing</span></p>
-            <p class="muted" style="margin-top: 0.6rem">← what we build today</p>
-          </div>
-          <div class="card">
-            <h3>2 · Linear MCP</h3>
-            <p class="muted">Linear hosts an MCP server. Connect it → the agent gets Linear tools with <strong>zero client code.</strong></p>
-            <p style="margin-top: 0.6rem"><span class="pill">mcp.linear.app</span></p>
-            <p class="muted" style="margin-top: 0.6rem">linear.app/docs/mcp</p>
-          </div>
-          <div class="card">
-            <h3>3 · Composio</h3>
-            <p class="muted">Bundled plugin. Linear + 100s of SaaS apps through one integration.</p>
-            <p style="margin-top: 0.6rem"><span class="pill">internal copilot</span></p>
-          </div>
-        </div>
-        <p style="margin-top: 1.4rem" class="muted">The choice follows the <strong>trust boundary</strong>: client-facing → custom/MCP with a tight tool set. Internal copilot → Composio's broad gateway is fine.</p>
-      </section>
-
-      <!-- 10 — BUILD: CLIENT -->
-      <section class="slide">
-        <div class="kicker">Build · step 1</div>
-        <h2>The client — <span class="accent">fetch + Zod</span>, no SDK</h2>
+        <div class="step">Part <b>3</b> · Build · step 1 of 4 — the client</div>
+        <h2>Talk to Linear: <span class="accent">fetch + Zod</span></h2>
         <span class="filename">plugins/linear/linear-client.ts</span>
         <pre><span class="k">export async function</span> <span class="f">createIssue</span>(params, signal) {
-  <span class="k">const</span> data = <span class="k">await</span> <span class="f">linearGraphql</span>(
-    params.apiKey,
-    <span class="s">`mutation CreateIssue($input: IssueCreateInput!) {
-       issueCreate(input: $input) {
-         success
-         issue { id identifier title url priority }
-       }
-     }`</span>,
+  <span class="k">const</span> data = <span class="k">await</span> <span class="f">linearGraphql</span>(params.apiKey,
+    <span class="s">`mutation { issueCreate(input: $input) {
+        success  issue { id identifier title url } } }`</span>,
     { input: { teamId, title, description, priority } },
-    <span class="n">responseSchema</span>,   <span class="c">// Zod-validate what comes back</span>
-    signal,
-  );
+    <span class="n">responseSchema</span>,  <span class="c">// validate what comes back</span>
+    signal);
   <span class="k">return</span> <span class="f">toTicket</span>(data.issueCreate.issue);
 }</pre>
-        <p class="muted" style="margin-top: 1rem">The agent never sees this file. It returns plain objects the tools hand back.</p>
+        <p class="muted" style="margin-top: 1rem">No SDK. The agent never sees this file — it returns plain objects the tools hand back.</p>
       </section>
 
-      <!-- 11 — BUILD: TOOLS -->
+      <!-- 11 TOOLS -->
       <section class="slide">
-        <div class="kicker">Build · step 2</div>
-        <h2>The tools — the oracle's <span class="accent">hands</span></h2>
-        <div class="grid cols-2" style="margin-top: 0.5rem">
-          <div class="card"><h3><span class="tag">create_ticket</span></h3><p class="muted">Files a Linear issue. Called on <strong>every</strong> case.</p></div>
-          <div class="card"><h3><span class="tag">comment_on_ticket</span></h3><p class="muted">Logs progress on an existing ticket.</p></div>
-          <div class="card"><h3><span class="tag">get_ticket</span></h3><p class="muted">Looks a ticket up by its identifier.</p></div>
-          <div class="card accent"><h3><span class="tag">escalate_to_human</span></h3><p class="muted">Hands the case to a human via Matrix.</p></div>
-        </div>
-        <p style="margin-top: 1.4rem" class="muted">Each tool: a name, a description, a Zod schema, and a handler. The description is part of the prompt — write it for the model.</p>
+        <div class="step">Part <b>3</b> · Build · step 2 of 4 — the tools</div>
+        <h2>Wrap it as a <span class="accent">tool</span></h2>
+        <span class="filename">plugins/linear/linear-tools.ts</span>
+        <pre><span class="f">tool</span>(<span class="k">async</span> (args, ctx) => {
+  <span class="k">const</span> { title, description, priority } = schema.<span class="f">parse</span>(args);
+  <span class="k">const</span> ticket = <span class="k">await</span> <span class="f">createIssue</span>({ ...config, title, description, priority });
+  <span class="k">return</span> <span class="f">JSON</span>.<span class="f">stringify</span>(ticket);
+}, {
+  name: <span class="s">"create_ticket"</span>,
+  description: <span class="s">"File a support ticket. Call for EVERY case."</span>,
+  schema,   <span class="c">// Zod — the model only sees valid args</span>
+});</pre>
+        <p class="muted" style="margin-top: 0.9rem">A name, a description (the model reads it), a Zod schema, a handler. Done.</p>
       </section>
 
-      <!-- 12 — ESCALATION REVEAL -->
+      <!-- 12 ESCALATION REVEAL -->
       <section class="slide">
-        <div class="kicker">The "wait, that's it?" moment</div>
+        <div class="step">Part <b>3</b> · The "wait, that's it?" moment</div>
         <h2>Escalation is <span class="accent">five lines</span></h2>
         <span class="filename">plugins/linear/linear-tools.ts · escalate_to_human</span>
         <pre><span class="c">// ctx.matrix is on EVERY tool — the runtime provides it.</span>
 <span class="c">// No Matrix client setup. No credentials in plugin code.</span>
 <span class="k">await</span> ctx.matrix.<span class="f">postToRoom</span>(escalationRoomId, {
   msgtype: <span class="s">"m.text"</span>,
-  body: <span class="s">`🚨 Support escalation\nReason: ${reason}\n\n${summary}\n\nTicket: ${ticketUrl}`</span>,
+  body: <span class="s">`🚨 Escalation: ${reason}\n${summary}\nTicket: ${ticketUrl}`</span>,
 });</pre>
-        <p style="margin-top: 1.2rem"><strong>The escalation isn't infrastructure you build.</strong> Matrix is already in every tool's hands. You write the policy that decides when to call it.</p>
+        <p style="margin-top: 1.1rem"><strong>The escalation isn't infrastructure you build.</strong> Matrix is already in every tool's hands — you just write the policy that decides when to call it.</p>
       </section>
 
-      <!-- 13 — MANIFEST -->
+      <!-- 13 MANIFEST -->
       <section class="slide">
-        <div class="kicker">Build · step 3</div>
-        <h2>The manifest <span class="accent">is</span> the policy</h2>
+        <div class="step">Part <b>3</b> · Build · step 3 of 4 — the policy</div>
+        <h2>Write the <span class="accent">manifest</span></h2>
         <span class="filename">plugins/linear/linear.plugin.ts · manifest</span>
         <pre>whenNotToUse: [
-  <span class="s">"Refunds, chargebacks, billing disputes — escalate, never decide these."</span>,
+  <span class="s">"Refunds, chargebacks, billing disputes — escalate, never decide."</span>,
   <span class="s">"Legal threats, account access, or security issues — escalate."</span>,
   <span class="s">"A visibly angry or repeat-unhappy customer — escalate."</span>,
   <span class="s">"Anything you are unsure about — escalate. Never guess."</span>,
 ],</pre>
-        <p style="margin-top: 1.1rem">The agent reasons over this. <strong>You tune the oracle's judgment by editing English</strong> and re-running the case — not by changing code.</p>
+        <p style="margin-top: 1.1rem">This is where the support agent's <strong>judgment</strong> lives. Change the behaviour → edit this list.</p>
       </section>
 
-      <!-- 14 — CONFIG -->
+      <!-- 14 CONFIG -->
       <section class="slide">
-        <div class="kicker">Build · step 4</div>
-        <h2>Config schema — <span class="accent">fail loud</span></h2>
+        <div class="step">Part <b>3</b> · Build · step 4 of 4 — config</div>
+        <h2>Declare your env — <span class="accent">fail loud</span></h2>
         <span class="filename">plugins/linear/linear.plugin.ts · configSchema</span>
         <pre><span class="k">const</span> configSchema = z.<span class="f">object</span>({
-  LINEAR_API_KEY:            z.<span class="f">string</span>().<span class="f">min</span>(<span class="n">1</span>),
-  LINEAR_TEAM_ID:            z.<span class="f">string</span>().<span class="f">min</span>(<span class="n">1</span>),
+  LINEAR_API_KEY:             z.<span class="f">string</span>().<span class="f">min</span>(<span class="n">1</span>),
+  LINEAR_TEAM_ID:             z.<span class="f">string</span>().<span class="f">min</span>(<span class="n">1</span>),
   SUPPORT_ESCALATION_ROOM_ID: z.<span class="f">string</span>().<span class="f">min</span>(<span class="n">1</span>),
 });</pre>
-        <p style="margin-top: 1.1rem">Miss one and the oracle <strong>refuses to boot</strong> with an error naming the <span class="tag">linear</span> plugin. No silent half-working state.</p>
-        <p class="muted" style="margin-top: 0.7rem"><span class="x">✗</span> Forgot the room id? You find out at boot — not when a customer's escalation vanishes.</p>
+        <p style="margin-top: 1.1rem">Miss one and the oracle <strong>refuses to boot</strong>, naming the <span class="tag">linear</span> plugin and the missing var. <span class="x">✗</span> No silent half-working state.</p>
       </section>
 
-      <!-- 15 — ATTACH -->
+      <!-- 15 PLUGIN CLASS -->
       <section class="slide">
-        <div class="kicker">Attach it</div>
-        <h2>Wire it into the agent</h2>
+        <div class="step">Part <b>3</b> · Build · the whole thing</div>
+        <h2>Snap it together</h2>
         <span class="filename">plugins/linear/linear.plugin.ts</span>
         <pre><span class="k">export class</span> <span class="f">LinearPlugin</span> <span class="k">extends</span> <span class="f">OraclePlugin</span> {
   name = <span class="s">"linear"</span>;
-  manifest = manifest;
-  configSchema = configSchema;
+  manifest = manifest;          <span class="c">// the judgment</span>
+  configSchema = configSchema;  <span class="c">// the safety</span>
 
-  <span class="c">// Only loads when LINEAR_API_KEY is set — so the reference</span>
-  <span class="c">// oracle still boots cleanly without Linear creds.</span>
-  <span class="f">autoDetect</span>(env) { <span class="k">return</span> <span class="f">Boolean</span>(env.LINEAR_API_KEY); }
-
-  <span class="f">getTools</span>(ctx) { <span class="k">return</span> [createTicket, comment, getTicket, escalate]; }
+  <span class="f">autoDetect</span>(env) { <span class="k">return</span> <span class="f">Boolean</span>(env.LINEAR_API_KEY); }  <span class="c">// load only if configured</span>
+  <span class="f">getTools</span>()      { <span class="k">return</span> [ createTicket, comment, getTicket, escalate ]; }  <span class="c">// the hands</span>
 }</pre>
-        <p class="muted" style="margin-top: 1rem">Then add <span class="tag">new LinearPlugin()</span> to the plugins array in <span class="tag">main.ts</span>. Done.</p>
+        <p class="muted" style="margin-top: 1rem">Three things — tools, manifest, config — in one class. <strong>This is the plugin.</strong></p>
       </section>
 
-      <!-- 16 — PROMPT -->
+      <!-- ============ ACT 4 — MAKE THE ORACLE WITH THE CLI ============ -->
+
+      <!-- 16 CLI NEW -->
       <section class="slide">
-        <div class="kicker">Write the agent</div>
-        <h2>Give it an <span class="accent">identity</span></h2>
-        <span class="filename">apps/qiforge-example/src/config.ts</span>
+        <div class="step">Part <b>4</b> · Make the oracle with the CLI</div>
+        <h2>Scaffold the <span class="accent">Support Agent</span></h2>
+        <div class="term" style="margin-top: 0.5rem">
+          <div><span class="pmt">$</span> <span class="cmd">npm install -g qiforge-cli</span></div>
+          <div><span class="pmt">$</span> <span class="cmd">qiforge new support-oracle</span></div>
+          <div class="out">  ✓ project scaffolded</div>
+          <div class="out">  ✓ sign-in + on-chain identity</div>
+          <div class="out">  ✓ Matrix wired</div>
+        </div>
+        <p style="margin-top: 1.3rem">One command. The CLI handles the parts nobody wants to hand-wire — <strong>identity, on-chain registration, and Matrix.</strong></p>
+      </section>
+
+      <!-- 17 IDENTITY + FEATURES -->
+      <section class="slide">
+        <div class="step">Part <b>4</b> · Give it a personality</div>
+        <h2>Identity + features in <span class="accent">config</span></h2>
+        <span class="filename">src/config.ts</span>
         <pre><span class="k">export const</span> config = {
   name: <span class="s">"Acme Support Oracle"</span>,
-  org: <span class="s">"Acme"</span>,
-  description: <span class="s">"Front-line customer support for Acme."</span>,
-  prompt: {
-    opening: <span class="s">"You are Acme's support oracle. File a ticket for every"</span>
-      + <span class="s">" case. Resolve what you can; escalate anything risky or"</span>
-      + <span class="s">" ambiguous. Be warm, concise, and never guess."</span>,
+  org:  <span class="s">"Acme"</span>,
+  prompt: { opening: <span class="s">"You run front-line support. File a ticket for"</span>
+    + <span class="s">" every case; resolve what you can; escalate anything risky."</span> },
+  features: {            <span class="c">// flip bundled plugins on/off</span>
+    memory: <span class="n">true</span>, "user-preferences": <span class="n">true</span>, composio: <span class="n">true</span>,
   },
 };</pre>
-        <p class="muted" style="margin-top: 1rem">Identity sets the voice. The <strong>manifest</strong> sets the routing. Together they're the whole brain.</p>
+        <p class="muted" style="margin-top: 0.9rem">Identity sets the voice. The manifest sets the routing. <span class="tag">features</span> picks the bundled powers.</p>
       </section>
 
-      <!-- 17 — RUN A -->
+      <!-- 18 FEATURE LIST -->
       <section class="slide">
-        <div class="kicker">Run it · Case A</div>
-        <h2><span class="pill good">resolves</span> &nbsp; The easy one</h2>
-        <div class="card" style="margin-top: 1rem">
-          <p><em>"Hi, I can't log into my account — the password reset email isn't arriving. My email is jane@example.com."</em></p>
+        <div class="step">Part <b>4</b> · What our Support Agent can do</div>
+        <h2>The oracle's <span class="accent">feature set</span></h2>
+        <div class="feat-list">
+          <div class="feat own"><span class="nm">linear</span><span class="muted">file/triage tickets + escalate to Matrix · <em>our plugin</em></span></div>
+          <div class="feat"><span class="nm">memory</span><span class="muted">remembers a customer across conversations</span></div>
+          <div class="feat"><span class="nm">user-preferences</span><span class="muted">tone, language, standing instructions</span></div>
+          <div class="feat"><span class="nm">firecrawl</span><span class="muted">look something up in the help centre / web</span></div>
+          <div class="feat"><span class="nm">composio</span><span class="muted">reach Gmail, Slack, Notion on the user's behalf</span></div>
+          <div class="feat"><span class="nm">matrix-group-chats</span><span class="muted">behave in the human escalation room</span></div>
         </div>
-        <div class="flow" style="margin-top: 1.4rem">
+        <p class="muted" style="margin-top: 1.5rem">Each feature is one toggle or one plugin. <strong>The agent discovers and loads them as the conversation needs them.</strong></p>
+      </section>
+
+      <!-- 19 RUN IT -->
+      <section class="slide">
+        <div class="step">Part <b>4</b> · Run it</div>
+        <h2>Boot &amp; <span class="accent">chat</span></h2>
+        <div class="term" style="margin-top: 0.5rem">
+          <div><span class="pmt">$</span> <span class="cmd">pnpm install &amp;&amp; pnpm dev</span></div>
+          <div class="out">  ✓ loaded plugins: memory, user-preferences, composio, linear …</div>
+          <div style="margin-top: 0.5rem"><span class="pmt">$</span> <span class="cmd">qiforge chat</span></div>
+          <div class="out">  › chatting with Acme Support Oracle — every tool call shown live</div>
+        </div>
+        <p style="margin-top: 1.3rem" class="muted">Now let's throw two real cases at it.</p>
+      </section>
+
+      <!-- 20 CASE A -->
+      <section class="slide">
+        <div class="step">Part <b>4</b> · Demo · Case A</div>
+        <h2><span class="pill good">resolves</span> &nbsp; The easy one</h2>
+        <div class="card" style="margin-top: 1rem"><p><em>"I can't log into my account — the password reset email isn't arriving."</em></p></div>
+        <div class="flow" style="margin-top: 1.3rem">
           <div class="node good">create_ticket <span class="muted">(normal)</span></div>
           <span class="arrow">→</span>
           <div class="node">explains reset steps</div>
           <span class="arrow">→</span>
           <div class="node">replies to customer</div>
         </div>
-        <p style="margin-top: 1.5rem" class="muted">It <strong>chose</strong> not to escalate. A ticket exists. The customer got an answer.</p>
+        <p style="margin-top: 1.4rem" class="muted">It <strong>chose</strong> not to escalate. A ticket exists. The customer got an answer.</p>
       </section>
 
-      <!-- 18 — RUN B -->
+      <!-- 21 CASE B -->
       <section class="slide">
-        <div class="kicker">Run it · Case B</div>
-        <h2><span class="pill bad">escalates</span> &nbsp; The money shot</h2>
-        <div class="card" style="margin-top: 1rem; border-color: var(--warn)">
-          <p><em>"This is the THIRD time. You charged me twice — £240 — and nobody has fixed it. I want a full refund today or I'm disputing with my bank."</em></p>
-        </div>
-        <div class="flow" style="margin-top: 1.4rem">
+        <div class="step">Part <b>4</b> · Demo · Case B</div>
+        <h2><span class="pill bad">escalates</span> &nbsp; The hard one</h2>
+        <div class="card" style="margin-top: 1rem; border-color: var(--warn)"><p><em>"This is the THIRD time. You charged me twice — £240 — and nobody fixed it. Full refund today or I'm disputing with my bank."</em></p></div>
+        <div class="flow" style="margin-top: 1.3rem">
           <div class="node bad">create_ticket <span class="muted">(urgent)</span></div>
           <span class="arrow">→</span>
           <div class="node bad">escalate_to_human</div>
           <span class="arrow">→</span>
-          <div class="node accent" style="border-color: var(--accent)">💬 Matrix room lights up</div>
+          <div class="node" style="border-color: var(--accent)">💬 Matrix room lights up</div>
         </div>
-        <p style="margin-top: 1.5rem"><strong>Project the Matrix room.</strong> The escalation lands live, with the ticket link. "It decided that one needed a person."</p>
+        <p style="margin-top: 1.4rem"><strong>Project the Matrix room.</strong> The escalation lands live, with the ticket link.</p>
       </section>
 
-      <!-- 19 — RECAP -->
+      <!-- 22 RECAP -->
       <section class="slide">
         <div class="kicker">Recap</div>
-        <h2>Three things to walk away with</h2>
-        <div class="grid" style="margin-top: 0.8rem; gap: 1rem">
-          <div class="card accent"><p>1 · <strong>An oracle is thin</strong> — you added one line to a list of plugins.</p></div>
-          <div class="card accent"><p>2 · <strong>A plugin is three things</strong> — tools, a policy in plain English, and config.</p></div>
-          <div class="card accent"><p>3 · <strong>Escalation is five lines</strong> — because Matrix is already in every tool's hands.</p></div>
+        <h2>What you just learned</h2>
+        <div class="grid" style="margin-top: 0.6rem; gap: 0.9rem">
+          <div class="card accent"><p><strong>QiForge</strong> = a framework. You write ~30 lines; it hands you a production agent.</p></div>
+          <div class="card accent"><p><strong>A plugin is three things</strong> — tools, a policy in English, and config.</p></div>
+          <div class="card accent"><p><strong>We built one</strong> — the Linear plugin — and escalation was five lines.</p></div>
+          <div class="card accent"><p><strong>The CLI</strong> scaffolds the oracle; <span class="tag">features</span> + plugins give it powers.</p></div>
         </div>
-        <p style="margin-top: 1.6rem" class="muted">An input arrives → a policy is consulted → a bounded action fires → the result is recorded. <strong>That pattern scales from a support ticket to a verified carbon credential.</strong></p>
       </section>
 
-      <!-- 20 — RESOURCES -->
+      <!-- 23 RESOURCES -->
       <section class="slide">
         <div class="kicker">Keep going</div>
         <h2>Resources</h2>
@@ -468,26 +412,27 @@
             <h3>Docs</h3>
             <ul>
               <li>docs.ixo.world/build-an-oracle</li>
-              <li>docs.ixo.world/build-an-oracle/plugin-api</li>
-              <li>docs.ixo.world/core-concepts#agentic-oracle</li>
+              <li>…/plugin-api</li>
+              <li>…/reference/cli</li>
             </ul>
           </div>
           <div class="card">
             <h3>In the repo</h3>
             <ul>
               <li><span class="tag">apps/qiforge-example/src/plugins/linear/</span></li>
-              <li><span class="tag">.../weather/WEATHER-PLUGIN.md</span></li>
+              <li><span class="tag">…/weather/WEATHER-PLUGIN.md</span></li>
               <li><span class="tag">docs/sessions/unblock-11-agentic-oracles.md</span></li>
             </ul>
           </div>
         </div>
-        <p style="margin-top: 1.8rem" class="big-quote">Build <span class="accent">honest</span> oracles.</p>
+        <p style="margin-top: 1.8rem" class="big-quote">Now go build <span class="accent">your</span> oracle.</p>
       </section>
+
     </div>
 
     <div class="footer">
-      <span>Unblock 11 · QiForge</span>
-      <span><span id="counter">1</span> / <span id="total">20</span></span>
+      <span>QiForge · Unblock 11</span>
+      <span><span id="counter">1</span> / <span id="total">23</span></span>
     </div>
 
     <script>
@@ -497,7 +442,6 @@
       const total = document.getElementById('total');
       const progress = document.getElementById('progress');
       total.textContent = slides.length;
-
       function show(n) {
         i = Math.max(0, Math.min(slides.length - 1, n));
         slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
@@ -505,9 +449,8 @@
         progress.style.width = ((i + 1) / slides.length) * 100 + '%';
         location.hash = i + 1;
       }
-      function next() { show(i + 1); }
-      function prev() { show(i - 1); }
-
+      const next = () => show(i + 1);
+      const prev = () => show(i - 1);
       document.addEventListener('keydown', (e) => {
         if (['ArrowRight', ' ', 'PageDown'].includes(e.key)) { e.preventDefault(); next(); }
         else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); prev(); }
@@ -515,12 +458,10 @@
         else if (e.key === 'End') show(slides.length - 1);
         else if (e.key === 'f') document.documentElement.requestFullscreen?.();
       });
-      // click right/left half to navigate
       document.getElementById('deck').addEventListener('click', (e) => {
         if (e.target.closest('a')) return;
         e.clientX > window.innerWidth / 2 ? next() : prev();
       });
-      // deep-link via #n
       const start = parseInt(location.hash.replace('#', ''), 10);
       show(Number.isFinite(start) && start > 0 ? start - 1 : 0);
     </script>
