@@ -10,7 +10,6 @@ import { describeAction, listActions } from '../actions.js';
 import { toToolError } from '../errors.js';
 import { withFlowDoc } from '../flow-doc.js';
 import { listReferenceableFields } from '../references.js';
-import { getFlowTemplate, listTemplateNames } from '../templates.js';
 
 const listActionsSchema = z.object({
   category: z
@@ -32,7 +31,10 @@ const referenceableSchema = z.object({
   stepId: z
     .string()
     .min(1)
-    .describe('The step whose available upstream outputs you want.'),
+    .describe(
+      'The step you are wiring data INTO (the downstream/consumer step) — NOT the source. ' +
+        'Returns the outputs of the steps that run before it. Passing the first step returns nothing (nothing runs before it).',
+    ),
 });
 
 export function buildListActionsTool(): PluginTool {
@@ -85,43 +87,6 @@ export function buildDescribeActionTool(): PluginTool {
   );
 }
 
-const templateSchema = z.object({
-  name: z
-    .string()
-    .optional()
-    .describe('Template name. Omit to list the available templates.'),
-});
-
-export function buildGetFlowTemplateTool(): PluginTool {
-  return tool(
-    async (args) => {
-      try {
-        const { name } = templateSchema.parse(args);
-        if (!name) return { templates: listTemplateNames() };
-        const flow = getFlowTemplate(name);
-        if (!flow) {
-          return {
-            ok: false,
-            error: {
-              code: 'flow_not_found',
-              message: `No template "${name}". Available: ${listTemplateNames().join(', ')}.`,
-            },
-          };
-        }
-        return flow;
-      } catch (err) {
-        return toToolError(err);
-      }
-    },
-    {
-      name: 'get_flow_template',
-      description:
-        'Get a ready-made starter flow you can tweak and then create. Call with no name to list the available templates.',
-      schema: templateSchema,
-    },
-  );
-}
-
 export function buildListReferenceableFieldsTool(
   matrixClient: MatrixClient | undefined,
 ): PluginTool {
@@ -144,8 +109,10 @@ export function buildListReferenceableFieldsTool(
     {
       name: 'list_referenceable_fields',
       description:
-        'List the upstream outputs a step can pipe from, as friendly field paths. Use these to wire inputs ' +
-        '("{{step-id.output.field}}") or with connect_steps, instead of guessing field names.',
+        'List the outputs a step can pull data FROM. Pass the step that NEEDS the data (the downstream/consumer ' +
+        "step) — it returns the output fields of every step before it (e.g. a form's answers like answers.did), so you " +
+        'wire the right "{{source.output.field}}" or call connect_steps. Passing the source step returns nothing, since ' +
+        'nothing runs before it.',
       schema: referenceableSchema,
     },
   );

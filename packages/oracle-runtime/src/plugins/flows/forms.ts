@@ -16,19 +16,23 @@ import {
   readRuntimeState,
   updateRuntimeState,
 } from '../editor/blocknote-helper.js';
-import {
-  parseSurveySchema,
-  type SurveySchema,
-  type SurveyElement,
-} from '../editor/survey-helpers.js';
+import { type SurveyElement } from '../editor/survey-helpers.js';
+import { setStepInputs } from './edit.js';
 import { FlowError } from './errors.js';
+import { inferPortType } from './port-types.js';
+import { readStep } from './read.js';
 import { stepIdToBlockId } from './translator.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
-function isSurveySchema(value: unknown): value is SurveySchema {
-  return isRecord(value) && Array.isArray(value.pages);
+
+function safeParseObject(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }
 
 export interface FormQuestion {
@@ -55,25 +59,35 @@ function readSurveySchema(
   const detail = getBlockDetail(doc, blockId);
   if (!detail)
     throw new FlowError('step_not_found', `No step "${stepId}" in this flow.`);
-  const raw = extractBlockProperties(detail).surveySchema;
+  const props = extractBlockProperties(detail);
 
-  // `extractBlockProperties` parses surveySchema to an object; fall back to a raw string.
-  let schema: SurveySchema | null = null;
-  if (isSurveySchema(raw)) schema = raw;
-  else if (typeof raw === 'string' && raw.length > 0)
-    schema = parseSurveySchema(raw);
-  else
+  // The schema location differs by form mechanism: the `form` block stores it at
+  // top-level `surveySchema`; the `qi/human.form.submit` action stores it inside
+  // `inputs.surveySchema`. Check both. (`extractBlockProperties` may auto-parse a
+  // JSON prop to an object, so a value can arrive as an object or a string.)
+  let raw: unknown = props.surveySchema;
+  if (raw === undefined || raw === null || raw === '') {
+    const inputs = props.inputs;
+    const parsedInputs =
+      typeof inputs === 'string' ? safeParseObject(inputs) : inputs;
+    if (isRecord(parsedInputs)) raw = parsedInputs.surveySchema;
+  }
+  if (typeof raw === 'string' && raw.length > 0) raw = safeParseObject(raw);
+
+  if (!isRecord(raw))
     throw new FlowError(
       'validation_failed',
       `Step "${stepId}" has no form to fill.`,
     );
-  if (!schema)
-    throw new FlowError(
-      'validation_failed',
-      `Step "${stepId}"'s form schema is malformed.`,
-    );
 
-  return { blockId, questions: flattenQuestions(schema.pages ?? []) };
+  // Accept either the pages form (`{ pages: [{ elements }] }`) or the flat
+  // elements form (`{ elements }`) — SurveyJS renders both.
+  const pages = Array.isArray(raw.pages)
+    ? raw.pages
+    : Array.isArray(raw.elements)
+      ? [{ elements: raw.elements }]
+      : [];
+  return { blockId, questions: flattenQuestions(pages) };
 }
 
 /** Flatten SurveyJS pages -> questions, descending into panels (which carry nested elements). */
@@ -109,6 +123,44 @@ export function describeForm(
 ): { questions: FormQuestion[] } {
   const { questions } = readSurveySchema(doc, stepId);
   return { questions };
+}
+
+/** One referenceable output a form step exposes downstream. */
+export interface FormOutputField {
+  field: string;
+  type: string;
+}
+
+/**
+ * The output fields a form step exposes for downstream references. A form emits
+ * a single bundled output, NOT a field per question:
+ *  - `answers` — the whole answers object,
+ *  - `form.answers` — that object as a JSON string (matches the form block's
+ *    runtime output shape).
+ * Plus, for each question, the load-bearing individual runtime path
+ * `answers.<questionName>`. A scalar input (e.g. a DID for `matrix.dm.targetDid`)
+ * MUST reference the single field — wiring the whole `answers` object stringifies
+ * to "[object Object]" at runtime. The per-question paths resolve because the
+ * form action's `run()` returns `answers` as a real object.
+ *
+ * Returns just the two bundle fields when the step has no readable survey schema
+ * yet (so callers still get a usable answer for an unconfigured form step).
+ */
+export function formOutputFields(doc: YDoc, stepId: string): FormOutputField[] {
+  const fields: FormOutputField[] = [
+    { field: 'answers', type: 'object' },
+    { field: 'form.answers', type: 'string' },
+  ];
+  let questions: FormQuestion[];
+  try {
+    questions = readSurveySchema(doc, stepId).questions;
+  } catch {
+    return fields;
+  }
+  for (const q of questions) {
+    fields.push({ field: `answers.${q.name}`, type: inferPortType(q.name) });
+  }
+  return fields;
 }
 
 /** Existing form answers from the runtime map (if any). */
@@ -208,4 +260,71 @@ export function fillForm(
     rejected,
     validation: { ok: rejected.length === 0, warnings },
   };
+}
+
+// ── Authoring a form's questions (build time) ───────────────────────────────
+
+/** One question the agent wants on a form (friendly shape — no SurveyJS internals). */
+export interface FormQuestionInput {
+  /** The answer key this question produces (referenced downstream as output.<name>). */
+  name: string;
+  /** The question text shown to the user (defaults to the name). */
+  label?: string;
+  /**
+   * Question type. Common SurveyJS types: text (default), comment (multi-line),
+   * dropdown, radiogroup, checkbox (multi-select), boolean, rating.
+   */
+  type?: string;
+  required?: boolean;
+  /** Allowed options for choice questions (dropdown/radiogroup/checkbox). */
+  choices?: string[];
+}
+
+/** Build a SurveyJS schema (pages form) from friendly questions. */
+function buildSurveyJs(questions: FormQuestionInput[]): {
+  pages: Array<{ name: string; elements: Array<Record<string, unknown>> }>;
+} {
+  return {
+    pages: [
+      {
+        name: 'page1',
+        elements: questions.map((q) => {
+          const element: Record<string, unknown> = {
+            type: q.type && q.type.length > 0 ? q.type : 'text',
+            name: q.name,
+            title: q.label ?? q.name,
+          };
+          if (q.required) element.isRequired = true;
+          if (q.choices && q.choices.length > 0)
+            element.choices = q.choices.map((c) => ({ value: c, text: c }));
+          return element;
+        }),
+      },
+    ],
+  };
+}
+
+/**
+ * Author a form step's questions. Builds a SurveyJS schema from the friendly
+ * questions and writes it to the step's `surveySchema` input (where the
+ * `qi/human.form.submit` action reads it). Without this a form step shows
+ * "Configure Survey Schema JSON…" and cannot run — this is how the agent
+ * actually defines the form, not just adds an empty form step.
+ */
+export function setFormSchema(
+  doc: YDoc,
+  roomId: string,
+  stepId: string,
+  questions: FormQuestionInput[],
+): { questionCount: number } {
+  const step = readStep(doc, roomId, stepId);
+  if (!step)
+    throw new FlowError('step_not_found', `No step "${stepId}" in this flow.`);
+  const survey = buildSurveyJs(questions);
+  // Preserve any existing inputs; surveySchema is stored as a JSON string.
+  setStepInputs(doc, stepId, {
+    ...(step.inputs ?? {}),
+    surveySchema: JSON.stringify(survey),
+  });
+  return { questionCount: questions.length };
 }

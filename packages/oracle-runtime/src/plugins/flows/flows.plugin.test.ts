@@ -4,6 +4,13 @@ import { validateManifest } from '../../manifest/validator.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
 import { FlowsPlugin } from './flows.plugin.js';
 import type { PluginTool } from '../../plugin-api/types.js';
+import {
+  conditionSchema,
+  dueSchema,
+  flowStepSchema,
+  hookSchema,
+  onEventSchema,
+} from './types.js';
 
 function toolNames(tools: PluginTool[]): string[] {
   return tools.map((t) => t.name).sort();
@@ -19,9 +26,9 @@ describe('FlowsPlugin', () => {
     const plugin = new FlowsPlugin();
     expect(plugin.name).toBe('flows');
     expect(plugin.version).toBe('0.1.0');
-    expect(plugin.manifest.title).toBe('Flows');
+    expect(plugin.manifest.title).toBe('Flow Builder');
     expect(plugin.manifest.category).toBe('automation');
-    expect(plugin.manifest.visibility).toBe('on-demand');
+    expect(plugin.manifest.visibility).toBe('always');
     expect(plugin.manifest.stability).toBe('beta');
 
     const result = validateManifest(plugin.manifest, plugin.name);
@@ -41,24 +48,29 @@ describe('FlowsPlugin', () => {
     const tools = plugin.getRequestTools(makeRuntimeContext());
     expect(toolNames(tools)).toEqual([
       'add_step',
+      'check_link',
+      'compatible_actions',
       'connect_steps',
-      'create_flow',
+      'create_template',
       'describe_action',
       'describe_form',
+      'explain_step',
       'fill_form',
       'flow_status',
-      'get_flow_template',
       'get_step',
       'list_actions',
       'list_referenceable_fields',
       'read_flow',
       'remove_step',
       'reorder_step',
+      'requirements',
+      'set_form_schema',
       'set_step_assignment',
       'set_step_conditions',
       'set_step_confirmation',
       'set_step_inputs',
       'set_step_schedule',
+      'set_step_trigger',
       'update_flow_meta',
       'update_step',
       'validate_flow',
@@ -98,6 +110,26 @@ describe('FlowsPlugin: leak guard (§9)', () => {
         expect(
           FORBIDDEN_FIELD,
           `${tool.name} field "${field}" is forbidden`,
+        ).not.toContain(field.toLowerCase());
+      }
+    }
+  });
+
+  it('no FlowSpec building-block field name leaks an editor primitive', () => {
+    // The nested FlowSpec the agent authors (steps, conditions, hooks, ...) must
+    // also stay friendly — these are the field names under create_template/add_step.
+    const buildingBlocks = [
+      flowStepSchema,
+      conditionSchema,
+      hookSchema,
+      dueSchema,
+      onEventSchema,
+    ];
+    for (const schema of buildingBlocks) {
+      for (const field of schemaKeys(schema)) {
+        expect(
+          FORBIDDEN_FIELD,
+          `FlowSpec field "${field}" is forbidden`,
         ).not.toContain(field.toLowerCase());
       }
     }
@@ -145,5 +177,32 @@ describe('FlowsPlugin: discovery tools (no connection)', () => {
       ok: false,
       error: { code: 'unknown_action' },
     });
+  });
+
+  it("surfaces an action's required inputs from the editor registry's inputSchema (single source of truth)", async () => {
+    // qi/proposal.create is NOT in the plugin's metadata overlay — so any
+    // required inputs it reports can only come from the editor's inputSchema.
+    const plugin = new FlowsPlugin();
+    const ctx = makeRuntimeContext();
+    const describe = plugin
+      .getRequestTools(ctx)
+      .find((t) => t.name === 'describe_action')!;
+
+    const described = (await describe.handler(
+      { action: 'qi/proposal.create' },
+      ctx,
+    )) as {
+      inputs: Array<{ name: string; required?: boolean }>;
+      inputsDeclared: boolean;
+    };
+
+    expect(described.inputsDeclared).toBe(true);
+    const required = described.inputs
+      .filter((f) => f.required)
+      .map((f) => f.name);
+    // The editor's proposalCreate.ts declares these required via run() throws.
+    expect(required).toEqual(
+      expect.arrayContaining(['coreAddress', 'title', 'description']),
+    );
   });
 });

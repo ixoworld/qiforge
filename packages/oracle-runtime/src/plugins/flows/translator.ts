@@ -51,6 +51,29 @@ const EVALUATOR_TO_OP: Record<string, Condition['is']> = Object.fromEntries(
 
 const REF_PATTERN = /^\{\{\s*(.+?)\s*\}\}$/;
 
+/**
+ * Data refs cross an id boundary. The agent works in STEP ids
+ * ("fill-form.output.answers.did"), but the flow engine resolves a `$ref` by
+ * calling `runtime.get(<id>)`, and the runtime is keyed by the BLOCK id
+ * (`flow_block_<stepId>`). So the stored `$ref` must carry the block id, or the
+ * engine reads `runtime.get("fill-form")` (empty) and the input resolves to
+ * nothing. These translate the id half of an "<id>.output.<path>" ref; non-output
+ * refs (e.g. `trigger.payload.*`) pass through untouched.
+ */
+function stepRefToBlockRef(ref: string): string {
+  const i = ref.indexOf('.output.');
+  if (i <= 0) return ref;
+  return `${stepIdToBlockId(ref.slice(0, i))}${ref.slice(i)}`;
+}
+function blockRefToStepRef(ref: string): string {
+  const i = ref.indexOf('.output.');
+  if (i <= 0) return ref;
+  const id = ref.slice(0, i);
+  return id.startsWith(BLOCK_ID_PREFIX)
+    ? `${id.slice(BLOCK_ID_PREFIX.length)}${ref.slice(i)}`
+    : ref;
+}
+
 /** Resolve a friendly action name (registry `type`) to its `can` ability string. */
 export function actionToCan(action: string): string {
   const can = typeToCan(action);
@@ -65,10 +88,58 @@ export function canToAction(can: string): string {
   return canToType(can) ?? can;
 }
 
+/** A `{ $ref: string }` runtime reference — the only shape the engine resolves. */
+function isRuntimeRef(value: unknown): value is { $ref: string } {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    '$ref' in value &&
+    typeof (value as { $ref: unknown }).$ref === 'string'
+  );
+}
+
+/**
+ * Convert a single friendly value into its `nb` form, recursing through objects
+ * and arrays. A "{{step-id.output.field}}" string becomes a `{ $ref }`; every
+ * other value passes through. Recursion matters because the engine's
+ * `resolveRuntimeRefs` resolves `$ref` at any depth — a nested mustache string
+ * (e.g. inside an email `variables` map) would otherwise ship verbatim.
+ */
+function friendlyValueToNb(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const match = REF_PATTERN.exec(value);
+    return match?.[1] ? { $ref: stepRefToBlockRef(match[1]) } : value;
+  }
+  if (Array.isArray(value)) return value.map(friendlyValueToNb);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      out[key] = friendlyValueToNb(val);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** Convert a single `nb` value back to its friendly form (reverse + recursive). */
+function nbValueToFriendly(value: unknown): unknown {
+  if (isRuntimeRef(value)) return `{{${blockRefToStepRef(value.$ref)}}}`;
+  if (Array.isArray(value)) return value.map(nbValueToFriendly);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      out[key] = nbValueToFriendly(val);
+    }
+    return out;
+  }
+  return value;
+}
+
 /**
  * Convert friendly inputs into capability `nb`. A value written as
  * "{{step-id.output.field}}" becomes a `{ $ref }` (the BaseUcanFlow ref form);
- * everything else passes through as a literal.
+ * everything else passes through as a literal. Nested objects/arrays are walked
+ * so refs inside maps (e.g. email `variables`) resolve at execution too.
  */
 export function friendlyInputsToNb(
   inputs: Record<string, unknown> | undefined,
@@ -76,34 +147,19 @@ export function friendlyInputsToNb(
   if (!inputs) return undefined;
   const nb: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(inputs)) {
-    if (typeof value === 'string') {
-      const match = REF_PATTERN.exec(value);
-      if (match) {
-        nb[key] = { $ref: match[1] };
-        continue;
-      }
-    }
-    nb[key] = value;
+    nb[key] = friendlyValueToNb(value);
   }
   return nb;
 }
 
-/** Reverse of {@link friendlyInputsToNb}: `{ $ref }` -> "{{...}}". */
+/** Reverse of {@link friendlyInputsToNb}: `{ $ref }` -> "{{...}}", recursively. */
 export function nbToFriendlyInputs(
   nb: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
   if (!nb || Object.keys(nb).length === 0) return undefined;
   const inputs: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(nb)) {
-    if (
-      value &&
-      typeof value === 'object' &&
-      '$ref' in (value as Record<string, unknown>)
-    ) {
-      inputs[key] = `{{${(value as { $ref: string }).$ref}}}`;
-    } else {
-      inputs[key] = value;
-    }
+    inputs[key] = nbValueToFriendly(value);
   }
   return inputs;
 }

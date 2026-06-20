@@ -9,6 +9,7 @@ import {
   setStepConfirmation,
   setStepInputs,
   setStepSchedule,
+  setStepTrigger,
   updateFlowMeta,
 } from './edit.js';
 import {
@@ -80,6 +81,15 @@ describe('edit: settings round-trip via read', () => {
     expect(step.due).toEqual({ at: '2026-07-01T00:00:00Z', within: 'PT1H' });
     expect(step.assignTo).toBe('did:ixo:assignee');
     expect(step.requireConfirmation).toBe(true);
+  });
+
+  it('trigger round-trips flow-start and clears back to the manual default', () => {
+    const doc = threeStepDoc();
+    setStepTrigger(doc, 'a', 'flow-start');
+    expect(readStep(doc, 'r', 'a')!.trigger).toBe('flow-start');
+    setStepTrigger(doc, 'a', 'manual');
+    // manual is the default, so it is omitted from the friendly read.
+    expect(readStep(doc, 'r', 'a')!.trigger).toBeUndefined();
   });
 
   it('clearing conditions removes them', () => {

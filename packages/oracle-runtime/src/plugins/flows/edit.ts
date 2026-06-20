@@ -85,7 +85,13 @@ export function setStepAssignment(
   stepId: string,
   assignTo: string | undefined,
 ): void {
+  // The portal shows + nudges the assignee from `props.assignment`; the
+  // `authorisedActors` whitelist also lets that actor run the step. Write both
+  // so the assignee is visible AND authorized; clear both when unassigned.
   setStepProps(doc, stepId, {
+    assignment: assignTo
+      ? JSON.stringify({ assignedActor: { did: assignTo } })
+      : '',
     authorisedActors: assignTo ? JSON.stringify([assignTo]) : '',
   });
 }
@@ -97,6 +103,24 @@ export function setStepConfirmation(
 ): void {
   setStepProps(doc, stepId, {
     requiresConfirmation: requireConfirmation ? 'true' : '',
+  });
+}
+
+/**
+ * Set a step's trigger to `manual` (default) or `flow-start`. Writes the same
+ * `trigger`/`triggerMode` props the compiler would. Event-triggers (`onEvent`)
+ * are NOT handled here — they synthesize compiled edges and go through the
+ * editor's compiler (set_step_event, deferred).
+ */
+export function setStepTrigger(
+  doc: YDoc,
+  stepId: string,
+  trigger: 'manual' | 'flow-start',
+): void {
+  const type = trigger === 'flow-start' ? 'flow.start' : 'manual';
+  setStepProps(doc, stepId, {
+    trigger: trigger === 'flow-start' ? JSON.stringify({ type }) : '',
+    triggerMode: type,
   });
 }
 

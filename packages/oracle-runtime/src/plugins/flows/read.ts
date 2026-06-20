@@ -151,6 +151,24 @@ function firstActor(value: unknown): string | undefined {
   return undefined;
 }
 
+/** The assignee DID from the `assignment` prop (`{ assignedActor: { did } }` JSON). */
+function assigneeFrom(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed && typeof parsed === 'object') {
+      const actor = (parsed as { assignedActor?: unknown }).assignedActor;
+      if (actor && typeof actor === 'object') {
+        const did = (actor as { did?: unknown }).did;
+        if (typeof did === 'string' && did.length > 0) return did;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
 /** Collect the upstream step ids this step refers to via "{{step.output.*}}" inputs. */
 function referencedSteps(
   inputs: Record<string, unknown> | undefined,
@@ -283,7 +301,10 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
     const commitTo = asString(props.ttlFromCommitment);
     if (commitTo) step.commitTo = commitTo;
 
-    const assignTo = firstActor(props.authorisedActors);
+    // The assignee lives in props.assignment (what the portal reads); fall back
+    // to the authorisedActors whitelist for flows authored before that split.
+    const assignTo =
+      assigneeFrom(props.assignment) ?? firstActor(props.authorisedActors);
     if (assignTo) step.assignTo = assignTo;
 
     if (

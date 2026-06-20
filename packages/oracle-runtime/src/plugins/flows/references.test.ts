@@ -1,8 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { getAllActions, typeToCan } from '@ixo/editor/core';
+import { getActionByCan, getAllActions, typeToCan } from '@ixo/editor/core';
 import { flowSpecToBaseUcan } from './translator.js';
+import { setStepProps } from './edit.js';
 import { listReferenceableFields } from './references.js';
 import { hydrateFlowDoc, someActionType } from './test-support.js';
+
+const FORM_ACTION = 'qi/human.form.submit';
+const SURVEY = JSON.stringify({
+  pages: [
+    {
+      elements: [
+        { name: 'did', type: 'text', title: 'Your DID', isRequired: true },
+      ],
+    },
+  ],
+});
+
+/** Skip form assertions if the registry doesn't register a form-submit action. */
+function formActionPresent(): boolean {
+  return Boolean(getActionByCan('form/submit') || getActionByCan('human/form'));
+}
 
 /** An action that declares a non-empty output schema, if the registry has one. */
 function actionWithOutputs(): { type: string; fields: string[] } | undefined {
@@ -63,6 +80,37 @@ describe('listReferenceableFields', () => {
     // `c` can only reference `a` and `b`.
     const forC = listReferenceableFields(doc, 'r', 'c');
     expect(forC.every((f) => f.fromStep === 'a' || f.fromStep === 'b')).toBe(
+      true,
+    );
+  });
+
+  it('expands an upstream form step into its individual answer fields', () => {
+    if (!formActionPresent()) return;
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        {
+          title: 'Form pipe',
+          steps: [
+            { id: 'form', action: FORM_ACTION },
+            { id: 'dst', action: someActionType() },
+          ],
+        },
+        { flowId: 'f' },
+      ),
+    );
+    setStepProps(doc, 'form', { surveySchema: SURVEY });
+
+    const fields = listReferenceableFields(doc, 'r', 'dst');
+    expect(fields.every((f) => f.fromStep === 'form')).toBe(true);
+    // The bundled outputs are still offered…
+    expect(
+      fields.some((f) => f.field === 'answers' && f.type === 'object'),
+    ).toBe(true);
+    expect(
+      fields.some((f) => f.field === 'form.answers' && f.type === 'string'),
+    ).toBe(true);
+    // …plus the individual question path, typed as a DID (the load-bearing one).
+    expect(fields.some((f) => f.field === 'answers.did' && f.type === 'did')).toBe(
       true,
     );
   });

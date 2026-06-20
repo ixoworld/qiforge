@@ -8,6 +8,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import { tool } from '../../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types.js';
 import { FlowError, toToolError } from '../errors.js';
+import { explainStep } from '../explain.js';
 import { withFlowDoc } from '../flow-doc.js';
 import { readFlowSpec, readFlowStatus, readStep } from '../read.js';
 
@@ -124,6 +125,41 @@ export function buildFlowStatusTool(
         'Get the per-step status of a flow: which steps are idle, running, completed, or failed (with the error), ' +
         'plus which are blocked and by what. Use to report progress or diagnose why a step failed.',
       schema: flowRefSchema,
+    },
+  );
+}
+
+export function buildExplainStepTool(
+  matrixClient: MatrixClient | undefined,
+): PluginTool {
+  return tool(
+    async (args, ctx: RuntimeContext) => {
+      try {
+        const { flowRef, stepId } = stepRefSchema.parse(args);
+        return await withFlowDoc(
+          ctx,
+          flowRef,
+          matrixClient,
+          async (doc, roomId) => {
+            const explanation = explainStep(doc, roomId, stepId);
+            if (!explanation)
+              throw new FlowError(
+                'step_not_found',
+                `No step "${stepId}" in this flow.`,
+              );
+            return explanation;
+          },
+        );
+      } catch (err) {
+        return toToolError(err);
+      }
+    },
+    {
+      name: 'explain_step',
+      description:
+        'Explain in plain language what a step will do and the inputs it will run with, plus its current status. ' +
+        'Use to walk the user through a step before they run it.',
+      schema: stepRefSchema,
     },
   );
 }

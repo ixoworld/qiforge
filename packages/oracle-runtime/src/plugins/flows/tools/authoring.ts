@@ -1,6 +1,6 @@
 /**
  * Authoring tools (spec §3.3). `validate_flow` is a pure compile-without-write.
- * `create_flow`/`add_step` go through the editor's compiler (`setupFlowFromBaseUcan`,
+ * `create_template`/`add_step` go through the editor's compiler (`setupFlowFromBaseUcan`,
  * which manages its own doc and syncs to the room). The remaining mutators are
  * thin wrappers over the tested per-block edit functions (edit.ts).
  *
@@ -8,15 +8,16 @@
  * (setStepConditions) — never through the compiler's `cap.condition`, which
  * never evaluates (translator.ts).
  */
-import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
-import type { Doc as YDoc } from 'yjs';
-import type { MatrixClient } from 'matrix-js-sdk';
+import { callBrowserTool } from '@ixo/common';
 import {
   compileBaseUcanFlow,
   getActionByCan,
   setupFlowFromBaseUcan,
 } from '@ixo/editor/core';
+import type { MatrixClient } from 'matrix-js-sdk';
+import { randomUUID } from 'node:crypto';
+import type { Doc as YDoc } from 'yjs';
+import { z } from 'zod';
 import { tool } from '../../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types.js';
 import { getActionDef, isEventCapable } from '../actions.js';
@@ -132,13 +133,105 @@ async function applyConditions(
   });
 }
 
-function buildCreateFlowTool(
+/**
+ * Apply each step's assignee to an already-authored flow room (post-pass).
+ * The compiler only writes the authorization whitelist; the assignee the portal
+ * shows + nudges lives in `props.assignment`, written by setStepAssignment.
+ */
+async function applyAssignments(
+  ctx: RuntimeContext,
+  flowRef: string,
+  matrixClient: MatrixClient | undefined,
+  steps: FlowStep[],
+): Promise<void> {
+  const withAssignee = steps.filter((s) => s.assignTo);
+  if (withAssignee.length === 0) return;
+  await withFlowDoc(ctx, flowRef, matrixClient, async (doc) => {
+    for (const step of withAssignee)
+      setStepAssignment(doc, step.id, step.assignTo);
+  });
+}
+
+/** The room id a `create_template_room` browser tool returned. */
+function extractRoomId(result: unknown): string | undefined {
+  if (result && typeof result === 'object') {
+    const roomId = (result as { roomId?: unknown }).roomId;
+    if (typeof roomId === 'string' && roomId.length > 0) return roomId;
+  }
+  return undefined;
+}
+
+/**
+ * Allocate the room to author the template into. Primary path: ask the user's
+ * front-end to create a dedicated `#template-*` room and invite the oracle,
+ * over the WS browser-tool channel. Fallback (non-portal client): author into
+ * the room the portal already opened (`state.editorRoomId`).
+ *
+ * The runtime never handles a space id. The FRONT-END owns space resolution
+ * entirely: `personalSpace` false (default) → the domain the user is viewing;
+ * true → their personal flows space. `oracleUserId` is the oracle's own
+ * identity, taken from its `MATRIX_ORACLE_ADMIN_USER_ID` config (trusted, not
+ * the LLM) so the FE can grant it power 50 at room creation.
+ */
+async function allocateTemplateRoom(
+  ctx: RuntimeContext,
+  flow: FlowSpecInput,
+  client: MatrixClient,
+  personalSpace: boolean,
+): Promise<string> {
+  const cfg = ctx.config as Record<string, unknown>;
+  const oracleUserId = cfg.MATRIX_ORACLE_ADMIN_USER_ID;
+  if (ctx.session.id) {
+    try {
+      const result = await callBrowserTool({
+        sessionId: ctx.session.id,
+        toolCallId: `tc-${ctx.session.requestId ?? 'template'}-create-room`,
+        toolName: 'create_template_room',
+        args: {
+          title: flow.title,
+          // The FE owns space resolution: `personalSpace` false → the domain the
+          // user is currently viewing; true → their personal flows space. We send
+          // no space id at all.
+          personalSpace,
+          oracleUserId:
+            typeof oracleUserId === 'string' ? oracleUserId : undefined,
+        },
+      });
+      const roomId = extractRoomId(result);
+      if (roomId) {
+        // The FE invited us — join so we can author into the room.
+        try {
+          await client.joinRoom(roomId);
+        } catch {
+          /* already joined, or the join races sync — setup retries the connection */
+        }
+        return roomId;
+      }
+    } catch {
+      // FE not reachable (e.g. a Matrix/Slack client, not the portal) — fall back.
+    }
+  }
+  return resolveFlowRef(ctx, flow.ref);
+}
+
+function buildCreateTemplateTool(
   matrixClient: MatrixClient | undefined,
 ): PluginTool {
+  const createTemplateSchema = z.object({
+    flow: flowSpecSchema,
+
+    personalSpace: z
+      .boolean()
+      .optional()
+      .describe(
+        'Where to put the template. Default false = the domain the user is currently viewing. ' +
+          'Set true only when the user explicitly asks for their personal/private flows space.',
+      ),
+  });
   return tool(
     async (args, ctx: RuntimeContext) => {
       try {
-        const { flow } = z.object({ flow: flowSpecSchema }).parse(args);
+        const { flow, personalSpace } = createTemplateSchema.parse(args);
         const errors = eventCapabilityErrors(flow);
         if (errors.length > 0)
           return {
@@ -146,12 +239,17 @@ function buildCreateFlowTool(
             error: { code: 'validation_failed', message: errors.join(' ') },
           };
 
-        // Room allocation: author into the room the portal opened for this flow.
-        // (The decided FE `create_flow_room` browser-tool path is a portal-side
-        // coordination dependency; until it lands, the portal pre-creates the room.)
-        const roomId = resolveFlowRef(ctx, flow.ref);
-        await requireRoomMembership(ctx, roomId);
+        // Room allocation: ask the FE to create a dedicated #template-* room
+        // over the WS browser-tool channel (create_template_room), falling back
+        // to the room the portal already opened. The user owns the room either way.
         const client = await resolveFlowsMatrixClient(ctx, matrixClient);
+        const roomId = await allocateTemplateRoom(
+          ctx,
+          flow,
+          client,
+          personalSpace ?? false,
+        );
+        await requireRoomMembership(ctx, roomId);
 
         const flowId = `flow-${randomUUID().slice(0, 8)}`;
         const plan = flowSpecToBaseUcan(flow, {
@@ -165,6 +263,7 @@ function buildCreateFlowTool(
           creatorDid: ctx.user.did,
         });
         await applyConditions(ctx, roomId, matrixClient, flow.steps);
+        await applyAssignments(ctx, roomId, matrixClient, flow.steps);
 
         return { ok: true, flowRef: roomId };
       } catch (err) {
@@ -172,11 +271,13 @@ function buildCreateFlowTool(
       }
     },
     {
-      name: 'create_flow',
+      name: 'create_template',
       description:
-        'Create a new flow from a full description (title, optional goal, and the ordered steps with their inputs and rules). ' +
-        'Validate first with validate_flow. The user runs the flow in the portal.',
-      schema: z.object({ flow: flowSpecSchema }),
+        'Create a BRAND-NEW flow template in its own new room — a reusable blueprint the user instantiates and runs in ' +
+        'the portal. Do NOT use this to change a template that already exists or is currently open — use the editing tools ' +
+        '(add_step, update_step, set_step_*, remove_step, reorder_step, connect_steps), which modify the open template in ' +
+        'place. Validate first with validate_flow.',
+      schema: createTemplateSchema,
     },
   );
 }
@@ -230,6 +331,7 @@ function buildAddStepTool(matrixClient: MatrixClient | undefined): PluginTool {
           strategy: 'merge',
         });
         await applyConditions(ctx, roomId, matrixClient, [step]);
+        await applyAssignments(ctx, roomId, matrixClient, [step]);
 
         if (typeof position === 'number') {
           await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
@@ -312,7 +414,7 @@ export function buildAuthoringTools(
 ): PluginTool[] {
   return [
     buildValidateFlowTool(),
-    buildCreateFlowTool(matrixClient),
+    buildCreateTemplateTool(matrixClient),
     buildAddStepTool(matrixClient),
     tool(
       async (args, ctx: RuntimeContext) => {

@@ -3,19 +3,20 @@
  * per-block / delta edit (§4.2). Every tool resolves the flow, runs its edit
  * against the connected doc, and returns `{ ok: true }`.
  */
-import { z } from 'zod';
 import type { MatrixClient } from 'matrix-js-sdk';
+import { z } from 'zod';
 import { tool } from '../../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types.js';
-import { toToolError } from '../errors.js';
-import { withFlowDoc } from '../flow-doc.js';
 import {
   setStepAssignment,
   setStepConditions,
   setStepConfirmation,
   setStepInputs,
   setStepSchedule,
+  setStepTrigger,
 } from '../edit.js';
+import { toToolError } from '../errors.js';
+import { withFlowDoc } from '../flow-doc.js';
 import { conditionSchema, dueSchema } from '../types.js';
 
 const base = {
@@ -51,6 +52,11 @@ const confirmationSchema = z.object({
   stepId: z.string().min(1),
   requireConfirmation: z.boolean(),
 });
+const triggerSchema = z.object({
+  ...base,
+  stepId: z.string().min(1),
+  trigger: z.enum(['manual', 'flow-start']),
+});
 
 const ok = { ok: true } as const;
 
@@ -73,7 +79,7 @@ export function buildSettingsTools(
       {
         name: 'set_step_inputs',
         description:
-          'Set a step\'s inputs. A value may reference an upstream output as "{{step-id.output.field}}". Replaces the step\'s inputs.',
+          'Set a step\'s inputs. A value may reference an upstream output as "{{step-id.output.field}}". Replaces the step\'s inputs. replaces the ENTIRE inputs object — it doesnt merge',
         schema: inputsSchema,
       },
     ),
@@ -152,6 +158,26 @@ export function buildSettingsTools(
         description:
           'Set whether the portal should force a confirmation before this step runs.',
         schema: confirmationSchema,
+      },
+    ),
+    tool(
+      async (args, ctx: RuntimeContext) => {
+        try {
+          const { flowRef, stepId, trigger } = triggerSchema.parse(args);
+          await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
+            setStepTrigger(doc, stepId, trigger),
+          );
+          return ok;
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+      {
+        name: 'set_step_trigger',
+        description:
+          "Set when a step runs: 'manual' (the user invokes it) or 'flow-start' (runs when the flow begins). " +
+          'For event-driven triggers, sequence with ordering + input references instead.',
+        schema: triggerSchema,
       },
     ),
   ];

@@ -4,8 +4,9 @@
  * so the agent never has to guess a "{{step.output.field}}" string.
  */
 import type { Doc as YDoc } from 'yjs';
-import { getActionDef } from './actions.js';
 import { ACTION_METADATA } from './action-metadata.js';
+import { getActionDef, isFormAction } from './actions.js';
+import { formOutputFields } from './forms.js';
 import { readFlowSpec } from './read.js';
 
 export interface ReferenceableField {
@@ -25,9 +26,12 @@ export function listReferenceableFields(
   stepId: string,
 ): ReferenceableField[] {
   const flow = readFlowSpec(doc, ref);
-  if (!flow) return [];
+  if (!flow) {
+    return [];
+  }
 
   const index = flow.steps.findIndex((s) => s.id === stepId);
+  
   const upstream =
     index >= 0
       ? flow.steps.slice(0, index)
@@ -36,6 +40,18 @@ export function listReferenceableFields(
   const out: ReferenceableField[] = [];
   for (const step of upstream) {
     const def = getActionDef(step.action);
+    // Form steps emit one bundled `answers` output, not a field per question.
+    // Expand to `answers`, `form.answers`, and the individual `answers.<name>`
+    // runtime paths so a downstream scalar input (e.g. a DID) can reference the
+    // single field instead of the whole object (which stringifies to
+    // "[object Object]"). The action's outputSchema only declares the bundle.
+    if (def && isFormAction(def)) {
+      const formFields = formOutputFields(doc, step.id);
+      for (const f of formFields) {
+        out.push({ fromStep: step.id, field: f.field, type: f.type });
+      }
+      continue;
+    }
     const overlayPorts = ACTION_METADATA[step.action]?.outputPorts ?? [];
     for (const port of overlayPorts) {
       out.push({ fromStep: step.id, field: port.path, type: port.portType });

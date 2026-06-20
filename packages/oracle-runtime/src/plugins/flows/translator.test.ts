@@ -35,10 +35,42 @@ describe('translator: field references', () => {
       count: 3,
     };
     const nb = friendlyInputsToNb(inputs);
+    // The stored $ref carries the BLOCK id (`flow_block_<stepId>`) — that is the
+    // key the flow engine resolves against (runtime.get(<ref id>)). The agent
+    // still works in friendly step ids, restored on the way back out.
     expect(nb).toEqual({
       to: 'alice@example.com',
-      batches: { $ref: 'load.output.harvestable' },
+      batches: { $ref: 'flow_block_load.output.harvestable' },
       count: 3,
+    });
+    expect(nbToFriendlyInputs(nb)).toEqual(inputs);
+  });
+
+  it('converts refs nested inside objects and arrays so the engine resolves them', () => {
+    // Regression: a "{{...}}" inside a nested map (e.g. an email `variables`
+    // block) used to pass through verbatim, so the engine — which only resolves
+    // `$ref` — shipped the literal "{{...}}" to the recipient.
+    const inputs = {
+      to: '{{submit-request.output.answers.requesterEmail}}',
+      variables: {
+        CLAIM_ID: '{{submit-request.output.answers.requestTitle}}',
+        LINK: 'https://portal.ixo.earth/flows/static',
+      },
+      recipients: ['{{submit-request.output.answers.cc}}', 'ops@example.com'],
+    };
+    const nb = friendlyInputsToNb(inputs);
+    expect(nb).toEqual({
+      to: { $ref: 'flow_block_submit-request.output.answers.requesterEmail' },
+      variables: {
+        CLAIM_ID: {
+          $ref: 'flow_block_submit-request.output.answers.requestTitle',
+        },
+        LINK: 'https://portal.ixo.earth/flows/static',
+      },
+      recipients: [
+        { $ref: 'flow_block_submit-request.output.answers.cc' },
+        'ops@example.com',
+      ],
     });
     expect(nbToFriendlyInputs(nb)).toEqual(inputs);
   });

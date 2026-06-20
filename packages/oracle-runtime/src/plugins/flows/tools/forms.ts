@@ -8,7 +8,7 @@ import { tool } from '../../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types.js';
 import { toToolError } from '../errors.js';
 import { withFlowDoc } from '../flow-doc.js';
-import { describeForm, fillForm } from '../forms.js';
+import { describeForm, fillForm, setFormSchema } from '../forms.js';
 
 const describeSchema = z.object({
   flowRef: z
@@ -16,6 +16,42 @@ const describeSchema = z.object({
     .optional()
     .describe('Which flow. Omit to use the flow that is currently open.'),
   stepId: z.string().min(1).describe('The form step to describe.'),
+});
+
+const questionSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .describe(
+      'The answer key this question produces (referenced downstream as {{step-id.output.<name>}}).',
+    ),
+  label: z
+    .string()
+    .optional()
+    .describe('The question text shown to the user (defaults to the name).'),
+  type: z
+    .string()
+    .optional()
+    .describe(
+      'Question type: text (default), comment (multi-line), dropdown, radiogroup, checkbox (multi-select), boolean, rating.',
+    ),
+  required: z.boolean().optional(),
+  choices: z
+    .array(z.string())
+    .optional()
+    .describe('Allowed options for choice questions (dropdown/radiogroup/checkbox).'),
+});
+
+const setFormSchemaSchema = z.object({
+  flowRef: z
+    .string()
+    .optional()
+    .describe('Which flow. Omit to use the flow that is currently open.'),
+  stepId: z.string().min(1).describe('The form step to define the questions for.'),
+  questions: z
+    .array(questionSchema)
+    .min(1)
+    .describe('The questions the form should ask, in order.'),
 });
 
 const fillSchema = describeSchema.extend({
@@ -34,6 +70,30 @@ export function buildFormTools(
   matrixClient: MatrixClient | undefined,
 ): PluginTool[] {
   return [
+    tool(
+      async (args, ctx: RuntimeContext) => {
+        try {
+          const { flowRef, stepId, questions } =
+            setFormSchemaSchema.parse(args);
+          return await withFlowDoc(
+            ctx,
+            flowRef,
+            matrixClient,
+            async (doc, roomId) => setFormSchema(doc, roomId, stepId, questions),
+          );
+        } catch (err) {
+          return toToolError(err);
+        }
+      },
+      {
+        name: 'set_form_schema',
+        description:
+          'Define the questions a form step asks (its survey). REQUIRED for any form step — a form with no questions ' +
+          "shows \"Configure Survey Schema JSON\" and cannot run. Give each question a name (the answer key, referenced " +
+          'downstream as {{step-id.output.<name>}}), a label, a type, and whether it is required. Call this after adding the form step.',
+        schema: setFormSchemaSchema,
+      },
+    ),
     tool(
       async (args, ctx: RuntimeContext) => {
         try {

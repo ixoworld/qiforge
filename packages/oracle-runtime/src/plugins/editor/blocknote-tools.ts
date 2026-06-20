@@ -6,10 +6,25 @@
 import { tool } from '@langchain/core/tools';
 import * as z from 'zod';
 
+import {
+  buildFlowNodeFromBlock,
+  executeNode,
+  getAction,
+  getAllActions,
+  type ActionServices,
+  type FlowNodeRuntimeState,
+  type FlowRuntimeStateManager,
+} from '@ixo/editor/core';
 import { Logger } from '@nestjs/common';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { randomUUID } from 'node:crypto';
 import * as Y from 'yjs';
+import { emojify, unemojify } from '../../utils/emoji.js';
+import {
+  findAndReplaceInDoc,
+  insertBlock,
+  moveBlock,
+} from './block-actions.js';
 import {
   appendBlock,
   collectAllBlocks,
@@ -31,29 +46,14 @@ import {
   type BlockSnapshot,
   type ConditionConfig,
 } from './blocknote-helper.js';
-import { emojify, unemojify } from '../../utils/emoji.js';
-import {
-  findAndReplaceInDoc,
-  insertBlock,
-  moveBlock,
-} from './block-actions.js';
-import { type AppConfig, MatrixProviderManager } from './provider.js';
+import { MatrixProviderManager, type AppConfig } from './provider.js';
 import {
   extractSurveyQuestions,
   getMissingRequiredFields,
   getVisibleQuestions,
-  type SurveySchema,
   validateAnswersAgainstSchema,
+  type SurveySchema,
 } from './survey-helpers.js';
-import {
-  getAction,
-  getAllActions,
-  buildFlowNodeFromBlock,
-  executeNode,
-  type ActionServices,
-  type FlowRuntimeStateManager,
-  type FlowNodeRuntimeState,
-} from '@ixo/editor/core';
 
 /** Matrix admin credentials the blocknote tools use to read/write Y.Docs. */
 export interface BlocknoteToolsMatrixConfig {
@@ -286,7 +286,7 @@ export const createBlocknoteTools = async (
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
         // Get the document fragment
@@ -479,7 +479,7 @@ List blocks 10-20:
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
       // Use the shared Matrix client (already synced)
@@ -739,7 +739,7 @@ List blocks 10-20:
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1047,7 +1047,7 @@ Optional flags:
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1161,7 +1161,7 @@ Optional flags:
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1353,7 +1353,7 @@ Optional flags:
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1469,7 +1469,7 @@ Optional flags:
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1537,7 +1537,7 @@ This is a lightweight call that gives you the full picture before diving into sp
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1629,7 +1629,7 @@ Pass nodeId to check a specific node, or omit to get all nodes.`,
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1735,7 +1735,7 @@ Returns audit events (timestamped actions) and invocations (UCAN-authorized exec
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -1855,7 +1855,7 @@ Optionally filter by audienceDid (recipient) or capability action (e.g., "flow/b
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
 
@@ -1950,7 +1950,7 @@ Optionally filter by audienceDid (recipient) or capability action (e.g., "flow/b
         if (!isInRoom) {
           return JSON.stringify({
             success: false,
-            error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+            error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
           });
         }
 
@@ -2072,7 +2072,7 @@ Examples:
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
 
@@ -2300,7 +2300,7 @@ Examples:
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
 
@@ -2399,7 +2399,7 @@ Examples:
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
 
@@ -2485,7 +2485,7 @@ Examples:
       if (!isInRoom) {
         return JSON.stringify({
           success: false,
-          error: `Companion is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
+          error: `The AI Agent is not in the room ${roomId}, please invite companion to the room. companion user id: ${matrixClient.getUserId()}`,
         });
       }
 
@@ -2676,23 +2676,58 @@ Examples:
   };
 };
 
+/**
+ * Returns whether the companion can access `roomId`.
+ *
+ * The editor MatrixClient runs in polling-only mode (no `startClient()`/sync),
+ * so its local store (`getRoom`/`getMember`) is never populated and cannot be
+ * trusted to report membership — it always looks like the companion is in no
+ * rooms. Membership is therefore determined from the server:
+ *
+ * - Public rooms are readable without joining → allowed.
+ * - Otherwise read the companion's own `m.room.member` state; `join` means it
+ *   already has access.
+ * - Failing that, attempt an (idempotent) join. Already-joined succeeds; a
+ *   genuine lack of invite to a private room throws → the companion truly can't
+ *   access the room.
+ */
 const checkIfInRoomAndJoinPublicRoom = async (
   matrixClient: MatrixClient,
   roomId: string,
-) => {
-  const joinRuleEvent = await matrixClient.getStateEvent(
-    roomId,
-    'm.room.join_rules',
-    '',
-  );
-  const joinRule = joinRuleEvent.join_rule;
-  const isPublicRoom = joinRule === 'public';
-  const isInRoom =
-    matrixClient.getRoom(roomId)?.getMember(matrixClient.getUserId() ?? '')
-      ?.membership === 'join';
-  if (!isPublicRoom && !isInRoom) {
+): Promise<boolean> => {
+  const selfUserId = matrixClient.getUserId() ?? '';
+
+  let joinRule: string | undefined;
+  try {
+    const joinRuleEvent = await matrixClient.getStateEvent(
+      roomId,
+      'm.room.join_rules',
+      '',
+    );
+    joinRule = joinRuleEvent?.join_rule;
+  } catch {
+    // Can't read state of a private room we're not in — fall through to join.
+  }
+
+  if (joinRule === 'public') return true;
+
+  try {
+    const memberEvent = await matrixClient.getStateEvent(
+      roomId,
+      'm.room.member',
+      selfUserId,
+    );
+    if (memberEvent?.membership === 'join') return true;
+  } catch {
+    // Not a member / can't read member state — fall through to join.
+  }
+
+  try {
     await matrixClient.joinRoom(roomId);
     Logger.log(`Joined room ${roomId}`);
+    return true;
+  } catch (error) {
+    Logger.warn(`Companion could not join room ${roomId}: ${error}`);
+    return false;
   }
-  return isInRoom;
 };

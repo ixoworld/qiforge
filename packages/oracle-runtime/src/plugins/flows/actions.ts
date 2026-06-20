@@ -28,6 +28,7 @@ export interface ActionSummary {
 export interface ActionField {
   name: string;
   type: string;
+  required?: boolean;
   description?: string;
 }
 
@@ -43,6 +44,12 @@ export interface ActionDescription {
   whenToUse: string[];
   whenNotToUse: string[];
   inputs: ActionField[];
+  /**
+   * Whether this action's input requirements are known. False means the field
+   * list above is NOT authoritative — the agent must ask the user what the step
+   * needs rather than assume it takes no inputs.
+   */
+  inputsDeclared: boolean;
   outputs: ActionField[];
   events: ActionEvent[];
   hooks: string[];
@@ -75,22 +82,57 @@ export function isEventCapable(def: ActionDefinition): boolean {
   );
 }
 
-function isFormAction(def: ActionDefinition): boolean {
+/**
+ * Whether a step is a human-form action (`qi/form.submit` / `qi/human.form.submit`
+ * and friends). Form steps need special output handling: they emit one bundled
+ * `answers` object rather than per-field outputs, so discovery + linkage expand
+ * the individual question paths separately (see `formOutputFields`).
+ */
+export function isFormAction(def: ActionDefinition): boolean {
   return def.can === 'human/form' || /form|survey/i.test(def.type);
 }
 
-/** Surface a JSON-schema-ish input schema as a flat field list (best-effort). */
-function inputFields(def: ActionDefinition): ActionField[] {
-  const schema = def.inputSchema as
-    | { properties?: Record<string, { type?: string; description?: string }> }
-    | undefined;
+type InputSchemaShape =
+  | {
+      properties?: Record<string, { type?: string; description?: string }>;
+      required?: string[];
+    }
+  | undefined;
+
+/** Whether we have any authoritative input-requirement data for this action. */
+function hasDeclaredInputs(def: ActionDefinition, overlay: OverlayEntry): boolean {
+  if ((overlay.inputPorts?.length ?? 0) > 0) return true;
+  return !!(def.inputSchema as InputSchemaShape)?.properties;
+}
+
+/**
+ * The action's input fields. The registry's `inputSchema` is the single source
+ * of truth for requirements (each action declares its required inputs); the
+ * overlay's `inputPorts` are only a fallback for an action that ships none.
+ * Empty when neither is present — pair with `hasDeclaredInputs` so callers know
+ * the difference between "no inputs" and "inputs unknown".
+ */
+function inputFields(def: ActionDefinition, overlay: OverlayEntry): ActionField[] {
+  const schema = def.inputSchema as InputSchemaShape;
   const props = schema?.properties;
-  if (!props) return [];
-  return Object.entries(props).map(([name, spec]) => ({
-    name,
-    type: typeof spec?.type === 'string' ? spec.type : 'unknown',
-    description: spec?.description,
-  }));
+  if (props) {
+    const required = new Set(schema?.required ?? []);
+    return Object.entries(props).map(([name, spec]) => ({
+      name,
+      type: typeof spec?.type === 'string' ? spec.type : 'unknown',
+      required: required.has(name),
+      description: spec?.description,
+    }));
+  }
+  if (overlay.inputPorts && overlay.inputPorts.length > 0) {
+    return overlay.inputPorts.map((p) => ({
+      name: p.path,
+      type: p.portType,
+      required: p.required ?? false,
+      description: p.description,
+    }));
+  }
+  return [];
 }
 
 function outputFields(def: ActionDefinition): ActionField[] {
@@ -130,7 +172,8 @@ export function describeAction(action: string): ActionDescription | null {
     summary: overlay.summary ?? '',
     whenToUse: overlay.whenToUse ?? [],
     whenNotToUse: overlay.whenNotToUse ?? [],
-    inputs: inputFields(def),
+    inputs: inputFields(def, overlay),
+    inputsDeclared: hasDeclaredInputs(def, overlay),
     outputs: outputFields(def),
     events: (def.events ?? []).map(
       (e: { name: string; displayName?: string; description?: string }) => ({

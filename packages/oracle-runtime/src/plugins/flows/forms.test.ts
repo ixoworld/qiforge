@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { flowSpecToBaseUcan, stepIdToBlockId } from './translator.js';
 import { setStepProps } from './edit.js';
-import { describeForm, fillForm } from './forms.js';
+import { describeForm, fillForm, setFormSchema } from './forms.js';
 import { hydrateFlowDoc, someActionType } from './test-support.js';
 import type { Doc as YDoc } from 'yjs';
 
@@ -63,6 +63,32 @@ describe('describe_form', () => {
       ),
     );
     expect(() => describeForm(doc, 'plain')).toThrowError(/no form/i);
+  });
+});
+
+describe('set_form_schema (authoring the questions)', () => {
+  it('authors questions into the step that describe_form then reads back', () => {
+    const action = someActionType();
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        { title: 'Form flow', steps: [{ id: 'form', action }] },
+        { flowId: 'f' },
+      ),
+    );
+
+    const result = setFormSchema(doc, 'room', 'form', [
+      { name: 'did', label: 'Your DID', required: true },
+      { name: 'role', type: 'dropdown', choices: ['admin', 'member'] },
+    ]);
+    expect(result.questionCount).toBe(2);
+
+    // The step now has a fillable form (written to inputs.surveySchema).
+    const { questions } = describeForm(doc, 'form');
+    expect(questions.map((q) => q.name).sort()).toEqual(['did', 'role']);
+    expect(questions.find((q) => q.name === 'did')?.isRequired).toBe(true);
+    const role = questions.find((q) => q.name === 'role');
+    expect(role?.type).toBe('dropdown');
+    expect(role?.choices?.map((c) => c.value)).toEqual(['admin', 'member']);
   });
 });
 

@@ -74,3 +74,4 @@ checkpoints/
 
 .data/
 .env
+apps/app
