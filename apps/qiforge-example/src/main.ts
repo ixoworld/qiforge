@@ -18,6 +18,7 @@ import {
 } from '@nestjs/common';
 import * as sdk from 'matrix-js-sdk';
 import { config } from './config.js';
+import { LinearPlugin } from './plugins/linear/index.js';
 import { WeatherPlugin } from './plugins/weather/index.js';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -118,6 +119,9 @@ async function bootstrap(): Promise<void> {
       // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
+      // Unblock 11 — customer support oracle. Auto-detects on LINEAR_API_KEY,
+      // so the reference oracle still boots without Linear creds set.
+      new LinearPlugin(),
     ],
     // Host-supplied Nest modules — see VersionController above (plus the
     // dev-only tasks dashboard when mounted).
