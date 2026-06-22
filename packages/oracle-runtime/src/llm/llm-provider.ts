@@ -45,7 +45,7 @@ const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
     // main: 'moonshotai/kimi-k2-thinking',
     skills: 'moonshotai/kimi-k2.6',
     // skills: 'moonshotai/kimi-k2-thinking',
-    subagent: 'moonshotai/kimi-k2.5',
+    subagent: 'moonshotai/kimi-k2.6',
     // subagent: 'moonshotai/kimi-k2-thinking',
     vision: 'google/gemini-2.5-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',

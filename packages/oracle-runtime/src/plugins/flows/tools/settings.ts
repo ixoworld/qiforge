@@ -79,7 +79,7 @@ export function buildSettingsTools(
       {
         name: 'set_step_inputs',
         description:
-          'Set a step\'s inputs. A value may reference an upstream output as "{{step-id.output.field}}". Replaces the step\'s inputs. replaces the ENTIRE inputs object — it doesnt merge',
+          'Set a step\'s inputs. Reference an upstream output as "{{step-id.output.field}}" — either as the whole value, or embedded inside a longer string (e.g. a prompt: "Employee {{a.output.name}} submitted {{a.output.amount}}."). Replaces the ENTIRE inputs object — it does not merge.',
         schema: inputsSchema,
       },
     ),

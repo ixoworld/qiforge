@@ -19,9 +19,9 @@ import type {
   FlowCapability,
   TriggerSpec,
 } from '@ixo/editor/core';
-import { typeToCan, canToType, getActionByCan } from '@ixo/editor/core';
+import { canToType, getActionByCan, typeToCan } from '@ixo/editor/core';
 import { FlowError } from './errors.js';
-import type { Condition, FlowStep, FlowSpecInput } from './types.js';
+import type { Condition, FlowSpecInput, FlowStep } from './types.js';
 
 /** The compiler's block-id convention (verified: `generateBlockId`). */
 export const BLOCK_ID_PREFIX = 'flow_block_';
@@ -74,6 +74,29 @@ function blockRefToStepRef(ref: string): string {
     : ref;
 }
 
+/**
+ * Rewrite every embedded "{{ <id>.output.<path> }}" placeholder inside a template
+ * string, mapping the id half with `mapRef` (`stepRefToBlockRef` outbound,
+ * `blockRefToStepRef` inbound). A *standalone* ref becomes a `{ $ref }` (handled
+ * above) so the engine resolves it as a typed value; an *embedded* ref lives in a
+ * larger string — e.g. an oracle `prompt` ("Employee {{x.output.answers.name}}
+ * submitted ..."). The engine only resolves `$ref` objects, so these placeholders
+ * are filled downstream against the same block-id-keyed runtime state; they must
+ * therefore carry the block id, or every "{{...}}" resolves to an empty string.
+ * Non-output tokens (handlebars helpers like `{{#if}}`, `trigger.payload.*`)
+ * contain no ".output." and pass through untouched.
+ */
+function rewriteEmbeddedRefs(
+  text: string,
+  mapRef: (ref: string) => string,
+): string {
+  return text.replace(
+    /(\{\{\s*)([^{}]+?)(\s*\}\})/g,
+    (_full, open: string, ref: string, close: string) =>
+      `${open}${mapRef(ref)}${close}`,
+  );
+}
+
 /** Resolve a friendly action name (registry `type`) to its `can` ability string. */
 export function actionToCan(action: string): string {
   const can = typeToCan(action);
@@ -94,7 +117,7 @@ function isRuntimeRef(value: unknown): value is { $ref: string } {
     !!value &&
     typeof value === 'object' &&
     '$ref' in value &&
-    typeof (value as { $ref: unknown }).$ref === 'string'
+    typeof value.$ref === 'string'
   );
 }
 
@@ -108,7 +131,10 @@ function isRuntimeRef(value: unknown): value is { $ref: string } {
 function friendlyValueToNb(value: unknown): unknown {
   if (typeof value === 'string') {
     const match = REF_PATTERN.exec(value);
-    return match?.[1] ? { $ref: stepRefToBlockRef(match[1]) } : value;
+    if (match?.[1]) return { $ref: stepRefToBlockRef(match[1]) };
+    return value.includes('{{')
+      ? rewriteEmbeddedRefs(value, stepRefToBlockRef)
+      : value;
   }
   if (Array.isArray(value)) return value.map(friendlyValueToNb);
   if (value && typeof value === 'object') {
@@ -124,6 +150,10 @@ function friendlyValueToNb(value: unknown): unknown {
 /** Convert a single `nb` value back to its friendly form (reverse + recursive). */
 function nbValueToFriendly(value: unknown): unknown {
   if (isRuntimeRef(value)) return `{{${blockRefToStepRef(value.$ref)}}}`;
+  if (typeof value === 'string')
+    return value.includes('{{')
+      ? rewriteEmbeddedRefs(value, blockRefToStepRef)
+      : value;
   if (Array.isArray(value)) return value.map(nbValueToFriendly);
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};

@@ -75,6 +75,44 @@ describe('translator: field references', () => {
     expect(nbToFriendlyInputs(nb)).toEqual(inputs);
   });
 
+  it('rewrites embedded refs inside a template string to block ids', () => {
+    // Regression: an oracle `prompt` embeds refs in a larger string. These are
+    // not a standalone `{{...}}`, so they never became a `$ref`; they shipped
+    // with STEP ids while the downstream renderer keys on BLOCK ids, so every
+    // placeholder resolved to an empty string.
+    const inputs = {
+      prompt:
+        'Employee {{expense-request.output.answers.name}} submitted ' +
+        '{{expense-request.output.answers.amount}}. ' +
+        'Manager decided: {{manager-review.output.answers.decision}}.',
+    };
+    const nb = friendlyInputsToNb(inputs);
+    expect(nb).toEqual({
+      prompt:
+        'Employee {{flow_block_expense-request.output.answers.name}} submitted ' +
+        '{{flow_block_expense-request.output.answers.amount}}. ' +
+        'Manager decided: {{flow_block_manager-review.output.answers.decision}}.',
+    });
+    expect(nbToFriendlyInputs(nb)).toEqual(inputs);
+  });
+
+  it('leaves non-output placeholders untouched while rewriting embedded refs', () => {
+    // Handlebars helpers and trigger.payload.* carry no ".output." and must
+    // pass through both directions verbatim.
+    const inputs = {
+      prompt:
+        '{{#if approved}}Approved by {{review.output.answers.decision}}.{{/if}} ' +
+        'Ticket {{trigger.payload.id}}.',
+    };
+    const nb = friendlyInputsToNb(inputs);
+    expect(nb).toEqual({
+      prompt:
+        '{{#if approved}}Approved by {{flow_block_review.output.answers.decision}}.{{/if}} ' +
+        'Ticket {{trigger.payload.id}}.',
+    });
+    expect(nbToFriendlyInputs(nb)).toEqual(inputs);
+  });
+
   it('returns undefined for empty inputs', () => {
     expect(friendlyInputsToNb(undefined)).toBeUndefined();
     expect(nbToFriendlyInputs({})).toBeUndefined();
