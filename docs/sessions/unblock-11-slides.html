@@ -200,8 +200,9 @@ whenNotToUse: [ <span class="s">"Refunds or billing disputes — escalate, never
       <section class="slide">
         <div class="step">Part <b>3</b> · Let's build a plugin</div>
         <h2>The <span class="accent">Linear</span> support plugin</h2>
-        <p class="lead">Four tools that let the agent run a support desk:</p>
-        <div class="grid cols-2" style="margin-top: 1.2rem">
+        <p class="lead">Five tools that let the agent run a support desk:</p>
+        <div class="grid cols-3" style="margin-top: 1.2rem">
+          <div class="card"><h3><span class="tag">search_tickets</span></h3><p class="muted">Find duplicates / prior history.</p></div>
           <div class="card"><h3><span class="tag">create_ticket</span></h3><p class="muted">File a Linear issue — on every case.</p></div>
           <div class="card"><h3><span class="tag">comment_on_ticket</span></h3><p class="muted">Log progress on a ticket.</p></div>
           <div class="card"><h3><span class="tag">get_ticket</span></h3><p class="muted">Look a ticket up by id.</p></div>
@@ -295,7 +296,7 @@ whenNotToUse: [ <span class="s">"Refunds or billing disputes — escalate, never
   configSchema = configSchema;  <span class="c">// the safety</span>
 
   <span class="f">autoDetect</span>(env) { <span class="k">return</span> <span class="f">Boolean</span>(env.LINEAR_API_KEY); }  <span class="c">// load only if configured</span>
-  <span class="f">getTools</span>()      { <span class="k">return</span> [ createTicket, comment, getTicket, escalate ]; }  <span class="c">// the hands</span>
+  <span class="f">getTools</span>()      { <span class="k">return</span> [ search, createTicket, comment, getTicket, escalate ]; }  <span class="c">// the hands</span>
 }</pre>
         <p class="muted" style="margin-top: 1rem">Three things — tools, manifest, config — in one class. <strong>This is the plugin.</strong></p>
       </section>

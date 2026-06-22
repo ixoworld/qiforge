@@ -176,3 +176,40 @@ export async function getIssue(
   );
   return data.issue ? toTicket(data.issue) : null;
 }
+
+/**
+ * Search the configured team's issues by text. Matches the query against
+ * issue title OR description (case-insensitive). Used to spot duplicates
+ * before filing a new ticket.
+ */
+export async function searchIssues(
+  params: { apiKey: string; teamId: string; query: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<LinearTicket[]> {
+  const first = Math.max(1, Math.min(25, params.limit ?? 10));
+  const data = await linearGraphql(
+    params.apiKey,
+    `query SearchIssues($filter: IssueFilter, $first: Int) {
+       issues(filter: $filter, first: $first) {
+         nodes { id identifier title url priority state { name } }
+       }
+     }`,
+    {
+      first,
+      filter: {
+        and: [
+          { team: { id: { eq: params.teamId } } },
+          {
+            or: [
+              { title: { containsIgnoreCase: params.query } },
+              { description: { containsIgnoreCase: params.query } },
+            ],
+          },
+        ],
+      },
+    },
+    z.object({ issues: z.object({ nodes: z.array(issueFields) }) }),
+    signal,
+  );
+  return data.issues.nodes.map(toTicket);
+}

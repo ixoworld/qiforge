@@ -10,6 +10,7 @@ import {
   buildCreateTicketTool,
   buildEscalateTool,
   buildGetTicketTool,
+  buildSearchTool,
   type LinearToolConfig,
 } from './linear-tools.js';
 
@@ -40,9 +41,10 @@ const manifest: PluginManifest = {
   summary:
     'File and manage customer support tickets in Linear, and escalate hard cases to the human team via Matrix. Create a ticket for EVERY case, then either resolve it or escalate.',
   whenToUse: [
-    'A customer reports a problem, complaint, question, or request — call create_ticket first, every time.',
+    'Before filing anything, call search_tickets to check whether this issue was already reported or the customer has prior history.',
+    'A customer reports a problem, complaint, question, or request — call create_ticket (after searching for duplicates).',
     'You can fully resolve the case from known information — resolve it, comment_on_ticket with what you did, and reply.',
-    'You need the current status of an existing ticket — call get_ticket.',
+    'You need the current status of a specific ticket — call get_ticket.',
   ],
   whenNotToUse: [
     'Refunds, chargebacks, or billing disputes — create the ticket, then escalate_to_human. Never decide these yourself.',
@@ -91,7 +93,7 @@ const manifest: PluginManifest = {
  *  • `autoDetect`    → only loads when LINEAR_API_KEY is set (keeps the
  *                      reference oracle bootable without Linear creds)
  *  • `manifest`      → the triage policy the agent reasons over
- *  • `getTools`      → create_ticket, comment_on_ticket, get_ticket, escalate_to_human
+ *  • `getTools`      → search_tickets, create_ticket, comment_on_ticket, get_ticket, escalate_to_human
  */
 export class LinearPlugin extends OraclePlugin {
   readonly name = NAME;
@@ -120,6 +122,7 @@ export class LinearPlugin extends OraclePlugin {
   override getTools(ctx: PluginContext): PluginTool[] {
     const config = this.resolveConfig(ctx.config);
     return [
+      buildSearchTool(config),
       buildCreateTicketTool(config),
       buildCommentTool(config),
       buildGetTicketTool(config),

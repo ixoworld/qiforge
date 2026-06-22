@@ -116,7 +116,10 @@ Two paths. Same oracle. The routing is the manifest.
 
 ---
 
-## 5. The four tools
+## 5. The five tools
+
+**`search_tickets`**
+Searches existing tickets by text (title or description). Called before filing to catch duplicates and surface a returning customer's history.
 
 **`create_ticket`**
 Files a new issue in Linear. Takes a title, description, and priority. Returns the ticket identifier and URL. Called on every case — a ticket is always created before any other action.

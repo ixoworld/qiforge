@@ -4,7 +4,12 @@ import {
   tool,
   z,
 } from '@ixo/oracle-runtime';
-import { addComment, createIssue, getIssue } from './linear-client.js';
+import {
+  addComment,
+  createIssue,
+  getIssue,
+  searchIssues,
+} from './linear-client.js';
 
 /**
  * Config the tools need at call time. Resolved once from the plugin's
@@ -127,6 +132,48 @@ export function buildGetTicketTool(config: LinearToolConfig): PluginTool {
           .string()
           .min(1)
           .describe('The ticket id or identifier to look up.'),
+      }),
+    },
+  );
+}
+
+/** `search_tickets` — find existing tickets by text, to catch duplicates. */
+export function buildSearchTool(config: LinearToolConfig): PluginTool {
+  return tool(
+    async (rawArgs, ctx: RuntimeContext) => {
+      const { query, limit } = z
+        .object({
+          query: z.string().min(1),
+          limit: z.number().int().min(1).max(25).optional(),
+        })
+        .parse(rawArgs);
+
+      const tickets = await searchIssues(
+        { apiKey: config.apiKey, teamId: config.teamId, query, limit },
+        ctx.abortSignal,
+      );
+      return tickets.length > 0
+        ? JSON.stringify(tickets)
+        : `No existing tickets match "${query}".`;
+    },
+    {
+      name: 'search_tickets',
+      description:
+        'Search existing support tickets by text (title or description). Use BEFORE create_ticket to check whether this issue was already reported, and to find related history for a returning customer.',
+      schema: z.object({
+        query: z
+          .string()
+          .min(1)
+          .describe(
+            'Keywords to search for, e.g. "double charge" or the customer email.',
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(25)
+          .optional()
+          .describe('Max results to return (default 10).'),
       }),
     },
   );
