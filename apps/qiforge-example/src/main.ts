@@ -1,12 +1,7 @@
 import 'dotenv/config';
 
-import {
-  CreditsPlugin,
-  EditorPlugin,
-  createOracleApp,
-  type AuthExcludedRoute,
-} from '@ixo/oracle-runtime';
-import Redis from 'ioredis';
+import { createOracleApp, type AuthExcludedRoute } from '@ixo/oracle-runtime';
+// import Redis from 'ioredis';
 import {
   Controller,
   Get,
@@ -19,7 +14,6 @@ import {
 import * as sdk from 'matrix-js-sdk';
 import { config } from './config.js';
 import { LinearPlugin } from './plugins/linear/index.js';
-import { WeatherPlugin } from './plugins/weather/index.js';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Host-supplied Nest module — proves the `nestModules` slot works AND
@@ -60,8 +54,8 @@ const HOST_AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
  * import them without triggering this file's top-level `bootstrap()` call.
  */
 async function bootstrap(): Promise<void> {
-  const redisUrl = process.env.REDIS_URL;
-  const redis = redisUrl ? new Redis(redisUrl) : null;
+  // const redisUrl = process.env.REDIS_URL;
+  // const redis = redisUrl ? new Redis(redisUrl) : null;
 
   const matrixBaseUrl = process.env.MATRIX_BASE_URL;
   const matrixUserId = process.env.MATRIX_ORACLE_ADMIN_USER_ID;
@@ -116,9 +110,6 @@ async function bootstrap(): Promise<void> {
     config,
     logger: Logger,
     plugins: [
-      // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
-      new EditorPlugin({ matrixClient }),
-      new WeatherPlugin(),
       // Unblock 11 — customer support oracle. Auto-detects on LINEAR_API_KEY,
       // so the reference oracle still boots without Linear creds set.
       new LinearPlugin(),
@@ -131,6 +122,7 @@ async function bootstrap(): Promise<void> {
       composio: false, // generic SaaS gateway — Linear handled by our plugin
       'domain-indexer': false, // IXO entity lookups — irrelevant here
       tasks: false, // background-job placeholder — unused
+      credits: false,
     },
     // Host-supplied Nest modules — see VersionController above (plus the
     // dev-only tasks dashboard when mounted).

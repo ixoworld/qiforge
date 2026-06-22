@@ -19,6 +19,7 @@ import {
 export interface LinearToolConfig {
   apiKey: string;
   teamId: string;
+  projectId: string;
   escalationRoomId: string;
 }
 
@@ -44,6 +45,7 @@ export function buildCreateTicketTool(config: LinearToolConfig): PluginTool {
         {
           apiKey: config.apiKey,
           teamId: config.teamId,
+          projectId: config.projectId,
           title,
           description,
           priority: priority ?? 'normal',
@@ -149,7 +151,7 @@ export function buildSearchTool(config: LinearToolConfig): PluginTool {
         .parse(rawArgs);
 
       const tickets = await searchIssues(
-        { apiKey: config.apiKey, teamId: config.teamId, query, limit },
+        { apiKey: config.apiKey, projectId: config.projectId, query, limit },
         ctx.abortSignal,
       );
       return tickets.length > 0

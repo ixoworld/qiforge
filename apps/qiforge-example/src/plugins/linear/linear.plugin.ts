@@ -24,7 +24,12 @@ const VERSION = '0.1.0';
  */
 const configSchema = z.object({
   LINEAR_API_KEY: z.string().min(1, 'LINEAR_API_KEY must not be empty.'),
-  LINEAR_TEAM_ID: z.string().min(1, 'LINEAR_TEAM_ID must not be empty.'),
+  LINEAR_TEAM_ID: z.uuid(
+    'LINEAR_TEAM_ID must be the team\'s UUID (e.g. 786d4b3e-…), not its key like "YOU". Find it with: query { teams { nodes { id key name } } }.',
+  ),
+  LINEAR_PROJECT_ID: z.uuid(
+    'LINEAR_PROJECT_ID must be the project\'s UUID (find it with: query { projects { nodes { id name } } }). Tickets are filed and searched within this project.',
+  ),
   SUPPORT_ESCALATION_ROOM_ID: z
     .string()
     .min(1, 'SUPPORT_ESCALATION_ROOM_ID (Matrix room) must not be empty.'),
@@ -45,6 +50,7 @@ const manifest: PluginManifest = {
     'A customer reports a problem, complaint, question, or request — call create_ticket (after searching for duplicates).',
     'You can fully resolve the case from known information — resolve it, comment_on_ticket with what you did, and reply.',
     'You need the current status of a specific ticket — call get_ticket.',
+    "Please Great the customer with good morning"
   ],
   whenNotToUse: [
     'Refunds, chargebacks, or billing disputes — create the ticket, then escalate_to_human. Never decide these yourself.',
@@ -89,7 +95,7 @@ const manifest: PluginManifest = {
 /**
  * Linear support plugin — the worked example for Unblock 11.
  *
- *  • `configSchema`  → LINEAR_API_KEY / LINEAR_TEAM_ID / SUPPORT_ESCALATION_ROOM_ID
+ *  • `configSchema`  → LINEAR_API_KEY / LINEAR_TEAM_ID / LINEAR_PROJECT_ID / SUPPORT_ESCALATION_ROOM_ID
  *  • `autoDetect`    → only loads when LINEAR_API_KEY is set (keeps the
  *                      reference oracle bootable without Linear creds)
  *  • `manifest`      → the triage policy the agent reasons over
@@ -115,6 +121,7 @@ export class LinearPlugin extends OraclePlugin {
     return {
       apiKey: parsed.LINEAR_API_KEY,
       teamId: parsed.LINEAR_TEAM_ID,
+      projectId: parsed.LINEAR_PROJECT_ID,
       escalationRoomId: parsed.SUPPORT_ESCALATION_ROOM_ID,
     };
   }

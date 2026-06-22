@@ -30,10 +30,26 @@ const LINEAR_TO_PRIORITY: Record<number, TicketPriority> = {
   4: 'low',
 };
 
-/** Shape every Linear GraphQL response shares: `{ data, errors }`. */
+/**
+ * Shape every Linear GraphQL response shares: `{ data, errors }`.
+ *
+ * Linear's top-level `message` is generic ("Argument Validation Error"). The
+ * actionable text lives in `extensions.userPresentableMessage` (e.g. "teamId
+ * must be a UUID.") — capture it so a misconfigured id surfaces legibly
+ * instead of cryptically.
+ */
 const envelopeSchema = z.object({
   data: z.unknown().optional(),
-  errors: z.array(z.object({ message: z.string() })).optional(),
+  errors: z
+    .array(
+      z.object({
+        message: z.string(),
+        extensions: z
+          .object({ userPresentableMessage: z.string().optional() })
+          .optional(),
+      }),
+    )
+    .optional(),
 });
 
 /**
@@ -64,9 +80,10 @@ async function linearGraphql<T>(
 
   const envelope = envelopeSchema.parse(await resp.json());
   if (envelope.errors && envelope.errors.length > 0) {
-    throw new Error(
-      `Linear GraphQL error: ${envelope.errors.map((e) => e.message).join('; ')}`,
-    );
+    const detail = envelope.errors
+      .map((e) => e.extensions?.userPresentableMessage ?? e.message)
+      .join('; ');
+    throw new Error(`Linear GraphQL error: ${detail}`);
   }
   return dataSchema.parse(envelope.data);
 }
@@ -106,6 +123,7 @@ export async function createIssue(
   params: {
     apiKey: string;
     teamId: string;
+    projectId: string;
     title: string;
     description: string;
     priority: TicketPriority;
@@ -123,6 +141,7 @@ export async function createIssue(
     {
       input: {
         teamId: params.teamId,
+        projectId: params.projectId,
         title: params.title,
         description: params.description,
         priority: PRIORITY_TO_LINEAR[params.priority],
@@ -178,12 +197,12 @@ export async function getIssue(
 }
 
 /**
- * Search the configured team's issues by text. Matches the query against
+ * Search the configured project's issues by text. Matches the query against
  * issue title OR description (case-insensitive). Used to spot duplicates
  * before filing a new ticket.
  */
 export async function searchIssues(
-  params: { apiKey: string; teamId: string; query: string; limit?: number },
+  params: { apiKey: string; projectId: string; query: string; limit?: number },
   signal?: AbortSignal,
 ): Promise<LinearTicket[]> {
   const first = Math.max(1, Math.min(25, params.limit ?? 10));
@@ -198,7 +217,7 @@ export async function searchIssues(
       first,
       filter: {
         and: [
-          { team: { id: { eq: params.teamId } } },
+          { project: { id: { eq: params.projectId } } },
           {
             or: [
               { title: { containsIgnoreCase: params.query } },
