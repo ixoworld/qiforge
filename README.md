@@ -71,7 +71,7 @@ pnpm install && pnpm dev
 qiforge chat
 ```
 
-> **Full developer docs:** [docs.ixo.earth](https://docs.ixo.earth) — quickstart, plugin recipes, env vars, CLI reference, deployment.
+> **Full developer docs:** [docs.ixo.world](https://docs.ixo.world) — quickstart, plugin recipes, env vars, CLI reference, deployment.
 >
 > **Canonical reference:** [`apps/qiforge-example/`](./apps/qiforge-example/) — a complete oracle wiring the full bundled plugin set, plus a custom Weather plugin that exercises **every** plugin hook. Walkthrough: [`WEATHER-PLUGIN.md`](./apps/qiforge-example/WEATHER-PLUGIN.md)
 
@@ -211,7 +211,7 @@ Requirements: a reachable Matrix homeserver, a persistent volume for encrypted s
 
 ## Support
 
-- [Documentation](https://docs.ixo.earth)
+- [Documentation](https://docs.ixo.world)
 - [GitHub Issues](https://github.com/ixoworld/qiforge/issues)
 - [GitHub Discussions](https://github.com/ixoworld/qiforge/discussions)
 

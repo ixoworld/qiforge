@@ -27,6 +27,14 @@ export interface ComposePromptInput {
   identity: OracleIdentity;
   /** Pre-rendered Tier-1 capability block. Empty string when no eager plugins. */
   capabilityBlock: string;
+  /**
+   * Custom Instructions section body — author-supplied standing guidance
+   * (`config.prompt.customInstructions`) plus any operating guides contributed
+   * by on-demand capabilities the agent has loaded for this thread (e.g. the
+   * Flow Builder guide). Empty string renders no section, so it costs nothing
+   * on turns where nothing contributes.
+   */
+  customInstructions: string;
   /** Operational-mode block — typically a multi-line string. */
   operationalMode: string;
   /** Editor block — empty string when no editor session is active. */
@@ -256,6 +264,12 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 
 {{{COMMUNICATION_STYLE}}}
 {{/COMMUNICATION_STYLE}}
+{{#CUSTOM_INSTRUCTIONS}}
+
+## Custom Instructions
+
+{{{CUSTOM_INSTRUCTIONS}}}
+{{/CUSTOM_INSTRUCTIONS}}
 
 ## Working with files
 
@@ -312,6 +326,7 @@ interface TemplateVariables {
   ORACLE_SECTION: string;
   CAPABILITIES_NOTE: string;
   CAPABILITY_BLOCK: string;
+  CUSTOM_INSTRUCTIONS: string;
   COMMUNICATION_STYLE: string;
   CONTEXT_BLOCK: string;
   TIME_CONTEXT: string;
@@ -330,6 +345,7 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'ORACLE_SECTION',
     'CAPABILITIES_NOTE',
     'CAPABILITY_BLOCK',
+    'CUSTOM_INSTRUCTIONS',
     'COMMUNICATION_STYLE',
     'CONTEXT_BLOCK',
     'TIME_CONTEXT',
@@ -372,6 +388,7 @@ export async function composePrompt(
     ORACLE_SECTION: oracleSection,
     CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
+    CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,

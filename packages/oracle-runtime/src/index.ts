@@ -113,7 +113,6 @@ export {
   sandboxPlugin,
   skillsPlugin,
   editorPlugin,
-  flowsPlugin,
   aguiPlugin,
   slackPlugin,
   tasksPlugin,

@@ -6,7 +6,6 @@ import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
-import { FlowsPlugin } from './flows/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
 import { PortalPlugin } from './portal/index.js';
@@ -43,7 +42,6 @@ export const composioPlugin = new ComposioPlugin();
 export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = new EditorPlugin();
-export const flowsPlugin = new FlowsPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const slackPlugin = new SlackPlugin();
 export const tasksPlugin = new TasksPlugin();
@@ -51,6 +49,11 @@ export const creditsPlugin = new CreditsPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
+
+// NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
+// a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
+// — see `apps/qiforge-example/src/main.ts`. The class stays exported from the
+// public barrel (`export * from './plugins/flows/index.js'`).
 
 /**
  * The canonical bundled-plugin set used by `createOracleApp` when the
@@ -69,7 +72,6 @@ export const BUNDLED_PLUGINS = [
   sandboxPlugin,
   skillsPlugin,
   editorPlugin,
-  flowsPlugin,
   aguiPlugin,
   slackPlugin,
   tasksPlugin,

@@ -9,7 +9,7 @@
 ## 0. TL;DR status
 
 - **Built & green:** 27 agent tools, 60 unit tests, typecheck + lint + prettier clean. Full `@ixo/oracle-runtime` suite passes except one pre-existing, unrelated `credits.plugin.test.ts` billing flake (fails on `main` too — DO NOT touch it, DO NOT mention it in demos).
-- **Wired in:** registered in `BUNDLED_PLUGINS`, exported from `@ixo/oracle-runtime`, instantiated in `apps/qiforge-example/src/main.ts` as `new FlowsPlugin({ matrixClient })`.
+- **Wired in (opt-in, NOT bundled):** `FlowsPlugin` is intentionally **not** in `BUNDLED_PLUGINS` and has no `flowsPlugin` singleton — the class ships from the `@ixo/oracle-runtime` barrel (`export * from './plugins/flows/index.js'`) and a fork opts in by constructing it: `apps/qiforge-example/src/main.ts` does `new FlowsPlugin({ matrixClient })` in its `plugins` array.
 - **Editor:** pristine published `@ixo/editor@5.31.0` (npm). NO editor source changes are consumed (an earlier 5.32.0 tarball experiment was reverted).
 - **Portal:** `create_flow_room` FE browser tool added (`/Users/yousef/impacts-x-web/lib/companion-tools/`), wired so `create_flow` allocates a real room.
 - **Live-tested by the user** on devnet; two real bugs found + fixed (oracle power level, and create_flow-vs-edit). Still needs a clean end-to-end re-test after restarting both apps.
@@ -73,8 +73,8 @@ Plugin dir: `packages/oracle-runtime/src/plugins/flows/`. Spec: `packages/oracle
 
 ### Modified outside the plugin dir
 - `packages/oracle-runtime/package.json` — `@ixo/editor: "5.31.0"`.
-- `packages/oracle-runtime/src/plugins/index.ts` — `flowsPlugin = new FlowsPlugin()` + in `BUNDLED_PLUGINS`.
-- `packages/oracle-runtime/src/index.ts` — public barrel: `flowsPlugin` named export + `export * from './plugins/flows/index.js'`.
+- `packages/oracle-runtime/src/plugins/index.ts` — NOT bundled: no `flowsPlugin` singleton, not in `BUNDLED_PLUGINS` (a note there explains why it's opt-in).
+- `packages/oracle-runtime/src/index.ts` — public barrel: `export * from './plugins/flows/index.js'` (the `FlowsPlugin` class). No `flowsPlugin` singleton export.
 - `apps/qiforge-example/src/main.ts` — `new FlowsPlugin({ matrixClient })`.
 - `pnpm-lock.yaml`, `pnpm-workspace.yaml` — editor bump side effects.
 

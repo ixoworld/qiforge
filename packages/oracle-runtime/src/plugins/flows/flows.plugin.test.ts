@@ -28,7 +28,7 @@ describe('FlowsPlugin', () => {
     expect(plugin.version).toBe('0.1.0');
     expect(plugin.manifest.title).toBe('Flow Builder');
     expect(plugin.manifest.category).toBe('automation');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.stability).toBe('beta');
 
     const result = validateManifest(plugin.manifest, plugin.name);
@@ -36,11 +36,13 @@ describe('FlowsPlugin', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('is registered in the bundled plugin set under the name "flows"', async () => {
-    // Importing the plugin index pulls in the whole bundled graph, so allow headroom.
-    const { BUNDLED_PLUGINS, flowsPlugin } = await import('../index.js');
-    expect(flowsPlugin.name).toBe('flows');
-    expect(BUNDLED_PLUGINS.some((p) => p.name === 'flows')).toBe(true);
+  it('is NOT in the bundled plugin set — it is opt-in, constructed explicitly', async () => {
+    // Flows is intentionally excluded from BUNDLED_PLUGINS; a fork wires it in
+    // via `plugins: [new FlowsPlugin({ matrixClient })]` (see the example app).
+    // The class still ships from the package barrel. Importing the plugin index
+    // pulls in the whole bundled graph, so allow headroom.
+    const { BUNDLED_PLUGINS } = await import('../index.js');
+    expect(BUNDLED_PLUGINS.some((p) => p.name === 'flows')).toBe(false);
   }, 30_000);
 
   it('contributes the discovery, inspect, authoring, settings, and form tools', () => {
