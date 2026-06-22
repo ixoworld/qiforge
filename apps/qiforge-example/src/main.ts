@@ -123,6 +123,15 @@ async function bootstrap(): Promise<void> {
       // so the reference oracle still boots without Linear creds set.
       new LinearPlugin(),
     ],
+    // Support oracle doesn't need these bundled capabilities — turn them off so
+    // they never enter the prompt or the tool surface. Each key maps to a
+    // bundled plugin; `false` excludes it regardless of env.
+    features: {
+      firecrawl: false, // web search/scraping — not a support concern
+      composio: false, // generic SaaS gateway — Linear handled by our plugin
+      'domain-indexer': false, // IXO entity lookups — irrelevant here
+      tasks: false, // background-job placeholder — unused
+    },
     // Host-supplied Nest modules — see VersionController above (plus the
     // dev-only tasks dashboard when mounted).
     nestModules,
