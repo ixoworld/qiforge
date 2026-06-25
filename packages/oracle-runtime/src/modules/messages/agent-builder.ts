@@ -297,7 +297,7 @@ export class AgentBuilder {
     const langGraphConfig: Record<string, unknown> = {
       version: 'v2',
       streamMode: ['updates', 'messages'],
-      recursionLimit: 150,
+      recursionLimit: 200,
       configurable: prepared.runnableConfig.configurable,
       context: requestCtx,
       ...(abortController && { signal: abortController.signal }),

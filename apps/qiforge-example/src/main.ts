@@ -1,13 +1,11 @@
 import 'dotenv/config';
 
 import {
-  CreditsPlugin,
   EditorPlugin,
   FlowsPlugin,
   createOracleApp,
   type AuthExcludedRoute,
 } from '@ixo/oracle-runtime';
-import Redis from 'ioredis';
 import {
   Controller,
   Get,
@@ -17,6 +15,7 @@ import {
   type DynamicModule,
   type Type,
 } from '@nestjs/common';
+import Redis from 'ioredis';
 import * as sdk from 'matrix-js-sdk';
 import { config } from './config.js';
 import { WeatherPlugin } from './plugins/weather/index.js';
