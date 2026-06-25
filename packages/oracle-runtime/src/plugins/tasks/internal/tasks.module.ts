@@ -1,6 +1,6 @@
 import { BullModule } from '@nestjs/bullmq';
-import { Inject, Module, type DynamicModule } from '@nestjs/common';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Module, type DynamicModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { MatrixListenerBridge } from '../../../modules/messages/matrix-listener-bridge.js';
