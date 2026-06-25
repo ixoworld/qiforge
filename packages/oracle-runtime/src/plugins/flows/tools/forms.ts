@@ -39,7 +39,9 @@ const questionSchema = z.object({
   choices: z
     .array(z.string())
     .optional()
-    .describe('Allowed options for choice questions (dropdown/radiogroup/checkbox).'),
+    .describe(
+      'Allowed options for choice questions (dropdown/radiogroup/checkbox).',
+    ),
 });
 
 const setFormSchemaSchema = z.object({
@@ -47,7 +49,10 @@ const setFormSchemaSchema = z.object({
     .string()
     .optional()
     .describe('Which flow. Omit to use the flow that is currently open.'),
-  stepId: z.string().min(1).describe('The form step to define the questions for.'),
+  stepId: z
+    .string()
+    .min(1)
+    .describe('The form step to define the questions for.'),
   questions: z
     .array(questionSchema)
     .min(1)
@@ -79,7 +84,8 @@ export function buildFormTools(
             ctx,
             flowRef,
             matrixClient,
-            async (doc, roomId) => setFormSchema(doc, roomId, stepId, questions),
+            async (doc, roomId) =>
+              setFormSchema(doc, roomId, stepId, questions),
           );
         } catch (err) {
           return toToolError(err);
@@ -89,7 +95,7 @@ export function buildFormTools(
         name: 'set_form_schema',
         description:
           'Define the questions a form step asks (its survey). REQUIRED for any form step — a form with no questions ' +
-          "shows \"Configure Survey Schema JSON\" and cannot run. Give each question a name (the answer key, referenced " +
+          'shows "Configure Survey Schema JSON" and cannot run. Give each question a name (the answer key, referenced ' +
           'downstream as {{step-id.output.<name>}}), a label, a type, and whether it is required. Call this after adding the form step.',
         schema: setFormSchemaSchema,
       },

@@ -20,6 +20,7 @@
 +22 new tests, full flowCompiler+actionRegistry suite green = 186 tests):
 
 **Final scope (locked):**
+
 - **Templates — author + edit.** The agent creates templates and edits their steps with
   **surgical per-block mutations** (no full rebuild, no compiler-patch). Create/add use the
   existing compiler; edit/remove/reorder use the new per-block functions.
@@ -32,16 +33,17 @@
 
 **The contract — exports now in `@ixo/editor/core`:**
 
-| Purpose | Functions |
-|---|---|
-| **Read** (template + flow) | `readFlowDocument(yDoc)` → structure + props + runtime; `readBlocksFromFragment` |
-| **Template edit** (surgical) | `setBlockProps(yDoc, blockId, partial)`, `removeFlowNode(yDoc, nodeId)`, `reorderFlowNodes(yDoc, order)` |
-| **Flow copilot** (runtime) | `setFormAnswers(yDoc, blockId, answers)`, `resetStepRuntime(yDoc, blockId)`, `updateNodeRuntime` |
-| **Conditions** | `buildBlockConditionsProp(conditions)`, `toEvaluatorOperator` (+ the compiler now emits the evaluator vocabulary — the silent-no-eval bug is fixed) |
-| **Re-exports** | `getEventsForBlock`, `getOutputSchemaForBlock`, `writeCompiledBlocksToFragment`, `replaceBlockInFragment`, `removeBlockFromFragment` |
-| **Reuse (pre-existing)** | `setupFlowFromBaseUcan` (full/merge — create/add), `readCompiledFlowFromYDoc`, `classifyNodeState`/`classifyBlockerCause`/`snapshotNode` (flow_status), `getAllActions`/`getActionByCan`/`typeToCan`/`canToType`, `resolveRuntimeRefs` |
+| Purpose                      | Functions                                                                                                                                                                                                                              |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Read** (template + flow)   | `readFlowDocument(yDoc)` → structure + props + runtime; `readBlocksFromFragment`                                                                                                                                                       |
+| **Template edit** (surgical) | `setBlockProps(yDoc, blockId, partial)`, `removeFlowNode(yDoc, nodeId)`, `reorderFlowNodes(yDoc, order)`                                                                                                                               |
+| **Flow copilot** (runtime)   | `setFormAnswers(yDoc, blockId, answers)`, `resetStepRuntime(yDoc, blockId)`, `updateNodeRuntime`                                                                                                                                       |
+| **Conditions**               | `buildBlockConditionsProp(conditions)`, `toEvaluatorOperator` (+ the compiler now emits the evaluator vocabulary — the silent-no-eval bug is fixed)                                                                                    |
+| **Re-exports**               | `getEventsForBlock`, `getOutputSchemaForBlock`, `writeCompiledBlocksToFragment`, `replaceBlockInFragment`, `removeBlockFromFragment`                                                                                                   |
+| **Reuse (pre-existing)**     | `setupFlowFromBaseUcan` (full/merge — create/add), `readCompiledFlowFromYDoc`, `classifyNodeState`/`classifyBlockerCause`/`snapshotNode` (flow_status), `getAllActions`/`getActionByCan`/`typeToCan`/`canToType`, `resolveRuntimeRefs` |
 
 **Behavior notes for the plugin:**
+
 - `setBlockProps` is surgical (fragment only, runtime untouched) and keeps the node-map
   `title`/`description`/`actor` in sync. Pass `''` to clear a prop.
 - `removeFlowNode` returns `{ ok:false, referencedBy:[…] }` if another step references the node
@@ -59,13 +61,13 @@
 1. **Do NOT start from zero.** The mechanics (FlowSpec/TemplateSpec ⇄ BaseUcanFlow, compile,
    read, per-step edit, discovery, linkage, validation, leak guard) are **identical** for
    templates and flows. Reframe + simplify the existing spec/plugin. Reasoning in §2.
-2. **Reframe: the agent builds TEMPLATES, not flow instances.** A template is the *creation*
-   artifact; a flow is the *running* instance. The editor already models this split
+2. **Reframe: the agent builds TEMPLATES, not flow instances.** A template is the _creation_
+   artifact; a flow is the _running_ instance. The editor already models this split
    (`docType:'template'`, `clearRuntimeForTemplateClone`, `source_template_id`). Details §3.
 3. **Consume the editor API, stop reverse-engineering internals.** I'm adding ~6 functions to
    `@ixo/editor/core` so your plugin is a thin translator. Contract in §4.
 4. **Two modes, one hard boundary.** The agent **authors templates** (creation) **and fixes
-   running flows** (view runtime errors + edit config to fix them). The *only* thing it never
+   running flows** (view runtime errors + edit config to fix them). The _only_ thing it never
    does is **execute / sign / mint a UCAN** — the **user** runs each step. So the runtime
    APIs (read status/errors, runtime-preserving edits) **stay in scope**. See §3.3, §4, §6.
 
@@ -81,7 +83,7 @@ Keep the spec and the plugin. Here's why a rewrite would be wasted motion:
   is fixed at the source. Your §2 abstraction, §4 per-block-delta principle, §5 metadata
   overlay, §8 safety model, §9 tests are all still right.
 - **The template reframe is a re-labelling + a room-type change, not a redirection.** Authoring
-  targets `#template-*` docs; the *same* read/status/edit machinery also serves fix-mode on
+  targets `#template-*` docs; the _same_ read/status/edit machinery also serves fix-mode on
   `#flow-*` docs. The runtime/status half isn't removed — it's **reused** from the editor
   (`classifyNodeState` et al.) instead of hand-rolled, which is the drift win.
 - **A rewrite throws away the verified research** (the §A.0 API surface, the sequencing
@@ -116,23 +118,23 @@ the editor API, fix the four factual corrections in §5. That's a focused PR, no
   - **Author mode** (`#template-*`, `docType:'template'`): create/edit the blueprint.
   - **Fix mode** (`#flow-*`, `docType:'flow'`): the user runs the flow; when a step **errors**
     or the user **requests a change**, the agent **reads the runtime error** and **edits the
-    live flow's config to fix it** — *runtime-preserving* (completed steps keep their
+    live flow's config to fix it** — _runtime-preserving_ (completed steps keep their
     results), then the **user re-runs** the fixed step.
 - **The hard boundary** (unchanged): the agent never **executes / signs / mints a UCAN**. In
   fix mode it reads runtime, edits config, and may **reset a failed step to idle** (clear the
-  error so the user can re-run) — but the *running itself* is always the user's action.
+  error so the user can re-run) — but the _running itself_ is always the user's action.
 
 ### 3.2 Rename map (search-and-replace, semantics preserved)
 
-| Old (flow) | New (template) |
-|---|---|
-| `FlowSpec` | `TemplateSpec` |
-| `flowRef` | `templateRef` (still = the Matrix room id, opaque) |
-| `create_flow` | `create_template` |
+| Old (flow)                 | New (template)                                                                    |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| `FlowSpec`                 | `TemplateSpec`                                                                    |
+| `flowRef`                  | `templateRef` (still = the Matrix room id, opaque)                                |
+| `create_flow`              | `create_template`                                                                 |
 | FE tool `create_flow_room` | FE tool `create_template_room` (creates `#template-*`, sets `docType:'template'`) |
-| `read_flow` / `get_step` | `read_template` / `get_step` (no runtime/status fields) |
-| `get_flow_template` | `get_starter_template` (in-plugin starter TemplateSpecs) |
-| "the user runs the flow" | "the user instantiates the template into a flow and runs it" |
+| `read_flow` / `get_step`   | `read_template` / `get_step` (no runtime/status fields)                           |
+| `get_flow_template`        | `get_starter_template` (in-plugin starter TemplateSpecs)                          |
+| "the user runs the flow"   | "the user instantiates the template into a flow and runs it"                      |
 
 `TemplateSpec` = your `FlowSpec` **minus** `step.status` and any runtime-derived field. The
 `steps[]` authoring shape (id, action, inputs, form schema, after, runWhen, onEvent, trigger,
@@ -141,10 +143,11 @@ due, assignTo, on, skills, requireConfirmation) is unchanged.
 ### 3.3 What's IN, and the one thing that's OUT
 
 **IN — author mode (templates):** create/edit the blueprint (steps, actions, inputs,
-conditions, triggers, schedule, assignee, hooks, skills, form *schema* + defaults). No
+conditions, triggers, schedule, assignee, hooks, skills, form _schema_ + defaults). No
 runtime here — a fresh template is all-idle.
 
 **IN — fix mode (running flows):** because the user runs the flow and hits errors/changes:
+
 - **View errors / status:** `read_flow` (with runtime), `flow_status` — reuse the editor's
   **`classifyNodeState` / `classifyBlockerCause`** (they already exist — §6 of the editor
   spec). Gives `Done/Blocked/Overdue/Pending` + a typed cause (`missing_input`,
@@ -174,9 +177,9 @@ security story trivial (`spec.md` §6.3) while still letting the agent diagnose 
   `classifyBlockerCause` and the runtime/audit reads. This is how the agent **views the
   errors**.
 - **Forms — two surfaces:**
-  - *Template-time:* `describe_form` reads `block.props.surveySchema`; `set_form_defaults`
+  - _Template-time:_ `describe_form` reads `block.props.surveySchema`; `set_form_defaults`
     authors default values into the schema (not a runtime write).
-  - *Fix-time:* `fill_form` pre-fills a live flow's answers (`setFormAnswers` →
+  - _Fix-time:_ `fill_form` pre-fills a live flow's answers (`setFormAnswers` →
     `runtime.output.form.answers`), **never submitting** — the user submits in the portal.
 - `read` (structure + props + runtime), `explain_step` (diff resolver, read-only).
 - Starter templates as in-plugin `TemplateSpec` (`spec.md` §7.4).
@@ -252,7 +255,7 @@ getEventsForBlock, getOutputSchemaForBlock          // onEvent validation + refe
 3. **Assignment maps to the wrong prop in your table.** The snapshot/portal read the assignee
    from **`props.assignment.assignedActor.did`** (`flowAgent/utils.ts:69`), not
    `authorisedActors`. `set_step_assignment` must write `props.assignment`. (`authorisedActors`
-   is the *authorization* whitelist — separate concern, and authorization is the portal's, so
+   is the _authorization_ whitelist — separate concern, and authorization is the portal's, so
    you may not even author it.)
 4. **`title`/`description`/`actor` are denormalized into the node map AND the fragment**
    (`hydrate.ts:177-184`). A fragment-only write desyncs them — `setBlockProps` handles the
@@ -266,6 +269,7 @@ getEventsForBlock, getOutputSchemaForBlock          // onEvent validation + refe
 ## 6. What the editor API replaces / reuses (the wins)
 
 Brittle in-plugin code you **delete** (the editor now owns it, tested against its own shape):
+
 - ❌ the multi-source read assembler + BlockNote XML parsing → ✅ one `readFlowDocument` call.
 - ❌ the in-plugin `replaceBlockInFragment` replica + remove/reorder yjs → ✅ `setBlockProps` /
   `removeFlowNode` / `reorderFlowNodes`.
@@ -275,8 +279,9 @@ Brittle in-plugin code you **delete** (the editor now owns it, tested against it
 - ❌ most of Appendix B's drift surface (the XML-shape coupling now lives in the editor).
 
 What the runtime APIs **enable** (the fix-mode features — view errors + change live flows):
+
 - ✅ **View errors:** `read_flow`/`flow_status` over `classifyNodeState`/`classifyBlockerCause`
-  + run-error message — the agent sees exactly which step failed and why.
+  - run-error message — the agent sees exactly which step failed and why.
 - ✅ **Change without losing progress:** `setBlockProps` edits a failed step in place while
   completed steps keep their results (the F4/F6 runtime-safety fixes make this safe — this is
   the headline correctness guarantee for editing a live flow).
@@ -290,13 +295,13 @@ leak-proof shape `spec.md` was reaching for — now covering both authoring and 
 
 ## 7. Sequencing (who does what)
 
-| Step | Owner | Output |
-|---|---|---|
-| Editor PR-E1: `readFlowDocument` + `readBlocksFromFragment` + re-exports | **me (editor)** | unblocks your read/translator |
-| Editor PR-E2: `setBlockProps` / `removeFlowNode` / `reorderFlowNodes` + runtime writers (`setFormAnswers` / `updateNodeRuntime` / `resetStepRuntime`) + F4/F6 runtime-safety fixes | **me (editor)** | unblocks authoring **and** runtime-preserving fix-mode |
-| Editor PR-E3: condition fix + `buildBlockConditionsProp` | **me (editor)** | unblocks conditions |
-| Plugin: add `create_template`/`#template-*`, swap in the editor read/edit/status API, wire fix-mode (view errors + runtime-preserving edit), apply §5 corrections | **you (plugin)** | template builder + flow fixer |
-| Portal: add `create_template_room` FE browser tool (`#template-*`, docType:'template') | portal team | unblocks `create_template` |
+| Step                                                                                                                                                                               | Owner            | Output                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------ |
+| Editor PR-E1: `readFlowDocument` + `readBlocksFromFragment` + re-exports                                                                                                           | **me (editor)**  | unblocks your read/translator                          |
+| Editor PR-E2: `setBlockProps` / `removeFlowNode` / `reorderFlowNodes` + runtime writers (`setFormAnswers` / `updateNodeRuntime` / `resetStepRuntime`) + F4/F6 runtime-safety fixes | **me (editor)**  | unblocks authoring **and** runtime-preserving fix-mode |
+| Editor PR-E3: condition fix + `buildBlockConditionsProp`                                                                                                                           | **me (editor)**  | unblocks conditions                                    |
+| Plugin: add `create_template`/`#template-*`, swap in the editor read/edit/status API, wire fix-mode (view errors + runtime-preserving edit), apply §5 corrections                  | **you (plugin)** | template builder + flow fixer                          |
+| Portal: add `create_template_room` FE browser tool (`#template-*`, docType:'template')                                                                                             | portal team      | unblocks `create_template`                             |
 
 Confirm the editor API signatures (§4) work for your translator **before** I implement E1–E3
 — if a return shape is awkward for you, say so now, that's the point of this handoff.
@@ -355,8 +360,9 @@ author writes SurveyJS JSON  →  block.props.surveySchema  (JSON string, in the
 FE renders:  JSON.parse(props.surveySchema) → new SurveyModel(schema) → <Survey/>   (FormPanel.tsx)
 answers persist to:  runtime.output.form.answers  (JSON string)
 ```
+
 - The schema **is the block's own data.** You can author it directly: `setBlockProps(blockId,
-  { surveySchema: <json> })`. `describe_form` reads `props.surveySchema`; `set_form_defaults`
+{ surveySchema: <json> })`. `describe_form` reads `props.surveySchema`; `set_form_defaults`
   writes default values into that schema; `fill_form` writes `runtime.output.form.answers`
   (via `setFormAnswers`).
 - This is the model your form tools target. Clean and self-contained.
@@ -369,6 +375,7 @@ FE renders:  handlers.getDeedSurveyTemplate(deedDid, collectionId) → SurveyMod
 the block also stores a DERIVED `surveyAnswersSchema` (flat field list) in inputs — for the
 reference picker / event payloads only, NOT the SurveyJS JSON itself.
 ```
+
 - The claim block is a **pointer to an on-chain collection's survey**, not a container of one.
   You **cannot** "set a survey" on a claim step — you bind a **collection** and the survey
   follows from chain. `surveyAnswersSchema` is materialised from that collection's survey
@@ -378,7 +385,7 @@ reference picker / event payloads only, NOT the SurveyJS JSON itself.
     **not** a stored `surveySchema` prop (there is none).
   - There is **no author-set survey** to write — so `set_form_defaults` doesn't apply; the
     survey is collection-defined.
-  - Filling a claim is the **on-chain submission** flow (PIN, signing) — that's *running*, so
+  - Filling a claim is the **on-chain submission** flow (PIN, signing) — that's _running_, so
     it stays the user's job in the portal, not a builder action.
   - (There is a latent `surveyJson` override branch in `ClaimFlowDetail`, but it is **not**
     wired to any input and we are **not** changing that — treat the claim survey as
@@ -386,7 +393,7 @@ reference picker / event payloads only, NOT the SurveyJS JSON itself.
 
 ### Net rule for your form tools
 
-| Step type | survey source | `describe_form` | author/fill |
-|---|---|---|---|
-| `form`, `domainCreator` | `props.surveySchema` (in the block) | read the prop | author schema + `set_form_defaults`; `fill_form` → runtime |
-| `claim` | on-chain collection (fetched) | call `getDeedSurveyTemplate(deedDid, collectionId)` | bind a collection (no author-set survey); submission is the user's run |
+| Step type               | survey source                       | `describe_form`                                     | author/fill                                                            |
+| ----------------------- | ----------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------- |
+| `form`, `domainCreator` | `props.surveySchema` (in the block) | read the prop                                       | author schema + `set_form_defaults`; `fill_form` → runtime             |
+| `claim`                 | on-chain collection (fetched)       | call `getDeedSurveyTemplate(deedDid, collectionId)` | bind a collection (no author-set survey); submission is the user's run |

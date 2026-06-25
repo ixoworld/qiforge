@@ -25,7 +25,7 @@ const SURVEY = JSON.stringify({
 function formAndDmPresent(): boolean {
   return Boolean(
     (getActionByCan('form/submit') || getActionByCan('human/form')) &&
-      getActionByCan('matrix/dm'),
+    getActionByCan('matrix/dm'),
   );
 }
 
@@ -143,7 +143,14 @@ describe('checkLink', () => {
     if (!formAndDmPresent()) return;
     const doc = formToDmDoc();
     // The form's `did` question -> matrix.dm `targetDid` (a declared did input).
-    const result = checkLink(doc, 'r', 'form', 'answers.did', 'dm', 'targetDid');
+    const result = checkLink(
+      doc,
+      'r',
+      'form',
+      'answers.did',
+      'dm',
+      'targetDid',
+    );
     expect(result.ok).toBe(true);
   });
 

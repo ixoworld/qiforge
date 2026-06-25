@@ -19,11 +19,11 @@
 
 ## 1. Repos & key paths (THREE repos)
 
-| Repo | Path | Role |
-|---|---|---|
-| **oracle-runtime** (boilerplate) | `/Users/yousef/ixo-oracles-boilerplate` | the plugin lives here. Branch `feat/flows-plugin`. |
-| **@ixo/editor** | `/Users/yousef/editor` | the Qi Flow engine (v5.31.0). Source reference only — pristine, nothing consumed from local. |
-| **portal** (impacts-x-web) | `/Users/yousef/impacts-x-web` | the FE `create_flow_room` browser tool. |
+| Repo                             | Path                                    | Role                                                                                         |
+| -------------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **oracle-runtime** (boilerplate) | `/Users/yousef/ixo-oracles-boilerplate` | the plugin lives here. Branch `feat/flows-plugin`.                                           |
+| **@ixo/editor**                  | `/Users/yousef/editor`                  | the Qi Flow engine (v5.31.0). Source reference only — pristine, nothing consumed from local. |
+| **portal** (impacts-x-web)       | `/Users/yousef/impacts-x-web`           | the FE `create_flow_room` browser tool.                                                      |
 
 Plugin dir: `packages/oracle-runtime/src/plugins/flows/`. Spec: `packages/oracle-runtime/src/plugins/editor/spec.md` (under `editor/` for historical reasons).
 
@@ -42,36 +42,41 @@ Plugin dir: `packages/oracle-runtime/src/plugins/flows/`. Spec: `packages/oracle
 ## 3. File inventory
 
 ### Plugin core (`packages/oracle-runtime/src/plugins/flows/`)
-| File | Role |
-|---|---|
-| `types.ts` | FlowSpec zod schemas + TS types (`FlowSpec`, `FlowStep`, `Condition`, `HookSpec`, `dueSchema`, `StepStatus`, `FlowSpecRead`). Condition operators = friendly vocab (`equals`/`notEquals`/…). |
-| `errors.ts` | `FlowError` (code+message) + `toToolError`. Codes: `no_flow_ref`, `not_in_room`, `flow_not_found`, `validation_failed`, `step_not_found`, `referenced`, `unknown_action`, `error`. |
-| `translator.ts` | **FlowSpec ⇄ BaseUcanFlow.** `flowSpecToBaseUcan`, `stepToCapability`, action↔can (`actionToCan`/`canToAction`), field-refs `{{step.output.x}}`↔`{$ref}` (`friendlyInputsToNb`/`nbToFriendlyInputs`), `buildConditionsProp`/`parseConditionsProp` (evaluator-vocab condition JSON), `stepIdToBlockId`=`flow_block_<id>`. |
-| `read.ts` | **Multi-source NATIVE read** → `FlowSpecRead`. `readCompiledStructure` (reads `qi.flow.*` maps with oracle-runtime's own yjs), reuses editor-plugin `collectAllBlocks`/`extractBlockProperties`/`readRuntimeState`, reconstructs trigger/onEvent from `props.trigger` JSON, due from `ttl*`, assignTo from `authorisedActors[0]`, requireConfirmation; computes `blockedBy`/`stale`. Exports `readFlowSpec`/`readStep`/`readFlowStatus`. |
-| `edit.ts` | **Per-block delta edits.** `setStepProps` (via editor-plugin `editBlock`), `setStepInputs/Conditions/Schedule/Assignment/Confirmation/Trigger`, `removeStep` (editor-plugin `deleteBlock` + native qi.flow.* cleanup + ref-guard), `reorderStep` (CLONE-based — `findParentOf`+`element.clone()`; editor `moveBlock` throws reinserting a deleted element), `updateFlowMeta`. |
-| `flow-doc.ts` | Connection: `withFlowDoc(rtCtx, ref?, matrixClient, fn)` (resolve ref → membership guard → MatrixProviderManager connect → run → dispose), `resolveFlowRef`, `requireRoomMembership`, `resolveFlowsMatrixClient`. Reuses editor-plugin `MatrixProviderManager`+`AppConfig` (`../editor/provider.js`), `buildBlocknoteToolsConfig`, `resolveEditorMatrixClient`. Matrix creds from `rtCtx.config.MATRIX_BASE_URL`/`MATRIX_ORACLE_ADMIN_USER_ID`/`MATRIX_ORACLE_ADMIN_ACCESS_TOKEN`. |
-| `actions.ts` | Registry access: `listActions`/`describeAction`/`getActionDef`/`isEventCapable`/`eventNamesFor`/`actionsSnapshot`. Merges the metadata overlay. |
-| `action-metadata.ts` | `ACTION_METADATA` overlay (input ports + requires), SEEDED for `qi/claim.submit`, `qi/claim.evaluate`, `qi/email.send`, `qi/matrix.dm`. Output ports mostly inferred from field names. |
-| `port-types.ts` | `inferPortType(path, primitive?)` — field-name → semantic port type; `CORE_PORT_TYPES`, `isCorePortType`. |
-| `linkage.ts` | `checkLink` (catches refs to non-existent output fields + core-type mismatch), `compatibleActions`, `requirements`. |
-| `references.ts` | `listReferenceableFields` — upstream output fields a step can pipe from. |
-| `forms.ts` | `describeForm`/`fillForm`. Reads `block.props.surveySchema` (NOTE: editor-plugin `extractBlockProperties` AUTO-PARSES surveySchema to an object — handle object-or-string), writes `runtime.output.form.answers`, NEVER sets `state:'completed'`. |
-| `explain.ts` | `explainStep` — read-only `{willDo, action, inputs, requiresConfirmation, status}` (diff resolver `changes` deferred). |
-| `templates.ts` | In-plugin FlowSpec starter templates. Currently one: `claim-and-notify` (claim.submit → email.send, real actions). |
-| `flows.plugin.ts` | `FlowsPlugin extends OraclePlugin`, manifest (category automation / on-demand / beta), `getRequestTools` wires all 27 tools. Constructor `{ matrixClient? }`. |
-| `index.ts` | `export { FlowsPlugin, type FlowsPluginOptions }`. |
-| `test-support.ts` | `hydrateFlowDoc(plan)` (compile + write qi.flow.* maps + fragment + runtime in NATIVE 13.6.31 yjs — see §6), `setStepRuntime`, `someActionType`. |
+
+| File                 | Role                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `types.ts`           | FlowSpec zod schemas + TS types (`FlowSpec`, `FlowStep`, `Condition`, `HookSpec`, `dueSchema`, `StepStatus`, `FlowSpecRead`). Condition operators = friendly vocab (`equals`/`notEquals`/…).                                                                                                                                                                                                                                                                                       |
+| `errors.ts`          | `FlowError` (code+message) + `toToolError`. Codes: `no_flow_ref`, `not_in_room`, `flow_not_found`, `validation_failed`, `step_not_found`, `referenced`, `unknown_action`, `error`.                                                                                                                                                                                                                                                                                                 |
+| `translator.ts`      | **FlowSpec ⇄ BaseUcanFlow.** `flowSpecToBaseUcan`, `stepToCapability`, action↔can (`actionToCan`/`canToAction`), field-refs `{{step.output.x}}`↔`{$ref}` (`friendlyInputsToNb`/`nbToFriendlyInputs`), `buildConditionsProp`/`parseConditionsProp` (evaluator-vocab condition JSON), `stepIdToBlockId`=`flow_block_<id>`.                                                                                                                                                           |
+| `read.ts`            | **Multi-source NATIVE read** → `FlowSpecRead`. `readCompiledStructure` (reads `qi.flow.*` maps with oracle-runtime's own yjs), reuses editor-plugin `collectAllBlocks`/`extractBlockProperties`/`readRuntimeState`, reconstructs trigger/onEvent from `props.trigger` JSON, due from `ttl*`, assignTo from `authorisedActors[0]`, requireConfirmation; computes `blockedBy`/`stale`. Exports `readFlowSpec`/`readStep`/`readFlowStatus`.                                           |
+| `edit.ts`            | **Per-block delta edits.** `setStepProps` (via editor-plugin `editBlock`), `setStepInputs/Conditions/Schedule/Assignment/Confirmation/Trigger`, `removeStep` (editor-plugin `deleteBlock` + native qi.flow.\* cleanup + ref-guard), `reorderStep` (CLONE-based — `findParentOf`+`element.clone()`; editor `moveBlock` throws reinserting a deleted element), `updateFlowMeta`.                                                                                                     |
+| `flow-doc.ts`        | Connection: `withFlowDoc(rtCtx, ref?, matrixClient, fn)` (resolve ref → membership guard → MatrixProviderManager connect → run → dispose), `resolveFlowRef`, `requireRoomMembership`, `resolveFlowsMatrixClient`. Reuses editor-plugin `MatrixProviderManager`+`AppConfig` (`../editor/provider.js`), `buildBlocknoteToolsConfig`, `resolveEditorMatrixClient`. Matrix creds from `rtCtx.config.MATRIX_BASE_URL`/`MATRIX_ORACLE_ADMIN_USER_ID`/`MATRIX_ORACLE_ADMIN_ACCESS_TOKEN`. |
+| `actions.ts`         | Registry access: `listActions`/`describeAction`/`getActionDef`/`isEventCapable`/`eventNamesFor`/`actionsSnapshot`. Merges the metadata overlay.                                                                                                                                                                                                                                                                                                                                    |
+| `action-metadata.ts` | `ACTION_METADATA` overlay (input ports + requires), SEEDED for `qi/claim.submit`, `qi/claim.evaluate`, `qi/email.send`, `qi/matrix.dm`. Output ports mostly inferred from field names.                                                                                                                                                                                                                                                                                             |
+| `port-types.ts`      | `inferPortType(path, primitive?)` — field-name → semantic port type; `CORE_PORT_TYPES`, `isCorePortType`.                                                                                                                                                                                                                                                                                                                                                                          |
+| `linkage.ts`         | `checkLink` (catches refs to non-existent output fields + core-type mismatch), `compatibleActions`, `requirements`.                                                                                                                                                                                                                                                                                                                                                                |
+| `references.ts`      | `listReferenceableFields` — upstream output fields a step can pipe from.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `forms.ts`           | `describeForm`/`fillForm`. Reads `block.props.surveySchema` (NOTE: editor-plugin `extractBlockProperties` AUTO-PARSES surveySchema to an object — handle object-or-string), writes `runtime.output.form.answers`, NEVER sets `state:'completed'`.                                                                                                                                                                                                                                  |
+| `explain.ts`         | `explainStep` — read-only `{willDo, action, inputs, requiresConfirmation, status}` (diff resolver `changes` deferred).                                                                                                                                                                                                                                                                                                                                                             |
+| `templates.ts`       | In-plugin FlowSpec starter templates. Currently one: `claim-and-notify` (claim.submit → email.send, real actions).                                                                                                                                                                                                                                                                                                                                                                 |
+| `flows.plugin.ts`    | `FlowsPlugin extends OraclePlugin`, manifest (category automation / on-demand / beta), `getRequestTools` wires all 27 tools. Constructor `{ matrixClient? }`.                                                                                                                                                                                                                                                                                                                      |
+| `index.ts`           | `export { FlowsPlugin, type FlowsPluginOptions }`.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `test-support.ts`    | `hydrateFlowDoc(plan)` (compile + write qi.flow.\* maps + fragment + runtime in NATIVE 13.6.31 yjs — see §6), `setStepRuntime`, `someActionType`.                                                                                                                                                                                                                                                                                                                                  |
 
 ### Tools (`…/flows/tools/`)
+
 `discovery.ts` (list_actions, describe_action, list_referenceable_fields, get_flow_template) · `inspect.ts` (read_flow, get_step, flow_status, explain_step) · `authoring.ts` (validate_flow, create_flow, add_step, remove_step, reorder_step, update_flow_meta, connect_steps, update_step) · `settings.ts` (set_step_inputs/conditions/schedule/assignment/confirmation/trigger) · `forms.ts` (describe_form, fill_form) · `linkage.ts` (check_link, compatible_actions, requirements).
 
 ### Tests (colocated `*.test.ts`)
+
 `translator.test.ts`(14) · `read.test.ts`(3) · `edit.test.ts`(10) · `authoring.test.ts`(4, validate_flow) · `forms.test.ts`(6) · `references.test.ts`(2) · `linkage.test.ts`(9) · `explain.test.ts`(2) · `flows.plugin.test.ts`(manifest+leak+discovery, incl. 27-tool name assertion). **Total 60.**
 
 ### Docs
+
 `PRESENTATION.md` (markdown deck), `presentation.html` (self-contained HTML slide deck for the team demo — open in browser, arrow/space/click nav), `HANDOFF.md` (this).
 
 ### Modified outside the plugin dir
+
 - `packages/oracle-runtime/package.json` — `@ixo/editor: "5.31.0"`.
 - `packages/oracle-runtime/src/plugins/index.ts` — NOT bundled: no `flowsPlugin` singleton, not in `BUNDLED_PLUGINS` (a note there explains why it's opt-in).
 - `packages/oracle-runtime/src/index.ts` — public barrel: `export * from './plugins/flows/index.js'` (the `FlowsPlugin` class). No `flowsPlugin` singleton export.
@@ -79,6 +84,7 @@ Plugin dir: `packages/oracle-runtime/src/plugins/flows/`. Spec: `packages/oracle
 - `pnpm-lock.yaml`, `pnpm-workspace.yaml` — editor bump side effects.
 
 ### Portal (`/Users/yousef/impacts-x-web`)
+
 - `lib/companion-tools/createFlowRoomTool.ts` — NEW. `create_flow_room` browser tool.
 - `lib/companion-tools/getTools.ts` — MODIFIED. registers `createFlowRoomTool` (gated on `options.matrixClient`).
 
@@ -96,6 +102,7 @@ git push
 ```
 
 **portal** — its own repo/branch/PR. Commit msg: `/tmp/flows-portal-commit-msg.txt`.
+
 ```bash
 cd /Users/yousef/impacts-x-web
 git checkout -b feat/create-flow-room-tool
@@ -103,6 +110,7 @@ git add lib/companion-tools/createFlowRoomTool.ts lib/companion-tools/getTools.t
 git commit -F /tmp/flows-portal-commit-msg.txt
 git push -u origin feat/create-flow-room-tool && gh pr create --fill
 ```
+
 (`/tmp` commit-msg files won't survive a reboot — regenerate if missing. NO co-author / "Generated with Claude" lines, per the user's binding rule.)
 
 ---
@@ -120,6 +128,7 @@ pnpm --filter @ixo/oracle-runtime build                                      # r
 # run the reference oracle (needs .env: matrix creds, LLM key, etc.)
 cd apps/qiforge-example && pnpm dev
 ```
+
 NOTE: `*.int.test.ts` are NOT auto-run. The example app imports the BUILT `@ixo/oracle-runtime` dist, so **rebuild oracle-runtime after any plugin change** for `pnpm dev` to pick it up.
 
 ---
@@ -142,6 +151,7 @@ NOTE: `*.int.test.ts` are NOT auto-run. The example app imports the BUILT `@ixo/
 ---
 
 ## 7. The 27 tools (quick reference)
+
 Discover: `list_actions`, `describe_action`, `list_referenceable_fields`, `get_flow_template` · Inspect: `read_flow`, `get_step`, `flow_status`, `explain_step` · Author: `validate_flow`, `create_flow`, `add_step`, `remove_step`, `reorder_step`, `update_flow_meta`, `connect_steps`, `update_step` · Tune: `set_step_inputs`, `set_step_conditions`, `set_step_schedule`, `set_step_assignment`, `set_step_confirmation`, `set_step_trigger` · Forms: `describe_form`, `fill_form` · Linkage: `check_link`, `compatible_actions`, `requirements`.
 
 ---
@@ -159,7 +169,7 @@ Discover: `list_actions`, `describe_action`, `list_referenceable_fields`, `get_f
 
 ## 9. OPEN ARCHITECTURAL QUESTION — templates vs flows (raised by user, NOT decided)
 
-Symptom: a `qi/claim.submit` block shows *"Configure DID and claim collection in template mode before running this action"* (form blocks show the same about survey schema). **Why:** claim.submit needs design-time config (which claim collection + the DID/entity context); that config lives in the editor's **"template mode."** Our builder authors a raw **flow** (no template-config step) + the agent doesn't know which collection (user's choice), so the block is half-configured.
+Symptom: a `qi/claim.submit` block shows _"Configure DID and claim collection in template mode before running this action"_ (form blocks show the same about survey schema). **Why:** claim.submit needs design-time config (which claim collection + the DID/entity context); that config lives in the editor's **"template mode."** Our builder authors a raw **flow** (no template-config step) + the agent doesn't know which collection (user's choice), so the block is half-configured.
 
 The IXO model is **template → instantiate → run**: a `#template-*` room is the reusable blueprint (configure collection/DID/survey once); a `#flow-*` room is a runnable instance (usually cloned from a template via the portal's `cloneFromProtocol`/`instantiateTemplate`). Building raw flows skips template config → the warnings.
 
@@ -168,6 +178,7 @@ The IXO model is **template → instantiate → run**: a `#template-*` room is t
 ---
 
 ## 10. Deferred / next (PR-later)
+
 - `set_step_event` (onEvent → needs `setupFlowFromBaseUcan` patch for edges, Matrix + event-capability validate), `set_step_hooks`/`set_step_skills` (hooks/skills NOT in `compileBlockProps` — verify where/if they persist in the editor first).
 - `explain_step` diff (`changes`) via editor diff resolvers (Appendix A.7 — verify export surface).
 - Integration tests (`*.int.test.ts`) for create_flow/add_step against a real room (`.env.integration`); MUST throw on missing env, no skip flags.
@@ -175,11 +186,12 @@ The IXO model is **template → instantiate → run**: a `#template-*` room is t
 - More starter templates.
 - The templates-vs-flows decision (§9).
 
-Real action types (41 with a `can`, verified): qi/claim.submit, qi/claim.evaluate, qi/email.send, qi/notification.push, qi/http.request, qi/bid.*, qi/proposal.*, qi/domain.sign, qi/matrix.dm, qi/wallet.*, qi/iid.create, qi/calendar.event.*, qi/xero.*, qi/pod.*, qi/human.form.submit, qi/collection.users, oracle, etc. (NO carbon actions exist as registry types.)
+Real action types (41 with a `can`, verified): qi/claim.submit, qi/claim.evaluate, qi/email.send, qi/notification.push, qi/http.request, qi/bid._, qi/proposal._, qi/domain.sign, qi/matrix.dm, qi/wallet._, qi/iid.create, qi/calendar.event._, qi/xero._, qi/pod._, qi/human.form.submit, qi/collection.users, oracle, etc. (NO carbon actions exist as registry types.)
 
 ---
 
 ## 11. Binding user rules / preferences (from memory + this session)
+
 - **NEVER run git write commands** (commit/push/branch/stash/reset/checkout/restore/clean/rebase/merge). Read-only git only. Hand the user the commands.
 - **No co-author / "Generated with Claude" lines** in commits or PRs. User's own git identity.
 - **No type assertions** (`as any`, `as X`) to silence the compiler — find the real mismatch (use type guards / narrowing). The codebase has `noUncheckedIndexedAccess` + `noImplicitAny`.
@@ -193,6 +205,7 @@ Real action types (41 with a `can`, verified): qi/claim.submit, qi/claim.evaluat
 ---
 
 ## 12. Pointers
+
 - Spec (design): `packages/oracle-runtime/src/plugins/editor/spec.md`
 - Persistent memory: `/Users/yousef/.claude/projects/-Users-yousef-ixo-oracles-boilerplate/memory/project_flows_plugin.md` (+ `MEMORY.md` index)
 - Demo deck: `packages/oracle-runtime/src/plugins/flows/presentation.html` (open in browser) · `PRESENTATION.md`

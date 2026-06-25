@@ -110,8 +110,8 @@ describe('listReferenceableFields', () => {
       fields.some((f) => f.field === 'form.answers' && f.type === 'string'),
     ).toBe(true);
     // …plus the individual question path, typed as a DID (the load-bearing one).
-    expect(fields.some((f) => f.field === 'answers.did' && f.type === 'did')).toBe(
-      true,
-    );
+    expect(
+      fields.some((f) => f.field === 'answers.did' && f.type === 'did'),
+    ).toBe(true);
   });
 });

@@ -100,7 +100,10 @@ type InputSchemaShape =
   | undefined;
 
 /** Whether we have any authoritative input-requirement data for this action. */
-function hasDeclaredInputs(def: ActionDefinition, overlay: OverlayEntry): boolean {
+function hasDeclaredInputs(
+  def: ActionDefinition,
+  overlay: OverlayEntry,
+): boolean {
   if ((overlay.inputPorts?.length ?? 0) > 0) return true;
   return !!(def.inputSchema as InputSchemaShape)?.properties;
 }
@@ -112,7 +115,10 @@ function hasDeclaredInputs(def: ActionDefinition, overlay: OverlayEntry): boolea
  * Empty when neither is present — pair with `hasDeclaredInputs` so callers know
  * the difference between "no inputs" and "inputs unknown".
  */
-function inputFields(def: ActionDefinition, overlay: OverlayEntry): ActionField[] {
+function inputFields(
+  def: ActionDefinition,
+  overlay: OverlayEntry,
+): ActionField[] {
   const schema = def.inputSchema as InputSchemaShape;
   const props = schema?.properties;
   if (props) {

@@ -31,7 +31,7 @@ export function listReferenceableFields(
   }
 
   const index = flow.steps.findIndex((s) => s.id === stepId);
-  
+
   const upstream =
     index >= 0
       ? flow.steps.slice(0, index)

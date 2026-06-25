@@ -11,7 +11,7 @@ Build multi-step action flows by chatting. The agent designs and wires the flow;
 
 A user describes an automation in plain language —
 
-> *"When a claim is submitted, email the applicant a confirmation and notify the team."*
+> _"When a claim is submitted, email the applicant a confirmation and notify the team."_
 
 — and the agent **builds it as a real, runnable flow**: adds the steps, wires outputs into inputs, sets conditions / schedules / assignees, pre-fills forms, and explains what it built. The user opens it in the portal and runs it.
 
@@ -21,12 +21,12 @@ Built on top of the `@ixo/editor` **Qi Flow** engine — the same flows the port
 
 ## The product promise
 
-| | |
-|---|---|
-| **Conversational** | No flow-builder UI gymnastics — describe it, the agent assembles it. |
-| **Real flows** | It writes actual Qi Flow documents the portal runs natively. Not a toy. |
-| **Honest** | The agent reads the *true* live state and reports errors — it never fabricates status. |
-| **Safe by construction** | The agent is a **builder, not a runner**. No keys, no signing, no execution. |
+|                          |                                                                                        |
+| ------------------------ | -------------------------------------------------------------------------------------- |
+| **Conversational**       | No flow-builder UI gymnastics — describe it, the agent assembles it.                   |
+| **Real flows**           | It writes actual Qi Flow documents the portal runs natively. Not a toy.                |
+| **Honest**               | The agent reads the _true_ live state and reports errors — it never fabricates status. |
+| **Safe by construction** | The agent is a **builder, not a runner**. No keys, no signing, no execution.           |
 
 ---
 
@@ -116,14 +116,14 @@ One translator module owns the projection, with exhaustive round-trip tests. A l
 
 ## 27 tools
 
-| Group | Tools |
-|---|---|
-| **Discover** | `list_actions` · `describe_action` · `list_referenceable_fields` · `get_flow_template` |
-| **Inspect** | `read_flow` · `get_step` · `flow_status` · `explain_step` |
-| **Author** | `validate_flow` · `create_flow` · `add_step` · `remove_step` · `reorder_step` · `update_flow_meta` · `connect_steps` · `update_step` |
+| Group           | Tools                                                                                                                                  |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **Discover**    | `list_actions` · `describe_action` · `list_referenceable_fields` · `get_flow_template`                                                 |
+| **Inspect**     | `read_flow` · `get_step` · `flow_status` · `explain_step`                                                                              |
+| **Author**      | `validate_flow` · `create_flow` · `add_step` · `remove_step` · `reorder_step` · `update_flow_meta` · `connect_steps` · `update_step`   |
 | **Tune a step** | `set_step_inputs` · `set_step_conditions` · `set_step_schedule` · `set_step_assignment` · `set_step_confirmation` · `set_step_trigger` |
-| **Forms** | `describe_form` · `fill_form` |
-| **Linkage** | `check_link` · `compatible_actions` · `requirements` |
+| **Forms**       | `describe_form` · `fill_form`                                                                                                          |
+| **Linkage**     | `check_link` · `compatible_actions` · `requirements`                                                                                   |
 
 All loaded on-demand (the agent pulls in the `flows` capability when you ask to build something).
 
@@ -133,7 +133,7 @@ All loaded on-demand (the agent pulls in the `flows` capability when you ask to 
 
 - **Conditions that actually fire.** The compiler writes operators (`eq`/`neq`) the FE evaluator can't read (`equals`/`not_equals`). We author `props.conditions` directly in the evaluator's vocabulary — so a condition the agent sets really gates the step.
 - **Per-block isolation.** Edits are deltas — changing one step never rewrites or drops another step's inputs, conditions, or run state. Proven by test.
-- **Lossless read.** Per-block props live only in the document fragment; the graph map drops them. `read_flow` gathers from *all three* sources so the agent sees the true flow.
+- **Lossless read.** Per-block props live only in the document fragment; the graph map drops them. `read_flow` gathers from _all three_ sources so the agent sees the true flow.
 - **Two yjs versions.** The editor bundles a different yjs than the runtime, so the plugin does all doc work in its own yjs and lets the editor's compiler sync via version-agnostic binary updates.
 - **Room access.** The FE creates the room, **grants the oracle power 50**, and invites it — so the oracle can author but the user stays the owner.
 
@@ -168,6 +168,6 @@ pnpm --filter @ixo/oracle-runtime exec vitest run src/plugins/flows
 cd apps/qiforge-example && pnpm dev
 ```
 
-Then chat: *"Build me a flow that …"* — and watch it assemble.
+Then chat: _"Build me a flow that …"_ — and watch it assemble.
 
 **Questions?**

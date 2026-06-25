@@ -18,7 +18,7 @@ Five commitments:
 
 1. **The agent operates on a friendly, leak-proof model (FlowSpec).** It never sees a block, Y.Doc, `can`/`with`, CAR, CID, or delegation. One translator module owns the projection (§2).
 2. **The agent never executes and never signs.** It writes flow documents and reads their state. All running, PIN entry, and signing happen in the portal, driven by the user. No keys, no `ActionServices`, no auth surface in this plugin.
-3. **Reads gather from every source and parse cleanly.** `read_flow` merges the graph map (structure), the document fragment (per-block inputs/conditions/trigger), and the runtime map (status/errors) into one FlowSpec — so the agent always sees the *true* current flow, not a lossy projection (§4.1).
+3. **Reads gather from every source and parse cleanly.** `read_flow` merges the graph map (structure), the document fragment (per-block inputs/conditions/trigger), and the runtime map (status/errors) into one FlowSpec — so the agent always sees the _true_ current flow, not a lossy projection (§4.1).
 4. **Edits are per-block / delta and lossless.** A mutation touches only its target step; unrelated steps' data is never rewritten or dropped (§4.2). No full-rebuild-from-a-lossy-read.
 5. **The agent sees errors at every layer.** Build/validation errors throw with precise messages at author time; the user's run results (success/failure/awaiting) and the audit history are read back from the shared Y.Doc (§4.3). The agent can diagnose a failed run and propose a fix.
 
@@ -30,7 +30,7 @@ Five commitments:
 
 **The abstraction (binding):** the agent operates exclusively on **FlowSpec** (§2). The plugin owns the **FlowSpec ⇄ BaseUcanFlow translator** — the one place internals could leak, so it is one module with exhaustive round-trip tests. No tool's JSON schema, argument, or output may mention `block`, `blockId`, `props`, `yDoc`, `roomId`, `CAR`, `CID`, `delegation`, `can`, `with`, or `nb`. The agent thinks in **steps, actions, inputs, outputs, conditions, schedules, assignees, forms** — never the compiler's primitives.
 
-**Flow handle:** the agent addresses a flow by an **opaque `flowRef`**. **Internally, `flowRef` *is* the Matrix room id** — opaque to the agent (it must never appear in a tool's prose/output per the leak guard), but the plugin resolves it directly to a room with no lookup table: `flowRef` → roomId is the identity, and every editor call (`readCompiledFlowFromYDoc`, `setupFlowFromBaseUcan`, the provider) takes that roomId. The **default** `flowRef` (when the agent omits it) is the current flow bound to `state.editorRoomId`. `create_flow` returns a fresh `flowRef` (the new room's id, opaque). This keeps resolution trivial and avoids any registry.
+**Flow handle:** the agent addresses a flow by an **opaque `flowRef`**. **Internally, `flowRef` _is_ the Matrix room id** — opaque to the agent (it must never appear in a tool's prose/output per the leak guard), but the plugin resolves it directly to a room with no lookup table: `flowRef` → roomId is the identity, and every editor call (`readCompiledFlowFromYDoc`, `setupFlowFromBaseUcan`, the provider) takes that roomId. The **default** `flowRef` (when the agent omits it) is the current flow bound to `state.editorRoomId`. `create_flow` returns a fresh `flowRef` (the new room's id, opaque). This keeps resolution trivial and avoids any registry.
 
 ---
 
@@ -42,89 +42,110 @@ FlowSpec is the friendly, faithful projection of `BaseUcanFlow` (Appendix A.0 ha
 
 ```ts
 interface FlowSpec {
-  ref?: string;          // opaque flowRef (omitted on create; assigned by the plugin)
+  ref?: string; // opaque flowRef (omitted on create; assigned by the plugin)
   title: string;
   goal?: string;
-  steps: FlowStep[];     // ORDER IS SEMANTIC — implicit sequential ordering (2.3)
+  steps: FlowStep[]; // ORDER IS SEMANTIC — implicit sequential ordering (2.3)
 }
 
 interface FlowStep {
-  id: string;            // stable, human-readable step id (e.g. "load-batches")
-  action: string;        // friendly action name (resolves to a `can` via the registry)
+  id: string; // stable, human-readable step id (e.g. "load-batches")
+  action: string; // friendly action name (resolves to a `can` via the registry)
   title?: string;
   description?: string;
 
-  inputs?: Record<string, unknown>;   // friendly inputs; values may be field refs (2.4)
-  form?: FormAnswers;                  // for human form/survey steps — pre-filled answers (2.5)
+  inputs?: Record<string, unknown>; // friendly inputs; values may be field refs (2.4)
+  form?: FormAnswers; // for human form/survey steps — pre-filled answers (2.5)
 
   // ── wiring / sequencing (see 2.3 for the verified model) ──
-  after?: string[];      // ordering: place this step after these (sequence). Pair with data-refs for a real dependency. NOT an auto-trigger.
-  runWhen?: Condition;   // gate activation on an upstream value — STATIC config props only (see 2.3 caveat)
+  after?: string[]; // ordering: place this step after these (sequence). Pair with data-refs for a real dependency. NOT an auto-trigger.
+  runWhen?: Condition; // gate activation on an upstream value — STATIC config props only (see 2.3 caveat)
   conditions?: Condition[]; // multiple gates (folded into one ConditionRef)
-  onEvent?: { fromStep: string; event: string };  // ADVANCED, opt-in: auto-trigger when an upstream EMITS a named event. Only valid when that upstream's action is event-capable (validated). Most actions are not — see 2.3.
+  onEvent?: { fromStep: string; event: string }; // ADVANCED, opt-in: auto-trigger when an upstream EMITS a named event. Only valid when that upstream's action is event-capable (validated). Most actions are not — see 2.3.
 
   // ── scheduling ──
-  trigger?: 'manual' | 'flow-start';   // explicit trigger override (default 'manual'). Event-triggering is via onEvent.
-  due?: { at?: string; within?: string; afterCommitment?: string };  // ISO date / ISO-8601 duration
+  trigger?: 'manual' | 'flow-start'; // explicit trigger override (default 'manual'). Event-triggering is via onEvent.
+  due?: { at?: string; within?: string; afterCommitment?: string }; // ISO date / ISO-8601 duration
 
   // ── assignment (flow metadata: who is meant to run / is notified) ──
-  assignTo?: string;     // assignee (DID or known alias)
-  commitTo?: string;     // commitment window (ISO-8601 duration)
+  assignTo?: string; // assignee (DID or known alias)
+  commitTo?: string; // commitment window (ISO-8601 duration)
 
   // ── lifecycle hooks (the `on` field) ──
-  on?: Record<string, HookSpec[]>;   // event name → hooks (sendEmail | addLinkedEntity | sendMatrixDM)
+  on?: Record<string, HookSpec[]>; // event name → hooks (sendEmail | addLinkedEntity | sendMatrixDM)
 
   // ── capsule skills attached to this step ──
   skills?: string[];
 
   // ── display metadata for the runner ──
-  requireConfirmation?: boolean;     // hint the portal to force a confirm before this step runs
-  status?: StepStatus;               // READ-ONLY (from runtime; never written by the agent) — see 2.6
+  requireConfirmation?: boolean; // hint the portal to force a confirm before this step runs
+  status?: StepStatus; // READ-ONLY (from runtime; never written by the agent) — see 2.6
 }
 ```
 
 ```ts
 // `is` values map 1:1 onto the FE condition evaluator's operator vocabulary at author time (§7.1):
 // equals | notEquals | greaterThan | lessThan | contains | isEmpty | isNotEmpty.
-interface Condition { fromStep: string; field: string; is: 'equals'|'notEquals'|'greaterThan'|'lessThan'|'contains'|'isEmpty'|'isNotEmpty'; value?: unknown }
-interface HookSpec  { type: 'sendEmail'|'addLinkedEntity'|'sendMatrixDM'; config: Record<string, unknown> }
-type FormAnswers   = Record<string, unknown>;   // keyed by question name (2.5)
+interface Condition {
+  fromStep: string;
+  field: string;
+  is:
+    | 'equals'
+    | 'notEquals'
+    | 'greaterThan'
+    | 'lessThan'
+    | 'contains'
+    | 'isEmpty'
+    | 'isNotEmpty';
+  value?: unknown;
+}
+interface HookSpec {
+  type: 'sendEmail' | 'addLinkedEntity' | 'sendMatrixDM';
+  config: Record<string, unknown>;
+}
+type FormAnswers = Record<string, unknown>; // keyed by question name (2.5)
 // Read-only, derived on read from the runtime map (never written by the agent — §2.6, §4.3):
 interface StepStatus {
-  state: 'idle'|'running'|'completed'|'failed'|'cancelled'|'awaiting_readback';  // stored (runtime.state)
-  error?: { message: string; code?: string; at?: number };  // stored (runtime.error)
-  lastRunAt?: number;        // stored (runtime.executedAt)
-  blockedBy?: string[];      // COMPUTED: upstream step ids that are failed or whose output this step's refs need
-  stale?: boolean;           // COMPUTED: completed but missing expected proof (transactionHash/claimId)
+  state:
+    | 'idle'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'awaiting_readback'; // stored (runtime.state)
+  error?: { message: string; code?: string; at?: number }; // stored (runtime.error)
+  lastRunAt?: number; // stored (runtime.executedAt)
+  blockedBy?: string[]; // COMPUTED: upstream step ids that are failed or whose output this step's refs need
+  stale?: boolean; // COMPUTED: completed but missing expected proof (transactionHash/claimId)
 }
 ```
 
-> **Dropped from the earlier draft (out of scope here):** `authorize`/permission grants and anything UCAN/delegation — those are execution-authorization, which lives in the portal. `assignTo` remains as *flow metadata* (who is meant to act), written into the flow doc; it grants nothing.
+> **Dropped from the earlier draft (out of scope here):** `authorize`/permission grants and anything UCAN/delegation — those are execution-authorization, which lives in the portal. `assignTo` remains as _flow metadata_ (who is meant to act), written into the flow doc; it grants nothing.
 
 ### 2.2 Field-by-field translation contract
 
 The translator (`flow-spec.ts`) maps every FlowSpec field onto the verified `BaseUcanFlow`/`FlowCapability` shape (Appendix A.0). This table **is** the translator's test matrix (§9).
 
-| FlowSpec | BaseUcanFlow target | Notes |
-|---|---|---|
-| `title`, `goal` | `flow.title`, `flow.goal` | direct |
-| `ref` | `flow.flowId` + `meta.flowUri` | opaque |
-| `step.id` | `capability.id` | stable node id |
-| `step.action` | `capability.can` (via `typeToCan`/`getActionByCan`) | friendly name → `can` |
-| `step.title`/`description` | `capability.title`/`description` | direct |
-| `step.inputs` | `capability.nb` | field refs translated (2.4) |
-| `step.form` | runtime `output.form.answers` (schema read from `block.props.surveySchema`) | survey path (2.5, §7.2) — not submitted |
-| `step.after` | **`capabilities[]` ORDER** (the step is placed after the named steps) | sequencing only — **not** a trigger; the real dependency is the data-ref (2.4). See 2.3. |
-| `step.runWhen`/`conditions[]` | `capability.condition` (`ConditionRef`) → compiled `props.conditions` | translator maps the friendly `is` to the **evaluator's operator vocabulary** (§7.1) and writes `props.conditions` directly; gates on **static props only** (2.3 caveat). Multiples folded into one ConditionRef. |
-| `step.onEvent` | `capability.trigger` = `block.event` (`{sourceBlockId, eventName, alias}`) | **advanced**; valid only if the upstream action is `eligibleForEventTrigger` and declares `event` — else `validate_flow` rejects it (2.3). |
-| `step.trigger` | `capability.trigger.type` (`manual`/`flow.start`) | explicit override; default `manual`. |
-| `step.due.*` | `capability.ttl.absoluteDueDate`/`fromEnablement`/`fromCommitment` | ISO-8601 |
-| `step.assignTo` | `capability.actor.authorisedActors` + block `assigneeDid` prop | metadata only |
-| `step.commitTo` | `capability.ttl.fromCommitment` | |
-| `step.on` | block `props.hookedActions` | Appendix A.4 |
-| `step.skills` | block `props.skills` | |
-| `step.requireConfirmation` | overrides action's `defaultRequiresConfirmation` | display hint for the runner |
-| `step.status` | runtime map (read-only) | never written by the agent (2.6) |
+| FlowSpec                      | BaseUcanFlow target                                                         | Notes                                                                                                                                                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`, `goal`               | `flow.title`, `flow.goal`                                                   | direct                                                                                                                                                                                                           |
+| `ref`                         | `flow.flowId` + `meta.flowUri`                                              | opaque                                                                                                                                                                                                           |
+| `step.id`                     | `capability.id`                                                             | stable node id                                                                                                                                                                                                   |
+| `step.action`                 | `capability.can` (via `typeToCan`/`getActionByCan`)                         | friendly name → `can`                                                                                                                                                                                            |
+| `step.title`/`description`    | `capability.title`/`description`                                            | direct                                                                                                                                                                                                           |
+| `step.inputs`                 | `capability.nb`                                                             | field refs translated (2.4)                                                                                                                                                                                      |
+| `step.form`                   | runtime `output.form.answers` (schema read from `block.props.surveySchema`) | survey path (2.5, §7.2) — not submitted                                                                                                                                                                          |
+| `step.after`                  | **`capabilities[]` ORDER** (the step is placed after the named steps)       | sequencing only — **not** a trigger; the real dependency is the data-ref (2.4). See 2.3.                                                                                                                         |
+| `step.runWhen`/`conditions[]` | `capability.condition` (`ConditionRef`) → compiled `props.conditions`       | translator maps the friendly `is` to the **evaluator's operator vocabulary** (§7.1) and writes `props.conditions` directly; gates on **static props only** (2.3 caveat). Multiples folded into one ConditionRef. |
+| `step.onEvent`                | `capability.trigger` = `block.event` (`{sourceBlockId, eventName, alias}`)  | **advanced**; valid only if the upstream action is `eligibleForEventTrigger` and declares `event` — else `validate_flow` rejects it (2.3).                                                                       |
+| `step.trigger`                | `capability.trigger.type` (`manual`/`flow.start`)                           | explicit override; default `manual`.                                                                                                                                                                             |
+| `step.due.*`                  | `capability.ttl.absoluteDueDate`/`fromEnablement`/`fromCommitment`          | ISO-8601                                                                                                                                                                                                         |
+| `step.assignTo`               | `capability.actor.authorisedActors` + block `assigneeDid` prop              | metadata only                                                                                                                                                                                                    |
+| `step.commitTo`               | `capability.ttl.fromCommitment`                                             |                                                                                                                                                                                                                  |
+| `step.on`                     | block `props.hookedActions`                                                 | Appendix A.4                                                                                                                                                                                                     |
+| `step.skills`                 | block `props.skills`                                                        |                                                                                                                                                                                                                  |
+| `step.requireConfirmation`    | overrides action's `defaultRequiresConfirmation`                            | display hint for the runner                                                                                                                                                                                      |
+| `step.status`                 | runtime map (read-only)                                                     | never written by the agent (2.6)                                                                                                                                                                                 |
 
 `parallelGroup`/`phase` (layout hints) are not surfaced in v1. The agent reasons in `after`/`runWhen`.
 
@@ -132,9 +153,9 @@ The translator (`flow-spec.ts`) maps every FlowSpec field onto the verified `Bas
 
 How "step B comes after step A" actually works in this engine (since the user runs the flow):
 
-1. **Order + data-refs is the primary, always-works mechanism.** `capabilities[]` array order *is* the sequence (the only compiled edge kind is `'trigger'`; ordering is implicit). A step that references an upstream's output (`{{A.output.x}}`, 2.4) is **not ready until A has produced that output** — the engine classifies it `Blocked`/missing-inputs until then. So the user steps through A → B, and B's inputs only resolve once A ran. This is exactly what the built-in templates do (e.g. carbon-harvest reads `{{carbon-load.output.harvestableBatches}}`). `step.after` compiles to **ordering** (+ signals the agent to wire the data-ref); it is **not** an auto-trigger.
+1. **Order + data-refs is the primary, always-works mechanism.** `capabilities[]` array order _is_ the sequence (the only compiled edge kind is `'trigger'`; ordering is implicit). A step that references an upstream's output (`{{A.output.x}}`, 2.4) is **not ready until A has produced that output** — the engine classifies it `Blocked`/missing-inputs until then. So the user steps through A → B, and B's inputs only resolve once A ran. This is exactly what the built-in templates do (e.g. carbon-harvest reads `{{carbon-load.output.harvestableBatches}}`). `step.after` compiles to **ordering** (+ signals the agent to wire the data-ref); it is **not** an auto-trigger.
 
-2. **Event auto-triggers (`onEvent`) are an ADVANCED, validated, opt-in feature — and only work for event-capable actions.** A `block.event` trigger requires the upstream action to be `eligibleForEventTrigger: true` AND to declare a named `event`. **Verified: only ~12 of ~55 actions qualify** (e.g. `claim.submit`, `evaluateClaim`, `domain.sign`, `email.send`, `http.request`, calendar/xero, some pod actions). Most actions — including `carbon.loadBatches`, `humanForm`, wallet/oracle/entity actions — **declare no event and are not eligible**, so `block.event` on them **fails to compile** (the editor throws `"not marked eligibleForEventTrigger"`). Therefore `onEvent` is for genuine event-driven patterns ("when this claim is *approved*, run the next step"), not general sequencing. `validate_flow` MUST reject `onEvent` whose `fromStep` action isn't event-capable, with a clear message, and steer the agent to order+data-refs instead.
+2. **Event auto-triggers (`onEvent`) are an ADVANCED, validated, opt-in feature — and only work for event-capable actions.** A `block.event` trigger requires the upstream action to be `eligibleForEventTrigger: true` AND to declare a named `event`. **Verified: only ~12 of ~55 actions qualify** (e.g. `claim.submit`, `evaluateClaim`, `domain.sign`, `email.send`, `http.request`, calendar/xero, some pod actions). Most actions — including `carbon.loadBatches`, `humanForm`, wallet/oracle/entity actions — **declare no event and are not eligible**, so `block.event` on them **fails to compile** (the editor throws `"not marked eligibleForEventTrigger"`). Therefore `onEvent` is for genuine event-driven patterns ("when this claim is _approved_, run the next step"), not general sequencing. `validate_flow` MUST reject `onEvent` whose `fromStep` action isn't event-capable, with a clear message, and steer the agent to order+data-refs instead.
 
 3. **`runWhen`/`conditions` gate on STATIC config props, not runtime output** (§7.4): the FE condition evaluator reads `sourceBlock.props[field]`, not the upstream's runtime output. So conditions can gate on authored configuration, but **cannot** gate on a live result like `evaluate.decision == approved` — that case is the `onEvent` path (an `approved` event) or simply user judgment. The translator authors `props.conditions` in the evaluator's operator vocabulary (§7.1).
 
@@ -164,50 +185,57 @@ Human form/survey steps use **SurveyJS** (Appendix A.2). The agent can **pre-fil
 All tools are contributed via `getRequestTools(rtCtx)` (they need per-request `state.editorRoomId`/`spaceId` + `ctx.user`) and inherit the room-membership guard (§6.1). Every tool's I/O is FlowSpec-shaped and passes the leak guard (§9). **No execution or permission tools exist** — running is the portal's job.
 
 ### 3.1 Discovery
-| Tool | In → Out | Purpose |
-|---|---|---|
-| `list_actions` | `{category?, tag?}` → `[{action, summary, whenToUse, tags}]` | enumerate available actions (driven by §5 manifests) |
-| `describe_action` | `{action}` → `{summary, inputs[], outputs[], events[], hooks[], isForm}` | full friendly spec of one action |
-| `list_referenceable_fields` | `{flowRef, stepId}` → `[{fromStep, field, type}]` | which upstream outputs a step can pipe from (2.4) |
-| `get_flow_template` | `{name}` → `FlowSpec` | a reference flow as FlowSpec (in-plugin starter templates — see §7.4) |
+
+| Tool                        | In → Out                                                                 | Purpose                                                               |
+| --------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `list_actions`              | `{category?, tag?}` → `[{action, summary, whenToUse, tags}]`             | enumerate available actions (driven by §5 manifests)                  |
+| `describe_action`           | `{action}` → `{summary, inputs[], outputs[], events[], hooks[], isForm}` | full friendly spec of one action                                      |
+| `list_referenceable_fields` | `{flowRef, stepId}` → `[{fromStep, field, type}]`                        | which upstream outputs a step can pipe from (2.4)                     |
+| `get_flow_template`         | `{name}` → `FlowSpec`                                                    | a reference flow as FlowSpec (in-plugin starter templates — see §7.4) |
 
 ### 3.2 Linkage (typed wiring checks)
-| Tool | In → Out | Purpose |
-|---|---|---|
-| `check_link` | `{flowRef, fromStep, field, toStep, input}` → `{ok, reason?}` | can this output feed that input? (typed-port check, §5) |
-| `compatible_actions` | `{flowRef, stepId, forInput}` → `[{action, field}]` | which actions produce a value compatible with this input |
-| `requirements` | `{action}` → `{requires[]}` | declarative prerequisites of an action (§5 `requires`) |
+
+| Tool                 | In → Out                                                      | Purpose                                                  |
+| -------------------- | ------------------------------------------------------------- | -------------------------------------------------------- |
+| `check_link`         | `{flowRef, fromStep, field, toStep, input}` → `{ok, reason?}` | can this output feed that input? (typed-port check, §5)  |
+| `compatible_actions` | `{flowRef, stepId, forInput}` → `[{action, field}]`           | which actions produce a value compatible with this input |
+| `requirements`       | `{action}` → `{requires[]}`                                   | declarative prerequisites of an action (§5 `requires`)   |
 
 ### 3.3 Authoring (per-block / delta — §4.2)
-| Tool | In → Out | Purpose |
-|---|---|---|
-| `validate_flow` | `{flow: FlowSpec}` → `{ok, errors[], warnings[]}` | compile-without-write; surfaces the exact compiler errors (§4.3). Never mutates |
-| `create_flow` | `{flow: FlowSpec}` → `{flowRef}` | allocate + compile + write a new flow (§6.5) |
-| `add_step` | `{flowRef, step, position?}` → `{ok}` | add a step (others untouched). `position`: a 0-based index, or `{after: stepId}` / `{before: stepId}`; omitted = append. Implemented via `strategy:'merge'` then `reorder_step` if a non-append position is given. |
-| `update_step` | `{flowRef, stepId, patch: Partial<FlowStep>}` → `{ok}` | convenience: shallow-merge any subset of step fields; routes each field to the same mechanism as its focused mutator (§4.2). The focused `set_step_*` (§3.4) are the canonical per-setting API. |
-| `remove_step` | `{flowRef, stepId}` → `{ok}` | targeted removal (§7.3); rejects if referenced |
-| `reorder_step` | `{flowRef, stepId, toIndex}` → `{ok}` | preserves semantic order (§7.3) |
-| `update_flow_meta` | `{flowRef, title?, goal?}` → `{ok}` | |
-| `connect_steps` | `{flowRef, fromStep, field, toStep, input}` → `{ok}` | wire a field ref (validated by `check_link`) |
+
+| Tool               | In → Out                                               | Purpose                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `validate_flow`    | `{flow: FlowSpec}` → `{ok, errors[], warnings[]}`      | compile-without-write; surfaces the exact compiler errors (§4.3). Never mutates                                                                                                                                    |
+| `create_flow`      | `{flow: FlowSpec}` → `{flowRef}`                       | allocate + compile + write a new flow (§6.5)                                                                                                                                                                       |
+| `add_step`         | `{flowRef, step, position?}` → `{ok}`                  | add a step (others untouched). `position`: a 0-based index, or `{after: stepId}` / `{before: stepId}`; omitted = append. Implemented via `strategy:'merge'` then `reorder_step` if a non-append position is given. |
+| `update_step`      | `{flowRef, stepId, patch: Partial<FlowStep>}` → `{ok}` | convenience: shallow-merge any subset of step fields; routes each field to the same mechanism as its focused mutator (§4.2). The focused `set_step_*` (§3.4) are the canonical per-setting API.                    |
+| `remove_step`      | `{flowRef, stepId}` → `{ok}`                           | targeted removal (§7.3); rejects if referenced                                                                                                                                                                     |
+| `reorder_step`     | `{flowRef, stepId, toIndex}` → `{ok}`                  | preserves semantic order (§7.3)                                                                                                                                                                                    |
+| `update_flow_meta` | `{flowRef, title?, goal?}` → `{ok}`                    |                                                                                                                                                                                                                    |
+| `connect_steps`    | `{flowRef, fromStep, field, toStep, input}` → `{ok}`   | wire a field ref (validated by `check_link`)                                                                                                                                                                       |
 
 ### 3.4 Settings mutators (one focused tool per setting; each per-block — §4.2)
+
 `set_step_inputs`, `set_step_conditions` (static-prop gates, §2.3), `set_step_trigger` (`manual`/`flow-start`), `set_step_sequence` (`after` ordering), `set_step_event` (`onEvent` — validated event-capability, §2.3), `set_step_schedule` (due/within), `set_step_assignment` (assignTo/commitTo), `set_step_hooks` (on), `set_step_skills`, `set_step_confirmation`. Each maps to exactly the §2.2 target and round-trips through `read_flow`.
 
 ### 3.5 Forms (§2.5)
-| Tool | In → Out | Purpose |
-|---|---|---|
-| `describe_form` | `{flowRef, stepId}` → `{questions:[{name, type, choices?, validators?, visibleIf?}]}` | exact fillable schema |
-| `fill_form` | `{flowRef, stepId, answers, merge?}` → `{applied, rejected, validation}` | pre-fill answers; **does not submit** |
+
+| Tool            | In → Out                                                                              | Purpose                               |
+| --------------- | ------------------------------------------------------------------------------------- | ------------------------------------- |
+| `describe_form` | `{flowRef, stepId}` → `{questions:[{name, type, choices?, validators?, visibleIf?}]}` | exact fillable schema                 |
+| `fill_form`     | `{flowRef, stepId, answers, merge?}` → `{applied, rejected, validation}`              | pre-fill answers; **does not submit** |
 
 ### 3.6 Inspect (multi-source read — §4.1)
-| Tool | In → Out | Purpose |
-|---|---|---|
-| `read_flow` | `{flowRef}` → `FlowSpec` (+ `{schemaVersion}`) | full friendly read, gathered from all sources. Each step carries its read-only `status: StepStatus` (§2.1). |
-| `get_step` | `{flowRef, stepId}` → `FlowStep` (incl. `status: StepStatus`) | one step incl. runtime status |
-| `flow_status` | `{flowRef}` → `{ steps: Array<{ id: string } & StepStatus> }` | per-step `StepStatus` (§2.1): `state`/`error`/`lastRunAt` stored, `blockedBy`/`stale` computed (§4.3) |
-| `explain_step` | `{flowRef, stepId}` → `{willDo, inputsResolved, changes?}` | a plain-language "what this step does + the diff it would produce" (uses the action's diff resolver, read-only — Appendix A.7). Helps the agent explain a step to the user before they run it |
+
+| Tool           | In → Out                                                      | Purpose                                                                                                                                                                                       |
+| -------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_flow`    | `{flowRef}` → `FlowSpec` (+ `{schemaVersion}`)                | full friendly read, gathered from all sources. Each step carries its read-only `status: StepStatus` (§2.1).                                                                                   |
+| `get_step`     | `{flowRef, stepId}` → `FlowStep` (incl. `status: StepStatus`) | one step incl. runtime status                                                                                                                                                                 |
+| `flow_status`  | `{flowRef}` → `{ steps: Array<{ id: string } & StepStatus> }` | per-step `StepStatus` (§2.1): `state`/`error`/`lastRunAt` stored, `blockedBy`/`stale` computed (§4.3)                                                                                         |
+| `explain_step` | `{flowRef, stepId}` → `{willDo, inputsResolved, changes?}`    | a plain-language "what this step does + the diff it would produce" (uses the action's diff resolver, read-only — Appendix A.7). Helps the agent explain a step to the user before they run it |
 
 ### 3.7 (Deferred — not v1) Propose-to-user
+
 `propose_step_change({flowRef, stepId, patch, rationale}) → {proposalId}` would write an **AI proposal** (`runtime.proposals[]`, Appendix A.0) the user accepts/rejects in the portal — the safe "suggest, human commits" path for sensitive edits. **Deferred:** it's unconfirmed whether the portal wires the proposal-accept UI, so v1 uses direct per-block mutation. Revisit once the portal side is confirmed (§4.4).
 
 ---
@@ -218,11 +246,11 @@ All tools are contributed via `getRequestTools(rtCtx)` (they need per-request `s
 
 The editor stores a compiled flow in **two places**, and per-block `props` (inputs, conditions, trigger, ttl, icon) live only in one of them. So a single read path is lossy; `read_flow` **gathers from all sources** and assembles the FlowSpec:
 
-| Source | Yields |
-|---|---|
-| `qi.flow.*` maps (`readCompiledFlowFromYDoc`) | structure: node ids, `can`/`with`, order, edges, `actor`, title/description |
-| BlockNote **`document` XmlFragment** block attributes | the per-block `props` the graph map omits — `inputs` (`nb`), `conditions`, `triggerMode`, `ttl*`, `icon` |
-| the **`runtime`** Y.Map (`yDoc.getMap('runtime')`, keyed by **blockId**) — `FlowNodeRuntimeState` | per-step `state`, `error`, `output`, `executedAt`, `readBack`, assignments, proposals |
+| Source                                                                                            | Yields                                                                                                   |
+| ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `qi.flow.*` maps (`readCompiledFlowFromYDoc`)                                                     | structure: node ids, `can`/`with`, order, edges, `actor`, title/description                              |
+| BlockNote **`document` XmlFragment** block attributes                                             | the per-block `props` the graph map omits — `inputs` (`nb`), `conditions`, `triggerMode`, `ttl*`, `icon` |
+| the **`runtime`** Y.Map (`yDoc.getMap('runtime')`, keyed by **blockId**) — `FlowNodeRuntimeState` | per-step `state`, `error`, `output`, `executedAt`, `readBack`, assignments, proposals                    |
 
 The translator merges these into one FlowSpec entirely in the plugin — **no editor change** (§7.1). The only coupling is that the fragment-parsing branch reads BlockNote's `blockContainer>blockContent` shape; that's contained in our code and re-verified on each editor bump (Appendix B).
 
@@ -251,6 +279,7 @@ Plus two derived signals `flow_status` computes: **(a) blocker classification** 
 **Access model (pull-based).** All of the above live in the **same flow-room Y.Doc the plugin connects to** — the portal writes run state over Matrix CRDT, the plugin reads it. It is **pull-based per tool call**: on a turn that calls `flow_status`, the plugin connects (`MatrixProviderManager` → sync → read → dispose) and returns the latest synced state. There is no background push into the conversation; the agent sees errors whenever it checks (e.g. user asks "did it work?"). Proactive notify-on-failure (subscribe to room events) is a possible later enhancement, out of v1.
 
 Example:
+
 ```jsonc
 flow_status("flow_abc") → { steps: [
   { id: "load-batches", state: "completed", lastRunAt: "…" },
@@ -261,7 +290,7 @@ flow_status("flow_abc") → { steps: [
 
 ### 4.4 Propose-to-user (optional safe-edit path)
 
-The editor has a native **AI-proposal** mechanism: `FlowNodeRuntimeState.proposals[]` (`mode:'inputs_patch'|'output_patch'`, `rationale`, `status:'open'|'accepted'|'rejected'`, `acceptanceInvocationCid`). For sensitive changes, instead of mutating directly the agent can `propose_step_change` (§3.7) — writing a proposal the user accepts/rejects in the portal. Default authoring is direct mutation (the agent *is* the builder); proposals are the opt-in "suggest, human commits" path. This is the editor's own pattern for agent-builds/human-decides, so we reuse it rather than inventing one.
+The editor has a native **AI-proposal** mechanism: `FlowNodeRuntimeState.proposals[]` (`mode:'inputs_patch'|'output_patch'`, `rationale`, `status:'open'|'accepted'|'rejected'`, `acceptanceInvocationCid`). For sensitive changes, instead of mutating directly the agent can `propose_step_change` (§3.7) — writing a proposal the user accepts/rejects in the portal. Default authoring is direct mutation (the agent _is_ the builder); proposals are the opt-in "suggest, human commits" path. This is the editor's own pattern for agent-builds/human-decides, so we reuse it rather than inventing one.
 
 ---
 
@@ -269,7 +298,7 @@ The editor has a native **AI-proposal** mechanism: `FlowNodeRuntimeState.proposa
 
 Discovery/linkage quality depends on richer metadata than the bare action registry provides. We add it as a **plugin-side overlay** (a map keyed by action `type`/`can`), merged with `getAllActions()` at runtime — **no editor change** (§7.5). Three pieces of metadata:
 
-1. **Manifest** — `{ summary, whenToUse: string[], whenNotToUse?: string[], tags: string[] }`. Drives `list_actions`/`describe_action`. No embeddings — the catalog is dozens to low-hundreds and static; manifests + tags give better precision at this size. (Revisit only for a large free-text flow/template *library*; manifests are the embedding input regardless.)
+1. **Manifest** — `{ summary, whenToUse: string[], whenNotToUse?: string[], tags: string[] }`. Drives `list_actions`/`describe_action`. No embeddings — the catalog is dozens to low-hundreds and static; manifests + tags give better precision at this size. (Revisit only for a large free-text flow/template _library_; manifests are the embedding input regardless.)
 2. **Typed ports** — semantic `portType` on inputs/outputs (`did`, `chainAddress`, `transactionHash`, `claimCollectionId`, …). Powers `check_link`/`compatible_actions`. Open-string vocabulary with a documented core set; unknown → primitive match + warning.
 3. **Declarative `requires`** — prerequisites (e.g. "needs a funded wallet"). Powers `requirements` + pre-write validation.
 
@@ -286,9 +315,10 @@ Additive and backward-compatible; actions without them fall back to primitive ma
 ```ts
 manifest = {
   title: 'Flows',
-  summary: 'Build, wire, and edit multi-step action flows, and fill their forms. Use whenever the user '
-         + 'wants to create an automation/workflow, change a flow’s steps or settings, fill a form, or '
-         + 'check a flow’s status. The user runs the flow in the portal.',
+  summary:
+    'Build, wire, and edit multi-step action flows, and fill their forms. Use whenever the user ' +
+    'wants to create an automation/workflow, change a flow’s steps or settings, fill a form, or ' +
+    'check a flow’s status. The user runs the flow in the portal.',
   whenToUse: [
     'User wants to build a workflow/automation/flow from steps or actions.',
     'User wants to change a step’s inputs, condition, trigger, schedule, or assignee.',
@@ -321,7 +351,7 @@ Tools via `getRequestTools(rtCtx)`. **Room-membership guard** on every read/muta
 
 ### 6.3 Why this is safe by construction
 
-The plugin's entire capability is: connect to a Matrix room the user is in, read/write that room's flow document, and read its runtime state. It holds no signing key, calls no chain, and triggers **no chain/signing side effect**. Its only allocation is creating a flow *room* — and even that is delegated to the user's FE over WS (§6.5), so the oracle never needs elevated Matrix rights. The worst-case blast radius of a bug is a malformed flow document in a room the user already belongs to — which the user sees and can fix or discard before running. There is no auth model to get wrong because there is nothing to authorize.
+The plugin's entire capability is: connect to a Matrix room the user is in, read/write that room's flow document, and read its runtime state. It holds no signing key, calls no chain, and triggers **no chain/signing side effect**. Its only allocation is creating a flow _room_ — and even that is delegated to the user's FE over WS (§6.5), so the oracle never needs elevated Matrix rights. The worst-case blast radius of a bug is a malformed flow document in a room the user already belongs to — which the user sees and can fix or discard before running. There is no auth model to get wrong because there is nothing to authorize.
 
 ### 6.4 Config & dependencies
 
@@ -361,42 +391,42 @@ Everything the plugin does is reads/writes against the flow room's Y.Doc. Three 
 
 **Y.Doc layout** — the top-level keys in a flow room's doc; the schema the custom code depends on (re-verify on bump, Appendix B):
 
-| Y.Doc key | Type | Holds | Plugin |
-|---|---|---|---|
-| `root` | Map | `schema_version`, `@context`, `_type` | read |
-| `qi.flow.meta` | Map | flowId, title, goal, version, flowOwnerDid, flowUri | read (editor fn) |
-| `qi.flow.nodes` | Map\<nodeId,Map\> | structure (`can`/`with`/`actor`/title…) — **no props** | read (editor fn) |
-| `qi.flow.edges` | Map | trigger edges | read (editor fn) |
-| `qi.flow.order` | Array\<nodeId\> | sequence | read; **write** (reorder) |
-| `qi.flow.blockIndex` | Map | nodeId→blockId | read |
-| **`document`** | XmlFragment | BlockNote doc: `blockGroup > blockContainer[id] > blockContent[…props as attrs]` — **per-block props live here** | **read** (props) + **write** (direct edits/remove/reorder) |
-| **`runtime`** | Map\<blockId, FlowNodeRuntimeState\> | `state`/`output`/`error`/`output.form.answers` | **read** (status) + **write** (form answers) |
-| `auditTrail` | Map\<blockId, RunRecord[]\> | run history | read |
-| `invocations` / `pendingInvocations` / `agentOutbox` / `agentLeases` | Map | execution machinery | **ignored** (portal/runtime) |
+| Y.Doc key                                                            | Type                                 | Holds                                                                                                            | Plugin                                                     |
+| -------------------------------------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `root`                                                               | Map                                  | `schema_version`, `@context`, `_type`                                                                            | read                                                       |
+| `qi.flow.meta`                                                       | Map                                  | flowId, title, goal, version, flowOwnerDid, flowUri                                                              | read (editor fn)                                           |
+| `qi.flow.nodes`                                                      | Map\<nodeId,Map\>                    | structure (`can`/`with`/`actor`/title…) — **no props**                                                           | read (editor fn)                                           |
+| `qi.flow.edges`                                                      | Map                                  | trigger edges                                                                                                    | read (editor fn)                                           |
+| `qi.flow.order`                                                      | Array\<nodeId\>                      | sequence                                                                                                         | read; **write** (reorder)                                  |
+| `qi.flow.blockIndex`                                                 | Map                                  | nodeId→blockId                                                                                                   | read                                                       |
+| **`document`**                                                       | XmlFragment                          | BlockNote doc: `blockGroup > blockContainer[id] > blockContent[…props as attrs]` — **per-block props live here** | **read** (props) + **write** (direct edits/remove/reorder) |
+| **`runtime`**                                                        | Map\<blockId, FlowNodeRuntimeState\> | `state`/`output`/`error`/`output.form.answers`                                                                   | **read** (status) + **write** (form answers)               |
+| `auditTrail`                                                         | Map\<blockId, RunRecord[]\>          | run history                                                                                                      | read                                                       |
+| `invocations` / `pendingInvocations` / `agentOutbox` / `agentLeases` | Map                                  | execution machinery                                                                                              | **ignored** (portal/runtime)                               |
 
 `runtime` and `auditTrail` are **top-level** maps (`yDoc.getMap('runtime')` / `getMap('auditTrail')`), not under `qi.flow.*`; `runtime` is keyed by **blockId** (not nodeId — `initializeRuntime` keys on `blockIndex[nodeId]`). The doc also contains maps the plugin **ignores** (`invocations`, `pendingInvocations`, `agentOutbox`, `agentLeases`, `xeroWorkItems`, `xeroConnection`, `delegations`, `migration`) — all execution/integration machinery owned by the portal/runtime.
 
 **Per-operation split:**
 
-| Plugin op | Editor tooling | Custom code |
-|---|---|---|
-| connect → Y.Doc | `MatrixProviderManager` (editor *plugin* reuse) | — |
-| `create_flow` | `setupFlowFromBaseUcan(full)` | translator; room created by the FE via `callBrowserTool('create_flow_room')` over WS (§6.5) |
-| `validate_flow` | `compileBaseUcanFlow` (catch throws) | translator; friendly errors |
-| `read_flow`/`get_step` | `readCompiledFlowFromYDoc` (structure) | parse fragment for props + read `runtime` + decode conditions → FlowSpec |
-| `flow_status` | — | read `runtime` + `auditTrail`; classify |
-| `add_step` | `setupFlowFromBaseUcan(merge)` | translator (delta cap) |
-| `set_step_*` **value** (inputs/conditions/schedule/assignee/hooks/skills/title/icon/trigger) | — | direct `blockContent` attribute write (in-plugin replica of `replaceBlockInFragment`); translator. Conditions written in the evaluator's operator vocabulary (§7.1) |
-| `set_step_sequence` (`after`) | — | reorder `qi.flow.order` / set array position (ordering only, §2.3) |
-| `set_step_event` (`onEvent`) **(edges)** | `setupFlowFromBaseUcan(patch)` (synthesizes trigger edges) | translator; `validate_flow` first checks the source action is event-capable (§2.3) |
-| `connect_steps` | (= set inputs) | ref build + `check_link` |
-| `remove_step` | `removeBlockFromFragment` (exported, §7.3) | ref-guard; delete from `qi.flow.nodes`/`blockIndex`/`order`/`edges`; delete `runtime` entry |
-| `reorder_step` | — | rewrite `qi.flow.order`; reorder `blockGroup` children |
-| `list_actions`/`describe_action` | `getAllActions`/`getActionByCan` | metadata overlay merge |
-| `check_link`/`compatible_actions`/`requirements` | `getAllActions` + output schemas | port-type matching (overlay) |
-| `describe_form` | — | read `block.props.surveySchema`; flatten SurveyJS |
-| `fill_form` | — *(opt: SurveyJS `SurveyModel` for validation — 3rd-party, not editor)* | write `runtime[blockId].output.form.answers` |
-| `get_flow_template` | *(opt)* `createOracleInitFlowTemplate` + `typeToCan` | in-plugin FlowSpec templates (preferred) |
+| Plugin op                                                                                    | Editor tooling                                                           | Custom code                                                                                                                                                         |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| connect → Y.Doc                                                                              | `MatrixProviderManager` (editor _plugin_ reuse)                          | —                                                                                                                                                                   |
+| `create_flow`                                                                                | `setupFlowFromBaseUcan(full)`                                            | translator; room created by the FE via `callBrowserTool('create_flow_room')` over WS (§6.5)                                                                         |
+| `validate_flow`                                                                              | `compileBaseUcanFlow` (catch throws)                                     | translator; friendly errors                                                                                                                                         |
+| `read_flow`/`get_step`                                                                       | `readCompiledFlowFromYDoc` (structure)                                   | parse fragment for props + read `runtime` + decode conditions → FlowSpec                                                                                            |
+| `flow_status`                                                                                | —                                                                        | read `runtime` + `auditTrail`; classify                                                                                                                             |
+| `add_step`                                                                                   | `setupFlowFromBaseUcan(merge)`                                           | translator (delta cap)                                                                                                                                              |
+| `set_step_*` **value** (inputs/conditions/schedule/assignee/hooks/skills/title/icon/trigger) | —                                                                        | direct `blockContent` attribute write (in-plugin replica of `replaceBlockInFragment`); translator. Conditions written in the evaluator's operator vocabulary (§7.1) |
+| `set_step_sequence` (`after`)                                                                | —                                                                        | reorder `qi.flow.order` / set array position (ordering only, §2.3)                                                                                                  |
+| `set_step_event` (`onEvent`) **(edges)**                                                     | `setupFlowFromBaseUcan(patch)` (synthesizes trigger edges)               | translator; `validate_flow` first checks the source action is event-capable (§2.3)                                                                                  |
+| `connect_steps`                                                                              | (= set inputs)                                                           | ref build + `check_link`                                                                                                                                            |
+| `remove_step`                                                                                | `removeBlockFromFragment` (exported, §7.3)                               | ref-guard; delete from `qi.flow.nodes`/`blockIndex`/`order`/`edges`; delete `runtime` entry                                                                         |
+| `reorder_step`                                                                               | —                                                                        | rewrite `qi.flow.order`; reorder `blockGroup` children                                                                                                              |
+| `list_actions`/`describe_action`                                                             | `getAllActions`/`getActionByCan`                                         | metadata overlay merge                                                                                                                                              |
+| `check_link`/`compatible_actions`/`requirements`                                             | `getAllActions` + output schemas                                         | port-type matching (overlay)                                                                                                                                        |
+| `describe_form`                                                                              | —                                                                        | read `block.props.surveySchema`; flatten SurveyJS                                                                                                                   |
+| `fill_form`                                                                                  | — _(opt: SurveyJS `SurveyModel` for validation — 3rd-party, not editor)_ | write `runtime[blockId].output.form.answers`                                                                                                                        |
+| `get_flow_template`                                                                          | _(opt)_ `createOracleInitFlowTemplate` + `typeToCan`                     | in-plugin FlowSpec templates (preferred)                                                                                                                            |
 
 **Principle:** anything that **compiles or writes the canonical flow graph** goes through editor tooling — never reimplemented (block ids, edges, ref-coverage, cycle detection are the editor's tested job). Custom yjs is confined to **reads the editor doesn't expose** + **two structural ops** (remove/reorder) + the **form-answer write** — simple map/fragment manipulation against the layout above. Translator/overlay/templates are pure logic. The one coupling risk is the Y.Doc layout + the `blockContainer>blockContent` shape; the `getAllActions()` snapshot canary + round-trip tests catch drift (Appendix B).
 
@@ -412,15 +442,15 @@ The capability table's "Editor change" column below reads **none** or **export**
 
 **Capability → in-plugin mechanism** (verified internals + detail in 7.1–7.5):
 
-| Capability | In-plugin mechanism | Editor change |
-|---|---|---|
-| Read a flow with **all** props | multi-source CRDT read: `readCompiledFlowFromYDoc` (structure) + parse the `document` XmlFragment (per-block props) + the runtime map (status) → FlowSpec | none |
-| Add / update / wire a step | `setupFlowFromBaseUcan` `merge`/`patch` with a single-capability delta; or a direct prop write on the block's fragment element | none |
-| Value-only prop edit | direct write of the block's `blockContent` attribute in the Y.XmlFragment (preserves runtime) | none |
-| **Remove / reorder** a step | **export** + call the editor's fragment helpers (`removeBlockFromFragment`/`replaceBlockInFragment`) + `qi.flow.*` map cleanup; or replicate in-plugin if not exported | export (preferred) or none |
-| Fill a form | read schema from `block.props.surveySchema`; write answers to the runtime map at `output.form.answers` | none |
-| Templates | ship starter templates as FlowSpec in the plugin, or convert the exported legacy factories in-plugin | none |
-| Action discovery/linkage metadata | plugin-side metadata **overlay** keyed by action `type`/`can`, merged with `getAllActions()` | none |
+| Capability                        | In-plugin mechanism                                                                                                                                                    | Editor change              |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| Read a flow with **all** props    | multi-source CRDT read: `readCompiledFlowFromYDoc` (structure) + parse the `document` XmlFragment (per-block props) + the runtime map (status) → FlowSpec              | none                       |
+| Add / update / wire a step        | `setupFlowFromBaseUcan` `merge`/`patch` with a single-capability delta; or a direct prop write on the block's fragment element                                         | none                       |
+| Value-only prop edit              | direct write of the block's `blockContent` attribute in the Y.XmlFragment (preserves runtime)                                                                          | none                       |
+| **Remove / reorder** a step       | **export** + call the editor's fragment helpers (`removeBlockFromFragment`/`replaceBlockInFragment`) + `qi.flow.*` map cleanup; or replicate in-plugin if not exported | export (preferred) or none |
+| Fill a form                       | read schema from `block.props.surveySchema`; write answers to the runtime map at `output.form.answers`                                                                 | none                       |
+| Templates                         | ship starter templates as FlowSpec in the plugin, or convert the exported legacy factories in-plugin                                                                   | none                       |
+| Action discovery/linkage metadata | plugin-side metadata **overlay** keyed by action `type`/`can`, merged with `getAllActions()`                                                                           | none                       |
 
 > **Out of scope entirely** (execution-only): `ucanRequired`, `dryRun`, UCAN/invocation exports.
 
@@ -440,11 +470,13 @@ The subsections below keep the **verified editor internals** (so the implementer
 **Why:** per-block `props` (`inputs`/`nb`, `conditions`, `triggerMode`, `ttl*`, `icon`) are the data the agent edits. The editor's own read drops them, so the plugin assembles the read itself.
 
 **Verified internals:**
+
 - The compiler writes every prop onto both the block and node (`compiler.ts:191–222`): `props.conditions = compileCondition(...)` (JSON string, shape below); `props.triggerMode = cap.trigger?.type || 'manual'`.
 - `hydrate.ts` `createYMapFromNode` (173–186) **omits `props`** from the `qi.flow.nodes` Y.Map → `readCompiledFlowFromYDoc` returns empty `props`.
 - `documentFragment.ts` `createBlockContainer` (108–125) **persists every prop as an attribute on the inner `blockContent` XML element** of the `document` XmlFragment — the authoritative prop store, for old and new flows alike.
 
 **In-plugin read assembler (no editor change):**
+
 1. `readCompiledFlowFromYDoc(yDoc)` → structure (nodes/order/edges/`can`/`with`/`actor`). Empty `props` is expected.
 2. Read `yDoc.getXmlFragment('document')` directly via yjs: walk the single `blockGroup`; for each `blockContainer` read its `id` attr + its child content element's attributes → that block's real props (`inputs`/`conditions`/`triggerMode`/`ttl*`/`icon`). Skip the container's `textColor`/`backgroundColor`. Map `blockId→nodeId` via `CompiledFlow.blockIndex`.
 3. Read the runtime map (`FlowNodeRuntimeState`) for per-step `state`/`error`/`output`.
@@ -460,7 +492,7 @@ The subsections below keep the **verified editor internals** (so the implementer
 
 **Tradeoff:** step 2 couples to BlockNote's `blockContainer>blockContent` shape — contained in our code, re-verified on each editor bump (Appendix B). No editor change.
 
-**⚠ Condition operator mapping (write side — verified gotcha).** `compileBaseUcanFlow` writes `ConditionRef.operator` (`eq`/`neq`/`gt`/`lt`/…) **verbatim** into `props.conditions`, but the FE evaluator (`conditionEvaluator.ts:14`) only understands `equals`/`not_equals`/`greater_than`/`less_than`/`contains`/`is_empty`/`is_not_empty`, and **no normalizer maps between them** (`conditionNormalizer.ts` only inverts effect *actions*). So a condition authored through the compiler's `cap.condition` path **never evaluates** (the evaluator hits `default: passes=false`). Therefore the plugin **authors `props.conditions` directly** (the §4.2 value-write path), building the `BlockCondition` JSON itself with the evaluator's operator names — mapping the friendly `Condition.is` (`equals`/`notEquals`/`greaterThan`/`lessThan`/`contains`/`isEmpty`/`isNotEmpty`, §2.1) → the evaluator's exact strings (`equals`/`not_equals`/`greater_than`/`less_than`/`contains`/`is_empty`/`is_not_empty`). On read (step 4 above), reverse the same mapping. Do **not** route conditions through `setupFlowFromBaseUcan`/`cap.condition`.
+**⚠ Condition operator mapping (write side — verified gotcha).** `compileBaseUcanFlow` writes `ConditionRef.operator` (`eq`/`neq`/`gt`/`lt`/…) **verbatim** into `props.conditions`, but the FE evaluator (`conditionEvaluator.ts:14`) only understands `equals`/`not_equals`/`greater_than`/`less_than`/`contains`/`is_empty`/`is_not_empty`, and **no normalizer maps between them** (`conditionNormalizer.ts` only inverts effect _actions_). So a condition authored through the compiler's `cap.condition` path **never evaluates** (the evaluator hits `default: passes=false`). Therefore the plugin **authors `props.conditions` directly** (the §4.2 value-write path), building the `BlockCondition` JSON itself with the evaluator's operator names — mapping the friendly `Condition.is` (`equals`/`notEquals`/`greaterThan`/`lessThan`/`contains`/`isEmpty`/`isNotEmpty`, §2.1) → the evaluator's exact strings (`equals`/`not_equals`/`greater_than`/`less_than`/`contains`/`is_empty`/`is_not_empty`). On read (step 4 above), reverse the same mapping. Do **not** route conditions through `setupFlowFromBaseUcan`/`cap.condition`.
 
 **Acceptance:** (a) author a flow with `nb` + a `ttl` + a static-prop `runWhen` via the plugin, write, re-read → FlowSpec equals input; (b) a condition authored via the plugin produces `props.conditions` whose operator is in the evaluator's vocabulary (so it would actually evaluate). Plugin tests.
 
@@ -471,10 +503,12 @@ The subsections below keep the **verified editor internals** (so the implementer
 **Why:** `describe_form`/`fill_form` need to read a form step's questions and pre-fill answers server-side.
 
 **Verified internals (`mantine/blocks/form/flow/FormPanel.tsx`):**
+
 - **Schema** is `block.props.surveySchema` (JSON-stringified SurveyJS).
-- **Answers persist in the RUNTIME map**, not block props: `updateRuntime(blockId, { output: { form: { answers: <JSON string> } } })` (118–120); the panel renders pre-fills from `runtime.output?.form?.answers` (123–129). Survey *complete* additionally sets `state:'completed'` + `executedAt`.
+- **Answers persist in the RUNTIME map**, not block props: `updateRuntime(blockId, { output: { form: { answers: <JSON string> } } })` (118–120); the panel renders pre-fills from `runtime.output?.form?.answers` (123–129). Survey _complete_ additionally sets `state:'completed'` + `executedAt`.
 
 **In-plugin (no editor change):**
+
 - `describe_form` reads `block.props.surveySchema`, flattens `pages[].elements[]` (incl. nested `panel`/`paneldynamic`), surfaces each choice question's **underlying `value`s** + validators + `visibleIf`.
 - `fill_form` validates answers against the schema (choice questions accept only declared `value`s; respect `isRequired`/`visibleIf` — optionally run SurveyJS `SurveyModel` headless in Node for validation), then writes them to the block's **runtime entry** at `output.form.answers` (JSON-stringified `Record<questionName,value>`). **Never** set `state:'completed'` — that's submission, which the user does. Matches the `humanForm` output shape (`{ form: { answers }, answers }`).
 
@@ -487,6 +521,7 @@ The subsections below keep the **verified editor internals** (so the implementer
 **Why:** `setupFlowFromBaseUcan` `patch`/`merge` cover add + update without disturbing siblings, but neither removes nor reorders a single step — and a `full` rebuild resets runtime. The fragment helpers (`removeBlockFromFragment`/`replaceBlockInFragment`/`applyMergeResultToFragment`) exist in `lib/flowCompiler/documentFragment.ts` but are **not exported** from `core/index.ts`.
 
 **Preferred: add the export, then orchestrate in-plugin.** Since additive exports are allowed (§7 intro), the cleanest, least-brittle path is to **export the fragment helpers** from `@ixo/editor/core` (a one-line re-export, no logic change) — or add a thin `removeFlowNode(yDoc, nodeId)` / `reorderFlowNodes(yDoc, order)` that does maps + fragment atomically. The plugin then composes them in one `transact()`:
+
 - **remove:** guard for references (any other node's `trigger.sourceBlockId`/`sources[]`, `condition.sourceBlockId`, or a `{{node.output.*}}` ref in `props.inputs`) → return `{ok:false, error:{code:'referenced'}}` listing the referrers (do not orphan refs). Then `removeBlockFromFragment(fragment, blockId)` + delete from `qi.flow.nodes`/`blockIndex`, drop the id from `qi.flow.order`, delete `qi.flow.edges` touching the node, delete its `runtime` entry. **Siblings untouched.**
 - **reorder:** validate the input is a permutation of `qi.flow.order`; rewrite `qi.flow.order`; reorder the `blockGroup` children to match. Maps/edges/runtime unchanged. (Sequence is display-only; `block.event` triggers are id-based, unaffected.)
 
@@ -503,10 +538,11 @@ The subsections below keep the **verified editor internals** (so the implementer
 **✅ `activationCondition` is vestigial** — grep shows it appears **only in the template files**, never evaluated in `core` or `mantine` at 5.31.0. The real dependency is the **data ref** (`{{carbon-load.output.harvestableBatches}}`); live gating uses data-ref availability + compiled `props.conditions`.
 
 **In-plugin (no editor change):** either
+
 - **(a, recommended)** author a handful of good starter flows **directly as FlowSpec in the plugin** — zero editor dependency, cleanest; or
 - **(b)** convert the legacy factories in-plugin: `props.actionType → action` (via `typeToCan`/`getActionByCan`), `JSON.parse(props.inputs) → inputs` (keep `{{…}}` refs), title/description/icon across, **drop `activationCondition`**. Note: only `createOracleInitFlowTemplate` (+ `oracleInitSurveySchema`) is exported from `core/index.ts`; `createCarbonHarvestFlowTemplate`/`createEntityTransferFlowTemplate` are **not** exported — which is another reason to prefer (a).
 
-> **Caveat for `runWhen`/`conditions` (§2.1):** `conditionEvaluator.ts:14` evaluates against `sourceBlock.props[rule.property]` — the source's **static props**, not runtime output. So a `runWhen` gating on an upstream's *runtime output* isn't honored by the current FE evaluator. Gating on static config props works today; runtime-output gating would need an editor change we are **not** making — so v1 scopes `runWhen`/`conditions` to static props and the agent leans on data-refs + `after` for sequencing.
+> **Caveat for `runWhen`/`conditions` (§2.1):** `conditionEvaluator.ts:14` evaluates against `sourceBlock.props[rule.property]` — the source's **static props**, not runtime output. So a `runWhen` gating on an upstream's _runtime output_ isn't honored by the current FE evaluator. Gating on static config props works today; runtime-output gating would need an editor change we are **not** making — so v1 scopes `runWhen`/`conditions` to static props and the agent leans on data-refs + `after` for sequencing.
 
 **Acceptance:** `get_flow_template` returns a valid FlowSpec that `create_flow` accepts and `compileBaseUcanFlow` compiles.
 
@@ -517,12 +553,14 @@ The subsections below keep the **verified editor internals** (so the implementer
 **Why:** lift `list_actions`/`describe_action` and `check_link`/`compatible_actions` from raw action types to well-described, typed capabilities — **without** editing `ActionDefinition`.
 
 **In-plugin (no editor change):** maintain a **metadata overlay** in the plugin — a map keyed by action `type` (or `can`) →
+
 ```ts
 { summary: string; whenToUse?: string[]; whenNotToUse?: string[]; tags?: string[];
   inputPorts?: { path: string; portType: string; required?: boolean }[];
   outputPorts?: { path: string; portType: string }[];
   requires?: { kind: string; description: string }[] }
 ```
+
 **Where it lives & seeding:** a committed module in the plugin (`action-metadata.ts`) — `const ACTION_METADATA: Record<string /*action type or can*/, OverlayEntry>`. One entry per action, authored by the maintainer, seeded against the committed `getAllActions()` snapshot (§7.0) so it stays aligned. `list_actions`/`describe_action` merge per action — `{ ...actionDef, ...ACTION_METADATA[action.type] }` (shallow); `check_link`/`compatible_actions` use the overlay's `inputPorts`/`outputPorts`, falling back to the editor's primitive `OutputSchemaField.type` + a warning when an action has no overlay entry. **Port-type vocabulary:** open string with a documented core set (`did`, `chainAddress`, `transactionHash`, `claimCollectionId`, `entityDid`, `roomId`, …).
 
 **Drift:** when the editor adds an action our overlay doesn't cover, discovery falls back to the raw `type`/`name` — and the `getAllActions()` snapshot canary (7.0) trips so we add metadata. No editor change.
@@ -601,6 +639,7 @@ Verified against `@ixo/editor@5.31.0`. Re-verify on each bump (Appendix B).
 ### A.0 Verified API surface (the parts this plugin uses)
 
 **Flow compiler / read (`@ixo/editor/core`):**
+
 - `compileBaseUcanFlow(plan: BaseUcanFlow, registry: { getActionByCan }): CompiledFlow` — `lib/flowCompiler/compiler.ts`. **Throws** on: non-array/empty capabilities, empty/duplicate id, unknown `can`, trigger→unknown source/event, `block.event` missing source/event, `block.event.all` on non-`eligibleForEventTrigger` action, barrier source missing alias, listener ref→unknown block, condition→unknown source, **trigger cycle** (readable path).
 - `setupFlowFromBaseUcan({ plan, roomId, matrixClient, creatorDid, docId?, strategy? }): Promise<{ compiled, roomId, flowId }>` — `strategy: 'full'|'merge'|'patch'`. `full` rebuilds; `merge` adds new ids; `patch` overwrites colliding ids, keeps the rest. `applyMergeResultToFragment` only replaces changed blocks (others' fragment props survive).
 - `readCompiledFlowFromYDoc(yDoc): CompiledFlow | null` — reads `qi.flow.*` maps. ⚠ node map omits `props` (read props from the fragment instead — §4.1).
@@ -615,24 +654,30 @@ Verified against `@ixo/editor@5.31.0`. Re-verify on each bump (Appendix B).
 **Runtime state (read-only for the plugin) — `types/authorization.ts` `FlowNodeRuntimeState`:** `state?: 'idle'|'running'|'completed'|'failed'|'cancelled'|'awaiting_readback'`, `output?`, `executedByDid?`, `executedAt?`, `enabledAt?`, `readBack?`, `invocations?`/`lastInvocationCid?`, `assignments?[]`, `commitments?[]`, **`proposals?[]`** (`mode:'inputs_patch'|'output_patch'`, `rationale`, `status:'open'|'accepted'|'rejected'`, `acceptanceInvocationCid`), `pendingPayload?`, **`error?:{message,code?,at,data?}`**, `cache?`, `userInputs?`, legacy `claimId?`/`evaluationStatus?`. Stored in the runtime Y.Map (`lib/flowEngine/runtime.ts` `FlowRuntimeStateManager.get/update`). Run history: `RunRecordDetails` (audit `block.run`).
 
 ### A.1 Block palette
-Compiler emits one generic `action` block per capability (`COMPILED_BLOCK_TYPE='action'`); the plugin authors everything executable as a `FlowStep`. Specialized blocks (`claim`/`bid`/`evaluator`/`proposal`/`governanceGroup`/`domainCreatorSign`/`notify`/`email`/`apiRequest`) compile to the same action types. `checkbox`/`form`/`domainCreator` → human-form steps. Display/data blocks (`list`, `overview`, `visualization`, `flowLink`, `secrets`, `skills`, …) are document content (editor-plugin territory); the flows plugin may *read* them but doesn't author them as steps.
+
+Compiler emits one generic `action` block per capability (`COMPILED_BLOCK_TYPE='action'`); the plugin authors everything executable as a `FlowStep`. Specialized blocks (`claim`/`bid`/`evaluator`/`proposal`/`governanceGroup`/`domainCreatorSign`/`notify`/`email`/`apiRequest`) compile to the same action types. `checkbox`/`form`/`domainCreator` → human-form steps. Display/data blocks (`list`, `overview`, `visualization`, `flowLink`, `secrets`, `skills`, …) are document content (editor-plugin territory); the flows plugin may _read_ them but doesn't author them as steps.
 
 ### A.2 Survey / form model
+
 SurveyJS. A form step's schema is SurveyJS JSON (`{ title?, pages?[], elements?:[{name,type,title?,isRequired?,visibleIf?,inputType?,choices?,choicesByUrl?}] }`); `answers` is a flat `Record<name,value>` (dropdowns need the underlying `value`). Two surfaces: **block-state forms** (answers persist to `block.props`/runtime — the durable authoring path the plugin targets) and **ephemeral open-survey panels** (`fillOpenSurvey`/`snapshotOpenSurvey`/`useOpenSurveyStore` from `@ixo/editor/mantine` — live UI, FE/session-scoped). Filling writes answers but never submits.
 
 ### A.3 Events, triggers & reconciliation
+
 Actions declare `events` (static `events[]` or `getDynamicEvents(inputs)`). A `block.event`/`block.event.all` trigger fires pending invocations at run time (the portal's concern) — **but only if the source action is `eligibleForEventTrigger:true` and declares the named event; the compiler throws otherwise.** Verified: ~12 of ~55 actions qualify (claim/evaluate, domain.sign, email/http, calendar/xero, some pod). So `block.event` is the `onEvent` (advanced) path, NOT general sequencing — `FlowSpec.after` is plain ordering + data-refs (§2.3). The plugin reads the **event vocabulary** off `ActionDefinition` to validate `onEvent` and to build `{sourceBlockId, eventName, alias}` sources; it does not run reconciliation.
 
 ### A.4 Hooked actions (`on`)
+
 Lifecycle events fire hooked actions (`sendEmail`, `addLinkedEntity`, `sendMatrixDM`); config interpolates `{{payload.<field>}}` / `{{util.currentDate|…}}`. Stored as `block.props.hookedActions`. `set_step_hooks` writes it; `describe_action` reports available events + hook types.
 
 ### A.7 Diff & slide-to-sign (powers `explain_step`)
+
 Action types register a **diff resolver** (`registerDiffResolver(actionType,{resolver})` → `DiffResult[]` of `{key,label,before,after,changeType,unit?,severity?}`) computing a before/after from merged inputs. The portal shows it above a slide-to-sign control at run time. `explain_step` surfaces the same data read-only so the agent can explain a step before the user runs it — no slider, no execution.
 
 ### A.8 Templates — **corrected**
+
 `src/core/templates/*` (**carbonHarvest**, **entityTransfer**, **oracleInit**) are exported as legacy `FlowNode[]` with (vestigial) `activationCondition`, **not** `BaseUcanFlow`. `get_flow_template` ships **in-plugin FlowSpec templates** (or converts the exported legacy factories in-plugin, dropping `activationCondition`) — §7.4. No editor change.
 
-*(UCAN/versioning/migration appendices from the earlier draft are omitted — they govern execution authorization, which is out of scope for the builder.)*
+_(UCAN/versioning/migration appendices from the earlier draft are omitted — they govern execution authorization, which is out of scope for the builder.)_
 
 ---
 

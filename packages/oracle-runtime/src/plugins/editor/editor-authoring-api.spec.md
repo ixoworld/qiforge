@@ -1,8 +1,8 @@
 # `@ixo/editor` Authoring API — Change Spec (for the Flows plugin)
 
 > **Companion to `spec.md`.** That spec describes the **plugin**; this one describes the
-> **small, additive `@ixo/editor/core` surface** the plugin imports so it can be a *thin
-> translator* instead of a reverse-engineered shadow of editor internals.
+> **small, additive `@ixo/editor/core` surface** the plugin imports so it can be a _thin
+> translator_ instead of a reverse-engineered shadow of editor internals.
 >
 > **Status:** design, pre-implementation. Every claim below was verified against
 > `@ixo/editor@5.31.0` source (file:line cited). No code written yet.
@@ -21,7 +21,7 @@ wiping its runtime** or desyncing the node map, (3) **remove/reorder** a step, (
 form**. Today the plugin spec plans to hand-roll all four in-plugin by parsing BlockNote's
 internal XML shape and replicating unexported helpers — which is where every future
 editor-bump bug will live (`spec.md` Appendix B). Since **we own the editor**, the correct
-move is to put that shape-coupled logic *inside the editor*, tested against the editor's own
+move is to put that shape-coupled logic _inside the editor_, tested against the editor's own
 block shape, and let the plugin call ~7 functions. This makes the plugin **smaller, more
 correct, and prod-ready**, and fixes a latent condition bug that currently hurts the portal
 too.
@@ -30,21 +30,21 @@ too.
 
 ## 1. Verified findings (the ground truth the design rests on)
 
-| # | Finding | Evidence | Consequence |
-|---|---|---|---|
-| F1 | **Per-block props live ONLY in the `document` XmlFragment**, written as XML attributes on the inner `blockContent` element (with `''`-valued props dropped, and `textColor`/`backgroundColor` hoisted to the container). | `documentFragment.ts:108-125` `createBlockContainer` | The fragment is the single prop store. Reads must parse it; writes must target it. |
-| F2 | **The `qi.flow.nodes` map omits props** — `createYMapFromNode` never sets `props`. | `hydrate.ts:173-186` | `readCompiledFlowFromYDoc` returns `props: {}`; `decompileToBaseUcanFlow` recovers no `nb`/`ttl`/`trigger` despite its code trying to. The composed decompile read is **lossy in practice**. |
-| F3 | **`title`/`description`/`actor` ARE in the node map** (denormalized — also present as fragment props). | `hydrate.ts:177-184`, `compileBlockProps` `blockMapping.ts:36-55` | A fragment-only edit of these desyncs the node map. A write helper must update both. |
-| F4 | **`setupFlowFromBaseUcan(patch/merge)` re-inits runtime for `replaced` nodes** to `{state:'idle'}` unconditionally. | `setup.ts:286-287` → `initializeRuntimeForNodes` `hydrate.ts:161-168` | Editing an already-run step via `patch` **wipes its results/progress**. Edge edits need a runtime-preserving path. |
-| F5 | **Condition operators are written verbatim and never evaluate.** Compiler writes `ConditionRef.operator` ∈ `eq\|neq\|gt\|lt\|in\|exists`; the evaluator only understands `equals\|not_equals\|greater_than\|less_than\|contains\|not_contains\|is_empty\|is_not_empty`; the normalizer only *inverts* operators, it does **not** map `eq→equals`. | compiler `compiler.ts:271`, evaluator `conditionEvaluator.ts:20-41`, normalizer `conditionNormalizer.ts:7-16` | A condition authored through `cap.condition` **silently never fires** — for the portal and the editor's own builder, not just the agent. Real bug. |
-| F6 | **`classifyNodeState` / `classifyBlockerCause` / `snapshotNode` are exported** and operate on `block` objects with `.props` via `getBlockProps`/`getBlockId`/etc. | `core/index.ts:95-96`, `flowAgent/state.ts`, `flowAgent/utils.ts` | The plugin should **reuse** these for `flow_status`, not reimplement `classifyNodeState`. It just needs to supply `{id,type,props}` blocks. |
-| F7 | **No headless "read blocks-with-props from a raw Y.Doc" function exists.** `buildFlowAgentContext` takes `blocks` from the caller (the live React `editor.document`). | `flowAgent/context.ts:22-32` | In a headless plugin (no React editor) the only way to get blocks-with-props today is to parse the fragment. **This is the one keystone primitive to add.** |
-| F8 | **Form answers persist to RUNTIME, as a JSON string** at `runtime.output.form.answers`; schema is `block.props.surveySchema`. | `FormPanel.tsx:57-64,118-120` | `fill_form` writes `runtime[blockId].output.form.answers`, must deep-merge `output`, must NOT set `state:'completed'`. |
-| F9 | **The snapshot's assignee comes from `props.assignment.assignedActor.did`** — not `authorisedActors`; **`Overdue` keys off `props.ttlAbsoluteDueDate` only**. | `flowAgent/utils.ts:69-82` | `set_step_assignment` must write `props.assignment`; `spec.md`'s mapping (assignTo→authorisedActors) is incomplete. |
-| F10 | **`resolveRuntimeRefs` is exported.** | `core/index.ts:174` | The plugin can compute **true data-ref readiness** ("waiting on upstream X's output") — richer than `classifyNodeState`'s flat `Pending`. Feature opportunity (see §6). |
+| #   | Finding                                                                                                                                                                                                                                                                                                                                           | Evidence                                                                                                      | Consequence                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1  | **Per-block props live ONLY in the `document` XmlFragment**, written as XML attributes on the inner `blockContent` element (with `''`-valued props dropped, and `textColor`/`backgroundColor` hoisted to the container).                                                                                                                          | `documentFragment.ts:108-125` `createBlockContainer`                                                          | The fragment is the single prop store. Reads must parse it; writes must target it.                                                                                                           |
+| F2  | **The `qi.flow.nodes` map omits props** — `createYMapFromNode` never sets `props`.                                                                                                                                                                                                                                                                | `hydrate.ts:173-186`                                                                                          | `readCompiledFlowFromYDoc` returns `props: {}`; `decompileToBaseUcanFlow` recovers no `nb`/`ttl`/`trigger` despite its code trying to. The composed decompile read is **lossy in practice**. |
+| F3  | **`title`/`description`/`actor` ARE in the node map** (denormalized — also present as fragment props).                                                                                                                                                                                                                                            | `hydrate.ts:177-184`, `compileBlockProps` `blockMapping.ts:36-55`                                             | A fragment-only edit of these desyncs the node map. A write helper must update both.                                                                                                         |
+| F4  | **`setupFlowFromBaseUcan(patch/merge)` re-inits runtime for `replaced` nodes** to `{state:'idle'}` unconditionally.                                                                                                                                                                                                                               | `setup.ts:286-287` → `initializeRuntimeForNodes` `hydrate.ts:161-168`                                         | Editing an already-run step via `patch` **wipes its results/progress**. Edge edits need a runtime-preserving path.                                                                           |
+| F5  | **Condition operators are written verbatim and never evaluate.** Compiler writes `ConditionRef.operator` ∈ `eq\|neq\|gt\|lt\|in\|exists`; the evaluator only understands `equals\|not_equals\|greater_than\|less_than\|contains\|not_contains\|is_empty\|is_not_empty`; the normalizer only _inverts_ operators, it does **not** map `eq→equals`. | compiler `compiler.ts:271`, evaluator `conditionEvaluator.ts:20-41`, normalizer `conditionNormalizer.ts:7-16` | A condition authored through `cap.condition` **silently never fires** — for the portal and the editor's own builder, not just the agent. Real bug.                                           |
+| F6  | **`classifyNodeState` / `classifyBlockerCause` / `snapshotNode` are exported** and operate on `block` objects with `.props` via `getBlockProps`/`getBlockId`/etc.                                                                                                                                                                                 | `core/index.ts:95-96`, `flowAgent/state.ts`, `flowAgent/utils.ts`                                             | The plugin should **reuse** these for `flow_status`, not reimplement `classifyNodeState`. It just needs to supply `{id,type,props}` blocks.                                                  |
+| F7  | **No headless "read blocks-with-props from a raw Y.Doc" function exists.** `buildFlowAgentContext` takes `blocks` from the caller (the live React `editor.document`).                                                                                                                                                                             | `flowAgent/context.ts:22-32`                                                                                  | In a headless plugin (no React editor) the only way to get blocks-with-props today is to parse the fragment. **This is the one keystone primitive to add.**                                  |
+| F8  | **Form answers persist to RUNTIME, as a JSON string** at `runtime.output.form.answers`; schema is `block.props.surveySchema`.                                                                                                                                                                                                                     | `FormPanel.tsx:57-64,118-120`                                                                                 | `fill_form` writes `runtime[blockId].output.form.answers`, must deep-merge `output`, must NOT set `state:'completed'`.                                                                       |
+| F9  | **The snapshot's assignee comes from `props.assignment.assignedActor.did`** — not `authorisedActors`; **`Overdue` keys off `props.ttlAbsoluteDueDate` only**.                                                                                                                                                                                     | `flowAgent/utils.ts:69-82`                                                                                    | `set_step_assignment` must write `props.assignment`; `spec.md`'s mapping (assignTo→authorisedActors) is incomplete.                                                                          |
+| F10 | **`resolveRuntimeRefs` is exported.**                                                                                                                                                                                                                                                                                                             | `core/index.ts:174`                                                                                           | The plugin can compute **true data-ref readiness** ("waiting on upstream X's output") — richer than `classifyNodeState`'s flat `Pending`. Feature opportunity (see §6).                      |
 
 > The headline: the plugin spec's central premise (the read is lossy → must assemble from
-> the fragment) is **correct** (F1+F2). But (a) much of the *classification* it planned to
+> the fragment) is **correct** (F1+F2). But (a) much of the _classification_ it planned to
 > rebuild already exists (F6), and (b) two traps it didn't catch (F4 runtime-wipe, F3
 > desync) make the naive edit path unsafe. This spec closes all of that.
 
@@ -54,14 +54,14 @@ too.
 
 Six groups. New surface = **one module (`authoring.ts`) + a few re-exports + one bug fix.**
 
-| Group | Change | Type | Replaces in plugin |
-|---|---|---|---|
-| **A** | `readFlowDocument(yDoc)` + `readBlocksFromFragment(fragment)` | **new (read)** | the entire multi-source read assembler + fragment XML parsing |
-| **B** | `setBlockProps`, `removeFlowNode`, `reorderFlowNodes`, `setFormAnswers` | **new (write)** | the in-plugin `replaceBlockInFragment` replica + remove/reorder + runtime write |
-| **C** | `buildBlockConditionsProp()` + compiler operator-map fix | **new helper + bug fix** | the in-plugin condition-operator translation layer |
-| **D** | re-export `getEventsForBlock`, `getOutputSchemaForBlock`, fragment helpers | **re-export** | direct off-`ActionDefinition` reads / replicas |
-| **E** | (none) document the **reuse** surface | **no change** | the plan to reimplement `classifyNodeState`, status, discovery |
-| **F** | idempotent runtime init + `preserveRuntime` on patch | **behaviour-preserving fix** | (closes the F4 trap) |
+| Group | Change                                                                     | Type                         | Replaces in plugin                                                              |
+| ----- | -------------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------- |
+| **A** | `readFlowDocument(yDoc)` + `readBlocksFromFragment(fragment)`              | **new (read)**               | the entire multi-source read assembler + fragment XML parsing                   |
+| **B** | `setBlockProps`, `removeFlowNode`, `reorderFlowNodes`, `setFormAnswers`    | **new (write)**              | the in-plugin `replaceBlockInFragment` replica + remove/reorder + runtime write |
+| **C** | `buildBlockConditionsProp()` + compiler operator-map fix                   | **new helper + bug fix**     | the in-plugin condition-operator translation layer                              |
+| **D** | re-export `getEventsForBlock`, `getOutputSchemaForBlock`, fragment helpers | **re-export**                | direct off-`ActionDefinition` reads / replicas                                  |
+| **E** | (none) document the **reuse** surface                                      | **no change**                | the plan to reimplement `classifyNodeState`, status, discovery                  |
+| **F** | idempotent runtime init + `preserveRuntime` on patch                       | **behaviour-preserving fix** | (closes the F4 trap)                                                            |
 
 Everything lives in `@ixo/editor/core` (pure yjs, no React) so the headless plugin can
 import it. Physical layout: a new `src/core/lib/flowCompiler/authoring.ts`, re-exported via
@@ -78,6 +78,7 @@ The exact inverse of `writeCompiledBlocksToFragment`/`createBlockContainer`. Liv
 `documentFragment.ts`.
 
 **What it does (move-by-move):**
+
 1. Get the single `blockGroup` (reuse the existing `getExistingBlockGroup`).
 2. For each `blockContainer` child: read `id`, `textColor`, `backgroundColor` attributes.
 3. Read its first child (`blockContent`): `type = child.nodeName`, `props = child.getAttributes()`.
@@ -85,12 +86,12 @@ The exact inverse of `writeCompiledBlocksToFragment`/`createBlockContainer`. Liv
    out, so to round-trip exactly we fold them back) → `{ id, type, props }`.
 
 **Why this and not the existing reads:** `readCompiledFlowFromYDoc` returns propless nodes
-(F2); `decompileToBaseUcanFlow` is lossy (F2). This is the *only* function that recovers the
+(F2); `decompileToBaseUcanFlow` is lossy (F2). This is the _only_ function that recovers the
 real props from a headless doc. Putting it in the editor means the BlockNote-shape coupling
 (`blockGroup > blockContainer > blockContent`) is **tested against the editor's own writer**
 and travels with every version — deleting the biggest item in `spec.md` Appendix B.
 
-**Risk:** couples to the XML shape — but that shape is *defined two functions up the file*,
+**Risk:** couples to the XML shape — but that shape is _defined two functions up the file_,
 so a writer change and this reader change land together. Far safer than the same coupling
 sitting in a downstream repo.
 
@@ -103,16 +104,17 @@ The one call the plugin's `read_flow`/`get_step` use. Composes the three sources
 
 ```ts
 interface FlowDocumentRead {
-  meta:  CompiledFlow['meta'];
+  meta: CompiledFlow['meta'];
   order: string[];
   edges: CompiledEdge[];
-  blockIndex: Record<string, string>;            // nodeId → blockId
+  blockIndex: Record<string, string>; // nodeId → blockId
   nodes: Array<{
     nodeId: string;
     blockId: string;
-    can: string; with: string;
-    props: Record<string, string>;               // ← from the fragment (authoritative)
-    runtime: FlowNodeRuntimeState;                // ← from the runtime map
+    can: string;
+    with: string;
+    props: Record<string, string>; // ← from the fragment (authoritative)
+    runtime: FlowNodeRuntimeState; // ← from the runtime map
   }>;
 }
 ```
@@ -138,6 +140,7 @@ The fast path for **value-only props that live only in the fragment** (`inputs`,
 `assignment`, `surveySchema`). Runtime is **never touched**.
 
 **Moves (one `yDoc.transact`):**
+
 1. Read the current block from the fragment (`readBlocksFromFragment` find by id).
 2. Merge `partial` over current props (passing `''` **clears** a prop — documented, matches
    F1's drop-empty rule).
@@ -181,7 +184,7 @@ The headless equivalent of FormPanel's write (F8). **Moves:** read `runtime[bloc
 deep-merge `{ output: { ...output, form: { ...output?.form, answers: JSON.stringify(answers) } } }`,
 write it back. **Never sets `state:'completed'`** — submission is the user's portal action.
 
-**Fix-mode also needs a step reset.** When the agent fixes a *failed* step on a running flow,
+**Fix-mode also needs a step reset.** When the agent fixes a _failed_ step on a running flow,
 the user must be able to cleanly re-run it — so the editor exposes a focused reset:
 
 ```ts
@@ -205,6 +208,7 @@ A single exported helper that produces the **evaluator-vocabulary** `props.condi
 `equals|not_equals|greater_than|less_than|contains|is_empty|is_not_empty`.
 
 **Used by two callers** so the shape has one source of truth:
+
 - the plugin's `set_step_conditions` (via `setBlockProps('conditions', …)` — runtime-safe), and
 - the compiler's `compileCondition`.
 
@@ -247,24 +251,24 @@ Two minimal, behaviour-preserving editor changes so editing/adding never destroy
 
 ## 7. Group D — Re-exports (one line each, zero logic)
 
-| Re-export | From | Why the plugin needs it |
-|---|---|---|
-| `getEventsForBlock`, `getOutputSchemaForBlock` | `actionRegistry/registry` | `onEvent` validation (event vocabulary) + `list_referenceable_fields` (output schema, incl. dynamic). Currently **not** in `core/index.ts`. |
-| `readBlocksFromFragment`, `removeBlockFromFragment`, `replaceBlockInFragment` | `flowCompiler/documentFragment` | low-level escape hatches; A/B wrap them but exporting keeps the plugin unblocked if it needs a bespoke op. |
-| `resolveRuntimeRefs` | already exported | data-ref readiness in `flow_status` (§6 feature). |
+| Re-export                                                                     | From                            | Why the plugin needs it                                                                                                                     |
+| ----------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getEventsForBlock`, `getOutputSchemaForBlock`                                | `actionRegistry/registry`       | `onEvent` validation (event vocabulary) + `list_referenceable_fields` (output schema, incl. dynamic). Currently **not** in `core/index.ts`. |
+| `readBlocksFromFragment`, `removeBlockFromFragment`, `replaceBlockInFragment` | `flowCompiler/documentFragment` | low-level escape hatches; A/B wrap them but exporting keeps the plugin unblocked if it needs a bespoke op.                                  |
+| `resolveRuntimeRefs`                                                          | already exported                | data-ref readiness in `flow_status` (§6 feature).                                                                                           |
 
 ---
 
 ## 8. Group E — Reuse as-is (NO editor change — documented so the plugin doesn't rebuild it)
 
-| Need | Use | Note |
-|---|---|---|
-| Validate (compile, no write) | `compileBaseUcanFlow(plan, { getActionByCan })` | catch throws → `validate_flow` |
-| Create / add / edge-edit | `setupFlowFromBaseUcan({…, strategy, preserveRuntime})` | `full`/`merge`/`patch` (+ §6 flag) |
-| Structure read | `readCompiledFlowFromYDoc` | inside `readFlowDocument` |
-| **Per-step status** | **`snapshotNode` / `classifyNodeState` / `classifyBlockerCause`** | **F6 — feed it the `{id,type,props}` blocks from `readFlowDocument`. Do NOT reimplement.** |
-| Audit / pending reads | `readRunRecords`, `readPendingInvocations`, `getActionForBlock` | `flow_status` history |
-| Discovery / linkage | `getAllActions`, `getAction`, `getActionByCan`, `typeToCan`, `canToType` | + `events`/`outputSchema` off `ActionDefinition` |
+| Need                         | Use                                                                      | Note                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| Validate (compile, no write) | `compileBaseUcanFlow(plan, { getActionByCan })`                          | catch throws → `validate_flow`                                                             |
+| Create / add / edge-edit     | `setupFlowFromBaseUcan({…, strategy, preserveRuntime})`                  | `full`/`merge`/`patch` (+ §6 flag)                                                         |
+| Structure read               | `readCompiledFlowFromYDoc`                                               | inside `readFlowDocument`                                                                  |
+| **Per-step status**          | **`snapshotNode` / `classifyNodeState` / `classifyBlockerCause`**        | **F6 — feed it the `{id,type,props}` blocks from `readFlowDocument`. Do NOT reimplement.** |
+| Audit / pending reads        | `readRunRecords`, `readPendingInvocations`, `getActionForBlock`          | `flow_status` history                                                                      |
+| Discovery / linkage          | `getAllActions`, `getAction`, `getActionByCan`, `typeToCan`, `canToType` | + `events`/`outputSchema` off `ActionDefinition`                                           |
 
 ### Explicitly DO NOT import (keeps the builder boundary, `spec.md` §6.3)
 
@@ -280,6 +284,7 @@ no crypto.)
 ## 9. How this makes the plugin production-ready & feature-rich
 
 **Production-ready (correctness & maintenance):**
+
 - **No runtime loss on edit** (B1 + F): the headline guarantee for editing live flows.
 - **No node-map desync** (B1/F3): reads and writes agree on `title`/`actor`.
 - **Conditions actually work** (C): authored gates fire instead of silently passing.
@@ -291,14 +296,15 @@ no crypto.)
   and "what the user sees."
 
 **Feature-rich (capabilities the API unlocks):**
+
 - **True readiness in `flow_status`** (F10): layer `resolveRuntimeRefs` over `snapshotNode`
   to turn flat `Pending` into "ready to run" vs "waiting on `load-batches.output.x`" with a
-  precise `blockedBy`. The agent can tell the user *exactly* what's missing.
+  precise `blockedBy`. The agent can tell the user _exactly_ what's missing.
 - **Safe live editing**: add/remove/reorder/retune a flow the user is mid-run on, without
   resetting completed steps — enables conversational "actually, change step 3 to…".
 - **Accurate diagnosis**: `classifyBlockerCause` gives `missing_input | failed_upstream |
-  service_error | external_confirmation_pending | …` straight from the runtime, so
-  `flow_status`/`explain_step` explain *why*, not just *that*, a step is stuck.
+service_error | external_confirmation_pending | …` straight from the runtime, so
+  `flow_status`/`explain_step` explain _why_, not just _that_, a step is stuck.
 - **Correct assignment/forms** (F8/F9): `set_step_assignment` writes the prop the snapshot
   actually reads; `fill_form` writes the durable runtime path the portal renders.
 
@@ -306,23 +312,23 @@ no crypto.)
 
 ## 10. Plugin tool → editor API (traceability — every tool is covered)
 
-| Plugin tool | Editor API | Plugin-side logic |
-|---|---|---|
-| `validate_flow` | `compileBaseUcanFlow` (catch) | translator, friendly errors |
-| `create_flow` | FE `create_flow_room` (WS) → `setupFlowFromBaseUcan(full)` | translator (room creation unchanged — FE tool) |
-| `read_flow` / `get_step` | **`readFlowDocument`** | → FlowSpec, condition decode |
-| `flow_status` | **`snapshotNode`/`classifyNodeState`** (+ `resolveRuntimeRefs`, `readRunRecords`) | blockId↔stepId join, readiness enrichment |
-| `explain_step` | diff resolver (read-only) + `classifyBlockerCause` | plain-language render |
-| `add_step` | `setupFlowFromBaseUcan(merge)` | delta capability |
-| `set_step_*` (value props) | **`setBlockProps`** | route field → prop |
-| `set_step_conditions` | **`setBlockProps` + `buildBlockConditionsProp`** | friendly `is` → evaluator vocab |
-| `set_step_event` (onEvent) | `setupFlowFromBaseUcan(patch, preserveRuntime:true)` + `getEventsForBlock` (validate) | event-capability check |
-| `set_step_assignment` | **`setBlockProps('assignment', …)`** (F9) | write `props.assignment.assignedActor.did` |
-| `remove_step` | **`removeFlowNode`** | (ref-guard inside) |
-| `reorder_step` / `set_step_sequence` | **`reorderFlowNodes`** | permutation/ordering |
-| `fill_form` | **`setFormAnswers`** | SurveyJS validate first |
-| `describe_form` | (props from `readFlowDocument`) | flatten SurveyJS |
-| `list_actions` / `check_link` | `getAllActions` + **`getOutputSchemaForBlock`** | metadata overlay |
+| Plugin tool                          | Editor API                                                                            | Plugin-side logic                              |
+| ------------------------------------ | ------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `validate_flow`                      | `compileBaseUcanFlow` (catch)                                                         | translator, friendly errors                    |
+| `create_flow`                        | FE `create_flow_room` (WS) → `setupFlowFromBaseUcan(full)`                            | translator (room creation unchanged — FE tool) |
+| `read_flow` / `get_step`             | **`readFlowDocument`**                                                                | → FlowSpec, condition decode                   |
+| `flow_status`                        | **`snapshotNode`/`classifyNodeState`** (+ `resolveRuntimeRefs`, `readRunRecords`)     | blockId↔stepId join, readiness enrichment      |
+| `explain_step`                       | diff resolver (read-only) + `classifyBlockerCause`                                    | plain-language render                          |
+| `add_step`                           | `setupFlowFromBaseUcan(merge)`                                                        | delta capability                               |
+| `set_step_*` (value props)           | **`setBlockProps`**                                                                   | route field → prop                             |
+| `set_step_conditions`                | **`setBlockProps` + `buildBlockConditionsProp`**                                      | friendly `is` → evaluator vocab                |
+| `set_step_event` (onEvent)           | `setupFlowFromBaseUcan(patch, preserveRuntime:true)` + `getEventsForBlock` (validate) | event-capability check                         |
+| `set_step_assignment`                | **`setBlockProps('assignment', …)`** (F9)                                             | write `props.assignment.assignedActor.did`     |
+| `remove_step`                        | **`removeFlowNode`**                                                                  | (ref-guard inside)                             |
+| `reorder_step` / `set_step_sequence` | **`reorderFlowNodes`**                                                                | permutation/ordering                           |
+| `fill_form`                          | **`setFormAnswers`**                                                                  | SurveyJS validate first                        |
+| `describe_form`                      | (props from `readFlowDocument`)                                                       | flatten SurveyJS                               |
+| `list_actions` / `check_link`        | `getAllActions` + **`getOutputSchemaForBlock`**                                       | metadata overlay                               |
 
 ---
 
@@ -331,7 +337,7 @@ no crypto.)
 1. **Single prop store stays the fragment.** Never start writing props into `qi.flow.nodes`
    (that would create the dual-source-of-truth we're avoiding). The node map keeps only its
    existing denormalized fields (`title`/`description`/`actor`), and `setBlockProps` keeps
-   *those* in sync (F3). Reads are fragment-authoritative.
+   _those_ in sync (F3). Reads are fragment-authoritative.
 2. **All writes inside `yDoc.transact()`** (mirror `hydrate.ts`).
 3. **No behaviour change to existing exports.** `preserveRuntime` defaults to off; the
    idempotent-init change is strictly safer; the condition fix only corrects a non-working
@@ -364,7 +370,7 @@ no crypto.)
 ## 13. Phasing (maps onto `spec.md` §10)
 
 - **PR-E1 (editor):** `documentFragment.readBlocksFromFragment` + `authoring.readFlowDocument`
-  + the re-exports (D). Unblocks the plugin's read/translator (plugin PR 2). Lowest risk.
+  - the re-exports (D). Unblocks the plugin's read/translator (plugin PR 2). Lowest risk.
 - **PR-E2 (editor):** `setBlockProps` (+ node-map sync), `removeFlowNode`, `reorderFlowNodes`,
   `setFormAnswers`. Unblocks plugin authoring + forms (plugin PR 2/3).
 - **PR-E3 (editor):** condition fix (C) + `buildBlockConditionsProp` + runtime-safety (F).
