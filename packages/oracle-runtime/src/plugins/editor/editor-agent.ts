@@ -315,6 +315,6 @@ export async function createEditorSubAgent(
     // FE renders page/block activity inline and the main agent sees results
     // directly — e.g. `mint_invocation`'s `blobId`, which it passes straight
     // to `sandbox_write_blob`.
-    forwardTools: true,
+    forwardTools: ['create_page', 'update_page', 'mint_invocation'],
   };
 }
