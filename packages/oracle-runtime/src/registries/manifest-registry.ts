@@ -1,3 +1,7 @@
+import {
+  mergeManifestOverride,
+  type PluginManifestOverride,
+} from '../manifest/merge-override.js';
 import { validateExamplesAgainstTools } from '../manifest/validator.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
@@ -25,9 +29,18 @@ export interface ManifestCrossCheckResult {
 export class ManifestRegistry {
   private readonly entries: RegisteredManifest[] = [];
 
-  /** Record a plugin's manifest. */
-  register(plugin: OraclePlugin): void {
-    this.entries.push({ pluginName: plugin.name, manifest: plugin.manifest });
+  /**
+   * Record a plugin's manifest. A fork-supplied `override` is merged shallowly
+   * over the plugin's own manifest, so every downstream reader (`collect()`,
+   * the Tier-1 renderer, the capability meta-tools, the agent's visibility
+   * index) sees the effective manifest — the override is the single source of
+   * truth from here on.
+   */
+  register(plugin: OraclePlugin, override?: PluginManifestOverride): void {
+    this.entries.push({
+      pluginName: plugin.name,
+      manifest: mergeManifestOverride(plugin.manifest, override),
+    });
   }
 
   /**

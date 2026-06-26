@@ -3,6 +3,7 @@ import {
   resolvePlugins,
   type FeatureToggle,
 } from '../bootstrap/plugin-loader.js';
+import type { PluginManifestOverride } from '../manifest/merge-override.js';
 import { validateManifest } from '../manifest/validator.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
@@ -49,6 +50,14 @@ export interface CreateTestRuntimeOptions {
    * for plugins that have an `autoDetect`, otherwise on.
    */
   features?: Partial<Record<string, FeatureToggle>>;
+  /**
+   * Per-plugin manifest overrides, same shape and semantics as
+   * `createOracleApp`. Merged shallowly over each plugin's own manifest, so
+   * `getManifest`/`listCapabilities` and the visibility-driven helpers reflect
+   * the override. Lets a test exercise a plugin under a retuned visibility
+   * (e.g. forcing `silent`) without a bespoke fixture.
+   */
+  manifestOverrides?: Partial<Record<string, PluginManifestOverride>>;
   /** Merged config (env vars). Plugins read this through `ctx.config`. */
   config?: Record<string, unknown>;
   /** Override fields on the synthesized RuntimeContext.user. */
@@ -159,11 +168,12 @@ export async function createTestRuntime(
   const configSchemas = new ConfigSchemaRegistry();
   const sharedState = new SharedStateRegistry();
 
+  const manifestOverrides = opts.manifestOverrides ?? {};
   for (const plugin of resolved.loaded) {
     tools.register(plugin);
     subAgents.register(plugin);
     middlewares.register(plugin);
-    manifests.register(plugin);
+    manifests.register(plugin, manifestOverrides[plugin.name]);
     configSchemas.register(plugin);
     sharedState.register(plugin);
   }
