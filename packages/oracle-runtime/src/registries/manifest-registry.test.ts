@@ -130,6 +130,34 @@ describe('ManifestRegistry', () => {
     expect(result.errors[0]).toContain('open_url');
   });
 
+  it('applies a fork override over the plugin manifest at registration', () => {
+    const reg = new ManifestRegistry();
+    reg.register(
+      makePlugin({
+        name: 'weather',
+        manifest: makeManifest({ title: 'Weather', visibility: 'always' }),
+      }),
+      { visibility: 'on-demand', summary: 'Tuned by the fork.' },
+    );
+
+    const [entry] = reg.collect();
+    expect(entry.manifest.visibility).toBe('on-demand');
+    expect(entry.manifest.summary).toBe('Tuned by the fork.');
+    // Untouched fields keep the plugin default.
+    expect(entry.manifest.title).toBe('Weather');
+  });
+
+  it('leaves the manifest unchanged when no override is supplied', () => {
+    const reg = new ManifestRegistry();
+    reg.register(
+      makePlugin({
+        name: 'weather',
+        manifest: makeManifest({ visibility: 'always' }),
+      }),
+    );
+    expect(reg.collect()[0].manifest.visibility).toBe('always');
+  });
+
   it('assertNoCollisions is a no-op (manifest titles can collide)', () => {
     const reg = new ManifestRegistry();
     reg.register(
