@@ -23,6 +23,10 @@ import {
   editorUnavailableMode,
   STANDALONE_EDITOR_PROMPTS,
 } from '../plugins/editor/prompts.js';
+import {
+  FLOWS_OPERATING_GUIDE,
+  FLOWS_PLUGIN_NAME,
+} from '../plugins/flows/prompts.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -368,9 +372,22 @@ export async function createMainAgent(
         ? STANDALONE_EDITOR_PROMPTS
         : null;
 
+  // Custom Instructions section: author-supplied standing guidance
+  // (config.prompt.customInstructions) plus operating guides contributed by
+  // on-demand capabilities the agent has loaded for this thread (e.g. the Flow
+  // Builder guide, which appears only once `flows` is in `loadedPlugins`, so it
+  // costs no tokens on turns where flows is never used).
+  const customInstructions = [
+    identity.prompt?.customInstructions?.trim(),
+    loadedSet.has(FLOWS_PLUGIN_NAME) ? FLOWS_OPERATING_GUIDE : '',
+  ]
+    .filter((part): part is string => Boolean(part && part.length > 0))
+    .join('\n\n');
+
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
+    customInstructions,
     operationalMode:
       editorPrompts?.operationalMode ??
       editorUnavailableBlock ??

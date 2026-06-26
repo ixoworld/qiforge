@@ -406,4 +406,48 @@ describe('createMainAgent', () => {
     // Operational mode default is rendered.
     expect(prompt).toContain('General conversation mode');
   });
+
+  it('injects the Flow Builder guide under Custom Instructions when flows is loaded', async () => {
+    await createMainAgent(baseArgs({ state: { loadedPlugins: ['flows'] } }));
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const prompt = params.systemPrompt as string;
+
+    expect(prompt).toContain('## Custom Instructions');
+    expect(prompt).toContain('### Flow Builder mode');
+    expect(prompt).toContain('discover → plan → confirm → build → hand off');
+  });
+
+  it('omits the Custom Instructions section when nothing contributes to it', async () => {
+    await createMainAgent(baseArgs());
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const prompt = params.systemPrompt as string;
+
+    expect(prompt).not.toContain('## Custom Instructions');
+    expect(prompt).not.toContain('Flow Builder mode');
+  });
+
+  it('renders author-supplied custom instructions from config.prompt.customInstructions', async () => {
+    await createMainAgent(
+      baseArgs({
+        identity: {
+          name: 'TestOracle',
+          org: 'Acme',
+          description: 'a test oracle',
+          entityDid: 'did:ixo:test',
+          prompt: { customInstructions: 'Always greet the user in French.' },
+        },
+      }),
+    );
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const prompt = params.systemPrompt as string;
+
+    expect(prompt).toContain('## Custom Instructions');
+    expect(prompt).toContain('Always greet the user in French.');
+  });
 });

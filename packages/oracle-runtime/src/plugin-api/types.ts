@@ -181,6 +181,17 @@ export interface OraclePromptConfig {
    * the plugin-derived capability list — additive, not a replacement.
    */
   capabilities?: string;
+
+  /**
+   * Free-form standing guidance injected verbatim into the system prompt under
+   * a dedicated `## Custom Instructions` section. Use for house style, domain
+   * rules, guardrails, or anything that doesn't fit `communicationStyle` (tone)
+   * or `capabilities` (the elevator pitch). The runtime renders the section
+   * only when there is content; it also routes operating guides contributed by
+   * loaded on-demand capabilities (e.g. the Flow Builder guide) through the
+   * same section, appended after the author's text.
+   */
+  customInstructions?: string;
 }
 
 /**

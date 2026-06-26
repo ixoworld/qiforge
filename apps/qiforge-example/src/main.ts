@@ -1,12 +1,11 @@
 import 'dotenv/config';
 
 import {
-  CreditsPlugin,
   EditorPlugin,
+  FlowsPlugin,
   createOracleApp,
   type AuthExcludedRoute,
 } from '@ixo/oracle-runtime';
-import Redis from 'ioredis';
 import {
   Controller,
   Get,
@@ -16,6 +15,7 @@ import {
   type DynamicModule,
   type Type,
 } from '@nestjs/common';
+import Redis from 'ioredis';
 import * as sdk from 'matrix-js-sdk';
 import { config } from './config.js';
 import { WeatherPlugin } from './plugins/weather/index.js';
@@ -51,9 +51,12 @@ const HOST_AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
 /**
  * Plugins with no constructor args flow in automatically from
  * `BUNDLED_PLUGINS` (each plugin's `autoDetect` inspects `process.env` and
- * opts in/out). We only instantiate the two plugins that take live runtime
+ * opts in/out). We only instantiate the plugins that take live runtime
  * objects (Matrix client) and pass them explicitly — the plugin loader
  * dedupes by name so our explicit instances override the bundled defaults.
+ *
+ * `FlowsPlugin` is NOT a bundled plugin — it is opt-in, so it only runs
+ * because we construct it here and pass it in `plugins`.
  *
  * Oracle identity + prompt live in `./config.ts` so integration tests can
  * import them without triggering this file's top-level `bootstrap()` call.
@@ -118,6 +121,10 @@ async function bootstrap(): Promise<void> {
       // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
+      // Flows is NOT a bundled plugin — opt in by constructing it explicitly.
+      // It shares the Matrix client so it can connect to flow rooms and author
+      // templates.
+      new FlowsPlugin({ matrixClient }),
     ],
     // Host-supplied Nest modules — see VersionController above (plus the
     // dev-only tasks dashboard when mounted).

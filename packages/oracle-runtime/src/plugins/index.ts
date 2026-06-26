@@ -50,6 +50,11 @@ export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 
+// NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
+// a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
+// — see `apps/qiforge-example/src/main.ts`. The class stays exported from the
+// public barrel (`export * from './plugins/flows/index.js'`).
+
 /**
  * The canonical bundled-plugin set used by `createOracleApp` when the
  * caller does not supply `bundledPlugins`. Forks that need a custom

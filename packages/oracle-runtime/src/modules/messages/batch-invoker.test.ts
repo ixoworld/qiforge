@@ -72,7 +72,7 @@ function build(
     builtAgentOverrides.langGraphConfig ?? {
       version: 'v2',
       streamMode: ['updates', 'messages'],
-      recursionLimit: 150,
+      recursionLimit: 200,
       configurable: { thread_id: SESSION_ID },
       context: { user: { did: USER_DID } },
       signal: abortController.signal,
@@ -119,7 +119,7 @@ describe('BatchInvoker', () => {
 
       const passedConfig = invoke.mock.calls[0]?.[1] as Record<string, unknown>;
       expect(passedConfig).toMatchObject({
-        recursionLimit: 150,
+        recursionLimit: 200,
         configurable: { thread_id: SESSION_ID },
         context: { user: { did: USER_DID } },
         signal: abortController.signal,

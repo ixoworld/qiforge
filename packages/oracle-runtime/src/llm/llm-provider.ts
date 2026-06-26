@@ -41,11 +41,11 @@ export type ProviderModelRole =
 
 const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
   openrouter: {
-    main: 'moonshotai/kimi-k2.6',
+    main: 'z-ai/glm-5.2',
     // main: 'moonshotai/kimi-k2-thinking',
-    skills: 'moonshotai/kimi-k2.6',
+    skills: 'z-ai/glm-5.2',
     // skills: 'moonshotai/kimi-k2-thinking',
-    subagent: 'moonshotai/kimi-k2.5',
+    subagent: 'z-ai/glm-5.2',
     // subagent: 'moonshotai/kimi-k2-thinking',
     vision: 'google/gemini-2.5-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
