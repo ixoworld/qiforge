@@ -107,6 +107,15 @@ export const baseEnvSchema = z.object({
   ENABLE_REQUEST_PATH_CACHES: z.string().optional().default('false'),
 
   /**
+   * Compact the "What you know about the user" memory block: dedup entities and
+   * facts across the six buckets (normalized exact-match only — near-duplicates
+   * are kept, so no unique fact is lost), keep each entity's richest summary,
+   * and bound the block with generous guardrail caps. Default off renders the
+   * block exactly as before.
+   */
+  COMPACT_MEMORY_CONTEXT: z.string().optional().default('false'),
+
+  /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first
    * token, at some cost to hard multi-step reasoning. Default `medium`
    * preserves current behaviour; set `low` to measure the latency/quality

@@ -123,6 +123,7 @@ describe('baseEnvSchema', () => {
       'LANGSMITH_PROJECT',
       'LANGSMITH_ENDPOINT',
       'ENABLE_REQUEST_PATH_CACHES',
+      'COMPACT_MEMORY_CONTEXT',
       'MAIN_REASONING_EFFORT',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);

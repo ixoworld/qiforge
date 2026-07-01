@@ -409,6 +409,7 @@ export async function createMainAgent(
     currentEntityDid: state.currentEntityDid ?? '',
     oracleNameOverride: state.userPreferences?.agentName,
     degradedServicesBlock: hooks?.degradedServicesBlock,
+    compactMemory: config.COMPACT_MEMORY_CONTEXT === 'true',
   });
 
   // ── 8. Model + checkpointer ─────────────────────────────────────────────
