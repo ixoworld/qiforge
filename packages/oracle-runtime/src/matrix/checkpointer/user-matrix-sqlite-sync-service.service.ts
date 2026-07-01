@@ -320,7 +320,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   }
 
   private isSaverCacheEnabled(): boolean {
-    return config.get('CACHE_CHECKPOINTER_SAVER') === 'true';
+    return config.get('ENABLE_REQUEST_PATH_CACHES') === 'true';
   }
 
   private async openUserDatabaseFromDisk(

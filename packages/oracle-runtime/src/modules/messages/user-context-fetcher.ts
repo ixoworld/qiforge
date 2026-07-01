@@ -82,7 +82,7 @@ export class UserContextFetcher {
     }
 
     const key =
-      this.configService.get<string>('CACHE_USER_CONTEXT_BY_ROOM') === 'true'
+      this.configService.get<string>('ENABLE_REQUEST_PATH_CACHES') === 'true'
         ? cacheKey('room', roomId)
         : cacheKey('session', sessionId);
 

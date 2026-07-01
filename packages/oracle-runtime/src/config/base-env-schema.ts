@@ -89,31 +89,22 @@ export const baseEnvSchema = z.object({
   LANGSMITH_ENDPOINT: z.string().optional(),
 
   // ── Latency experiment flags ────────────────────────────────────────────
-  // All default OFF so behaviour is byte-identical until explicitly enabled.
-  // Toggle one at a time and compare request timings to attribute the win.
-  // Read as strings (`=== 'true'`) to match the existing boolean-env pattern.
+  // Default OFF so behaviour is byte-identical until explicitly enabled.
+  // Read as a string (`=== 'true'`) to match the existing boolean-env pattern.
 
   /**
-   * Reuse a per-user `SqliteSaver` (bound to the cached DB connection) instead
-   * of constructing a fresh one — and re-running its `setup()` schema/prepare
-   * pass — on every `checkpointerForUser` call. The default agent build calls
-   * that hook twice per turn.
+   * Master switch for the request-path caches, enabled together so a single
+   * before/after comparison attributes the combined win:
+   *   - reuse a per-user `SqliteSaver` (bound to the cached DB connection)
+   *     instead of rebuilding it — and re-running its `setup()` — on every
+   *     `checkpointerForUser` call (the build calls that hook twice per turn);
+   *   - make `AgentBuilder`'s prior-state read skip the messages join (the
+   *     build only needs scalar state; the agent's own restore still loads
+   *     full history), avoiding a second full-thread deserialize per request;
+   *   - key the Memory-Engine `userContext` cache by `roomId` instead of
+   *     `sessionId`, so a new session for the same room reuses the value.
    */
-  CACHE_CHECKPOINTER_SAVER: z.string().optional().default('false'),
-
-  /**
-   * Make `AgentBuilder`'s prior-state read skip the messages join. The build
-   * only needs `loadedPlugins`/`currentEntityDid`/etc.; the agent's own restore
-   * still loads full history. Avoids deserializing the whole thread twice.
-   */
-  LIGHT_BUILD_STATE_READ: z.string().optional().default('false'),
-
-  /**
-   * Key the Memory-Engine `userContext` cache by `roomId` instead of
-   * `sessionId`. The context is a function of the room, so a new session for
-   * the same room reuses the cached value instead of paying a fresh fetch.
-   */
-  CACHE_USER_CONTEXT_BY_ROOM: z.string().optional().default('false'),
+  ENABLE_REQUEST_PATH_CACHES: z.string().optional().default('false'),
 
   /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first

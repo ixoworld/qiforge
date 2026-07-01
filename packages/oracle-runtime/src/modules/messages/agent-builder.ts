@@ -139,7 +139,7 @@ export class AgentBuilder {
           configurable: { thread_id: prepared.langchainThreadId },
         };
         const useLightRead =
-          this.config.get<string>('LIGHT_BUILD_STATE_READ') === 'true';
+          this.config.get<string>('ENABLE_REQUEST_PATH_CACHES') === 'true';
         const tuple =
           useLightRead && supportsLightRead(checkpointer)
             ? await checkpointer.getTupleWithoutMessages(cfg)
