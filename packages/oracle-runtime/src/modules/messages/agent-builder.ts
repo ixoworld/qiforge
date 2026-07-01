@@ -25,6 +25,23 @@ export interface BuildAgentArgs {
   inputMessages: BaseMessage[];
 }
 
+/**
+ * A checkpointer that also exposes the history-skipping read added to
+ * `SqliteSaver`. The method is optional so any `BaseCheckpointSaver` (incl.
+ * fork-supplied ones without it) is assignable; `supportsLightRead` narrows.
+ */
+type CheckpointerWithLightRead = BaseCheckpointSaver & {
+  getTupleWithoutMessages?: BaseCheckpointSaver['getTuple'];
+};
+
+function supportsLightRead(
+  checkpointer: CheckpointerWithLightRead,
+): checkpointer is CheckpointerWithLightRead & {
+  getTupleWithoutMessages: BaseCheckpointSaver['getTuple'];
+} {
+  return typeof checkpointer.getTupleWithoutMessages === 'function';
+}
+
 export interface BuiltAgent {
   agent: CompiledMainAgent;
   stateInput: Partial<TMainAgentGraphState>;
@@ -114,9 +131,19 @@ export class AgentBuilder {
     let priorState: Partial<TMainAgentGraphState> = {};
     if (checkpointer) {
       try {
-        const tuple = await checkpointer.getTuple({
+        // The build only reads scalar channel_values (loadedPlugins,
+        // currentEntityDid, …), never the message history — so when
+        // `LIGHT_BUILD_STATE_READ` is on and the saver supports it, skip the
+        // messages join here. The agent's own restore still loads full history.
+        const cfg = {
           configurable: { thread_id: prepared.langchainThreadId },
-        });
+        };
+        const useLightRead =
+          this.config.get<string>('LIGHT_BUILD_STATE_READ') === 'true';
+        const tuple =
+          useLightRead && supportsLightRead(checkpointer)
+            ? await checkpointer.getTupleWithoutMessages(cfg)
+            : await checkpointer.getTuple(cfg);
         const channelValues = tuple?.checkpoint?.channel_values as
           | Partial<TMainAgentGraphState>
           | undefined;

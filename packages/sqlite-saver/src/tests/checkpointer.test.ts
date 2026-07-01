@@ -213,6 +213,42 @@ describe('SqliteSaver', () => {
     expect(countMessages('2')).toBe(1);
   });
 
+  it('getTupleWithoutMessages omits history but keeps other channel_values', async () => {
+    const saver = SqliteSaver.fromConnString(':memory:');
+
+    const checkpoint: Checkpoint = {
+      ...emptyCheckpoint(),
+      id: uuid6(-1),
+      channel_values: {
+        messages: [new HumanMessage({ id: 'm1', content: 'hello' })],
+        loadedPlugins: ['weather'],
+      },
+    };
+
+    await saver.put({ configurable: { thread_id: '1' } }, checkpoint, {
+      source: 'update',
+      step: -1,
+      parents: {},
+    });
+
+    // Full read attaches the persisted message history.
+    const full = await saver.getTuple({ configurable: { thread_id: '1' } });
+    expect(
+      (full?.checkpoint.channel_values.messages as unknown[])?.length,
+    ).toBe(1);
+    expect(full?.checkpoint.channel_values.loadedPlugins).toEqual(['weather']);
+
+    // Light read skips the messages join but still returns scalar state.
+    const light = await saver.getTupleWithoutMessages({
+      configurable: { thread_id: '1' },
+    });
+    expect(light?.checkpoint.channel_values.messages).toBeUndefined();
+    expect(light?.checkpoint.channel_values.loadedPlugins).toEqual(['weather']);
+    // Same checkpoint identity + metadata as the full read.
+    expect(light?.config.configurable?.checkpoint_id).toBe(checkpoint.id);
+    expect(light?.metadata?.source).toBe('update');
+  });
+
   it('should delete thread on a fresh saver without prior reads or writes', async () => {
     const saver = SqliteSaver.fromConnString(':memory:');
 

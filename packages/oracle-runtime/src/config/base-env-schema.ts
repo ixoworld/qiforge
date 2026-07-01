@@ -87,6 +87,41 @@ export const baseEnvSchema = z.object({
   LANGSMITH_API_KEY: z.string().optional(),
   LANGSMITH_PROJECT: z.string().optional(),
   LANGSMITH_ENDPOINT: z.string().optional(),
+
+  // ── Latency experiment flags ────────────────────────────────────────────
+  // All default OFF so behaviour is byte-identical until explicitly enabled.
+  // Toggle one at a time and compare request timings to attribute the win.
+  // Read as strings (`=== 'true'`) to match the existing boolean-env pattern.
+
+  /**
+   * Reuse a per-user `SqliteSaver` (bound to the cached DB connection) instead
+   * of constructing a fresh one — and re-running its `setup()` schema/prepare
+   * pass — on every `checkpointerForUser` call. The default agent build calls
+   * that hook twice per turn.
+   */
+  CACHE_CHECKPOINTER_SAVER: z.string().optional().default('false'),
+
+  /**
+   * Make `AgentBuilder`'s prior-state read skip the messages join. The build
+   * only needs `loadedPlugins`/`currentEntityDid`/etc.; the agent's own restore
+   * still loads full history. Avoids deserializing the whole thread twice.
+   */
+  LIGHT_BUILD_STATE_READ: z.string().optional().default('false'),
+
+  /**
+   * Key the Memory-Engine `userContext` cache by `roomId` instead of
+   * `sessionId`. The context is a function of the room, so a new session for
+   * the same room reuses the cached value instead of paying a fresh fetch.
+   */
+  CACHE_USER_CONTEXT_BY_ROOM: z.string().optional().default('false'),
+
+  /**
+   * Extended-thinking effort for the main model. Lower = faster time-to-first
+   * token, at some cost to hard multi-step reasoning. Default `medium`
+   * preserves current behaviour; set `low` to measure the latency/quality
+   * trade-off.
+   */
+  MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
