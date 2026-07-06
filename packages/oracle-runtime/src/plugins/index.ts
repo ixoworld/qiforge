@@ -8,6 +8,7 @@ import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
+import { PodCreatorPlugin } from './pod-creator/index.js';
 import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
 import { SkillsPlugin } from './skills/index.js';
@@ -49,6 +50,7 @@ export const creditsPlugin = new CreditsPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
+export const podCreatorPlugin = new PodCreatorPlugin();
 
 // NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
 // a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
@@ -79,4 +81,5 @@ export const BUNDLED_PLUGINS = [
   callsPlugin,
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
+  podCreatorPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;
