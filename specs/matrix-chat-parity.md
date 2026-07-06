@@ -17,7 +17,7 @@ Make oracle chat inside Matrix rooms as capable and as stable as the HTTP + WebS
 
 ### Non-goals
 
-- Token-level streaming **into the Matrix timeline**. Matrix has no ephemeral message-edit stream suitable for this; the timeline gets the final message. (Live token streaming to *our* FE is still possible over the WS side-channel — see §4.6.5 — but it is optional, not a parity requirement.)
+- Token-level streaming **into the Matrix timeline**. Matrix has no ephemeral message-edit stream suitable for this; the timeline gets the final message. (Live token streaming to _our_ FE is still possible over the WS side-channel — see §4.6.5 — but it is optional, not a parity requirement.)
 - Replacing the HTTP path. HTTP/SSE remains the primary transport for the portal chat.
 - A server-driven generic component descriptor language. We keep the existing model: the FE registers React components by name; the server sends `{componentName, props}`.
 
@@ -40,22 +40,22 @@ Auth: none at ingress — the DID is derived from the Matrix sender's localpart.
 
 ### 2.2 Feature comparison
 
-| Concern | HTTP + WS | Matrix room |
-|---|---|---|
-| Authentication | UCAN invocation (Bearer) or delegation fallback, validated vs Blocksync (`auth-header.middleware.ts`) | None — trusts Matrix sender id |
-| Subscription / credits (402) | `SubscriptionMiddleware` (Express) | Skipped entirely |
-| Rate limiting | `ThrottlerGuard` 10 req/60 s | 500 ms debounce only |
-| DTO validation | Global `ValidationPipe` | n/a (constructed in code) |
-| Token streaming | SSE `message` events | No (final message only) |
-| Reasoning / "thinking" | SSE `reasoning` events | No |
-| Tool-call visibility | SSE + WS `tool_call` (name, args, status, output) | No |
-| UI components | Client `uiComponents` map keyed by tool/action name; `render_component` event plumbed (unused) | No |
-| Browser tools / AG-UI actions | WS `browser_tool_call` / `action_call` + `tool_result` round-trip | No |
-| Error surfaced to user | SSE `error` event | **No — errors are swallowed**, turn dies silently |
-| Duplicate delivery guard | n/a (request/response) | None — no event-id dedup |
-| Concurrency per session | One in-flight stream per session | **None — overlapping turns can write the same checkpointer thread** |
-| Missed messages on downtime | n/a | Sync-token only; token loss ⇒ silent gap or replay |
-| Progress UX | Streaming | Typing indicator (not refreshed; times out ~30 s) |
+| Concern                       | HTTP + WS                                                                                             | Matrix room                                                         |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Authentication                | UCAN invocation (Bearer) or delegation fallback, validated vs Blocksync (`auth-header.middleware.ts`) | None — trusts Matrix sender id                                      |
+| Subscription / credits (402)  | `SubscriptionMiddleware` (Express)                                                                    | Skipped entirely                                                    |
+| Rate limiting                 | `ThrottlerGuard` 10 req/60 s                                                                          | 500 ms debounce only                                                |
+| DTO validation                | Global `ValidationPipe`                                                                               | n/a (constructed in code)                                           |
+| Token streaming               | SSE `message` events                                                                                  | No (final message only)                                             |
+| Reasoning / "thinking"        | SSE `reasoning` events                                                                                | No                                                                  |
+| Tool-call visibility          | SSE + WS `tool_call` (name, args, status, output)                                                     | No                                                                  |
+| UI components                 | Client `uiComponents` map keyed by tool/action name; `render_component` event plumbed (unused)        | No                                                                  |
+| Browser tools / AG-UI actions | WS `browser_tool_call` / `action_call` + `tool_result` round-trip                                     | No                                                                  |
+| Error surfaced to user        | SSE `error` event                                                                                     | **No — errors are swallowed**, turn dies silently                   |
+| Duplicate delivery guard      | n/a (request/response)                                                                                | None — no event-id dedup                                            |
+| Concurrency per session       | One in-flight stream per session                                                                      | **None — overlapping turns can write the same checkpointer thread** |
+| Missed messages on downtime   | n/a                                                                                                   | Sync-token only; token loss ⇒ silent gap or replay                  |
+| Progress UX                   | Streaming                                                                                             | Typing indicator (not refreshed; times out ~30 s)                   |
 
 ### 2.3 What already exists that we build on
 
@@ -91,20 +91,20 @@ graph TD
 ```
 
 - **Pillar A — Stability hardening (§4.1–4.3).** Bring the ingress to production quality: identity binding, subscription/credit and rate-limit enforcement, event dedup, per-session turn serialization, visible errors, typing keepalive, federation timeouts.
-- **Pillar B — Durable UI events (§4.4–4.5).** Replace `BatchInvoker` on Matrix turns with a streaming runner that translates graph events. Only two things are ever *persisted* to the room beyond the final reply: **UI components** (things that must render as an element in chat) and **errors**. Tool activity is deliberately ephemeral — live over WS for our FE, invisible to plain Matrix clients beyond the typing indicator. This is the "UI components in Matrix chat" answer: the component payload lives in the room, E2EE-encrypted, replayable on any device — no live connection needed to see history.
+- **Pillar B — Durable UI events (§4.4–4.5).** Replace `BatchInvoker` on Matrix turns with a streaming runner that translates graph events. Only two things are ever _persisted_ to the room beyond the final reply: **UI components** (things that must render as an element in chat) and **errors**. Tool activity is deliberately ephemeral — live over WS for our FE, invisible to plain Matrix clients beyond the typing indicator. This is the "UI components in Matrix chat" answer: the component payload lives in the room, E2EE-encrypted, replayable on any device — no live connection needed to see history.
 - **Pillar C — Live WS side-channel (§4.6).** The FE detects the oracle in a room, resolves its API URL, and opens a background WS connection (existing gateway, existing UCAN auth). This carries the ephemeral/interactive traffic: reasoning, live tool status, `browser_tool_call` / `action_call` round-trips, and (optionally) token streaming. **Yes — the "detect oracle → connect WS in the background" idea is the right architecture**, with the specifics pinned down in §4.6.
 
 Division of labor between the two channels:
 
-| Content | Channel | Why |
-|---|---|---|
-| User message | Matrix (native send) | Works from any client, E2EE, attributed to the user |
-| Final AI reply | Matrix `m.text` in thread | Durable, renders everywhere |
-| UI component | Matrix `m.room.message` + `ixo.oracle.component` content key | Durable; text fallback in Element |
-| Error | Matrix `m.notice` + `ixo.oracle.error` content key | User must see failures everywhere |
-| Tool calls (all states, args, output), reasoning, progress | WS only | Ephemeral; no timeline value, would spam the room. Nothing tool-shaped is persisted to Matrix |
-| `browser_tool_call`, `action_call` (full args) + results | WS only | Requires a live client by definition |
-| Token stream (optional) | WS only | Matrix can't do it; FE-only nicety |
+| Content                                                    | Channel                                                      | Why                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| User message                                               | Matrix (native send)                                         | Works from any client, E2EE, attributed to the user                                           |
+| Final AI reply                                             | Matrix `m.text` in thread                                    | Durable, renders everywhere                                                                   |
+| UI component                                               | Matrix `m.room.message` + `ixo.oracle.component` content key | Durable; text fallback in Element                                                             |
+| Error                                                      | Matrix `m.notice` + `ixo.oracle.error` content key           | User must see failures everywhere                                                             |
+| Tool calls (all states, args, output), reasoning, progress | WS only                                                      | Ephemeral; no timeline value, would spam the room. Nothing tool-shaped is persisted to Matrix |
+| `browser_tool_call`, `action_call` (full args) + results   | WS only                                                      | Requires a live client by definition                                                          |
+| Token stream (optional)                                    | WS only                                                      | Matrix can't do it; FE-only nicety                                                            |
 
 Sends stay **native Matrix** in room chat (the user's own client posts the message). We considered the alternative — FE intercepts sends in oracle rooms and posts via HTTP, with the runtime mirroring to the room — and rejected it: it creates a user-message attribution problem (the bot would post on the user's behalf, or we need echo-suppression markers and dedup races), it forks the FE send path in two, and the native path still has to be hardened anyway for Element/mobile users. One send path, one hardened ingress.
 
@@ -123,6 +123,7 @@ Rules, applied in `MatrixListenerBridge` before delivery:
 3. **Delegation as the DID binding**: load the stored UCAN delegation from room state for that DID (existing `delegation-store.ts` read-through) and validate it cryptographically (existing validation path). A valid delegation can only have been issued by the holder of the DID's keys, so a validated delegation ⇒ the DID binding is genuine, regardless of homeserver.
 
    The provisioning loop for this **already exists end-to-end and needs no new work**: the runtime's `POST /delegation` route (`delegation.controller.ts`) stores the user→oracle UCAN into Matrix room state via the delegation store; the FE's `useAuthorizeOracleForMatrix` hook already calls GET/POST/DELETE `/delegation` from the authorize modal, which is opened by the existing `ixo.oracle.delegation_required` timeline event. Matrix auth = "validate what `/delegation` stored"; this spec only adds the enforcement rules around it.
+
 4. **No delegation** ⇒ keep today's behavior (emit `ixo.oracle.delegation_required`, proceed with `raw: ''`) **only if** `MATRIX_ALLOW_UNDELEGATED_TURNS=true` (default `true` during migration, flip to `false` at cutover). When `false`, post a notice in-thread telling the user to authorize the oracle (deep link), and do not invoke the agent.
 
 We do **not** require a per-message UCAN invocation embedded in Matrix events — that would break native clients and defeat the point of Matrix chat.
@@ -164,7 +165,7 @@ Principle: **nothing goes to the Matrix timeline unless it renders as a UI eleme
 
 All chat-scoped events are thread-related to the session root (`m.relates_to: { rel_type: 'm.thread', event_id: <sessionId> }`) and carry `sessionId` + `requestId`. In E2EE rooms they are encrypted like any other event (bot has Rust crypto; FE already handles the encrypted→decrypted case for custom events).
 
-**UI components** — posted as a regular message with an extension content key, so every client shows *something*:
+**UI components** — posted as a regular message with an extension content key, so every client shows _something_:
 
 ```jsonc
 {
@@ -172,14 +173,17 @@ All chat-scoped events are thread-related to the session root (`m.relates_to: { 
   "content": {
     "msgtype": "m.text",
     "body": "📊 Revenue by month — open in IXO Portal to view: <link>",
-    "sessionId": "…", "requestId": "…",
+    "sessionId": "…",
+    "requestId": "…",
     "ixo.oracle.component": {
-      "componentName": "create_bar_chart",   // key into the FE uiComponents map
-      "props": { /* … */ },
-      "eventId": "…"
+      "componentName": "create_bar_chart", // key into the FE uiComponents map
+      "props": {
+        /* … */
+      },
+      "eventId": "…",
     },
-    "m.relates_to": { "rel_type": "m.thread", "event_id": "<sessionId>" }
-  }
+    "m.relates_to": { "rel_type": "m.thread", "event_id": "<sessionId>" },
+  },
 }
 ```
 
@@ -188,7 +192,7 @@ Our FE checks for the `ixo.oracle.component` key before falling through to the p
 **How the runtime knows something is a UI element** — two producers, both landing in the WS sink (live) and the durable sink (persisted):
 
 1. **Explicit emit**: `ctx.emit.renderComponent({ componentName, args })` — already fully plumbed in the plugin API, event class, and SDK resolver; it just has no producer today. This becomes the primary way a plugin says "render this".
-2. **Manifest-flagged tools**: since today's FE renders components keyed by *tool name* (`uiComponents[toolName]`), a plugin can mark a tool in its manifest (e.g. `uiComponent: true` or `uiComponent: '<componentName>'`). The durable sink auto-converts that tool's **terminal** call into a component event with `props: { args, output, status }` — same shape `resolveUIComponent` feeds the component on the HTTP path. No plugin code changes for existing tools like the task cards or AG-UI charts.
+2. **Manifest-flagged tools**: since today's FE renders components keyed by _tool name_ (`uiComponents[toolName]`), a plugin can mark a tool in its manifest (e.g. `uiComponent: true` or `uiComponent: '<componentName>'`). The durable sink auto-converts that tool's **terminal** call into a component event with `props: { args, output, status }` — same shape `resolveUIComponent` feeds the component on the HTTP path. No plugin code changes for existing tools like the task cards or AG-UI charts.
 
 Unflagged tools produce nothing durable — WS-only, by design.
 
@@ -197,8 +201,15 @@ Unflagged tools produce nothing durable — WS-only, by design.
 **Room identification** — new state event, written by the runtime when it joins a room (and by the tasks/editor plugins when they create rooms):
 
 ```jsonc
-{ "type": "ixo.oracle.room", "state_key": "<oracleDid>",
-  "content": { "oracleDid": "…", "oracleEntityDid": "…", "apiUrl": "https://…" } }
+{
+  "type": "ixo.oracle.room",
+  "state_key": "<oracleDid>",
+  "content": {
+    "oracleDid": "…",
+    "oracleEntityDid": "…",
+    "apiUrl": "https://…",
+  },
+}
 ```
 
 Today the FE detects oracle rooms only by alias convention — which fails for runtime-created task/editor rooms that have no oracle alias. The state event makes detection uniform and gives the FE the API URL with zero extra lookups (alias detection stays as fallback for old rooms).
@@ -242,8 +253,8 @@ Today: session = reply-chain thread root. A bare (non-reply) message starts a **
 
 Recommended resolution order for the bridge (feature flag `MATRIX_SESSION_MODE=hybrid|thread`, default `hybrid`):
 
-1. Room pinned by a plugin resolver (tasks rooms) → that session. *(exists)*
-2. Message is a thread/reply → its root's session. *(exists)*
+1. Room pinned by a plugin resolver (tasks rooms) → that session. _(exists)_
+2. Message is a thread/reply → its root's session. _(exists)_
 3. Bare message in a DM oracle room → the room's **default rolling session** (created on first bare message, stored in room account-data/state; the "New Conversation Started" anchor keeps `sessionId` = a real event id, preserving the invariant). A "new conversation" is started by the existing `createSession` flow or an explicit command/button.
 4. Bare message in a **group** room → unchanged (mention/reply-gated by the group-chat middleware anyway).
 
@@ -269,7 +280,7 @@ FE composer in oracle rooms: send messages as thread replies to the active sessi
 
 - **Localpart spoofing across federation** → trusted-homeservers list (§4.1.2), later DID-doc verification.
 - **Delegation = DID binding** — only a validated UCAN proves the sender controls the DID; undelegated turns are migration-only and gated by env flag.
-- **Timeline exposure**: tool args/outputs are never persisted to Matrix (WS-only), which removes most of the leakage surface. What *is* persisted — component props — is visible to all room members in group rooms, same as the text reply; a plugin flagging a tool with `uiComponent` is opting its terminal args/output into the room record and must not do so for secret-bearing tools.
+- **Timeline exposure**: tool args/outputs are never persisted to Matrix (WS-only), which removes most of the leakage surface. What _is_ persisted — component props — is visible to all room members in group rooms, same as the text reply; a plugin flagging a tool with `uiComponent` is opting its terminal args/output into the room record and must not do so for secret-bearing tools.
 - **WS session access**: subscribe validated against session ownership; never trust client-supplied `userDid` (gateway already stashes the authenticated DID).
 - **Credits**: charged to the sender's DID; group-room members can't spend each other's credits.
 
@@ -281,56 +292,56 @@ Phases are independently shippable; each ends with a review checkpoint before th
 
 ### Phase 0 — Stability hardening (runtime only, no protocol change)
 
-| # | Task | Where |
-|---|---|---|
-| 0.1 | `processed_matrix_events` dedup table + prune | bridge + sqlite |
-| 0.2 | Per-session turn queue (cap 3, overflow notice) | bridge |
-| 0.3 | Error replies in-thread (`m.notice` + `ixo.oracle.error` key) | bridge |
-| 0.4 | Typing keepalive (20 s refresh) | bridge |
-| 0.5 | Federation timeout + retry on thread-root walk | bridge |
-| 0.6 | Replay age guard (`MATRIX_MAX_EVENT_AGE_HOURS`) | bridge |
-| 0.7 | Per-DID rate limit (`MATRIX_TURNS_PER_MINUTE`) | bridge |
-| 0.8 | `matrixManager.init()` retry/backoff + health surfacing | bootstrap/health |
+| #   | Task                                                          | Where            |
+| --- | ------------------------------------------------------------- | ---------------- |
+| 0.1 | `processed_matrix_events` dedup table + prune                 | bridge + sqlite  |
+| 0.2 | Per-session turn queue (cap 3, overflow notice)               | bridge           |
+| 0.3 | Error replies in-thread (`m.notice` + `ixo.oracle.error` key) | bridge           |
+| 0.4 | Typing keepalive (20 s refresh)                               | bridge           |
+| 0.5 | Federation timeout + retry on thread-root walk                | bridge           |
+| 0.6 | Replay age guard (`MATRIX_MAX_EVENT_AGE_HOURS`)               | bridge           |
+| 0.7 | Per-DID rate limit (`MATRIX_TURNS_PER_MINUTE`)                | bridge           |
+| 0.8 | `matrixManager.init()` retry/backoff + health surfacing       | bootstrap/health |
 
-*Acceptance:* unit tests for dedup/queue/age-guard; simulated duplicate delivery, concurrent bursts to one thread, agent throw, and slow homeserver all behave (no double answers, no interleaved checkpoints, visible error, no stall).
+_Acceptance:_ unit tests for dedup/queue/age-guard; simulated duplicate delivery, concurrent bursts to one thread, agent throw, and slow homeserver all behave (no double answers, no interleaved checkpoints, visible error, no stall).
 
 ### Phase 1 — Auth & billing parity
 
-| # | Task |
-|---|---|
+| #   | Task                                                                                                              |
+| --- | ----------------------------------------------------------------------------------------------------------------- |
 | 1.1 | Extract `SubscriptionGuardService`; Express middleware becomes adapter (HTTP behavior unchanged, locked by tests) |
-| 1.2 | Bridge enforcement + payment notice; `MATRIX_ALLOW_UNDELEGATED_TURNS` flag |
-| 1.3 | Sender→DID binding rules + `MATRIX_TRUSTED_HOMESERVERS` |
-| 1.4 | Env schema additions (base-env-schema) + docs |
+| 1.2 | Bridge enforcement + payment notice; `MATRIX_ALLOW_UNDELEGATED_TURNS` flag                                        |
+| 1.3 | Sender→DID binding rules + `MATRIX_TRUSTED_HOMESERVERS`                                                           |
+| 1.4 | Env schema additions (base-env-schema) + docs                                                                     |
 
 ### Phase 2 — Turn runner refactor + durable events
 
-| # | Task |
-|---|---|
-| 2.1 | Snapshot-test current SSE frame sequences; extract `GraphStreamTranslator`; `SseStreamRunner` = translator + SSE sink (behavior-identical) |
-| 2.2 | `MatrixTurnRunner` (translator + WS sink + final-message collector) replaces `BatchInvoker` for `clientType: 'matrix'` |
-| 2.3 | Matrix durable sink: component-in-message + error events only; 32 KiB truncation + media offload via existing upload utils |
-| 2.4 | `ixo.oracle.room` state event on join + task/editor room creation |
+| #   | Task                                                                                                                                                         |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2.1 | Snapshot-test current SSE frame sequences; extract `GraphStreamTranslator`; `SseStreamRunner` = translator + SSE sink (behavior-identical)                   |
+| 2.2 | `MatrixTurnRunner` (translator + WS sink + final-message collector) replaces `BatchInvoker` for `clientType: 'matrix'`                                       |
+| 2.3 | Matrix durable sink: component-in-message + error events only; 32 KiB truncation + media offload via existing upload utils                                   |
+| 2.4 | `ixo.oracle.room` state event on join + task/editor room creation                                                                                            |
 | 2.5 | Wire `ctx.emit.renderComponent` → durable sink (first real producer for the plumbed event); manifest `uiComponent` flag + terminal-tool-call auto-conversion |
 
-*Acceptance:* SSE snapshots unchanged; a Matrix turn with tool calls produces live WS events and **zero** tool events in the timeline; a `renderComponent` emit / `uiComponent`-flagged tool produces one durable component message in-thread; oversized props land as media ref.
+_Acceptance:_ SSE snapshots unchanged; a Matrix turn with tool calls produces live WS events and **zero** tool events in the timeline; a `renderComponent` emit / `uiComponent`-flagged tool produces one durable component message in-thread; oversized props land as media ref.
 
 ### Phase 3 — Live side-channel + FE + SDK
 
-| # | Task |
-|---|---|
-| 3.1 | WS gateway: `subscribe_session`/`unsubscribe_session` with ownership validation (handshake path kept) |
-| 3.2 | `register_capabilities` registry in `WsService`; `RequestPreparer` merges live capabilities into Matrix turns; `callFrontendTool` disconnect timeout |
-| 3.3 | SDK: live-channel hook extensions + `matrixEventsToMessages` transformer |
+| #   | Task                                                                                                                                                       |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3.1 | WS gateway: `subscribe_session`/`unsubscribe_session` with ownership validation (handshake path kept)                                                      |
+| 3.2 | `register_capabilities` registry in `WsService`; `RequestPreparer` merges live capabilities into Matrix turns; `callFrontendTool` disconnect timeout       |
+| 3.3 | SDK: live-channel hook extensions + `matrixEventsToMessages` transformer                                                                                   |
 | 3.4 | FE: shared `uiComponents` registry module; timeline renderers for the new events; `useOracleRoomLiveChannel`; composer auto-threading + "new conversation" |
-| 3.5 | Optional: `streamTokens` WS token streaming + FE reconcile-on-final |
+| 3.5 | Optional: `streamTokens` WS token streaming + FE reconcile-on-final                                                                                        |
 
 ### Phase 4 — Session UX, docs, integration tests
 
-| # | Task |
-|---|---|
-| 4.1 | Hybrid session resolution (`MATRIX_SESSION_MODE`, default `hybrid`) |
-| 4.2 | Public docs: "Chat over Matrix" page in `build-an-oracle/` (event schema, env vars, FE integration); internal `docs/architecture/` page for the bridge/turn-runner (currently undocumented) |
+| #   | Task                                                                                                                                                                                                      |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4.1 | Hybrid session resolution (`MATRIX_SESSION_MODE`, default `hybrid`)                                                                                                                                       |
+| 4.2 | Public docs: "Chat over Matrix" page in `build-an-oracle/` (event schema, env vars, FE integration); internal `docs/architecture/` page for the bridge/turn-runner (currently undocumented)               |
 | 4.3 | Integration tests (`*.int.test.ts`): Matrix turn end-to-end — send in room → durable events + reply; delegation-missing path; credit-exhausted path. Written + type-checked; run manually per repo policy |
 
 Dependencies: 0 → 1 → 2 → 3 → 4 is the natural order; 1 is independent of 0; 3.1/3.2 only need the WS gateway and can start alongside 2.
