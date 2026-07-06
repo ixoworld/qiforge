@@ -27,8 +27,10 @@ import {
   setStepAssignment,
   setStepConditions,
   setStepConfirmation,
+  setStepEventTrigger,
   setStepInputs,
   setStepSchedule,
+  setStepTrigger,
   updateFlowMeta,
 } from '../edit.js';
 import { FlowError, toToolError } from '../errors.js';
@@ -389,7 +391,7 @@ const updateStepSchema = z.object({
 });
 
 /** Route an update_step patch to the focused per-block edits. */
-function applyStepPatch(
+export function applyStepPatch(
   doc: YDoc,
   stepId: string,
   patch: Partial<FlowStep>,
@@ -407,6 +409,11 @@ function applyStepPatch(
     setStepAssignment(doc, stepId, patch.assignTo);
   if (patch.requireConfirmation !== undefined)
     setStepConfirmation(doc, stepId, patch.requireConfirmation);
+  // Both write the same trigger props; onEvent is the more specific intent.
+  if (patch.onEvent !== undefined)
+    setStepEventTrigger(doc, stepId, patch.onEvent);
+  else if (patch.trigger !== undefined)
+    setStepTrigger(doc, stepId, patch.trigger);
 }
 
 export function buildAuthoringTools(
@@ -515,7 +522,9 @@ export function buildAuthoringTools(
       {
         name: 'update_step',
         description:
-          "Update any subset of a step's settings in one call (inputs, conditions, schedule, assignee, confirmation).",
+          "Update any subset of a step's settings in one call (inputs, conditions, schedule, assignee, confirmation, " +
+          'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
+          'clear an onEvent auto-trigger.',
         schema: updateStepSchema,
       },
     ),

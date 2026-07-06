@@ -176,7 +176,7 @@ export function buildSettingsTools(
         name: 'set_step_trigger',
         description:
           "Set when a step runs: 'manual' (the user invokes it) or 'flow-start' (runs when the flow begins). " +
-          'For event-driven triggers, sequence with ordering + input references instead.',
+          "For an event-driven auto-trigger, set the step's onEvent via update_step; setting 'manual' here clears one.",
         schema: triggerSchema,
       },
     ),

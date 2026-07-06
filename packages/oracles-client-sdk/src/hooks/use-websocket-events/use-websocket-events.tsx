@@ -4,13 +4,13 @@ import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
 import { useOraclesConfig } from '../use-oracles-config.js';
+import { executeToolAndEmitResult } from './tool-executor.js';
 import {
   type ConnectionStatus,
   type IUseWebSocketEventsReturn,
   type IWebSocketConfig,
   type WebSocketEvent,
 } from './types.js';
-import { executeToolAndEmitResult } from './tool-executor.js';
 
 export function useWebSocketEvents(
   props: IWebSocketConfig,
@@ -258,7 +258,13 @@ export function useWebSocketEvents(
       setIsConnected(false);
       setConnectionStatus('disconnected');
     };
-  }, [sessionId, wallet, apiUrl]);
+  }, [
+    sessionId,
+    wallet?.did,
+    wallet?.address,
+    wallet?.matrix.accessToken,
+    apiUrl,
+  ]);
 
   return {
     isConnected,

@@ -22,6 +22,7 @@ import {
   readRuntimeState,
 } from '../editor/blocknote-helper.js';
 import {
+  blockIdToStepId,
   canToAction,
   nbToFriendlyInputs,
   parseConditionsProp,
@@ -284,8 +285,9 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
       trigger.sourceBlockId &&
       trigger.eventName
     ) {
+      // Compiled props store the BLOCK id; the agent always sees step ids.
       step.onEvent = {
-        fromStep: trigger.sourceBlockId,
+        fromStep: blockIdToStepId(trigger.sourceBlockId),
         event: trigger.eventName,
       };
     } else if (trigger?.type === 'flow.start') {

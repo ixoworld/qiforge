@@ -133,6 +133,7 @@ async function bootstrap(): Promise<void> {
     // plugin-side `getAuthExcludedRoutes()` hook used by the Weather plugin
     // for `/weather/now`. Both merge onto the runtime's built-in exclusions.
     authExcludedRoutes,
+    
   });
 
   app.onPluginStatusChange((event) => {

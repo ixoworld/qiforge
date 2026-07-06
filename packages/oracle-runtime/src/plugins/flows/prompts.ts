@@ -40,7 +40,7 @@ You have loaded the **Flow Builder** capability. Use it whenever the user wants 
 
 4. **Build (only after confirmation).** Run \`validate_flow\` first, then:
    - New flow → \`create_template\`. Editing the flow that is already open → the edit tools (\`add_step\`, \`update_step\`, \`remove_step\`, \`reorder_step\`, \`set_step_*\`, \`connect_steps\`). \`create_template\` makes a BRAND-NEW flow in its own room — never use it to change an existing or open flow.
-   - Set each step's inputs (\`set_step_inputs\`) and wire data between steps with \`connect_steps\`, or by writing a \`{{step-id.output.field}}\` reference. Use \`list_referenceable_fields\` to see what a step can pull from upstream, and \`check_link\` / \`compatible_actions\` to verify a wire before relying on it.
+   - Set a step's literal input values with \`set_step_inputs\`; wire data between steps with \`connect_steps\` (one upstream output → one downstream input per call). Use \`list_referenceable_fields\` to see what a step can pull from upstream, and \`check_link\` / \`compatible_actions\` to verify a wire before relying on it.
    - For a **form** step you MUST call \`set_form_schema\` to define its questions — a form with no questions cannot run. \`fill_form\` only pre-fills answers; it never submits.
    - Apply conditions, schedule, assignee, and confirmation with the matching \`set_step_*\` tool.
 
@@ -48,11 +48,17 @@ You have loaded the **Flow Builder** capability. Use it whenever the user wants 
 
 **Wiring & sequencing (verified — get this right):**
 - Sequence with **step order + data references.** A step that reads \`{{a.output.x}}\` is not ready until step \`a\` has produced that output — that is the real dependency, and it works for every block.
-- \`set_step_trigger\` sets \`manual\` vs \`flow-start\`. Event auto-triggers only work for the few event-capable blocks; \`validate_flow\` rejects them on anything else — fall back to order + data references.
+- **Always wire step-to-step data with \`connect_steps\`, never \`set_step_inputs\`.** \`set_step_inputs\` REPLACES the step's entire inputs map — using it to add one wire silently drops every other input already configured on that step (e.g. the email block loses its recipient). \`connect_steps\` merges a single \`{{from.output.field}}\` reference into the existing inputs. Reserve \`set_step_inputs\` for setting a step's full set of values in one call.
+- **Auto-run a step when an upstream step finishes:** set that step's \`onEvent\` to \`{ fromStep: "<upstream-step-id>", event: "<event-name>" }\`. This is the ONLY thing that auto-fires a downstream block. Use \`describe_action\` to see a step's emitted events. Example: a **form** step emits \`form.submitted\` — to send an email the moment the form is submitted, set the email step's \`onEvent\` to \`{ fromStep: "<form-step>", event: "form.submitted" }\` and wire its inputs from \`{{<form-step>.output.answers.<field>}}\`.
+- **Do NOT** use \`after\` (ordering only — it does NOT auto-fire) or lifecycle hooks (e.g. \`on.sendEmail\`, which is a separate platform-email side effect, NOT a way to trigger an integration block) to auto-run a step. Only \`onEvent\` auto-fires.
+- \`set_step_trigger\` sets \`manual\` vs \`flow-start\`. \`onEvent\` is only valid when the upstream action actually emits events (\`validate_flow\` enforces this); otherwise fall back to order + data references and the user runs the step manually.
 - \`set_step_conditions\` gate on an upstream step's **configured** value, not its live runtime result.
 
 **Asking vs guessing:** STOP and ask for any \`requires\` you can't fill from context (collection ids, DIDs, recipients, connected accounts, template names, endpoints, PINs, amounts). Never fabricate them. But don't ask for things the portal collects at run time, or that you can reasonably infer.
 
 **Status is read-only.** \`flow_status\` / \`get_step\` / \`explain_step\` report the user's real runs — use them to report progress or to diagnose a failed step and fix the template. Never invent a step's state, a transaction result, or a proof.
 
-**Tools at a glance.** Discover: \`list_actions\`, \`describe_action\`, \`requirements\`, \`list_referenceable_fields\`. Inspect: \`read_flow\`, \`get_step\`, \`flow_status\`, \`explain_step\`. Author: \`validate_flow\`, \`create_template\`, \`add_step\`, \`update_step\`, \`remove_step\`, \`reorder_step\`, \`connect_steps\`, \`update_flow_meta\`. Tune: \`set_step_inputs\`, \`set_step_conditions\`, \`set_step_schedule\`, \`set_step_assignment\`, \`set_step_confirmation\`, \`set_step_trigger\`. Link: \`check_link\`, \`compatible_actions\`. Forms: \`set_form_schema\`, \`describe_form\`, \`fill_form\`.`;
+**Tools at a glance.** Discover: \`list_actions\`, \`describe_action\`, \`requirements\`, \`list_referenceable_fields\`. Inspect: \`read_flow\`, \`get_step\`, \`flow_status\`, \`explain_step\`. Author: \`validate_flow\`, \`create_template\`, \`add_step\`, \`update_step\`, \`remove_step\`, \`reorder_step\`, \`connect_steps\`, \`update_flow_meta\`. Tune: \`set_step_inputs\`, \`set_step_conditions\`, \`set_step_schedule\`, \`set_step_assignment\`, \`set_step_confirmation\`, \`set_step_trigger\`. Link: \`check_link\`, \`compatible_actions\`. Forms: \`set_form_schema\`, \`describe_form\`, \`fill_form\`.
+
+**Step ids are short everywhere.** Always use the short step id in \`onEvent.fromStep\` and in \`{{step-id.output.field}}\` references (e.g. \`{{it-request-form.output.answers.email}}\`). After configuring an \`onEvent\` trigger, report back to the user exactly what it does: which step fires, on which event, and which downstream step it triggers.
+`;
