@@ -41,11 +41,11 @@ export type ProviderModelRole =
 
 const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
   openrouter: {
-    main: 'z-ai/glm-5.2',
+    main: 'x-ai/grok-build-0.1',
     // main: 'moonshotai/kimi-k2-thinking',
-    skills: 'z-ai/glm-5.2',
+    skills: 'x-ai/grok-build-0.1',
     // skills: 'moonshotai/kimi-k2-thinking',
-    subagent: 'z-ai/glm-5.2',
+    subagent: 'x-ai/grok-build-0.1',
     // subagent: 'moonshotai/kimi-k2-thinking',
     vision: 'google/gemini-2.5-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
@@ -74,6 +74,24 @@ const OPENROUTER_MAIN_FALLBACKS = [
   'qwen/qwen3-235b-a22b-thinking-2507',
   'google/gemini-2.5-flash-lite',
 ];
+
+/**
+ * Extended-thinking effort for the main model, from `MAIN_REASONING_EFFORT`
+ * (default `medium`). Lower effort trims time-to-first-token on simple turns
+ * at some cost to hard multi-step reasoning. Scoped to the `main` role so
+ * sub-agent reasoning is unchanged. Read from `process.env` directly to match
+ * how this factory already resolves provider keys (no Nest DI here).
+ */
+function resolveMainReasoningEffort(): 'low' | 'medium' | 'high' {
+  switch (process.env.MAIN_REASONING_EFFORT) {
+    case 'low':
+      return 'low';
+    case 'high':
+      return 'high';
+    default:
+      return 'medium';
+  }
+}
 
 /**
  * Get the model identifier for a given role, respecting the active provider.
@@ -127,7 +145,7 @@ export const getProviderChatModel = (
         ...params?.modelKwargs,
       },
       reasoning: {
-        effort: 'medium',
+        effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
         ...params?.reasoning,
       },
     });

@@ -145,7 +145,15 @@ export class Claims {
   }: SubmitAndSaveSignedClaimParams) {
     const credentialArgs: ICreateVerifiableCredentialArgs = {
       credential: {
-        '@context': ['https://www.w3.org/2018/credentials/v1'],
+        // The inline @vocab context maps every credentialSubject field to an
+        // IRI. Without it, JSON-LD canonicalization drops the claim fields as
+        // undefined terms — jsonld-signatures >= 10 runs in safe mode and
+        // throws ("Safe mode validation error") instead of signing a
+        // credential the signature wouldn't actually cover.
+        '@context': [
+          'https://www.w3.org/2018/credentials/v1',
+          { '@vocab': 'https://w3id.org/ixo/vocab#' },
+        ],
         type: ['VerifiableCredential'],
         credentialSubject: claim.body,
         issuer: '', // This will be set by the createCredential function

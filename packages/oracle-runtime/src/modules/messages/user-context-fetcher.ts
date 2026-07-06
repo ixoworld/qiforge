@@ -16,8 +16,14 @@ type UserContextRecord = Record<string, unknown>;
 
 const CACHE_TTL_MS = minutes(5);
 
-function cacheKey(sessionId: string): string {
-  return `user-context:${sessionId}`;
+/**
+ * Cache key for the fetched context. The Memory-Engine result is a function of
+ * the room (and oracle), not the session — so keying by `roomId` lets a new
+ * session for the same room reuse the cached value instead of paying a fresh
+ * fetch.
+ */
+function cacheKey(roomId: string): string {
+  return `user-context:room:${roomId}`;
 }
 
 /**
@@ -74,7 +80,9 @@ export class UserContextFetcher {
       return undefined;
     }
 
-    const cached = await this.cache.get<UserContextRecord>(cacheKey(sessionId));
+    const key = cacheKey(roomId);
+
+    const cached = await this.cache.get<UserContextRecord>(key);
     if (cached) {
       this.logger.log(
         `[UserContextFetcher] cache hit — room=${roomId}, keys=${Object.keys(cached).length}`,
@@ -133,7 +141,7 @@ export class UserContextFetcher {
       this.logger.log(
         `[UserContextFetcher] gather returned ${keyCount} key(s) for room ${roomId}: ${keyCount > 0 ? Object.keys(widened).join(', ') : '(empty)'}`,
       );
-      await this.cache.set(cacheKey(sessionId), widened, CACHE_TTL_MS);
+      await this.cache.set(key, widened, CACHE_TTL_MS);
       return widened;
     } catch (err) {
       this.logger.warn(

@@ -413,6 +413,27 @@ ON writes(thread_id, checkpoint_id, channel);
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
+    return this.loadTuple(config, true);
+  }
+
+  /**
+   * Like `getTuple` but skips the `messages` join and its per-message
+   * deserialization. For callers that only need the checkpoint's scalar
+   * `channel_values` (e.g. building the agent from `loadedPlugins` /
+   * `currentEntityDid`) and never read the history — the returned checkpoint's
+   * `channel_values.messages` is left unset. O(1) in conversation length
+   * instead of O(history).
+   */
+  async getTupleWithoutMessages(
+    config: RunnableConfig,
+  ): Promise<CheckpointTuple | undefined> {
+    return this.loadTuple(config, false);
+  }
+
+  protected async loadTuple(
+    config: RunnableConfig,
+    includeMessages: boolean,
+  ): Promise<CheckpointTuple | undefined> {
     this.setup();
     const {
       thread_id,
@@ -446,11 +467,13 @@ ON writes(thread_id, checkpoint_id, channel);
       throw new Error('Missing thread_id or checkpoint_id');
     }
 
-    const messages = this.getMessageStmt.all(
-      finalConfig.configurable?.thread_id,
-      finalConfig.configurable?.checkpoint_ns,
-      finalConfig.configurable?.checkpoint_id,
-    ) as MessageRow[];
+    const messages = includeMessages
+      ? (this.getMessageStmt.all(
+          finalConfig.configurable?.thread_id,
+          finalConfig.configurable?.checkpoint_ns,
+          finalConfig.configurable?.checkpoint_id,
+        ) as MessageRow[])
+      : [];
 
     const pendingWrites = await Promise.all(
       (JSON.parse(row.pending_writes) as PendingWriteColumn[]).map(

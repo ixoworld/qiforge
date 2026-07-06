@@ -17,6 +17,7 @@ import {
 import {
   CredentialProviderLD,
   LdDefaultContexts,
+  VeramoEd25519Signature2018,
   VeramoEd25519Signature2020,
 } from '@veramo/credential-ld';
 import {
@@ -162,7 +163,16 @@ export const createVeramoAgent = async (
       new CredentialPlugin([
         new CredentialProviderLD({
           contextMaps: [LdDefaultContexts],
-          suites: [new VeramoEd25519Signature2020()],
+          // IXO DID documents publish Ed25519 keys as Ed25519VerificationKey2018.
+          // Veramo's 2020 suite can SIGN with such keys but cannot dereference
+          // 2018 verification methods when verifying, so self-verification fails.
+          // Suite order decides which one signs for a given DID key type — the
+          // 2018 suite must come first so 2018 keys produce 2018 proofs (same
+          // registration order the IXO Portal uses).
+          suites: [
+            new VeramoEd25519Signature2018(),
+            new VeramoEd25519Signature2020(),
+          ],
         }),
       ]),
     ],

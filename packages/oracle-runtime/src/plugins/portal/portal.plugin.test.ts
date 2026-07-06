@@ -49,14 +49,15 @@ describe('PortalPlugin', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('uses only the request-time sub-agent builder (no boot-time getSubAgents / getTools)', () => {
+  it('uses only the request-time tool builder (no boot-time getTools / getSubAgents)', () => {
     const plugin = new PortalPlugin();
-    expect(plugin.getSubAgents).toBeUndefined();
     expect(plugin.getTools).toBeUndefined();
-    expect(typeof plugin.getRequestSubAgents).toBe('function');
+    expect(plugin.getSubAgents).toBeUndefined();
+    expect(plugin.getRequestSubAgents).toBeUndefined();
+    expect(typeof plugin.getRequestTools).toBe('function');
   });
 
-  it('returns no sub-agents when state.browserTools is empty or absent', async () => {
+  it('returns no tools when state.browserTools is empty or absent', async () => {
     const plugin = new PortalPlugin();
 
     const emptyArrayCtx = makeRuntimeContext({
@@ -67,15 +68,13 @@ describe('PortalPlugin', () => {
         state: { messages: [], browserTools: [] },
       },
     });
-    await expect(plugin.getRequestSubAgents(emptyArrayCtx)).resolves.toEqual(
-      [],
-    );
+    await expect(plugin.getRequestTools(emptyArrayCtx)).resolves.toEqual([]);
 
     const missingCtx = makeRuntimeContext();
-    await expect(plugin.getRequestSubAgents(missingCtx)).resolves.toEqual([]);
+    await expect(plugin.getRequestTools(missingCtx)).resolves.toEqual([]);
   });
 
-  it('builds one sub-agent with one PluginTool per browserTool, model=subagent, JSON-schema converted to Zod, and tool docs in the prompt', async () => {
+  it('builds one PluginTool per browserTool, JSON-schema converted to Zod', async () => {
     const plugin = new PortalPlugin();
     const rtCtx = makeRuntimeContext({
       history: {
@@ -89,15 +88,7 @@ describe('PortalPlugin', () => {
       },
     });
 
-    const subAgents = await plugin.getRequestSubAgents(rtCtx);
-    expect(subAgents).toHaveLength(1);
-
-    const [sub] = subAgents;
-    if (!sub) throw new Error('expected one sub-agent');
-    expect(sub.name).toBe('Portal Agent');
-    expect(sub.model).toBe('subagent');
-
-    const tools = Array.isArray(sub.tools) ? sub.tools : [];
+    const tools = await plugin.getRequestTools(rtCtx);
     expect(tools.map((t) => t.name)).toEqual([
       OPEN_URL_TOOL.name,
       CLICK_TOOL.name,
@@ -112,14 +103,9 @@ describe('PortalPlugin', () => {
     );
     expect(openUrlSchema?.safeParse({ url: 123 }).success).toBe(false);
     expect(openUrlSchema?.safeParse({}).success).toBe(false);
-
-    const prompt = typeof sub.systemPrompt === 'string' ? sub.systemPrompt : '';
-    expect(prompt).toContain('Portal Agent');
-    expect(prompt).toContain(OPEN_URL_TOOL.name);
-    expect(prompt).toContain(CLICK_TOOL.name);
   });
 
-  it('browser-tool handler dispatches via callBrowserTool with session id, requestId-derived toolCallId, and matrix logging when roomId is set', async () => {
+  it('tool handler dispatches via callBrowserTool with session id, requestId-derived toolCallId, and matrix logging when roomId is set', async () => {
     const callBrowserToolMock = vi.mocked(callBrowserTool);
     const logActionToMatrixMock = vi.mocked(logActionToMatrix);
     callBrowserToolMock.mockClear();
@@ -142,9 +128,7 @@ describe('PortalPlugin', () => {
       },
     });
 
-    const [sub] = await plugin.getRequestSubAgents(rtCtx);
-    if (!sub) throw new Error('expected one sub-agent');
-    const tools = Array.isArray(sub.tools) ? sub.tools : [];
+    const tools = await plugin.getRequestTools(rtCtx);
     const [browserTool] = tools;
     if (!browserTool) throw new Error('expected one tool');
 
@@ -189,9 +173,7 @@ describe('PortalPlugin', () => {
       },
     });
 
-    const [sub] = await plugin.getRequestSubAgents(rtCtx);
-    if (!sub) throw new Error('expected one sub-agent');
-    const tools = Array.isArray(sub.tools) ? sub.tools : [];
+    const tools = await plugin.getRequestTools(rtCtx);
     const [browserTool] = tools;
     if (!browserTool) throw new Error('expected one tool');
 

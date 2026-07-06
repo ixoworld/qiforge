@@ -5,11 +5,9 @@ import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type {
   PluginManifest,
-  PluginSubAgent,
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
-import { createPortalSubAgent } from './portal-agent.js';
 
 const manifest: PluginManifest = {
   title: 'Portal',
@@ -20,15 +18,15 @@ const manifest: PluginManifest = {
     "A task needs a browser-side capability the server can't do alone — open a URL in the user's tab, click a Portal button, fill a form.",
   ],
   whenNotToUse: [
-    'No browser tools are declared on this request (sub-agent is not built).',
+    'No browser tools are declared on this request (no tools are contributed).',
     'The task can be completed purely server-side (use a server tool or sub-agent).',
   ],
   examples: [
     {
       user: 'Open my workspace and navigate to the Reports page.',
       thought:
-        'Portal exposes navigation as a browser tool — delegate via call_portal_agent with the target URL.',
-      tool: 'call_portal_agent',
+        'Portal exposes navigation as a browser tool — call the FE-declared tool (e.g. `open_url`) directly with the target URL.',
+      tool: 'open_url',
     },
   ],
   tags: ['portal', 'browser', 'ui'],
@@ -121,11 +119,10 @@ function readBrowserTools(rtCtx: RuntimeContext): BrowserToolCall[] {
 }
 
 /**
- * Portal plugin. The sub-agent is built per-request from `state.browserTools`
- * — the client declares its browser-side tools on each `sendMessage`, the
- * runtime wraps each into a PluginTool, and the agent decides whether to
- * delegate. When no browser tools are declared the plugin contributes
- * nothing.
+ * Portal plugin. Tools are built per-request from `state.browserTools` — the
+ * client declares its browser-side tools on each `sendMessage`, and the
+ * runtime wraps each into a PluginTool bound directly to the main agent.
+ * When no browser tools are declared the plugin contributes nothing.
  */
 export class PortalPlugin extends OraclePlugin {
   readonly name = 'portal';
@@ -134,13 +131,10 @@ export class PortalPlugin extends OraclePlugin {
 
   readonly manifest = manifest;
 
-  override async getRequestSubAgents(
-    rtCtx: RuntimeContext,
-  ): Promise<PluginSubAgent[]> {
+  override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const browserTools = readBrowserTools(rtCtx);
     if (browserTools.length === 0) return [];
 
-    const tools = browserTools.map(buildBrowserTool);
-    return [createPortalSubAgent(tools)];
+    return browserTools.map(buildBrowserTool);
   }
 }

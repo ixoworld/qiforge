@@ -3,7 +3,6 @@ import {
   loadEncryptionKey,
   setupClaimSigningMnemonics,
 } from '@ixo/oracles-chain-client';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   Logger,
@@ -484,8 +483,11 @@ export async function createOracleApp(
   const defaultHooks: MainAgentHooks = checkpointSync
     ? {
         checkpointerForUser: async (userDid: string) => {
-          const db = await checkpointSync.getUserDatabase(userDid);
-          return SqliteSaver.fromDatabase(db) as unknown as BaseCheckpointSaver;
+          // `getUserCheckpointer` reuses a per-connection saver when
+          // `CACHE_CHECKPOINTER_SAVER` is on (the build calls this hook twice
+          // per turn), otherwise builds a fresh one — same as before.
+          const saver = await checkpointSync.getUserCheckpointer(userDid);
+          return saver as unknown as BaseCheckpointSaver;
         },
       }
     : {};

@@ -87,6 +87,13 @@ export const baseEnvSchema = z.object({
   LANGSMITH_API_KEY: z.string().optional(),
   LANGSMITH_PROJECT: z.string().optional(),
   LANGSMITH_ENDPOINT: z.string().optional(),
+
+  /**
+   * Extended-thinking effort for the main model. Lower = faster time-to-first
+   * token, at some cost to hard multi-step reasoning. Default `medium`
+   * preserves current behaviour; set `low` to trade reasoning depth for latency.
+   */
+  MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
