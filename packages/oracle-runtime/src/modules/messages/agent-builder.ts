@@ -132,18 +132,15 @@ export class AgentBuilder {
     if (checkpointer) {
       try {
         // The build only reads scalar channel_values (loadedPlugins,
-        // currentEntityDid, …), never the message history — so when
-        // `LIGHT_BUILD_STATE_READ` is on and the saver supports it, skip the
-        // messages join here. The agent's own restore still loads full history.
+        // currentEntityDid, …), never the message history — so skip the
+        // messages join here when the saver supports it. The agent's own
+        // restore still loads full history.
         const cfg = {
           configurable: { thread_id: prepared.langchainThreadId },
         };
-        const useLightRead =
-          this.config.get<string>('ENABLE_REQUEST_PATH_CACHES') === 'true';
-        const tuple =
-          useLightRead && supportsLightRead(checkpointer)
-            ? await checkpointer.getTupleWithoutMessages(cfg)
-            : await checkpointer.getTuple(cfg);
+        const tuple = supportsLightRead(checkpointer)
+          ? await checkpointer.getTupleWithoutMessages(cfg)
+          : await checkpointer.getTuple(cfg);
         const channelValues = tuple?.checkpoint?.channel_values as
           | Partial<TMainAgentGraphState>
           | undefined;

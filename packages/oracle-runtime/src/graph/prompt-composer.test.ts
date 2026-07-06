@@ -121,20 +121,8 @@ describe('composePrompt — compact memory context', () => {
     }),
   };
 
-  it('renders every duplicate when compaction is off (unchanged behaviour)', async () => {
-    const prompt = await composePrompt(
-      baseInput({ userContext, compactMemory: false }),
-    );
-    // Duplicate fact appears once per bucket it is in (3).
-    expect(count(prompt, 'The user provides daily LinkedIn drafts.')).toBe(3);
-    // Entity 'user' rendered in each of the three buckets.
-    expect(count(prompt, '**user**')).toBe(3);
-  });
-
   it('dedups repeats but keeps near-duplicates and the richest summary', async () => {
-    const prompt = await composePrompt(
-      baseInput({ userContext, compactMemory: true }),
-    );
+    const prompt = await composePrompt(baseInput({ userContext }));
 
     // Exact-duplicate fact collapses to a single line.
     expect(count(prompt, 'The user provides daily LinkedIn drafts.')).toBe(1);
@@ -153,7 +141,6 @@ describe('composePrompt — compact memory context', () => {
   it('keeps episodes and communities (deduped, not dropped by type)', async () => {
     const prompt = await composePrompt(
       baseInput({
-        compactMemory: true,
         userContext: {
           recent: section({
             episodes: [
@@ -176,7 +163,6 @@ describe('composePrompt — compact memory context', () => {
     );
     const prompt = await composePrompt(
       baseInput({
-        compactMemory: true,
         userContext: { work: section({ facts: many }) },
       }),
     );

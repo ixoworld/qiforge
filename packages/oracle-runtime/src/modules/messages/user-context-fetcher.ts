@@ -18,13 +18,12 @@ const CACHE_TTL_MS = minutes(5);
 
 /**
  * Cache key for the fetched context. The Memory-Engine result is a function of
- * the room (and oracle), not the session — so keying by `roomId`
- * (`CACHE_USER_CONTEXT_BY_ROOM`) lets a new session for the same room reuse the
- * cached value instead of paying a fresh fetch. Defaults to the legacy
- * per-session key.
+ * the room (and oracle), not the session — so keying by `roomId` lets a new
+ * session for the same room reuse the cached value instead of paying a fresh
+ * fetch.
  */
-function cacheKey(scope: 'room' | 'session', id: string): string {
-  return `user-context:${scope}:${id}`;
+function cacheKey(roomId: string): string {
+  return `user-context:room:${roomId}`;
 }
 
 /**
@@ -81,10 +80,7 @@ export class UserContextFetcher {
       return undefined;
     }
 
-    const key =
-      this.configService.get<string>('ENABLE_REQUEST_PATH_CACHES') === 'true'
-        ? cacheKey('room', roomId)
-        : cacheKey('session', sessionId);
+    const key = cacheKey(roomId);
 
     const cached = await this.cache.get<UserContextRecord>(key);
     if (cached) {

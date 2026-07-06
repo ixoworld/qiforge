@@ -88,38 +88,10 @@ export const baseEnvSchema = z.object({
   LANGSMITH_PROJECT: z.string().optional(),
   LANGSMITH_ENDPOINT: z.string().optional(),
 
-  // ── Latency experiment flags ────────────────────────────────────────────
-  // Default OFF so behaviour is byte-identical until explicitly enabled.
-  // Read as a string (`=== 'true'`) to match the existing boolean-env pattern.
-
-  /**
-   * Master switch for the request-path caches, enabled together so a single
-   * before/after comparison attributes the combined win:
-   *   - reuse a per-user `SqliteSaver` (bound to the cached DB connection)
-   *     instead of rebuilding it — and re-running its `setup()` — on every
-   *     `checkpointerForUser` call (the build calls that hook twice per turn);
-   *   - make `AgentBuilder`'s prior-state read skip the messages join (the
-   *     build only needs scalar state; the agent's own restore still loads
-   *     full history), avoiding a second full-thread deserialize per request;
-   *   - key the Memory-Engine `userContext` cache by `roomId` instead of
-   *     `sessionId`, so a new session for the same room reuses the value.
-   */
-  ENABLE_REQUEST_PATH_CACHES: z.string().optional().default('false'),
-
-  /**
-   * Compact the "What you know about the user" memory block: dedup entities and
-   * facts across the six buckets (normalized exact-match only — near-duplicates
-   * are kept, so no unique fact is lost), keep each entity's richest summary,
-   * and bound the block with generous guardrail caps. Default off renders the
-   * block exactly as before.
-   */
-  COMPACT_MEMORY_CONTEXT: z.string().optional().default('false'),
-
   /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first
    * token, at some cost to hard multi-step reasoning. Default `medium`
-   * preserves current behaviour; set `low` to measure the latency/quality
-   * trade-off.
+   * preserves current behaviour; set `low` to trade reasoning depth for latency.
    */
   MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
 });

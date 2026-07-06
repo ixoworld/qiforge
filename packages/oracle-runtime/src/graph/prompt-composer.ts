@@ -57,11 +57,6 @@ export interface ComposePromptInput {
   oracleNameOverride?: string;
   /** Degraded-services notice appended after the main prompt body. */
   degradedServicesBlock?: string;
-  /**
-   * Dedup + budget the memory-context block (`COMPACT_MEMORY_CONTEXT`). Default
-   * false renders the block exactly as before.
-   */
-  compactMemory?: boolean;
 }
 
 /**
@@ -87,95 +82,8 @@ const CONTEXT_SECTION_LABELS: Record<ContextSlot, string> = {
   recent: 'Recent activity',
 };
 
-/**
- * Format a single memory-engine context section as mid-density rich content.
- *
- * Goal: enough high-level signal that the agent can converse without re-querying,
- * but compact enough that six categorical sections don't blow up the prompt.
- * The agent can always deep-dive via the search_memory_engine tool.
- *
- * Layout per section (in priority order):
- *   1. **Key entities** with summaries — entity.summary contains the richest
- *      multi-fact synthesis graphiti produces (e.g. "user had a 1:1 with Carlos
- *      at 2pm today; user agreed to do the database migration in three phases").
- *   2. **Facts** — short relationship-level bullets for breadth.
- *   3. **Recent episodes** — raw source text, only when `includeEpisodes` is on.
- *
- * Returns `null` when the slot has no usable content — composer drops the
- * sub-section entirely rather than emitting an empty header.
- */
-/**
- * Render a single SearchEnhancedResponse slot. Dumps everything the memory
- * engine returned — entities (with their multi-fact summaries), facts,
- * episodes (raw source text), and communities (topic clusters). The server
- * already caps result counts via per-query max_* settings, so no further
- * truncation is needed here.
- *
- * Returns `null` for an empty/missing slot so the composer can skip the
- * sub-section entirely instead of printing a bare header.
- */
-function formatContextSection(
-  data: SearchEnhancedResponse | undefined,
-): string | null {
-  if (!data) return null;
-  const { entities, facts, episodes, communities } = data;
-  if (
-    !entities?.length &&
-    !facts?.length &&
-    !episodes?.length &&
-    !communities?.length
-  ) {
-    return null;
-  }
-
-  const lines: string[] = [];
-
-  if (entities?.length) {
-    lines.push('_Key entities:_');
-    for (const e of entities) {
-      const labels = e.labels.filter((l) => l !== 'Entity').join('/');
-      const tag = labels ? ` (${labels})` : '';
-      const summary = e.summary?.trim();
-      lines.push(
-        summary ? `- **${e.name}**${tag}: ${summary}` : `- **${e.name}**${tag}`,
-      );
-    }
-  }
-
-  if (facts?.length) {
-    if (lines.length) lines.push('');
-    lines.push('_Facts:_');
-    for (const f of facts) {
-      const text = f.fact?.trim();
-      if (text) lines.push(`- ${text}`);
-    }
-  }
-
-  if (episodes?.length) {
-    if (lines.length) lines.push('');
-    lines.push('_Episodes (raw):_');
-    for (const ep of episodes) {
-      const content = ep.content?.trim();
-      if (!content) continue;
-      const date = ep.created_at?.slice(0, 10) ?? '';
-      lines.push(date ? `- *${date}* — ${content}` : `- ${content}`);
-    }
-  }
-
-  if (communities?.length) {
-    if (lines.length) lines.push('');
-    lines.push('_Topic clusters:_');
-    for (const c of communities) {
-      const summary = c.summary?.trim();
-      lines.push(summary ? `- **${c.name}**: ${summary}` : `- **${c.name}**`);
-    }
-  }
-
-  return lines.length ? lines.join('\n') : null;
-}
-
-// ── Compact-memory rendering ────────────────────────────────────────────────
-// Guardrail caps for COMPACT_MEMORY_CONTEXT. Dedup does the real shrinking;
+// ── Memory-context rendering ────────────────────────────────────────────────
+// Guardrail caps for the block. Cross-bucket dedup does the real shrinking;
 // these only fire on pathological inputs so one entity/section can't dominate.
 const COMPACT_ENTITY_SUMMARY_CAP = 700;
 const COMPACT_BLOCK_BUDGET = 2000;
@@ -228,10 +136,10 @@ function capAtBoundary(text: string, max: number): string {
 }
 
 /**
- * Compact variant of formatContextSection. Dedups entities (by name) and facts
- * (by normalized text) against a `seen` set shared across every bucket, using
- * the richest summary collected for each entity. Episodes and communities are
- * kept but deduped the same way — nothing is dropped by type, only by proven
+ * Render one memory-context bucket. Dedups entities (by name) and facts (by
+ * normalized text) against a `seen` set shared across every bucket, using the
+ * richest summary collected for each entity. Episodes and communities are kept
+ * but deduped the same way — nothing is dropped by type, only by proven
  * redundancy.
  */
 function formatContextSectionCompact(
@@ -348,26 +256,13 @@ function collectRichestSummaries(
  * plugin-api surface keeps it as `Record<string, unknown>` to avoid forcing
  * plugins to depend on the common package. Cast once at this boundary.
  *
- * `compact` enables cross-bucket dedup + guardrail budgeting; without it the
- * block renders exactly as before.
+ * Cross-bucket dedup + guardrail budgeting are always applied — the memory
+ * engine returns six overlapping buckets, so an un-deduped block repeats the
+ * same entities and facts several times over.
  */
-function buildContextBlock(
-  userContext: UserContextData | undefined,
-  compact = false,
-): string {
+function buildContextBlock(userContext: UserContextData | undefined): string {
   if (!userContext) return '';
   const typed = userContext as TypedUserContextData;
-
-  if (!compact) {
-    const sections: string[] = [];
-    for (const key of Object.keys(CONTEXT_SECTION_LABELS) as ContextSlot[]) {
-      const formatted = formatContextSection(typed[key]);
-      if (formatted) {
-        sections.push(`**${CONTEXT_SECTION_LABELS[key]}**\n${formatted}`);
-      }
-    }
-    return sections.join('\n\n');
-  }
 
   const seen = new Set<string>();
   const richestSummary = collectRichestSummaries(typed);
@@ -587,7 +482,7 @@ export async function composePrompt(
     CAPABILITY_BLOCK: input.capabilityBlock,
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
-    CONTEXT_BLOCK: buildContextBlock(input.userContext, input.compactMemory),
+    CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,
     OPERATIONAL_MODE: input.operationalMode,

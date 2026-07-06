@@ -278,12 +278,9 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
    * Return a checkpoint saver for a user, syncing from Matrix on the first
    * request this process (same contract as `getUserDatabase`).
    *
-   * When `CACHE_CHECKPOINTER_SAVER` is enabled the saver is reused across
-   * calls for the same connection, so its one-time `setup()` (schema +
-   * prepared statements) runs once per connection instead of once per call.
-   * The default agent build calls this hook twice per turn, so the flag
-   * removes a redundant `setup()` on the hot path. Disabled → identical to
-   * the previous `SqliteSaver.fromDatabase(db)` behaviour.
+   * The saver is reused across calls for the same connection, so its one-time
+   * `setup()` (schema + prepared statements) runs once per connection instead
+   * of once per call — the agent build calls this hook twice per turn.
    */
   public async getUserCheckpointer(userDid: string): Promise<SqliteSaver> {
     const db = await this.getUserDatabase(userDid);
@@ -303,9 +300,6 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   }
 
   private resolveSaver(userDid: string, db: DatabaseType): SqliteSaver {
-    if (!this.isSaverCacheEnabled()) {
-      return SqliteSaver.fromDatabase(db);
-    }
     // `openUserDatabaseFromDisk` always caches the connection, so the entry
     // exists and its `db` is the one we were handed. Guard on identity so a
     // reopened connection never reuses a saver bound to a closed handle.
@@ -317,10 +311,6 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return entry.saver;
     }
     return SqliteSaver.fromDatabase(db);
-  }
-
-  private isSaverCacheEnabled(): boolean {
-    return config.get('ENABLE_REQUEST_PATH_CACHES') === 'true';
   }
 
   private async openUserDatabaseFromDisk(
