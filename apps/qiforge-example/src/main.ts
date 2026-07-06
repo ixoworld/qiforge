@@ -1,8 +1,8 @@
 import 'dotenv/config';
 
 import {
+  CreditsPlugin,
   EditorPlugin,
-  FlowsPlugin,
   createOracleApp,
   type AuthExcludedRoute,
 } from '@ixo/oracle-runtime';
@@ -118,13 +118,13 @@ async function bootstrap(): Promise<void> {
     config,
     logger: Logger,
     plugins: [
-      // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
+      ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
       // Flows is NOT a bundled plugin — opt in by constructing it explicitly.
       // It shares the Matrix client so it can connect to flow rooms and author
       // templates.
-      new FlowsPlugin({ matrixClient }),
+      // new FlowsPlugin({ matrixClient }),
     ],
     // Host-supplied Nest modules — see VersionController above (plus the
     // dev-only tasks dashboard when mounted).
@@ -133,6 +133,11 @@ async function bootstrap(): Promise<void> {
     // plugin-side `getAuthExcludedRoutes()` hook used by the Weather plugin
     // for `/weather/now`. Both merge onto the runtime's built-in exclusions.
     authExcludedRoutes,
+    manifestOverrides: {
+      portal: {
+        visibility: 'always',
+      },
+    },
   });
 
   app.onPluginStatusChange((event) => {
