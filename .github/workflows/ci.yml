@@ -39,3 +39,8 @@ jobs:
 
       - name: Format check
         run: pnpm format:check
+
+      # Scoped to oracle-runtime: the legacy app and some sibling packages
+      # still carry failing suites. Widen the filter as they come green.
+      - name: Test (oracle-runtime)
+        run: pnpm test --filter @ixo/oracle-runtime

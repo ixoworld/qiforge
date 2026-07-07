@@ -37,6 +37,8 @@ export function makeSessionManagerStub() {
       getEventById: vi.fn(),
       onMessage: vi.fn(() => () => undefined),
       init: vi.fn().mockResolvedValue(undefined),
+      // No live client in unit tests; callers guard with `getClient()?.`.
+      getClient: vi.fn(() => undefined),
     },
   };
 }

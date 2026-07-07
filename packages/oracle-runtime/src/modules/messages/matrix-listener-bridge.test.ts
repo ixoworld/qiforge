@@ -74,6 +74,8 @@ async function build(): Promise<Harness> {
     ORACLE_DID,
     ORACLE_ENTITY_DID,
     ORACLE_NAME,
+    // flush() rewrites mentions of the admin user; getOrThrow demands the key.
+    MATRIX_ORACLE_ADMIN_USER_ID: '@oracle-admin:home.server',
   });
 
   const bridge = new MatrixListenerBridge(
