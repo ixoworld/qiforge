@@ -21,7 +21,7 @@ Reach for a bundled plugin when the capability belongs to every QiForge oracle b
 
 ## Directory layout
 
-Look at any of the existing 14 plugins for the canonical structure. The Sandbox plugin is a minimal example with config schema and tools; the Editor plugin shows a sub-agent + many tools + Matrix CRDT integration; the POD Creator plugin is the richest orchestration example — a conductor driving stage-gated specialist sub-agents, with the on-chain create path behind an injected `ChainGateway` seam.
+Look at any of the existing plugins under `src/plugins/` for the canonical structure. The Sandbox plugin is a minimal example with config schema and tools; the Editor plugin shows a sub-agent + many tools + Matrix CRDT integration; the POD Creator plugin is the richest orchestration example — a conductor driving stage-gated specialist sub-agents, with the on-chain create path behind an injected `ChainGateway` seam.
 
 ```
 plugins/<name>/

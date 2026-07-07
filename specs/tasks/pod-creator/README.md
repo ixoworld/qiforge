@@ -24,15 +24,15 @@ spec is the source of truth.
 
 Status: `TODO` → `In Progress` → `Done`.
 
-| ID                                            | Task                                               | Phase | Effort | Depends on     | Blocks         | Status |
-| --------------------------------------------- | -------------------------------------------------- | ----- | ------ | -------------- | -------------- | ------ |
-| [POD‑01](POD-01-skeleton.md)                  | Plugin skeleton + manifest                         | 1     | 1.5d   | —              | all            | TODO   |
-| [POD‑02](POD-02-capsule-content-client.md)    | Capsule content client                             | 1     | 2d     | POD‑01         | POD‑04         | TODO   |
-| [POD‑03](POD-03-conductor-blueprint-store.md) | Conductor + blueprint store                        | 2     | 3d     | POD‑01         | POD‑04, POD‑05 | TODO   |
-| [POD‑04](POD-04-specialist-subagents.md)      | Specialist sub‑agents (per‑stage, registry‑loaded) | 2     | 3d     | POD‑02, POD‑03 | POD‑05         | TODO   |
-| [POD‑05](POD-05-create-path.md)               | Create path (prepare → sign → confirm)             | 3     | 4d     | POD‑03, POD‑04 | POD‑06         | TODO   |
-| [POD‑06](POD-06-approval-safety.md)           | Approval gate + network safety                     | 3     | 2d     | POD‑05         | POD‑07         | TODO   |
-| [POD‑07](POD-07-docs-example.md)              | Docs + example wiring                              | 4     | 2d     | POD‑05, POD‑06 | —              | TODO   |
+| ID                                            | Task                                               | Phase | Effort | Depends on     | Blocks         | Status      |
+| --------------------------------------------- | -------------------------------------------------- | ----- | ------ | -------------- | -------------- | ----------- |
+| [POD‑01](POD-01-skeleton.md)                  | Plugin skeleton + manifest                         | 1     | 1.5d   | —              | all            | Done        |
+| [POD‑02](POD-02-capsule-content-client.md)    | Capsule content client                             | 1     | 2d     | POD‑01         | POD‑04         | Done        |
+| [POD‑03](POD-03-conductor-blueprint-store.md) | Conductor + blueprint store                        | 2     | 3d     | POD‑01         | POD‑04, POD‑05 | Done        |
+| [POD‑04](POD-04-specialist-subagents.md)      | Specialist sub‑agents (per‑stage, registry‑loaded) | 2     | 3d     | POD‑02, POD‑03 | POD‑05         | Done        |
+| [POD‑05](POD-05-create-path.md)               | Create path (prepare → sign → confirm)             | 3     | 4d     | POD‑03, POD‑04 | POD‑06         | Done        |
+| [POD‑06](POD-06-approval-safety.md)           | Approval gate + network safety                     | 3     | 2d     | POD‑05         | POD‑07         | Done        |
+| [POD‑07](POD-07-docs-example.md)              | Docs + example wiring                              | 4     | 2d     | POD‑05, POD‑06 | —              | In Progress |
 
 **Total: 7 tasks, ~17.5 days for one engineer** (POD‑02 ∥ POD‑03 shave ~2 days when parallelized).
 

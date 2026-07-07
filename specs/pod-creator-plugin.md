@@ -1,7 +1,6 @@
 # QiForge POD‑Creator Plugin — Design & Implementation Plan
 
-**Status:** Plan — decisions locked, pending implementation
-**Branch:** `claude/exciting-clarke-7mmggn`
+**Status:** Implemented — see `docs/architecture/pod-creator.md` for the as-built runtime doc
 **Date:** 2026‑06‑12
 **Stack:** NestJS · LangGraph/LangChain 1.x · Zod · `@ixo/oracles-chain-client` · Matrix · Vitest
 **Skills source:** ai‑skills `design-pod-*` capsules — registry `capsules.skills.ixo.earth`
