@@ -1,3 +1,4 @@
+import { BoundedMap, type BoundedMapOptions } from './bounded-map.js';
 import type { BlueprintSection, PodBlueprint } from './blueprint-types.js';
 
 /**
@@ -15,9 +16,16 @@ export interface BlueprintStore {
     threadId: string,
     section: BlueprintSection,
   ): Promise<PodBlueprint>;
+  /** Discard the thread's blueprint so a fresh design can start. */
+  reset(threadId: string): Promise<void>;
 }
 
 const nowIso = (): string => new Date().toISOString();
+
+/** A design session that idles longer than this is discarded. */
+const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
+/** Concurrent design sessions retained before LRU eviction. */
+const DEFAULT_MAX_ENTRIES = 500;
 
 /** Defensive copy so callers can't mutate the stored document in place. */
 function snapshot(bp: PodBlueprint): PodBlueprint {
@@ -27,11 +35,20 @@ function snapshot(bp: PodBlueprint): PodBlueprint {
 /**
  * Process-local {@link BlueprintStore}. Held on the plugin instance, so a
  * blueprint persists across every request in the running process and survives
- * a fresh `RuntimeContext` — but NOT a process restart. A cross-restart durable
- * backend is a separate, swappable implementation of this interface.
+ * a fresh `RuntimeContext` — but NOT a process restart. Bounded (LRU + idle
+ * TTL) so long-running oracles don't accumulate dead sessions. A cross-restart
+ * durable backend is a separate, swappable implementation of this interface.
  */
 export class InMemoryBlueprintStore implements BlueprintStore {
-  private readonly docs = new Map<string, PodBlueprint>();
+  private readonly docs: BoundedMap<PodBlueprint>;
+
+  constructor(options: Partial<BoundedMapOptions> = {}) {
+    this.docs = new BoundedMap({
+      maxEntries: options.maxEntries ?? DEFAULT_MAX_ENTRIES,
+      ttlMs: options.ttlMs ?? DEFAULT_TTL_MS,
+      ...(options.now ? { now: options.now } : {}),
+    });
+  }
 
   async init(
     threadId: string,
@@ -42,6 +59,7 @@ export class InMemoryBlueprintStore implements BlueprintStore {
       if (brief && existing.brief === undefined) {
         existing.brief = brief;
         existing.updatedAt = nowIso();
+        this.docs.set(threadId, existing);
       }
       return snapshot(existing);
     }
@@ -72,10 +90,14 @@ export class InMemoryBlueprintStore implements BlueprintStore {
     if (!bp) {
       const now = nowIso();
       bp = { threadId, sections: {}, createdAt: now, updatedAt: now };
-      this.docs.set(threadId, bp);
     }
     bp.sections[section.role] = section;
     bp.updatedAt = nowIso();
+    this.docs.set(threadId, bp);
     return snapshot(bp);
+  }
+
+  async reset(threadId: string): Promise<void> {
+    this.docs.delete(threadId);
   }
 }

@@ -118,6 +118,7 @@ export {
   creditsPlugin,
   callsPlugin,
   userPreferencesPlugin,
+  podCreatorPlugin,
   BUNDLED_PLUGINS,
 } from './plugins/index.js';
 
@@ -133,6 +134,7 @@ export * from './plugins/editor/index.js';
 export * from './plugins/firecrawl/index.js';
 export * from './plugins/matrix-group-chats/index.js';
 export * from './plugins/memory/index.js';
+export * from './plugins/pod-creator/index.js';
 export * from './plugins/portal/index.js';
 export * from './plugins/sandbox/index.js';
 export * from './plugins/skills/index.js';

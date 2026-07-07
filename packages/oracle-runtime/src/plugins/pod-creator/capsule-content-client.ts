@@ -3,9 +3,15 @@ import {
   mintInvocationSafely,
   resolveServiceDidSafely,
 } from '../ucan-failure.js';
+import { BoundedMap } from './bounded-map.js';
+import { DEFAULT_NETWORK } from './config.js';
 
 /** Public capsules registry served by ai-skills. */
 export const DEFAULT_CAPSULES_BASE_URL = 'https://capsules.skills.ixo.earth';
+
+/** Capsule texts cached across requests; sized for many concurrent design threads. */
+const CACHE_MAX_ENTRIES = 1000;
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Mints an `ixo:skills` invocation for an outbound capsules-registry call, or
@@ -37,7 +43,7 @@ export type CapsuleContentFetcher = (
 export interface CapsuleContentClientOptions {
   /** Registry base URL. Defaults to {@link DEFAULT_CAPSULES_BASE_URL}. */
   baseUrl?: string;
-  /** Routing hint forwarded as `X-IXO-Network`. Defaults to `'mainnet'`. */
+  /** Routing hint forwarded as `X-IXO-Network`. Defaults to {@link DEFAULT_NETWORK}. */
   network?: string;
   /** UCAN minter. Defaults to a shared-helper builder for `ixo:skills`. */
   ucanBuilder?: CapsuleUcanBuilder;
@@ -89,12 +95,15 @@ export class CapsuleContentClient {
   private readonly network: string;
   private readonly ucanBuilder: CapsuleUcanBuilder;
   private readonly fetcher: CapsuleContentFetcher;
-  /** Cache keyed by `${threadId}:${capsuleName}`. */
-  private readonly cache = new Map<string, string>();
+  /** Keyed by `${threadId}:${capsuleName}`; bounded so long-lived processes don't accumulate dead threads. */
+  private readonly cache = new BoundedMap<string>({
+    maxEntries: CACHE_MAX_ENTRIES,
+    ttlMs: CACHE_TTL_MS,
+  });
 
   constructor(options: CapsuleContentClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? DEFAULT_CAPSULES_BASE_URL;
-    this.network = options.network ?? 'mainnet';
+    this.network = options.network ?? DEFAULT_NETWORK;
     this.ucanBuilder = options.ucanBuilder ?? defaultUcanBuilder;
     this.fetcher = options.fetcher ?? notConfiguredFetcher;
   }

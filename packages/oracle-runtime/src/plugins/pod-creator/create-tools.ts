@@ -1,37 +1,30 @@
+import { callAgAction } from '@ixo/common';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
-import type { ApprovalStore } from './approval-store.js';
 import type { BlueprintStore } from './blueprint-store.js';
-import type { ChainGateway } from './chain-gateway.js';
+import {
+  notConfiguredChainGateway,
+  type ChainGateway,
+} from './chain-gateway.js';
+import { readPodCreatorConfig } from './config.js';
+import type { CreateSessionStore } from './create-session-store.js';
 import { assembleServicePodBlueprint, computeReadiness } from './stage.js';
 
 const threadId = (ctx: RuntimeContext): string => ctx.session.id;
 
-const configReadSchema = z.object({
-  NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).optional(),
-  POD_CREATOR_ALLOW_MAINNET: z
-    .union([
-      z.boolean(),
-      z.enum(['true', 'false']).transform((value) => value === 'true'),
-    ])
-    .optional(),
-});
+/** The AG-UI action the client must register to sign POD creation batches. */
+export const SIGN_TRANSACTION_ACTION = 'sign_transaction';
 
-/** Network routing + the mainnet opt-in, read from the merged config. */
-function readConfig(ctx: RuntimeContext): {
-  network: string;
-  mainnetAllowed: boolean;
-} {
-  const parsed = configReadSchema.safeParse(ctx.config);
-  if (!parsed.success) {
-    return { network: 'testnet', mainnetAllowed: false };
-  }
-  return {
-    network: parsed.data.NETWORK ?? 'testnet',
-    mainnetAllowed: parsed.data.POD_CREATOR_ALLOW_MAINNET ?? false,
-  };
-}
+/**
+ * Wallet review + broadcast takes far longer than a UI render, so the sign
+ * round-trip gets its own generous deadline.
+ */
+const SIGN_TIMEOUT_MS = 120_000;
+
+/** Cosmos SDK transaction hash: 32 bytes hex. */
+const TX_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
 
 const blobIdSchema = z.object({
   blobId: z
@@ -42,15 +35,27 @@ const blobIdSchema = z.object({
 const confirmSchema = z.object({
   txHash: z
     .string()
-    .min(1)
+    .regex(TX_HASH_PATTERN, 'expected a 64-character hex transaction hash')
     .describe('The transaction hash the wallet returned after broadcasting.'),
 });
 
-/** Validate a blobId and confirm the prepared batch is still retrievable. */
+const signResultSchema = z.object({
+  txHash: z.string().regex(TX_HASH_PATTERN),
+});
+
+const CHAIN_UNAVAILABLE_MESSAGE =
+  'On-chain POD creation is not yet enabled on this oracle — the chain ' +
+  'gateway is not configured. The design blueprint is saved; creation can ' +
+  'proceed once the operator wires the IXO MCP chain gateway.';
+
+/**
+ * Validate a blobId and return the stored batch, throwing when it is missing
+ * or expired so the agent knows to re-prepare.
+ */
 async function requirePreparedBlob(
   ctx: RuntimeContext,
   blobId: string,
-): Promise<void> {
+): Promise<{ name: string; value: string }> {
   if (!ctx.blobStore.isValidBlobId(blobId)) {
     throw new Error(`Invalid blobId: ${blobId}`);
   }
@@ -60,31 +65,38 @@ async function requirePreparedBlob(
       'Prepared transaction not found or expired. Call prepare_pod_transaction again.',
     );
   }
+  return blob;
 }
 
 /**
- * The on-chain create path — a non-blocking propose → approve → commit handoff
- * that keeps the oracle out of the signing loop:
+ * The on-chain create path — a propose → approve → commit handoff that keeps
+ * the oracle out of the signing loop:
  *
- * - `prepare_pod_transaction` (propose) builds the UNSIGNED batch and stashes the
- *   bytes in the blob store (the LLM only ever sees a short `blobId`). It refuses
- *   on mainnet unless `POD_CREATOR_ALLOW_MAINNET` is set, and supersedes any prior
- *   approval.
- * - `approve_pod_transaction` (approve) records the user's explicit go-ahead for a
- *   specific `blobId`, after the agent has shown them the summary.
- * - `request_pod_signature` (commit) refuses unless that exact batch is approved,
- *   then emits the `sign_transaction` AG-UI action for the user's wallet.
- * - `confirm_pod_creation` reads the created POD back from the broadcast tx hash.
+ * - `prepare_pod_transaction` (propose) builds the UNSIGNED batch and stashes
+ *   the bytes in the blob store (the LLM only ever sees a short `blobId`). It
+ *   refuses on mainnet unless `POD_CREATOR_ALLOW_MAINNET` is set, and
+ *   supersedes any prior approval.
+ * - `approve_pod_transaction` (approve) binds the user's explicit go-ahead to
+ *   the exact batch prepared in this conversation.
+ * - `request_pod_signature` (commit) SPENDS that approval, then runs the
+ *   blocking `sign_transaction` AG-UI round-trip: the unsigned bytes travel to
+ *   the wallet in the action args (never through model context) and the
+ *   broadcast txHash comes back as the result. A second dispatch always needs
+ *   a fresh approval — a sign request cannot be replayed.
+ * - `confirm_pod_creation` resolves the created POD from the broadcast tx and
+ *   closes the session.
  *
- * The whole path only matters once the launch-readiness gate passes. The binding
- * hard gates are the operator's mainnet opt-in and the wallet signature itself —
- * the oracle never signs creation.
+ * The whole path only matters once the launch-readiness gate passes. The
+ * binding hard gates are the operator's mainnet opt-in and the wallet
+ * signature itself — the oracle never signs creation.
  */
 export function createCreateTools(
   store: BlueprintStore,
   gateway: ChainGateway,
-  approvals: ApprovalStore,
+  sessions: CreateSessionStore,
 ): PluginTool[] {
+  const chainUnavailable = gateway === notConfiguredChainGateway;
+
   const prepare = tool(
     async (_args, ctx) => {
       const bp = await store.get(threadId(ctx));
@@ -105,7 +117,10 @@ export function createCreateTools(
             'Launch-readiness gate not passed; cannot prepare the creation transaction yet.',
         };
       }
-      const { network, mainnetAllowed } = readConfig(ctx);
+      if (chainUnavailable) {
+        return { prepared: false, message: CHAIN_UNAVAILABLE_MESSAGE };
+      }
+      const { network, mainnetAllowed } = readPodCreatorConfig(ctx);
       if (network === 'mainnet' && !mainnetAllowed) {
         return {
           prepared: false,
@@ -123,8 +138,10 @@ export function createCreateTools(
         name: 'pod-unsigned-tx',
         value: batch.unsignedTx,
       });
-      // A freshly prepared batch must be re-approved before it can be signed.
-      await approvals.clear(threadId(ctx));
+      await sessions.prepared(ctx.user.did, threadId(ctx), blobId);
+      ctx.logger.log(
+        `[pod-creator] prepared batch ${blobId} (${batch.messageCount} msgs, ${network}) user=${ctx.user.did} thread=${threadId(ctx)}`,
+      );
       return {
         prepared: true,
         blobId,
@@ -149,7 +166,17 @@ export function createCreateTools(
     async (args, ctx) => {
       const { blobId } = blobIdSchema.parse(args);
       await requirePreparedBlob(ctx, blobId);
-      await approvals.approve(threadId(ctx), blobId);
+      const bound = await sessions.approve(ctx.user.did, threadId(ctx), blobId);
+      if (!bound) {
+        return {
+          approved: false,
+          message:
+            'That blobId is not the batch prepared in this conversation. Call prepare_pod_transaction and approve the blobId it returns.',
+        };
+      }
+      ctx.logger.log(
+        `[pod-creator] approved batch ${blobId} user=${ctx.user.did} thread=${threadId(ctx)}`,
+      );
       return {
         approved: true,
         message:
@@ -167,28 +194,73 @@ export function createCreateTools(
   const requestSignature = tool(
     async (args, ctx) => {
       const { blobId } = blobIdSchema.parse(args);
-      await requirePreparedBlob(ctx, blobId);
-      if (!(await approvals.isApproved(threadId(ctx), blobId))) {
+      const blob = await requirePreparedBlob(ctx, blobId);
+      const { network, mainnetAllowed } = readPodCreatorConfig(ctx);
+      if (network === 'mainnet' && !mainnetAllowed) {
         throw new Error(
-          'Transaction not approved. Call approve_pod_transaction after the user explicitly confirms the batch.',
+          'Mainnet POD creation is disabled; cannot request a signature.',
         );
       }
-      const { network } = readConfig(ctx);
-      ctx.emit.actionCall({
-        toolName: 'sign_transaction',
-        ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
-        args: { blobId, network },
-      });
-      return {
-        requested: true,
-        message:
-          'Sign request sent to the wallet. Once the user signs and broadcasts, call confirm_pod_creation with the txHash.',
-      };
+      const consumed = await sessions.consume(
+        ctx.user.did,
+        threadId(ctx),
+        blobId,
+      );
+      if (!consumed) {
+        throw new Error(
+          'Transaction not approved (or its approval was already used). Call approve_pod_transaction after the user explicitly confirms the batch.',
+        );
+      }
+      const toolCallId = `pod_${ctx.session.requestId || 'noreq'}_${randomUUID().slice(0, 8)}`;
+      try {
+        const result = await callAgAction({
+          sessionId: ctx.session.id,
+          toolCallId,
+          toolName: SIGN_TRANSACTION_ACTION,
+          args: { blobId, unsignedTx: blob.value, network },
+          timeout: SIGN_TIMEOUT_MS,
+        });
+        const parsed = signResultSchema.safeParse(result);
+        if (parsed.success) {
+          ctx.logger.log(
+            `[pod-creator] wallet signed batch ${blobId} tx=${parsed.data.txHash} user=${ctx.user.did} thread=${threadId(ctx)}`,
+          );
+          return {
+            requested: true,
+            txHash: parsed.data.txHash,
+            message:
+              'Wallet signed and broadcast the transaction. Call confirm_pod_creation with this txHash.',
+          };
+        }
+        ctx.logger.warn(
+          `[pod-creator] sign result for ${blobId} carried no txHash`,
+        );
+        return {
+          requested: true,
+          txHash: null,
+          message:
+            'The wallet responded without a transaction hash. If the user has the txHash, call confirm_pod_creation with it; otherwise re-approve and retry.',
+        };
+      } catch (error) {
+        const detail =
+          error instanceof Error
+            ? `${error.name}: ${error.message}`
+            : String(error);
+        ctx.logger.warn(
+          `[pod-creator] sign dispatch for ${blobId} failed: ${detail}`,
+        );
+        return {
+          requested: true,
+          txHash: null,
+          message:
+            'The wallet did not complete signing (timed out, unsupported by this client, or rejected). The approval was spent — to retry, get the user to confirm again and call approve_pod_transaction, then request_pod_signature.',
+        };
+      }
     },
     {
       name: 'request_pod_signature',
       description:
-        "Hand the approved unsigned transaction to the user's wallet to sign and broadcast (emits the sign_transaction action). Refuses unless approve_pod_transaction recorded approval for this exact blobId.",
+        "Send the approved unsigned transaction to the user's wallet to sign and broadcast (blocking sign_transaction AG-UI round-trip; returns the txHash on success). Spends the approval — each dispatch needs a fresh approve_pod_transaction.",
       schema: blobIdSchema,
     },
   );
@@ -196,10 +268,17 @@ export function createCreateTools(
   const confirm = tool(
     async (args, ctx) => {
       const { txHash } = confirmSchema.parse(args);
-      const { network } = readConfig(ctx);
+      if (chainUnavailable) {
+        return { created: false, message: CHAIN_UNAVAILABLE_MESSAGE };
+      }
+      const { network } = readPodCreatorConfig(ctx);
       const created = await gateway.confirmPodCreation(
         { txHash, network },
         ctx,
+      );
+      await sessions.clear(ctx.user.did, threadId(ctx));
+      ctx.logger.log(
+        `[pod-creator] confirmed POD ${created.podDid} tx=${txHash} user=${ctx.user.did} thread=${threadId(ctx)}`,
       );
       return {
         created: true,

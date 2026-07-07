@@ -6,7 +6,6 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
-import { InMemoryApprovalStore, type ApprovalStore } from './approval-store.js';
 import {
   InMemoryBlueprintStore,
   type BlueprintStore,
@@ -20,31 +19,14 @@ import {
   notConfiguredChainGateway,
   type ChainGateway,
 } from './chain-gateway.js';
+import { podCreatorConfigSchema } from './config.js';
+import {
+  InMemoryCreateSessionStore,
+  type CreateSessionStore,
+} from './create-session-store.js';
 import { createCreateTools } from './create-tools.js';
 import { createOrchestrationTools } from './orchestration-tools.js';
 import { buildStageSubAgents } from './sub-agents.js';
-
-/**
- * Plugin-owned env vars. The capsules registry URL and `NETWORK` are read as
- * siblings from the merged config (owned by the skills plugin / base schema),
- * so they are intentionally NOT redeclared here — that would collide in the
- * config-schema registry when both plugins are loaded.
- */
-const configSchema = z.object({
-  /** Marketplace endpoint used by the commercial-packager listing draft. */
-  POD_CREATOR_MARKETPLACE_URL: z.url().optional(),
-  /**
-   * Must be explicitly enabled before a mainnet creation batch can be
-   * prepared. Testnet / devnet require no opt-in. Accepts a real boolean
-   * (tests / programmatic config) or the string `'true'` / `'false'` (env).
-   */
-  POD_CREATOR_ALLOW_MAINNET: z
-    .union([
-      z.boolean(),
-      z.enum(['true', 'false']).transform((value) => value === 'true'),
-    ])
-    .default(false),
-});
 
 /**
  * Sibling env read at request time to configure the capsule client. The
@@ -93,9 +75,9 @@ export interface PodCreatorPluginOptions {
    */
   capsuleContentFetcher?: CapsuleContentFetcher;
   /**
-   * Chain gateway for the create path. Injected by tests; the real
-   * `@ixo/oracles-chain-client`-backed gateway wires in here. When omitted, the
-   * create tools error until a gateway is configured.
+   * Chain gateway for the create path. Injected by tests; the real IXO MCP
+   * server binding wires in here. When omitted, the create tools report
+   * on-chain creation as unavailable.
    */
   chainGateway?: ChainGateway;
 }
@@ -110,8 +92,10 @@ export interface PodCreatorPluginOptions {
  * `CapsuleContentClient`.
  *
  * Exposes the conductor's orchestration tools (the blueprint lifecycle), the
- * stage-gated specialist sub-agents, and the on-chain create path
- * (prepare → sign → confirm) behind an injectable chain gateway.
+ * stage-gated specialist sub-agents, and the on-chain create path — a
+ * propose → approve → commit handoff with single-use approvals, ending in the
+ * blocking `sign_transaction` AG-UI round-trip. The chain encoding sits behind
+ * an injectable gateway.
  */
 export class PodCreatorPlugin extends OraclePlugin {
   readonly name = 'pod-creator';
@@ -123,18 +107,20 @@ export class PodCreatorPlugin extends OraclePlugin {
     'domain-indexer',
     'memory',
   ];
-  override readonly configSchema = configSchema;
+  override readonly configSchema = podCreatorConfigSchema;
 
   /**
    * Process-local blueprint store, held on the plugin instance so a design
-   * session persists across requests. A cross-restart durable backend is a
-   * swappable implementation of `BlueprintStore`.
+   * session persists across requests. Bounded (LRU + idle TTL); a
+   * cross-restart durable backend is a swappable implementation of
+   * `BlueprintStore`.
    */
   private readonly blueprintStore: BlueprintStore =
     new InMemoryBlueprintStore();
 
-  /** Per-thread record of which prepared batch the user has approved to sign. */
-  private readonly approvalStore: ApprovalStore = new InMemoryApprovalStore();
+  /** Per-(user, thread) propose → approve → commit state for the create path. */
+  private readonly createSessions: CreateSessionStore =
+    new InMemoryCreateSessionStore();
 
   private readonly capsuleContentFetcher?: CapsuleContentFetcher;
 
@@ -158,7 +144,7 @@ export class PodCreatorPlugin extends OraclePlugin {
       ...createCreateTools(
         this.blueprintStore,
         this.chainGateway,
-        this.approvalStore,
+        this.createSessions,
       ),
     ];
   }

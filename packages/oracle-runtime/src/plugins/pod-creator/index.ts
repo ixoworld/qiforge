@@ -34,11 +34,20 @@ export {
 } from './stage.js';
 export { createOrchestrationTools } from './orchestration-tools.js';
 export { buildStageSubAgents } from './sub-agents.js';
-export { createCreateTools } from './create-tools.js';
+export { SIGN_TRANSACTION_ACTION, createCreateTools } from './create-tools.js';
 export {
   notConfiguredChainGateway,
   type ChainGateway,
   type CreatedPod,
   type PreparedPodBatch,
 } from './chain-gateway.js';
-export { InMemoryApprovalStore, type ApprovalStore } from './approval-store.js';
+export {
+  InMemoryCreateSessionStore,
+  type CreateSessionStore,
+} from './create-session-store.js';
+export {
+  DEFAULT_NETWORK,
+  podCreatorConfigSchema,
+  readPodCreatorConfig,
+} from './config.js';
+export { BoundedMap, type BoundedMapOptions } from './bounded-map.js';
