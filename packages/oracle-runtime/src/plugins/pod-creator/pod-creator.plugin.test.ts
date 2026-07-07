@@ -57,7 +57,6 @@ describe('PodCreatorPlugin loads via createTestRuntime', () => {
       'confirm_pod_creation',
       'get_blueprint',
       'prepare_pod_transaction',
-      'record_blueprint_section',
       'request_pod_signature',
       'start_pod_design',
     ]);
@@ -82,5 +81,16 @@ describe('PodCreatorPlugin getRequestSubAgents', () => {
       throw new Error('expected a string systemPrompt');
     }
     expect(prompt).toContain('Score the request.');
+  });
+
+  it('degrades to the built-in prompts when no capsule fetcher is configured (the bundled default)', async () => {
+    const plugin = new PodCreatorPlugin();
+    const subs = await plugin.getRequestSubAgents(makeRuntimeContext());
+    expect(subs.map((s) => s.name)).toEqual(['service_intent_scorer']);
+    const prompt = subs[0]?.systemPrompt;
+    if (typeof prompt !== 'string') {
+      throw new Error('expected a string systemPrompt');
+    }
+    expect(prompt).toContain('built-in summary');
   });
 });

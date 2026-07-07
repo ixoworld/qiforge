@@ -8,17 +8,36 @@ import type {
 import type { BlueprintSection } from './blueprint-types.js';
 import type { BlueprintStore } from './blueprint-store.js';
 import type { CapsuleContentClient } from './capsule-content-client.js';
-import { DESIGN_POD_ROLES, type DesignPodRole } from './design-pod-roles.js';
-import { deriveStage } from './stage.js';
+import {
+  DESIGN_POD_ROLES,
+  type DesignPodRole,
+  type DesignPodStage,
+} from './design-pod-roles.js';
+import { deriveStage, summarizeSection } from './stage.js';
 
 const isGateRole = (role: DesignPodRole): boolean =>
   role.stage === 'evaluate' || role.stage === 'gate';
+
+/** What each lifecycle stage is accountable for, for the fallback prompts. */
+const STAGE_DUTIES: Record<DesignPodStage, string> = {
+  qualify:
+    'Score the incoming service intent for viability and fit, and give a clear go / no-go rationale the later stages can rely on.',
+  architect:
+    'Design the POD structure for your discipline — service roles, workspaces and services, claim schemas and the UDID model, or the UCAN rights model — precisely enough for the build stage to implement without guessing.',
+  build:
+    'Produce the executable artifacts for your discipline — Flow pages for the workflow and UX, or the operating playbooks and rule cards — grounded in the architect sections.',
+  evaluate:
+    'Judge the recorded design from your lens (automation feasibility, governance and risk, or the outcome contract). Be adversarial: name what breaks, and fail the gate when the blueprint does not hold up.',
+  package:
+    'Package the POD for the market — the commercial offer and marketplace listing draft, or a runnable demo — from the completed design sections.',
+  gate: 'Run final QA across every prior section and issue the launch-readiness verdict. Pass only a blueprint you would stand behind going on-chain.',
+};
 
 function sectionInstruction(role: DesignPodRole): string {
   const verdict = isGateRole(role)
     ? ' Include a pass|fail verdict (and blockers when failing).'
     : '';
-  return `Use read_blueprint for the sections recorded so far, then call submit_section exactly once with your section content.${verdict}`;
+  return `Use read_blueprint for the sections recorded so far (pass roles=[...] when you need a section's full content), then call submit_section exactly once with your section content.${verdict}`;
 }
 
 /** The role's registry instructions, framed for the pipeline. */
@@ -28,7 +47,17 @@ function composePrompt(role: DesignPodRole, skillMarkdown: string): string {
 
 /** Built-in prompt used when the registry instructions can't be fetched. */
 function fallbackPrompt(role: DesignPodRole): string {
-  return `You are the \`${role.id}\` specialist in the POD design pipeline (stage: ${role.stage}).\n${role.description}\n\n${sectionInstruction(role)}\n\n(The registry-published instructions for this role were unavailable; operating from the built-in summary.)`;
+  return [
+    `You are the \`${role.id}\` specialist in the POD design pipeline (stage: ${role.stage}).`,
+    role.description,
+    '',
+    STAGE_DUTIES[role.stage],
+    'Ground everything in the POD brief and the sections recorded before yours; produce concrete, structured content — not commentary.',
+    '',
+    sectionInstruction(role),
+    '',
+    '(The registry-published instructions for this role were unavailable; operating from the built-in summary.)',
+  ].join('\n');
 }
 
 const submitSchema = z.object({
@@ -45,21 +74,44 @@ const submitSchema = z.object({
     .describe('Blocking issues to surface when your verdict is fail.'),
 });
 
+const readSchema = z.object({
+  roles: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Role ids whose full section content to include. Omit for the compact per-section summary.',
+    ),
+});
+
 /** The narrow tool set each specialist gets: read prior context, submit once. */
 function roleTools(role: DesignPodRole, store: BlueprintStore): PluginTool[] {
   const readBlueprint = tool(
-    async (_args, ctx) => {
+    async (args, ctx) => {
+      const { roles } = readSchema.parse(args);
       const bp = await store.get(ctx.session.id);
       if (!bp) {
-        return { brief: undefined, sections: {} };
+        return { brief: undefined, sections: [] };
       }
-      return { brief: bp.brief, sections: bp.sections };
+      const sections = Object.values(bp.sections);
+      return {
+        brief: bp.brief,
+        sections: sections.map(summarizeSection),
+        ...(roles !== undefined
+          ? {
+              content: Object.fromEntries(
+                sections
+                  .filter((section) => roles.includes(section.role))
+                  .map((section) => [section.role, section.content]),
+              ),
+            }
+          : {}),
+      };
     },
     {
       name: 'read_blueprint',
       description:
-        'Read the POD brief and the sections recorded so far, for context.',
-      schema: z.object({}),
+        'Read the POD brief and a compact summary of the sections recorded so far. Pass roles=[...] to include the full content of specific sections.',
+      schema: readSchema,
     },
   );
 

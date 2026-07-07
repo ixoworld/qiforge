@@ -120,6 +120,27 @@ export function computeReadiness(bp: PodBlueprint): Readiness {
   };
 }
 
+/**
+ * Compact per-section view for blueprint reads. Sections carry arbitrary-size
+ * role-defined payloads, so blueprint reads return this summary by default and
+ * full content only for explicitly requested roles.
+ */
+export function summarizeSection(section: BlueprintSection): {
+  role: string;
+  stage: DesignPodStage;
+  verdict?: 'pass' | 'fail';
+  recordedAt: string;
+  contentBytes: number;
+} {
+  return {
+    role: section.role,
+    stage: section.stage,
+    ...(section.verdict !== undefined ? { verdict: section.verdict } : {}),
+    recordedAt: section.recordedAt,
+    contentBytes: JSON.stringify(section.content ?? null).length,
+  };
+}
+
 /** Group the recorded sections by stage, preserving the stage ordering. */
 function groupSectionsByStage(
   bp: PodBlueprint,
@@ -133,7 +154,9 @@ function groupSectionsByStage(
     gate: [],
   };
   for (const section of Object.values(bp.sections)) {
-    out[section.stage].push(section);
+    // A directly-seeded store could carry a stage outside the catalogue;
+    // dropping it beats crashing assembly on the whole blueprint.
+    out[section.stage]?.push(section);
   }
   return out;
 }

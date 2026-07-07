@@ -2,23 +2,13 @@ import { z } from 'zod';
 import { computeSubAgentToolName } from '../../graph/subagent-as-tool.js';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
-import type { BlueprintSection } from './blueprint-types.js';
 import type { BlueprintStore } from './blueprint-store.js';
-import { DESIGN_POD_ROLES, type DesignPodStage } from './design-pod-roles.js';
 import {
   SPECIALISTS_FOR_STAGE,
   assembleServicePodBlueprint,
   computeReadiness,
+  summarizeSection,
 } from './stage.js';
-
-const ROLE_STAGE: Map<string, DesignPodStage> = new Map(
-  DESIGN_POD_ROLES.map((role): [string, DesignPodStage] => [
-    role.id,
-    role.stage,
-  ]),
-);
-
-const ROLE_ID_LIST = DESIGN_POD_ROLES.map((role) => role.id).join(', ');
 
 const startSchema = z.object({
   brief: z
@@ -27,28 +17,21 @@ const startSchema = z.object({
     .describe(
       'A concise statement of what the POD should do — the service, who it serves, and the outcome it produces.',
     ),
-});
-
-const recordSchema = z.object({
-  role: z
-    .string()
-    .refine((value) => ROLE_STAGE.has(value), {
-      message: `unknown design-pod role id; expected one of: ${ROLE_ID_LIST}`,
-    })
-    .describe('The specialist role id that produced this section.'),
-  content: z
-    .unknown()
-    .describe('The structured section content the specialist produced.'),
-  verdict: z
-    .enum(['pass', 'fail'])
+  restart: z
+    .boolean()
     .optional()
     .describe(
-      'For gate-bearing roles (the evaluate oracles and qa_launch_readiness_oracle), the gate verdict.',
+      'Discard any existing design in this conversation and start fresh with the new brief.',
     ),
-  blockers: z
+});
+
+const getBlueprintSchema = z.object({
+  roles: z
     .array(z.string())
     .optional()
-    .describe('Blocking issues to surface when the verdict is fail.'),
+    .describe(
+      'Role ids whose full section content to include. Omit for the compact per-section summary.',
+    ),
 });
 
 const emptySchema = z.object({});
@@ -57,19 +40,25 @@ const threadId = (ctx: RuntimeContext): string => ctx.session.id;
 
 /**
  * The conductor's orchestration tools. They own the blueprint lifecycle —
- * starting a session, recording the specialists' sections, scoring readiness,
- * and assembling the final `service_pod_blueprint`. Stage and readiness are
+ * starting a session, scoring readiness, and assembling the final
+ * `service_pod_blueprint`. Sections are written ONLY by the specialist
+ * sub-agents' `submit_section`; the conductor gets no write path, so it cannot
+ * self-certify gate verdicts and skip the specialists. Stage and readiness are
  * always derived from the recorded sections, never stored.
  */
 export function createOrchestrationTools(store: BlueprintStore): PluginTool[] {
   const startPodDesign = tool(
     async (args, ctx) => {
-      const { brief } = startSchema.parse(args);
+      const { brief, restart } = startSchema.parse(args);
+      if (restart) {
+        await store.reset(threadId(ctx));
+      }
       const bp = await store.init(threadId(ctx), brief);
       const readiness = computeReadiness(bp);
       return {
         started: true,
         threadId: bp.threadId,
+        brief: bp.brief,
         stage: readiness.stage,
         nextSpecialists: SPECIALISTS_FOR_STAGE[readiness.stage].map((id) =>
           computeSubAgentToolName(id),
@@ -79,46 +68,14 @@ export function createOrchestrationTools(store: BlueprintStore): PluginTool[] {
     {
       name: 'start_pod_design',
       description:
-        'Open a POD design session and initialise the blueprint. Call this first when the user wants to create a POD.',
+        'Open a POD design session and initialise the blueprint. Call this first when the user wants to create a POD; pass restart=true to discard the existing design and begin again.',
       schema: startSchema,
     },
   );
 
-  const recordBlueprintSection = tool(
-    async (args, ctx) => {
-      const input = recordSchema.parse(args);
-      const stage = ROLE_STAGE.get(input.role);
-      if (stage === undefined) {
-        throw new Error(`Unknown design-pod role: ${input.role}`);
-      }
-      const section: BlueprintSection = {
-        role: input.role,
-        stage,
-        content: input.content,
-        recordedAt: new Date().toISOString(),
-        ...(input.verdict !== undefined ? { verdict: input.verdict } : {}),
-        ...(input.blockers !== undefined ? { blockers: input.blockers } : {}),
-      };
-      const bp = await store.putSection(threadId(ctx), section);
-      const readiness = computeReadiness(bp);
-      return {
-        recorded: input.role,
-        stage: readiness.stage,
-        complete: readiness.complete,
-        score: readiness.score,
-        blockers: readiness.blockers,
-      };
-    },
-    {
-      name: 'record_blueprint_section',
-      description:
-        "Persist a specialist sub-agent's returned section into the blueprint. Pass the role id, the section content, and — for evaluate/gate roles — a pass|fail verdict.",
-      schema: recordSchema,
-    },
-  );
-
   const getBlueprint = tool(
-    async (_args, ctx) => {
+    async (args, ctx) => {
+      const { roles } = getBlueprintSchema.parse(args);
       const bp = await store.get(threadId(ctx));
       if (!bp) {
         return {
@@ -127,12 +84,28 @@ export function createOrchestrationTools(store: BlueprintStore): PluginTool[] {
             'No POD design session started yet. Call start_pod_design first.',
         };
       }
-      return { started: true, blueprint: bp, readiness: computeReadiness(bp) };
+      const sections = Object.values(bp.sections);
+      return {
+        started: true,
+        ...(bp.brief !== undefined ? { brief: bp.brief } : {}),
+        readiness: computeReadiness(bp),
+        sections: sections.map(summarizeSection),
+        ...(roles !== undefined
+          ? {
+              content: Object.fromEntries(
+                sections
+                  .filter((section) => roles.includes(section.role))
+                  .map((section) => [section.role, section.content]),
+              ),
+            }
+          : {}),
+      };
     },
     {
       name: 'get_blueprint',
-      description: 'Read the current POD blueprint and its readiness.',
-      schema: emptySchema,
+      description:
+        'Read the POD blueprint: readiness plus a compact per-section summary. Pass roles=[...] to include the full content of specific sections.',
+      schema: getBlueprintSchema,
     },
   );
 
@@ -188,7 +161,6 @@ export function createOrchestrationTools(store: BlueprintStore): PluginTool[] {
 
   return [
     startPodDesign,
-    recordBlueprintSection,
     getBlueprint,
     computeReadinessTool,
     assembleBlueprint,
