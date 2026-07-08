@@ -2233,7 +2233,8 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'bcc',
         portType: 'emailAddress',
-        description: 'Optional BCC recipients; comma-separated email addresses.',
+        description:
+          'Optional BCC recipients; comma-separated email addresses.',
       },
       {
         path: 'is_html',
@@ -2301,7 +2302,8 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'bcc_emails',
         portType: 'emailAddress',
-        description: 'Optional BCC recipients; comma-separated email addresses.',
+        description:
+          'Optional BCC recipients; comma-separated email addresses.',
       },
       {
         path: 'is_html',
