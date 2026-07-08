@@ -1,1 +1,1 @@
-export * from './router.event';
+export * from './router.event.js';

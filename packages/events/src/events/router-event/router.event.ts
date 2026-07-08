@@ -2,7 +2,7 @@ import {
   BaseEvent,
   shouldHaveSessionId,
   type WithRequiredEventProps,
-} from '../base-event/base-event';
+} from '../base-event/base-event.js';
 
 interface IRouterEvent {
   step: string;

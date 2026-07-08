@@ -1,6 +1,6 @@
 /* istanbul ignore file */
-export * from './events';
+export * from './events/index.js';
 
-export * from './graph-event-emitter';
-export * from './root-event-emitter';
-export * from './types';
+export * from './graph-event-emitter.js';
+export * from './root-event-emitter/index.js';
+export * from './types/index.js';

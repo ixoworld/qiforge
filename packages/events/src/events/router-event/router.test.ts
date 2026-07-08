@@ -1,6 +1,6 @@
-import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter';
-import { shouldRegisterEvent } from '../test-utils';
-import { RouterEvent } from './router.event';
+import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter.js';
+import { shouldRegisterEvent } from '../test-utils.js';
+import { RouterEvent } from './router.event.js';
 
 describe('RouterEvent', () => {
   it('should initialize with the correct payload and eventName', () => {

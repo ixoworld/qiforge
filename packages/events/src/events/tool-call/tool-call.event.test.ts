@@ -1,6 +1,6 @@
-import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter';
-import { shouldRegisterEvent } from '../test-utils';
-import { ToolCallEvent } from './tool-call.event';
+import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter.js';
+import { shouldRegisterEvent } from '../test-utils.js';
+import { ToolCallEvent } from './tool-call.event.js';
 
 describe('ToolCallEvent', () => {
   it('should have a default status of "isRunning" if not provided', () => {

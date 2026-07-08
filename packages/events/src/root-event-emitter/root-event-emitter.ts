@@ -1,10 +1,16 @@
-import EventEmitter2 from 'eventemitter2';
+// eventemitter2 is CJS with `module.exports = EventEmitter2` plus a
+// self-referencing `.EventEmitter2` property that Node's ESM interop cannot
+// expose as a named export — import the default and destructure instead.
+import eventemitter2 from 'eventemitter2';
+import type { EventEmitter2 as EventEmitter2Type } from 'eventemitter2';
+
+const { EventEmitter2 } = eventemitter2;
 
 const GLOBAL_KEY = Symbol.for('@ixo/oracles-events:root-event-emitter');
 
 export class RootEventEmitter {
   private static instance: RootEventEmitter | null = null;
-  private readonly emitter: EventEmitter2;
+  private readonly emitter: EventEmitter2Type;
 
   private constructor() {
     this.emitter = new EventEmitter2();
