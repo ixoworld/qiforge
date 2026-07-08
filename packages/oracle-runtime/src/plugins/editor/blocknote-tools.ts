@@ -2161,15 +2161,28 @@ Examples:
         // Matrix format: @did-ixo-ixo1abc123:mx.server.com → did:ixo:ixo1abc123
         const actorDid = matrixUserIdToDid(config.matrix.userId ?? '');
 
-        const flowId = (flowMeta.doc_id as string) ?? roomId;
+        const flowId =
+          typeof flowMeta.doc_id === 'string' ? flowMeta.doc_id : roomId;
+        const flowUri = `ixo:flow:${flowId}`;
+        const flowOwnerDid =
+          typeof flowMeta.flowOwnerDid === 'string' && flowMeta.flowOwnerDid
+            ? flowMeta.flowOwnerDid
+            : actorDid;
 
-        // 9. Execute through the flow engine (V1 — no UCAN invocation for MVP)
-        // executeNode handles: activation check → authorization check → action() → runtime update
+        // 9. Execute through the flow engine (no UCAN invocation for MVP)
+        // executeNode handles: authorization check → action() → runtime update.
+        // With no ucanService the authorization step passes through, so the
+        // UCAN-only fields (actorType, pin) are inert here but required by the type.
         const outcome = await executeNode({
           node: flowNode,
           actorDid,
+          actorType: 'user',
+          pin: '',
           context: {
             runtime: runtimeManager,
+            flowUri,
+            flowId,
+            flowOwnerDid,
           },
           action: async () => {
             const result = await actionDef.run(inputs, {
