@@ -159,14 +159,14 @@ These rules apply to every contribution. They're documented in detail in the per
 
 ## Linear project tracking
 
-This repo is tracked under the **Oracles App (Base)** project in Linear.
+This repo is tracked under the **Qi Forge** project in Linear.
 
-| Field               | Value                                                              |
-| ------------------- | ------------------------------------------------------------------ |
-| Project name        | Oracles App (Base)                                                 |
-| Project ID          | `ba41a5cd-1a73-4790-ac80-bab98efaa362`                             |
-| Project URL         | https://linear.app/ixo-world/project/oracles-app-base-0ffadb464768 |
-| Team                | Oracles (`ORA`) + IXO World (`IXO`)                                |
+| Field               | Value                                                     |
+| ------------------- | ---------------------------------------------------------- |
+| Project name        | Qi Forge                                                  |
+| Project ID          | `ba41a5cd-1a73-4790-ac80-bab98efaa362`                    |
+| Project URL         | https://linear.app/ixo-world/project/qi-forge-0ffadb464768 |
+| Team                | Oracles (`ORA`) + IXO World (`IXO`)                        |
 | Team ID (Oracles)   | `a0dbdaaf-2c77-4f93-b933-39766e75c8f1`                             |
 | Team ID (IXO World) | `195237bd-9887-4f87-a276-26735e2b2dad`                             |
 | Lead                | youssef.hany@ixo.earth (`f2904c18-18a2-4424-b7c0-19f845379ca7`)    |
@@ -188,7 +188,7 @@ This repo is tracked under the **Oracles App (Base)** project in Linear.
 
 When pushing a release or significant milestone, post a project status update:
 
-- Use `save_status_update` with `type: "project"` and `project: "Oracles App (Base)"`.
+- Use `save_status_update` with `type: "project"` and `project: "Qi Forge"`.
 - Set `health` to `onTrack`, `atRisk`, or `offTrack`.
 - Write the body in markdown — readable by both tech and non-tech audiences.
 
