@@ -1,6 +1,6 @@
-import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter';
-import { shouldRegisterEvent } from '../test-utils';
-import { RenderComponentEvent } from './render-component.event';
+import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter.js';
+import { shouldRegisterEvent } from '../test-utils.js';
+import { RenderComponentEvent } from './render-component.event.js';
 
 describe('RenderComponentEvent', () => {
   it('should have a default status of "isRunning" if not provided', () => {

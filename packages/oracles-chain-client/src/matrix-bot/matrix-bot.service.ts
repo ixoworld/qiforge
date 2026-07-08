@@ -9,7 +9,10 @@ import {
   getMatrixUrlsForDid,
   getMatrixHomeServerCroppedForDid,
 } from './did-matrix-batcher.js';
-import type { GetOpenIdToken } from './openid-token-provider.js';
+import {
+  MATRIX_BOT_RESOURCES,
+  type GetUcanToken,
+} from './ucan-token-provider.js';
 
 export interface MatrixConfig {
   botUrl: string;
@@ -19,31 +22,27 @@ export interface MatrixConfig {
 
 export class MatrixBotService {
   private accessToken?: string;
-  private getOpenIdToken?: GetOpenIdToken;
-  private authDid?: string;
+  private getUcanToken?: GetUcanToken;
 
-  constructor(
-    accessToken?: string,
-    getOpenIdToken?: GetOpenIdToken,
-    authDid?: string,
-  ) {
+  constructor(accessToken?: string, getUcanToken?: GetUcanToken) {
     this.accessToken = accessToken;
-    this.getOpenIdToken = getOpenIdToken;
-    this.authDid = authDid;
+    this.getUcanToken = getUcanToken;
   }
 
-  private async requireAuth(): Promise<{
-    openIdToken: string;
-    authDid: string;
-  }> {
-    if (!this.getOpenIdToken || !this.authDid) {
+  private async requireUcanToken(
+    did: string,
+    bot: keyof typeof MATRIX_BOT_RESOURCES,
+  ): Promise<string> {
+    if (!this.getUcanToken) {
       throw new Error(
-        'OpenID token provider and authDid are required for authenticated bot operations. ' +
-          'Pass getOpenIdToken and authDid to the MatrixBotService constructor.',
+        'A UCAN token provider is required for authenticated bot operations. ' +
+          'Pass getUcanToken (see createUcanTokenProvider) to the MatrixBotService constructor.',
       );
     }
-    const openIdToken = await this.getOpenIdToken();
-    return { openIdToken, authDid: this.authDid };
+    // getMatrixUrlsForDid caches per DID, so this lookup is shared with the
+    // bot-client getters rather than duplicated work.
+    const matrixUrls = await getMatrixUrlsForDid(did);
+    return this.getUcanToken(matrixUrls[bot], MATRIX_BOT_RESOURCES[bot]);
   }
 
   private async getStateBotForDid(did: string) {
@@ -87,14 +86,13 @@ export class MatrixBotService {
     path?: string,
   ): Promise<T | Record<string, T>> {
     try {
-      const { openIdToken, authDid } = await this.requireAuth();
+      const ucanToken = await this.requireUcanToken(did, 'stateBot');
       const stateBot = await this.getStateBotForDid(did);
       const response = await stateBot.state.v1beta1.queryState(
         roomId,
         key,
         path ?? '',
-        openIdToken,
-        authDid,
+        ucanToken,
       );
       return response.data as T | Record<string, T>;
     } catch (error) {
@@ -135,12 +133,11 @@ export class MatrixBotService {
 
   async sourceRoomAndJoinWithDid(entityDid: string): Promise<string> {
     try {
-      const { openIdToken, authDid } = await this.requireAuth();
+      const ucanToken = await this.requireUcanToken(entityDid, 'roomsBot');
       const roomBot = await this.getRoomBotForDid(entityDid);
       const sourceRoomResponse = await roomBot.room.v1beta1.sourceRoomAndJoin(
         entityDid,
-        openIdToken,
-        authDid,
+        ucanToken,
       );
 
       const claimBot = await this.getClaimBotForDid(entityDid);
@@ -169,14 +166,13 @@ export class MatrixBotService {
     claim: unknown,
   ) {
     try {
-      const { openIdToken, authDid } = await this.requireAuth();
+      const ucanToken = await this.requireUcanToken(entityDid, 'claimBot');
       const claimBot = await this.getClaimBotForDid(entityDid);
       const claimToStr = JSON.stringify(claim);
       const response = await claimBot.claim.v1beta1.saveClaim(
         collectionId,
         claimToStr,
-        openIdToken,
-        authDid,
+        ucanToken,
       );
       return response;
     } catch (error) {
@@ -191,13 +187,12 @@ export class MatrixBotService {
     collectionId: string,
     claimId: string,
   ) {
-    const { openIdToken, authDid } = await this.requireAuth();
+    const ucanToken = await this.requireUcanToken(entityDid, 'claimBot');
     const claimBot = await this.getClaimBotForDid(entityDid);
     const claimBody = await claimBot.claim.v1beta1.queryClaim(
       collectionId,
       claimId,
-      openIdToken,
-      authDid,
+      ucanToken,
     );
     return claimBody;
   }

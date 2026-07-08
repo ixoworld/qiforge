@@ -1,2 +1,2 @@
-export { ReasoningEvent } from './reasoning-event';
-export type { IReasoningEvent } from './types';
+export { ReasoningEvent } from './reasoning-event.js';
+export type { IReasoningEvent } from './types.js';

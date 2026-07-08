@@ -1,15 +1,15 @@
 {
   "name": "@ixo/oracles-client-sdk",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "type": "module",
   "private": false,
   "description": "Client SDK for interacting with QiForge oracles, designed for React applications",
-  "main": "dist/index.js",
+  "main": "./dist/index.cjs",
   "repository": {
     "type": "git",
     "url": "https://github.com/ixoworld/qiforge.git"
   },
-  "module": "dist/index.mjs",
+  "module": "./dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -61,5 +61,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "sideEffects": false
 }

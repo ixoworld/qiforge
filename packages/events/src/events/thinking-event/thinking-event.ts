@@ -1,7 +1,7 @@
 import {
   BaseEvent,
   type WithRequiredEventProps,
-} from '../base-event/base-event';
+} from '../base-event/base-event.js';
 
 /**
  * Payload for the ThinkingEvent.

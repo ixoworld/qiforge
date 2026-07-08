@@ -1,1 +1,1 @@
-export * from './message-cache-invalidation.event';
+export * from './message-cache-invalidation.event.js';

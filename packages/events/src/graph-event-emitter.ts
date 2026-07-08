@@ -4,10 +4,10 @@ import {
   ReasoningEvent,
   RenderComponentEvent,
   ActionCallEvent,
-} from './events';
-import { MessageCacheInvalidationEvent } from './events/message-cache-invalidation';
-import { RouterEvent } from './events/router-event/router.event';
-import { ToolCallEvent } from './events/tool-call/tool-call.event';
+} from './events/index.js';
+import { MessageCacheInvalidationEvent } from './events/message-cache-invalidation/index.js';
+import { RouterEvent } from './events/router-event/router.event.js';
+import { ToolCallEvent } from './events/tool-call/tool-call.event.js';
 
 export class GraphEventEmitter {
   static registerEventHandlers(

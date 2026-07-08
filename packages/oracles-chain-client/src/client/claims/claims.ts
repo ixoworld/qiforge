@@ -2,8 +2,7 @@ import { type Coin } from '@cosmjs/proto-signing';
 import { cosmos, ixo } from '@ixo/impactxclient-sdk';
 import { type ICreateVerifiableCredentialArgs } from '@veramo/core';
 import { MatrixBotService } from 'src/matrix-bot/matrix-bot.service.js';
-import { getMatrixHomeServerForDid } from 'src/matrix-bot/did-matrix-batcher.js';
-import { createOpenIdTokenProvider } from 'src/matrix-bot/openid-token-provider.js';
+import { createUcanTokenProvider } from 'src/matrix-bot/ucan-token-provider.js';
 import { setupClaimSigningMnemonics } from 'src/matrix-bot/setup-claim-signing-mnemonics.js';
 import { gqlClient } from '../../gql/index.js';
 import { ValidationError } from '../../utils/validation-error.js';
@@ -160,16 +159,6 @@ export class Claims {
       },
       proofFormat: 'lds',
     };
-    const oracleHomeServerUrl = await getMatrixHomeServerForDid(oracleDid);
-    const getOpenIdToken = createOpenIdTokenProvider({
-      matrixAccessToken: accessToken,
-      homeServerUrl: oracleHomeServerUrl,
-    });
-    const matrixBotService = new MatrixBotService(
-      accessToken,
-      getOpenIdToken,
-      oracleDid,
-    );
     // Callers that already resolved the signing mnemonic at boot pass it in
     // here so we skip the per-claim HTTP GET + AES decrypt against the
     // oracle's Matrix account room state. Falls back to the original lookup
@@ -184,6 +173,19 @@ export class Claims {
         signerDid: oracleDid,
         network,
       }));
+
+    // The oracle authenticates to the matrix bots as itself: a self-issued
+    // UCAN invocation signed with the derived claim-signing mnemonic (its
+    // ed25519 key is the verification method registered on the oracle DID —
+    // NOT the secp wallet mnemonic). This mirrors apps/app's UcanService,
+    // which signs with the same setupClaimSigningMnemonics output.
+    const matrixBotService = new MatrixBotService(
+      accessToken,
+      createUcanTokenProvider({
+        mnemonic: decryptedSigningMnemonic,
+        did: oracleDid,
+      }),
+    );
 
     const agent = await createVeramoAgent(network);
     if (!agent || !agent.verifyCredential) {

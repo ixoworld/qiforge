@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracles-chain-client",
-  "version": "1.3.2",
+  "version": "2.0.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -100,14 +100,15 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@cosmjs/crypto": "0.32.4",
-    "@cosmjs/encoding": "0.32.4",
-    "@cosmjs/proto-signing": "0.32.4",
-    "@cosmjs/stargate": "0.32.4",
-    "@ixo/did-provider-x": "^0.0.2",
-    "@ixo/impactxclient-sdk": "2.4.1",
+    "@cosmjs/crypto": "0.39.0",
+    "@cosmjs/encoding": "0.39.0",
+    "@cosmjs/proto-signing": "0.39.0",
+    "@cosmjs/stargate": "0.39.0",
+    "@ixo/did-provider-x": "^0.1.1",
+    "@ixo/impactxclient-sdk": "3.0.0",
     "@ixo/logger": "workspace:*",
-    "@ixo/matrixclient-sdk": "^1.0.0",
+    "@ixo/matrixclient-sdk": "^3.0.0",
+    "@ixo/ucan": "workspace:*",
     "@veramo/core": "^7.0.0",
     "@veramo/credential-ld": "^7.0.0",
     "@veramo/credential-w3c": "^7.0.0",
@@ -118,7 +119,7 @@
     "@veramo/kms-local": "^7.0.0",
     "ajv": "8.17.1",
     "ajv-formats": "3.0.1",
-    "axios": "1.7.8",
+    "axios": "1.18.1",
     "axios-retry": "4.5.0",
     "bs58": "^6.0.0",
     "did-resolver": "4.1.0",
@@ -127,9 +128,10 @@
     "graphql": "^16.10.0",
     "graphql-request": "7.1.2",
     "graphql-tag": "^2.12.6",
+    "jose": "^6.0.8",
     "limiter": "2.1.0",
     "store": "2.0.12",
-    "jose": "^6.0.8",
     "zod": "^4.3.6"
-  }
+  },
+  "sideEffects": false
 }

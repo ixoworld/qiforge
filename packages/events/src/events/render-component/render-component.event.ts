@@ -2,7 +2,7 @@ import {
   BaseEvent,
   shouldHaveSessionId,
   type WithRequiredEventProps,
-} from '../base-event/base-event';
+} from '../base-event/base-event.js';
 
 interface IRenderComponentEvent<
   Props extends Record<string, unknown> = Record<string, unknown>,

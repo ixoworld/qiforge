@@ -2,8 +2,8 @@ import {
   BaseEvent,
   shouldHaveSessionId,
   type WithRequiredEventProps,
-} from '../base-event/base-event';
-import { EVENT_NAME, type IBrowserToolCallEvent } from './types';
+} from '../base-event/base-event.js';
+import { EVENT_NAME, type IBrowserToolCallEvent } from './types.js';
 
 export class BrowserToolCallEvent extends BaseEvent<IBrowserToolCallEvent> {
   constructor(public payload: WithRequiredEventProps<IBrowserToolCallEvent>) {

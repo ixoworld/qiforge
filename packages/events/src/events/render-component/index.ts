@@ -1,1 +1,1 @@
-export * from './render-component.event';
+export * from './render-component.event.js';
