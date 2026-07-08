@@ -2186,6 +2186,260 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
     ],
   },
 
+  // ── Delegated integrations (author-bound, free-form) ──────────────────────
+  'qi/gmail.email.send': {
+    summary:
+      "Send a free-form email from the TEMPLATE AUTHOR's own connected Gmail account (Composio GMAIL_SEND_EMAIL). Delegated execution: the author connects and binds their Gmail ONCE at design time, and any runner of the flow then sends on the author's behalf via an opaque server-side binding — runners never connect Gmail and never hold the author's credential. Field values (recipient, subject, body) may be literals or reference upstream block outputs (e.g. an email submitted in an upstream form). Side-effecting: delivers a real message. Runs when the runner clicks the block, or automatically when a wired upstream block event fires (no slide-to-sign). Emits an email.sent event.",
+    whenToUse: [
+      "An automation needs to email someone as the template author, from the author's own Gmail inbox.",
+      'You want free-form subject/body (optionally wired from upstream block outputs), not a pre-registered template.',
+    ],
+    whenNotToUse: [
+      "Do NOT confuse with qi/email.send, which sends a PRE-DEFINED TEMPLATED email from the PLATFORM owner's address; this block sends free-form content from the AUTHOR's own Gmail.",
+      'For Outlook use qi/outlook.email.send; to post to Slack use qi/slack.message.send.',
+    ],
+    tags: ['integration', 'email'],
+    inputPorts: [
+      {
+        path: 'connection',
+        portType: 'object',
+        required: true,
+        description:
+          "The author's bound Gmail connection (set at design time). Runners never set this — it carries the author's opaque server-side binding, not their credential.",
+      },
+      {
+        path: 'recipient_email',
+        portType: 'emailAddress',
+        required: true,
+        description:
+          "Recipient email address. May be a literal or wired from an upstream block output (e.g. a form's submitted email).",
+      },
+      {
+        path: 'body',
+        portType: 'string',
+        required: true,
+        description: 'Email body. Plain text unless is_html is set.',
+      },
+      {
+        path: 'subject',
+        portType: 'string',
+        description: 'Optional email subject line.',
+      },
+      {
+        path: 'cc',
+        portType: 'emailAddress',
+        description: 'Optional CC recipients; comma-separated email addresses.',
+      },
+      {
+        path: 'bcc',
+        portType: 'emailAddress',
+        description:
+          'Optional BCC recipients; comma-separated email addresses.',
+      },
+      {
+        path: 'is_html',
+        portType: 'boolean',
+        description: 'When true, render the body as HTML.',
+      },
+    ],
+    requires: [
+      {
+        kind: 'connectedAccount',
+        description:
+          'The template author must connect and bind their Gmail account at design time; ask the author to connect Gmail. Runners never connect anything.',
+      },
+    ],
+  },
+  'qi/outlook.email.send': {
+    summary:
+      "Send a free-form email from the TEMPLATE AUTHOR's own connected Outlook account (Composio OUTLOOK_OUTLOOK_SEND_EMAIL). Delegated execution: the author connects and binds their Outlook ONCE at design time, and any runner of the flow then sends on the author's behalf via an opaque server-side binding — runners never connect Outlook and never hold the author's credential. Field values may be literals or reference upstream block outputs. Side-effecting: delivers a real message. Runs when the runner clicks the block, or automatically when a wired upstream block event fires (no slide-to-sign). Emits an email.sent event.",
+    whenToUse: [
+      "An automation needs to email someone as the template author, from the author's own Outlook inbox.",
+      'You want free-form subject/body (optionally wired from upstream block outputs), not a pre-registered template.',
+    ],
+    whenNotToUse: [
+      "Do NOT confuse with qi/email.send, which sends a PRE-DEFINED TEMPLATED email from the PLATFORM owner's address; this block sends free-form content from the AUTHOR's own Outlook.",
+      'For Gmail use qi/gmail.email.send; to post to Slack use qi/slack.message.send.',
+    ],
+    tags: ['integration', 'email'],
+    inputPorts: [
+      {
+        path: 'connection',
+        portType: 'object',
+        required: true,
+        description:
+          "The author's bound Outlook connection (set at design time). Runners never set this — it carries the author's opaque server-side binding, not their credential.",
+      },
+      {
+        path: 'to_email',
+        portType: 'emailAddress',
+        required: true,
+        description:
+          "Recipient email address. May be a literal or wired from an upstream block output (e.g. a form's submitted email).",
+      },
+      {
+        path: 'subject',
+        portType: 'string',
+        required: true,
+        description: 'Email subject line.',
+      },
+      {
+        path: 'body',
+        portType: 'string',
+        required: true,
+        description: 'Email body. Plain text unless is_html is set.',
+      },
+      {
+        path: 'to_name',
+        portType: 'string',
+        description: 'Optional display name for the recipient.',
+      },
+      {
+        path: 'cc_emails',
+        portType: 'emailAddress',
+        description: 'Optional CC recipients; comma-separated email addresses.',
+      },
+      {
+        path: 'bcc_emails',
+        portType: 'emailAddress',
+        description:
+          'Optional BCC recipients; comma-separated email addresses.',
+      },
+      {
+        path: 'is_html',
+        portType: 'boolean',
+        description: 'When true, render the body as HTML.',
+      },
+    ],
+    requires: [
+      {
+        kind: 'connectedAccount',
+        description:
+          'The template author must connect and bind their Outlook account at design time; ask the author to connect Outlook. Runners never connect anything.',
+      },
+    ],
+  },
+  'qi/slack.message.send': {
+    summary:
+      "Post a free-form message to a Slack channel from the TEMPLATE AUTHOR's own connected Slack workspace (Composio SLACK_CHAT_POST_MESSAGE). Delegated execution: the author connects and binds their Slack ONCE at design time, and any runner of the flow then posts on the author's behalf via an opaque server-side binding — runners never connect Slack and never hold the author's credential. Field values may be literals or reference upstream block outputs. Side-effecting: posts a real message. Runs when the runner clicks the block, or automatically when a wired upstream block event fires (no slide-to-sign). Emits a message.sent event.",
+    whenToUse: [
+      "An automation needs to post a Slack message as the template author, into the author's own workspace.",
+      'You want free-form message text (optionally wired from upstream block outputs).',
+    ],
+    whenNotToUse: [
+      "Do NOT confuse with qi/email.send, which sends a PRE-DEFINED TEMPLATED email from the PLATFORM owner's address; this block posts free-form content to the AUTHOR's own Slack.",
+      'To email rather than post to Slack, use qi/gmail.email.send or qi/outlook.email.send.',
+    ],
+    tags: ['integration', 'messaging'],
+    inputPorts: [
+      {
+        path: 'connection',
+        portType: 'object',
+        required: true,
+        description:
+          "The author's bound Slack connection (set at design time). Runners never set this — it carries the author's opaque server-side binding, not their credential.",
+      },
+      {
+        path: 'channel',
+        portType: 'string',
+        required: true,
+        description: 'Target channel ID or name, e.g. #general or C0123456.',
+      },
+      {
+        path: 'markdown_text',
+        portType: 'string',
+        description:
+          'Optional message text in Slack markdown. May be a literal or wired from an upstream block output.',
+      },
+      {
+        path: 'thread_ts',
+        portType: 'string',
+        description:
+          'Optional parent message timestamp to reply within a thread.',
+      },
+    ],
+    requires: [
+      {
+        kind: 'connectedAccount',
+        description:
+          'The template author must connect and bind their Slack account at design time; ask the author to connect Slack. Runners never connect anything.',
+      },
+    ],
+  },
+  'qi/googlecalendar.event.create': {
+    summary:
+      "Create a free-form event on the TEMPLATE AUTHOR's own connected Google Calendar (Composio GOOGLECALENDAR_CREATE_EVENT). Delegated execution: the author connects and binds their calendar ONCE at design time, and any runner of the flow then creates events on the author's behalf via an opaque server-side binding — runners never connect a calendar and never hold the author's credential. Field values may be literals or reference upstream block outputs (e.g. a start time resolved upstream). Side-effecting: writes a real event. Runs when the runner clicks the block, or automatically when a wired upstream block event fires (no slide-to-sign). Emits an event.created event.",
+    whenToUse: [
+      "An automation needs to create a calendar event as the template author, on the author's own Google Calendar.",
+      'You want free-form event details (optionally wired from upstream block outputs).',
+    ],
+    whenNotToUse: [
+      "Do NOT confuse with the older self-connected qi/calendar.event.create, where each runner connects their OWN calendar; this delegated block writes to the AUTHOR's own calendar on every runner's behalf.",
+      "Do NOT confuse with qi/email.send (a PLATFORM-owner templated email); this block creates a calendar event from the AUTHOR's own account.",
+    ],
+    tags: ['integration', 'calendar', 'google'],
+    inputPorts: [
+      {
+        path: 'connection',
+        portType: 'object',
+        required: true,
+        description:
+          "The author's bound Google Calendar connection (set at design time). Runners never set this — it carries the author's opaque server-side binding, not their credential.",
+      },
+      {
+        path: 'start_datetime',
+        portType: 'string',
+        required: true,
+        description:
+          'Event start time in ISO 8601, e.g. 2026-05-12T09:00:00. May be a literal or wired from an upstream block output.',
+      },
+      {
+        path: 'summary',
+        portType: 'string',
+        description: 'Optional event title.',
+      },
+      {
+        path: 'description',
+        portType: 'string',
+        description: 'Optional event description.',
+      },
+      {
+        path: 'location',
+        portType: 'string',
+        description: 'Optional event location.',
+      },
+      {
+        path: 'timezone',
+        portType: 'string',
+        description: 'Optional IANA timezone, e.g. Europe/London.',
+      },
+      {
+        path: 'attendees',
+        portType: 'string',
+        description: 'Optional attendees as comma-separated email addresses.',
+      },
+      {
+        path: 'calendar_id',
+        portType: 'string',
+        description:
+          "Optional calendar to write to; use 'primary' for the author's main calendar.",
+      },
+      {
+        path: 'event_duration_minutes',
+        portType: 'number',
+        description:
+          'Optional event duration in minutes; defaults to the calendar default if blank.',
+      },
+    ],
+    requires: [
+      {
+        kind: 'connectedAccount',
+        description:
+          'The template author must connect and bind their Google Calendar at design time; ask the author to connect Calendar. Runners never connect anything.',
+      },
+    ],
+  },
+
   // ── Calendar & Xero integrations ──────────────────────────────────────────
   'qi/calendar.event.create': {
     summary:

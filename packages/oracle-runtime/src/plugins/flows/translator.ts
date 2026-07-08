@@ -256,6 +256,8 @@ function triggerForStep(step: FlowStep): TriggerSpec | undefined {
   if (step.onEvent) {
     return {
       type: 'block.event',
+      // Plan-level triggers carry the STEP id; the editor compiler remaps it to
+      // the block id (flow_block_<stepId>) when writing the compiled `props.trigger`.
       sourceBlockId: step.onEvent.fromStep,
       eventName: step.onEvent.event,
     };

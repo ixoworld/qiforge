@@ -201,4 +201,25 @@ describe('translator: flowSpecToBaseUcan', () => {
     // Conditions are NEVER emitted onto the capability — they are written to props directly.
     expect(plan.capabilities[1]?.condition).toBeUndefined();
   });
+
+  it('emits onEvent triggers with the SHORT step id — the compiler owns the block-id remap', () => {
+    const action = someActionType();
+    const spec: FlowSpecInput = {
+      title: 'Trigger flow',
+      steps: [
+        { id: 'support-form', action },
+        {
+          id: 'notify',
+          action,
+          onEvent: { fromStep: 'support-form', event: 'form.submitted' },
+        },
+      ],
+    };
+    const plan = flowSpecToBaseUcan(spec, { flowId: 'trigger-flow' });
+    expect(plan.capabilities[1]?.trigger).toEqual({
+      type: 'block.event',
+      sourceBlockId: 'support-form',
+      eventName: 'form.submitted',
+    });
+  });
 });

@@ -26,6 +26,7 @@ import type {
   CompiledFlow,
   FlowNodeRuntimeState,
 } from '@ixo/editor/core';
+import { isEventCapable } from './actions.js';
 import { stepIdToBlockId } from './translator.js';
 
 /** A real registry action type with a `can`, picked dynamically so tests never hardcode a stale name. */
@@ -35,6 +36,22 @@ export function someActionType(): string {
   );
   if (!withCan) throw new Error('no action with a `can` in the registry');
   return withCan.type;
+}
+
+/** A registry action that can source an `onEvent` trigger (event-capable, with a `can`). */
+export function someEventCapableActionType(): string {
+  const match = getAllActions().find(
+    (a) => typeof typeToCan(a.type) === 'string' && isEventCapable(a),
+  );
+  if (!match) throw new Error('no event-capable action in the registry');
+  return match.type;
+}
+
+/** A registry action that can NOT source an `onEvent` trigger, if the registry has one. */
+export function someNonEventActionType(): string | undefined {
+  return getAllActions().find(
+    (a) => typeof typeToCan(a.type) === 'string' && !isEventCapable(a),
+  )?.type;
 }
 
 function writeNodeMap(doc: Y.Doc, compiled: CompiledFlow): void {

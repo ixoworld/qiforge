@@ -6,6 +6,7 @@ import {
   hydrateFlowDoc,
   setStepRuntime,
   someActionType,
+  someEventCapableActionType,
 } from './test-support.js';
 import type { FlowSpecInput } from './types.js';
 
@@ -75,6 +76,32 @@ describe('readFlowSpec: multi-source round-trip', () => {
     expect(one?.status?.error?.message).toBe('boom');
     // `two` references `one`, which failed -> blocked by `one`.
     expect(two?.status?.blockedBy).toContain('one');
+  });
+
+  it('reads onEvent back with the short step id however the compiler stored the source', () => {
+    // The compiled `props.trigger` may carry the short step id (older editor)
+    // or the prefixed block id (current editor remaps on compile); the
+    // agent-facing read must return the short step id either way.
+    const action = someEventCapableActionType();
+    const doc = buildDoc({
+      title: 'Event read',
+      steps: [
+        { id: 'support-form', action },
+        {
+          id: 'notify',
+          action,
+          onEvent: { fromStep: 'support-form', event: 'form.submitted' },
+        },
+      ],
+    });
+
+    const notify = readFlowSpec(doc, 'room-ev')?.steps.find(
+      (s) => s.id === 'notify',
+    );
+    expect(notify?.onEvent).toEqual({
+      fromStep: 'support-form',
+      event: 'form.submitted',
+    });
   });
 
   it('returns null for an empty doc', () => {

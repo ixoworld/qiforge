@@ -1,3 +1,4 @@
+import { Logger } from '@ixo/logger';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   BaseCheckpointSaver,
@@ -17,7 +18,6 @@ import Database, {
 } from 'better-sqlite3';
 import { type BaseMessage } from 'langchain';
 import migration001 from './migrations/001_add_created_at_to_messages';
-import { Logger } from '@ixo/logger';
 import {
   _default,
   type CleanAdditionalKwargs,

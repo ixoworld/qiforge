@@ -19,10 +19,14 @@ import {
   editBlock,
   findParentOf,
 } from '../editor/block-actions.js';
+import { getActionDef, isEventCapable } from './actions.js';
 import { FlowError } from './errors.js';
 import { readFlowSpec } from './read.js';
 import {
+  BLOCK_ID_PREFIX,
+  blockIdToStepId,
   buildConditionsProp,
+  canToAction,
   friendlyInputsToNb,
   stepIdToBlockId,
 } from './translator.js';
@@ -108,9 +112,8 @@ export function setStepConfirmation(
 
 /**
  * Set a step's trigger to `manual` (default) or `flow-start`. Writes the same
- * `trigger`/`triggerMode` props the compiler would. Event-triggers (`onEvent`)
- * are NOT handled here — they synthesize compiled edges and go through the
- * editor's compiler (set_step_event, deferred).
+ * `trigger`/`triggerMode` props the compiler would. Event triggers are written
+ * by {@link setStepEventTrigger}; setting `manual` here clears one.
  */
 export function setStepTrigger(
   doc: YDoc,
@@ -121,6 +124,56 @@ export function setStepTrigger(
   setStepProps(doc, stepId, {
     trigger: trigger === 'flow-start' ? JSON.stringify({ type }) : '',
     triggerMode: type,
+  });
+}
+
+/**
+ * Auto-trigger a step when an upstream step emits an event. Writes the same
+ * `trigger`/`triggerMode` props the compiler would for a `block.event` trigger.
+ * The stored `sourceBlockId` carries the BLOCK id (`flow_block_<stepId>`) —
+ * that is what the FE reconciler matches against the source block's real `.id`
+ * — while callers keep passing the friendly step id.
+ */
+export function setStepEventTrigger(
+  doc: YDoc,
+  stepId: string,
+  onEvent: { fromStep: string; event: string },
+): void {
+  if (onEvent.fromStep.startsWith(BLOCK_ID_PREFIX)) {
+    throw new FlowError(
+      'validation_failed',
+      `"${onEvent.fromStep}" is an internal block id — use the short step id ("${blockIdToStepId(onEvent.fromStep)}").`,
+    );
+  }
+  const sourceBlockId = requireStep(doc, onEvent.fromStep);
+
+  // Same event-capability rule validate_flow enforces at plan level (spec §2.3).
+  const source = doc.getMap('qi.flow.nodes').get(onEvent.fromStep);
+  const registryType =
+    source instanceof Y.Map ? source.get('registryType') : undefined;
+  const can = source instanceof Y.Map ? source.get('can') : undefined;
+  const action =
+    typeof registryType === 'string'
+      ? registryType
+      : typeof can === 'string'
+        ? canToAction(can)
+        : undefined;
+  const def = action ? getActionDef(action) : undefined;
+  if (def && !isEventCapable(def)) {
+    throw new FlowError(
+      'validation_failed',
+      `Step "${stepId}" can't auto-trigger on "${onEvent.fromStep}" — its action "${action}" cannot emit events. ` +
+        'Use ordering (after) + an input reference instead.',
+    );
+  }
+
+  setStepProps(doc, stepId, {
+    trigger: JSON.stringify({
+      type: 'block.event',
+      sourceBlockId,
+      eventName: onEvent.event,
+    }),
+    triggerMode: 'block.event',
   });
 }
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { flowSpecToBaseUcan } from './translator.js';
+import {
+  collectAllBlocks,
+  extractBlockProperties,
+} from '../editor/blocknote-helper.js';
+import { flowSpecToBaseUcan, stepIdToBlockId } from './translator.js';
 import { readFlowSpec, readStep } from './read.js';
 import {
   removeStep,
@@ -7,6 +11,7 @@ import {
   setStepAssignment,
   setStepConditions,
   setStepConfirmation,
+  setStepEventTrigger,
   setStepInputs,
   setStepSchedule,
   setStepTrigger,
@@ -16,6 +21,8 @@ import {
   hydrateFlowDoc,
   setStepRuntime,
   someActionType,
+  someEventCapableActionType,
+  someNonEventActionType,
 } from './test-support.js';
 import type { FlowSpecInput } from './types.js';
 
@@ -90,6 +97,94 @@ describe('edit: settings round-trip via read', () => {
     setStepTrigger(doc, 'a', 'manual');
     // manual is the default, so it is omitted from the friendly read.
     expect(readStep(doc, 'r', 'a')!.trigger).toBeUndefined();
+  });
+
+  it('event trigger stores the block id on the block but reads back as the short step id', () => {
+    const action = someEventCapableActionType();
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        {
+          title: 'Event flow',
+          steps: [
+            { id: 'support-form', action },
+            { id: 'notify', action },
+          ],
+        },
+        { flowId: 'event-flow' },
+      ),
+    );
+
+    setStepEventTrigger(doc, 'notify', {
+      fromStep: 'support-form',
+      event: 'form.submitted',
+    });
+
+    // Stored block props carry the PREFIXED block id — the FE reconciler
+    // matches trigger.sourceBlockId against the source block's real `.id`.
+    const block = collectAllBlocks(doc.getXmlFragment('document')).find(
+      (b) => b.id === stepIdToBlockId('notify'),
+    )!;
+    const props = extractBlockProperties(block);
+    expect(props.trigger).toBe(
+      JSON.stringify({
+        type: 'block.event',
+        sourceBlockId: stepIdToBlockId('support-form'),
+        eventName: 'form.submitted',
+      }),
+    );
+    expect(props.triggerMode).toBe('block.event');
+
+    // ...but the agent-facing read maps it back to the short step id.
+    expect(readStep(doc, 'r', 'notify')!.onEvent).toEqual({
+      fromStep: 'support-form',
+      event: 'form.submitted',
+    });
+
+    // Resetting the trigger to manual clears the event trigger.
+    setStepTrigger(doc, 'notify', 'manual');
+    const cleared = readStep(doc, 'r', 'notify')!;
+    expect(cleared.onEvent).toBeUndefined();
+    expect(cleared.trigger).toBeUndefined();
+  });
+
+  it('event trigger rejects an unknown source step', () => {
+    const doc = threeStepDoc();
+    expect(() =>
+      setStepEventTrigger(doc, 'b', { fromStep: 'nope', event: 'x' }),
+    ).toThrowError(/No step "nope"/);
+  });
+
+  it('event trigger rejects an already-prefixed block id', () => {
+    const doc = threeStepDoc();
+    expect(() =>
+      setStepEventTrigger(doc, 'b', {
+        fromStep: 'flow_block_a',
+        event: 'x',
+      }),
+    ).toThrowError(/short step id/);
+  });
+
+  it('event trigger rejects a non-event-capable source action', () => {
+    const action = someNonEventActionType();
+    if (!action) {
+      // Every action is event-capable in this registry — nothing to assert.
+      return;
+    }
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        {
+          title: 'No events',
+          steps: [
+            { id: 'src', action },
+            { id: 'dst', action },
+          ],
+        },
+        { flowId: 'no-events' },
+      ),
+    );
+    expect(() =>
+      setStepEventTrigger(doc, 'dst', { fromStep: 'src', event: 'whatever' }),
+    ).toThrowError(/cannot emit events/);
   });
 
   it('clearing conditions removes them', () => {
