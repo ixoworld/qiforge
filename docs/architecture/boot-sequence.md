@@ -28,12 +28,14 @@ Order plugins by `dependsOn`. Cycles or missing hard deps surface as resolver er
 
 ### 4. Manifest validation
 
-For each loaded plugin, `validateManifest(plugin.manifest, plugin.name)` in `manifest/validator.ts`:
+First, fork-supplied `opts.manifestOverrides` are merged onto each plugin's own manifest via `mergeManifestOverride(plugin.manifest, override)` (`manifest/merge-override.ts`). The merge is shallow — keys the override sets win, omitted keys keep the plugin default, and `undefined` values are ignored so a sparse override never blanks a field. Override keys that don't match a loaded plugin are logged (`boot.plugin.manifest_override_unknown`) and ignored. This is how a fork retunes a bundled plugin's discovery — most commonly flipping a noisy `always` plugin to `on-demand`, hiding one behind `silent`, or relabelling `summary`/`tags`/`whenToUse` — without forking the plugin source.
+
+Validation then runs against the **merged** manifest, so an override is held to the same rules as an authored manifest. For each loaded plugin, `validateManifest(effectiveManifest, plugin.name)` in `manifest/validator.ts`:
 
 - Hard: `summary` non-empty; `whenToUse` ≥ 1 entry when `visibility !== 'silent'`; every `example.tool` references a registered tool.
 - Soft: `summary` ≤ 120 chars; `whenToUse` entries ≤ 100 chars and ≤ 8 entries; `tags` all lowercase.
 
-Hard violations are collected; if non-empty, boot throws `Plugin manifest validation failed (N issues)`.
+Hard violations are collected; if non-empty, boot throws `Plugin manifest validation failed (N issues)`. The same merged manifest is what gets handed to the `ManifestRegistry` in step 8, so every downstream reader (the Tier-1 prompt, the capability meta-tools, the agent's visibility index) sees the override too.
 
 ### 5. Schema merge + env validation
 

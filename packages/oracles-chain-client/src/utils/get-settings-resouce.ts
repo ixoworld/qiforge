@@ -1,4 +1,4 @@
-import { type LinkedResource } from '@ixo/impactxclient-sdk/types/codegen/ixo/iid/v1beta1/types.js';
+import { type LinkedResource } from '@ixo/impactxclient-sdk/codegen/ixo/iid/v1beta1/types';
 import { gqlClient } from 'src/gql/index.js';
 import { type TGetSettingsResourceSchema } from '../client/entities/types.js';
 

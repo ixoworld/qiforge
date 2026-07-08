@@ -6,6 +6,8 @@ settings:
 
 overrides:
   ws: 8.18.2
+  form-data@<2.5.4: ^2.5.4
+  did-resolver: 4.1.0
   '@langchain/core': 1.1.48
   '@langchain/langgraph': 1.3.2
   '@langchain/langgraph-checkpoint': 1.0.2
@@ -94,7 +96,7 @@ importers:
         version: 1.1.43(@browserbasehq/sdk@2.14.1)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.61.1)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(zod@4.4.3))(@ibm-cloud/watsonx-ai@1.7.14)(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(better-sqlite3@12.11.1)(expo@56.0.12)(fast-xml-parser@4.5.6)(ibm-cloud-sdk-core@5.5.0)(ignore@7.0.5)(ioredis@5.11.1)(it-all@3.0.11)(jsdom@25.0.1)(jsonwebtoken@9.0.3)(lodash@4.18.1)(react-dom@18.3.1(react@18.3.1))(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(react@18.3.1)(web-streams-polyfill@3.3.3)(ws@8.18.2)(zod-to-json-schema@3.25.2(zod@4.4.3))
       '@ixo/editor':
         specifier: 3.0.0-beta.11
-        version: 3.0.0-beta.11(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@types/hast@3.0.4)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react-jazzicon@1.0.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
+        version: 3.0.0-beta.11(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react-jazzicon@1.0.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
       '@ixo/matrix':
         specifier: 1.2.33
         version: 1.2.33(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
@@ -118,7 +120,7 @@ importers:
         version: 1.0.54(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2)
       '@ixo/ucan':
         specifier: 1.2.3
-        version: 1.2.3(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(typescript@5.9.3)
+        version: 1.2.3(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(typescript@5.9.3)
       '@langchain/community':
         specifier: 1.1.28
         version: 1.1.28(@browserbasehq/sdk@2.14.1)(@browserbasehq/stagehand@1.14.0(@playwright/test@1.61.1)(deepmerge@4.3.1)(dotenv@16.6.1)(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(zod@4.4.3))(@ibm-cloud/watsonx-ai@1.7.14)(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(better-sqlite3@12.11.1)(duck-duck-scrape@2.2.7)(fast-xml-parser@4.5.6)(html-to-text@9.0.5)(ibm-cloud-sdk-core@5.5.0)(ignore@7.0.5)(ioredis@5.11.1)(it-all@3.0.11)(jsdom@25.0.1)(jsonwebtoken@9.0.3)(lodash@4.18.1)(mammoth@1.12.0)(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(playwright@1.61.1)(ws@8.18.2)
@@ -377,14 +379,14 @@ importers:
   packages/common:
     dependencies:
       '@cosmjs/proto-signing':
-        specifier: ^0.33.0
-        version: 0.33.1
+        specifier: ^0.39.0
+        version: 0.39.0
       '@cosmjs/stargate':
-        specifier: ^0.33.0
-        version: 0.33.1
+        specifier: ^0.39.0
+        version: 0.39.0
       '@ixo/impactxclient-sdk':
-        specifier: ^2.3.1
-        version: 2.4.1
+        specifier: ^3.0.0
+        version: 3.0.0
       '@ixo/logger':
         specifier: workspace:*
         version: link:../logger
@@ -645,8 +647,8 @@ importers:
         specifier: workspace:*
         version: link:../common
       '@ixo/editor':
-        specifier: file:/Users/yousef/editor/ixo-editor-5.37.2.tgz
-        version: file:../editor/ixo-editor-5.37.2.tgz(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
+        specifier: ^5.34.0
+        version: 5.34.0(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
       '@ixo/matrix':
         specifier: 1.2.33
         version: 1.2.33(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
@@ -796,29 +798,32 @@ importers:
   packages/oracles-chain-client:
     dependencies:
       '@cosmjs/crypto':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@cosmjs/encoding':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@cosmjs/proto-signing':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@cosmjs/stargate':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@ixo/did-provider-x':
-        specifier: ^0.0.2
-        version: 0.0.2
+        specifier: ^0.1.1
+        version: 0.1.1
       '@ixo/impactxclient-sdk':
-        specifier: 2.4.1
-        version: 2.4.1
+        specifier: 3.0.0
+        version: 3.0.0
       '@ixo/logger':
         specifier: workspace:*
         version: link:../logger
       '@ixo/matrixclient-sdk':
-        specifier: ^1.0.0
-        version: 1.0.0
+        specifier: ^3.0.0
+        version: 3.0.0
+      '@ixo/ucan':
+        specifier: workspace:*
+        version: link:../ucan
       '@veramo/core':
         specifier: ^7.0.0
         version: 7.0.0
@@ -850,11 +855,11 @@ importers:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.17.1)
       axios:
-        specifier: 1.7.8
-        version: 1.7.8
+        specifier: 1.18.1
+        version: 1.18.1
       axios-retry:
         specifier: 4.5.0
-        version: 4.5.0(axios@1.7.8)
+        version: 4.5.0(axios@1.18.1)
       bs58:
         specifier: ^6.0.0
         version: 6.0.0
@@ -1103,11 +1108,11 @@ importers:
         version: 10.0.1
     devDependencies:
       '@cosmjs/crypto':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@cosmjs/encoding':
-        specifier: 0.32.4
-        version: 0.32.4
+        specifier: 0.39.0
+        version: 0.39.0
       '@ixo/eslint-config':
         specifier: workspace:*
         version: link:../eslint-config
@@ -1849,8 +1854,14 @@ packages:
   '@cosmjs/amino@0.33.1':
     resolution: {integrity: sha512-WfWiBf2EbIWpwKG9AOcsIIkR717SY+JdlXM/SL/bI66BdrhniAF+/ZNis9Vo9HF6lP2UU5XrSmFA4snAvEgdrg==}
 
+  '@cosmjs/amino@0.39.0':
+    resolution: {integrity: sha512-56WqsZ4xbdJE4KWJTPbw7hUzePflRxRLuxoBlUsa8qIiFumpzZRW0Ycb7IloEF8wAmdgsdfrG1hSJSBlqdFE7A==}
+
   '@cosmjs/cosmwasm-stargate@0.32.4':
     resolution: {integrity: sha512-Fuo9BGEiB+POJ5WeRyBGuhyKR1ordvxZGLPuPosFJOH9U0gKMgcjwKMCgAlWFkMlHaTB+tNdA8AifWiHrI7VgA==}
+
+  '@cosmjs/cosmwasm@0.39.0':
+    resolution: {integrity: sha512-iAZ3HNUtHKHgwJUj1hEfWfO1Gqhfun4J5oBrAF8zRrEJdmLbeHxTydwkY5CW3pNChiA/Q40M7xiB3Q0nVdNGEg==}
 
   '@cosmjs/crypto@0.29.5':
     resolution: {integrity: sha512-2bKkaLGictaNL0UipQCL6C1afaisv6k8Wr/GCLx9FqiyFkh9ZgRHDyetD64ZsjnWV/N/D44s/esI+k6oPREaiQ==}
@@ -1864,6 +1875,9 @@ packages:
     resolution: {integrity: sha512-U4kGIj/SNBzlb2FGgA0sMR0MapVgJUg8N+oIAiN5+vl4GZ3aefmoL1RDyTrFS/7HrB+M+MtHsxC0tvEu4ic/zA==}
     deprecated: This uses elliptic for cryptographic operations, which contains several security-relevant bugs. To what degree this affects your application is something you need to carefully investigate. See https://github.com/cosmos/cosmjs/issues/1708 for further pointers. Starting with version 0.34.0 the cryptographic library has been replaced. However, private keys might still be at risk.
 
+  '@cosmjs/crypto@0.39.0':
+    resolution: {integrity: sha512-ATRhSXN8w3fvUkj9xzLHwvzylDvvn4f3cC1CQwhQc2OxyzpEEFACS3wHS6iwdJJS99acV8dq+oVOYflUqI0brQ==}
+
   '@cosmjs/encoding@0.29.5':
     resolution: {integrity: sha512-G4rGl/Jg4dMCw5u6PEZHZcoHnUBlukZODHbm/wcL4Uu91fkn5jVo5cXXZcvs4VCkArVGrEj/52eUgTZCmOBGWQ==}
 
@@ -1873,11 +1887,17 @@ packages:
   '@cosmjs/encoding@0.33.1':
     resolution: {integrity: sha512-nuNxf29fUcQE14+1p//VVQDwd1iau5lhaW/7uMz7V2AH3GJbFJoJVaKvVyZvdFk+Cnu+s3wCqgq4gJkhRCJfKw==}
 
+  '@cosmjs/encoding@0.39.0':
+    resolution: {integrity: sha512-+poEaeM8YjGNVtrHLQNWqkhEeDxapjrdpnPCT+JCRh8YNbeHEdftzZLCH5VCBSOtvo7PF0gK1B7sbQbBl6q5pQ==}
+
   '@cosmjs/json-rpc@0.32.4':
     resolution: {integrity: sha512-/jt4mBl7nYzfJ2J/VJ+r19c92mUKF0Lt0JxM3MXEJl7wlwW5haHAWtzRujHkyYMXOwIR+gBqT2S0vntXVBRyhQ==}
 
   '@cosmjs/json-rpc@0.33.1':
     resolution: {integrity: sha512-T6VtWzecpmuTuMRGZWuBYHsMF/aznWCYUt/cGMWNSz7DBPipVd0w774PKpxXzpEbyt5sr61NiuLXc+Az15S/Cw==}
+
+  '@cosmjs/json-rpc@0.39.0':
+    resolution: {integrity: sha512-slyo76IYkTuSxrzxvF1s1ScFPIGnW7PbNSx8lr++NzdyPluqe053+cSqsxLUioXb5qI9Nxny2fWxOK8isSn+cg==}
 
   '@cosmjs/math@0.29.5':
     resolution: {integrity: sha512-2GjKcv+A9f86MAWYLUkjhw1/WpRl2R1BTb3m9qPG7lzMA7ioYff9jY5SPCfafKdxM4TIQGxXQlYGewQL16O68Q==}
@@ -1888,17 +1908,26 @@ packages:
   '@cosmjs/math@0.33.1':
     resolution: {integrity: sha512-ytGkWdKFCPiiBU5eqjHNd59djPpIsOjbr2CkNjlnI1Zmdj+HDkSoD9MUGpz9/RJvRir5IvsXqdE05x8EtoQkJA==}
 
+  '@cosmjs/math@0.39.0':
+    resolution: {integrity: sha512-FSLy/oDF+BtOP/J60RsjL5W4MCKiCfBjSoeV5xj6qg2g8N884Ue853iuWanjqGkQJwkXCp+JbeK8Mv9j6AaYHw==}
+
   '@cosmjs/proto-signing@0.32.4':
     resolution: {integrity: sha512-QdyQDbezvdRI4xxSlyM1rSVBO2st5sqtbEIl3IX03uJ7YiZIQHyv6vaHVf1V4mapusCqguiHJzm4N4gsFdLBbQ==}
 
   '@cosmjs/proto-signing@0.33.1':
     resolution: {integrity: sha512-Sv4W+MxX+0LVnd+2rU4Fw1HRsmMwSVSYULj7pRkij3wnPwUlTVoJjmKFgKz13ooIlfzPrz/dnNjGp/xnmXChFQ==}
 
+  '@cosmjs/proto-signing@0.39.0':
+    resolution: {integrity: sha512-jthQ2PA092fvrbFaZRRKuHV7awOsayjDLIBACaGIblFj9yJCcrvhFp+8YV87ia990DjKmWJc3sstHvQZ3yK/EQ==}
+
   '@cosmjs/socket@0.32.4':
     resolution: {integrity: sha512-davcyYziBhkzfXQTu1l5NrpDYv0K9GekZCC9apBRvL1dvMc9F/ygM7iemHjUA+z8tJkxKxrt/YPjJ6XNHzLrkw==}
 
   '@cosmjs/socket@0.33.1':
     resolution: {integrity: sha512-KzAeorten6Vn20sMiM6NNWfgc7jbyVo4Zmxev1FXa5EaoLCZy48cmT3hJxUJQvJP/lAy8wPGEjZ/u4rmF11x9A==}
+
+  '@cosmjs/socket@0.39.0':
+    resolution: {integrity: sha512-mvA+/ycMn7dnjjdooSPq516poFpSARRXhFhKjCXxGUmBZA+74vLDLbtD6VGzHd08A2JSZBSiAhVOZpjYqgV78A==}
 
   '@cosmjs/stargate@0.32.0':
     resolution: {integrity: sha512-Yo3l+A4vdy3ql30cIanY/j2uD3zxRXTQPrn2YUc67qCxacFkf7Fn3N9GdI7D/B2LQlguf/B5OwheizzWucapkw==}
@@ -1909,17 +1938,26 @@ packages:
   '@cosmjs/stargate@0.33.1':
     resolution: {integrity: sha512-CnJ1zpSiaZgkvhk+9aTp5IPmgWn2uo+cNEBN8VuD9sD6BA0V4DMjqe251cNFLiMhkGtiE5I/WXFERbLPww3k8g==}
 
+  '@cosmjs/stargate@0.39.0':
+    resolution: {integrity: sha512-dQtucU9czF2NUUbEKs19PMfv+EusDFKWHMVK6Hinytmpq9sdk5JUIln+g/8k+UjKcV4HPv6S0AywbhE+tl84kQ==}
+
   '@cosmjs/stream@0.32.4':
     resolution: {integrity: sha512-Gih++NYHEiP+oyD4jNEUxU9antoC0pFSg+33Hpp0JlHwH0wXhtD3OOKnzSfDB7OIoEbrzLJUpEjOgpCp5Z+W3A==}
 
   '@cosmjs/stream@0.33.1':
     resolution: {integrity: sha512-bMUvEENjeQPSTx+YRzVsWT1uFIdHRcf4brsc14SOoRQ/j5rOJM/aHfsf/BmdSAnYbdOQ3CMKj/8nGAQ7xUdn7w==}
 
+  '@cosmjs/stream@0.39.0':
+    resolution: {integrity: sha512-h56it+ku5F6nlO94VyVAyz3pQqYsGRJ8v+5Y5erXYlQ0Qmr+rLrlSMCiViFEMK9INRSilAypdI5hKPCzotiqRg==}
+
   '@cosmjs/tendermint-rpc@0.32.4':
     resolution: {integrity: sha512-MWvUUno+4bCb/LmlMIErLypXxy7ckUuzEmpufYYYd9wgbdCXaTaO08SZzyFM5PI8UJ/0S2AmUrgWhldlbxO8mw==}
 
   '@cosmjs/tendermint-rpc@0.33.1':
     resolution: {integrity: sha512-22klDFq2MWnf//C8+rZ5/dYatr6jeGT+BmVbutXYfAK9fmODbtFcumyvB6uWaEORWfNukl8YK1OLuaWezoQvxA==}
+
+  '@cosmjs/tendermint-rpc@0.39.0':
+    resolution: {integrity: sha512-KowP/6P6Tx+OnGoimYnxuSBIfhB+vWqWER2pZpEIOHId8ZfcjQ9JS2F+Ah+WmZ9D+bKgn4pJ5ImAS13TeShIEw==}
 
   '@cosmjs/utils@0.29.5':
     resolution: {integrity: sha512-m7h+RXDUxOzEOGt4P+3OVPX7PuakZT3GBmaM/Y2u+abN3xZkziykD/NvedYFvvCCdQo714XcGl33bwifS9FZPQ==}
@@ -1929,6 +1967,9 @@ packages:
 
   '@cosmjs/utils@0.33.1':
     resolution: {integrity: sha512-UnLHDY6KMmC+UXf3Ufyh+onE19xzEXjT4VZ504Acmk4PXxqyvG4cCPprlKUFnGUX7f0z8Or9MAOHXBx41uHBcg==}
+
+  '@cosmjs/utils@0.39.0':
+    resolution: {integrity: sha512-h7fy7Tbcl9v8ABntp8+kqw2VmUus2HbnRJFyzTkM7byRktLtECHYNMsztwyl1rdHkzc8Nc2xs6K/56d7a+75aw==}
 
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
@@ -3336,6 +3377,9 @@ packages:
   '@ixo/did-provider-x@0.0.2':
     resolution: {integrity: sha512-QOZH3i68pGfRZSyU+OSu3OkplfB5UIj6nRrm0ieD827/OyAQXu+uTyz+POoD9Icrn9OVFP3gl7b3b0sgpaeavg==}
 
+  '@ixo/did-provider-x@0.1.1':
+    resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
+
   '@ixo/editor@3.0.0-beta.11':
     resolution: {integrity: sha512-g6qYMQCeN5d7rmVnoOPgHe+Rq9N4bK610sehfDlkcUJ8pK2ykaYjfYYq/1KlxqPjyZXx1sD1EIX7SlNOwDcqYQ==}
     peerDependencies:
@@ -3376,6 +3420,13 @@ packages:
   '@ixo/impactxclient-sdk@2.4.1':
     resolution: {integrity: sha512-os0fllhn80KsH4Y+GiepGmWbTeva23RXWL1qux2XeNS3RNg8hYV6ahpNJtHy7rIzF7e10fVspZ73u00j6QwBDQ==}
 
+  '@ixo/impactxclient-sdk@2.5.1':
+    resolution: {integrity: sha512-MQXVi9uvPppbGbF6HjAka4wyIJgCPOJemVb40Sn/JlIljzqSvmihQRUgyhxaS5HrycJlidLaPs2IoL1XDFF6Fg==}
+
+  '@ixo/impactxclient-sdk@3.0.0':
+    resolution: {integrity: sha512-pHHhN5NWf5oVCArzEWgIrUHBvkOA+YrN0UN6WbOhJTBVqzd2id6o+CkObhyI8FA8oDlzMioZ61UHPUJCWkRkZA==}
+    engines: {node: '>=22'}
+
   '@ixo/logger@0.0.2':
     resolution: {integrity: sha512-HRoYZXXVoyKRoLXTFhY6wKE/nHcYddzEfk5L9gbcdkPF9+IQ7pQnXzL5yQtuiO8yWP2f6VamP8JAWTlASBTW/w==}
 
@@ -3400,6 +3451,10 @@ packages:
 
   '@ixo/matrixclient-sdk@1.0.0':
     resolution: {integrity: sha512-+9N3eJU1QlmQOk5vN/mwLObVw/WFesvvbJ4IHjxvjdwKdHtZU6okrOpnd7ICjj6VU4qeEXEFXvJJBbil7CQf3Q==}
+
+  '@ixo/matrixclient-sdk@3.0.0':
+    resolution: {integrity: sha512-rVXxyfpKhdANICbwp2qTA/8+SSggfq96REg3eVhFDF7SKAGXZVg8ego/ew5chdga265lY066zp6WpavVIa7xeA==}
+    engines: {node: '>=22'}
 
   '@ixo/oracles-chain-client@1.2.1':
     resolution: {integrity: sha512-Pea3qD+kH1LtwD5lWEh5rWvKcaNHFmOGAZOOzkkTFFtv6gK4fWfeJaulm+2nmaUjjhAIa4EKd8035zyW5zXwjA==}
@@ -4465,12 +4520,20 @@ packages:
     resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
     engines: {node: ^14.21.3 || >=16}
 
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
+    engines: {node: '>= 20.19.0'}
+
   '@noble/curves@1.2.0':
     resolution: {integrity: sha512-oYclrNgRaM9SsBUBVbb8M6DTV7ZHRTKugureoYEncY5c65HOmRzvSiTE3y5CYaPYJA/GVkrhXEoF0M3Ya9PMnw==}
 
   '@noble/curves@1.9.7':
     resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
     engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@2.2.0':
+    resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
+    engines: {node: '>= 20.19.0'}
 
   '@noble/ed25519@1.7.5':
     resolution: {integrity: sha512-xuS0nwRMQBvSxDa7UxMb61xTiH3MxTgUfhyPUALVIe0FlOAz4sjELwyDRyUvqeEYfRSG9qNjFIycqLZppg4RSA==}
@@ -4482,6 +4545,10 @@ packages:
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@2.2.0':
+    resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -4964,6 +5031,9 @@ packages:
 
   '@scure/base@2.2.0':
     resolution: {integrity: sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg==}
+
+  '@scure/bip39@2.2.0':
+    resolution: {integrity: sha512-T/Bj/YvYMNkIPq6EENO6/rcs2e7qTNuyoUXf0KBFDmp0ZDu0H2X4Lq6yC3i0c8PcWkov5EbW+yQZZbdMmk154A==}
 
   '@selderee/plugin-htmlparser2@0.11.0':
     resolution: {integrity: sha512-P33hHGdldxGabLFjPPpaTxVolMrzrcegejx+0GxjrIb9Zv48D8yAIA/QTDR2dFl7Uz7urX8aX6+5bCZslr+gWQ==}
@@ -6999,6 +7069,10 @@ packages:
   comma-separated-tokens@2.0.3:
     resolution: {integrity: sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==}
 
+  commander@10.0.1:
+    resolution: {integrity: sha512-y4Mg2tXshplEbSGzx7amzPwKKOCGuoSRP/CjEdwwk0FOGlUbq6lKuoyDZTNZkmxHdJtp54hdfY/JUrdL7Xfdug==}
+    engines: {node: '>=14'}
+
   commander@11.1.0:
     resolution: {integrity: sha512-yPVavfyCcRhmorC7rWlkHn15b4wDVgVmBA7kV4QVBsF7kv/9TKJAbAXVTxvTnwP8HHKjRCJDClKbciiYS7p0DQ==}
     engines: {node: '>=16'}
@@ -7132,6 +7206,10 @@ packages:
     peerDependenciesMeta:
       typescript:
         optional: true
+
+  cosmjs-types@0.11.0:
+    resolution: {integrity: sha512-kDSkgHpRTrg1413jCNehT3P21+EBxZWFMBr9JEzVfmPiNdtuwAoLAkCYo7c7i/pTakAwyHsXbxOg8kkD+AN33w==}
+    engines: {node: '>=20.19'}
 
   cosmjs-types@0.9.0:
     resolution: {integrity: sha512-MN/yUe6mkJwHnCFfsNPeCfXVhyxHYW6c/xDUzrSbBycYzw++XvWDMJArXp2pLdgD6FQ8DW79vkPjeNKVrXaHeQ==}
@@ -8126,8 +8204,8 @@ packages:
     resolution: {integrity: sha512-yDYSgNMraqvnxiEXO4hi88+YZxaHC6QKzb5N84iRCTDeRO7ZALpir/lVmf/uXUhnwUr2O4HU8s/n6x+yNjQkHw==}
     engines: {node: '>= 14.17'}
 
-  form-data@2.3.3:
-    resolution: {integrity: sha512-1lLKB2Mu3aGP1Q/2eCOx0fNbRMe7XdwktwOruhfqqd0rIJWwN4Dh+E3hrPSlDCXnSR7UtZ1N38rVXm+6+MEhJQ==}
+  form-data@2.5.6:
+    resolution: {integrity: sha512-Ogz/E85h9tlfJzpI6TuFpGcHZFhLrb9Gw8wq9v40CxSCPnv7ahKr6Xgtkn0KYCDQJ8DNn5VoMO8EXr9V5PadyA==}
     engines: {node: '>= 0.12'}
 
   form-data@4.0.6:
@@ -10850,6 +10928,10 @@ packages:
     resolution: {integrity: sha512-RJJPTTpvFfHcWLkIa2JFWK4XvtSzS0yEWDmunqHXli1h3JlkbcQZXDZdcWxv+JK3Xsl5/UFDPZ0iGm7DAengYw==}
     engines: {node: '>=12.0.0'}
 
+  protobufjs@7.6.5:
+    resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
+    engines: {node: '>=12.0.0'}
+
   protobufjs@8.6.5:
     resolution: {integrity: sha512-zeE5LPpencAGXvsxyOYmEgJhxzHY8IsmPAFzstZVhDSVT8QH03q6gMZwZRaQGApevZbAL6u28ugs4CC+YKB2jQ==}
     engines: {node: '>=12.0.0'}
@@ -11106,6 +11188,9 @@ packages:
   readdirp@4.1.2:
     resolution: {integrity: sha512-GDhwkLfywWL2s6vEjyhri+eXmfH6j1L7JE27WhqLeYzoh/A3DBaYGEj2H/HFZCn/kMfim73FXxEJTw06WtxQwg==}
     engines: {node: '>= 14.18.0'}
+
+  readonly-date-esm@2.0.0:
+    resolution: {integrity: sha512-adlyzz144ofU22kjnnRIN0HPPqIbc5IZvMmMuVtEgMY4mKgNyKqOVb4Fa2GUzE2By4TEPOYoGqDoKRyqmeEuPQ==}
 
   readonly-date@1.0.0:
     resolution: {integrity: sha512-tMKIV7hlk0h4mO3JTmmVuIlJVXjKk3Sep9Bf5OH0O+758ruuVkUy2J9SttDLm91IEX/WHlXPSpxMGjPj4beMIQ==}
@@ -13024,9 +13109,10 @@ packages:
     resolution: {integrity: sha512-U/PBtDf35ff0D8X8D0jfdzHYEPFxAI7jJlxZXwCSez5M3190m+QobIfh+sWDWSHMCWWJN2AWamkegn6vr6YBTw==}
     engines: {node: '>=18'}
 
-  z-schema@5.0.5:
-    resolution: {integrity: sha512-D7eujBWkLa3p2sIpJA0d1pr7es+a7m0vFAnZLlCEKq/Ij2k0MLi9Br2UPxoxdYystm5K1yeBGzub0FlYUEWj2Q==}
+  z-schema@5.0.6:
+    resolution: {integrity: sha512-+XR1GhnWklYdfr8YaZv/iu+vY+ux7V5DS5zH1DQf6bO5ufrt/5cgNhVO5qyhsjFXvsqQb/f08DWE9b6uPscyAg==}
     engines: {node: '>=8.0.0'}
+    deprecated: has issues with node 14
     hasBin: true
 
   z-schema@6.0.2:
@@ -14186,6 +14272,13 @@ snapshots:
       '@cosmjs/math': 0.33.1
       '@cosmjs/utils': 0.33.1
 
+  '@cosmjs/amino@0.39.0':
+    dependencies:
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/utils': 0.39.0
+
   '@cosmjs/cosmwasm-stargate@0.32.4':
     dependencies:
       '@cosmjs/amino': 0.32.4
@@ -14202,6 +14295,21 @@ snapshots:
       - bufferutil
       - debug
       - supports-color
+      - utf-8-validate
+
+  '@cosmjs/cosmwasm@0.39.0':
+    dependencies:
+      '@cosmjs/amino': 0.39.0
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/proto-signing': 0.39.0
+      '@cosmjs/stargate': 0.39.0
+      '@cosmjs/tendermint-rpc': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      cosmjs-types: 0.11.0
+    transitivePeerDependencies:
+      - bufferutil
       - utf-8-validate
 
   '@cosmjs/crypto@0.29.5':
@@ -14234,6 +14342,16 @@ snapshots:
       elliptic: 6.6.1
       libsodium-wrappers-sumo: 0.7.16
 
+  '@cosmjs/crypto@0.39.0':
+    dependencies:
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      '@noble/ciphers': 2.2.0
+      '@noble/curves': 2.2.0
+      '@noble/hashes': 2.2.0
+      '@scure/bip39': 2.2.0
+
   '@cosmjs/encoding@0.29.5':
     dependencies:
       base64-js: 1.5.1
@@ -14252,6 +14370,12 @@ snapshots:
       bech32: 1.1.4
       readonly-date: 1.0.0
 
+  '@cosmjs/encoding@0.39.0':
+    dependencies:
+      '@scure/base': 2.2.0
+      base64-js: 1.5.1
+      readonly-date-esm: 2.0.0
+
   '@cosmjs/json-rpc@0.32.4':
     dependencies:
       '@cosmjs/stream': 0.32.4
@@ -14260,6 +14384,11 @@ snapshots:
   '@cosmjs/json-rpc@0.33.1':
     dependencies:
       '@cosmjs/stream': 0.33.1
+      xstream: 11.14.0
+
+  '@cosmjs/json-rpc@0.39.0':
+    dependencies:
+      '@cosmjs/stream': 0.39.0
       xstream: 11.14.0
 
   '@cosmjs/math@0.29.5':
@@ -14273,6 +14402,8 @@ snapshots:
   '@cosmjs/math@0.33.1':
     dependencies:
       bn.js: 5.2.3
+
+  '@cosmjs/math@0.39.0': {}
 
   '@cosmjs/proto-signing@0.32.4':
     dependencies:
@@ -14292,6 +14423,15 @@ snapshots:
       '@cosmjs/utils': 0.33.1
       cosmjs-types: 0.9.0
 
+  '@cosmjs/proto-signing@0.39.0':
+    dependencies:
+      '@cosmjs/amino': 0.39.0
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      cosmjs-types: 0.11.0
+
   '@cosmjs/socket@0.32.4':
     dependencies:
       '@cosmjs/stream': 0.32.4
@@ -14305,6 +14445,16 @@ snapshots:
   '@cosmjs/socket@0.33.1':
     dependencies:
       '@cosmjs/stream': 0.33.1
+      isomorphic-ws: 4.0.1(ws@8.18.2)
+      ws: 8.18.2
+      xstream: 11.14.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
+  '@cosmjs/socket@0.39.0':
+    dependencies:
+      '@cosmjs/stream': 0.39.0
       isomorphic-ws: 4.0.1(ws@8.18.2)
       ws: 8.18.2
       xstream: 11.14.0
@@ -14364,11 +14514,29 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@cosmjs/stargate@0.39.0':
+    dependencies:
+      '@cosmjs/amino': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/proto-signing': 0.39.0
+      '@cosmjs/stream': 0.39.0
+      '@cosmjs/tendermint-rpc': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      cosmjs-types: 0.11.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@cosmjs/stream@0.32.4':
     dependencies:
       xstream: 11.14.0
 
   '@cosmjs/stream@0.33.1':
+    dependencies:
+      xstream: 11.14.0
+
+  '@cosmjs/stream@0.39.0':
     dependencies:
       xstream: 11.14.0
 
@@ -14408,11 +14576,28 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@cosmjs/tendermint-rpc@0.39.0':
+    dependencies:
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/json-rpc': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/socket': 0.39.0
+      '@cosmjs/stream': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      readonly-date-esm: 2.0.0
+      xstream: 11.14.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@cosmjs/utils@0.29.5': {}
 
   '@cosmjs/utils@0.32.4': {}
 
   '@cosmjs/utils@0.33.1': {}
+
+  '@cosmjs/utils@0.39.0': {}
 
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
@@ -15953,14 +16138,14 @@ snapshots:
     dependencies:
       lodash.camelcase: 4.3.0
       long: 5.3.2
-      protobufjs: 7.6.4
+      protobufjs: 7.6.5
       yargs: 17.7.3
 
   '@grpc/proto-loader@0.8.1':
     dependencies:
       lodash.camelcase: 4.3.0
       long: 5.3.2
-      protobufjs: 7.6.4
+      protobufjs: 7.6.5
       yargs: 17.7.3
 
   '@hono/node-server@1.19.14(hono@4.12.27)':
@@ -16191,7 +16376,7 @@ snapshots:
     dependencies:
       '@cosmjs/proto-signing': 0.33.1
       '@cosmjs/stargate': 0.33.1
-      '@ixo/impactxclient-sdk': 2.4.1
+      '@ixo/impactxclient-sdk': 2.5.1
       '@ixo/logger': 0.0.2
       '@ixo/matrix': 1.2.33(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       '@ixo/oracles-chain-client': 1.3.2(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
@@ -16371,7 +16556,16 @@ snapshots:
       - debug
       - supports-color
 
-  '@ixo/editor@3.0.0-beta.11(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@types/hast@3.0.4)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react-jazzicon@1.0.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))':
+  '@ixo/did-provider-x@0.1.1':
+    dependencies:
+      '@babel/runtime': 7.29.7
+      axios: 1.18.0(debug@4.3.4)
+      did-resolver: 4.1.0
+    transitivePeerDependencies:
+      - debug
+      - supports-color
+
+  '@ixo/editor@3.0.0-beta.11(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react-jazzicon@1.0.4(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))':
     dependencies:
       '@blocknote/core': 0.29.1(@types/hast@3.0.4)
       '@blocknote/mantine': 0.29.1(@types/hast@3.0.4)(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -16379,7 +16573,7 @@ snapshots:
       '@dnd-kit/core': 6.3.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@ixo/matrix-crdt': 1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       '@ixo/surveys': 0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@ixo/ucan': 1.2.3(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(typescript@5.9.3)
+      '@ixo/ucan': 1.2.3(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(typescript@5.9.3)
       '@mantine/core': 7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@mantine/hooks': 7.17.8(react@18.3.1)
       '@tabler/icons-react': 3.35.0(react@18.3.1)
@@ -16404,7 +16598,7 @@ snapshots:
       - typescript
       - use-sync-external-store
 
-  '@ixo/editor@file:../editor/ixo-editor-5.37.2.tgz(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))':
+  '@ixo/editor@5.34.0(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@37.13.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))':
     dependencies:
       '@blocknote/core': 0.29.1(@types/hast@3.0.4)
       '@blocknote/mantine': 0.29.1(@types/hast@3.0.4)(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -16412,7 +16606,7 @@ snapshots:
       '@dnd-kit/core': 6.3.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@ixo/matrix-crdt': 1.2.5(lib0@0.2.117)(matrix-js-sdk@37.13.0)(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
       '@ixo/surveys': 0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@ixo/ucan': 1.2.3(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(typescript@5.9.3)
+      '@ixo/ucan': 1.2.3(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(typescript@5.9.3)
       '@mantine/core': 7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@mantine/dates': 7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
       '@mantine/hooks': 7.17.8(react@18.3.1)
@@ -16470,6 +16664,51 @@ snapshots:
       bs58: 5.0.0
       dotenv: 16.0.3
       protobufjs: 6.11.2
+    transitivePeerDependencies:
+      - bufferutil
+      - debug
+      - supports-color
+      - utf-8-validate
+
+  '@ixo/impactxclient-sdk@2.5.1':
+    dependencies:
+      '@babel/runtime': 7.19.4
+      '@cosmjs/amino': 0.32.4
+      '@cosmjs/cosmwasm-stargate': 0.32.4
+      '@cosmjs/crypto': 0.32.4
+      '@cosmjs/encoding': 0.32.4
+      '@cosmjs/proto-signing': 0.32.4
+      '@cosmjs/stargate': 0.32.4
+      '@cosmjs/tendermint-rpc': 0.32.4
+      axios: 1.2.5
+      bip39-light: 1.0.7
+      bs58: 5.0.0
+      dotenv: 16.0.3
+      protobufjs: 6.11.2
+    transitivePeerDependencies:
+      - bufferutil
+      - debug
+      - supports-color
+      - utf-8-validate
+
+  '@ixo/impactxclient-sdk@3.0.0':
+    dependencies:
+      '@babel/runtime': 7.29.7
+      '@cosmjs/amino': 0.39.0
+      '@cosmjs/cosmwasm': 0.39.0
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
+      '@cosmjs/json-rpc': 0.39.0
+      '@cosmjs/math': 0.39.0
+      '@cosmjs/proto-signing': 0.39.0
+      '@cosmjs/stargate': 0.39.0
+      '@cosmjs/tendermint-rpc': 0.39.0
+      '@cosmjs/utils': 0.39.0
+      '@scure/bip39': 2.2.0
+      axios: 1.18.1
+      bs58: 5.0.0
+      long: 5.3.2
+      protobufjs: 7.6.5
     transitivePeerDependencies:
       - bufferutil
       - debug
@@ -16563,7 +16802,11 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@ixo/oracles-chain-client@1.2.1(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)':
+  '@ixo/matrixclient-sdk@3.0.0':
+    dependencies:
+      '@babel/runtime': 7.29.7
+
+  '@ixo/oracles-chain-client@1.2.1':
     dependencies:
       '@cosmjs/crypto': 0.32.4
       '@cosmjs/encoding': 0.32.4
@@ -16706,7 +16949,7 @@ snapshots:
 
   '@ixo/typescript-config@1.0.0': {}
 
-  '@ixo/ucan@1.2.3(@cosmjs/crypto@0.33.1)(@cosmjs/encoding@0.33.1)(typescript@5.9.3)':
+  '@ixo/ucan@1.2.3(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(typescript@5.9.3)':
     dependencies:
       '@ucanto/client': 9.0.2
       '@ucanto/core': 10.4.6
@@ -16717,8 +16960,8 @@ snapshots:
       '@ucanto/validator': 10.0.1
       typescript: 5.9.3
     optionalDependencies:
-      '@cosmjs/crypto': 0.33.1
-      '@cosmjs/encoding': 0.33.1
+      '@cosmjs/crypto': 0.39.0
+      '@cosmjs/encoding': 0.39.0
 
   '@ixo/vitest-config@1.0.0(@swc/core@1.15.43)(@types/debug@4.1.13)(@types/node@22.20.0)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.32.0)(rollup@4.62.2)(terser@5.48.0)(tsx@4.22.4)(yaml@2.9.0)':
     dependencies:
@@ -17503,6 +17746,8 @@ snapshots:
 
   '@noble/ciphers@1.3.0': {}
 
+  '@noble/ciphers@2.2.0': {}
+
   '@noble/curves@1.2.0':
     dependencies:
       '@noble/hashes': 1.3.2
@@ -17511,11 +17756,17 @@ snapshots:
     dependencies:
       '@noble/hashes': 1.8.0
 
+  '@noble/curves@2.2.0':
+    dependencies:
+      '@noble/hashes': 2.2.0
+
   '@noble/ed25519@1.7.5': {}
 
   '@noble/hashes@1.3.2': {}
 
   '@noble/hashes@1.8.0': {}
+
+  '@noble/hashes@2.2.0': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -18049,6 +18300,11 @@ snapshots:
   '@scure/base@1.2.6': {}
 
   '@scure/base@2.2.0': {}
+
+  '@scure/bip39@2.2.0':
+    dependencies:
+      '@noble/hashes': 2.2.0
+      '@scure/base': 2.2.0
 
   '@selderee/plugin-htmlparser2@0.11.0':
     dependencies:
@@ -19311,7 +19567,7 @@ snapshots:
       '@veramo/core-types': 5.6.0
       debug: 4.4.3
       events: 3.3.0
-      z-schema: 5.0.5
+      z-schema: 5.0.6
     transitivePeerDependencies:
       - supports-color
 
@@ -20949,6 +21205,9 @@ snapshots:
 
   comma-separated-tokens@2.0.3: {}
 
+  commander@10.0.1:
+    optional: true
+
   commander@11.1.0:
     optional: true
 
@@ -21079,6 +21338,8 @@ snapshots:
       path-type: 4.0.0
     optionalDependencies:
       typescript: 5.9.3
+
+  cosmjs-types@0.11.0: {}
 
   cosmjs-types@0.9.0: {}
 
@@ -22402,11 +22663,14 @@ snapshots:
 
   form-data-encoder@2.1.4: {}
 
-  form-data@2.3.3:
+  form-data@2.5.6:
     dependencies:
       asynckit: 0.4.0
       combined-stream: 1.0.8
+      es-set-tostringtag: 2.1.0
+      hasown: 2.0.4
       mime-types: 2.1.35
+      safe-buffer: 5.2.1
 
   form-data@4.0.6:
     dependencies:
@@ -25741,6 +26005,20 @@ snapshots:
       '@types/node': 22.20.0
       long: 5.3.2
 
+  protobufjs@7.6.5:
+    dependencies:
+      '@protobufjs/aspromise': 1.1.2
+      '@protobufjs/base64': 1.1.2
+      '@protobufjs/codegen': 2.0.5
+      '@protobufjs/eventemitter': 1.1.1
+      '@protobufjs/fetch': 1.1.1
+      '@protobufjs/float': 1.0.2
+      '@protobufjs/path': 1.1.2
+      '@protobufjs/pool': 1.1.0
+      '@protobufjs/utf8': 1.1.1
+      '@types/node': 22.20.0
+      long: 5.3.2
+
   protobufjs@8.6.5:
     dependencies:
       long: 5.3.2
@@ -26061,6 +26339,8 @@ snapshots:
 
   readdirp@4.1.2: {}
 
+  readonly-date-esm@2.0.0: {}
+
   readonly-date@1.0.0: {}
 
   redent@3.0.0:
@@ -26227,7 +26507,7 @@ snapshots:
       combined-stream: 1.0.8
       extend: 3.0.2
       forever-agent: 0.6.1
-      form-data: 2.3.3
+      form-data: 2.5.6
       har-validator: 5.1.5
       http-signature: 1.2.0
       is-typedarray: 1.0.0
@@ -28284,13 +28564,13 @@ snapshots:
 
   yoctocolors-cjs@2.1.3: {}
 
-  z-schema@5.0.5:
+  z-schema@5.0.6:
     dependencies:
       lodash.get: 4.4.2
       lodash.isequal: 4.5.0
       validator: 13.15.35
     optionalDependencies:
-      commander: 9.5.0
+      commander: 10.0.1
 
   z-schema@6.0.2:
     dependencies:

@@ -1,10 +1,10 @@
 import { type Server } from 'socket.io';
-import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter';
+import { rootEventEmitter } from '../../root-event-emitter/root-event-emitter.js';
 import {
   BaseEvent,
   shouldHaveSessionId,
   type WithRequiredEventProps,
-} from './base-event';
+} from './base-event.js';
 
 describe('BaseEvent', () => {
   class TestEvent extends BaseEvent<unknown> {

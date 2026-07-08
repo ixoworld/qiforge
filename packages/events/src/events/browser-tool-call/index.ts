@@ -1,2 +1,2 @@
-export * from './browser-tool-call.event';
-export * from './types';
+export * from './browser-tool-call.event.js';
+export * from './types.js';

@@ -1,6 +1,6 @@
 {
   "name": "@ixo/common",
-  "version": "1.1.43",
+  "version": "1.2.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -46,9 +46,9 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "@cosmjs/proto-signing": "^0.33.0",
-    "@cosmjs/stargate": "^0.33.0",
-    "@ixo/impactxclient-sdk": "^2.3.1",
+    "@cosmjs/proto-signing": "^0.39.0",
+    "@cosmjs/stargate": "^0.39.0",
+    "@ixo/impactxclient-sdk": "^3.0.0",
     "@ixo/logger": "workspace:*",
     "@ixo/matrix": "workspace:*",
     "@ixo/oracles-chain-client": "workspace:*",

@@ -1,4 +1,4 @@
-import { RootEventEmitter, rootEventEmitter } from './root-event-emitter';
+import { RootEventEmitter, rootEventEmitter } from './root-event-emitter.js';
 
 describe('RootEventEmitter', () => {
   it('should return the same instance on multiple calls', () => {

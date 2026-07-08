@@ -1,5 +1,5 @@
 import { customMessages, ixo, utils } from '@ixo/impactxclient-sdk';
-import { type KeyTypes } from '@ixo/impactxclient-sdk/types/messages/iid.js';
+import { type KeyTypes } from '@ixo/impactxclient-sdk/messages/iid';
 import { Logger } from '@ixo/logger';
 import base58 from 'bs58';
 import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';

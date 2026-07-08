@@ -1,1 +1,1 @@
-export * from './base-event';
+export * from './base-event.js';

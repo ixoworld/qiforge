@@ -302,6 +302,70 @@ describe('createOracleApp — credits + subscription middleware', () => {
   });
 });
 
+describe('createOracleApp — manifest overrides', () => {
+  class OverridablePlugin extends OraclePlugin {
+    readonly name = 'overridable';
+    readonly version = '1.0.0';
+    readonly manifest: PluginManifest = {
+      title: 'Overridable',
+      summary: 'A plugin whose manifest a fork can retune.',
+      whenToUse: ['user asks the overridable thing'],
+      visibility: 'always',
+    };
+  }
+
+  it('boots cleanly when an override only retunes display fields', async () => {
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [new OverridablePlugin()],
+        manifestOverrides: {
+          overridable: { visibility: 'on-demand', summary: 'Tuned summary.' },
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('validates the merged manifest — a bad override fails boot', async () => {
+    // Base is `always` with a populated whenToUse (valid). Emptying whenToUse
+    // while leaving visibility non-silent must fail, proving the validator
+    // runs against the merged manifest rather than the plugin's own.
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [new OverridablePlugin()],
+        manifestOverrides: {
+          overridable: { whenToUse: [] },
+        },
+      }),
+    ).rejects.toThrow(/manifest validation failed/i);
+  });
+
+  it('warns and ignores overrides that reference an unloaded plugin', async () => {
+    const warnings: string[] = [];
+    const logger = {
+      log: () => undefined,
+      warn: (msg: unknown) =>
+        warnings.push(typeof msg === 'string' ? msg : JSON.stringify(msg)),
+      error: () => undefined,
+    };
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [new OverridablePlugin()],
+        manifestOverrides: {
+          'does-not-exist': { visibility: 'silent' },
+        },
+        logger,
+      }),
+    ).resolves.toBeDefined();
+
+    expect(warnings.join('\n')).toMatch(/does-not-exist/);
+    expect(warnings.join('\n')).toMatch(/not a loaded plugin/);
+  });
+});
+
 describe('createOracleApp — plugin-contributed NestJS modules', () => {
   it('flows getNestModules() output into RuntimeAppModule.imports', async () => {
     class FakeSlackModule {}

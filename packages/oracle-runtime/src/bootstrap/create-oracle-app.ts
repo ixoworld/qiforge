@@ -3,7 +3,6 @@ import {
   loadEncryptionKey,
   setupClaimSigningMnemonics,
 } from '@ixo/oracles-chain-client';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import {
   Logger,
@@ -21,6 +20,10 @@ import {
 } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
+import {
+  mergeManifestOverride,
+  type PluginManifestOverride,
+} from '../manifest/merge-override.js';
 import { validateManifest } from '../manifest/validator.js';
 import { UserMatrixSqliteSyncService } from '../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { setFileProcessingProvider } from '../modules/messages/file-processing.service.js';
@@ -70,6 +73,20 @@ export interface CreateOracleAppOptions {
    */
   config: OracleConfig;
   features?: Partial<Record<BundledFeatureName | (string & {}), FeatureToggle>>;
+  /**
+   * Per-plugin manifest overrides. Each entry is merged shallowly over the
+   * plugin's own `manifest` at boot — keys you set win, keys you omit keep the
+   * plugin's default. Use to retune a bundled plugin's discovery without
+   * forking its source: flip a noisy `always` plugin to `on-demand`, hide one
+   * behind `silent`, or relabel its `summary`/`tags`/`whenToUse`. The merged
+   * manifest is validated exactly like an authored one, so an override that
+   * (say) empties `whenToUse` on a non-silent plugin fails the boot with a
+   * clear message. Keys that don't match a loaded plugin are logged and
+   * ignored.
+   */
+  manifestOverrides?: Partial<
+    Record<BundledFeatureName | (string & {}), PluginManifestOverride>
+  >;
   plugins?: OraclePlugin[];
   /** Developer's own NestJS modules. Spread into `RuntimeAppModule.imports`. */
   nestModules?: Array<Type | DynamicModule>;
@@ -189,10 +206,32 @@ export async function createOracleApp(
     throw err;
   }
 
-  // 4. Manifest validation
+  // 4. Manifest validation — against the effective (override-merged) manifest
+  // so a fork override is held to the same rules as an authored manifest.
+  const manifestOverrides = opts.manifestOverrides ?? {};
+  const loadedNames = new Set(resolved.loaded.map((p) => p.name));
+  for (const key of Object.keys(manifestOverrides)) {
+    if (!loadedNames.has(key)) {
+      logger.warn?.(
+        `[boot] manifestOverrides references '${key}', which is not a loaded plugin — ignored ` +
+          `(event: boot.plugin.manifest_override_unknown)`,
+      );
+    }
+  }
+
+  const effectiveManifests = new Map(
+    resolved.loaded.map((plugin) => [
+      plugin.name,
+      mergeManifestOverride(plugin.manifest, manifestOverrides[plugin.name]),
+    ]),
+  );
+
   const manifestErrors: string[] = [];
   for (const plugin of resolved.loaded) {
-    const result = validateManifest(plugin.manifest, plugin.name);
+    const result = validateManifest(
+      effectiveManifests.get(plugin.name),
+      plugin.name,
+    );
     if (!result.valid) manifestErrors.push(...result.errors);
   }
   if (manifestErrors.length > 0) {
@@ -264,7 +303,7 @@ export async function createOracleApp(
     registries.tools.register(plugin);
     registries.subAgents.register(plugin);
     registries.middlewares.register(plugin);
-    registries.manifests.register(plugin);
+    registries.manifests.register(plugin, manifestOverrides[plugin.name]);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
   }
@@ -444,8 +483,11 @@ export async function createOracleApp(
   const defaultHooks: MainAgentHooks = checkpointSync
     ? {
         checkpointerForUser: async (userDid: string) => {
-          const db = await checkpointSync.getUserDatabase(userDid);
-          return SqliteSaver.fromDatabase(db) as unknown as BaseCheckpointSaver;
+          // `getUserCheckpointer` reuses a per-connection saver when
+          // `CACHE_CHECKPOINTER_SAVER` is on (the build calls this hook twice
+          // per turn), otherwise builds a fresh one — same as before.
+          const saver = await checkpointSync.getUserCheckpointer(userDid);
+          return saver as unknown as BaseCheckpointSaver;
         },
       }
     : {};

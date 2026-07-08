@@ -76,6 +76,24 @@ const OPENROUTER_MAIN_FALLBACKS = [
 ];
 
 /**
+ * Extended-thinking effort for the main model, from `MAIN_REASONING_EFFORT`
+ * (default `medium`). Lower effort trims time-to-first-token on simple turns
+ * at some cost to hard multi-step reasoning. Scoped to the `main` role so
+ * sub-agent reasoning is unchanged. Read from `process.env` directly to match
+ * how this factory already resolves provider keys (no Nest DI here).
+ */
+function resolveMainReasoningEffort(): 'low' | 'medium' | 'high' {
+  switch (process.env.MAIN_REASONING_EFFORT) {
+    case 'low':
+      return 'low';
+    case 'high':
+      return 'high';
+    default:
+      return 'medium';
+  }
+}
+
+/**
  * Get the model identifier for a given role, respecting the active provider.
  * Unknown roles fall back to `subagent` so plugin-side custom roles still resolve.
  */
@@ -127,7 +145,7 @@ export const getProviderChatModel = (
         ...params?.modelKwargs,
       },
       reasoning: {
-        effort: 'medium',
+        effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
         ...params?.reasoning,
       },
     });

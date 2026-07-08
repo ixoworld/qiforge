@@ -96,12 +96,14 @@ export {
   validateManifest,
   validateExamplesAgainstTools,
   renderTier1,
+  mergeManifestOverride,
 } from './manifest/index.js';
 export type {
   ManifestValidationResult,
   Tier1Entry,
   Tier1Input,
   Tier1Output,
+  PluginManifestOverride,
 } from './manifest/index.js';
 
 export {
