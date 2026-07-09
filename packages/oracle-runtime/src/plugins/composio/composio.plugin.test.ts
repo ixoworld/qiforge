@@ -90,6 +90,10 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
 
@@ -127,6 +131,10 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
 

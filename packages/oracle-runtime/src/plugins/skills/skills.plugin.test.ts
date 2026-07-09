@@ -133,6 +133,10 @@ describe('createDefaultSkillsUcanBuilder', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
 
@@ -158,6 +162,10 @@ describe('createDefaultSkillsUcanBuilder', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
     expect(await builder(SKILLS_URL, runCtxNoDid)).toBeUndefined();

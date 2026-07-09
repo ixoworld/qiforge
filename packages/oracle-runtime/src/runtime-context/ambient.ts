@@ -99,6 +99,33 @@ export interface UcanAdapter {
     capability: { can: string; with: string },
     options?: { maxTtlSeconds?: number },
   ): Promise<{ invocation: string } | { error: string }>;
+  /**
+   * Mint a SELF-SIGNED invocation — issued by this oracle with NO proof chain —
+   * for calling a downstream service AS THE ORACLE ITSELF (not on a user's
+   * behalf). Returns `{ invocation }` (base64 CAR) on success or `{ error }`
+   * with a surfaced-verbatim reason (signing key missing, did:web unreachable,
+   * etc.). Non-throwing.
+   */
+  mintSelfSignedInvocation(
+    serviceUrl: string,
+    capability: { can: string; with: string },
+    options?: { maxTtlSeconds?: number },
+  ): Promise<{ invocation: string } | { error: string }>;
+  /**
+   * Fetch, from the UCAN Store Worker, a delegation `userDid` deposited for
+   * this oracle over `opts.resource`. Selects the newest active delegation
+   * whose capability covers `opts.requiredAbility`. Returns `{ token, with }`
+   * on success or `{ error }` — `'no-delegation'` when none satisfies the
+   * request, `'store-error'` (with `detail`) for auth / network / store
+   * failures. Non-throwing.
+   */
+  getServiceDelegation(
+    userDid: string,
+    opts: { storeUrl: string; resource: string; requiredAbility: string },
+  ): Promise<
+    | { token: string; with: string }
+    | { error: 'no-delegation' | 'store-error'; detail?: string }
+  >;
 }
 
 /** Raw event payload — what callers pass before the scoped emitter adds session/request ids. */

@@ -170,6 +170,8 @@ export function makeRuntimeContext(
       createInvocationFromDelegation: async () => ({
         invocation: 'invocation-car',
       }),
+      mintSelfSignedInvocation: async () => ({ invocation: 'invocation-car' }),
+      getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
     },
     llm: {
       get: () =>

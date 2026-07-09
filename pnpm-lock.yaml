@@ -24,6 +24,8 @@ overrides:
   '@digitalbazaar/http-client': 4.2.0
   '@ixo/matrix': 1.2.33
 
+packageExtensionsChecksum: sha256-HzD4b9oFt2aZPg2ZLMf05+8Y4A1cyEdz+89p1KB79Y0=
+
 importers:
 
   .:
@@ -19872,6 +19874,7 @@ snapshots:
     dependencies:
       '@ipld/dag-pb': 4.1.7
       '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
       '@veramo/core-types': 6.0.2
       credential-status: 3.0.4
       cross-fetch: 4.1.0
@@ -19893,6 +19896,7 @@ snapshots:
     dependencies:
       '@ipld/dag-pb': 4.1.7
       '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
       '@veramo/core-types': 7.0.0
       credential-status: 3.0.4
       cross-fetch: 4.1.0

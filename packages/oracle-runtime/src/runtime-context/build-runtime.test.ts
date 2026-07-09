@@ -66,6 +66,12 @@ function makeAmbient(overrides: AmbientMockOverrides = {}): AmbientServices {
       requireCapability: vi.fn(),
       mintInvocation: vi.fn(async () => 'invocation-cid'),
       resolveServiceDid: vi.fn(async () => 'did:web:example.com'),
+      mintSelfSignedInvocation: vi.fn(async () => ({
+        invocation: 'invocation-car',
+      })),
+      getServiceDelegation: vi.fn(async () => ({
+        error: 'no-delegation' as const,
+      })),
     },
     logger: noopLogger,
   };

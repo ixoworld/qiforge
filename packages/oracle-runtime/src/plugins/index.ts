@@ -14,6 +14,7 @@ import { SkillsPlugin } from './skills/index.js';
 import { SlackPlugin } from './slack/index.js';
 import { TasksPlugin } from './tasks/index.js';
 import { UserPreferencesPlugin } from './user-preferences/index.js';
+import { VfsPlugin } from './vfs/index.js';
 
 const stubManifest = (title: string): PluginManifest => ({
   title,
@@ -49,6 +50,7 @@ export const creditsPlugin = new CreditsPlugin();
 export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
+export const vfsPlugin = new VfsPlugin();
 
 // NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
 // a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
@@ -79,4 +81,5 @@ export const BUNDLED_PLUGINS = [
   callsPlugin,
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
+  vfsPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

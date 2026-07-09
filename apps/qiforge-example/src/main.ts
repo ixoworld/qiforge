@@ -118,7 +118,7 @@ async function bootstrap(): Promise<void> {
     config,
     logger: Logger,
     plugins: [
-      ...(redis ? [new CreditsPlugin({ redis, network })] : []),
+      // ...(redis ? [new CreditsPlugin({ redis, network })] : []),
       new EditorPlugin({ matrixClient }),
       new WeatherPlugin(),
       // Flows is NOT a bundled plugin — opt in by constructing it explicitly.
