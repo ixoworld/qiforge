@@ -11,6 +11,10 @@ type Service = {
   id: string;
 };
 
+// Oracle entity documents change rarely; a generous staleTime keeps remounting
+// consumers from refetching the same config.
+const ORACLES_CONFIG_STALE_TIME_MS = 5 * 60 * 1000;
+
 export const useOraclesConfig = (
   oracleId: string,
   overrides?: {
@@ -25,6 +29,8 @@ export const useOraclesConfig = (
       const res = await gqlClient.GetEntityById({ id: oracleId });
       return res.entity;
     },
+    enabled: Boolean(oracleId),
+    staleTime: ORACLES_CONFIG_STALE_TIME_MS,
   });
 
   const { data: authConfig, isLoading: isLoadingAuthConfig } = useQuery({
@@ -36,7 +42,8 @@ export const useOraclesConfig = (
         matrixAccessToken: wallet?.matrix.accessToken,
         matrixHomeServer: wallet?.matrix.homeServer,
       }),
-    enabled: Boolean(wallet?.address),
+    enabled: Boolean(wallet?.address && oracleId),
+    staleTime: ORACLES_CONFIG_STALE_TIME_MS,
   });
 
   const apiUrl = useMemo(() => {
