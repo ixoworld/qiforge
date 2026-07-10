@@ -1094,9 +1094,7 @@ export class UcanService implements OnModuleDestroy {
       // Cache the hit for its remaining life, capped at 10 minutes. Skip
       // caching when the window is non-positive. Failures are never cached.
       const ttlSeconds =
-        row.expiresAt != null
-          ? Math.min(row.expiresAt - nowSeconds, 600)
-          : 600;
+        row.expiresAt != null ? Math.min(row.expiresAt - nowSeconds, 600) : 600;
       if (ttlSeconds > 0) {
         await this.cacheManager.set(cacheKey, result, ttlSeconds * 1000);
       }

@@ -148,7 +148,9 @@ export class VfsPlugin extends OraclePlugin {
     const cfg: VfsConfig = {
       VFS_BASE_URL: urls.vfs,
       UCAN_STORE_URL: urls.store,
-      VFS_MAX_READ_LINES: tuning.success ? tuning.data.VFS_MAX_READ_LINES : 2000,
+      VFS_MAX_READ_LINES: tuning.success
+        ? tuning.data.VFS_MAX_READ_LINES
+        : 2000,
       VFS_REQUEST_TIMEOUT_MS: tuning.success
         ? tuning.data.VFS_REQUEST_TIMEOUT_MS
         : 20000,

@@ -306,7 +306,10 @@ export class VfsClient {
 
   /** Literal term search inside files (`/grep`). */
   async grep(q: string, path: string): Promise<VfsSearchHit[]> {
-    const res = await this.get('fs/read', `/grep?q=${enc(q)}&path=${enc(path)}`);
+    const res = await this.get(
+      'fs/read',
+      `/grep?q=${enc(q)}&path=${enc(path)}`,
+    );
     return arrayAt(await this.json(res), 'matches')
       .map(parseGrepMatch)
       .filter(nonNull);
@@ -364,11 +367,16 @@ export class VfsClient {
     body: string | Uint8Array,
     mime: string,
   ): Promise<VfsFileStat> {
-    const res = await this.send('fs/write', 'POST', `/files?path=${enc(path)}`, {
-      body,
-      contentType: mime,
-      accept: 'application/json',
-    });
+    const res = await this.send(
+      'fs/write',
+      'POST',
+      `/files?path=${enc(path)}`,
+      {
+        body,
+        contentType: mime,
+        accept: 'application/json',
+      },
+    );
     return parseFile(await this.json(res), path) ?? emptyStat(path);
   }
 

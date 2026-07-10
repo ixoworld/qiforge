@@ -157,7 +157,9 @@ export function buildClient(
  * DID" field when granting the agent access. Absent → the message omits it.
  */
 function readOracleDid(ctx: RuntimeContext): string | undefined {
-  const parsed = z.object({ ORACLE_DID: z.string().min(1) }).safeParse(ctx.config);
+  const parsed = z
+    .object({ ORACLE_DID: z.string().min(1) })
+    .safeParse(ctx.config);
   return parsed.success ? parsed.data.ORACLE_DID : undefined;
 }
 

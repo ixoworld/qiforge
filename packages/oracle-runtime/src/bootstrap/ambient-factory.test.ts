@@ -21,9 +21,7 @@ function makeFakeUcanService(): UcanService {
     mintSelfSignedInvocation: vi
       .fn()
       .mockResolvedValue({ invocation: 'inv-car' }),
-    getServiceDelegation: vi
-      .fn()
-      .mockResolvedValue({ error: 'no-delegation' }),
+    getServiceDelegation: vi.fn().mockResolvedValue({ error: 'no-delegation' }),
   } as unknown as UcanService;
 }
 

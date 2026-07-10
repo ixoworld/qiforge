@@ -115,7 +115,9 @@ function map409(err: VfsHttpError, path?: string): string {
   if (/modified concurrently/.test(text)) {
     return 'The file was changed by someone else while I was writing. Please try again.';
   }
-  return err.message || 'That change conflicts with the current state of the file.';
+  return (
+    err.message || 'That change conflicts with the current state of the file.'
+  );
 }
 
 /**

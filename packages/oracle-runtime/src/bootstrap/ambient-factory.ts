@@ -114,11 +114,7 @@ export function buildAmbientServices(
       );
     },
     mintSelfSignedInvocation(serviceUrl, capability, opts) {
-      return ucanService.mintSelfSignedInvocation(
-        serviceUrl,
-        capability,
-        opts,
-      );
+      return ucanService.mintSelfSignedInvocation(serviceUrl, capability, opts);
     },
     getServiceDelegation(userDid, opts) {
       return ucanService.getServiceDelegation(userDid, opts);
