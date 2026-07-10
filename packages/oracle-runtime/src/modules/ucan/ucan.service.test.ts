@@ -169,6 +169,94 @@ describe('UcanService', () => {
     expect(second.error).toMatch(/replay/i);
   });
 
+  describe('getServiceDelegation (UCAN store inbox)', () => {
+    const USER = 'did:ixo:ixo18ulens';
+    const STORE_URL = 'https://devnet.store.ucan.ixo.earth';
+    // A domain/subtree grant — the exact shape the OLD `resource=ixo:filesystem`
+    // server filter dropped, because the store matches `resources` by an exact
+    // comma-delimited token (`,ixo:filesystem,` never matches
+    // `,ixo:filesystem/<entity>,`). This is the bug this suite guards.
+    const SUBTREE = 'ixo:filesystem/did:ixo:entity:12907';
+
+    function stubStoreFetch(delegations: unknown[]): ReturnType<typeof vi.fn> {
+      return vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              delegations,
+              total: delegations.length,
+              limit: 200,
+              offset: 0,
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      );
+    }
+
+    beforeEach(() => {
+      svc.setSigningMnemonic('seed words here', ORACLE_DID);
+      // A unit test must not resolve a real did:web or sign — stub the mint.
+      vi.spyOn(svc, 'mintSelfSignedInvocation').mockResolvedValue({
+        invocation: 'stub-inv',
+      });
+    });
+
+    it('queries the store by rootIssuer only — never the exact-match resource/issuer/can filters that drop subtree grants', async () => {
+      const fetchMock = stubStoreFetch([
+        {
+          token: 'tok',
+          lifecycleState: 'active',
+          expiresAt: null,
+          createdAt: 1,
+          capabilities: [
+            { can: 'fs/write', with: SUBTREE },
+            { can: 'fs/delete', with: SUBTREE },
+          ],
+        },
+      ]);
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await svc.getServiceDelegation(USER, {
+        storeUrl: STORE_URL,
+        resource: 'ixo:filesystem',
+        requiredAbility: 'fs/read',
+      });
+
+      const url = String(fetchMock.mock.calls[0]?.[0]);
+      expect(url).toContain(`rootIssuer=${encodeURIComponent(USER)}`);
+      // These filters are exact comma-delimited INSTR matches in the store and
+      // would exclude a subtree grant / a broader-but-covering ability.
+      expect(url).not.toContain('resource=');
+      expect(url).not.toMatch(/[?&]issuer=/);
+      expect(url).not.toContain('can=');
+
+      // fs/write covers fs/read via the lattice; the granted subtree is returned.
+      expect(result).toEqual({ token: 'tok', with: SUBTREE });
+    });
+
+    it('returns no-delegation when rows exist but none covers the required ability', async () => {
+      vi.stubGlobal(
+        'fetch',
+        stubStoreFetch([
+          {
+            token: 'tok',
+            lifecycleState: 'active',
+            expiresAt: null,
+            createdAt: 1,
+            capabilities: [{ can: 'fs/list', with: SUBTREE }],
+          },
+        ]),
+      );
+
+      const result = await svc.getServiceDelegation(USER, {
+        storeUrl: STORE_URL,
+        resource: 'ixo:filesystem',
+        requiredAbility: 'fs/write',
+      });
+      expect(result).toEqual({ error: 'no-delegation' });
+    });
+  });
+
   describe('getDelegationForUser', () => {
     const USER = 'did:ixo:user1';
     const ROOM = '!room:home';

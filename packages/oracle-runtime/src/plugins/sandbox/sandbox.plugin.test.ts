@@ -131,6 +131,10 @@ describe('createDefaultAuthBuilder', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
 
@@ -164,6 +168,10 @@ describe('createDefaultAuthBuilder', () => {
         createInvocationFromDelegation: async () => ({
           invocation: 'mock-invocation-car',
         }),
+        mintSelfSignedInvocation: async () => ({
+          invocation: 'mock-invocation-car',
+        }),
+        getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
       },
     });
 

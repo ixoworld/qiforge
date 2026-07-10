@@ -27,6 +27,7 @@ import {
   type MCPUCANConfig,
   requiresUCANAuth,
 } from './ucan.config.js';
+import { randomUUID } from 'node:crypto';
 import {
   signerFromMnemonic,
   parseDelegation,
@@ -260,6 +261,20 @@ function createMCPResourceURI(
 const DELEGATION_CACHE_PREFIX = 'ucan_delegation_';
 const INVOCATION_CACHE_PREFIX = 'ucan_invocation_';
 const MAX_INVOCATION_TTL_SECONDS = 3600; // 1 hour max
+
+/**
+ * VFS ability lattice — maps a granted ability to the set of abilities it
+ * covers. Used to decide whether a stored delegation's capability satisfies
+ * the ability a downstream request requires: a `fs/read` grant also covers
+ * `fs/list`, `fs/write` covers read+list, and `*` covers everything.
+ */
+const VFS_ABILITY_LATTICE: Record<string, string[]> = {
+  '*': ['fs/read', 'fs/write', 'fs/delete', 'fs/list', '*'],
+  'fs/read': ['fs/read', 'fs/list'],
+  'fs/list': ['fs/list'],
+  'fs/write': ['fs/write', 'fs/read', 'fs/list'],
+  'fs/delete': ['fs/delete', 'fs/read', 'fs/list'],
+};
 
 // ============================================================================
 // UCAN Service
@@ -709,6 +724,10 @@ export class UcanService implements OnModuleDestroy {
         capability: { can: '*', with: resource as `${string}:${string}` },
         proofs: [delegation],
         expiration: expirationSeconds,
+        // Unique nonce → unique invocation CID even for two mints in the same
+        // second. Without it, downstream single-use replay gates reject the
+        // second call as a replay of the first.
+        facts: [{ nonce: randomUUID() }],
       });
 
       const serialized = await serializeInvocation(invocation);
@@ -854,6 +873,9 @@ export class UcanService implements OnModuleDestroy {
         },
         proofs: [delegation],
         expiration: expirationSeconds,
+        // Unique nonce → unique invocation CID, so two mints in the same
+        // second don't collide and trip the service's single-use replay gate.
+        facts: [{ nonce: randomUUID() }],
       });
 
       const serialized = await serializeInvocation(invocation);
@@ -868,6 +890,232 @@ export class UcanService implements OnModuleDestroy {
       this.logger.warn(`[UCAN] mint failed: ${message}`);
       return { error: `Failed to mint invocation: ${message}` };
     }
+  }
+
+  /**
+   * Mint a SELF-SIGNED UCAN invocation — issued by this oracle with NO proof
+   * chain — for calling a downstream service AS THE ORACLE ITSELF, rather than
+   * on behalf of a user via a delegation. Use this for oracle→service calls the
+   * service authorizes against the oracle's own DID directly (e.g. reading a
+   * user's deposited delegation back out of the UCAN Store Worker).
+   *
+   * @param serviceUrl URL of the target service — used to resolve the did:web
+   *   audience by fetching `<serviceUrl>/.well-known/did.json`.
+   * @param capability The exact capability the service requires for this route,
+   *   e.g. `{ can: 'store/get', with: 'ixo:ucan-store' }`.
+   * @param options.maxTtlSeconds Invocation lifetime in seconds. Default 120 —
+   *   invocations are single-use so a short window suffices.
+   *
+   * @returns `{ invocation }` (base64 CAR) on success, or `{ error }` with a
+   *   surfaced-verbatim reason on failure. Non-throwing.
+   */
+  async mintSelfSignedInvocation(
+    serviceUrl: string,
+    capability: { can: string; with: string },
+    options: { maxTtlSeconds?: number } = {},
+  ): Promise<{ invocation: string } | { error: string }> {
+    if (!this.signingMnemonic || !this.oracleDid) {
+      return {
+        error:
+          'Oracle has no signing key configured — set SERVICE_ED25519_MNEMONIC',
+      };
+    }
+    if (
+      !capability ||
+      typeof capability.can !== 'string' ||
+      typeof capability.with !== 'string'
+    ) {
+      return { error: 'capability { can, with } is required' };
+    }
+
+    const serviceDid = await this.resolveServiceDid(serviceUrl);
+    if (!serviceDid) {
+      return {
+        error: `Could not resolve worker DID via ${serviceUrl}/.well-known/did.json`,
+      };
+    }
+
+    try {
+      const { signer } = await signerFromMnemonic(
+        this.signingMnemonic,
+        this.oracleDid as SupportedDID,
+      );
+
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const expirationSeconds = nowSeconds + (options.maxTtlSeconds ?? 120);
+
+      const invocation = await createInvocation({
+        issuer: signer,
+        audience: serviceDid,
+        capability: {
+          can: capability.can as `${string}/${string}`,
+          with: capability.with as `${string}:${string}`,
+        },
+        proofs: [],
+        expiration: expirationSeconds,
+        facts: [{ nonce: randomUUID() }],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+
+      this.logger.debug(
+        `[UCAN] Minted self-signed invocation iss=${this.oracleDid} aud=${serviceDid} can=${capability.can} ttl=${expirationSeconds - nowSeconds}s`,
+      );
+
+      return { invocation: serialized };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`[UCAN] self-signed mint failed: ${message}`);
+      return { error: `Failed to mint invocation: ${message}` };
+    }
+  }
+
+  /**
+   * Fetch, from the UCAN Store Worker, a delegation a user deposited for this
+   * oracle over a given resource. Used by oracle→service flows that act on a
+   * user's behalf but read the delegation from the store rather than the
+   * per-request auth header (e.g. background / async paths).
+   *
+   * Authenticates to the store with a self-signed `store/get` invocation, lists
+   * the user's delegations, and selects the newest still-active one whose
+   * capability covers the required ability over the resource.
+   *
+   * @returns `{ token, with }` (the delegation CAR + the granted resource) on
+   *   success, or `{ error }` — `'no-delegation'` when the user has none that
+   *   satisfies the request, `'store-error'` (with `detail`) for auth / network
+   *   / store failures. Non-throwing.
+   */
+  async getServiceDelegation(
+    userDid: string,
+    opts: { storeUrl: string; resource: string; requiredAbility: string },
+  ): Promise<
+    | { token: string; with: string }
+    | { error: 'no-delegation' | 'store-error'; detail?: string }
+  > {
+    const cacheKey = `ucan-store-del:${userDid}:${opts.resource}:${opts.requiredAbility}`;
+    const cached = await this.cacheManager.get<{ token: string; with: string }>(
+      cacheKey,
+    );
+    if (cached) {
+      return cached;
+    }
+
+    const inv = await this.mintSelfSignedInvocation(
+      opts.storeUrl,
+      { can: 'store/get', with: 'ixo:ucan-store' },
+      { maxTtlSeconds: 120 },
+    );
+    if ('error' in inv) {
+      return { error: 'store-error', detail: inv.error };
+    }
+
+    interface StoreDelegation {
+      token: string;
+      capabilities: Array<{ can: string; with: string }>;
+      expiresAt: number | null;
+      lifecycleState: string;
+      createdAt: number;
+    }
+    interface StoreDelegationsResponse {
+      delegations: StoreDelegation[];
+      total: number;
+      limit: number;
+      offset: number;
+    }
+
+    // Scope the inbox to this user's grants by the delegation-chain ROOT — the
+    // acting user is always the chain root, which also catches re-delegated
+    // grants (user -> intermediary -> oracle) where the immediate `issuer` is an
+    // intermediary. We deliberately do NOT pass `resource=` or `can=`: the store
+    // filters both with an exact comma-delimited `INSTR(col, ',<value>,')` match,
+    // so `resource=ixo:filesystem` would exclude a subtree grant over
+    // `ixo:filesystem/<entityDid>`, and `can=fs/read` would exclude a broader
+    // `fs/write` grant that in fact covers reads. Resource prefix + ability
+    // coverage are resolved client-side below against the ability lattice.
+    let res: Response;
+    try {
+      res = await fetch(
+        `${opts.storeUrl}/api/delegations?rootIssuer=${encodeURIComponent(userDid)}`,
+        {
+          headers: {
+            authorization: `Bearer ${inv.invocation}`,
+            'x-auth-type': 'ucan',
+          },
+        },
+      );
+    } catch (error) {
+      return {
+        error: 'store-error',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    if (!res.ok) {
+      // 404 → the store has no rows for this issuer/resource; not an error.
+      if (res.status === 404) {
+        return { error: 'no-delegation' };
+      }
+      return { error: 'store-error', detail: `store ${res.status}` };
+    }
+
+    let body: StoreDelegationsResponse;
+    try {
+      body = (await res.json()) as StoreDelegationsResponse;
+    } catch (error) {
+      return {
+        error: 'store-error',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const rows = Array.isArray(body.delegations) ? body.delegations : [];
+
+    this.logger.debug(
+      `[UCAN] store inbox root=${userDid}: ${rows.length} delegation(s); selecting one covering ${opts.requiredAbility} over ${opts.resource}`,
+    );
+
+    // Rows are newest-first; pick the first active, unexpired row whose
+    // capability covers the requested ability over the requested resource.
+    for (const row of rows) {
+      if (row.lifecycleState !== 'active') continue;
+      if (row.expiresAt != null && row.expiresAt <= nowSeconds) continue;
+
+      const caps = Array.isArray(row.capabilities) ? row.capabilities : [];
+      const match = caps.find(
+        (c) =>
+          (c.with === opts.resource || c.with.startsWith(opts.resource)) &&
+          this.abilityCovers(c.can, opts.requiredAbility),
+      );
+      if (!match) continue;
+
+      const result = { token: row.token, with: match.with };
+
+      // Cache the hit for its remaining life, capped at 10 minutes. Skip
+      // caching when the window is non-positive. Failures are never cached.
+      const ttlSeconds =
+        row.expiresAt != null ? Math.min(row.expiresAt - nowSeconds, 600) : 600;
+      if (ttlSeconds > 0) {
+        await this.cacheManager.set(cacheKey, result, ttlSeconds * 1000);
+      }
+
+      return result;
+    }
+
+    if (rows.length > 0) {
+      this.logger.warn(
+        `[UCAN] store returned ${rows.length} delegation(s) for ${userDid} but none is active + unexpired and covers ${opts.requiredAbility} over ${opts.resource}`,
+      );
+    }
+    return { error: 'no-delegation' };
+  }
+
+  /**
+   * Whether a `granted` VFS ability covers a `required` one, per the VFS
+   * ability lattice (e.g. `fs/read` covers `fs/list`; `*` covers everything).
+   */
+  private abilityCovers(granted: string, required: string): boolean {
+    return (VFS_ABILITY_LATTICE[granted] ?? []).includes(required);
   }
 
   // ============================================================================

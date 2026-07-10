@@ -157,6 +157,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
           capability,
           opts,
         ),
+      mintSelfSignedInvocation: (serviceUrl, capability, opts) =>
+        ambient.ucan.mintSelfSignedInvocation(serviceUrl, capability, opts),
+      getServiceDelegation: (userDid, opts) =>
+        ambient.ucan.getServiceDelegation(userDid, opts),
     },
     llm: {
       get: (role, params) => ambient.llm.get(role, params),

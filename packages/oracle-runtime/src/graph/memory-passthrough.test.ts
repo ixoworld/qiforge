@@ -89,6 +89,12 @@ function makeAmbient(): AmbientServices {
       createInvocationFromDelegation: vi.fn(async () => ({
         invocation: 'mock-invocation-car',
       })),
+      mintSelfSignedInvocation: vi.fn(async () => ({
+        invocation: 'mock-invocation-car',
+      })),
+      getServiceDelegation: vi.fn(async () => ({
+        error: 'no-delegation' as const,
+      })),
     },
     logger: {
       log: vi.fn(),

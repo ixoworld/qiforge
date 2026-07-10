@@ -178,6 +178,12 @@ export function mockUcan(): UcanAdapter {
     createInvocationFromDelegation: vi.fn(async () => ({
       invocation: 'mock-invocation-car',
     })),
+    mintSelfSignedInvocation: vi.fn(async () => ({
+      invocation: 'mock-invocation-car',
+    })),
+    getServiceDelegation: vi.fn(async () => ({
+      error: 'no-delegation' as const,
+    })),
   };
 }
 

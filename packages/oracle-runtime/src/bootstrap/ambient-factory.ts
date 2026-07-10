@@ -113,6 +113,12 @@ export function buildAmbientServices(
         opts,
       );
     },
+    mintSelfSignedInvocation(serviceUrl, capability, opts) {
+      return ucanService.mintSelfSignedInvocation(serviceUrl, capability, opts);
+    },
+    getServiceDelegation(userDid, opts) {
+      return ucanService.getServiceDelegation(userDid, opts);
+    },
   };
 
   const matrixAdapter: MatrixAdapter = {

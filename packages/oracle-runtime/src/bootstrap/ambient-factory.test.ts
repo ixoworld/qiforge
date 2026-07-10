@@ -18,6 +18,10 @@ function makeFakeUcanService(): UcanService {
     createInvocationFromDelegation: vi
       .fn()
       .mockResolvedValue({ invocation: 'inv-car' }),
+    mintSelfSignedInvocation: vi
+      .fn()
+      .mockResolvedValue({ invocation: 'inv-car' }),
+    getServiceDelegation: vi.fn().mockResolvedValue({ error: 'no-delegation' }),
   } as unknown as UcanService;
 }
 
@@ -74,6 +78,8 @@ describe('buildAmbientServices', () => {
     expect(typeof ambient.blobStore.isValidBlobId).toBe('function');
     expect(typeof ambient.ucan.hasSigningKey).toBe('function');
     expect(typeof ambient.ucan.createInvocationFromDelegation).toBe('function');
+    expect(typeof ambient.ucan.mintSelfSignedInvocation).toBe('function');
+    expect(typeof ambient.ucan.getServiceDelegation).toBe('function');
     expect(typeof ambient.llm.get).toBe('function');
     expect(typeof ambient.emit.emit).toBe('function');
   });

@@ -91,6 +91,10 @@ function makeRuntimeContext(
       createInvocationFromDelegation: async () => ({
         invocation: 'mock-invocation-car',
       }),
+      mintSelfSignedInvocation: async () => ({
+        invocation: 'mock-invocation-car',
+      }),
+      getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
     },
     llm: {
       get: () =>

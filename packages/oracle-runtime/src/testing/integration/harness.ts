@@ -502,6 +502,16 @@ export async function createIntegrationRuntime(
           'boot if your test needs CAR-driven invocation minting.',
       );
     },
+    async mintSelfSignedInvocation() {
+      throw new Error(
+        'createIntegrationRuntime: mintSelfSignedInvocation is not wired. Pass ' +
+          '`ucan: bootedOracle.app.ambient.ucan` from a `createIntegrationOracle()` ' +
+          'boot if your test needs self-signed invocation minting.',
+      );
+    },
+    async getServiceDelegation() {
+      return { error: 'no-delegation' as const };
+    },
   };
 
   const emitAdapter: EmitAdapter = {

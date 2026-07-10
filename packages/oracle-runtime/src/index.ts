@@ -121,6 +121,7 @@ export {
   creditsPlugin,
   callsPlugin,
   userPreferencesPlugin,
+  vfsPlugin,
   BUNDLED_PLUGINS,
 } from './plugins/index.js';
 
@@ -142,3 +143,4 @@ export * from './plugins/sandbox/index.js';
 export * from './plugins/skills/index.js';
 export * from './plugins/slack/index.js';
 export * from './plugins/user-preferences/index.js';
+export * from './plugins/vfs/index.js';
