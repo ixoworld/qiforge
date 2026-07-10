@@ -43,6 +43,7 @@ export const OraclesProvider = ({
   transactSignX,
   createDelegation,
   createInvocation,
+  queryClient: externalQueryClient,
 }: PropsWithChildren<IOraclesProviderProps>) => {
   if ((!initialWallet as unknown) || !transactSignX) {
     throw new Error('initialWallet and transactSignX are required');
@@ -217,7 +218,20 @@ export const OraclesProvider = ({
     ],
   );
 
-  const [queryClient] = useState(() => new QueryClient());
+  // Config-style queries barely change; without defaults every remount and
+  // window focus refetches them all.
+  const [ownQueryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            staleTime: 60_000,
+            refetchOnWindowFocus: false,
+          },
+        },
+      }),
+  );
+  const queryClient = externalQueryClient ?? ownQueryClient;
   return (
     <OraclesContext.Provider value={value}>
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>

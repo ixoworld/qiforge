@@ -1,4 +1,5 @@
 import type { TransactionFn } from '@ixo/oracles-chain-client/react';
+import type { QueryClient } from '@tanstack/react-query';
 import type { AgAction } from '../../hooks/use-ag-action.js';
 
 export interface IMatrixLoginProps {
@@ -62,4 +63,10 @@ export interface IOraclesProviderProps {
   transactSignX: TransactionFn;
   createDelegation: CreateDelegationFn;
   createInvocation?: CreateInvocationFn;
+  /**
+   * Share the host app's react-query client instead of the SDK creating its
+   * own. Without this, hosts that already mount a QueryClientProvider get a
+   * second client (and second cache) shadowing theirs for the SDK subtree.
+   */
+  queryClient?: QueryClient;
 }

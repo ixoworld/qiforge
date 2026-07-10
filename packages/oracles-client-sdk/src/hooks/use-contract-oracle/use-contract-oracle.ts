@@ -24,6 +24,11 @@ interface IUseContractOracleProps {
   };
 }
 
+// Oracle entity settings (authz config, pricing list, room ids) change rarely;
+// keep them fresh for a while so remounting hosts (lists render one hook per
+// oracle card) don't refetch the same documents.
+const ORACLE_CONFIG_STALE_TIME_MS = 5 * 60 * 1000;
+
 const useContractOracle = ({ params }: IUseContractOracleProps) => {
   const { wallet, transactSignX } = useOraclesContext();
   const matrixClientRef = useMemo(
@@ -45,7 +50,8 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
       });
       return config;
     },
-    enabled: Boolean(wallet?.address),
+    enabled: Boolean(wallet?.address && params.oracleDid),
+    staleTime: ORACLE_CONFIG_STALE_TIME_MS,
   });
 
   const { data: oracleRoomId, isLoading: _isLoadingOracleRoomId } = useQuery({
@@ -59,6 +65,7 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
       return roomId;
     },
     enabled: Boolean(wallet?.did && params.oracleDid),
+    staleTime: ORACLE_CONFIG_STALE_TIME_MS,
   });
 
   // Get pricing list
@@ -72,6 +79,8 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
       );
       return list;
     },
+    enabled: Boolean(params.oracleDid),
+    staleTime: ORACLE_CONFIG_STALE_TIME_MS,
   });
 
   const { mutateAsync: contractOracle, isPending: isContractingOracle } =

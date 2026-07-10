@@ -2,6 +2,38 @@ import { type LinkedResource } from '@ixo/impactxclient-sdk/codegen/ixo/iid/v1be
 import { gqlClient } from 'src/gql/index.js';
 import { type TGetSettingsResourceSchema } from '../client/entities/types.js';
 
+type ProtocolEntity = Awaited<
+  ReturnType<typeof gqlClient.GetEntityById>
+>['entity'];
+
+// Every settings resource on the same protocol (authz `#orz`, pricing `#fee`,
+// …) resolves the identical entity document, and callers fetch them side by
+// side — so entity lookups are deduped in-flight and briefly cached instead of
+// hitting blocksync once per resource. Failures are evicted immediately.
+const ENTITY_CACHE_TTL_MS = 60_000;
+const entityFetchCache = new Map<
+  string,
+  { promise: Promise<ProtocolEntity>; at: number }
+>();
+
+function getEntityByIdCached(protocolDid: string): Promise<ProtocolEntity> {
+  const cached = entityFetchCache.get(protocolDid);
+  if (cached && Date.now() - cached.at < ENTITY_CACHE_TTL_MS) {
+    return cached.promise;
+  }
+
+  const promise = gqlClient
+    .GetEntityById({ id: protocolDid })
+    .then((result) => result?.entity);
+  entityFetchCache.set(protocolDid, { promise, at: Date.now() });
+  promise.catch(() => {
+    if (entityFetchCache.get(protocolDid)?.promise === promise) {
+      entityFetchCache.delete(protocolDid);
+    }
+  });
+  return promise;
+}
+
 function rewriteMatrixMediaUrl(url: string, matrixHomeServer: string): string {
   const mediaMatch = url.match(
     /https?:\/\/[^/]+\/_matrix\/media\/[^/]+\/download\/([^/]+)\/(.+)/,
@@ -17,9 +49,9 @@ export async function getSettingsResource<T>(
   matrixAccessToken?: string,
   matrixHomeServer?: string,
 ): Promise<T> {
-  const protocol = (
-    await gqlClient.GetEntityById({ id: settingsResourceParams.protocolDid })
-  )?.entity;
+  const protocol = await getEntityByIdCached(
+    settingsResourceParams.protocolDid,
+  );
   if (!protocol) {
     throw new Error(
       'Protocol not found with did: ' + settingsResourceParams.protocolDid,
