@@ -193,6 +193,23 @@ const maturitySchema = z.object({
 
 const listReviewsSchema = z.object({});
 
+const listRubricsSchema = z.object({
+  claimType: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Filter to rubrics observed for this claim type (e.g. "coding_task.completed").',
+    ),
+  rubricVersionId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Fetch one rubric's full config instead of the listing. Use the exact rubricVersionId from a previous listing.",
+    ),
+});
+
 /**
  * Project a job into the compact view the agent reasons over. The raw
  * resultSummary nests the full evaluation report; this keeps the verdict,
@@ -293,6 +310,15 @@ const MATURITY_DESCRIPTION = `Look up the governance maturity ladder of the Eval
 Every claim type sits on a rung: "advisory" (verdicts are recommendations), "assisted" (verdicts execute with human confirmation), or "autonomous" (verdicts execute automatically). Pass claimType (e.g. "coding.task") for one claim type — returns { claimType, rung, registered, gatePolicyId, records }. Omit claimType to list the full ladder.
 
 Use this to explain how much authority the engine's verdicts carry for a claim type. Rung changes (register/promote/demote) are governance actions outside this tool's scope.`;
+
+const RUBRICS_DESCRIPTION = `Discover evaluation rubrics known to the Evals Engine — use this BEFORE evaluate_claim instead of asking the user for rubric parameters.
+
+WHAT IT RETURNS:
+- Without arguments: every stored rubric (rubricVersionId, contentCid, thresholdBps, mode, claimTypes, governedCollections) plus all governed collection bindings the engine's resolver can enumerate (collectionId, protocol LinkedResource id, content CID, serviceEndpoint, verified).
+- With claimType: only rubrics observed for that claim type.
+- With rubricVersionId: that rubric's FULL config — pass it directly as the rubric argument of evaluate_claim.
+
+Governed collections reject rubric content that does not match their on-chain binding, so submitting a discovered rubric verbatim is the reliable path. Returns { "error": "rubric_not_found" } for unknown ids.`;
 
 const REVIEWS_DESCRIPTION = `List claim evaluations waiting for manual human review.
 
@@ -418,6 +444,23 @@ export function createEvalsTools(client: EvalsEngineClient): PluginTool[] {
     },
   );
 
+  const listRubrics = tool(
+    async (rawArgs, ctx) => {
+      const { claimType, rubricVersionId } = listRubricsSchema.parse(
+        rawArgs ?? {},
+      );
+      if (rubricVersionId !== undefined) {
+        return client.getRubric(rubricVersionId, ctx.abortSignal);
+      }
+      return client.listRubrics(claimType, ctx.abortSignal);
+    },
+    {
+      name: 'list_evaluation_rubrics',
+      description: RUBRICS_DESCRIPTION,
+      schema: listRubricsSchema,
+    },
+  );
+
   return [
     evaluateClaim,
     getStatus,
@@ -425,5 +468,6 @@ export function createEvalsTools(client: EvalsEngineClient): PluginTool[] {
     getAudit,
     getMaturity,
     listReviews,
+    listRubrics,
   ];
 }

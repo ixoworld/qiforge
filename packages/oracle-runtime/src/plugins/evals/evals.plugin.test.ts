@@ -24,6 +24,7 @@ const TOOL_NAMES = [
   'get_evaluation_audit',
   'get_evaluation_maturity',
   'list_evaluation_reviews',
+  'list_evaluation_rubrics',
 ];
 
 const VALID_EVALUATE_ARGS = {
@@ -184,7 +185,7 @@ describe('EvalsPlugin', () => {
     await rt.close();
   });
 
-  it('registers an Evals Agent sub-agent exposing the six engine tools', async () => {
+  it('registers an Evals Agent sub-agent exposing the seven engine tools', async () => {
     const rt = await createTestRuntime({
       plugins: [new EvalsPlugin()],
       config: { EVALS_ENGINE_URL: BASE_URL },
@@ -537,6 +538,85 @@ describe('EvalsPlugin', () => {
       expect(String(url)).toBe(
         `${BASE_URL}/v1/governance/maturity/coding.task`,
       );
+    });
+  });
+
+  describe('list_evaluation_rubrics tool', () => {
+    it('lists rubrics, optionally filtered by claimType', async () => {
+      const listing = {
+        rubrics: [
+          {
+            rubricVersionId: 'rubric-v1',
+            contentCid: 'bafk-cid',
+            thresholdBps: 7000,
+            mode: 'fail_any_dimension',
+            claimTypes: ['coding_task.completed'],
+            governedCollections: ['collection-1'],
+          },
+        ],
+        governedCollections: [],
+      };
+      fetchSpy
+        .mockResolvedValueOnce(jsonResponse(listing))
+        .mockResolvedValueOnce(jsonResponse(listing));
+      const plugin = new EvalsPlugin();
+      const rubrics = toolNamed(
+        plugin,
+        ctxWithUrl(),
+        'list_evaluation_rubrics',
+      );
+
+      const all = await rubrics.handler({}, runtimeCtx());
+      expect(all).toEqual(listing);
+      expect(String(fetchSpy.mock.calls[0]![0])).toBe(`${BASE_URL}/v1/rubrics`);
+
+      await rubrics.handler(
+        { claimType: 'coding_task.completed' },
+        runtimeCtx(),
+      );
+      expect(String(fetchSpy.mock.calls[1]![0])).toBe(
+        `${BASE_URL}/v1/rubrics?claimType=coding_task.completed`,
+      );
+    });
+
+    it('fetches one rubric by id and passes through not-found errors', async () => {
+      fetchSpy
+        .mockResolvedValueOnce(
+          jsonResponse({
+            rubricVersionId: 'rubric-v1',
+            rubric: { thresholdBps: 7000 },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse(
+            { error: 'rubric_not_found', rubricVersionId: 'nope' },
+            404,
+          ),
+        );
+      const plugin = new EvalsPlugin();
+      const rubrics = toolNamed(
+        plugin,
+        ctxWithUrl(),
+        'list_evaluation_rubrics',
+      );
+
+      const detail = await rubrics.handler(
+        { rubricVersionId: 'rubric-v1' },
+        runtimeCtx(),
+      );
+      expect(detail).toMatchObject({ rubricVersionId: 'rubric-v1' });
+      expect(String(fetchSpy.mock.calls[0]![0])).toBe(
+        `${BASE_URL}/v1/rubrics/rubric-v1`,
+      );
+
+      const missing = await rubrics.handler(
+        { rubricVersionId: 'nope' },
+        runtimeCtx(),
+      );
+      expect(missing).toEqual({
+        error: 'rubric_not_found',
+        rubricVersionId: 'nope',
+      });
     });
   });
 

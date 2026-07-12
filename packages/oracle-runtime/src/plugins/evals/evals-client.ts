@@ -195,6 +195,36 @@ export class EvalsEngineClient {
   }
 
   /**
+   * `GET /v1/rubrics[?claimType=...]` — rubric discovery listing: stored
+   * rubric versions plus every governed collection binding the engine's
+   * resolver can enumerate.
+   */
+  async listRubrics(
+    claimType?: string,
+    signal?: AbortSignal,
+  ): Promise<EvalsApiResult<Record<string, unknown>>> {
+    const query =
+      claimType === undefined
+        ? ''
+        : `?claimType=${encodeURIComponent(claimType)}`;
+    return this.request<Record<string, unknown>>('GET', `/v1/rubrics${query}`, {
+      signal,
+    });
+  }
+
+  /** `GET /v1/rubrics/{id}` — one rubric's full stored config. */
+  async getRubric(
+    rubricVersionId: string,
+    signal?: AbortSignal,
+  ): Promise<EvalsApiResult<Record<string, unknown>>> {
+    return this.request<Record<string, unknown>>(
+      'GET',
+      `/v1/rubrics/${encodeURIComponent(rubricVersionId)}`,
+      { signal },
+    );
+  }
+
+  /**
    * Poll `GET /v1/jobs/{jobId}` until it leaves `pending`/`processing` or the
    * wait budget runs out. Returns the last observed job state either way —
    * callers inspect `status` to see whether the evaluation finished.
