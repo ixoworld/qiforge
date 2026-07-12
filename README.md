@@ -18,7 +18,7 @@ Most AI frameworks give you a chatbot. QiForge gives you a **verified, autonomou
 | ------------------------ | ---------------------------------------------------------------------- | -------------------- |
 | **Verified identity**    | Blockchain DID — users can verify who your agent is                    | None                 |
 | **Encrypted comms**      | Per-user encrypted Matrix rooms, synced and self-healing               | Plain text / logs    |
-| **Plugins**              | 15 bundled capability packs — toggle with one switch                   | Hardcoded wiring     |
+| **Plugins**              | 16 bundled capability packs — toggle with one switch                   | Hardcoded wiring     |
 | **Skills at runtime**    | Discovered from a shared registry, executed in a sandbox — no redeploy | Hardcoded tools      |
 | **Capability discovery** | The agent equips its own tools mid-conversation                        | Static toolset       |
 | **Multi-LLM**            | OpenRouter + Nebius, per-role models, automatic failover               | Vendor lock-in       |
@@ -38,7 +38,7 @@ import { config } from './config.js';
 
 const app = await createOracleApp({
   config, // name, org, personality, features
-  plugins: [new WeatherPlugin()], // your plugins, next to 15 bundled ones
+  plugins: [new WeatherPlugin()], // your plugins, next to 16 bundled ones
 });
 
 await app.listen();
@@ -50,7 +50,7 @@ That's a working oracle. The runtime hands you, for free:
 - UCAN auth on every request and an on-chain identity for the oracle
 - Encrypted per-user storage with Matrix sync and corruption recovery
 - A LangGraph agent rebuilt per request — dynamic tool loading and always-on safety middlewares (validation, retry, loop-breaking, summarization)
-- 15 bundled plugins behind simple `features` toggles
+- 16 bundled plugins behind simple `features` toggles
 - A typed plugin API for everything custom
 
 ---
@@ -108,10 +108,12 @@ Plugins give the agent its powers — including three major services: a **Memory
 | **editor**             | Edit live workspace documents — blocks, forms, executable flows      | ✅             |
 | **firecrawl**          | Web search + page reading                                            | ✅             |
 | **domain-indexer**     | Search IXO entities — orgs, projects, DAOs, events, geo filters      | ✅             |
+| **evals**              | Claim evaluation via the IXO Evals Engine — signed verdicts (UDIDs)  | ✅ beta        |
 | **portal**             | Drive the user's web app (frontend-declared actions)                 | ✅             |
 | **agui**               | Render tables, charts, and forms in the user's browser               | ✅             |
 | **slack**              | Run the oracle as a Slack bot                                        | ✅             |
 | **credits**            | Budgets, metering, on-chain settlement                               | ✅             |
+| **vfs**                | The user's persistent, governed virtual filesystem                   | ✅             |
 | **tasks**              | Background jobs                                                      | ⚠️ placeholder |
 | **calls**              | Voice/video calls                                                    | ⚠️ placeholder |
 

@@ -5,6 +5,7 @@ import { ComposioPlugin } from './composio/index.js';
 import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { EditorPlugin } from './editor/index.js';
+import { EvalsPlugin } from './evals/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
@@ -51,6 +52,7 @@ export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const vfsPlugin = new VfsPlugin();
+export const evalsPlugin = new EvalsPlugin();
 
 // NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
 // a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
@@ -82,4 +84,5 @@ export const BUNDLED_PLUGINS = [
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
   vfsPlugin,
+  evalsPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

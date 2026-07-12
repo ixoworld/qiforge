@@ -122,6 +122,7 @@ export {
   callsPlugin,
   userPreferencesPlugin,
   vfsPlugin,
+  evalsPlugin,
   BUNDLED_PLUGINS,
 } from './plugins/index.js';
 
@@ -134,6 +135,7 @@ export * from './plugins/composio/index.js';
 export * from './plugins/credits/index.js';
 export * from './plugins/domain-indexer/index.js';
 export * from './plugins/editor/index.js';
+export * from './plugins/evals/index.js';
 export * from './plugins/firecrawl/index.js';
 export * from './plugins/flows/index.js';
 export * from './plugins/matrix-group-chats/index.js';
