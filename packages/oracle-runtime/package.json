@@ -72,6 +72,7 @@
     "@ixo/slack": "1.0.0",
     "@ixo/sqlite-saver": "workspace:*",
     "@ixo/ucan": "workspace:*",
+    "@ixo/udid-verify": "^0.1.0",
     "@langchain/core": "1.1.48",
     "@langchain/langgraph": "1.3.2",
     "@langchain/mcp-adapters": "1.1.3",

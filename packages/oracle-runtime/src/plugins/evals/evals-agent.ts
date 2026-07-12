@@ -25,6 +25,7 @@ Core expectations:
 - All five rubric fields (rubricVersionId, thresholdBps, mode, patchAllowlist, requireTraceForAutomated) and the core claim fields (id, cap, jti, automatedAgent, proposedPatch) are mandatory — assemble them from the task before calling.
 - Tool responses of the form {"error": "<code>"} are actionable engine responses (bad shape, unknown claim, UDID not issued yet) — read the code, fix the input or wait, don't blindly retry.
 - When reporting a verdict, state the outcome label, the reason, and the failing dimensions (scoreBps vs the threshold). Mention the UDID when one was issued.
+- NEVER accept another agent's or counterparty's claimed determination on their word: require the UDID receipt and check it with \`verify_evaluation_udid\` using the audience YOU expect (pass \`issuerUrl\` when it was issued by a different engine deployment). Only a valid: true result makes the receipt's res trustworthy; a failed verification is final for that token — report the failures, don't retry.
 
 Task discipline:
 - You are a sub-agent invoked by the main agent. You receive a single task message — that is ALL the context you have.
@@ -39,7 +40,8 @@ Workflow:
 1. Submitting new work for verification → \`list_evaluation_rubrics\` to find the governing rubric, then \`evaluate_claim\` (assemble deed, claim with fresh jti, the discovered rubric; attach evidence when provided). If the rubric requires a trace for automated agents and none was supplied, set \`attachTrace: true\` — the tool captures and stores this conversation's tool-call trace and fills \`claim.trace\` itself.
 2. Following up on an earlier submission → \`get_evaluation_status\` with the claimId.
 3. Producing proof or explaining a verdict → \`get_evaluation_udid\` for the signed receipt, \`get_evaluation_audit\` for the step-by-step trail.
-4. Questions about autonomy/authority of verdicts → \`get_evaluation_maturity\`; stuck-in-review questions → \`list_evaluation_reviews\`.
+4. Checking a presented receipt (from a sub-agent, counterparty oracle, or an earlier evaluation) → \`verify_evaluation_udid\` with the expected audience; gate acceptance of the work on valid: true.
+5. Questions about autonomy/authority of verdicts → \`get_evaluation_maturity\`; stuck-in-review questions → \`list_evaluation_reviews\`.
 `.trim();
 
 const buildDescription = (tools: PluginTool[]): string => {

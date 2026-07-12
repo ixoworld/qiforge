@@ -41,6 +41,7 @@ const manifest: PluginManifest = {
     'User asks to evaluate, verify, score, or adjudicate a claim about completed work (a task, delivery, payment, or other deed).',
     'User asks for the status or verdict of a previously submitted claim evaluation.',
     'User needs the signed receipt (UDID) or the audit trail explaining why a claim was approved or rejected.',
+    'A UDID receipt is presented (by a sub-agent, counterparty oracle, or user) and must be cryptographically verified before its determination is trusted.',
     'User asks how much autonomy the engine has for a claim type (maturity ladder) or what is waiting on human review.',
   ],
   whenNotToUse: [

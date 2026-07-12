@@ -15,6 +15,7 @@ export type {
 } from './evals-client.js';
 export { createEvalsTools } from './evals-tools.js';
 export { createEvalsSubAgent } from './evals-agent.js';
+export { createVerifyUdidTool } from './evals-verify.js';
 export {
   captureTrace,
   matrixEventUri,

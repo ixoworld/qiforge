@@ -8,6 +8,7 @@ import {
   type EvaluationJob,
 } from './evals-client.js';
 import { captureTrace } from './evals-trace.js';
+import { createVerifyUdidTool } from './evals-verify.js';
 
 /**
  * The hosted evaluate endpoint rejects requests with unknown keys at every
@@ -304,7 +305,7 @@ Use this after evaluate_claim returned status "pending", or to re-check any earl
 
 const UDID_DESCRIPTION = `Fetch the signed UDID receipt (verifiable determination) for an evaluated claim.
 
-Provide the claimId. Returns { claimId, compactJws, payload } where compactJws is the signed JWS receipt (share this as the verifiable proof of the determination) and payload contains the decoded claims (iss, aud, sub, jti, act, res). Anyone can verify the signature against the engine's public keys at /v1/issuer-keys.
+Provide the claimId. Returns { claimId, compactJws, payload } where compactJws is the signed JWS receipt (share this as the verifiable proof of the determination) and payload contains the decoded claims (iss, aud, sub, jti, act, res). Anyone can verify the signature against the engine's public keys at /v1/issuer-keys — use verify_evaluation_udid to run that check here.
 
 Returns { "error": "udid_not_issued" } while the evaluation is still running or when no UDID was issued — check get_evaluation_status first.`;
 
@@ -336,7 +337,7 @@ Takes no arguments. Returns { claimIds, cases } — the claims flagged into the 
 Use this to report what is stuck awaiting a human decision. Adjudicating a case is a human reviewer action performed against the engine directly — this plugin deliberately does not expose it.`;
 
 /**
- * Build the six Evals Engine tools, closing over the configured client.
+ * Build the Evals Engine tools, closing over the configured client.
  * Handlers thread `ctx.abortSignal` into every HTTP call so a cancelled
  * request also cancels in-flight polling.
  */
@@ -495,6 +496,7 @@ export function createEvalsTools(client: EvalsEngineClient): PluginTool[] {
     evaluateClaim,
     getStatus,
     getUdid,
+    createVerifyUdidTool(client),
     getAudit,
     getMaturity,
     listReviews,

@@ -98,7 +98,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export class EvalsEngineClient {
-  private readonly baseUrl: string;
+  /** Configured engine base URL (public so tools can name the default issuer). */
+  readonly baseUrl: string;
   private readonly authToken?: string;
   private readonly pollIntervalMs: number;
 

@@ -21,6 +21,7 @@ const TOOL_NAMES = [
   'evaluate_claim',
   'get_evaluation_status',
   'get_evaluation_udid',
+  'verify_evaluation_udid',
   'get_evaluation_audit',
   'get_evaluation_maturity',
   'list_evaluation_reviews',
@@ -185,7 +186,7 @@ describe('EvalsPlugin', () => {
     await rt.close();
   });
 
-  it('registers an Evals Agent sub-agent exposing the seven engine tools', async () => {
+  it('registers an Evals Agent sub-agent exposing the eight engine tools', async () => {
     const rt = await createTestRuntime({
       plugins: [new EvalsPlugin()],
       config: { EVALS_ENGINE_URL: BASE_URL },
