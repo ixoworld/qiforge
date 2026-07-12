@@ -1,7 +1,4 @@
-import {
-  PublishedIssuerKeysError,
-  verifyUdidReceipt,
-} from '@ixo/udid-verify';
+import { PublishedIssuerKeysError, verifyUdidReceipt } from '@ixo/udid-verify';
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool } from '../../plugin-api/types.js';
@@ -46,7 +43,9 @@ const verifySchema = z
       .min(0)
       .max(300)
       .optional()
-      .describe('Tolerated clock skew in seconds when checking expiry (default 0).'),
+      .describe(
+        'Tolerated clock skew in seconds when checking expiry (default 0).',
+      ),
   })
   .refine((v) => v.compactJws !== undefined || v.claimId !== undefined, {
     message: 'Provide compactJws or claimId.',
@@ -128,7 +127,10 @@ export function createVerifyUdidTool(client: EvalsEngineClient): PluginTool {
       if (receiptJws === undefined) {
         // claimId path: fetch the receipt from the configured engine, then
         // verify it exactly like a presented one.
-        const fetched = await client.getUdid(claimId as string, ctx.abortSignal);
+        const fetched = await client.getUdid(
+          claimId as string,
+          ctx.abortSignal,
+        );
         if (isEvalsApiError(fetched)) return fetched;
         receiptJws = fetched.compactJws;
       }

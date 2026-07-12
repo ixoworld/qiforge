@@ -27,7 +27,9 @@ function rawPublicKey(publicKey: KeyObject): Buffer {
 
 /** base64url(sha256(raw public key)) — the engine's kid derivation. */
 function kidOf(publicKey: KeyObject): string {
-  return createHash('sha256').update(rawPublicKey(publicKey)).digest('base64url');
+  return createHash('sha256')
+    .update(rawPublicKey(publicKey))
+    .digest('base64url');
 }
 
 function publishedKeys(publicKey: KeyObject): unknown {
@@ -101,11 +103,16 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('verifies a presented receipt against the configured engine keys', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(publishedKeys(issuer.publicKey)));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(publishedKeys(issuer.publicKey)),
+    );
     const tool = createVerifyUdidTool(client());
 
     const result = (await tool.handler(
-      { compactJws: signReceipt(RECEIPT_PAYLOAD), expectedAud: 'did:example:aud' },
+      {
+        compactJws: signReceipt(RECEIPT_PAYLOAD),
+        expectedAud: 'did:example:aud',
+      },
       makeRuntimeContext(),
     )) as Record<string, unknown>;
 
@@ -127,7 +134,9 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('fetches counterparty keys from issuerUrl, keeping a reverse-proxy subpath', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(publishedKeys(issuer.publicKey)));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(publishedKeys(issuer.publicKey)),
+    );
     const tool = createVerifyUdidTool(client());
 
     const result = (await tool.handler(
@@ -148,11 +157,16 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('fails closed on an audience mismatch', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(publishedKeys(issuer.publicKey)));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(publishedKeys(issuer.publicKey)),
+    );
     const tool = createVerifyUdidTool(client());
 
     const result = (await tool.handler(
-      { compactJws: signReceipt(RECEIPT_PAYLOAD), expectedAud: 'did:example:someone-else' },
+      {
+        compactJws: signReceipt(RECEIPT_PAYLOAD),
+        expectedAud: 'did:example:someone-else',
+      },
       makeRuntimeContext(),
     )) as Record<string, unknown>;
 
@@ -162,7 +176,9 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('fails closed on a tampered payload', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(publishedKeys(issuer.publicKey)));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse(publishedKeys(issuer.publicKey)),
+    );
     const tool = createVerifyUdidTool(client());
 
     const genuine = signReceipt(RECEIPT_PAYLOAD);
@@ -171,13 +187,20 @@ describe('verify_evaluation_udid', () => {
       JSON.stringify(
         sortKeysDeep({
           ...RECEIPT_PAYLOAD,
-          res: { outcome: 1, reason: 'approve', patch: { status: 'done', paid: true } },
+          res: {
+            outcome: 1,
+            reason: 'approve',
+            patch: { status: 'done', paid: true },
+          },
         }),
       ),
     );
 
     const result = (await tool.handler(
-      { compactJws: `${header}.${forgedBody}.${signature}`, expectedAud: 'did:example:aud' },
+      {
+        compactJws: `${header}.${forgedBody}.${signature}`,
+        expectedAud: 'did:example:aud',
+      },
       makeRuntimeContext(),
     )) as Record<string, unknown>;
 
@@ -189,7 +212,11 @@ describe('verify_evaluation_udid', () => {
     const jws = signReceipt(RECEIPT_PAYLOAD);
     fetchSpy
       .mockResolvedValueOnce(
-        jsonResponse({ claimId: 'claim-1', compactJws: jws, payload: RECEIPT_PAYLOAD }),
+        jsonResponse({
+          claimId: 'claim-1',
+          compactJws: jws,
+          payload: RECEIPT_PAYLOAD,
+        }),
       )
       .mockResolvedValueOnce(jsonResponse(publishedKeys(issuer.publicKey)));
     const tool = createVerifyUdidTool(client());
@@ -208,7 +235,9 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('passes udid_not_issued through as an actionable error', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse({ error: 'udid_not_issued' }, 404));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse({ error: 'udid_not_issued' }, 404),
+    );
     const tool = createVerifyUdidTool(client());
 
     const result = await tool.handler(
@@ -220,11 +249,16 @@ describe('verify_evaluation_udid', () => {
   });
 
   it('reports an unreachable or malformed issuer-keys endpoint as an actionable error', async () => {
-    fetchSpy.mockResolvedValueOnce(new Response('down', { status: 503, statusText: 'Unavailable' }));
+    fetchSpy.mockResolvedValueOnce(
+      new Response('down', { status: 503, statusText: 'Unavailable' }),
+    );
     const tool = createVerifyUdidTool(client());
 
     const result = (await tool.handler(
-      { compactJws: signReceipt(RECEIPT_PAYLOAD), expectedAud: 'did:example:aud' },
+      {
+        compactJws: signReceipt(RECEIPT_PAYLOAD),
+        expectedAud: 'did:example:aud',
+      },
       makeRuntimeContext(),
     )) as Record<string, unknown>;
 
