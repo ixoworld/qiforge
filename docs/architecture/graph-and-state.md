@@ -84,6 +84,7 @@ The tool's `description` is auto-prefixed with the plugin's `manifest.title` (e.
 - Runs the sub-graph and returns the final text.
 - If `forwardTools` is truthy, forwards inner tool call events to the parent run so the UI renders them.
 - Memory passthrough: the runtime injects non-destructive memory CRUD tools (search/save/read/delete) into every sub-agent's tool list automatically. `clear_memory` stays main-agent-only. No plugin API surfaces this — it's a runtime filter inside the agent builder.
+- Parent-thread visibility: the inner run is a separate graph, so its tools can't see the invoking conversation (and `RuntimeContext.history` is deliberately empty inside tool handlers — the runtime doesn't pin the thread into tool closures). Before invoking the inner agent, the wrapper reads the parent graph's live messages (`getCurrentTaskInput`) and publishes them as an AsyncLocalStorage context variable scoped to the nested invocation. Inner tools that need the invoking thread — e.g. the evals plugin's execution-trace capture — read it via `graph/thread-context.ts` (`parentThreadMessages()` / `currentTaskMessages()`).
 
 ## Prompt composition
 

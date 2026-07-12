@@ -247,12 +247,23 @@ export class EvalsEngineClient {
     return job;
   }
 
+  /**
+   * Join an API path onto the configured base URL. `new URL('/v1/x', base)`
+   * would discard any path prefix on the base, breaking deployments mounted
+   * behind a reverse-proxy subpath (`https://host/oracle-api`) — so resolve
+   * the path relative to the base with a trailing slash instead.
+   */
+  private resolveUrl(path: string): URL {
+    const base = this.baseUrl.endsWith('/') ? this.baseUrl : `${this.baseUrl}/`;
+    return new URL(path.replace(/^\//, ''), base);
+  }
+
   private async request<T>(
     method: 'GET' | 'POST',
     path: string,
     opts: { body?: unknown; signal?: AbortSignal },
   ): Promise<EvalsApiResult<T>> {
-    const url = new URL(path, this.baseUrl);
+    const url = this.resolveUrl(path);
     const headers: Record<string, string> = {};
     if (this.authToken) headers.authorization = `Bearer ${this.authToken}`;
     if (opts.body !== undefined) headers['content-type'] = 'application/json';

@@ -11,6 +11,7 @@ import {
   cidV1RawSha256Utf8,
   sha256DigestOfCanonicalJson,
 } from './content-cid.js';
+import { publishParentThreadMessages } from '../../graph/thread-context.js';
 import {
   captureTrace,
   matrixEventUri,
@@ -265,6 +266,51 @@ describe('captureTrace', () => {
     expect(matrixEventUri('!abc:ixo.world', '$evt/1')).toBe(
       'matrix:roomid/abc%3Aixo.world/e/evt%2F1',
     );
+  });
+
+  it('refuses to post an empty trace when no thread history is resolvable', async () => {
+    const postToRoom = vi.fn(async () => '$never');
+    const ctx = traceCtx([], {
+      matrix: {
+        postToRoom,
+        getRoomState: async (roomId: string) => ({ roomId, state: [] }),
+        getEventById: async (_roomId: string, eventId: string) => ({
+          eventId,
+          type: 'm.room.message',
+          content: {},
+        }),
+      },
+    });
+    const result = await captureTrace(ctx);
+    expect(result).toMatchObject({
+      error: expect.stringContaining('no thread history'),
+    });
+    expect(postToRoom).not.toHaveBeenCalled();
+  });
+
+  it('prefers the invoking thread published by the sub-agent wrapper', async () => {
+    // Tool handlers receive a context with an empty history (the runtime
+    // does not pin the thread into tool closures) — the wrapper-published
+    // parent thread is what makes the trace non-empty in production.
+    const postToRoom = vi.fn(async () => '$event-1');
+    const ctx = traceCtx([], {
+      matrix: {
+        postToRoom,
+        getRoomState: async (roomId: string) => ({ roomId, state: [] }),
+        getEventById: async (_roomId: string, eventId: string) => ({
+          eventId,
+          type: 'm.room.message',
+          content: {},
+        }),
+      },
+    });
+
+    publishParentThreadMessages(goldenHistory());
+    const result = await captureTrace(ctx);
+    expect(result).toEqual({
+      uri: 'matrix:roomid/room%3Aixo.world/e/event-1',
+      cid: GOLDEN_TRACE_CID,
+    });
   });
 });
 

@@ -16,6 +16,10 @@ import { randomUUID } from 'node:crypto';
 import { emojify } from '../utils/emoji.js';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types.js';
+import {
+  currentTaskMessages,
+  publishParentThreadMessages,
+} from './thread-context.js';
 
 const NOOP_LOGGER: Logger = {
   log: () => undefined,
@@ -273,6 +277,13 @@ export function createSubagentAsTool(
         if (!spec.model) {
           return `Error: ${spec.name} has no model configured.`;
         }
+
+        // The inner agent is a separate graph: its tools can only see the
+        // inner thread. Publish the parent thread's live messages into the
+        // nested invocation's async context so inner tools that need the
+        // invoking conversation (e.g. execution-trace capture) can read it.
+        const parentThread = currentTaskMessages(config);
+        if (parentThread) publishParentThreadMessages(parentThread);
 
         const checkpointer = await resolveCheckpointer(spec);
 

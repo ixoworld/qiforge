@@ -1,5 +1,9 @@
 import { AIMessage, ToolMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
+import {
+  currentTaskMessages,
+  parentThreadMessages,
+} from '../../graph/thread-context.js';
 import type { RuntimeContext } from '../../plugin-api/types.js';
 import { canonicalJsonString, cidV1RawSha256Utf8 } from './content-cid.js';
 
@@ -102,6 +106,27 @@ export type TraceRef = { uri: string; cid: string };
 export type TraceCaptureResult = TraceRef | { error: string };
 
 /**
+ * The thread whose execution the trace should describe. The `RuntimeContext`
+ * handed to tool handlers deliberately carries an empty message history (the
+ * runtime does not pin the thread into tool closures), so the live thread is
+ * resolved from the graph machinery instead, most-informative first:
+ *
+ * 1. The parent thread published by the sub-agent wrapper — when these tools
+ *    run inside `call_evals_agent`, the work being claimed happened in the
+ *    conversation that invoked the sub-agent, not in the sub-agent's own
+ *    short thread.
+ * 2. The current graph task's own state — the thread itself when an evals
+ *    tool is mounted directly on an agent's graph.
+ * 3. `rtCtx.history.messages` — direct programmatic invocations that build a
+ *    populated context by hand.
+ */
+function resolveThreadMessages(rtCtx: RuntimeContext): readonly BaseMessage[] {
+  return (
+    parentThreadMessages() ?? currentTaskMessages() ?? rtCtx.history.messages
+  );
+}
+
+/**
  * Capture the current turn's tool-call trace: serialize, post to the
  * session's Matrix room, and return `{ uri, cid }` for `claim.trace`. The
  * URI is an MSC2312 matrix URI (`matrix:roomid/<room>/e/<event>`) pointing
@@ -119,7 +144,15 @@ export async function captureTrace(
     };
   }
 
-  const document = serializeToolCallTrace(rtCtx.history.messages, {
+  const messages = resolveThreadMessages(rtCtx);
+  if (messages.length === 0) {
+    return {
+      error:
+        'Trace capture found no thread history for this invocation — an empty trace would be a useless audit artifact, so none was posted.',
+    };
+  }
+
+  const document = serializeToolCallTrace(messages, {
     sessionId: rtCtx.session.id,
     requestId: rtCtx.session.requestId,
   });

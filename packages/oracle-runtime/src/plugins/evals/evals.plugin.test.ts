@@ -431,6 +431,22 @@ describe('EvalsPlugin', () => {
       const result = await status.handler({ claimId: 'nope' }, runtimeCtx());
       expect(result).toEqual({ error: 'claim_job_not_found' });
     });
+
+    it('keeps a reverse-proxy subpath prefix from the base URL in request URLs', async () => {
+      fetchSpy.mockResolvedValueOnce(
+        jsonResponse({ error: 'claim_job_not_found' }, 404),
+      );
+      const plugin = new EvalsPlugin();
+      const prefixedCtx = makeBuildCtx({
+        config: { EVALS_ENGINE_URL: 'https://host.test/oracle-api' },
+      });
+      const status = toolNamed(plugin, prefixedCtx, 'get_evaluation_status');
+      await status.handler({ claimId: 'claim-1' }, runtimeCtx());
+      const [url] = fetchSpy.mock.calls[0]!;
+      expect(String(url)).toBe(
+        'https://host.test/oracle-api/v1/claims/claim-1/status',
+      );
+    });
   });
 
   describe('get_evaluation_udid tool', () => {
