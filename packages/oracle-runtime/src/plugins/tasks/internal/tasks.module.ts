@@ -1,8 +1,12 @@
 import { BullModule } from '@nestjs/bullmq';
 import type { OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Inject, Module, type DynamicModule } from '@nestjs/common';
+import { Inject, Logger, Module, type DynamicModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
+import {
+  createVerifiedWorkSubmitterFromEnv,
+  VERIFIED_WORK_SUBMITTER,
+} from '../../evals/verified-work.js';
 import { MatrixListenerBridge } from '../../../modules/messages/matrix-listener-bridge.js';
 import { MessagesModule } from '../../../modules/messages/messages.module.js';
 import { SessionsModule } from '../../../modules/sessions/sessions.module.js';
@@ -79,6 +83,19 @@ export class TasksModule implements OnModuleInit, OnModuleDestroy {
           useFactory: (config: ConfigService) =>
             new Redis(config.getOrThrow<string>('REDIS_URL'), {
               enableReadyCheck: true,
+            }),
+        },
+        {
+          // Verified-work loop (evals plugin): when enabled, completed task
+          // runs are submitted as claims to the Evals Engine and settlement
+          // gates on the verdict. Null when EVALS_VERIFIED_WORK is unset.
+          provide: VERIFIED_WORK_SUBMITTER,
+          inject: [ConfigService, TASKS_REDIS],
+          useFactory: (config: ConfigService, redis: Redis) =>
+            createVerifiedWorkSubmitterFromEnv({
+              env: { get: (key) => config.get<string>(key) },
+              redis,
+              logger: new Logger('VerifiedWork'),
             }),
         },
         { provide: TASK_FS, useClass: RedisTaskFs },

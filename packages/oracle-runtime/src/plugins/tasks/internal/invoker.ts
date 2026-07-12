@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { SessionManagerService } from '@ixo/common';
+import type { BaseMessage } from '@langchain/core/messages';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MessagesService } from '../../../modules/messages/messages.service.js';
@@ -36,9 +37,11 @@ export class AgentInvoker {
 
   /**
    * Create a throwaway session, invoke the main agent on it with `message`,
-   * delete the session, return the agent's output. Anchored in `roomId`
-   * when provided (a dedicated task room); otherwise in the user's main
-   * oracle room (resolved by `SessionManagerService`).
+   * delete the session, return the agent's output plus the run's thread
+   * (read from the checkpointer before the session teardown erases it — the
+   * verified-work hook serializes it into the claim's execution trace).
+   * Anchored in `roomId` when provided (a dedicated task room); otherwise in
+   * the user's main oracle room (resolved by `SessionManagerService`).
    *
    * Note: `roomId` here is purely the *session anchor* — `RequestPreparer`
    * uses it to satisfy its room-resolution check. Delivery to the task's
@@ -48,7 +51,7 @@ export class AgentInvoker {
     did: string;
     message: string;
     roomId?: string;
-  }): Promise<string> {
+  }): Promise<{ output: string; sessionId: string; messages: BaseMessage[] }> {
     const startedAt = Date.now();
     const oracleEntityDid = this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
     // Synthetic session id — Matrix never sees it. The leading `$` matches
@@ -89,10 +92,20 @@ export class AgentInvoker {
       if (content.length === 0) {
         throw new Error('Agent returned no output');
       }
+      // Best-effort: the thread only feeds trace capture, so a read failure
+      // must not turn a delivered run into a failed one.
+      let messages: BaseMessage[] = [];
+      try {
+        messages = await this.messages.getThreadMessages(args.did, sessionId);
+      } catch (err) {
+        this.logger.warn(
+          `Could not read run thread for ${sessionId}: ${(err as Error).message}`,
+        );
+      }
       this.logger.log(
         `runOnce completed for ${args.did} (session ${sessionId}) in ${Date.now() - startedAt}ms`,
       );
-      return content;
+      return { output: content, sessionId, messages };
     } finally {
       // Best-effort cleanup. This synthetic session lives in the user's main
       // room, so a leaked row would surface in their session list — delete it

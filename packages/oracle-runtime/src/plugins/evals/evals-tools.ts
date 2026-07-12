@@ -2,7 +2,9 @@ import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper.js';
 import type { PluginTool } from '../../plugin-api/types.js';
 import {
+  asRecord,
   isEvalsApiError,
+  jobVerdict,
   labelOutcome,
   type EvalsEngineClient,
   type EvaluationJob,
@@ -227,12 +229,11 @@ function summarizeJob(
   claimId: string,
 ): Record<string, unknown> {
   const summary = asRecord(job.resultSummary);
-  const res = asRecord(summary?.res);
   const report = asRecord(summary?.evaluationReport);
   const evidence = asRecord(report?.evidence);
   const verification = asRecord(evidence?.verificationResult);
   const applyResult = asRecord(summary?.applyResult);
-  const outcome = typeof res?.outcome === 'number' ? res.outcome : undefined;
+  const { outcome, reason, udidIssued } = jobVerdict(job);
 
   return {
     claimId,
@@ -243,7 +244,7 @@ function summarizeJob(
     ...(outcome === undefined
       ? {}
       : { outcome, outcomeLabel: labelOutcome(outcome) }),
-    ...(res?.reason === undefined ? {} : { reason: res.reason }),
+    ...(reason === undefined ? {} : { reason }),
     ...(report?.gateReason === undefined
       ? {}
       : { gateReason: report.gateReason }),
@@ -261,14 +262,8 @@ function summarizeJob(
         }
       : {}),
     ...(applyResult ? { applyResult } : {}),
-    udidIssued: typeof summary?.compactJws === 'string',
+    udidIssued,
   };
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 const EVALUATE_DESCRIPTION = `Submit a claim to the IXO Evals Engine for rubric-based evaluation and wait for the verdict.

@@ -1,6 +1,11 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Inject, Logger } from '@nestjs/common';
+import { Inject, Logger, Optional } from '@nestjs/common';
 import type { Job } from 'bullmq';
+import {
+  VERIFIED_WORK_SUBMITTER,
+  type CompletedTaskRun,
+  type VerifiedWorkSubmitter,
+} from '../../evals/verified-work.js';
 import { DeliveryService } from './delivery.js';
 import { AgentInvoker } from './invoker.js';
 import { RedisState } from './redis-state.js';
@@ -39,6 +44,9 @@ export class TaskRunWorker extends WorkerHost {
     private readonly delivery: DeliveryService,
     private readonly invoker: AgentInvoker,
     @Inject(TASKS_RUNTIME_CONFIG) private readonly config: TasksRuntimeConfig,
+    @Optional()
+    @Inject(VERIFIED_WORK_SUBMITTER)
+    private readonly verifiedWork: VerifiedWorkSubmitter | null = null,
   ) {
     super();
   }
@@ -108,6 +116,7 @@ export class TaskRunWorker extends WorkerHost {
 
       let output: string;
       let anchorEventId: string | undefined;
+      let completedRun: Omit<CompletedTaskRun, 'deliveredEventId'> | undefined;
       const beforeAction = spec.frontmatter.approval === 'before-action';
       if (beforeAction) {
         // A `before-action` task always has a dedicated room. Each run is a
@@ -140,7 +149,7 @@ export class TaskRunWorker extends WorkerHost {
           await this.invoker.deleteSession(owner, prev.sessionId);
         }
       } else {
-        output = await this.invoker.runOnce({
+        const run = await this.invoker.runOnce({
           did: owner,
           message: spec.body,
           // Anchor the throwaway session in the task's delivery room so
@@ -148,16 +157,47 @@ export class TaskRunWorker extends WorkerHost {
           roomId:
             spec.frontmatter.delivery.roomId === 'main' ? undefined : roomId,
         });
+        output = run.output;
+        // Only a delivered run is completed WORK — a `before-action` run
+        // only produced a draft awaiting approval, so it makes no claim.
+        completedRun = {
+          taskId,
+          owner,
+          title: spec.frontmatter.title,
+          output: run.output,
+          roomId,
+          sessionId: run.sessionId,
+          requestId: job.id,
+          messages: run.messages,
+        };
       }
 
       // `post` throws on Matrix failure → the run fails → BullMQ retries. A
       // silent log-and-continue here would mean "task succeeded" while the
       // user never saw the result (or the draft+ask). Drafts thread under the
       // run marker so quote-replies to them resolve to the run's session.
-      await this.delivery.post(roomId, output, anchorEventId);
+      const deliveredEventId = await this.delivery.post(
+        roomId,
+        output,
+        anchorEventId,
+      );
 
       await this.state.resetFailures(taskId);
       await this.finishRun(spec);
+
+      // Fire-and-forget: the claim submission is non-throwing by contract
+      // and must never turn a delivered run into a failed one; the ledger
+      // entry it writes gates settlement until the verdict resolves.
+      if (completedRun && this.verifiedWork) {
+        const submitter = this.verifiedWork;
+        void submitter
+          .submitCompletedTask({ ...completedRun, deliveredEventId })
+          .catch((err: unknown) =>
+            this.logger.warn(
+              `Verified-work submission for ${taskId} errored: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+      }
       this.logger.log(
         `Run end: ${taskId} in ${Date.now() - startedAt}ms (${output.length} chars, ${beforeAction ? 'draft-for-approval' : 'delivered'})`,
       );

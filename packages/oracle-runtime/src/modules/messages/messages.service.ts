@@ -141,7 +141,21 @@ export class MessagesService implements OnModuleInit {
   ): Promise<ListOracleMessagesResponse> {
     const { did, sessionId } = params;
     this.preparer.validateSessionId(sessionId, did);
+    const messages = await this.getThreadMessages(did, sessionId);
+    return transformGraphStateMessageToListMessageResponse(messages);
+  }
 
+  /**
+   * The raw graph-state messages of one checkpointer thread. Internal
+   * consumers (e.g. the tasks worker capturing an execution trace before it
+   * deletes a run's throwaway session) read the untransformed thread; the
+   * HTTP surface goes through `listMessages`, which validates the session id
+   * and projects the client shape.
+   */
+  async getThreadMessages(
+    did: string,
+    sessionId: string,
+  ): Promise<BaseMessage[]> {
     this.checkpointSync.markUserActive(did);
     try {
       const db = await this.checkpointSync.getUserDatabase(did);
@@ -149,11 +163,11 @@ export class MessagesService implements OnModuleInit {
       const tuple = await saver.getTuple({
         configurable: { thread_id: sessionId },
       });
-      const messages =
+      return (
         (tuple?.checkpoint?.channel_values?.messages as
           | BaseMessage[]
-          | undefined) ?? [];
-      return transformGraphStateMessageToListMessageResponse(messages);
+          | undefined) ?? []
+      );
     } finally {
       this.checkpointSync.markUserInactive(did);
     }

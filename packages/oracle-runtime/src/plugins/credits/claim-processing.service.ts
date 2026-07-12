@@ -19,6 +19,10 @@ import {
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { UcanService } from '../../modules/ucan/ucan.service.js';
+import {
+  VERIFIED_WORK_GATE,
+  type VerifiedWorkGate,
+} from '../evals/verified-work.js';
 import { TokenLimiter } from './token-limiter.js';
 
 /** Token used to inject the credits-plugin TokenLimiter instance into the service. */
@@ -115,6 +119,9 @@ export class ClaimProcessingService {
     @Optional()
     @Inject(CLAIM_PROCESSING_TOKEN_LIMITER)
     tokenLimiter?: TokenLimiter,
+    @Optional()
+    @Inject(VERIFIED_WORK_GATE)
+    private readonly verifiedWorkGate: VerifiedWorkGate | null = null,
   ) {
     if (!tokenLimiter) {
       throw new Error(
@@ -431,6 +438,19 @@ export class ClaimProcessingService {
             `Insufficient available credits found for user: ${userDid}`,
           );
           continue;
+        }
+
+        // Verified-work gate: while this user has task claims that have not
+        // resolved to an approved verdict, their held amount stays held —
+        // like the preconditions above, the user is retried next cron tick.
+        if (this.verifiedWorkGate) {
+          const verdict = await this.verifiedWorkGate.check(userDid);
+          if (!verdict.settle) {
+            this.logger.warn(
+              `Verified-work gate holding settlement for ${userDid}: ${verdict.reason}`,
+            );
+            continue;
+          }
         }
 
         const oraclePricingList = await Payments.getOraclePricingList(

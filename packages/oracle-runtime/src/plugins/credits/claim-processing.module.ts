@@ -1,5 +1,15 @@
-import { type DynamicModule, Module, type Provider } from '@nestjs/common';
+import {
+  type DynamicModule,
+  Logger,
+  Module,
+  type Provider,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
+import {
+  createVerifiedWorkGateFromEnv,
+  VERIFIED_WORK_GATE,
+} from '../evals/verified-work.js';
 import {
   CLAIM_PROCESSING_TOKEN_LIMITER,
   ClaimProcessingService,
@@ -42,9 +52,27 @@ export class ClaimProcessingModule {
       useValue: tokenLimiter,
     };
 
+    // Verified-work loop (evals plugin): when enabled, a user's held amount
+    // only settles while they have no unresolved task claims outstanding.
+    // Null when EVALS_VERIFIED_WORK is unset.
+    const verifiedWorkGateProvider: Provider = {
+      provide: VERIFIED_WORK_GATE,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
+        createVerifiedWorkGateFromEnv({
+          env: { get: (key) => config.get<string>(key) },
+          redis: opts.redis,
+          logger: new Logger('VerifiedWorkGate'),
+        }),
+    };
+
     return {
       module: ClaimProcessingModule,
-      providers: [tokenLimiterProvider, ClaimProcessingService],
+      providers: [
+        tokenLimiterProvider,
+        verifiedWorkGateProvider,
+        ClaimProcessingService,
+      ],
       exports: [ClaimProcessingService],
     };
   }

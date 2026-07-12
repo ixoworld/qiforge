@@ -15,6 +15,15 @@ const configSchema = z.object({
     .string()
     .url('EVALS_ENGINE_URL must be a valid HTTP(S) URL.'),
   EVALS_ENGINE_AUTH_TOKEN: z.string().min(1).optional(),
+  // Verified-work loop (see verified-work.ts). The factories in the tasks
+  // and credits modules validate coherence at boot — required-together
+  // constraints don't belong in a composed per-plugin schema, which only
+  // applies when this plugin is in the resolved set.
+  EVALS_VERIFIED_WORK: z.enum(['true', 'false']).optional(),
+  EVALS_TASK_RUBRIC_ID: z.string().min(1).optional(),
+  EVALS_TASK_CLAIM_TYPE: z.string().min(1).optional(),
+  EVALS_TASK_CLAIM_CAP: z.string().min(1).optional(),
+  EVALS_VERIFIED_WORK_WAIT_SECONDS: z.string().regex(/^\d+$/).optional(),
 });
 
 function resolveEvalsConfig(config: MergedConfig): {

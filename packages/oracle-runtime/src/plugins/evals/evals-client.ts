@@ -21,6 +21,34 @@ export function labelOutcome(outcome: number | undefined): string | undefined {
   return OUTCOME_LABELS[outcome] ?? `unknown(${outcome})`;
 }
 
+/** Narrow an unknown to a plain object, or undefined. */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * The verdict fields nested inside a job's `resultSummary`: the outcome code
+ * (`res.outcome`, mirroring x/claims EvaluationStatus), the engine's reason,
+ * and whether a signed UDID receipt was minted for the claim.
+ */
+export function jobVerdict(job: EvaluationJob): {
+  outcome?: number;
+  reason?: string;
+  udidIssued: boolean;
+} {
+  const summary = asRecord(job.resultSummary);
+  const res = asRecord(summary?.res);
+  const outcome = typeof res?.outcome === 'number' ? res.outcome : undefined;
+  const reason = typeof res?.reason === 'string' ? res.reason : undefined;
+  return {
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(reason === undefined ? {} : { reason }),
+    udidIssued: typeof summary?.compactJws === 'string',
+  };
+}
+
 /**
  * Expected domain responses (validation errors, conflicts, not-yet-issued)
  * come back to the agent as `{ error, ... }` objects it can react to.
