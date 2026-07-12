@@ -7,6 +7,7 @@ import {
   type EvalsEngineClient,
   type EvaluationJob,
 } from './evals-client.js';
+import { captureTrace } from './evals-trace.js';
 
 /**
  * The hosted evaluate endpoint rejects requests with unknown keys at every
@@ -161,6 +162,12 @@ const evaluateSchema = z.object({
     .describe(
       'How long to wait for the evaluation to complete before returning (0-55s, default 15). If it is still running when the wait expires, the tool returns status "pending" — check again later with get_evaluation_status.',
     ),
+  attachTrace: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Capture this conversation turn's tool-call trace, persist it to the session's Matrix room, and attach it as claim.trace {uri, cid}. Set true when the rubric has requireTraceForAutomated and claim.automatedAgent is true but no trace is supplied. Ignored when claim.trace is already provided.",
+    ),
 });
 
 const claimIdSchema = z.object({
@@ -285,7 +292,9 @@ IMPORTANT:
 - claim.jti must be UNIQUE per submission — the engine rejects replays (409 jti conflict). Generate a fresh one every time.
 - If status comes back "pending", the evaluation is still running: use get_evaluation_status with the claimId later instead of resubmitting.
 - A 4xx response is returned as { "error": "<code>" } — fix the request shape and retry with a fresh jti.
-- Optional: evidence ({ packet, envelope?, envelopes? }) for evidence-based verification; claim.trace ({ uri, cid }) when the rubric requires traces for automated agents; claim.claimType to bind to the governance maturity ladder.`;
+- Optional: evidence ({ packet, envelope?, envelopes? }) for evidence-based verification; claim.trace ({ uri, cid }) when the rubric requires traces for automated agents; claim.claimType to bind to the governance maturity ladder.
+- When the rubric has requireTraceForAutomated and you have no trace, set attachTrace: true — this tool captures the current turn's tool-call trace, stores it in the session's Matrix room, and attaches claim.trace automatically.
+- If you supply evidence, evidence.packet.claimId MUST equal claim.id (checked before submission).`;
 
 const STATUS_DESCRIPTION = `Check the status and verdict of a previously submitted claim evaluation.
 
@@ -334,7 +343,28 @@ Use this to report what is stuck awaiting a human decision. Adjudicating a case 
 export function createEvalsTools(client: EvalsEngineClient): PluginTool[] {
   const evaluateClaim = tool(
     async (rawArgs, ctx) => {
-      const { waitSeconds, ...request } = evaluateSchema.parse(rawArgs);
+      const { waitSeconds, attachTrace, ...request } =
+        evaluateSchema.parse(rawArgs);
+
+      // Catch the claim-binding mismatch locally: the engine only rejects it
+      // inside the async evaluation job, as a hard invalid_evidence verdict.
+      const packetClaimId = asRecord(request.evidence?.packet)?.claimId;
+      if (
+        typeof packetClaimId === 'string' &&
+        packetClaimId !== request.claim.id
+      ) {
+        return {
+          error: 'evidence_claim_binding_mismatch',
+          guidance: `evidence.packet.claimId ("${packetClaimId}") must equal claim.id ("${request.claim.id}") or the engine rejects the evidence as invalid.`,
+        };
+      }
+
+      if (attachTrace && !request.claim.trace) {
+        const trace = await captureTrace(ctx);
+        if ('error' in trace) return trace;
+        request.claim = { ...request.claim, trace };
+      }
+
       const accepted = await client.evaluateClaim(request, ctx.abortSignal);
       if (isEvalsApiError(accepted)) return accepted;
 
