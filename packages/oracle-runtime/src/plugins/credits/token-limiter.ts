@@ -221,10 +221,14 @@ export class TokenLimiter {
     totalTokens: number;
     model?: string;
   }): number {
+    // Post-markup USD cost via the same 3-priority fallback — logged alongside
+    // credits in every branch so the source and dollar cost are both visible.
+    const usdCost = this.calculateCostUsdWithMarkup(params);
+
     if (params.providerCost != null && params.providerCost > 0) {
       const credits = this.usdCostToCredits(params.providerCost);
       this.logger.log(
-        `[TokenLimiter] Using provider cost: $${params.providerCost} → ${credits} credits`,
+        `[TokenLimiter] source=provider-cost providerCost=$${params.providerCost} costUsd=$${usdCost.toFixed(6)} → ${credits} credits (network=${this.network})`,
       );
       return credits;
     }
@@ -236,13 +240,13 @@ export class TokenLimiter {
         pricing,
       );
       this.logger.log(
-        `[TokenLimiter] Using cached pricing for model=${params.model ?? 'unknown'} → ${credits} credits`,
+        `[TokenLimiter] source=model-pricing model=${params.model ?? 'unknown'} in=${params.inputTokens} out=${params.outputTokens} costUsd=$${usdCost.toFixed(6)} → ${credits} credits (network=${this.network})`,
       );
       return credits;
     }
     const credits = this.llmTokenToCredits(params.totalTokens);
     this.logger.log(
-      `[TokenLimiter] Using flat-rate fallback (model=${params.model ?? 'unknown'}) → ${credits} credits`,
+      `[TokenLimiter] source=flat-rate model=${params.model ?? 'unknown'} totalTokens=${params.totalTokens} costUsd=$${usdCost.toFixed(6)} → ${credits} credits (network=${this.network})`,
     );
     return credits;
   }
