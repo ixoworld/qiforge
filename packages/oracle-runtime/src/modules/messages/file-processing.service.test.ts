@@ -677,6 +677,83 @@ describe('FileProcessingService', () => {
     });
   });
 
+  describe('room-key retry (via processFileFromEventId)', () => {
+    const ROOM_KEY_ERROR =
+      "Can't find the room key to decrypt the event, withheld code: None";
+
+    it('retries when the room key has not arrived yet, then succeeds', async () => {
+      vi.useFakeTimers();
+      matrixGetEvent
+        .mockRejectedValueOnce(new Error(ROOM_KEY_ERROR))
+        .mockResolvedValueOnce({
+          content: { url: 'mxc://h/evt', msgtype: 'm.text' },
+        });
+      matrixDownloadContent.mockResolvedValue({
+        data: Buffer.from('hello world', 'utf-8'),
+      });
+
+      const promise = svc.processFileFromEventId(ROOM_ID, '$evt1', {
+        filename: 'notes.txt',
+        mimetype: 'text/plain',
+      });
+      // Flush the first backoff (750ms) so the retry fires.
+      await vi.advanceTimersByTimeAsync(1_000);
+      const result = await promise;
+
+      expect(result).toContain('hello world');
+      expect(matrixGetEvent).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry non-crypto errors', async () => {
+      matrixGetEvent.mockRejectedValue(new Error('Event not found'));
+
+      await expect(
+        svc.processFileFromEventId(ROOM_ID, '$evt1', {
+          filename: 'notes.txt',
+          mimetype: 'text/plain',
+        }),
+      ).rejects.toThrow(/Event not found/);
+      expect(matrixGetEvent).toHaveBeenCalledTimes(1);
+    });
+
+    it('gives up after the max attempts, and falls back to a backup restore', async () => {
+      vi.useFakeTimers();
+      const restoreKeyBackup = vi
+        .fn()
+        .mockResolvedValue({ imported: 0, total: 3 });
+      matrixGetInstance.mockReturnValue({
+        getClient: () => ({
+          mxClient: {
+            downloadContent: matrixDownloadContent,
+            getEvent: matrixGetEvent,
+            crypto: {
+              decryptMedia: matrixDecryptMedia,
+              getBackupManager: () => ({ restoreKeyBackup }),
+            },
+          },
+        }),
+      });
+      matrixGetEvent.mockRejectedValue(new Error(ROOM_KEY_ERROR));
+
+      const promise = svc.processFileFromEventId(ROOM_ID, '$evt1', {
+        filename: 'notes.txt',
+        mimetype: 'text/plain',
+      });
+      // Swallow the eventual rejection so it isn't flagged as unhandled while
+      // we drive the fake timers forward; we assert on it explicitly below.
+      const settled = promise.then(
+        () => 'resolved',
+        (err: unknown) => (err instanceof Error ? err.message : String(err)),
+      );
+      // Advance through every backoff: 750 + 1500 + 3000 + 6000 ms.
+      await vi.advanceTimersByTimeAsync(11_500);
+
+      expect(await settled).toMatch(/room key/);
+      expect(matrixGetEvent).toHaveBeenCalledTimes(5);
+      expect(restoreKeyBackup).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('downloadFromUrl (via downloadAndProcessFile)', () => {
     it('aborts the request after MATRIX_DOWNLOAD_TIMEOUT_MS', async () => {
       vi.useFakeTimers();

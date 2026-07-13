@@ -9,6 +9,11 @@ import {
   type FileProcessingCreditSink,
 } from './file-processing-credit-sink.port.js';
 
+/** The Matrix client handle returned by `MatrixManager.getClient()`, non-null. */
+type MatrixClientHandle = NonNullable<
+  ReturnType<ReturnType<typeof MatrixManager.getInstance>['getClient']>
+>;
+
 interface AiProcessUsage {
   cost?: number;
   promptTokens?: number;
@@ -26,6 +31,21 @@ const MAX_TEXT_LENGTH = 50_000;
 const MATRIX_DOWNLOAD_TIMEOUT_MS = 60_000;
 const AI_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_ERROR_BODY_LENGTH = 1024;
+
+// Decrypting an attachment needs the Megolm room key for that event. The
+// sender shares it out-of-band as an `m.room_key` to-device message, which is
+// processed on a *separate* sync cycle from the event itself — so when a user
+// uploads a file the encrypted event frequently arrives before its key. A
+// single decrypt attempt loses that race and fails with "Can't find the room
+// key". These retries give the key time to land: ~750ms, 1.5s, 3s, 6s between
+// attempts (~11s total worst case), well inside the download/AI timeouts.
+const MATRIX_DECRYPT_MAX_ATTEMPTS = 5;
+const MATRIX_DECRYPT_BASE_DELAY_MS = 750;
+// A full server-side key-backup restore is the only way to bypass the SDK's
+// per-session "missing from backup" negative cache, so we fall back to it once
+// mid-retry — throttled so overlapping requests don't trigger repeated full
+// restores.
+const MATRIX_BACKUP_RESTORE_MIN_INTERVAL_MS = 30_000;
 
 const SANDBOX_TRUNCATE_LIMIT = 500;
 const SANDBOX_OUTPUT_PREFIX = '/workspace/output';
@@ -174,6 +194,9 @@ export class FileProcessingService {
   private readonly providerBaseURL: string;
   private readonly providerHeaders: Record<string, string>;
   private readonly processingModel: string;
+
+  /** Epoch ms of the last full key-backup restore, for throttling. */
+  private lastBackupRestoreAt = 0;
 
   constructor(
     private readonly config: ConfigService,
@@ -664,7 +687,7 @@ export class FileProcessingService {
       throw new Error('Matrix client not available');
     }
 
-    const event = await client.mxClient.getEvent(roomId, eventId);
+    const event = await this.getDecryptedEventWithRetry(client, roomId, eventId);
     if (!event.content) {
       throw new Error('Event has no content');
     }
@@ -687,6 +710,92 @@ export class FileProcessingService {
 
     this.logger.log(`Downloaded ${data.length} bytes from event ${eventId}`);
     return data;
+  }
+
+  /**
+   * Fetch and decrypt a Matrix event, retrying when the Megolm room key has
+   * not arrived yet. Decrypt failures caused by a missing room key are almost
+   * always a transient race — the sender's key share is still in flight — so
+   * we back off and retry. Any other error (event not found, malformed
+   * content, network) fails immediately. Midway through, we also trigger a
+   * key-backup restore as a fallback for keys that were never shared to-device
+   * but do exist in the server-side backup.
+   */
+  private async getDecryptedEventWithRetry(
+    client: MatrixClientHandle,
+    roomId: string,
+    eventId: string,
+  ) {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < MATRIX_DECRYPT_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await client.mxClient.getEvent(roomId, eventId);
+      } catch (error) {
+        lastError = error;
+        // Non-crypto failures won't fix themselves with time — fail fast.
+        if (!this.isMissingRoomKeyError(error)) {
+          throw error;
+        }
+        const isLastAttempt = attempt === MATRIX_DECRYPT_MAX_ATTEMPTS - 1;
+        if (isLastAttempt) {
+          break;
+        }
+        const delayMs = MATRIX_DECRYPT_BASE_DELAY_MS * 2 ** attempt;
+        this.logger.warn(
+          `Room key for event ${eventId} not available yet (attempt ${attempt + 1}/${MATRIX_DECRYPT_MAX_ATTEMPTS}); the sender's key share is still in flight — retrying in ${delayMs}ms`,
+        );
+        // Halfway through the retries, fall back to a full backup restore. The
+        // SDK's per-event recovery negatively caches a session it can't find,
+        // so a fresh getEvent alone won't re-check the backup — only a full
+        // restore imports keys uploaded since.
+        if (attempt === Math.floor(MATRIX_DECRYPT_MAX_ATTEMPTS / 2)) {
+          await this.tryRestoreKeyBackup();
+        }
+        await this.sleep(delayMs);
+      }
+    }
+    throw lastError;
+  }
+
+  /** True when a decrypt error is a missing/withheld Megolm room key. */
+  private isMissingRoomKeyError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /can'?t find the room key|withheld|megolmdecryptionerror|missing.*(room|session) key|no.*(room|session) key/i.test(
+      message,
+    );
+  }
+
+  /**
+   * Best-effort full restore of room keys from the server-side key backup.
+   * Throttled so overlapping attachment requests don't each kick off a full
+   * restore. Never throws — a failed restore just means the retry loop keeps
+   * waiting on the to-device key share.
+   */
+  private async tryRestoreKeyBackup(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastBackupRestoreAt < MATRIX_BACKUP_RESTORE_MIN_INTERVAL_MS) {
+      return;
+    }
+    this.lastBackupRestoreAt = now;
+    try {
+      const client = MatrixManager.getInstance().getClient();
+      const backupManager = client?.mxClient?.crypto?.getBackupManager();
+      if (!backupManager) {
+        return;
+      }
+      const result = await backupManager.restoreKeyBackup();
+      this.logger.log(
+        `Restored ${result.imported}/${result.total} room key(s) from Matrix key backup`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Key-backup restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
