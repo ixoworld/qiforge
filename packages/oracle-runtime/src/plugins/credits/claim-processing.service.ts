@@ -55,6 +55,10 @@ interface ClaimProcessingConfig {
   // Raw env string — ConfigService reads process.env before the validated
   // (coerced) config, so this is never a boolean here.
   DISABLE_CREDITS?: string;
+  // Minimum held credits before a claim is settled on-chain. Arrives as a
+  // raw string when set in process.env, or the zod-coerced number (from the
+  // loaded validated config) when unset. Parsed defensively at boot.
+  MINIMUM_CLAIM_THRESHOLD?: string | number;
 }
 
 interface ProcessClaimParams {
@@ -78,8 +82,14 @@ interface SplitContext {
   originalAmount: number;
 }
 
-/** Minimum held credits before submitting a claim (prevents spam of tiny txns). */
-const MINIMUM_CLAIM_THRESHOLD = 5000;
+/**
+ * Default minimum held credits before submitting a claim (prevents spam of
+ * tiny txns). Overridable per-oracle via the `MINIMUM_CLAIM_THRESHOLD` env var.
+ */
+const DEFAULT_MINIMUM_CLAIM_THRESHOLD = 1000;
+
+/** Log prefix for the whole claim-settlement flow — grep this to trace it end-to-end. */
+const LOG_TAG = '[Credits/Claims]';
 
 /**
  * Submits held-credit claims to the chain on a fixed cron. Pulls users with
@@ -102,6 +112,7 @@ export class ClaimProcessingService {
   private readonly claimProcessingCheckpointer: BaseCheckpointSaver;
   private readonly claimProcessingDbPath: string;
   private readonly tokenLimiter: TokenLimiter;
+  private readonly minimumClaimThreshold: number;
 
   private readonly retryPolicy = {
     maxAttempts: 3,
@@ -128,6 +139,16 @@ export class ClaimProcessingService {
         ? MAINNET_IBC_DENOM
         : 'uixo';
 
+    this.minimumClaimThreshold = this.resolveMinimumClaimThreshold();
+
+    this.logger.log(
+      `${LOG_TAG} Claim processing initialized: network=${this.configService.get(
+        'NETWORK',
+      )} denom=${this.denom} minimumClaimThreshold=${this.minimumClaimThreshold} disableCredits=${
+        this.configService.get('DISABLE_CREDITS') ?? 'false'
+      } matrixAccountRoomId=${this.configService.get('MATRIX_ACCOUNT_ROOM_ID') ? 'set' : 'MISSING'}`,
+    );
+
     const sqlitePath = this.configService.getOrThrow('SQLITE_DATABASE_PATH');
     const claimProcessingFolder = path.join(sqlitePath, 'claim_processing');
     this.claimProcessingDbPath = path.join(
@@ -149,6 +170,29 @@ export class ClaimProcessingService {
     const sqliteSaver = SqliteSaver.fromConnString(this.claimProcessingDbPath);
     this.claimProcessingCheckpointer =
       sqliteSaver as unknown as BaseCheckpointSaver;
+  }
+
+  /**
+   * Resolve the minimum held-credits threshold from config. Accepts a raw env
+   * string (process.env precedence) or the zod-coerced number (from the loaded
+   * validated config); falls back to {@link DEFAULT_MINIMUM_CLAIM_THRESHOLD}
+   * when unset or invalid.
+   */
+  private resolveMinimumClaimThreshold(): number {
+    const raw = this.configService.get('MINIMUM_CLAIM_THRESHOLD');
+    if (raw === undefined || raw === null || raw === '') {
+      return DEFAULT_MINIMUM_CLAIM_THRESHOLD;
+    }
+
+    const parsed = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      this.logger.warn(
+        `${LOG_TAG} Invalid MINIMUM_CLAIM_THRESHOLD="${String(raw)}"; falling back to default ${DEFAULT_MINIMUM_CLAIM_THRESHOLD}`,
+      );
+      return DEFAULT_MINIMUM_CLAIM_THRESHOLD;
+    }
+
+    return Math.round(parsed);
   }
 
   /**
@@ -177,6 +221,10 @@ export class ClaimProcessingService {
       retry: this.retryPolicy,
     },
     async (params: ProcessClaimParams) => {
+      this.logger.log(
+        `${LOG_TAG} [step 1/4 submitIntent] user=${params.userDid} amount=${params.heldAmount} denom=${params.denom} — sending payment to escrow`,
+      );
+
       const collectionId =
         params.subscription.claimCollections.oracleClaimsCollectionId;
       if (!collectionId) {
@@ -194,7 +242,7 @@ export class ClaimProcessingService {
 
       if (hasActiveIntent) {
         this.logger.log(
-          `User ${params.userDid} already has an active intent, skipping`,
+          `${LOG_TAG} [step 1/4 submitIntent] user=${params.userDid} already has an active intent — reusing it, skipping escrow payment`,
         );
         return { success: true, transactionHash: null };
       }
@@ -208,13 +256,16 @@ export class ClaimProcessingService {
       });
 
       if (intent.code !== 0) {
+        this.logger.error(
+          `${LOG_TAG} [step 1/4 submitIntent] FAILED user=${params.userDid} code=${intent.code}: ${intent.rawLog || 'Unknown error'}`,
+        );
         throw new Error(
           `Failed to send payment to escrow: ${intent.rawLog || 'Unknown error'}`,
         );
       }
 
       this.logger.log(
-        `Successfully sent payment to escrow for user: ${params.userDid} with intent tx hash: ${intent.transactionHash}`,
+        `${LOG_TAG} [step 1/4 submitIntent] OK user=${params.userDid} intentTxHash=${intent.transactionHash}`,
       );
 
       return { success: true, transactionHash: intent.transactionHash };
@@ -228,6 +279,10 @@ export class ClaimProcessingService {
       retry: this.retryPolicy,
     },
     async (params: ProcessClaimParams) => {
+      this.logger.log(
+        `${LOG_TAG} [step 2/4 saveToMatrix] user=${params.userDid} amount=${params.heldAmount} — signing claim and saving to Matrix`,
+      );
+
       const collectionId =
         params.subscription.claimCollections.oracleClaimsCollectionId;
       if (!collectionId) {
@@ -280,7 +335,7 @@ export class ClaimProcessingService {
       });
 
       this.logger.log(
-        `Successfully submitted and saved signed claim ${cid} for user: ${params.userDid}`,
+        `${LOG_TAG} [step 2/4 saveToMatrix] OK user=${params.userDid} claimCid=${cid}`,
       );
 
       return { cid };
@@ -294,6 +349,10 @@ export class ClaimProcessingService {
       retry: this.retryPolicy,
     },
     async (params: ProcessClaimParams & { cid: string }) => {
+      this.logger.log(
+        `${LOG_TAG} [step 3/4 submitToChain] user=${params.userDid} claimCid=${params.cid} amount=${params.heldAmount} — submitting on-chain`,
+      );
+
       const collectionId =
         params.subscription.claimCollections.oracleClaimsCollectionId;
       if (!collectionId) {
@@ -317,13 +376,16 @@ export class ClaimProcessingService {
       });
 
       if (result.code !== 0) {
+        this.logger.error(
+          `${LOG_TAG} [step 3/4 submitToChain] FAILED user=${params.userDid} claimCid=${params.cid} code=${result.code}: ${result.rawLog || 'Unknown error'}`,
+        );
         throw new Error(
           `Failed to submit claim to chain: ${result.rawLog || 'Unknown error'}`,
         );
       }
 
       this.logger.log(
-        `Successfully submitted claim ${params.cid} to chain for user: ${params.userDid}`,
+        `${LOG_TAG} [step 3/4 submitToChain] OK user=${params.userDid} claimCid=${params.cid} chainTxHash=${result.transactionHash}`,
       );
 
       return { success: true, transactionHash: result.transactionHash };
@@ -341,10 +403,14 @@ export class ClaimProcessingService {
         this.configService.get('SUBSCRIPTION_URL') ??
         getSubscriptionUrlByNetwork(params.configService.getOrThrow('NETWORK'));
 
+      this.logger.log(
+        `${LOG_TAG} [step 4/4 sendToSubsApi] user=${params.userDid} claimCid=${params.cid} — notifying subscription API at ${subscriptionUrl}`,
+      );
+
       await submitClaimToSubscriptionApi(subscriptionUrl, params.cid);
 
       this.logger.log(
-        `Successfully sent claim ${params.cid} to subscription API for user: ${params.userDid}`,
+        `${LOG_TAG} [step 4/4 sendToSubsApi] OK user=${params.userDid} claimCid=${params.cid}`,
       );
 
       return { success: true };
@@ -390,51 +456,72 @@ export class ClaimProcessingService {
     if (disableCredits) {
       this.logger.debug(
         matrixAccountRoomId
-          ? 'Claims task submission skipped (DISABLE_CREDITS=true)'
-          : 'Claims task submission skipped (MATRIX_ACCOUNT_ROOM_ID not set)',
+          ? `${LOG_TAG} Cron tick skipped (DISABLE_CREDITS=true)`
+          : `${LOG_TAG} Cron tick skipped (MATRIX_ACCOUNT_ROOM_ID not set)`,
       );
       return;
     }
 
     const users = await this.tokenLimiter.listUsersWithHeldAmount(
-      MINIMUM_CLAIM_THRESHOLD,
+      this.minimumClaimThreshold,
     );
-    this.logger.log(`Processing held amount for ${users.length} users`);
+    this.logger.log(
+      `${LOG_TAG} Cron tick: ${users.length} user(s) at/above threshold ${this.minimumClaimThreshold} — starting settlement`,
+    );
+
+    let submitted = 0;
+    let skipped = 0;
+    let failed = 0;
 
     for (const [userDid, rawHeldAmount] of users) {
       try {
         const heldAmount = Math.round(rawHeldAmount);
-        if (heldAmount < MINIMUM_CLAIM_THRESHOLD) {
+        this.logger.log(
+          `${LOG_TAG} user=${userDid} heldAmount=${heldAmount} — evaluating`,
+        );
+        if (heldAmount < this.minimumClaimThreshold) {
           this.logger.debug(
-            `Held amount ${heldAmount} for user ${userDid} below threshold ${MINIMUM_CLAIM_THRESHOLD}, skipping`,
+            `${LOG_TAG} SKIP user=${userDid} heldAmount=${heldAmount} below threshold ${this.minimumClaimThreshold}`,
           );
+          skipped++;
           continue;
         }
 
         const subscription =
           await this.tokenLimiter.getSubscriptionPayload(userDid);
         if (!subscription) {
-          this.logger.warn(`No subscription found for user: ${userDid}`);
+          this.logger.warn(
+            `${LOG_TAG} SKIP user=${userDid} — no subscription payload found in Redis`,
+          );
+          skipped++;
           continue;
         }
 
         if (!subscription.claimCollections.oracleClaimsCollectionId) {
           this.logger.warn(
-            `No oracle claims collection ID found for user: ${userDid}`,
+            `${LOG_TAG} SKIP user=${userDid} — subscription has no oracleClaimsCollectionId`,
           );
+          skipped++;
           continue;
         }
 
         const availableCredits = subscription.totalCredits;
         if (availableCredits < heldAmount) {
           this.logger.warn(
-            `Insufficient available credits found for user: ${userDid}`,
+            `${LOG_TAG} SKIP user=${userDid} — insufficient available credits (available=${availableCredits} < held=${heldAmount})`,
           );
+          skipped++;
           continue;
         }
 
-        const oraclePricingList = await Payments.getOraclePricingList(
-          this.configService.getOrThrow('ORACLE_ENTITY_DID'),
+        const oracleEntityDid =
+          this.configService.getOrThrow('ORACLE_ENTITY_DID');
+        const oraclePricingList =
+          await Payments.getOraclePricingList(oracleEntityDid);
+        this.logger.log(
+          `${LOG_TAG} user=${userDid} pricing: fetched on-chain oracle pricing list for entity=${oracleEntityDid} → ${JSON.stringify(
+            oraclePricingList,
+          )}`,
         );
         const maxAllowedClaimAmount = oraclePricingList.find(
           (item) => item.denom === this.denom,
@@ -448,6 +535,9 @@ export class ClaimProcessingService {
 
         const maxAmount = parseInt(maxAllowedClaimAmount, 10);
         const splits = this.calculateSplits(heldAmount, maxAmount);
+        this.logger.log(
+          `${LOG_TAG} user=${userDid} cost: claiming heldAmount=${heldAmount} ${this.denom} | per-claim ceiling maxAmount=${maxAmount} ${this.denom} (from oracle pricing list) | ${splits.length} claim(s)`,
+        );
 
         const collectionId =
           subscription.claimCollections.oracleClaimsCollectionId;
@@ -461,7 +551,7 @@ export class ClaimProcessingService {
 
         if (splits.length > 1) {
           this.logger.log(
-            `Held amount ${heldAmount} for user ${userDid} exceeds max allowed ${maxAmount}. Splitting into ${splits.length} chunks: ${splits.join(', ')}`,
+            `${LOG_TAG} user=${userDid} heldAmount=${heldAmount} exceeds per-claim max ${maxAmount} — splitting into ${splits.length} chunks: ${splits.join(', ')}`,
           );
 
           for (let i = 0; i < splits.length; i++) {
@@ -492,11 +582,11 @@ export class ClaimProcessingService {
           }
 
           this.logger.log(
-            `Successfully processed all ${splits.length} splits for user: ${userDid}`,
+            `${LOG_TAG} DONE user=${userDid} — all ${splits.length} split claim(s) submitted successfully`,
           );
         } else {
           this.logger.log(
-            `Processing held amount ${heldAmount} for user ${userDid} (no splitting needed)`,
+            `${LOG_TAG} user=${userDid} heldAmount=${heldAmount} within per-claim max ${maxAmount} — no splitting needed`,
           );
 
           await this.processAmount(
@@ -505,15 +595,23 @@ export class ClaimProcessingService {
             subscriptionForProcessing,
           );
         }
+
+        submitted++;
       } catch (error) {
+        failed++;
         this.logger.error(
-          `Error processing held amount for user ${userDid}:`,
-          error instanceof Error ? error.message : String(error),
+          `${LOG_TAG} FAILED user=${userDid} — ${
+            error instanceof Error ? error.message : String(error)
+          } (held amount + pending claim kept, will retry next tick)`,
           error instanceof Error ? error.stack : undefined,
         );
         // Don't clear held amount or pending claim - will retry next run.
       }
     }
+
+    this.logger.log(
+      `${LOG_TAG} Cron tick complete: submitted=${submitted} skipped=${skipped} failed=${failed} (of ${users.length} candidate user(s))`,
+    );
   }
 
   /**
@@ -536,11 +634,13 @@ export class ClaimProcessingService {
       );
     }
 
-    if (splitContext) {
-      this.logger.log(
-        `Processing split ${splitContext.index}/${splitContext.total} (amount: ${heldAmount}, original: ${splitContext.originalAmount}) for user: ${userDid}`,
-      );
-    }
+    const claimLabel = splitContext
+      ? `split ${splitContext.index}/${splitContext.total} (amount=${heldAmount}, original=${splitContext.originalAmount})`
+      : `full claim (amount=${heldAmount})`;
+
+    this.logger.log(
+      `${LOG_TAG} user=${userDid} — starting 4-step workflow for ${claimLabel}`,
+    );
 
     const internalClaimId = await this.tokenLimiter.getOrCreatePendingClaim(
       userDid,
@@ -575,21 +675,21 @@ export class ClaimProcessingService {
       if (splitContext) {
         await this.tokenLimiter.incrementUserHeldAmount(userDid, -heldAmount);
         this.logger.log(
-          `Successfully processed split ${splitContext.index}/${splitContext.total} (claim ${result.cid}) and decremented held amount by ${heldAmount} for user: ${userDid}`,
+          `${LOG_TAG} ✔ SUBMITTED user=${userDid} claimCid=${result.cid} — split ${splitContext.index}/${splitContext.total} done, held amount decremented by ${heldAmount}`,
         );
       } else {
         await this.tokenLimiter.deleteUserHeldAmount(userDid);
         this.logger.log(
-          `Successfully processed claim ${result.cid} and cleared held amount and pending claim for user: ${userDid}`,
+          `${LOG_TAG} ✔ SUBMITTED user=${userDid} claimCid=${result.cid} — full claim done, held amount + pending claim cleared`,
         );
       }
     } else {
       this.logger.warn(
-        `Workflow completed but result indicates failure for user: ${userDid}${
+        `${LOG_TAG} workflow completed but result indicates failure for user=${userDid}${
           splitContext
             ? ` (split ${splitContext.index}/${splitContext.total})`
             : ''
-        }`,
+        } — held amount kept, will retry next tick`,
       );
     }
   }

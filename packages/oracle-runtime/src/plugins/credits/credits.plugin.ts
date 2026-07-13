@@ -44,6 +44,10 @@ const CreditsConfigSchema = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => v === 'true'),
+  // Minimum held credits before the claim-processing cron settles a claim
+  // on-chain. Validated when set; when unset, the claim-processing service
+  // applies its own default (prevents spamming the chain with tiny txns).
+  MINIMUM_CLAIM_THRESHOLD: z.coerce.number().int().positive().optional(),
 });
 
 type CreditsConfig = z.infer<typeof CreditsConfigSchema>;
