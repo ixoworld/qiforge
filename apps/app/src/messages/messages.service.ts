@@ -30,6 +30,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Database as DatabaseType } from 'better-sqlite3';
 import type { Request, Response } from 'express';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import {
@@ -73,11 +74,30 @@ import {
   sweepExpiredBotThreads,
 } from './group-chat.guard';
 import { type ListMessagesDto } from './dto/list-messages.dto';
+import {
+  type MessageFeedback,
+  type MessageFeedbackResponse,
+} from './dto/message-feedback.dto';
+import {
+  clearMessageFeedback as clearPersistedMessageFeedback,
+  listMessageFeedback,
+  saveMessageFeedback,
+  validateMessageFeedbackTarget,
+} from './message-feedback.repository';
 import { type SendMessagePayload } from './dto/send-message.dto';
 import {
   FileProcessingService,
   type SandboxUploadConfig,
 } from './file-processing.service';
+
+type MessageDto = ListOracleMessagesResponse['messages'][number];
+export type MessageWithFeedback = MessageDto & {
+  feedback?: MessageFeedback;
+};
+export interface ListMessagesWithFeedbackResponse {
+  messages: MessageWithFeedback[];
+  capabilities: { messageFeedback: true };
+}
 
 @Injectable()
 export class MessagesService implements OnModuleInit, OnModuleDestroy {
@@ -941,7 +961,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       did: string;
       homeServer?: string;
     },
-  ): Promise<ListOracleMessagesResponse> {
+  ): Promise<ListMessagesWithFeedbackResponse> {
     const { did, sessionId } = params;
     if (!sessionId || !did) {
       throw new BadRequestException('Invalid parameters');
@@ -950,24 +970,85 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     this.checkpointStorageSyncService.markUserActive(did);
     try {
       const db = await this.checkpointStorageSyncService.getUserDatabase(did);
-      const saver = SqliteSaver.fromDatabase(db);
+      const result = await this.loadSessionMessages(db, sessionId);
+      const feedbackByMessageId = listMessageFeedback(db, sessionId);
 
-      const rows = db
-        .prepare(
-          `SELECT message FROM messages
-           WHERE thread_id = ? AND checkpoint_ns = ?
-           ORDER BY created_at ASC, rowid ASC`,
-        )
-        .all(sessionId, '') as { message: Buffer | string }[];
-
-      const messages: BaseMessage[] = await Promise.all(
-        rows.map((row) => saver.serde.loadsTyped('json', row.message)),
-      );
-
-      return transformGraphStateMessageToListMessageResponse(messages);
+      return {
+        capabilities: { messageFeedback: true },
+        messages: result.messages.map((message) => {
+          const feedback = feedbackByMessageId.get(message.id);
+          return message.type === 'ai' && feedback
+            ? { ...message, feedback }
+            : message;
+        }),
+      };
     } finally {
       this.checkpointStorageSyncService.markUserInactive(did);
     }
+  }
+
+  public async setMessageFeedback(params: {
+    did: string;
+    sessionId: string;
+    messageId: string;
+    feedback: MessageFeedback;
+  }): Promise<MessageFeedbackResponse> {
+    const { did, sessionId, messageId, feedback } = params;
+    this.checkpointStorageSyncService.markUserActive(did);
+
+    try {
+      const db = await this.checkpointStorageSyncService.getUserDatabase(did);
+      await this.assertMessageFeedbackTarget(db, sessionId, messageId);
+
+      return saveMessageFeedback(db, { sessionId, messageId, feedback });
+    } finally {
+      this.checkpointStorageSyncService.markUserInactive(did);
+    }
+  }
+
+  public async clearMessageFeedback(params: {
+    did: string;
+    sessionId: string;
+    messageId: string;
+  }): Promise<MessageFeedbackResponse> {
+    const { did, sessionId, messageId } = params;
+    this.checkpointStorageSyncService.markUserActive(did);
+
+    try {
+      const db = await this.checkpointStorageSyncService.getUserDatabase(did);
+      await this.assertMessageFeedbackTarget(db, sessionId, messageId);
+      return clearPersistedMessageFeedback(db, { sessionId, messageId });
+    } finally {
+      this.checkpointStorageSyncService.markUserInactive(did);
+    }
+  }
+
+  private async loadSessionMessages(
+    db: DatabaseType,
+    sessionId: string,
+  ): Promise<ListOracleMessagesResponse> {
+    const saver = SqliteSaver.fromDatabase(db);
+    const rows = db
+      .prepare(
+        `SELECT message FROM messages
+         WHERE thread_id = ? AND checkpoint_ns = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(sessionId, '') as { message: Buffer | string }[];
+    const messages: BaseMessage[] = await Promise.all(
+      rows.map((row) => saver.serde.loadsTyped('json', row.message)),
+    );
+
+    return transformGraphStateMessageToListMessageResponse(messages);
+  }
+
+  private async assertMessageFeedbackTarget(
+    db: DatabaseType,
+    sessionId: string,
+    messageId: string,
+  ): Promise<MessageDto> {
+    const { messages } = await this.loadSessionMessages(db, sessionId);
+    return validateMessageFeedbackTarget(db, sessionId, messageId, messages);
   }
 
   public async sendMessage(

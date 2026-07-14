@@ -43,6 +43,19 @@ export type MessageContent =
   | IComponentMetadata
   | Array<string | IComponentMetadata>;
 
+export type MessageFeedback = 'approved' | 'disapproved';
+
+export interface MessageFeedbackResponse {
+  sessionId: string;
+  messageId: string;
+  feedback: MessageFeedback | null;
+  updatedAt: string;
+}
+
+export interface ChatCapabilities {
+  messageFeedback?: boolean;
+}
+
 export interface IMessage {
   id: string;
   content: MessageContent;
@@ -60,6 +73,7 @@ export interface IMessage {
   isComplete?: boolean;
   isReasoning?: boolean;
   attachment?: Attachment;
+  feedback?: MessageFeedback;
 }
 
 export type ChatStatus = 'submitted' | 'streaming' | 'ready' | 'error';

@@ -19,6 +19,7 @@ import { type CreateSessionDto } from './dto/create-session.dto'; // Import DTO
 import { type DeleteSessionDto } from './dto/delete-session.dto'; // Import DTO
 import { type ListSessionsDto } from './dto/list-sessions.dto'; // Import DTO
 import { SessionHistoryProcessor } from './session-history-processor.service';
+import { deleteSessionMessageFeedback } from '../messages/message-feedback.repository';
 
 @Injectable()
 export class SessionsService {
@@ -225,11 +226,13 @@ export class SessionsService {
           this.syncService.markUserInactive(data.did);
         });
 
-      await this.sessionManager.deleteSession({
-        did: data.did,
-        sessionId: data.sessionId,
-        oracleEntityDid,
-      });
+      const db = await this.syncService.getUserDatabase(data.did);
+      db.transaction(() => {
+        deleteSessionMessageFeedback(db, data.sessionId);
+        db.prepare('DELETE FROM sessions WHERE session_id = ?').run(
+          data.sessionId,
+        );
+      })();
       return { message: 'Session deleted successfully' };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

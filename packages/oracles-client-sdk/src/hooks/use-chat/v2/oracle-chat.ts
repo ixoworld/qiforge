@@ -101,6 +101,15 @@ export class OracleChat {
     });
   };
 
+  updateMessageById = async (
+    messageId: string,
+    updater: (message: IMessage) => IMessage,
+  ): Promise<void> => {
+    return this.#jobExecutor.run(async () => {
+      this.#state.updateMessageById(messageId, updater);
+    });
+  };
+
   // For WebSocket tool calls (finds by ID when needed)
   updateToolCall = async (
     messageId: string,

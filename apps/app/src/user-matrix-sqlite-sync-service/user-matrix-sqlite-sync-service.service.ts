@@ -468,8 +468,18 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS message_feedback (
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        feedback TEXT NOT NULL CHECK (feedback IN ('approved', 'disapproved')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, message_id)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(last_updated_at);
       CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
+      CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id);
     `);
   }
 

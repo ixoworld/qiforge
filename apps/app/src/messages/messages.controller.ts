@@ -1,17 +1,20 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   Post,
+  Put,
   Req,
   Res,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { AbortRequestDto, SendMessageDto } from './dto/send-message.dto';
+import { SetMessageFeedbackDto } from './dto/message-feedback.dto';
 import { MessagesService } from './messages.service';
 
 @ApiTags('messages')
@@ -59,6 +62,52 @@ export class MessagesController {
       sessionId,
       did,
       homeServer,
+    });
+  }
+
+  @Put(':sessionId/:messageId/feedback')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set feedback for an Agent message' })
+  @ApiResponse({ status: 200, description: 'Message feedback saved.' })
+  @ApiResponse({
+    status: 400,
+    description: 'Feedback is invalid or the message is not an Agent response.',
+  })
+  @ApiResponse({ status: 404, description: 'Session or message not found.' })
+  async setMessageFeedback(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: SetMessageFeedbackDto,
+  ) {
+    const { did } = req.authData;
+    return this.messagesService.setMessageFeedback({
+      did,
+      sessionId,
+      messageId,
+      feedback: dto.feedback,
+    });
+  }
+
+  @Delete(':sessionId/:messageId/feedback')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Clear feedback for an Agent message' })
+  @ApiResponse({ status: 200, description: 'Message feedback cleared.' })
+  @ApiResponse({
+    status: 400,
+    description: 'The message is not an Agent response.',
+  })
+  @ApiResponse({ status: 404, description: 'Session or message not found.' })
+  async clearMessageFeedback(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const { did } = req.authData;
+    return this.messagesService.clearMessageFeedback({
+      did,
+      sessionId,
+      messageId,
     });
   }
 
