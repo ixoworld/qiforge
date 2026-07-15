@@ -1,7 +1,7 @@
 {
   "name": "@ixo/ucan",
   "description": "UCAN authorization for any service - built on ucanto",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -56,8 +56,6 @@
     }
   },
   "devDependencies": {
-    "@cosmjs/crypto": "0.39.0",
-    "@cosmjs/encoding": "0.39.0",
     "@ixo/eslint-config": "workspace:*",
     "@ixo/typescript-config": "workspace:*",
     "@ixo/vitest-config": "workspace:*",
@@ -76,17 +74,7 @@
     "@ucanto/validator": "10.0.1"
   },
   "peerDependencies": {
-    "@cosmjs/crypto": ">=0.39.0",
-    "@cosmjs/encoding": ">=0.39.0",
     "typescript": ">=5.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@cosmjs/crypto": {
-      "optional": true
-    },
-    "@cosmjs/encoding": {
-      "optional": true
-    }
   },
   "sideEffects": false
 }
