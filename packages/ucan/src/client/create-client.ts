@@ -106,53 +106,23 @@ export async function signerFromMnemonic(
   did: string;
   privateKey: string;
 }> {
-  // Use @cosmjs/crypto - same as IXO frontend for verification methods
-  // This ensures the derived key matches what's registered on-chain
-  const { Ed25519, sha256 } = await import('@cosmjs/crypto');
-  const { toUtf8 } = await import('@cosmjs/encoding');
-
-  // Derive Ed25519 keypair using same method as IXO verification methods:
-  // SHA256(mnemonic UTF-8 bytes) → first 32 bytes as seed → Ed25519 keypair
-  const seed = sha256(toUtf8(mnemonic.trim())).slice(0, 32);
-  const keypair = await Ed25519.makeKeypair(seed);
-
-  // Note: cosmjs returns keypair.privkey as 64 bytes (seed + pubkey concatenated)
-  // but ucanto expects just the 32-byte seed, so we use `seed` directly
-
-  // Build ucanto's private key format (68 bytes total):
-  // M + base64( [0x80, 0x26] + seed(32) + [0xed, 0x01] + pubkey(32) )
-  // where:
-  //   [0x80, 0x26] = varint for 0x1300 (ed25519-priv multicodec)
-  //   [0xed, 0x01] = varint for 0xed (ed25519-pub multicodec, 237 decimal)
-  const ED25519_PRIV_MULTICODEC = new Uint8Array([0x80, 0x26]); // 2 bytes
-  const ED25519_PUB_MULTICODEC = new Uint8Array([0xed, 0x01]); // 2 bytes (varint of 237)
-
-  // Total: 2 + 32 + 2 + 32 = 68 bytes (matches ucanto expectation)
-  const keyMaterial = new Uint8Array(
-    ED25519_PRIV_MULTICODEC.length + // 2
-      seed.length + // 32
-      ED25519_PUB_MULTICODEC.length + // 2
-      keypair.pubkey.length, // 32
+  // Derive the Ed25519 keypair the same way as IXO verification methods:
+  // SHA256(mnemonic UTF-8 bytes) → first 32 bytes as seed → Ed25519 keypair.
+  //
+  // Pure JS (WebCrypto + ucanto) so it runs everywhere ucanto runs — Node,
+  // browsers, and Cloudflare Workers. (The previous implementation derived the
+  // keypair via @cosmjs/crypto, whose libsodium WASM loader crashes on workerd.
+  // The output is byte-identical — see the golden vectors in create-client.test.ts.)
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(mnemonic.trim()),
   );
-  keyMaterial.set(ED25519_PRIV_MULTICODEC, 0);
-  keyMaterial.set(seed, ED25519_PRIV_MULTICODEC.length);
-  keyMaterial.set(
-    ED25519_PUB_MULTICODEC,
-    ED25519_PRIV_MULTICODEC.length + seed.length,
-  );
-  keyMaterial.set(
-    keypair.pubkey,
-    ED25519_PRIV_MULTICODEC.length +
-      seed.length +
-      ED25519_PUB_MULTICODEC.length,
-  );
+  const seed = new Uint8Array(digest).slice(0, 32);
 
-  // Encode as base64pad multibase (prefix 'M')
-  const base64 = Buffer.from(keyMaterial).toString('base64');
-  const multibasePrivateKey = 'M' + base64;
-
-  // Parse using ucanto's parser to get a proper Signer
-  const signer = ed25519.Signer.parse(multibasePrivateKey);
+  const signer = await ed25519.derive(seed);
+  // ed25519.format → 'M' + base64pad([0x80,0x26] + seed(32) + [0xed,0x01] + pubkey(32)),
+  // i.e. exactly the 68-byte ucanto private key the old code assembled by hand.
+  const multibasePrivateKey = ed25519.format(signer);
   const finalSigner = did ? signer.withDID(did) : signer;
 
   return {
