@@ -1,20 +1,19 @@
 import {
   Body,
   Controller,
-  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
   Post,
-  Put,
   Req,
   Res,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AbortRequestDto, SendMessageDto } from './dto/send-message.dto';
-import { SetMessageFeedbackDto } from './dto/message-feedback.dto';
+import { SubmitAnonymousMessageFeedbackDto } from './dto/message-feedback.dto';
 import { MessagesService } from './messages.service';
 
 @ApiTags('messages')
@@ -65,49 +64,34 @@ export class MessagesController {
     });
   }
 
-  @Put(':sessionId/:messageId/feedback')
+  @Post(':sessionId/:messageId/feedback')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Set feedback for an Agent message' })
-  @ApiResponse({ status: 200, description: 'Message feedback saved.' })
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  @ApiOperation({ summary: 'Submit anonymous feedback for an Agent message' })
+  @ApiResponse({ status: 200, description: 'Anonymous feedback submitted.' })
   @ApiResponse({
     status: 400,
-    description: 'Feedback is invalid or the message is not an Agent response.',
+    description:
+      'Feedback contains invalid data or the message is not a completed Agent response.',
   })
   @ApiResponse({ status: 404, description: 'Session or message not found.' })
-  async setMessageFeedback(
+  @ApiResponse({ status: 429, description: 'Feedback rate limit exceeded.' })
+  @ApiResponse({ status: 503, description: 'Feedback delivery unavailable.' })
+  async submitAnonymousMessageFeedback(
     @Req() req: Request,
     @Param('sessionId') sessionId: string,
     @Param('messageId') messageId: string,
-    @Body() dto: SetMessageFeedbackDto,
+    @Body() dto: SubmitAnonymousMessageFeedbackDto,
   ) {
     const { did } = req.authData;
-    return this.messagesService.setMessageFeedback({
+    return this.messagesService.submitAnonymousMessageFeedback({
       did,
+      clientIp: req.ip,
       sessionId,
       messageId,
+      submissionId: dto.submissionId,
       feedback: dto.feedback,
-    });
-  }
-
-  @Delete(':sessionId/:messageId/feedback')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Clear feedback for an Agent message' })
-  @ApiResponse({ status: 200, description: 'Message feedback cleared.' })
-  @ApiResponse({
-    status: 400,
-    description: 'The message is not an Agent response.',
-  })
-  @ApiResponse({ status: 404, description: 'Session or message not found.' })
-  async clearMessageFeedback(
-    @Req() req: Request,
-    @Param('sessionId') sessionId: string,
-    @Param('messageId') messageId: string,
-  ) {
-    const { did } = req.authData;
-    return this.messagesService.clearMessageFeedback({
-      did,
-      sessionId,
-      messageId,
+      context: dto.context,
     });
   }
 

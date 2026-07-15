@@ -8,6 +8,20 @@ export const EnvSchema = z.object({
   PORT: z.coerce.number().default(3000),
   ORACLE_NAME: z.string(),
 
+  // Anonymous response feedback. The capability stays disabled unless the
+  // API key, destination IDs, and HMAC secret are all configured.
+  LINEAR_FEEDBACK_API_URL: z.url().default('https://api.linear.app/graphql'),
+  LINEAR_FEEDBACK_API_KEY: z.string().min(1).optional(),
+  LINEAR_FEEDBACK_TEAM_ID: z
+    .string()
+    .default('c781a53a-d432-469f-9c9c-2345a0f8243b'),
+  LINEAR_FEEDBACK_PROJECT_ID: z
+    .string()
+    .default('6c1474a9-620c-4e3c-b443-0263992f3b55'),
+  LINEAR_FEEDBACK_LABEL_IDS: z.string().optional(),
+  FEEDBACK_HMAC_SECRET: z.string().min(32).optional(),
+  QIFORGE_BUILD_VERSION: z.string().optional(),
+
   // CORS
   CORS_ORIGIN: z.string().default('*'),
   COMPOSIO_BASE_URL: z.url().default('https://composio.ixo.earth'),

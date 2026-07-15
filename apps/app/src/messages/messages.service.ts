@@ -75,15 +75,11 @@ import {
 } from './group-chat.guard';
 import { type ListMessagesDto } from './dto/list-messages.dto';
 import {
-  type MessageFeedback,
-  type MessageFeedbackResponse,
+  type AnonymousMessageFeedbackContextDto,
+  type AnonymousMessageFeedbackResponse,
 } from './dto/message-feedback.dto';
-import {
-  clearMessageFeedback as clearPersistedMessageFeedback,
-  listMessageFeedback,
-  saveMessageFeedback,
-  validateMessageFeedbackTarget,
-} from './message-feedback.repository';
+import { validateAnonymousFeedbackTarget } from './anonymous-feedback.utils';
+import { AnonymousFeedbackService } from './feedback/anonymous-feedback.service';
 import { type SendMessagePayload } from './dto/send-message.dto';
 import {
   FileProcessingService,
@@ -91,12 +87,9 @@ import {
 } from './file-processing.service';
 
 type MessageDto = ListOracleMessagesResponse['messages'][number];
-export type MessageWithFeedback = MessageDto & {
-  feedback?: MessageFeedback;
-};
-export interface ListMessagesWithFeedbackResponse {
-  messages: MessageWithFeedback[];
-  capabilities: { messageFeedback: true };
+export interface ListMessagesResponse {
+  messages: MessageDto[];
+  capabilities: { anonymousMessageFeedback?: true };
 }
 
 @Injectable()
@@ -160,6 +153,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     private readonly checkpointStorageSyncService: UserMatrixSqliteSyncService,
     private readonly fileProcessingService: FileProcessingService,
     private readonly channelMemoryService: ChannelMemoryService,
+    private readonly anonymousFeedbackService: AnonymousFeedbackService,
     @Optional() private readonly tasksService?: TasksService,
     @Optional() private readonly approvalService?: ApprovalService,
     @Optional() private readonly ucanService?: UcanService,
@@ -961,7 +955,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       did: string;
       homeServer?: string;
     },
-  ): Promise<ListMessagesWithFeedbackResponse> {
+  ): Promise<ListMessagesResponse> {
     const { did, sessionId } = params;
     if (!sessionId || !did) {
       throw new BadRequestException('Invalid parameters');
@@ -971,53 +965,34 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     try {
       const db = await this.checkpointStorageSyncService.getUserDatabase(did);
       const result = await this.loadSessionMessages(db, sessionId);
-      const feedbackByMessageId = listMessageFeedback(db, sessionId);
 
       return {
-        capabilities: { messageFeedback: true },
-        messages: result.messages.map((message) => {
-          const feedback = feedbackByMessageId.get(message.id);
-          return message.type === 'ai' && feedback
-            ? { ...message, feedback }
-            : message;
-        }),
+        capabilities: this.anonymousFeedbackService.isEnabled()
+          ? { anonymousMessageFeedback: true }
+          : {},
+        messages: result.messages,
       };
     } finally {
       this.checkpointStorageSyncService.markUserInactive(did);
     }
   }
 
-  public async setMessageFeedback(params: {
+  public async submitAnonymousMessageFeedback(params: {
     did: string;
+    clientIp?: string;
     sessionId: string;
     messageId: string;
-    feedback: MessageFeedback;
-  }): Promise<MessageFeedbackResponse> {
-    const { did, sessionId, messageId, feedback } = params;
-    this.checkpointStorageSyncService.markUserActive(did);
-
-    try {
-      const db = await this.checkpointStorageSyncService.getUserDatabase(did);
-      await this.assertMessageFeedbackTarget(db, sessionId, messageId);
-
-      return saveMessageFeedback(db, { sessionId, messageId, feedback });
-    } finally {
-      this.checkpointStorageSyncService.markUserInactive(did);
-    }
-  }
-
-  public async clearMessageFeedback(params: {
-    did: string;
-    sessionId: string;
-    messageId: string;
-  }): Promise<MessageFeedbackResponse> {
+    submissionId: string;
+    feedback: string;
+    context: AnonymousMessageFeedbackContextDto;
+  }): Promise<AnonymousMessageFeedbackResponse> {
     const { did, sessionId, messageId } = params;
     this.checkpointStorageSyncService.markUserActive(did);
 
     try {
       const db = await this.checkpointStorageSyncService.getUserDatabase(did);
-      await this.assertMessageFeedbackTarget(db, sessionId, messageId);
-      return clearPersistedMessageFeedback(db, { sessionId, messageId });
+      await this.assertAnonymousFeedbackTarget(db, sessionId, messageId);
+      return await this.anonymousFeedbackService.submit(params);
     } finally {
       this.checkpointStorageSyncService.markUserInactive(did);
     }
@@ -1042,13 +1017,13 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     return transformGraphStateMessageToListMessageResponse(messages);
   }
 
-  private async assertMessageFeedbackTarget(
+  private async assertAnonymousFeedbackTarget(
     db: DatabaseType,
     sessionId: string,
     messageId: string,
   ): Promise<MessageDto> {
     const { messages } = await this.loadSessionMessages(db, sessionId);
-    return validateMessageFeedbackTarget(db, sessionId, messageId, messages);
+    return validateAnonymousFeedbackTarget(db, sessionId, messageId, messages);
   }
 
   public async sendMessage(

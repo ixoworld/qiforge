@@ -43,17 +43,46 @@ export type MessageContent =
   | IComponentMetadata
   | Array<string | IComponentMetadata>;
 
-export type MessageFeedback = 'approved' | 'disapproved';
+export type AnonymousMessageFeedbackSurface = 'workspace' | 'agentSidebar';
+export type AnonymousMessageFeedbackTheme = 'dark' | 'light';
+export type AnonymousMessageFeedbackDeviceClass =
+  | 'mobile'
+  | 'tablet'
+  | 'desktop';
+export type AnonymousMessageFeedbackViewportBucket =
+  | 'compact'
+  | 'medium'
+  | 'wide';
+export type AnonymousMessageFeedbackNetwork =
+  | 'mainnet'
+  | 'testnet'
+  | 'devnet'
+  | 'unknown';
 
-export interface MessageFeedbackResponse {
-  sessionId: string;
-  messageId: string;
-  feedback: MessageFeedback | null;
-  updatedAt: string;
+export interface AnonymousMessageFeedbackContext {
+  surface: AnonymousMessageFeedbackSurface;
+  locale: string;
+  theme: AnonymousMessageFeedbackTheme;
+  deviceClass: AnonymousMessageFeedbackDeviceClass;
+  viewportBucket: AnonymousMessageFeedbackViewportBucket;
+  network: AnonymousMessageFeedbackNetwork;
+  portalBuildVersion?: string;
+}
+
+export interface AnonymousMessageFeedbackSubmission {
+  submissionId: string;
+  feedback: string;
+  context: AnonymousMessageFeedbackContext;
+}
+
+export interface AnonymousMessageFeedbackResponse {
+  submissionId: string;
+  status: 'submitted';
+  submittedAt: string;
 }
 
 export interface ChatCapabilities {
-  messageFeedback?: boolean;
+  anonymousMessageFeedback?: boolean;
 }
 
 export interface IMessage {
@@ -73,7 +102,6 @@ export interface IMessage {
   isComplete?: boolean;
   isReasoning?: boolean;
   attachment?: Attachment;
-  feedback?: MessageFeedback;
 }
 
 export type ChatStatus = 'submitted' | 'streaming' | 'ready' | 'error';

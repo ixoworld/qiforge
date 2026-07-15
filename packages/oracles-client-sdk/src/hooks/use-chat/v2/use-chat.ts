@@ -26,16 +26,15 @@ import { resolveContent } from '../resolve-content.js';
 import transformToMessagesMap from '../transform-to-messages-map.js';
 import { OracleChat } from './oracle-chat.js';
 import {
-  applyMessageFeedbackOptimistically,
-  isMessageFeedbackCapabilitySupported,
-  persistMessageFeedback,
+  isAnonymousMessageFeedbackCapabilitySupported,
+  submitAnonymousMessageFeedback,
 } from './message-feedback.js';
 import {
+  type AnonymousMessageFeedbackSubmission,
   type AnyEvent,
   type ChatCapabilities,
   type IChatOptions,
   type IMessage,
-  type MessageFeedback,
 } from './types.js';
 import { useSendMessage } from './use-send-message.js';
 
@@ -99,9 +98,8 @@ export function useChat({
   const { authedRequest, executeAgAction, getAgActionRender, agActions } =
     useOraclesContext();
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
-  const [updatingFeedbackMessageId, setUpdatingFeedbackMessageId] = useState<
-    string | null
-  >(null);
+  const [submittingFeedbackMessageId, setSubmittingFeedbackMessageId] =
+    useState<string | null>(null);
   const [messageFeedbackError, setMessageFeedbackError] =
     useState<Error | null>(null);
 
@@ -153,45 +151,42 @@ export function useChat({
     }
   }, [data, queryStatus, agActions, uiComponents]);
 
-  const isMessageFeedbackSupported = isMessageFeedbackCapabilitySupported(
-    data?.capabilities,
-  );
+  const isAnonymousMessageFeedbackSupported =
+    isAnonymousMessageFeedbackCapabilitySupported(data?.capabilities);
 
   useEffect(() => {
-    setUpdatingFeedbackMessageId(null);
+    setSubmittingFeedbackMessageId(null);
     setMessageFeedbackError(null);
   }, [sessionId]);
 
-  const setMessageFeedback = useCallback(
-    async (messageId: string, feedback: MessageFeedback | null) => {
+  const submitMessageFeedback = useCallback(
+    async (
+      messageId: string,
+      submission: AnonymousMessageFeedbackSubmission,
+    ) => {
       if (!apiUrl || !sessionId) {
         throw new Error('A configured chat session is required');
       }
-      if (!isMessageFeedbackSupported) {
+      if (!isAnonymousMessageFeedbackSupported) {
         throw new Error('Message feedback is not supported by this Agent');
       }
 
       const chat = chatRef.current;
-      if (!chat) throw new Error('Agent message not found');
-      setUpdatingFeedbackMessageId(messageId);
+      const target = chat?.messages.find((message) => message.id === messageId);
+      if (!target || target.type !== 'ai' || target.isComplete === false) {
+        throw new Error('Completed Agent message not found');
+      }
+      setSubmittingFeedbackMessageId(messageId);
       setMessageFeedbackError(null);
 
       try {
-        await applyMessageFeedbackOptimistically({
-          messages: chat.messages,
+        return await submitAnonymousMessageFeedback({
+          apiUrl,
+          sessionId,
           messageId,
-          feedback,
-          updateMessage: chat.updateMessageById,
-          persist: () =>
-            persistMessageFeedback({
-              apiUrl,
-              sessionId,
-              messageId,
-              feedback,
-              oracleDid,
-              authedRequest,
-            }),
-          refetch: refetchMessages,
+          submission,
+          oracleDid,
+          authedRequest,
         });
       } catch (feedbackError) {
         const normalizedError =
@@ -201,15 +196,14 @@ export function useChat({
         setMessageFeedbackError(normalizedError);
         throw normalizedError;
       } finally {
-        setUpdatingFeedbackMessageId(null);
+        setSubmittingFeedbackMessageId(null);
       }
     },
     [
       apiUrl,
       authedRequest,
-      isMessageFeedbackSupported,
+      isAnonymousMessageFeedbackSupported,
       oracleDid,
-      refetchMessages,
       sessionId,
     ],
   );
@@ -457,9 +451,9 @@ export function useChat({
     isRealTimeConnected: isWebSocketConnected,
     status,
     isConfigReady,
-    setMessageFeedback,
-    isMessageFeedbackSupported,
-    updatingFeedbackMessageId,
+    submitMessageFeedback,
+    isAnonymousMessageFeedbackSupported,
+    submittingFeedbackMessageId,
     messageFeedbackError,
   };
 }

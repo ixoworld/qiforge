@@ -2,4 +2,4 @@
 '@ixo/oracles-client-sdk': minor
 ---
 
-Add authenticated, persisted approve/disapprove feedback for completed Agent messages, including capability discovery and optimistic SDK controls.
+Add capability-gated anonymous response feedback submissions with privacy-safe context and non-persisted SDK state.
