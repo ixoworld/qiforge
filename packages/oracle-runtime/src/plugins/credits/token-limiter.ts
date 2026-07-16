@@ -158,7 +158,7 @@ export class TokenLimiter {
     totalTokens: number;
     model?: string;
   }): number {
-    const markup = this.network === 'mainnet' ? 1.6 : 5;
+    const markup = 1.6;
 
     if (params.providerCost != null && params.providerCost > 0) {
       return params.providerCost * markup;
@@ -178,7 +178,7 @@ export class TokenLimiter {
 
   /** Flat-rate fallback: $0.75 per 1M tokens × network markup. */
   llmTokenToCredits(tokenCount: number): number {
-    const markup = this.network === 'mainnet' ? 1.6 : 5;
+    const markup = 1.6;
     const costPerMillionTokens = 0.75 * markup;
     const tokensPerMillion = 1_000_000;
     return Math.round((tokenCount / tokensPerMillion) * costPerMillionTokens);
@@ -200,7 +200,7 @@ export class TokenLimiter {
       return this.llmTokenToCredits(inputTokens + outputTokens);
     }
 
-    const markup = this.network === 'mainnet' ? 1.6 : 5;
+    const markup = 1.6;
     const divisor = 1_000_000;
     const inputCost =
       (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
