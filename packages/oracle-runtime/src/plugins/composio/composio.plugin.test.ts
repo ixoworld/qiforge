@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { validateManifest } from '../../manifest/validator.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
-import type {
-  ComposioSessionFactory,
-  ComposioSessionTool,
+import {
+  COMPOSIO_DEFS_CACHE_MAX_ENTRIES,
+  COMPOSIO_TOOL_DEFS_TTL_MS,
+  createComposioTools,
+  type ComposioDefsCache,
+  type ComposioSessionFactory,
+  type ComposioSessionTool,
 } from './composio-tools.js';
 import { ComposioPlugin } from './composio.plugin.js';
 
@@ -296,5 +300,112 @@ describe('ComposioPlugin.getRequestTools — wrapped tool semantics', () => {
     expect(String(errorLogger.mock.calls[0]?.[0])).toMatch(
       /503 service unavailable/,
     );
+  });
+});
+
+describe('ComposioPlugin.getRequestTools — session tool-definition cache', () => {
+  it('opens the session once, then serves later requests from the cache and connects lazily on invoke', async () => {
+    const sessionTool = fakeSessionTool('COMPOSIO_SEARCH_TOOLS');
+    const sessionFactory: ComposioSessionFactory = vi.fn(async () => [
+      sessionTool,
+    ]);
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-cache',
+    });
+    const rtCtx = () => makeRuntimeContext({ config: buildConfig() });
+
+    const cold = await plugin.getRequestTools(rtCtx());
+    expect(cold.map((t) => t.name)).toEqual(['COMPOSIO_SEARCH_TOOLS']);
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+
+    const warm = await plugin.getRequestTools(rtCtx());
+    // Same tool surface, no session opened while binding.
+    expect(warm.map((t) => t.name)).toEqual(['COMPOSIO_SEARCH_TOOLS']);
+    expect(warm[0]!.description).toBe(cold[0]!.description);
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+
+    // First invocation opens the session with THIS request's invocation.
+    const result = await warm[0]!.handler(
+      { value: 'find gmail tools' },
+      makeRuntimeContext(),
+    );
+    expect(result).toEqual({
+      tool: 'COMPOSIO_SEARCH_TOOLS',
+      echoed: { value: 'find gmail tools' },
+    });
+    expect(sessionFactory).toHaveBeenCalledTimes(2);
+    expect(sessionFactory).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ucanInvocation: 'ucan-token-cache' }),
+    );
+  });
+
+  it('caches per user — a different DID still opens its own session', async () => {
+    const sessionFactory: ComposioSessionFactory = vi.fn(async () => [
+      fakeSessionTool('COMPOSIO_SEARCH_TOOLS'),
+    ]);
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-multi',
+    });
+
+    await plugin.getRequestTools(makeRuntimeContext({ config: buildConfig() }));
+    await plugin.getRequestTools(
+      makeRuntimeContext({
+        config: buildConfig(),
+        user: {
+          did: 'did:ixo:user2',
+          matrixUserId: '@did-ixo-user2:ixo.world',
+          ucanDelegation: { raw: 'test-ucan-delegation' },
+        },
+      }),
+    );
+
+    expect(sessionFactory).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts expired entries on write, so one-off users do not accumulate for the process lifetime', async () => {
+    const defsCache: ComposioDefsCache = new Map();
+    defsCache.set(`${COMPOSIO_URL}::did:ixo:departed-user`, {
+      defs: [{ name: 'STALE', description: 'stale', schema: undefined }],
+      expiresAt: Date.now() - 1,
+    });
+
+    await createComposioTools({
+      apiKey: COMPOSIO_API_KEY,
+      baseUrl: COMPOSIO_URL,
+      ucanInvocation: 'ucan-token-evict',
+      userId: 'did:ixo:fresh-user',
+      sessionFactory: async () => [fakeSessionTool('COMPOSIO_SEARCH_TOOLS')],
+      defsCache,
+    });
+
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:departed-user`)).toBe(false);
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:fresh-user`)).toBe(true);
+  });
+
+  it('caps the cache size, evicting the soonest-to-expire entries first', async () => {
+    const defsCache: ComposioDefsCache = new Map();
+    const base = Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS;
+    for (let i = 0; i < COMPOSIO_DEFS_CACHE_MAX_ENTRIES; i++) {
+      defsCache.set(`${COMPOSIO_URL}::did:ixo:user-${i}`, {
+        defs: [],
+        expiresAt: base + i,
+      });
+    }
+
+    await createComposioTools({
+      apiKey: COMPOSIO_API_KEY,
+      baseUrl: COMPOSIO_URL,
+      ucanInvocation: 'ucan-token-cap',
+      userId: 'did:ixo:one-more-user',
+      sessionFactory: async () => [fakeSessionTool('COMPOSIO_SEARCH_TOOLS')],
+      defsCache,
+    });
+
+    expect(defsCache.size).toBe(COMPOSIO_DEFS_CACHE_MAX_ENTRIES);
+    // The soonest-to-expire seeded entry was evicted; the newest survives.
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:user-0`)).toBe(false);
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:one-more-user`)).toBe(true);
   });
 });

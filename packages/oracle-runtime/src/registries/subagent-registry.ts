@@ -55,17 +55,23 @@ export class SubAgentRegistry {
   /**
    * Run every plugin's `getRequestSubAgents(rtCtx)`. Does NOT touch the boot
    * cache.
+   *
+   * Hooks run concurrently (they can involve Matrix membership checks and
+   * sub-agent builds); output order stays plugin-registration order and a
+   * hook rejection still fails the whole collection.
    */
   async collectRequest(rtCtx: RuntimeContext): Promise<RegisteredSubAgent[]> {
-    const out: RegisteredSubAgent[] = [];
-    for (const plugin of this.plugins) {
-      if (!plugin.getRequestSubAgents) continue;
-      const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
-      for (const subAgent of requestSubAgents) {
-        out.push({ pluginName: plugin.name, subAgent });
-      }
-    }
-    return out;
+    const perPlugin = await Promise.all(
+      this.plugins.map(async (plugin) => {
+        if (!plugin.getRequestSubAgents) return [];
+        const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
+        return requestSubAgents.map((subAgent) => ({
+          pluginName: plugin.name,
+          subAgent,
+        }));
+      }),
+    );
+    return perPlugin.flat();
   }
 
   /**

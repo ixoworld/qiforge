@@ -7,6 +7,7 @@ import type {
 } from '../../plugin-api/types.js';
 import {
   createComposioTools,
+  type ComposioDefsCache,
   type ComposioSessionFactory,
 } from './composio-tools.js';
 import { mintComposioInvocation } from './composio-ucan.js';
@@ -146,6 +147,13 @@ export class ComposioPlugin extends OraclePlugin {
     baseUrl: string,
   ) => Promise<string | null>;
 
+  /**
+   * Per-user session tool definitions. Warm entries let `createComposioTools`
+   * skip the session-open + tools-list round-trips on the chat hot path and
+   * open the session lazily on first invocation instead.
+   */
+  private readonly toolDefsCache: ComposioDefsCache = new Map();
+
   constructor(opts: ComposioPluginOptions = {}) {
     super();
     this.sessionFactoryOverride = opts.sessionFactory;
@@ -187,6 +195,7 @@ export class ComposioPlugin extends OraclePlugin {
         userId: rtCtx.user.did,
         network,
         sessionFactory: this.sessionFactoryOverride,
+        defsCache: this.toolDefsCache,
       });
     } catch (error) {
       const detail =

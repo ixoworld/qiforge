@@ -185,4 +185,64 @@ describe('ToolRegistry', () => {
       'open_url',
     ]);
   });
+
+  it('runs request-time hooks concurrently, not one-after-another', async () => {
+    const reg = new ToolRegistry();
+    const started: string[] = [];
+    let releaseSlow: (() => void) | undefined;
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+
+    reg.register(
+      makePlugin({
+        name: 'slow',
+        getRequestTools: async () => {
+          started.push('slow');
+          await slowGate;
+          return [makeTool('slow_tool')];
+        },
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'fast',
+        getRequestTools: () => {
+          started.push('fast');
+          return [makeTool('fast_tool')];
+        },
+      }),
+    );
+
+    const pending = reg.collectRequest(makeRuntimeContext());
+    // Both hooks must have started before the slow one resolves — a serial
+    // loop would not reach 'fast' until 'slow' finished.
+    await Promise.resolve();
+    expect(started).toEqual(['slow', 'fast']);
+
+    releaseSlow?.();
+    const tools = await pending;
+    // Output order stays plugin-registration order even though 'fast'
+    // resolved first.
+    expect(tools.map((t) => t.tool.name)).toEqual(['slow_tool', 'fast_tool']);
+  });
+
+  it('propagates a request-time hook rejection as a collection failure', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'broken',
+        getRequestTools: async () => {
+          throw new Error('hook exploded');
+        },
+      }),
+    );
+    reg.register(
+      makePlugin({ name: 'ok', getRequestTools: () => [makeTool('ok_tool')] }),
+    );
+
+    await expect(reg.collectRequest(makeRuntimeContext())).rejects.toThrow(
+      'hook exploded',
+    );
+  });
 });

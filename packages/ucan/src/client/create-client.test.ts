@@ -43,19 +43,25 @@ describe('signerFromMnemonic', () => {
 
   it('trims surrounding whitespace before hashing (same key either way)', async () => {
     const clean = await signerFromMnemonic(GOLDEN_VECTORS[0].mnemonic);
-    const padded = await signerFromMnemonic(`  ${GOLDEN_VECTORS[0].mnemonic}\n`);
+    const padded = await signerFromMnemonic(
+      `  ${GOLDEN_VECTORS[0].mnemonic}\n`,
+    );
     expect(padded.did).toBe(clean.did);
     expect(padded.privateKey).toBe(clean.privateKey);
   });
 
   it('returns a privateKey that parseSigner round-trips to the same signer', async () => {
-    const { did, privateKey } = await signerFromMnemonic(GOLDEN_VECTORS[0].mnemonic);
+    const { did, privateKey } = await signerFromMnemonic(
+      GOLDEN_VECTORS[0].mnemonic,
+    );
     const reparsed = parseSigner(privateKey);
     expect(reparsed.did()).toBe(did);
   });
 
   it('produces signatures that verify against the derived public key', async () => {
-    const { signer, did } = await signerFromMnemonic(GOLDEN_VECTORS[0].mnemonic);
+    const { signer, did } = await signerFromMnemonic(
+      GOLDEN_VECTORS[0].mnemonic,
+    );
     const payload = new TextEncoder().encode('ucan-signer-round-trip');
     const signature = await signer.sign(payload);
     const verifier = ed25519.Verifier.parse(did as `did:key:${string}`);
@@ -63,7 +69,8 @@ describe('signerFromMnemonic', () => {
   });
 
   it('withDID override keeps the same key but reports the supplied DID', async () => {
-    const oracleDid = 'did:ixo:ixo1fyc0tfakzvup0p7q76apt9kky255h5vejajqkl' as const;
+    const oracleDid =
+      'did:ixo:ixo1fyc0tfakzvup0p7q76apt9kky255h5vejajqkl' as const;
     const { signer, did, privateKey } = await signerFromMnemonic(
       GOLDEN_VECTORS[0].mnemonic,
       oracleDid,

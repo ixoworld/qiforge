@@ -46,7 +46,7 @@ Per-request, `MessagesController` calls into the agent build pipeline. The orche
 1. Builds a per-request `RuntimeContext` via `buildRuntimeContext(runConfig, ambient, state)`.
 2. Builds a per-request `PluginContext` via `buildPluginContext({ config, identity, availablePlugins, logger, pluginName: '__main-agent__' })`.
 3. Reads the cached boot snapshot for tools, sub-agents, middlewares from the registries.
-4. Runs `getRequestTools(rtCtx)` and `getRequestSubAgents(rtCtx)` for every plugin to add request-time contributions.
+4. Runs `getRequestTools(rtCtx)` and `getRequestSubAgents(rtCtx)` for every plugin to add request-time contributions. All request-time hooks run **concurrently** (across plugins, and tools concurrently with sub-agents) — several of them do network I/O, so the slowest single hook, not the sum, gates the build. Output order stays plugin-registration order.
 5. Wraps each `PluginTool` and each `PluginSubAgent` via `wrapPluginTool` and `createSubagentAsTool` respectively, so they expose the standard LangChain `StructuredTool` shape.
 6. Composes the system prompt via `composePrompt(...)` from base prompt + Tier-1 plugin block + identity + operational mode + memory enrichment + time context + user preferences + editor context + Slack formatting (when client is Slack) + secrets context + Composio context (if loaded).
 7. Calls LangChain's `createAgent({ stateSchema: MainAgentGraphState, tools, middleware, prompt, model, checkpointer })`.

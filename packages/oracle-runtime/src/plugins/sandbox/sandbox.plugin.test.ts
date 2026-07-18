@@ -428,6 +428,103 @@ describe('SandboxPlugin', () => {
       const tools = await plugin.getRequestTools(makeSandboxRuntimeContext());
       expect(tools.map((t) => t.name)).toEqual(['sandbox_run']);
     });
+
+    it('serves the second request from the definitions cache — no secrets fetch, no MCP client', async () => {
+      const upstream = [
+        makeUpstreamTool('sandbox_run'),
+        makeUpstreamTool('sandbox_write_file'),
+      ];
+      const { factory, seenConfigs } = makeMcpFactory(upstream);
+      const getIndexSpy = vi.fn(async () => ({}));
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+
+      const rtCtx = () =>
+        makeSandboxRuntimeContext({
+          secrets: { getIndex: getIndexSpy, getValues: async () => ({}) },
+        });
+
+      const cold = await plugin.getRequestTools(rtCtx());
+      expect(seenConfigs).toHaveLength(1);
+      expect(getIndexSpy).toHaveBeenCalledTimes(1);
+
+      const warm = await plugin.getRequestTools(rtCtx());
+      // Same visible tool surface, but no additional secrets read and no
+      // additional MCP client until a tool is actually invoked.
+      expect(warm.map((t) => t.name)).toEqual(cold.map((t) => t.name));
+      expect(seenConfigs).toHaveLength(1);
+      expect(getIndexSpy).toHaveBeenCalledTimes(1);
+      // The auth gate still ran for the warm request (with empty secrets).
+      expect(authBuilder).toHaveBeenCalledTimes(2);
+    });
+
+    it('warm-path tools connect with full headers (secrets included) on first invocation', async () => {
+      const runInvoke = vi.fn(async () => 'ran');
+      const upstream = [makeUpstreamTool('sandbox_run', runInvoke)];
+      const { factory, seenConfigs } = makeMcpFactory(upstream);
+
+      const plugin = new SandboxPlugin({
+        authBuilder,
+        mcpClientFactory: factory,
+      });
+
+      const rtCtx = () =>
+        makeSandboxRuntimeContext({
+          config: {
+            SANDBOX_MCP_URL: SANDBOX_URL,
+            ORACLE_SECRETS: 'OPENAI_KEY=sk-oracle',
+          },
+          secrets: {
+            getIndex: async () => ({ DATABASE_URL: { key: 'DATABASE_URL' } }),
+            getValues: async () => ({ DATABASE_URL: 'pg://real' }),
+          },
+        });
+
+      await plugin.getRequestTools(rtCtx());
+      const warm = await plugin.getRequestTools(rtCtx());
+      expect(seenConfigs).toHaveLength(1);
+
+      const run = warm.find((t) => t.name === 'sandbox_run');
+      const result = await run!.handler(
+        { command: 'echo hi' },
+        makeRuntimeContext(),
+      );
+      expect(result).toBe('ran');
+      expect(runInvoke).toHaveBeenCalledWith({ command: 'echo hi' });
+
+      // The lazy connect built a second client carrying the full header set.
+      expect(seenConfigs).toHaveLength(2);
+      const lazyHeaders = seenConfigs[1]!.headers;
+      expect(lazyHeaders.Authorization).toBe('Bearer ucan-sandbox');
+      expect(lazyHeaders['x-os-openai_key']).toBe('sk-oracle');
+      expect(lazyHeaders['x-us-database_url']).toBe('pg://real');
+    });
+
+    it('warm path still contributes zero tools when the auth gate fails', async () => {
+      const upstream = [makeUpstreamTool('sandbox_run')];
+      const { factory, seenConfigs } = makeMcpFactory(upstream);
+      let authorized = true;
+      const flippableAuth: SandboxAuthBuilder = async () =>
+        authorized
+          ? { Authorization: 'Bearer ucan-sandbox', 'X-Auth-Type': 'ucan' }
+          : {};
+
+      const plugin = new SandboxPlugin({
+        authBuilder: flippableAuth,
+        mcpClientFactory: factory,
+      });
+
+      const cold = await plugin.getRequestTools(makeSandboxRuntimeContext());
+      expect(cold.map((t) => t.name)).toEqual(['sandbox_run']);
+
+      authorized = false;
+      const denied = await plugin.getRequestTools(makeSandboxRuntimeContext());
+      expect(denied).toEqual([]);
+      expect(seenConfigs).toHaveLength(1);
+    });
   });
 
   describe('sandbox_write_blob', () => {

@@ -37,6 +37,10 @@ These run on every agent build (per HTTP request that triggers a turn).
 
 Implemented in `graph/agent-builder.ts` — the agent builder reads the cached boot snapshot plus runs these two hooks fresh.
 
+Request-time hooks run **concurrently**: every plugin's `getRequestTools` starts at the same time (same for `getRequestSubAgents`, and the two collections overlap each other too). Hooks must therefore not assume another plugin's request hook has already finished. Merged output order is still plugin-registration order, so the agent-visible tool list is deterministic.
+
+Bundled plugins that talk to upstream services in these hooks (memory, sandbox, composio) cache the upstream **tool definitions** (name/description/schema) with a short TTL and defer the authenticated connection to the first actual tool invocation. Per-request auth minting — and the "no auth → no tools" gate — still runs on every request; only the definition fetch is cached. Custom plugins with network-backed request hooks should follow the same pattern.
+
 ## Tool handler
 
 Every `PluginTool.handler` fires when the LLM calls the tool. Receives `(args, rtCtx: RuntimeContext)`. Errors propagate to the LangChain tool retry middleware — one retry on validation failure, then to the agent (which usually apologises).
