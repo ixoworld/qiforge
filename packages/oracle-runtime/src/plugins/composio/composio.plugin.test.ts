@@ -2,9 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { validateManifest } from '../../manifest/validator.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
-import type {
-  ComposioSessionFactory,
-  ComposioSessionTool,
+import {
+  COMPOSIO_DEFS_CACHE_MAX_ENTRIES,
+  COMPOSIO_TOOL_DEFS_TTL_MS,
+  createComposioTools,
+  type ComposioDefsCache,
+  type ComposioSessionFactory,
+  type ComposioSessionTool,
 } from './composio-tools.js';
 import { ComposioPlugin } from './composio.plugin.js';
 
@@ -358,5 +362,50 @@ describe('ComposioPlugin.getRequestTools — session tool-definition cache', () 
     );
 
     expect(sessionFactory).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts expired entries on write, so one-off users do not accumulate for the process lifetime', async () => {
+    const defsCache: ComposioDefsCache = new Map();
+    defsCache.set(`${COMPOSIO_URL}::did:ixo:departed-user`, {
+      defs: [{ name: 'STALE', description: 'stale', schema: undefined }],
+      expiresAt: Date.now() - 1,
+    });
+
+    await createComposioTools({
+      apiKey: COMPOSIO_API_KEY,
+      baseUrl: COMPOSIO_URL,
+      ucanInvocation: 'ucan-token-evict',
+      userId: 'did:ixo:fresh-user',
+      sessionFactory: async () => [fakeSessionTool('COMPOSIO_SEARCH_TOOLS')],
+      defsCache,
+    });
+
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:departed-user`)).toBe(false);
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:fresh-user`)).toBe(true);
+  });
+
+  it('caps the cache size, evicting the soonest-to-expire entries first', async () => {
+    const defsCache: ComposioDefsCache = new Map();
+    const base = Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS;
+    for (let i = 0; i < COMPOSIO_DEFS_CACHE_MAX_ENTRIES; i++) {
+      defsCache.set(`${COMPOSIO_URL}::did:ixo:user-${i}`, {
+        defs: [],
+        expiresAt: base + i,
+      });
+    }
+
+    await createComposioTools({
+      apiKey: COMPOSIO_API_KEY,
+      baseUrl: COMPOSIO_URL,
+      ucanInvocation: 'ucan-token-cap',
+      userId: 'did:ixo:one-more-user',
+      sessionFactory: async () => [fakeSessionTool('COMPOSIO_SEARCH_TOOLS')],
+      defsCache,
+    });
+
+    expect(defsCache.size).toBe(COMPOSIO_DEFS_CACHE_MAX_ENTRIES);
+    // The soonest-to-expire seeded entry was evicted; the newest survives.
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:user-0`)).toBe(false);
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:one-more-user`)).toBe(true);
   });
 });

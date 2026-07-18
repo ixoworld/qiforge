@@ -90,8 +90,34 @@ export type ComposioDefsCache = Map<string, CachedComposioDefs>;
  */
 export const COMPOSIO_TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Hard ceiling on cached users. The expired-entry sweep is what bounds the
+ * cache in practice (entries outlive their user by at most one TTL); the cap
+ * only kicks in if more distinct users than this are active inside a single
+ * TTL window, evicting the soonest-to-expire entries first.
+ */
+export const COMPOSIO_DEFS_CACHE_MAX_ENTRIES = 1000;
+
 function defsCacheKey(baseUrl: string, userId: string): string {
   return `${baseUrl}::${userId}`;
+}
+
+/**
+ * Drop expired entries (and, if still over the cap, the soonest-to-expire
+ * ones). Runs on every cache write, so in a long-running multi-tenant
+ * process one-off users' schemas are reclaimed instead of accumulating for
+ * the process lifetime.
+ */
+function pruneDefsCache(cache: ComposioDefsCache, now: number): void {
+  for (const [key, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(key);
+  }
+  const surplus = cache.size - COMPOSIO_DEFS_CACHE_MAX_ENTRIES;
+  if (surplus <= 0) return;
+  const soonestFirst = [...cache.entries()]
+    .sort((a, b) => a[1].expiresAt - b[1].expiresAt)
+    .slice(0, surplus);
+  for (const [key] of soonestFirst) cache.delete(key);
 }
 
 export interface CreateComposioToolsOptions {
@@ -278,14 +304,19 @@ export async function createComposioTools(
   }
 
   const sessionTools = await sessionFactory(sessionArgs);
-  opts.defsCache?.set(cacheKey, {
-    defs: sessionTools.map(({ name, description, schema }) => ({
-      name,
-      description,
-      schema,
-    })),
-    expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
-  });
+  if (opts.defsCache) {
+    opts.defsCache.set(cacheKey, {
+      defs: sessionTools.map(({ name, description, schema }) => ({
+        name,
+        description,
+        schema,
+      })),
+      expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
+    });
+    // Prune after the write so the cap accounts for the entry just added —
+    // the fresh entry has the latest expiry, so it always survives.
+    pruneDefsCache(opts.defsCache, Date.now());
+  }
 
   return sessionTools.map(wrapAsPluginTool);
 }
