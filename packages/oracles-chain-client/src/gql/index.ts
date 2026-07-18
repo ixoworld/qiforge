@@ -19,10 +19,12 @@ if (!GRAPHQL_ENDPOINT) {
 }
 
 /**
- * GraphQL client instance configured with the IXO Blocksync endpoint
- * This is used internally by the SDK
+ * GraphQL client instance configured with the IXO Blocksync endpoint.
+ * Used internally by the SDK, and exported for narrowly-scoped raw queries
+ * that would otherwise force a full SDK regeneration against a drifted
+ * schema (e.g. `getSupportAccounts`).
  */
-const graphqlClient = new GraphQLClient(GRAPHQL_ENDPOINT);
+export const graphqlClient = new GraphQLClient(GRAPHQL_ENDPOINT);
 
 /**
  * Type-safe SDK for making GraphQL requests to the IXO Blocksync API

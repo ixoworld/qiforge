@@ -97,7 +97,8 @@
     "tsc-alias": "^1.8.11",
     "tsconfig-paths": "^4.2.0",
     "tsup": "8.3.5",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "@cosmjs/crypto": "0.39.0",
