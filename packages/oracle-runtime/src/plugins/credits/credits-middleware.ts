@@ -34,6 +34,19 @@ function extractUserDid(context: unknown): string | undefined {
   return typeof did === 'string' && did.length > 0 ? did : undefined;
 }
 
+/** Extract `session.mode` from the runtime context with the same narrowing. */
+function extractSessionMode(context: unknown): string | undefined {
+  if (!context || typeof context !== 'object' || !('session' in context)) {
+    return undefined;
+  }
+  const { session } = context;
+  if (!session || typeof session !== 'object' || !('mode' in session)) {
+    return undefined;
+  }
+  const { mode } = session;
+  return typeof mode === 'string' ? mode : undefined;
+}
+
 interface UsageMetadata {
   input_tokens: number;
   output_tokens: number;
@@ -124,6 +137,14 @@ export const createCreditsMiddleware = (
         return;
       }
 
+      // Concierge turns (unauthorized Matrix visitors) are unmetered: no
+      // balance gate and no deduction — there is no subscription to bill.
+      // The restricted concierge tool surface bounds the exposure.
+      if (extractSessionMode(runtime.context) === 'concierge') {
+        logger.debug?.('Credits middleware skipped (concierge turn)');
+        return;
+      }
+
       const userDid = extractUserDid(runtime.context);
       if (!userDid) {
         throw new Error('User DID is required for credit limiting');
@@ -146,6 +167,7 @@ export const createCreditsMiddleware = (
 
     afterModel: async (state, runtime) => {
       if (!limiter) return;
+      if (extractSessionMode(runtime.context) === 'concierge') return;
 
       try {
         const userDid = extractUserDid(runtime.context);
