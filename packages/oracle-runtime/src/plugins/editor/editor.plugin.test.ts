@@ -16,20 +16,28 @@ vi.mock('../../matrix/room-membership.js', () => ({
 
 // Avoid the ~2.7s matrix-js-sdk module load in test runs. Editor tools only
 // need a MatrixClient shape — never actually hit the wire — so a minimal
-// stub satisfies every code path the tests exercise. `vi.mock` is hoisted.
-vi.mock('matrix-js-sdk', () => ({
-  createClient: vi.fn(() => ({
+// stub satisfies every code path the tests exercise. `vi.mock` is hoisted;
+// variables stay inside the factory. `MatrixStateManager` also constructs a
+// `new MatrixClient(...)` while `@ixo/matrix` initializes, so the class must
+// exist on the mock alongside `createClient`.
+vi.mock('matrix-js-sdk', () => {
+  const clientStub = () => ({
     getStateEvent: vi.fn().mockResolvedValue(null),
     sendStateEvent: vi.fn().mockResolvedValue({ event_id: '$mock' }),
     sendEvent: vi.fn().mockResolvedValue({ event_id: '$mock' }),
+    getJoinedRooms: vi.fn().mockResolvedValue({ joined_rooms: [] }),
     on: vi.fn(),
     off: vi.fn(),
     removeListener: vi.fn(),
-  })),
-  ClientEvent: { Sync: 'sync' },
-  Filter: vi.fn(),
-  SyncState: { Prepared: 'PREPARED', Syncing: 'SYNCING', Error: 'ERROR' },
-}));
+  });
+  return {
+    createClient: vi.fn(clientStub),
+    MatrixClient: vi.fn(clientStub),
+    ClientEvent: { Sync: 'sync' },
+    Filter: vi.fn(),
+    SyncState: { Prepared: 'PREPARED', Syncing: 'SYNCING', Error: 'ERROR' },
+  };
+});
 
 const MATRIX_CONFIG = {
   MATRIX_BASE_URL: 'https://matrix.test.ixo.world',

@@ -43,7 +43,11 @@ overrides:
   '@composio/core': '0.10.0'
   '@composio/langchain': '0.9.2'
   '@digitalbazaar/http-client': '4.2.0'
-  '@ixo/matrix': '1.2.33'
+  # Collapse every @ixo/matrix instance (including legacy apps/app's ^1.2.33
+  # spec) onto the workspace source. A fixed registry pin here silently
+  # defeated the packages' `workspace:*` declarations, so changes to
+  # packages/matrix were invisible in-repo until published to npm.
+  '@ixo/matrix': 'workspace:*'
 
 # @veramo/utils@7 imports the subpath `@noble/hashes/sha256` but never declares
 # @noble/hashes as a dependency (a phantom dep). pnpm resolves that undeclared
