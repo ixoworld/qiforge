@@ -8,7 +8,7 @@ QiForge — a plugin-based framework for building Agentic Oracles on the IXO net
 
 Active codebase:
 
-- `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 14 bundled plugins).
+- `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 17 bundled plugins).
 - `apps/qiforge-example/` — reference oracle wiring the bundled plugin set + a custom Weather plugin. Use as the canonical "how a fork is built".
 
 `apps/app/` is legacy and being removed (TASK-32). Do not touch prompts, tools, or middlewares there. Scope edits to the runtime package and the example app.
@@ -46,7 +46,7 @@ CI runs `pnpm lint` and `pnpm format:check` — both must pass.
 
 ### Monorepo structure
 
-- **`packages/oracle-runtime/`** — `@ixo/oracle-runtime`, the framework. Bootstrap (`createOracleApp`), agent build, graph, modules (Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Health, Matrix checkpointer), 14 bundled plugins.
+- **`packages/oracle-runtime/`** — `@ixo/oracle-runtime`, the framework. Bootstrap (`createOracleApp`), agent build, graph, modules (Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Health, Matrix checkpointer), 17 bundled plugins.
 - **`apps/qiforge-example/`** — reference oracle.
 - **`apps/app/`** — legacy monolith, being removed.
 - **`packages/`** — other shared packages (`@ixo/events`, `@ixo/matrix`, `@ixo/sqlite-saver`, `@ixo/oracles-chain-client`, `@ixo/oracles-client-sdk`, etc.).
@@ -93,7 +93,7 @@ Single new state field: `loadedPlugins` — populated by the `load_capability` m
 | Meta-tools             | `packages/oracle-runtime/src/meta-tools/` (load-capability, list-capabilities)                                        |
 | Always-on middlewares  | `packages/oracle-runtime/src/graph/middlewares/`                                                                      |
 | Six registries         | `packages/oracle-runtime/src/registries/`                                                                             |
-| Bundled plugins        | `packages/oracle-runtime/src/plugins/` (14 dirs)                                                                      |
+| Bundled plugins        | `packages/oracle-runtime/src/plugins/` (17 dirs)                                                                      |
 | Bundled plugin index   | `packages/oracle-runtime/src/plugins/index.ts` (`BUNDLED_PLUGINS`)                                                    |
 | Always-on Nest modules | `packages/oracle-runtime/src/modules/` (sessions, messages, ws, secrets, ucan, auth, subscription, throttler, health) |
 | Matrix checkpointer    | `packages/oracle-runtime/src/matrix/checkpointer/`                                                                    |

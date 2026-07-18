@@ -75,6 +75,16 @@ Currently the Tier-1 prompt block has no hard cap. A 50-plugin oracle marking ev
 
 No version compat checking in v1. A plugin authored against `@ixo/oracle-runtime ^1.0.0` could in principle be loaded into a `2.x` runtime with a breaking change. Adding a `requiresRuntime` field on the plugin would let the loader validate.
 
+### Concierge: public docs, VFS auth confirmation, abuse limits
+
+**Introduced by:** the concierge feature (Linear project "Oracle Concierge", IXO-3742…IXO-3750).
+
+- **Public docs (`ixo-docs/build-an-oracle/`) updates** for the new public API surface: `RuntimeContext.session.mode`, the `concierge` bundled-plugin page, `IMessageOptions.mentions` + `MatrixManager.sendFileMessage`, greet-on-join behavior, the Matrix formatting rule, and the removal of `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` (the automatic delegation nudge was replaced by the concierge's `request_authorization` tool). The docs repo was not available in the implementing session.
+- **Confirm VFS accepts oracle-issuer entity-namespace invocations.** `search_domain_docs` self-signs an invocation over `ixo:filesystem/<ORACLE_ENTITY_DID>` (the worker authorizes entity namespaces by domain membership). If the worker turns out to require a deposited delegation instead, swap only `entityDocsMint` in `plugins/concierge/domain-docs-tools.ts` for a `getServiceDelegation`-style flow — the tool already degrades gracefully on 401/403 meanwhile.
+- **Concierge abuse limits + operator settings.** Concierge turns are unmetered by design (no subscription to bill), bounded by the restricted tool surface, the domain-scoped prompt, and group-room mention gating. A per-DID daily turn cap and operator-facing concierge settings (scope, tone, toggles) were explicitly deferred.
+- **Matrix-ingress integration driver.** The integration harness is HTTP-only, so the invite → greet → concierge-turn flow is covered by unit tests plus the manual verification script. A minimal Matrix test-user driver would let CI exercise the ingress path end-to-end.
+- **Rooms-bot `/spaces/source` support-room provisioning.** Spec'd in `specs/spaces-source-support-room.md`; implementation lives in `ixofoundation/ixo-matrix-appservice-rooms`.
+
 ## Out of scope for v1
 
 Listed for clarity — these are not follow-ups in flight; they're deliberately out of scope:

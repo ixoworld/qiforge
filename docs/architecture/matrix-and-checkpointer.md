@@ -74,6 +74,14 @@ Boot continues regardless. Operators see warning logs naming the CLI command to 
 
 Exposed to plugins via `rtCtx.ucan.{requireCapability, hasCapability, mintInvocation, resolveServiceDid}`.
 
+## Matrix chat surface
+
+`modules/messages/matrix-listener-bridge.ts` is the Matrix ingress AND the greeter:
+
+- **Greet-on-join.** The bridge registers `matrixManager.onBotJoinedRoom` next to `onMessage`. When the bot is freshly added to a room (invites are auto-accepted — `autoJoin: true` in `MatrixManager`), it waits ~1.5s for device lists to settle, resolves DM-vs-group shape via `getRoomInfo`, and sends a deterministic greeting composed by `modules/messages/room-greeting.ts`. The send is not just UX: the outbound encrypt establishes Olm 1:1 sessions with current members and distributes a Megolm group session, which is what makes the user's FIRST message in a fresh encrypted room decryptable. Idempotent per process (`welcomedRooms`); send failures are logged, never retried (a re-invite re-greets).
+- **Outbound replies** from both the Matrix-ingress path and the portal replay funnel through `matrix/outbound-reply.ts` (`postAgentReplyToMatrix`). Replies over `MATRIX_MESSAGE_OVERFLOW_CHARS` (2,000) are uploaded as an in-thread `response-<ts>.md` file via `MatrixManager.sendFileMessage` with a short lead-in message; upload failure falls back to posting the full text. User-message replay stays verbatim.
+- **`MatrixManager.sendFileMessage`** (in `@ixo/matrix`) posts a standard `m.room.message` / `msgtype: 'm.file'` — encrypted rooms go through `crypto.encryptMedia` with the full envelope, plain rooms use a direct mxc URL. `sendMessage` also accepts `mentions: string[]`, emitted as `m.mentions.user_ids` (intentional mentions → push notifications); the concierge plugin's `escalate_to_support` uses this to notify the entity's support team in its Support room.
+
 ## Graceful shutdown
 
 `bootstrap/graceful-shutdown.ts` registers SIGTERM and SIGINT handlers (unless `opts.skipGracefulShutdown`). On signal:

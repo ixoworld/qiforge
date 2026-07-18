@@ -16,7 +16,7 @@ packages/oracle-runtime/src/
 ├── meta-tools/           # load_capability, list_capabilities
 ├── modules/              # always-on NestJS modules (Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Health)
 ├── plugin-api/           # OraclePlugin, defineOraclePlugin, tool(), types
-├── plugins/              # 14 bundled plugins
+├── plugins/              # 17 bundled plugins
 ├── registries/           # 6 internal registries
 ├── runtime-context/      # buildPluginContext, buildRuntimeContext, ambient services
 ├── testing/              # createTestRuntime + mocks + integration harness

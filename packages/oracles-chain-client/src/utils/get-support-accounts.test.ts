@@ -30,7 +30,11 @@ describe('parseSupportAccounts', () => {
     ]);
 
     expect(accounts).toEqual([
-      { did: 'did:ixo:ixo1support', relationship: 'support', service: 'matrix' },
+      {
+        did: 'did:ixo:ixo1support',
+        relationship: 'support',
+        service: 'matrix',
+      },
       { did: 'did:x:second', relationship: 'support', service: 'matrix' },
     ]);
   });
@@ -63,19 +67,26 @@ describe('getSupportAccounts', () => {
     const accounts = await getSupportAccounts('did:ixo:entity:fetch1');
 
     expect(accounts).toEqual([
-      { did: 'did:ixo:ixo1support', relationship: 'support', service: 'matrix' },
+      {
+        did: 'did:ixo:ixo1support',
+        relationship: 'support',
+        service: 'matrix',
+      },
     ]);
-    expect(requestMock).toHaveBeenCalledWith(expect.stringContaining('linkedEntity'), {
-      id: 'did:ixo:entity:fetch1',
-    });
+    expect(requestMock).toHaveBeenCalledWith(
+      expect.stringContaining('linkedEntity'),
+      {
+        id: 'did:ixo:entity:fetch1',
+      },
+    );
   });
 
   it('returns [] when the entity does not exist', async () => {
     requestMock.mockResolvedValueOnce({ entity: null });
 
-    await expect(getSupportAccounts('did:ixo:entity:missing1')).resolves.toEqual(
-      [],
-    );
+    await expect(
+      getSupportAccounts('did:ixo:entity:missing1'),
+    ).resolves.toEqual([]);
   });
 
   it('caches the lookup per entity DID', async () => {

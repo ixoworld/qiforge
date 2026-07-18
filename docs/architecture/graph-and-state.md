@@ -92,7 +92,22 @@ The tool's `description` is auto-prefixed with the plugin's `manifest.title` (e.
 - **Tier-1 capability block** — alphabetical list of `always` plugins with their `manifest.summary`. Rendered by `ManifestRegistry.renderTier1(eagerPluginNames)`. ~80 tokens per plugin.
 - **Loaded section** — listing of plugins the agent has `load_capability`'d so far in this thread.
 
-Other sections (identity, operating mode, user context, time context, user preferences, editor context, Slack formatting, secrets context, Composio context) are framework-owned. Plugins shouldn't try to add free-form prompt content — their interface to the LLM is the manifest plus tool/sub-agent descriptions.
+Other sections (identity, operating mode, user context, time context, user preferences, editor context, Slack formatting, Matrix formatting, secrets context, Composio context) are framework-owned. Plugins shouldn't try to add free-form prompt content — their interface to the LLM is the manifest plus tool/sub-agent descriptions.
+
+Client-specific formatting blocks are keyed on `session.client`: Slack sessions get `SLACK_FORMATTING_CONSTRAINTS_CONTENT`, Matrix sessions get `MATRIX_FORMATTING_CONSTRAINTS_CONTENT` (concise chat replies; deliberate long-form goes out as an artefact via `share_artifact` or the editor's `create_page` — backed by the deterministic overflow guard on the reply path, see [Matrix & checkpointer](matrix-and-checkpointer.md)).
+
+## Concierge mode
+
+`session.mode?: 'full' | 'concierge'` rides the per-request context (typed in `plugin-api/types.ts`, `graph/main-agent-types.ts`, `runtime-context/build-runtime.ts`). `AgentBuilder` computes it per turn: a Matrix sender with neither a per-request nor a stored UCAN delegation is a concierge visitor. Because it's recomputed every turn, authorizing mid-conversation promotes the very next message to full mode with no migration.
+
+On a concierge turn, `createMainAgent`:
+
+- filters the collected tools/sub-agents through `graph/concierge-policy.ts` — only the `concierge` plugin's tools and the `domain-indexer` sub-agent bind (the latter's manifest is `visibility: 'always'`, so the capability gate passes it without meta-tools);
+- drops the meta-tools (`load_capability` must not widen the surface);
+- skips the editor prompt/stub machinery;
+- swaps the operational mode for `CONCIERGE_OPERATIONAL_MODE` (front-desk persona: domain-scoped answers grounded in the oracle's domain card + docs, human escalation, authorization explainer).
+
+The credits middleware passes through on concierge turns (no balance gate, no deduction), and the old automatic `ixo.oracle.delegation_required` nudge in `AgentBuilder` is gone — the concierge plugin's `request_authorization` tool emits that event when the user asks to unlock the full service.
 
 ## Middlewares wired into the agent
 
