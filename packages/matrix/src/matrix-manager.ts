@@ -17,6 +17,7 @@ import {
   type ISimpleMatrixClientConfig,
   type SimpleMatrixClient,
 } from './utils/create-simple-matrix-client.js';
+import { buildFileMessageContent } from './utils/file-message.js';
 import { formatMsg } from './utils/format-msg.js';
 import { extractBackupKeyFromSSS } from './utils/ssss.js';
 
@@ -377,12 +378,76 @@ export class MatrixManager {
         type: 'html',
         formattedBody: htmlContent,
         threadId: options.threadId,
+        mentions: options.mentions,
         metadata: options.metadata,
       });
     } catch (error) {
       Logger.error('❌ Error sending message:', error);
       throw error;
     }
+  }
+
+  /**
+   * Upload a file and post it into a room as a standard `m.room.message`
+   * with `msgtype: 'm.file'` — the shape ordinary Matrix clients render as a
+   * downloadable attachment (and the shape the runtime's own listener parses
+   * inbound). Encrypted rooms get the media encrypted via the crypto store;
+   * plain rooms get a direct mxc URL.
+   */
+  async sendFileMessage(options: {
+    roomId: string;
+    filename: string;
+    mimetype: string;
+    data: Buffer;
+    threadId?: string;
+    /** Fallback text for clients that can't render files. Defaults to the filename. */
+    body?: string;
+  }): Promise<string> {
+    if (!this.mxClient) {
+      throw new Error('Simple client not initialized');
+    }
+
+    const mx = this.mxClient.mxClient;
+    const isEncrypted = await mx.crypto.isRoomEncrypted(options.roomId);
+
+    let content: Record<string, unknown>;
+    if (isEncrypted) {
+      const encrypted = await mx.crypto.encryptMedia(options.data);
+      const mxc = await mx.uploadContent(encrypted.buffer);
+      content = buildFileMessageContent({
+        filename: options.filename,
+        mimetype: options.mimetype,
+        size: options.data.length,
+        body: options.body,
+        threadId: options.threadId,
+        encryptedFile: { url: mxc, ...encrypted.file },
+      });
+    } else {
+      const mxc = await mx.uploadContent(
+        options.data,
+        options.mimetype,
+        options.filename,
+      );
+      content = buildFileMessageContent({
+        filename: options.filename,
+        mimetype: options.mimetype,
+        size: options.data.length,
+        body: options.body,
+        threadId: options.threadId,
+        url: mxc,
+      });
+    }
+
+    return await mx.sendEvent(options.roomId, 'm.room.message', content);
+  }
+
+  /**
+   * The homeserver name this oracle operates on (from
+   * `MATRIX_HOMESERVER_NAME`, falling back to the `MATRIX_BASE_URL` host).
+   * Used to derive room aliases and Matrix user IDs without re-reading env.
+   */
+  public getHomeserverName(): string {
+    return this.homeserverName;
   }
 
   async editMessage(

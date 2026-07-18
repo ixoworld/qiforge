@@ -27,6 +27,8 @@ export interface IMessageOptions {
 
   type?: 'text' | 'html';
   formattedBody?: string;
+  /** Full Matrix user IDs for intentional mentions (`m.mentions.user_ids`). */
+  mentions?: string[];
   /** Custom fields spread onto the Matrix event content (e.g. `{ 'ixo.task_id': '...' }`) */
   metadata?: Record<string, unknown>;
 }
@@ -167,7 +169,12 @@ export class SimpleMatrixClient {
       // Use matrix-bot-sdk's sendText method
       const eventId = await this.mxClient.sendMessage(options.roomId, {
         body: options.message,
-        'm.mentions': {},
+        // An explicit empty object means "intentionally no mentions"; when
+        // user IDs are provided their clients notify per the intentional
+        // mentions spec.
+        'm.mentions': options.mentions?.length
+          ? { user_ids: options.mentions }
+          : {},
         msgtype: 'm.text',
         ...(options.threadId
           ? {

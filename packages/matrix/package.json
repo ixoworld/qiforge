@@ -45,7 +45,8 @@
     "@testcontainers/postgresql": "^10.16.0",
     "rimraf": "^6.0.1",
     "testcontainers": "^10.16.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "@ixo/logger": "workspace:*",
