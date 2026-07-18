@@ -122,6 +122,7 @@ export {
   callsPlugin,
   userPreferencesPlugin,
   vfsPlugin,
+  conciergePlugin,
   BUNDLED_PLUGINS,
 } from './plugins/index.js';
 
@@ -131,6 +132,7 @@ export {
 // `createOracleApp` to override.
 export * from './plugins/agui/index.js';
 export * from './plugins/composio/index.js';
+export * from './plugins/concierge/index.js';
 export * from './plugins/credits/index.js';
 export * from './plugins/domain-indexer/index.js';
 export * from './plugins/editor/index.js';

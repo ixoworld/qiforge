@@ -1,4 +1,4 @@
-export { VfsPlugin, type VfsConfig } from './vfs.plugin.js';
+export { VfsPlugin, resolveVfsBaseUrls, type VfsConfig } from './vfs.plugin.js';
 export { createVfsTools, type CreateVfsToolsDeps } from './vfs-tools.js';
 export {
   createVfsSandboxTools,

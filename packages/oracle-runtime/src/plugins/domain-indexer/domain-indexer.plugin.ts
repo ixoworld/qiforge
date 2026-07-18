@@ -26,7 +26,7 @@ const configSchema = z.object({
 
 const networkSchema = z.enum(['mainnet', 'testnet', 'devnet']);
 
-function resolveDomainIndexerUrl(config: MergedConfig): string {
+export function resolveDomainIndexerUrl(config: MergedConfig): string {
   const override = configSchema.safeParse(config);
   if (override.success && override.data.DOMAIN_INDEXER_URL) {
     return override.data.DOMAIN_INDEXER_URL;

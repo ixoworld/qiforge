@@ -164,7 +164,7 @@ WORKFLOW:
 IMPORTANT: This tool returns a filtered response with only essential fields (summary, overview, FAQ, and basic info) to avoid context overload. All fields are at the top level - no need to navigate nested objects.`;
 
 /** Domain-card payload trimmed to the fields the agent needs. */
-interface DomainCardSummary {
+export interface DomainCardSummary {
   id: unknown;
   name: unknown;
   description: unknown;
@@ -181,7 +181,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function projectDomainCard(card: unknown): DomainCardSummary {
+export function projectDomainCard(card: unknown): DomainCardSummary {
   const c = isRecord(card) ? card : {};
   return {
     id: c.id,

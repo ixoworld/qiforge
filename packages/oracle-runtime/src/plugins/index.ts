@@ -2,6 +2,7 @@ import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
 import { ComposioPlugin } from './composio/index.js';
+import { ConciergePlugin } from './concierge/index.js';
 import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
 import { EditorPlugin } from './editor/index.js';
@@ -51,6 +52,7 @@ export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const vfsPlugin = new VfsPlugin();
+export const conciergePlugin = new ConciergePlugin();
 
 // NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
 // a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
@@ -82,4 +84,5 @@ export const BUNDLED_PLUGINS = [
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
   vfsPlugin,
+  conciergePlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

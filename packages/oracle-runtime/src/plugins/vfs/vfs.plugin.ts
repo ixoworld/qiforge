@@ -56,6 +56,20 @@ export interface VfsConfig {
   VFS_REQUEST_TIMEOUT_MS: number;
 }
 
+/**
+ * Resolve the VFS + UCAN Store worker base URLs from the merged config's
+ * `NETWORK` (default devnet). Shared with the concierge plugin, which reads
+ * the oracle's own entity namespace on the same worker.
+ */
+export function resolveVfsBaseUrls(config: unknown): {
+  vfs: string;
+  store: string;
+} {
+  const siblings = siblingEnvSchema.safeParse(config);
+  const network = (siblings.success && siblings.data.NETWORK) || 'devnet';
+  return NETWORK_URLS[network];
+}
+
 const manifest: PluginManifest = {
   title: 'Files',
   summary:
@@ -143,8 +157,7 @@ export class VfsPlugin extends OraclePlugin {
 
     const tuning = configSchema.safeParse(rtCtx.config);
     const siblings = siblingEnvSchema.safeParse(rtCtx.config);
-    const network = (siblings.success && siblings.data.NETWORK) || 'devnet';
-    const urls = NETWORK_URLS[network];
+    const urls = resolveVfsBaseUrls(rtCtx.config);
     const cfg: VfsConfig = {
       VFS_BASE_URL: urls.vfs,
       UCAN_STORE_URL: urls.store,
