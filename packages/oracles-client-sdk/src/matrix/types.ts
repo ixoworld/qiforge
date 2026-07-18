@@ -82,5 +82,25 @@ export type SourceSpaceResponse = {
       };
       rooms: unknown[];
     };
+    /**
+     * Community subspace — optional until the rooms-bot ships it (see
+     * qiforge `specs/spaces-source-support-room.md`). Its Support room
+     * (`<hyphenated entity DID>-sup`) is where the scaffold adds the
+     * entity's designated support accounts with moderation power.
+     */
+    community?: {
+      space_id: string;
+      space_alias: string;
+      privacy: {
+        encrypted: boolean;
+        join_rule: string;
+        history_visibility: string;
+      };
+      rooms: unknown[];
+      support_room?: {
+        room_id: string;
+        room_alias: string;
+      };
+    };
   };
 };
