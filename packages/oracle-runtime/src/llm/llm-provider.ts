@@ -5,6 +5,7 @@ import {
   type LLMProvider,
 } from '@ixo/common';
 import { Logger } from '@nestjs/common';
+import { DEFAULT_MODEL_ID, getDefaultModelId } from './model-catalog.js';
 
 // Re-use ChatOpenAIFields type via the return type of getChatOpenAiModel
 type ChatOpenAIFields = Parameters<typeof getChatOpenAiModel>[0];
@@ -41,8 +42,10 @@ export type ProviderModelRole =
 
 const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
   openrouter: {
-    main: 'z-ai/glm-5.2:nitro',
-    // main: 'moonshotai/kimi-k2-thinking',
+    // The user-facing default. Overridable per deployment via DEFAULT_MODEL and
+    // per request via the model field on a send — both resolved in
+    // `getModelForRole('main')` / `getProviderChatModel`.
+    main: DEFAULT_MODEL_ID,
     skills: 'z-ai/glm-5.2:nitro',
     // skills: 'moonshotai/kimi-k2-thinking',
     subagent: 'z-ai/glm-5.2:nitro',
@@ -100,6 +103,12 @@ function resolveMainReasoningEffort(): 'low' | 'medium' | 'high' {
 export function getModelForRole(role: ProviderModelRole | string): string {
   const provider = getLLMProvider();
   const map = MODEL_MAP[provider];
+  // The `main` model is deployment-configurable via DEFAULT_MODEL. Only
+  // OpenRouter participates in model selection today; Nebius keeps its fixed
+  // role map so its self-hosted deployments are unaffected.
+  if (role === 'main' && provider === 'openrouter') {
+    return getDefaultModelId();
+  }
   return map[role as ProviderModelRole] ?? map.subagent;
 }
 

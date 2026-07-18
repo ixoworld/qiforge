@@ -416,8 +416,13 @@ export async function createMainAgent(
   });
 
   // ── 8. Model + checkpointer ─────────────────────────────────────────────
+  // A per-request model (already allow-list-validated in AgentBuilder) wins
+  // over the role default; the provider factory honours `params.model`.
   const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
-  const model = resolveModel('main');
+  const model = resolveModel(
+    'main',
+    requestCtx.model ? { model: requestCtx.model } : undefined,
+  );
   const checkpointer = hooks?.checkpointerForUser
     ? await hooks.checkpointerForUser(requestCtx.user.did)
     : undefined;

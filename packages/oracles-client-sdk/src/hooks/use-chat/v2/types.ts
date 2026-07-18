@@ -87,6 +87,13 @@ export interface IChatOptions {
     wsUrl?: string;
   };
   streamingMode?: 'batched' | 'immediate';
+  /**
+   * Model id to answer with, chosen from `useModels()` / `GET /models`. When
+   * omitted the oracle's default model is used. Model is a conversation-level
+   * setting (like the ChatGPT/Claude switcher): the value in effect at send
+   * time is applied to that message.
+   */
+  model?: string;
 }
 
 export interface Attachment {
@@ -108,6 +115,8 @@ export interface ISendMessageOptions {
   browserTools?: IBrowserTools;
   chatRef?: React.MutableRefObject<OracleChat>;
   refetchQueries?: () => Promise<void>;
+  /** Model id to answer with; omitted → the oracle's default model. */
+  model?: string;
 
   // NEW callbacks for streaming events
   onToolCall?: (data: {

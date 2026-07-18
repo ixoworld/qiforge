@@ -29,6 +29,7 @@ These are imported by `RuntimeAppModule` on every boot regardless of plugin set:
 | -------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
 | `SessionsModule`     | Chat session lifecycle (per-user, per-thread).                                                     | `/sessions`          |
 | `MessagesModule`     | Send + stream messages; per-request agent build.                                                   | `/messages`          |
+| `ModelsModule`       | Model catalog with cost tiers ([model selection](./model-selection.md)). Auth-excluded (public).   | `/models`            |
 | `WsModule`           | WebSocket gateway for typed events.                                                                | WebSocket            |
 | `SecretsModule`      | Per-room JWE-encrypted secrets with 24h cache.                                                     | (no public routes)   |
 | `UcanModule`         | UCAN delegation + invocation signing.                                                              | (no public routes)   |

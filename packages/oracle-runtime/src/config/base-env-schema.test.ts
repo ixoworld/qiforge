@@ -117,6 +117,8 @@ describe('baseEnvSchema', () => {
       'OPENAI_API_KEY',
       'OPEN_ROUTER_API_KEY',
       'NEBIUS_API_KEY',
+      'DEFAULT_MODEL',
+      'MODEL_PRICE_MARKUP',
       'LIVE_AGENT_AUTH_API_KEY',
       'LANGSMITH_TRACING',
       'LANGSMITH_API_KEY',

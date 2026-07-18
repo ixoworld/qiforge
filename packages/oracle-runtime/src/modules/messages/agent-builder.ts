@@ -10,6 +10,7 @@ import type {
 } from '../../graph/main-agent-types.js';
 import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
+import { isAllowedModel } from '../../llm/model-catalog.js';
 import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
 import { UcanService } from '../ucan/ucan.service.js';
@@ -262,6 +263,20 @@ export class AgentBuilder {
           raw: matrixDelegationRaw ?? '',
         };
 
+    // Per-request model override, gated by the catalog allow-list so a client
+    // can't point a turn at an arbitrary (or unlisted, costly) model. An
+    // unknown id is dropped and the turn falls back to the default model.
+    let requestedModel: string | undefined;
+    if (payload.model) {
+      if (isAllowedModel(payload.model)) {
+        requestedModel = payload.model;
+      } else {
+        this.logger.warn(
+          `Ignoring unknown model "${payload.model}" — falling back to the default model.`,
+        );
+      }
+    }
+
     const requestCtx: MainAgentRequestContext = {
       user: {
         did: payload.did,
@@ -277,6 +292,7 @@ export class AgentBuilder {
         roomId: prepared.roomId,
       },
       history: { userContext },
+      model: requestedModel,
     };
 
     const buildTimeState: Partial<TMainAgentGraphState> = {
