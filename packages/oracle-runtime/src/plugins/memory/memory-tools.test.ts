@@ -24,7 +24,10 @@ vi.mock('@langchain/mcp-adapters', () => ({
 
 const MEMORY_MCP_URL = 'https://memory.test/mcp';
 
-function upstreamTool(name: string, invoke = vi.fn(async () => ({ ok: true }))) {
+function upstreamTool(
+  name: string,
+  invoke = vi.fn(async () => ({ ok: true })),
+) {
   return {
     name,
     description: `upstream ${name}`,
@@ -128,7 +131,9 @@ describe('createDefaultMemoryMcpFactory tool-definition cache', () => {
 
   it('a failed lazy connect does not poison later invocations', async () => {
     const invoke = vi.fn(async () => ({ ok: true }));
-    getToolsSpy.mockResolvedValue([upstreamTool(MEMORY_SEARCH_MCP_NAME, invoke)]);
+    getToolsSpy.mockResolvedValue([
+      upstreamTool(MEMORY_SEARCH_MCP_NAME, invoke),
+    ]);
 
     await createDefaultMemoryMcpFactory(MEMORY_MCP_URL)(ctx());
     const warm = await createDefaultMemoryMcpFactory(MEMORY_MCP_URL)(ctx());
