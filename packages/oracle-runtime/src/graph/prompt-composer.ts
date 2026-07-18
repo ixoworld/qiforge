@@ -43,6 +43,8 @@ export interface ComposePromptInput {
   composioContext: string;
   /** Slack-specific formatting constraints. Empty string for non-slack clients. */
   slackFormattingConstraints: string;
+  /** Matrix-specific formatting constraints. Empty string for non-matrix clients. */
+  matrixFormattingConstraints: string;
   /** Per-key user-secret bullet list (e.g. `- _USER_SECRET_FOO`). Empty when none. */
   userSecretsContext: string;
   /** User preferences rendered as bullets. Empty when not set. */
@@ -69,6 +71,23 @@ Slack doesn't render markdown tables. When responding in a Slack session:
 - Use bullet lists with bold labels ("• **Name:** value") instead of tables
 - Use numbered lists for sequential data
 - When delegating to sub-agents, ask them for list-based formatting (no tables)
+
+`;
+
+/**
+ * Matrix chat constraints, injected when `session.client === 'matrix'`. Chat
+ * replies stay chat-sized; deliberate long-form goes out as an artefact file
+ * (the runtime also enforces this with an overflow guard on the reply path).
+ */
+export const MATRIX_FORMATTING_CONSTRAINTS_CONTENT = `## Matrix Chat Formatting
+
+You are chatting in a Matrix room. Replies must read like chat, not documents:
+- Be concise: short paragraphs, minimal headings, no wall-of-text enumerations. A reply should comfortably fit on one phone screen — stay well under 2,000 characters.
+- When a complete answer genuinely needs long form, do NOT paste it into chat. Say in one sentence that you're attaching it, then deliver it as an artefact file:
+  - \`share_artifact\` with format "md" for long-form TEXT (reports, guides, detailed answers). Not for code or raw JSON — keep those in chat code blocks unless the user asks for a file.
+  - \`share_artifact\` with format "html" for VISUAL presentations (styled tables, comparisons, formatted summaries).
+  - the editor's \`create_page\` for a COLLABORATIVE page/canvas people will edit together (when that tool is available).
+- Oversized replies are auto-attached as a markdown file with a short lead-in — but attaching deliberately with \`share_artifact\` always reads better.
 
 `;
 
@@ -412,6 +431,10 @@ These are auto-injected — don't ask the user for them. If a skill needs a secr
 
 {{{SLACK_FORMATTING_CONSTRAINTS}}}
 {{/SLACK_FORMATTING_CONSTRAINTS}}
+{{#MATRIX_FORMATTING_CONSTRAINTS}}
+
+{{{MATRIX_FORMATTING_CONSTRAINTS}}}
+{{/MATRIX_FORMATTING_CONSTRAINTS}}
 `;
 
 interface TemplateVariables {
@@ -426,6 +449,7 @@ interface TemplateVariables {
   OPERATIONAL_MODE: string;
   EDITOR_SECTION: string;
   SLACK_FORMATTING_CONSTRAINTS: string;
+  MATRIX_FORMATTING_CONSTRAINTS: string;
   USER_SECRETS_CONTEXT: string;
   COMPOSIO_CONTEXT: string;
   USER_PREFERENCES_CONTEXT: string;
@@ -445,6 +469,7 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'OPERATIONAL_MODE',
     'EDITOR_SECTION',
     'SLACK_FORMATTING_CONSTRAINTS',
+    'MATRIX_FORMATTING_CONSTRAINTS',
     'USER_SECRETS_CONTEXT',
     'COMPOSIO_CONTEXT',
     'USER_PREFERENCES_CONTEXT',
@@ -488,6 +513,7 @@ export async function composePrompt(
     OPERATIONAL_MODE: input.operationalMode,
     EDITOR_SECTION: input.editorSection,
     SLACK_FORMATTING_CONSTRAINTS: input.slackFormattingConstraints,
+    MATRIX_FORMATTING_CONSTRAINTS: input.matrixFormattingConstraints,
     USER_SECRETS_CONTEXT: input.userSecretsContext,
     COMPOSIO_CONTEXT: input.composioContext,
     USER_PREFERENCES_CONTEXT: input.userPreferencesContext,

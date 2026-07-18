@@ -10,9 +10,19 @@ const NOOP_LOGGER: Logger = {
   error: () => undefined,
 };
 
+/**
+ * The three limiter capabilities the middleware consumes — structural so
+ * tests can pass a plain stub while the plugin passes the real
+ * `TokenLimiter`.
+ */
+export type CreditLimiter = Pick<
+  TokenLimiter,
+  'getRemaining' | 'limit' | 'creditsForUsage'
+>;
+
 export interface CreditsMiddlewareOptions {
   /** Active limiter. When `null`, the middleware skips silently. */
-  limiter: TokenLimiter | null;
+  limiter: CreditLimiter | null;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }

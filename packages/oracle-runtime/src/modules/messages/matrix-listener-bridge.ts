@@ -11,6 +11,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { postAgentReplyToMatrix } from '../../matrix/outbound-reply.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { composeGreeting } from './room-greeting.js';
 
@@ -418,11 +419,11 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      await this.matrixManager.sendMessage({
-        message: aiResponse.message.content,
+      await postAgentReplyToMatrix({
+        matrixManager: this.matrixManager,
+        content: aiResponse.message.content,
         roomId: first.roomId,
         threadId,
-        isOracleAdmin: true,
         disablePrefix: true,
       });
     } catch (error) {

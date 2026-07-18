@@ -12,6 +12,7 @@ import type { Request, Response } from 'express';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
+import { postAgentReplyToMatrix } from '../../matrix/outbound-reply.js';
 import { BatchInvoker } from './batch-invoker.js';
 import { type ListMessagesDto } from './dto/list-messages.dto.js';
 import {
@@ -201,19 +202,18 @@ export class MessagesService implements OnModuleInit {
           abortControllers: this.abortControllers,
           onComplete: (assistantText) => {
             if (!msgFromMatrixRoom && assistantText) {
-              this.sessions.matrixManger
-                .sendMessage({
-                  message: assistantText,
-                  roomId: prepared.roomId,
-                  threadId: replayThreadId,
-                  isOracleAdmin: true,
-                })
-                .catch((err) =>
-                  this.logger.error(
-                    `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
-                    err,
-                  ),
-                );
+              postAgentReplyToMatrix({
+                matrixManager: this.sessions.matrixManger,
+                content: assistantText,
+                roomId: prepared.roomId,
+                threadId: replayThreadId,
+                disablePrefix: false,
+              }).catch((err) =>
+                this.logger.error(
+                  `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
+                  err,
+                ),
+              );
             }
             if (!skipPostSync) this.firePostSync(params, prepared);
           },
@@ -228,19 +228,18 @@ export class MessagesService implements OnModuleInit {
       });
 
       if (!msgFromMatrixRoom) {
-        this.sessions.matrixManger
-          .sendMessage({
-            message: result.message.content,
-            roomId: prepared.roomId,
-            threadId: replayThreadId,
-            isOracleAdmin: true,
-          })
-          .catch((err) =>
-            this.logger.error(
-              `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
-              err,
-            ),
-          );
+        postAgentReplyToMatrix({
+          matrixManager: this.sessions.matrixManger,
+          content: result.message.content,
+          roomId: prepared.roomId,
+          threadId: replayThreadId,
+          disablePrefix: false,
+        }).catch((err) =>
+          this.logger.error(
+            `Matrix replay (AI response) failed — roomId=${prepared.roomId} threadId=${prepared.sessionId}`,
+            err,
+          ),
+        );
       }
       if (!skipPostSync) this.firePostSync(params, prepared);
       return result;

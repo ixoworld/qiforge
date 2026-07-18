@@ -27,12 +27,14 @@ import {
   FLOWS_OPERATING_GUIDE,
   FLOWS_PLUGIN_NAME,
 } from '../plugins/flows/prompts.js';
+import { CONCIERGE_OPERATIONAL_MODE } from '../plugins/concierge/index.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
   type RunConfig,
   type RuntimeStateInput,
 } from '../runtime-context/build-runtime.js';
+import { applyConciergePolicy } from './concierge-policy.js';
 import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
 import {
   createCapabilityGateMiddleware,
@@ -45,6 +47,7 @@ import {
   composePrompt,
   formatTimeContext,
   formatUserPreferences,
+  MATRIX_FORMATTING_CONSTRAINTS_CONTENT,
   SLACK_FORMATTING_CONSTRAINTS_CONTENT,
 } from './prompt-composer.js';
 import { MainAgentGraphState } from './state.js';
@@ -159,13 +162,30 @@ export async function createMainAgent(
         requestId: requestCtx.session.requestId,
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
+        mode: requestCtx.session.mode,
       },
     },
   };
   const rtCtx = buildRuntimeContext(runConfig, ambient, wrapState);
 
   // ── 3. Resolve registries (boot-time + request-time contributions) ──────
-  const allTools = await registries.tools.collect(buildCtx, rtCtx);
+  // Concierge turns (unauthorized Matrix visitors) bind a restricted
+  // surface: concierge tools + the domain-indexer sub-agent, nothing else —
+  // see `applyConciergePolicy`. Filtering the collections up front means
+  // nothing below (visibility selection, memory passthrough, gate maps)
+  // ever sees the dropped capabilities.
+  const concierge = requestCtx.session.mode === 'concierge';
+  const collectedTools = await registries.tools.collect(buildCtx, rtCtx);
+  const collectedSubAgents = await registries.subAgents.collect(
+    buildCtx,
+    rtCtx,
+  );
+  const { tools: allTools, subAgents: allSubAgents } = concierge
+    ? applyConciergePolicy({
+        allTools: collectedTools,
+        allSubAgents: collectedSubAgents,
+      })
+    : { tools: collectedTools, subAgents: collectedSubAgents };
   const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
   const titleByPlugin = new Map(
@@ -209,9 +229,8 @@ export async function createMainAgent(
   // Sub-agents share the tool namespace with plugin tools, so they go through
   // the same `CapabilityGateMiddleware` filter as plugin tools. Binding all
   // of them keeps the bound list stable across runs while still respecting
-  // the manifest's visibility rule on every model call.
-  const allSubAgents = await registries.subAgents.collect(buildCtx, rtCtx);
-
+  // the manifest's visibility rule on every model call. (Collected in step 3
+  // so the concierge policy filters tools and sub-agents together.)
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -242,8 +261,12 @@ export async function createMainAgent(
     'main-agent: tool/sub-agent binding summary (all bound; gated at runtime)',
   );
 
+  // Concierge turns drop the meta-tools: without `load_capability` there is
+  // no escape hatch from the restricted surface.
   const tools: StructuredTool[] = [
-    ...metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState })),
+    ...(concierge
+      ? []
+      : metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState }))),
     ...eagerTools.map(wrap),
     ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
@@ -338,7 +361,7 @@ export async function createMainAgent(
   // (60s TTL), so this costs no extra Matrix round-trip; `isUserInRoom`
   // fails closed, matching the plugin's decision.
   let editorUnavailableBlock: string | null = null;
-  if (!editorToolBound && state.editorRoomId) {
+  if (!concierge && !editorToolBound && state.editorRoomId) {
     const isMember = await isUserInRoom(
       state.editorRoomId,
       requestCtx.user.matrixUserId,
@@ -358,7 +381,7 @@ export async function createMainAgent(
       `[main-agent] editorRoomId=${state.editorRoomId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind (reason: ${reason}, user: ${requestCtx.user.matrixUserId}) — ` +
         `binding access-denied stub and injecting the unavailable notice`,
     );
-  } else if (!editorToolBound && state.spaceId) {
+  } else if (!concierge && !editorToolBound && state.spaceId) {
     ambient.logger.warn(
       `[main-agent] spaceId=${state.spaceId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind — suppressing editor prompts; ` +
         `see preceding [editor] log lines for the refusal reason`,
@@ -388,16 +411,21 @@ export async function createMainAgent(
     identity,
     capabilityBlock: tier1.block,
     customInstructions,
-    operationalMode:
-      editorPrompts?.operationalMode ??
-      editorUnavailableBlock ??
-      hooks?.operationalMode ??
-      DEFAULT_OPERATIONAL_MODE,
+    operationalMode: concierge
+      ? CONCIERGE_OPERATIONAL_MODE
+      : (editorPrompts?.operationalMode ??
+        editorUnavailableBlock ??
+        hooks?.operationalMode ??
+        DEFAULT_OPERATIONAL_MODE),
     editorSection: editorPrompts?.editorSection ?? hooks?.editorSection ?? '',
     composioContext: hooks?.composioContext ?? '',
     slackFormattingConstraints:
       requestCtx.session.client === 'slack'
         ? SLACK_FORMATTING_CONSTRAINTS_CONTENT
+        : '',
+    matrixFormattingConstraints:
+      requestCtx.session.client === 'matrix'
+        ? MATRIX_FORMATTING_CONSTRAINTS_CONTENT
         : '',
     userSecretsContext: hooks?.userSecretsContext ?? '',
     userPreferencesContext: formatUserPreferences(state.userPreferences),

@@ -81,6 +81,7 @@ function baseInput(overrides: Partial<ComposePromptInput>): ComposePromptInput {
     editorSection: '',
     composioContext: '',
     slackFormattingConstraints: '',
+    matrixFormattingConstraints: '',
     userSecretsContext: '',
     userPreferencesContext: '',
     userContext: undefined,
