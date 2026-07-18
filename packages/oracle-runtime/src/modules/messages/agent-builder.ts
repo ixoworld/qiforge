@@ -123,13 +123,14 @@ export class AgentBuilder {
     // what `getState().values` would return; reading directly skips a
     // redundant agent rebuild + state-snapshot materialization.
     // ────────────────────────────────────────────────────────────────────
-    let checkpointer: BaseCheckpointSaver | undefined;
-    if (hooks.checkpointerForUser) {
-      checkpointer = await hooks.checkpointerForUser(payload.did);
-    }
-
-    let priorState: Partial<TMainAgentGraphState> = {};
-    if (checkpointer) {
+    const readPriorState = async (): Promise<{
+      checkpointer: BaseCheckpointSaver | undefined;
+      priorState: Partial<TMainAgentGraphState>;
+    }> => {
+      if (!hooks.checkpointerForUser) {
+        return { checkpointer: undefined, priorState: {} };
+      }
+      const checkpointer = await hooks.checkpointerForUser(payload.did);
       try {
         // The build only reads scalar channel_values (loadedPlugins,
         // currentEntityDid, …), never the message history — so skip the
@@ -144,11 +145,12 @@ export class AgentBuilder {
         const channelValues = tuple?.checkpoint?.channel_values as
           | Partial<TMainAgentGraphState>
           | undefined;
-        if (channelValues) priorState = channelValues;
+        return { checkpointer, priorState: channelValues ?? {} };
       } catch {
         // First message in a thread — no prior tuple. Continue with empty state.
+        return { checkpointer, priorState: {} };
       }
-    }
+    };
 
     // ────────────────────────────────────────────────────────────────────
     // Fetch userContext + userPreferences BEFORE building the agent so the
@@ -172,36 +174,44 @@ export class AgentBuilder {
     const needsMatrixDelegation =
       clientType === 'matrix' && !payload.ucanDelegation;
 
+    // The checkpoint read and the enrichment fetches touch disjoint stores
+    // (local SQLite vs Memory Engine / Matrix room state), so they run in a
+    // single Promise.all — the slowest leg gates the build, not the sum.
     const userPrefsService = UserPreferencesService.getInstance();
-    const [freshUserContext, freshUserPreferences, matrixDelegationRaw] =
-      await Promise.all([
-        this.userContextFetcher
-          .fetch({
-            roomId: prepared.roomId,
-            userDid: payload.did,
-            sessionId: prepared.sessionId,
-          })
-          .catch((err) => {
-            this.logger.warn(
-              `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            return undefined;
-          }),
-        userPrefsService.get(prepared.roomId).catch((err) => {
+    const [
+      { checkpointer, priorState },
+      freshUserContext,
+      freshUserPreferences,
+      matrixDelegationRaw,
+    ] = await Promise.all([
+      readPriorState(),
+      this.userContextFetcher
+        .fetch({
+          roomId: prepared.roomId,
+          userDid: payload.did,
+          sessionId: prepared.sessionId,
+        })
+        .catch((err) => {
           this.logger.warn(
-            `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+            `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
           );
           return undefined;
         }),
-        needsMatrixDelegation
-          ? this.ucan.getDelegationForUser(payload.did).catch((err) => {
-              this.logger.warn(
-                `[AgentBuilder] delegation read-through failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-              return null;
-            })
-          : Promise.resolve(null),
-      ]);
+      userPrefsService.get(prepared.roomId).catch((err) => {
+        this.logger.warn(
+          `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return undefined;
+      }),
+      needsMatrixDelegation
+        ? this.ucan.getDelegationForUser(payload.did).catch((err) => {
+            this.logger.warn(
+              `[AgentBuilder] delegation read-through failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
 
     const userContext = freshUserContext ?? priorState.userContext;
     const userPreferences = freshUserPreferences ?? priorState.userPreferences;
@@ -281,12 +291,19 @@ export class AgentBuilder {
       agActions: payload.agActions ?? priorState.agActions,
     };
 
+    // The build resolves `checkpointerForUser` again for the compiled agent;
+    // hand it the saver already resolved above instead of paying a second
+    // per-user lookup in the same turn.
+    const buildHooks = checkpointer
+      ? { ...hooks, checkpointerForUser: () => Promise.resolve(checkpointer) }
+      : hooks;
+
     const agent = await createMainAgent({
       registries: bundle.registries,
       identity: bundle.identity,
       config: bundle.config,
       availablePlugins: bundle.availablePlugins,
-      hooks,
+      hooks: buildHooks,
       ambient: bundle.ambient,
       requestCtx,
       state: buildTimeState,

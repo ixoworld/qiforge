@@ -49,10 +49,114 @@ export type MemoryMcpFactory = (
 ) => Promise<UpstreamMcpTool[] | null>;
 
 /**
- * Default factory: opens an HTTP MCP client to `MEMORY_MCP_URL` with the
- * per-request UCAN headers from {@link buildMemoryHeaders} and returns the
- * upstream's tool list. A fresh client per request mirrors the old apps/app
- * pattern and ensures each invocation runs against the authenticated user.
+ * Tool *definitions* (name/description/schema) published by a Memory Engine
+ * MCP server. User-independent — the per-user part of a memory call is the
+ * auth headers, which are minted per request and applied at invoke time.
+ */
+interface MemoryToolDef {
+  name: string;
+  description: string;
+  schema: z.ZodType;
+}
+
+interface CachedToolDefs {
+  defs: MemoryToolDef[];
+  expiresAt: number;
+}
+
+/**
+ * Definitions change only when the upstream server deploys, so a short TTL
+ * keeps the surface fresh while taking the MCP connect + tools/list network
+ * round-trip off nearly every chat turn.
+ */
+const TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
+
+/** Cached upstream definitions, keyed by MCP URL. */
+const toolDefsCache = new Map<string, CachedToolDefs>();
+
+/** Test hook: drop all cached upstream tool definitions. */
+export function clearMemoryToolDefsCache(): void {
+  toolDefsCache.clear();
+}
+
+async function connectAndListTools(
+  memoryMcpUrl: string,
+  headers: Record<string, string>,
+): Promise<UpstreamMcpTool[]> {
+  const client = new MultiServerMCPClient({
+    useStandardContentBlocks: true,
+    prefixToolNameWithServerName: true,
+    mcpServers: {
+      'memory-engine': {
+        type: 'http',
+        transport: 'http',
+        url: memoryMcpUrl,
+        headers,
+        reconnect: {
+          enabled: true,
+          maxAttempts: 3,
+          delayMs: 2000,
+        },
+        defaultToolTimeout: 420_000,
+      },
+    },
+  });
+  return (await client.getTools()) as unknown as UpstreamMcpTool[];
+}
+
+/**
+ * Bind cached definitions to this request's auth headers. The MCP client is
+ * created lazily on the first actual invocation (and shared across the
+ * request's memory tools), so turns that never touch memory pay zero
+ * Memory-Engine round-trips.
+ */
+function buildLazyUpstreamTools(
+  defs: MemoryToolDef[],
+  memoryMcpUrl: string,
+  headers: Record<string, string>,
+): UpstreamMcpTool[] {
+  let upstreamByName: Promise<Map<string, UpstreamMcpTool>> | null = null;
+  const connect = (): Promise<Map<string, UpstreamMcpTool>> => {
+    if (!upstreamByName) {
+      upstreamByName = connectAndListTools(memoryMcpUrl, headers).then(
+        (tools) => new Map(tools.map((t) => [t.name, t])),
+      );
+      // A failed connect must not poison the rest of the run — clear the
+      // memo so a later invocation retries with a fresh client.
+      upstreamByName.catch(() => {
+        upstreamByName = null;
+      });
+    }
+    return upstreamByName;
+  };
+
+  return defs.map((def) => ({
+    name: def.name,
+    description: def.description,
+    schema: def.schema,
+    invoke: async (input: unknown) => {
+      const byName = await connect();
+      const upstream = byName.get(def.name);
+      if (!upstream) {
+        throw new Error(
+          `Memory Engine no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
+        );
+      }
+      return upstream.invoke(input);
+    },
+  }));
+}
+
+/**
+ * Default factory: authenticates with the per-request UCAN headers from
+ * {@link buildMemoryHeaders}, then serves the upstream tool list.
+ *
+ * The first request per process (and after each TTL expiry) connects and
+ * lists tools exactly like the old always-fetch path, then snapshots the
+ * definitions. Subsequent requests skip the network entirely and bind lazy
+ * tools that open their own authenticated client only when the agent
+ * actually calls one. Auth semantics are unchanged: header minting still
+ * happens (and gates the tool surface) on every request.
  */
 export function createDefaultMemoryMcpFactory(
   memoryMcpUrl: string,
@@ -61,25 +165,21 @@ export function createDefaultMemoryMcpFactory(
     const headers = await buildMemoryHeaders(runCtx, memoryMcpUrl);
     if (!headers) return null;
 
-    const client = new MultiServerMCPClient({
-      useStandardContentBlocks: true,
-      prefixToolNameWithServerName: true,
-      mcpServers: {
-        'memory-engine': {
-          type: 'http',
-          transport: 'http',
-          url: memoryMcpUrl,
-          headers,
-          reconnect: {
-            enabled: true,
-            maxAttempts: 3,
-            delayMs: 2000,
-          },
-          defaultToolTimeout: 420_000,
-        },
-      },
+    const cached = toolDefsCache.get(memoryMcpUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      return buildLazyUpstreamTools(cached.defs, memoryMcpUrl, headers);
+    }
+
+    const tools = await connectAndListTools(memoryMcpUrl, headers);
+    toolDefsCache.set(memoryMcpUrl, {
+      defs: tools.map(({ name, description, schema }) => ({
+        name,
+        description,
+        schema,
+      })),
+      expiresAt: Date.now() + TOOL_DEFS_TTL_MS,
     });
-    return (await client.getTools()) as unknown as UpstreamMcpTool[];
+    return tools;
   };
 }
 

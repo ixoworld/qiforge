@@ -298,3 +298,65 @@ describe('ComposioPlugin.getRequestTools — wrapped tool semantics', () => {
     );
   });
 });
+
+describe('ComposioPlugin.getRequestTools — session tool-definition cache', () => {
+  it('opens the session once, then serves later requests from the cache and connects lazily on invoke', async () => {
+    const sessionTool = fakeSessionTool('COMPOSIO_SEARCH_TOOLS');
+    const sessionFactory: ComposioSessionFactory = vi.fn(async () => [
+      sessionTool,
+    ]);
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-cache',
+    });
+    const rtCtx = () => makeRuntimeContext({ config: buildConfig() });
+
+    const cold = await plugin.getRequestTools(rtCtx());
+    expect(cold.map((t) => t.name)).toEqual(['COMPOSIO_SEARCH_TOOLS']);
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+
+    const warm = await plugin.getRequestTools(rtCtx());
+    // Same tool surface, no session opened while binding.
+    expect(warm.map((t) => t.name)).toEqual(['COMPOSIO_SEARCH_TOOLS']);
+    expect(warm[0]!.description).toBe(cold[0]!.description);
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+
+    // First invocation opens the session with THIS request's invocation.
+    const result = await warm[0]!.handler(
+      { value: 'find gmail tools' },
+      makeRuntimeContext(),
+    );
+    expect(result).toEqual({
+      tool: 'COMPOSIO_SEARCH_TOOLS',
+      echoed: { value: 'find gmail tools' },
+    });
+    expect(sessionFactory).toHaveBeenCalledTimes(2);
+    expect(sessionFactory).toHaveBeenLastCalledWith(
+      expect.objectContaining({ ucanInvocation: 'ucan-token-cache' }),
+    );
+  });
+
+  it('caches per user — a different DID still opens its own session', async () => {
+    const sessionFactory: ComposioSessionFactory = vi.fn(async () => [
+      fakeSessionTool('COMPOSIO_SEARCH_TOOLS'),
+    ]);
+    const plugin = new ComposioPlugin({
+      sessionFactory,
+      mintInvocation: async () => 'ucan-token-multi',
+    });
+
+    await plugin.getRequestTools(makeRuntimeContext({ config: buildConfig() }));
+    await plugin.getRequestTools(
+      makeRuntimeContext({
+        config: buildConfig(),
+        user: {
+          did: 'did:ixo:user2',
+          matrixUserId: '@did-ixo-user2:ixo.world',
+          ucanDelegation: { raw: 'test-ucan-delegation' },
+        },
+      }),
+    );
+
+    expect(sessionFactory).toHaveBeenCalledTimes(2);
+  });
+});

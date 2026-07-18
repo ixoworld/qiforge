@@ -69,17 +69,22 @@ export class ToolRegistry {
    * Run every plugin's `getRequestTools(rtCtx)`. Does NOT touch the boot
    * cache — boot-time tools must be collected via `collectBoot(buildCtx)`
    * before the first request.
+   *
+   * Hooks run concurrently — several of them open network connections
+   * (MCP list-tools, secrets reads), so serializing them puts every
+   * round-trip on the chat hot path back-to-back. Output order stays
+   * plugin-registration order regardless of which hook resolves first,
+   * and any hook rejection still fails the whole collection.
    */
   async collectRequest(rtCtx: RuntimeContext): Promise<RegisteredTool[]> {
-    const out: RegisteredTool[] = [];
-    for (const plugin of this.plugins) {
-      if (!plugin.getRequestTools) continue;
-      const requestTools = await plugin.getRequestTools(rtCtx);
-      for (const tool of requestTools) {
-        out.push({ pluginName: plugin.name, tool });
-      }
-    }
-    return out;
+    const perPlugin = await Promise.all(
+      this.plugins.map(async (plugin) => {
+        if (!plugin.getRequestTools) return [];
+        const requestTools = await plugin.getRequestTools(rtCtx);
+        return requestTools.map((tool) => ({ pluginName: plugin.name, tool }));
+      }),
+    );
+    return perPlugin.flat();
   }
 
   /**

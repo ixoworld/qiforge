@@ -129,4 +129,44 @@ describe('SubAgentRegistry', () => {
       'call_agui_plan_agent',
     ]);
   });
+
+  it('runs request-time hooks concurrently while preserving registration order', async () => {
+    const reg = new SubAgentRegistry();
+    const started: string[] = [];
+    let releaseSlow: (() => void) | undefined;
+    const slowGate = new Promise<void>((resolve) => {
+      releaseSlow = resolve;
+    });
+
+    reg.register(
+      makePlugin({
+        name: 'slow',
+        getRequestSubAgents: async () => {
+          started.push('slow');
+          await slowGate;
+          return [makeSubAgent('slow_agent')];
+        },
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'fast',
+        getRequestSubAgents: () => {
+          started.push('fast');
+          return [makeSubAgent('fast_agent')];
+        },
+      }),
+    );
+
+    const pending = reg.collectRequest(makeRuntimeContext());
+    await Promise.resolve();
+    expect(started).toEqual(['slow', 'fast']);
+
+    releaseSlow?.();
+    const collected = await pending;
+    expect(collected.map((c) => c.subAgent.name)).toEqual([
+      'slow_agent',
+      'fast_agent',
+    ]);
+  });
 });

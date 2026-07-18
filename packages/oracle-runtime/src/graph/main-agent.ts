@@ -165,7 +165,13 @@ export async function createMainAgent(
   const rtCtx = buildRuntimeContext(runConfig, ambient, wrapState);
 
   // ── 3. Resolve registries (boot-time + request-time contributions) ──────
-  const allTools = await registries.tools.collect(buildCtx, rtCtx);
+  // Tool and sub-agent collection are independent request-time fan-outs
+  // (each may open network connections); run them concurrently so the
+  // slower of the two — not their sum — gates the build.
+  const [allTools, allSubAgents] = await Promise.all([
+    registries.tools.collect(buildCtx, rtCtx),
+    registries.subAgents.collect(buildCtx, rtCtx),
+  ]);
   const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
   const titleByPlugin = new Map(
@@ -210,8 +216,6 @@ export async function createMainAgent(
   // the same `CapabilityGateMiddleware` filter as plugin tools. Binding all
   // of them keeps the bound list stable across runs while still respecting
   // the manifest's visibility rule on every model call.
-  const allSubAgents = await registries.subAgents.collect(buildCtx, rtCtx);
-
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,

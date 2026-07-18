@@ -63,6 +63,37 @@ export function createDefaultComposioSessionFactory(): ComposioSessionFactory {
   };
 }
 
+/**
+ * Tool *definition* — the session-independent slice of a
+ * {@link ComposioSessionTool}. The per-user/per-request part (the UCAN
+ * invocation header baked into the session) is applied at invoke time.
+ */
+export interface ComposioToolDef {
+  name: string;
+  description: string;
+  schema: unknown;
+}
+
+export interface CachedComposioDefs {
+  defs: ComposioToolDef[];
+  expiresAt: number;
+}
+
+/** Cache of session tool definitions, keyed per user (see {@link defsCacheKey}). */
+export type ComposioDefsCache = Map<string, CachedComposioDefs>;
+
+/**
+ * The composio session surface is a stable meta-toolset (search / execute /
+ * manage-connections); it shifts only when the user's connected-account state
+ * flips. A short TTL keeps that fresh while removing the session-create +
+ * tools-list round-trips from nearly every chat turn.
+ */
+export const COMPOSIO_TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
+
+function defsCacheKey(baseUrl: string, userId: string): string {
+  return `${baseUrl}::${userId}`;
+}
+
 export interface CreateComposioToolsOptions {
   apiKey: string;
   baseUrl: string;
@@ -71,6 +102,13 @@ export interface CreateComposioToolsOptions {
   network?: string;
   /** Override the session factory — defaults to the real SDK client. */
   sessionFactory?: ComposioSessionFactory;
+  /**
+   * Optional definitions cache (owned by the plugin instance). When provided
+   * and warm, the session open is deferred to the first actual tool
+   * invocation; when absent, every call opens a session — the pre-cache
+   * behaviour.
+   */
+  defsCache?: ComposioDefsCache;
 }
 
 /**
@@ -164,9 +202,55 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
 }
 
 /**
+ * Bind cached definitions to a lazily-opened session. The session (with this
+ * request's UCAN invocation) is created on the first actual invocation and
+ * shared by every composio tool in the request — turns that never call
+ * composio pay zero composio round-trips.
+ */
+function buildLazySessionTools(
+  defs: ComposioToolDef[],
+  sessionArgs: ComposioSessionFactoryArgs,
+  sessionFactory: ComposioSessionFactory,
+): PluginTool[] {
+  let sessionByName: Promise<Map<string, ComposioSessionTool>> | null = null;
+  const connect = (): Promise<Map<string, ComposioSessionTool>> => {
+    if (!sessionByName) {
+      sessionByName = sessionFactory(sessionArgs).then(
+        (tools) => new Map(tools.map((t) => [t.name, t])),
+      );
+      // A failed session open must not poison the rest of the run — clear
+      // the memo so a later invocation retries with a fresh session.
+      sessionByName.catch(() => {
+        sessionByName = null;
+      });
+    }
+    return sessionByName;
+  };
+
+  return defs.map((def) =>
+    wrapAsPluginTool({
+      name: def.name,
+      description: def.description,
+      schema: def.schema,
+      invoke: async (input: unknown) => {
+        const byName = await connect();
+        const sessionTool = byName.get(def.name);
+        if (!sessionTool) {
+          throw new Error(
+            `composio no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
+          );
+        }
+        return sessionTool.invoke(input);
+      },
+    }),
+  );
+}
+
+/**
  * Build the composio plugin's request-time tool list.
  *
- *   1. Opens a composio session via the configured factory.
+ *   1. Opens a composio session via the configured factory (or, with a warm
+ *      `defsCache`, defers the open to the first actual invocation).
  *   2. Wraps each returned tool into a {@link PluginTool} that proxies args
  *      to the session tool's `invoke`.
  *
@@ -179,12 +263,28 @@ export async function createComposioTools(
   const sessionFactory =
     opts.sessionFactory ?? createDefaultComposioSessionFactory();
 
-  const sessionTools = await sessionFactory({
+  const sessionArgs: ComposioSessionFactoryArgs = {
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,
     ucanInvocation: opts.ucanInvocation,
     userId: opts.userId,
     network: opts.network,
+  };
+
+  const cacheKey = defsCacheKey(opts.baseUrl, opts.userId);
+  const cached = opts.defsCache?.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return buildLazySessionTools(cached.defs, sessionArgs, sessionFactory);
+  }
+
+  const sessionTools = await sessionFactory(sessionArgs);
+  opts.defsCache?.set(cacheKey, {
+    defs: sessionTools.map(({ name, description, schema }) => ({
+      name,
+      description,
+      schema,
+    })),
+    expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
   });
 
   return sessionTools.map(wrapAsPluginTool);

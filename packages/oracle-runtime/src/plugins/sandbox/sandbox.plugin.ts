@@ -163,6 +163,25 @@ export interface SandboxPluginOptions {
 const ORACLE_MANAGEMENT_TOOL_PREFIX = 'oracle_';
 
 /**
+ * Upstream tool *definition* — the user-independent slice of a
+ * {@link SandboxMcpTool}. Auth (UCAN invocation + secret headers) is applied
+ * per request at invoke time, so definitions are safe to share.
+ */
+type SandboxToolDef = Pick<SandboxMcpTool, 'name' | 'description' | 'schema'>;
+
+interface CachedSandboxDefs {
+  defs: SandboxToolDef[];
+  expiresAt: number;
+}
+
+/**
+ * Definitions change only on upstream deploys; a short TTL keeps them fresh
+ * while removing the per-turn secrets fetch + MCP connect + tools/list chain
+ * from the chat hot path.
+ */
+const SANDBOX_TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
+
+/**
  * Sandbox plugin.
  *
  * Surfaces every upstream sandbox MCP tool — `sandbox_run`, `sandbox_write_file`,
@@ -213,6 +232,9 @@ export class SandboxPlugin extends OraclePlugin {
     return Boolean(env.SANDBOX_MCP_URL);
   }
 
+  /** Cached upstream tool definitions, keyed by sandbox MCP URL. */
+  private readonly toolDefsCache = new Map<string, CachedSandboxDefs>();
+
   override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const parsed = configSchema.safeParse(rtCtx.config);
     if (!parsed.success) {
@@ -232,6 +254,32 @@ export class SandboxPlugin extends OraclePlugin {
       : '';
 
     const oracleSecrets = parseOracleSecrets(oracleSecretsRaw);
+    const sandboxMcpUrl = parsed.data.SANDBOX_MCP_URL;
+
+    const cached = this.toolDefsCache.get(sandboxMcpUrl);
+    if (cached && cached.expiresAt > Date.now()) {
+      // Warm path — definitions are known, so skip the per-turn secrets
+      // fetch and MCP connect. The auth *gate* still runs every request:
+      // minting is local (service-DID resolution is cached upstream), so an
+      // unauthorized user sees no sandbox tools, exactly as before.
+      const gateHeaders = await this.authBuilder(
+        { sandboxMcpUrl, skillsServiceUrl, oracleSecrets: {}, userSecrets: {} },
+        rtCtx,
+      );
+      if (!gateHeaders.Authorization) {
+        rtCtx.logger.log(
+          '[sandbox] skipping — no UCAN invocation (user not authorized); not connecting to the sandbox MCP server.',
+        );
+        return [];
+      }
+      const lazyUpstream = this.buildLazyUpstreamTools(cached.defs, {
+        sandboxMcpUrl,
+        skillsServiceUrl,
+        oracleSecrets,
+        rtCtx,
+      });
+      return this.toPluginTools(lazyUpstream, rtCtx);
+    }
 
     const userSecretIndex = await rtCtx.secrets.getIndex();
     const userSecretKeys = Object.keys(userSecretIndex);
@@ -242,7 +290,7 @@ export class SandboxPlugin extends OraclePlugin {
 
     const headers = await this.authBuilder(
       {
-        sandboxMcpUrl: parsed.data.SANDBOX_MCP_URL,
+        sandboxMcpUrl,
         skillsServiceUrl,
         oracleSecrets,
         userSecrets,
@@ -265,7 +313,7 @@ export class SandboxPlugin extends OraclePlugin {
       mcpServers: {
         sandbox: {
           type: 'http',
-          url: parsed.data.SANDBOX_MCP_URL,
+          url: sandboxMcpUrl,
           transport: 'http',
           headers,
         },
@@ -275,7 +323,113 @@ export class SandboxPlugin extends OraclePlugin {
     });
 
     const upstream = await client.getTools();
+    this.toolDefsCache.set(sandboxMcpUrl, {
+      defs: upstream.map(({ name, description, schema }) => ({
+        name,
+        description,
+        schema,
+      })),
+      expiresAt: Date.now() + SANDBOX_TOOL_DEFS_TTL_MS,
+    });
 
+    return this.toPluginTools(upstream, rtCtx);
+  }
+
+  /**
+   * Bind cached definitions to lazily-connected upstream tools. The full
+   * connection chain (secrets fetch → header mint → MCP connect →
+   * tools/list) runs once, on the first actual invocation, and is shared by
+   * every sandbox tool in the request — turns that never call the sandbox
+   * pay zero sandbox round-trips.
+   */
+  private buildLazyUpstreamTools(
+    defs: SandboxToolDef[],
+    args: {
+      sandboxMcpUrl: string;
+      skillsServiceUrl: string | undefined;
+      oracleSecrets: Record<string, string>;
+      rtCtx: RuntimeContext;
+    },
+  ): SandboxMcpTool[] {
+    let upstreamByName: Promise<Map<string, SandboxMcpTool>> | null = null;
+    const connect = (): Promise<Map<string, SandboxMcpTool>> => {
+      if (!upstreamByName) {
+        upstreamByName = this.connectWithFullHeaders(args).then(
+          (tools) => new Map(tools.map((t) => [t.name, t])),
+        );
+        // A failed connect must not poison the rest of the run — clear the
+        // memo so a later invocation retries with a fresh client.
+        upstreamByName.catch(() => {
+          upstreamByName = null;
+        });
+      }
+      return upstreamByName;
+    };
+
+    return defs.map((def) => ({
+      name: def.name,
+      description: def.description,
+      schema: def.schema,
+      invoke: async (input: unknown) => {
+        const byName = await connect();
+        const upstream = byName.get(def.name);
+        if (!upstream) {
+          throw new Error(
+            `sandbox MCP no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
+          );
+        }
+        return upstream.invoke(input);
+      },
+    }));
+  }
+
+  private async connectWithFullHeaders(args: {
+    sandboxMcpUrl: string;
+    skillsServiceUrl: string | undefined;
+    oracleSecrets: Record<string, string>;
+    rtCtx: RuntimeContext;
+  }): Promise<SandboxMcpTool[]> {
+    const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
+    const userSecretIndex = await rtCtx.secrets.getIndex();
+    const userSecretKeys = Object.keys(userSecretIndex);
+    const userSecrets: Record<string, string> =
+      userSecretKeys.length > 0
+        ? await rtCtx.secrets.getValues(userSecretKeys)
+        : {};
+
+    const headers = await this.authBuilder(
+      { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, userSecrets },
+      rtCtx,
+    );
+    if (!headers.Authorization) {
+      throw new Error(
+        'sandbox: no UCAN invocation could be minted for this call — the user is not authorized.',
+      );
+    }
+
+    const client = this.mcpClientFactory({
+      mcpServers: {
+        sandbox: {
+          type: 'http',
+          url: sandboxMcpUrl,
+          transport: 'http',
+          headers,
+        },
+      },
+      defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
+      useStandardContentBlocks: true,
+    });
+    return client.getTools();
+  }
+
+  /**
+   * Shared tail of both paths: visibility filter, PluginTool mapping, and
+   * the synthetic `sandbox_write_blob` companion.
+   */
+  private toPluginTools(
+    upstream: SandboxMcpTool[],
+    rtCtx: RuntimeContext,
+  ): PluginTool[] {
     const filtered = this.includeOracleManagementTools
       ? upstream
       : upstream.filter(
