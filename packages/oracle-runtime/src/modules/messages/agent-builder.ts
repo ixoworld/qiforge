@@ -1,8 +1,5 @@
-import { MatrixManager } from '@ixo/matrix';
-import { type Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, Logger } from '@nestjs/common';
 import { type BaseMessage } from 'langchain';
 import type {
   CompiledMainAgent,
@@ -91,18 +88,10 @@ export interface BuiltAgent {
 export class AgentBuilder {
   private readonly logger = new Logger(AgentBuilder.name);
 
-  /**
-   * Default throttle window for the Matrix re-auth prompt: one prompt per
-   * user per 6 hours. Overridable via `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`.
-   */
-  private static readonly DEFAULT_REAUTH_THROTTLE_SECONDS = 6 * 60 * 60;
-
   constructor(
     private readonly bundleHolder: OracleRuntimeBundleHolder,
     private readonly userContextFetcher: UserContextFetcher,
     private readonly ucan: UcanService,
-    private readonly config: ConfigService,
-    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   async build(
@@ -214,20 +203,16 @@ export class AgentBuilder {
     // is null); a paying user then gets one concierge turn instead of a
     // silently-degraded full turn, which is the safer failure mode — but log
     // it distinctly so store hiccups are visible.
+    //
+    // The old automatic `ixo.oracle.delegation_required` nudge that fired
+    // here is gone: the concierge explains authorization conversationally
+    // and its `request_authorization` tool emits that same event when the
+    // user actually asks to unlock the full service.
     const conciergeMode = needsMatrixDelegation && !matrixDelegationRaw;
     if (conciergeMode) {
       this.logger.log(
         `[AgentBuilder] concierge mode for did=${payload.did} (matrix turn, no stored delegation)`,
       );
-    }
-
-    // No valid stored delegation on a Matrix turn → emit a throttled
-    // delegation-required event (the web app opens the authorize modal) and
-    // proceed without UCAN tooling. Suppressed in concierge mode: the
-    // concierge explains authorization conversationally and its
-    // `request_authorization` tool emits this event on user request instead.
-    if (needsMatrixDelegation && !matrixDelegationRaw && !conciergeMode) {
-      await this.maybePromptReauth(payload.did, prepared.roomId);
     }
 
     this.logger.log(
@@ -346,55 +331,5 @@ export class AgentBuilder {
     };
 
     return { agent, stateInput, langGraphConfig };
-  }
-
-  /**
-   * Emit a single throttled `ixo.oracle.delegation_required` event into the
-   * user's Matrix room when a Matrix turn finds no valid delegation. The web
-   * app listens for this event and opens the "authorize for Matrix" modal
-   * in-place; the payload is self-contained (carries the oracle entity DID the
-   * FE needs to mint + store a delegation), so the listener's location doesn't
-   * matter. Throttled per user via the cache manager (key
-   * `ucan_reauth_prompt_${userDid}`, TTL from
-   * `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`, default 6h). Best-effort — never
-   * throws, so a Matrix-send failure can't break the turn.
-   */
-  private async maybePromptReauth(
-    userDid: string,
-    roomId: string,
-  ): Promise<void> {
-    try {
-      const throttleKey = `ucan_reauth_prompt_${userDid}`;
-      const already = await this.cacheManager.get(throttleKey);
-      if (already) {
-        this.logger.debug(
-          `[AgentBuilder] delegation-required event throttled for ${userDid} (already prompted within the window)`,
-        );
-        return;
-      }
-
-      const throttleSeconds =
-        this.config.get<number>('UCAN_REAUTH_PROMPT_THROTTLE_SECONDS') ??
-        AgentBuilder.DEFAULT_REAUTH_THROTTLE_SECONDS;
-
-      await this.cacheManager.set(throttleKey, true, throttleSeconds * 1000);
-
-      await MatrixManager.getInstance().sendMatrixEvent(
-        roomId,
-        'ixo.oracle.delegation_required',
-        {
-          oracleEntityDid: this.config.get<string>('ORACLE_ENTITY_DID'),
-          oracleDid: this.config.get<string>('ORACLE_DID'),
-        },
-      );
-
-      this.logger.log(
-        `[AgentBuilder] sent ixo.oracle.delegation_required to room ${roomId} for ${userDid}`,
-      );
-    } catch (err) {
-      this.logger.warn(
-        `[AgentBuilder] delegation-required event failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 }

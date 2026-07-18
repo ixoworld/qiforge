@@ -61,13 +61,6 @@ export const baseEnvSchema = z.object({
    */
   UCAN_AUTH_MAX_TTL_SECONDS: z.coerce.number().default(900),
 
-  /**
-   * Throttle window (seconds) between "please re-authorize" prompts posted into
-   * a user's Matrix room when their stored delegation is missing/expired, so a
-   * de-authorized user isn't nagged on every message. Default 6 hours.
-   */
-  UCAN_REAUTH_PROMPT_THROTTLE_SECONDS: z.coerce.number().default(21600),
-
   // LLM provider selection (provider-specific keys are optional so a fork
   // can choose between OpenRouter and Nebius without setting both).
   LLM_PROVIDER: z.enum(['openrouter', 'nebius']).default('openrouter'),

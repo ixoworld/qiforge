@@ -1,5 +1,3 @@
-import type { Cache } from '@nestjs/cache-manager';
-import type { ConfigService } from '@nestjs/config';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { HumanMessage, fakeModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,9 +38,11 @@ vi.mock('../../graph/main-agent.js', () => ({
   createMainAgent: (...args: unknown[]) => createMainAgentMock(...args),
 }));
 
-// Mock MatrixManager.getInstance().sendMatrixEvent so the re-auth nudge path
-// can be asserted without a real Matrix client. Keep the rest of @ixo/matrix
-// intact (other modules import from it) by spreading the actual module.
+// Mock MatrixManager.getInstance().sendMatrixEvent so tests can assert the
+// old automatic re-auth nudge stays gone (concierge turns must be silent —
+// the concierge plugin's request_authorization tool owns that event now).
+// Keep the rest of @ixo/matrix intact (other modules import from it) by
+// spreading the actual module.
 const { sendMatrixEventMock } = vi.hoisted(() => ({
   sendMatrixEventMock: vi.fn(async () => 'event-id'),
 }));
@@ -174,8 +174,6 @@ interface Harness {
   bundleHolder: { get: ReturnType<typeof vi.fn> };
   fetchMock: ReturnType<typeof vi.fn>;
   getDelegationMock: ReturnType<typeof vi.fn>;
-  cacheGetMock: ReturnType<typeof vi.fn>;
-  cacheSetMock: ReturnType<typeof vi.fn>;
   bundle: OracleRuntimeBundle;
 }
 
@@ -189,7 +187,6 @@ function buildHarness(
       sessionId: string;
     }) => Promise<Record<string, unknown> | undefined>;
     getDelegationImpl?: (userDid: string) => Promise<string | null>;
-    configValues?: Record<string, unknown>;
   } = {},
 ): Harness {
   const bundle = overrides.bundle ?? makeBundle();
@@ -216,27 +213,10 @@ function buildHarness(
     getDelegationForUser: getDelegationMock,
   } as unknown as UcanService;
 
-  const configValues = overrides.configValues ?? {};
-  const config = {
-    get: vi.fn((key: string) => configValues[key]),
-  } as unknown as ConfigService;
-
-  const cacheStore = new Map<string, unknown>();
-  const cacheGetMock = vi.fn(async (k: string) => cacheStore.get(k));
-  const cacheSetMock = vi.fn(async (k: string, v: unknown) => {
-    cacheStore.set(k, v);
-  });
-  const cacheManager = {
-    get: cacheGetMock,
-    set: cacheSetMock,
-  } as unknown as Cache;
-
   const builder = new AgentBuilder(
     bundleHolder as unknown as OracleRuntimeBundleHolder,
     userContextFetcher,
     ucan,
-    config,
-    cacheManager,
   );
 
   return {
@@ -244,8 +224,6 @@ function buildHarness(
     bundleHolder,
     fetchMock,
     getDelegationMock,
-    cacheGetMock,
-    cacheSetMock,
     bundle,
   };
 }
@@ -471,7 +449,7 @@ describe('AgentBuilder', () => {
       expect(sendMatrixEventMock).not.toHaveBeenCalled();
     });
 
-    it('reads the stored delegation through on a Matrix turn and uses it as raw', async () => {
+    it('reads the stored delegation through on a Matrix turn, uses it as raw, and stays in full mode', async () => {
       const { builder, getDelegationMock } = buildHarness({
         getDelegationImpl: async () => 'stored-raw-delegation',
       });
@@ -483,21 +461,16 @@ describe('AgentBuilder', () => {
       );
 
       expect(getDelegationMock).toHaveBeenCalledWith(USER_DID);
-      const ctxUcan = lastMainAgentArgs().requestCtx.user.ucanDelegation as {
-        raw: string;
-      };
+      const requestCtx = lastMainAgentArgs().requestCtx;
+      const ctxUcan = requestCtx.user.ucanDelegation as { raw: string };
       expect(ctxUcan.raw).toBe('stored-raw-delegation');
-      // Found a delegation → no re-auth nudge.
+      expect(requestCtx.session.mode).toBe('full');
       expect(sendMatrixEventMock).not.toHaveBeenCalled();
     });
 
-    it('falls back to {raw: ""} and emits a throttled delegation-required event when a Matrix turn has no stored delegation', async () => {
-      const { builder, getDelegationMock, cacheSetMock } = buildHarness({
+    it('enters concierge mode with {raw: ""} — and no delegation-required event — when a Matrix turn has no stored delegation', async () => {
+      const { builder, getDelegationMock } = buildHarness({
         getDelegationImpl: async () => null,
-        configValues: {
-          ORACLE_ENTITY_DID: 'did:ixo:entity',
-          ORACLE_DID: 'did:ixo:oracleacct',
-        },
       });
 
       await builder.build(
@@ -507,56 +480,21 @@ describe('AgentBuilder', () => {
       );
 
       expect(getDelegationMock).toHaveBeenCalledWith(USER_DID);
-      const ctxUcan = lastMainAgentArgs().requestCtx.user.ucanDelegation as {
-        raw: string;
-      };
+      const requestCtx = lastMainAgentArgs().requestCtx;
+      const ctxUcan = requestCtx.user.ucanDelegation as { raw: string };
       expect(ctxUcan.raw).toBe('');
-      expect(sendMatrixEventMock).toHaveBeenCalledTimes(1);
-      expect(sendMatrixEventMock).toHaveBeenCalledWith(
-        ROOM_ID,
-        'ixo.oracle.delegation_required',
-        { oracleEntityDid: 'did:ixo:entity', oracleDid: 'did:ixo:oracleacct' },
-      );
-      // Throttle key written so the next miss is suppressed.
-      expect(cacheSetMock).toHaveBeenCalledWith(
-        `ucan_reauth_prompt_${USER_DID}`,
-        true,
-        expect.any(Number),
-      );
-    });
-
-    it('skips the re-auth prompt when the throttle key is already set', async () => {
-      const { builder, cacheGetMock } = buildHarness({
-        getDelegationImpl: async () => null,
-      });
-      cacheGetMock.mockResolvedValue(true);
-
-      await builder.build(
-        makeArgs({
-          payload: { clientType: 'matrix', ucanDelegation: undefined },
-        }),
-      );
-
+      expect(requestCtx.session.mode).toBe('concierge');
+      // The automatic nudge is gone: the concierge's request_authorization
+      // tool emits ixo.oracle.delegation_required on user request instead.
       expect(sendMatrixEventMock).not.toHaveBeenCalled();
     });
 
-    it('honours UCAN_REAUTH_PROMPT_THROTTLE_SECONDS for the throttle TTL', async () => {
-      const { builder, cacheSetMock } = buildHarness({
-        getDelegationImpl: async () => null,
-        configValues: { UCAN_REAUTH_PROMPT_THROTTLE_SECONDS: 100 },
-      });
+    it('keeps portal turns in full mode even without a delegation', async () => {
+      const { builder } = buildHarness();
 
-      await builder.build(
-        makeArgs({
-          payload: { clientType: 'matrix', ucanDelegation: undefined },
-        }),
-      );
+      await builder.build(makeArgs({ payload: { ucanDelegation: undefined } }));
 
-      expect(cacheSetMock).toHaveBeenCalledWith(
-        `ucan_reauth_prompt_${USER_DID}`,
-        true,
-        100 * 1000,
-      );
+      expect(lastMainAgentArgs().requestCtx.session.mode).toBe('full');
     });
 
     it('produces langGraphConfig with version="v2" and forwards abortController.signal', async () => {
