@@ -206,10 +206,27 @@ export class AgentBuilder {
     const userContext = freshUserContext ?? priorState.userContext;
     const userPreferences = freshUserPreferences ?? priorState.userPreferences;
 
+    // A Matrix sender with no delegation at all (neither per-request nor
+    // stored) runs in concierge mode: front-desk prompt, restricted tool
+    // surface, no credit metering. Recomputed every turn — storing a
+    // delegation promotes the user to full mode on their next message.
+    // Note a delegation *read failure* also lands here (matrixDelegationRaw
+    // is null); a paying user then gets one concierge turn instead of a
+    // silently-degraded full turn, which is the safer failure mode — but log
+    // it distinctly so store hiccups are visible.
+    const conciergeMode = needsMatrixDelegation && !matrixDelegationRaw;
+    if (conciergeMode) {
+      this.logger.log(
+        `[AgentBuilder] concierge mode for did=${payload.did} (matrix turn, no stored delegation)`,
+      );
+    }
+
     // No valid stored delegation on a Matrix turn → emit a throttled
     // delegation-required event (the web app opens the authorize modal) and
-    // proceed without UCAN tooling.
-    if (needsMatrixDelegation && !matrixDelegationRaw) {
+    // proceed without UCAN tooling. Suppressed in concierge mode: the
+    // concierge explains authorization conversationally and its
+    // `request_authorization` tool emits this event on user request instead.
+    if (needsMatrixDelegation && !matrixDelegationRaw && !conciergeMode) {
       await this.maybePromptReauth(payload.did, prepared.roomId);
     }
 
@@ -265,6 +282,7 @@ export class AgentBuilder {
         client: clientType,
         requestId: prepared.requestId,
         roomId: prepared.roomId,
+        mode: conciergeMode ? 'concierge' : 'full',
       },
       history: { userContext },
     };

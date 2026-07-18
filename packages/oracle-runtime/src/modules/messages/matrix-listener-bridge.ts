@@ -11,9 +11,13 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
+import { composeGreeting } from './room-greeting.js';
 
 const FILE_MSGTYPES = new Set(['m.file', 'm.image', 'm.video', 'm.audio']);
 const DEBOUNCE_MS = 500;
+/** Settle time before the greeting so device lists / Olm sessions converge. */
+const WELCOME_DELAY_MS = 1500;
 
 /**
  * Matrix text-event content. Spec-standard fields the base
@@ -75,8 +79,11 @@ export interface MatrixIncomingMessage {
 export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MatrixListenerBridge.name);
   private cleanUpListener?: () => void;
+  private cleanUpJoinListener?: () => void;
   private readonly threadRootCache = new Map<string, string>();
   private readonly buffer = new Map<string, BufferEntry>();
+  /** Rooms greeted in this process — guards against double `room.join` fires. */
+  private readonly welcomedRooms = new Set<string>();
   private readonly matrixManager: MatrixManager;
   private deliverHandler:
     | ((msg: MatrixIncomingMessage) => Promise<unknown>)
@@ -88,6 +95,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly sessions: SessionManagerService,
     private readonly config: ConfigService,
+    private readonly bundleHolder: OracleRuntimeBundleHolder,
   ) {
     this.matrixManager = this.sessions.matrixManger;
   }
@@ -122,6 +130,23 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
           );
         });
         this.logger.log('Matrix message listener registered');
+
+        // Greet every room the bot freshly joins. Beyond initiating the
+        // conversation, the outbound send establishes Olm 1:1 sessions with
+        // current members and distributes a Megolm group session — without
+        // it, the user's first message in a fresh encrypted room is often
+        // encrypted to a session the bot isn't in and never reaches the
+        // agent.
+        this.cleanUpJoinListener = this.matrixManager.onBotJoinedRoom(
+          (roomId) => {
+            this.handleBotJoinedRoom(roomId).catch((err) =>
+              this.logger.warn(
+                `Welcome handler failed for ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+          },
+        );
+        this.logger.log('Matrix room.join welcome listener registered');
       })
       .catch((err) =>
         this.logger.error('Failed to set up Matrix listener', err),
@@ -132,6 +157,56 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     for (const [, entry] of this.buffer) clearTimeout(entry.timer);
     this.buffer.clear();
     this.cleanUpListener?.();
+    this.cleanUpJoinListener?.();
+  }
+
+  /**
+   * Send a one-time greeting when the bot joins a room. Idempotent within
+   * the process via `welcomedRooms`; matrix-bot-sdk's `room.join` only fires
+   * for fresh joins (not on restart-sync of already-joined rooms), so the
+   * Set only guards against double-fires. On send failure we do NOT retry —
+   * a re-invite re-triggers the greeting, and retrying could spam the room.
+   */
+  private async handleBotJoinedRoom(roomId: string): Promise<void> {
+    if (this.welcomedRooms.has(roomId)) return;
+    this.welcomedRooms.add(roomId);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, WELCOME_DELAY_MS));
+
+    let isDirect = true;
+    try {
+      const info = await this.matrixManager.getRoomInfo(roomId);
+      isDirect = info.isDirect;
+    } catch (err) {
+      this.logger.warn(
+        `getRoomInfo failed for ${roomId}, defaulting to DM tone: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Identity lives in the runtime bundle, which is populated after Nest
+    // boots. Joins can only arrive later (they need a live sync), but fall
+    // back to env config just in case the bundle isn't ready yet.
+    let oracleName = this.config.get<string>('ORACLE_NAME') ?? 'Oracle';
+    let description: string | undefined;
+    if (this.bundleHolder.isReady()) {
+      const identity = this.bundleHolder.get().identity;
+      oracleName = identity.name || oracleName;
+      description = identity.description;
+    }
+
+    try {
+      await this.matrixManager.sendMessage({
+        roomId,
+        message: composeGreeting({ oracleName, description, isDirect }),
+        isOracleAdmin: true,
+        disablePrefix: true,
+      });
+      this.logger.log(`Sent greeting to ${roomId} (isDirect=${isDirect})`);
+    } catch (err) {
+      this.logger.warn(
+        `Failed to send greeting to ${roomId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async handleMessage(

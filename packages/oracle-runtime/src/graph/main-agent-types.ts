@@ -40,6 +40,13 @@ export const mainAgentRequestContextSchema = z.object({
     requestId: z.string(),
     wsId: z.string().optional(),
     roomId: z.string().optional(),
+    /**
+     * Interaction mode for this turn. `concierge` = Matrix sender with no
+     * stored UCAN delegation: restricted tool surface, front-desk prompt,
+     * no credit metering. Absent/`full` = normal operation. Recomputed
+     * every turn, so authorizing mid-conversation promotes the next turn.
+     */
+    mode: z.enum(['full', 'concierge']).optional(),
   }),
   history: z.object({
     userContext: z.record(z.string(), z.unknown()).optional(),

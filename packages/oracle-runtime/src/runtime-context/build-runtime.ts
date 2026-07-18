@@ -32,6 +32,8 @@ export interface RuntimeSessionContext {
   wsId?: string;
   requestId: string;
   roomId?: string;
+  /** See `RuntimeContext['session']['mode']` — concierge vs full turns. */
+  mode?: 'full' | 'concierge';
 }
 
 /** What LangGraph hands us at invocation time on `runtime.context`. */

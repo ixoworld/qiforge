@@ -268,6 +268,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     wsId?: string;
     requestId: string;
     roomId?: string;
+    /**
+     * Interaction mode for this turn. `concierge` = Matrix sender with no
+     * stored UCAN delegation: restricted tool surface, front-desk prompt,
+     * no credit metering. Absent/`full` = normal operation. Recomputed per
+     * turn, so a user who authorizes mid-conversation is promoted on their
+     * next message.
+     */
+    mode?: 'full' | 'concierge';
   };
 
   /** Read-only view over the graph state's history. */
