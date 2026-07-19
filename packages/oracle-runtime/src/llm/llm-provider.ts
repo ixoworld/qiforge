@@ -46,10 +46,8 @@ const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
     // per request via the model field on a send — both resolved in
     // `getModelForRole('main')` / `getProviderChatModel`.
     main: DEFAULT_MODEL_ID,
-    skills: 'z-ai/glm-5.2:nitro',
-    // skills: 'moonshotai/kimi-k2-thinking',
-    subagent: 'z-ai/glm-5.2:nitro',
-    // subagent: 'moonshotai/kimi-k2-thinking',
+    skills: 'openai/gpt-5.4-nano',
+    subagent: 'openai/gpt-5.4-nano',
     vision: 'google/gemini-3.1-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
     routing: 'openai/gpt-oss-20b',
