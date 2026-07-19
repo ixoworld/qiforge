@@ -33,6 +33,19 @@ export interface ModelPrice {
   outputPerMillion: number;
 }
 
+/**
+ * Native (non-text) input types a model accepts, from OpenRouter's
+ * `input_modalities`. Drives attachment routing: an attachment is sent to the
+ * model directly only when the model accepts that modality; otherwise it is
+ * turned into text by the helper model first.
+ */
+export interface ModelInputCapabilities {
+  image: boolean;
+  file: boolean;
+  audio: boolean;
+  video: boolean;
+}
+
 /** A single hand-curated model. */
 export interface ModelCatalogEntry {
   /** OpenRouter slug — sent to the provider and used as the allow-list key. */
@@ -234,6 +247,84 @@ export function isAllowedModel(id: string | undefined | null): id is string {
 export function getDefaultModelId(): string {
   const override = process.env.DEFAULT_MODEL?.trim();
   return override && override.length > 0 ? override : DEFAULT_MODEL_ID;
+}
+
+/**
+ * Native input capabilities per model — the routing source of truth (the
+ * catalog's `vision` flag is the display counterpart of `image`). Kept as a
+ * compact map so adding a model is one line. An id not listed here — e.g. a
+ * `DEFAULT_MODEL` override outside the catalog — is treated as text-only, so
+ * attachments are always turned into text rather than assumed-supported.
+ *
+ * `audio`/`video` are `false` everywhere for now: the runtime only builds
+ * native `image` and `file` content blocks (the proven LangChain→OpenRouter
+ * path), so audio/video are transcribed by the helper model regardless of the
+ * model's own capability. Flip these to `true` once native a/v blocks are
+ * wired.
+ */
+const MODEL_INPUT_CAPS: Record<string, ModelInputCapabilities> = {
+  'openai/gpt-5.4-nano': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'google/gemini-3.1-flash-lite': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'z-ai/glm-5.2': { image: false, file: false, audio: false, video: false },
+  'moonshotai/kimi-k2.5': {
+    image: true,
+    file: false,
+    audio: false,
+    video: false,
+  },
+  'openai/gpt-5.6-luna': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'google/gemini-3.5-flash': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'anthropic/claude-sonnet-5': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'moonshotai/kimi-k3': {
+    image: true,
+    file: false,
+    audio: false,
+    video: false,
+  },
+  'anthropic/claude-opus-4.8': {
+    image: true,
+    file: true,
+    audio: false,
+    video: false,
+  },
+  'openai/gpt-5.6-sol': { image: true, file: true, audio: false, video: false },
+};
+
+const TEXT_ONLY_CAPS: ModelInputCapabilities = {
+  image: false,
+  file: false,
+  audio: false,
+  video: false,
+};
+
+/** Native input capabilities for a model id; text-only for unknown ids. */
+export function getModelCapabilities(modelId: string): ModelInputCapabilities {
+  return MODEL_INPUT_CAPS[modelId] ?? TEXT_ONLY_CAPS;
 }
 
 /** Round a USD-per-million price to 4 dp — enough for sub-cent-per-M models. */

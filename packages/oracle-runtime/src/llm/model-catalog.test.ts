@@ -5,6 +5,7 @@ import {
   buildModelListing,
   getCatalogEntry,
   getDefaultModelId,
+  getModelCapabilities,
   isAllowedModel,
   type ModelPrice,
 } from './model-catalog.js';
@@ -51,6 +52,32 @@ describe('model-catalog', () => {
 
   it('has the default model in the catalog', () => {
     expect(getCatalogEntry(DEFAULT_MODEL_ID)).toBeDefined();
+  });
+
+  describe('getModelCapabilities', () => {
+    it('reports GPT-5.4 Nano as image+file but not audio/video', () => {
+      expect(getModelCapabilities(DEFAULT_MODEL_ID)).toEqual({
+        image: true,
+        file: true,
+        audio: false,
+        video: false,
+      });
+    });
+
+    it('treats unknown ids as text-only', () => {
+      expect(getModelCapabilities('does/not-exist')).toEqual({
+        image: false,
+        file: false,
+        audio: false,
+        video: false,
+      });
+    });
+
+    it("keeps each entry's display `vision` flag in sync with image capability", () => {
+      for (const entry of MODEL_CATALOG) {
+        expect(entry.vision).toBe(getModelCapabilities(entry.id).image);
+      }
+    });
   });
 
   describe('buildModelListing', () => {
