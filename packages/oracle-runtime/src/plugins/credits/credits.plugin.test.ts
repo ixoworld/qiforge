@@ -138,14 +138,15 @@ describe('CreditsPlugin', () => {
       { context: DEFAULT_RUNTIME_CONTEXT },
     );
 
-    // Flat-rate devnet: usd = (300 / 1e6) * 0.75 = 0.000225; credits =
-    // round(0.000225 * creditsPerUsd(10_000) * markup(4)) = round(9) = 9
+    // Flat-rate (uniform across networks): usd = (300 / 1e6) * 0.75 =
+    // 0.000225; credits = round(0.000225 * creditsPerUsd(1000) * markup(1.6))
+    // = round(0.36) = 0 — a 300-token turn is below one credit.
     expect(redis.eval).toHaveBeenCalledTimes(1);
     const lastEvalArgs = redis.eval.mock.calls.at(-1)!;
     // numKeys=2, then balanceKey, heldKey, userDid, credits
     expect(lastEvalArgs[1]).toBe(2);
     expect(lastEvalArgs[4]).toBe('did:ixo:user-1');
-    expect(lastEvalArgs[5]).toBe('9');
+    expect(lastEvalArgs[5]).toBe('0');
     await rt.close();
   });
 
@@ -247,11 +248,11 @@ describe('TokenLimiter — USD→credits conversion', () => {
     );
   });
 
-  it('scales up on devnet (10_000 credits/USD, markup 4)', () => {
+  it('uses the same uniform rate on devnet as mainnet (1000/USD, markup 1.6)', () => {
     const limiter = new TokenLimiter({ redis, network: 'devnet' });
 
-    expect(limiter.usdCostToCredits(1)).toBe(40_000);
-    // flat-rate: $0.75 → 0.75 * 10_000 * 4 = 30_000
-    expect(limiter.llmTokenToCredits(1_000_000)).toBe(30_000);
+    expect(limiter.usdCostToCredits(1)).toBe(1600);
+    // flat-rate: $0.75 → 0.75 * 1000 * 1.6 = 1200 — identical to mainnet.
+    expect(limiter.llmTokenToCredits(1_000_000)).toBe(1200);
   });
 });
