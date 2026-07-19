@@ -253,7 +253,7 @@ export function buildModelListing(params: {
 }): ModelListing {
   const { livePrices, markup, defaultModelId } = params;
 
-  const models: ModelListItem[] = MODEL_CATALOG.map((entry) => {
+  const models: ModelListItem[] = MODEL_CATALOG.map((entry): ModelListItem => {
     const raw = livePrices?.get(entry.id) ?? entry.baselinePrice;
     const display = TIER_DISPLAY[entry.tier];
     return {

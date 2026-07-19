@@ -50,7 +50,7 @@ const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
     // skills: 'moonshotai/kimi-k2-thinking',
     subagent: 'z-ai/glm-5.2:nitro',
     // subagent: 'moonshotai/kimi-k2-thinking',
-    vision: 'google/gemini-2.5-flash-lite',
+    vision: 'google/gemini-3.1-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
     routing: 'openai/gpt-oss-20b',
     custom_low: 'openai/gpt-oss-120b',
