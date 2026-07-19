@@ -334,6 +334,14 @@ export class MessagesService implements OnModuleInit {
         this.logger.log(
           `[attachments] NATIVE → "${attachment.filename}" sent directly to ${effectiveModel} (${buffer.length} bytes, ${kind}); skipping helper-model extraction`,
         );
+        // Archive the original to the sandbox off the hot path — the agent's
+        // file-processing tools can still reach it later, without delaying
+        // this request.
+        this.fileProcessing.archiveAttachmentInBackground(
+          attachment,
+          buffer,
+          params.did,
+        );
       } catch (error) {
         this.logger.warn(
           `[attachments] native load failed for "${attachment.filename}", falling back to extraction: ${

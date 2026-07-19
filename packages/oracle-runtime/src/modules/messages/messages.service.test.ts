@@ -71,6 +71,7 @@ interface ServiceUnderTest {
   fileProcessing: {
     processAttachments: ReturnType<typeof vi.fn>;
     loadAttachmentBytes: ReturnType<typeof vi.fn>;
+    archiveAttachmentInBackground: ReturnType<typeof vi.fn>;
   };
   checkpointSync: ReturnType<typeof makeCheckpointSync>;
   postSync: { run: ReturnType<typeof vi.fn> };
@@ -93,6 +94,7 @@ function build(): ServiceUnderTest {
   const fileProcessing = {
     processAttachments: vi.fn(),
     loadAttachmentBytes: vi.fn(),
+    archiveAttachmentInBackground: vi.fn(),
   };
   const checkpointSync = makeCheckpointSync();
   const postSync = { run: vi.fn() };
@@ -524,6 +526,12 @@ describe('MessagesService', () => {
       expect(fileProcessing.loadAttachmentBytes).toHaveBeenCalledWith(
         imageAttachment,
         ROOM_ID,
+      );
+      // The original is still archived to the sandbox, off the hot path.
+      expect(fileProcessing.archiveAttachmentInBackground).toHaveBeenCalledWith(
+        imageAttachment,
+        Buffer.from('png-bytes'),
+        USER_DID,
       );
 
       const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
