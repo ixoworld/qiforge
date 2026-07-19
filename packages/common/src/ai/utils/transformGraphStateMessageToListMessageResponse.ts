@@ -51,6 +51,29 @@ export interface CleanAdditionalKwargs {
   [key: string]: unknown; // Allow additional properties for LangChain compatibility
 }
 
+/**
+ * Flatten message content to display text. Multimodal human messages (native
+ * image/file attachments) carry an array of content blocks — only the text
+ * blocks are surfaced; base64 data blocks must never reach the client (the
+ * attachment chip renders from `attachment` metadata instead).
+ */
+function contentToText(content: BaseMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object' && 'text' in part) {
+          const text = (part as { text?: unknown }).text;
+          return typeof text === 'string' ? text : '';
+        }
+        return '';
+      })
+      .join('');
+  }
+  return String(content);
+}
+
 export function transformGraphStateMessageToListMessageResponse(
   messages: BaseMessage[],
 ): ListOracleMessagesResponse {
@@ -71,10 +94,11 @@ export function transformGraphStateMessageToListMessageResponse(
         const attachment =
           message.type === 'human' ? additionalKwargs?.attachment : undefined;
 
+        const textContent = contentToText(message.content);
         acc.push({
           type: message.type === 'ai' ? 'ai' : 'human',
-          content: emojify(String(message.content)),
-          id: uuidFromString(message.id ?? String(message.content)),
+          content: emojify(textContent),
+          id: uuidFromString(message.id ?? textContent),
           toolCalls: (message as AIMessage).tool_calls?.map((toolCall) => ({
             name: toolCall.name,
             args: toolCall.args,

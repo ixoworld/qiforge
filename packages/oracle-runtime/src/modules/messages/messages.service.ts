@@ -15,9 +15,21 @@ import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matr
 import { BatchInvoker } from './batch-invoker.js';
 import { type ListMessagesDto } from './dto/list-messages.dto.js';
 import {
+  type AttachmentDto,
   type SendMessagePayload,
   type SendMessageResponse,
 } from './dto/send-message.dto.js';
+import {
+  getDefaultModelId,
+  getModelCapabilities,
+  isAllowedModel,
+} from '../../llm/index.js';
+import { classifyAttachment } from './attachments/classify.js';
+import {
+  buildUserMessageContent,
+  type NativeAttachment,
+} from './attachments/content-blocks.js';
+import { routeAttachment } from './attachments/route.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
@@ -256,51 +268,144 @@ export class MessagesService implements OnModuleInit {
     const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
     const timestamp = new Date().toISOString();
 
-    const { content, additionalKwargs } = await this.buildHumanMessageParts(
-      params,
-      prepared,
-      msgFromMatrixRoom,
-      timestamp,
-    );
+    const { content: baseText, additionalKwargs } =
+      await this.buildHumanMessageParts(
+        params,
+        prepared,
+        msgFromMatrixRoom,
+        timestamp,
+      );
+
+    if (!params.attachments?.length) {
+      return [
+        new HumanMessage({
+          content: baseText,
+          additional_kwargs: additionalKwargs,
+        }),
+      ];
+    }
+
+    // Route each attachment by the selected model's native capabilities. The
+    // effective model here MUST match what the agent resolves (agent-builder
+    // validates the same way), so a supported model receives its images/files
+    // directly instead of the helper model turning them into text.
+    const effectiveModel = isAllowedModel(params.model)
+      ? params.model
+      : getDefaultModelId();
+    const caps = getModelCapabilities(effectiveModel);
+
+    const nativeAttachments: AttachmentDto[] = [];
+    const extractAttachments: AttachmentDto[] = [];
+    for (const attachment of params.attachments) {
+      const kind = classifyAttachment({
+        mimetype: attachment.mimetype,
+        filename: attachment.filename,
+      });
+      const strategy = routeAttachment(kind, caps);
+      this.logger.log(
+        `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${effectiveModel} → ${strategy}`,
+      );
+      if (strategy === 'send-native') nativeAttachments.push(attachment);
+      else extractAttachments.push(attachment);
+    }
+
+    // Download + base64 the native attachments. On any failure, fall that one
+    // file back to extraction so a bad download never drops the whole message.
+    const natives: NativeAttachment[] = [];
+    const nativeSent: AttachmentDto[] = [];
+    for (const attachment of nativeAttachments) {
+      try {
+        const { buffer, mimetype } =
+          await this.fileProcessing.loadAttachmentBytes(
+            attachment,
+            prepared.roomId,
+          );
+        const kind = classifyAttachment({
+          mimetype,
+          filename: attachment.filename,
+        });
+        natives.push({
+          kind: kind === 'image' ? 'image' : 'file',
+          mimeType: mimetype,
+          base64: buffer.toString('base64'),
+          filename: attachment.filename,
+        });
+        nativeSent.push(attachment);
+        this.logger.log(
+          `[attachments] NATIVE → "${attachment.filename}" sent directly to ${effectiveModel} (${buffer.length} bytes, ${kind}); skipping helper-model extraction`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[attachments] native load failed for "${attachment.filename}", falling back to extraction: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        extractAttachments.push(attachment);
+      }
+    }
+
+    // Surface the first natively-sent attachment's metadata on the human
+    // message — the list-messages transform reads `attachment` off human
+    // messages, so the client can render the file/image chip after a refetch.
+    const firstNative = nativeSent[0];
+    const humanKwargs = firstNative
+      ? {
+          ...additionalKwargs,
+          attachment: {
+            filename: firstNative.filename,
+            mimetype: firstNative.mimetype,
+            size: firstNative.size,
+            mxcUri: firstNative.mxcUri,
+            eventId: firstNative.eventId,
+            category: classifyAttachment({
+              mimetype: firstNative.mimetype,
+              filename: firstNative.filename,
+            }),
+          },
+        }
+      : additionalKwargs;
 
     const out: BaseMessage[] = [
       new HumanMessage({
-        content,
-        additional_kwargs: additionalKwargs,
+        content: buildUserMessageContent(baseText, natives),
+        additional_kwargs: humanKwargs,
       }),
     ];
 
-    if (!params.attachments?.length) return out;
-
-    this.logger.log(
-      `sendMessage: ${params.attachments.length} attachment(s) for session ${prepared.sessionId}`,
-    );
-    const { texts, metadata } = await this.fileProcessing.processAttachments(
-      params.attachments,
-      prepared.roomId,
-      params.did,
-    );
-
-    texts.forEach((text, i) => {
-      const meta = metadata[i];
-      if (!meta) return;
-      const sourceRef = meta.eventId
-        ? `[source: eventId="${meta.eventId}"]`
-        : meta.mxcUri
-          ? `[source: url="${meta.mxcUri}"]`
-          : '';
-      const content = sourceRef ? `${sourceRef}\n${text}` : text;
-      out.push(
-        new AIMessage({
-          content,
-          additional_kwargs: {
-            msgFromMatrixRoom,
-            timestamp: new Date().toISOString(),
-            attachment: meta,
-          },
-        }),
+    // Everything not sent natively (plain text, and anything a text-only model
+    // can't read) is turned into text by the existing pipeline and appended.
+    if (extractAttachments.length > 0) {
+      this.logger.log(
+        `[attachments] EXTRACT ${extractAttachments.length} attachment(s) via file-processing pipeline (local parse for text, helper model otherwise) for session ${prepared.sessionId}`,
       );
-    });
+      const { texts, metadata } = await this.fileProcessing.processAttachments(
+        extractAttachments,
+        prepared.roomId,
+        params.did,
+      );
+
+      texts.forEach((text, i) => {
+        const meta = metadata[i];
+        if (!meta) return;
+        const sourceRef = meta.eventId
+          ? `[source: eventId="${meta.eventId}"]`
+          : meta.mxcUri
+            ? `[source: url="${meta.mxcUri}"]`
+            : '';
+        const content = sourceRef ? `${sourceRef}\n${text}` : text;
+        out.push(
+          new AIMessage({
+            content,
+            additional_kwargs: {
+              msgFromMatrixRoom,
+              timestamp: new Date().toISOString(),
+              attachment: meta,
+            },
+          }),
+        );
+      });
+    }
+
     return out;
   }
 

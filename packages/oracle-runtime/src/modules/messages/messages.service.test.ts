@@ -68,7 +68,10 @@ interface ServiceUnderTest {
   };
   streamer: { run: ReturnType<typeof vi.fn> };
   batchInvoker: { invoke: ReturnType<typeof vi.fn> };
-  fileProcessing: { processAttachments: ReturnType<typeof vi.fn> };
+  fileProcessing: {
+    processAttachments: ReturnType<typeof vi.fn>;
+    loadAttachmentBytes: ReturnType<typeof vi.fn>;
+  };
   checkpointSync: ReturnType<typeof makeCheckpointSync>;
   postSync: { run: ReturnType<typeof vi.fn> };
   matrixBridge: { setDeliverHandler: ReturnType<typeof vi.fn> };
@@ -87,7 +90,10 @@ function build(): ServiceUnderTest {
       sessionId: SESSION_ID,
     }),
   };
-  const fileProcessing = { processAttachments: vi.fn() };
+  const fileProcessing = {
+    processAttachments: vi.fn(),
+    loadAttachmentBytes: vi.fn(),
+  };
   const checkpointSync = makeCheckpointSync();
   const postSync = { run: vi.fn() };
   const matrixBridge = { setDeliverHandler: vi.fn() };
@@ -433,7 +439,13 @@ describe('MessagesService', () => {
       });
 
       await svc.sendMessage(
-        makeSendPayload({ stream: false, attachments: [attachment] }),
+        // A text-only model (GLM) routes every attachment to extraction —
+        // this test pins the extract path deliberately.
+        makeSendPayload({
+          stream: false,
+          attachments: [attachment],
+          model: 'z-ai/glm-5.2',
+        }),
       );
 
       expect(fileProcessing.processAttachments).toHaveBeenCalledWith(
@@ -470,6 +482,7 @@ describe('MessagesService', () => {
         makeSendPayload({
           stream: false,
           attachments: [attachment, urlAttachment],
+          model: 'z-ai/glm-5.2',
         }),
       );
 
@@ -487,6 +500,88 @@ describe('MessagesService', () => {
         '[source: url="mxc://home/abc"]',
       );
       expect(String(urlBodied.content)).toContain('from url');
+    });
+
+    it('sends an image NATIVELY (no extraction) when the model supports it', async () => {
+      const { svc, fileProcessing, batchInvoker } = build();
+      const imageAttachment: AttachmentDto = {
+        eventId: '$img-1',
+        filename: 'photo.png',
+        mimetype: 'image/png',
+      };
+      fileProcessing.loadAttachmentBytes.mockResolvedValueOnce({
+        buffer: Buffer.from('png-bytes'),
+        mimetype: 'image/png',
+      });
+
+      await svc.sendMessage(
+        // No model → default (GPT-5.4 Nano), which accepts images natively.
+        makeSendPayload({ stream: false, attachments: [imageAttachment] }),
+      );
+
+      // The old flow must NOT run for a natively-sent image.
+      expect(fileProcessing.processAttachments).not.toHaveBeenCalled();
+      expect(fileProcessing.loadAttachmentBytes).toHaveBeenCalledWith(
+        imageAttachment,
+        ROOM_ID,
+      );
+
+      const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
+        inputMessages: BaseMessage[];
+      };
+      // Single multimodal HumanMessage — no injected AIMessage.
+      expect(invokeArg.inputMessages).toHaveLength(1);
+      const human = invokeArg.inputMessages[0]!;
+      expect(human).toBeInstanceOf(HumanMessage);
+      const content = human.content as Array<Record<string, unknown>>;
+      expect(Array.isArray(content)).toBe(true);
+      expect(content[0]).toEqual({ type: 'text', text: 'hello' });
+      expect(content[1]).toMatchObject({
+        type: 'image',
+        source_type: 'base64',
+        mime_type: 'image/png',
+        data: Buffer.from('png-bytes').toString('base64'),
+      });
+      // Attachment metadata rides on the human message for the client.
+      expect(human.additional_kwargs.attachment).toMatchObject({
+        filename: 'photo.png',
+        mimetype: 'image/png',
+        eventId: '$img-1',
+      });
+    });
+
+    it('falls back to extraction when the native download fails', async () => {
+      const { svc, fileProcessing, batchInvoker } = build();
+      const imageAttachment: AttachmentDto = {
+        eventId: '$img-2',
+        filename: 'broken.png',
+        mimetype: 'image/png',
+      };
+      fileProcessing.loadAttachmentBytes.mockRejectedValueOnce(
+        new Error('download failed'),
+      );
+      fileProcessing.processAttachments.mockResolvedValueOnce({
+        texts: ['described image'],
+        metadata: [{ eventId: '$img-2', filename: 'broken.png' }],
+        totalUsage: { cost: 0, promptTokens: 0, completionTokens: 0 },
+      });
+
+      await svc.sendMessage(
+        makeSendPayload({ stream: false, attachments: [imageAttachment] }),
+      );
+
+      // Failed native load → that file goes through the extract pipeline.
+      expect(fileProcessing.processAttachments).toHaveBeenCalledWith(
+        [imageAttachment],
+        ROOM_ID,
+        USER_DID,
+      );
+      const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
+        inputMessages: BaseMessage[];
+      };
+      expect(invokeArg.inputMessages).toHaveLength(2);
+      // Human content stays a plain string — nothing was sent natively.
+      expect(typeof invokeArg.inputMessages[0]!.content).toBe('string');
     });
   });
 
