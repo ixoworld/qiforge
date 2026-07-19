@@ -134,7 +134,7 @@ describe('UserContextFetcher.fetch', () => {
     });
     expect(result).toEqual(fetched);
     expect(cache.set).toHaveBeenCalledWith(
-      `user-context:${SESSION_ID}`,
+      `user-context:room:${ROOM_ID}`,
       fetched,
       expect.any(Number),
     );
@@ -189,7 +189,7 @@ describe('UserContextFetcher.fetch', () => {
     expect(cache.set).not.toHaveBeenCalled();
   });
 
-  it('uses sessionId (not roomId) for the cache key — regression check', async () => {
+  it('uses roomId for the cache key — one shared context per room, not per session', async () => {
     cache.get.mockResolvedValue(undefined);
     const fetched = { identity: { name: 'Carol' } };
     memoryEngine.gatherUserContext.mockResolvedValue(fetched);
@@ -201,10 +201,10 @@ describe('UserContextFetcher.fetch', () => {
       sessionId: SESSION_ID,
     });
 
-    expect(cache.get).toHaveBeenCalledWith(`user-context:${SESSION_ID}`);
-    expect(cache.get).not.toHaveBeenCalledWith(`user-context:${ROOM_ID}`);
+    expect(cache.get).toHaveBeenCalledWith(`user-context:room:${ROOM_ID}`);
+    expect(cache.get).not.toHaveBeenCalledWith(`user-context:${SESSION_ID}`);
     expect(cache.set).toHaveBeenCalledWith(
-      `user-context:${SESSION_ID}`,
+      `user-context:room:${ROOM_ID}`,
       fetched,
       expect.any(Number),
     );

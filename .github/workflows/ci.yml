@@ -34,8 +34,45 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Recursive run executes `typecheck` in every workspace package that
+      # declares it (workspace dependency types come from the build above);
+      # packages without the script are skipped.
+      - name: Typecheck
+        run: pnpm -r typecheck
+
       - name: Lint
         run: pnpm lint
 
       - name: Format check
         run: pnpm format:check
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Workspace dependencies must be built before the suites import them.
+      - name: Build
+        run: pnpm build
+
+      # Scoped to the runtime package for now — the first suite wired into
+      # CI. Widen the filter as other packages' suites are brought up to
+      # CI-clean.
+      - name: Unit tests (oracle-runtime)
+        run: pnpm test --filter @ixo/oracle-runtime

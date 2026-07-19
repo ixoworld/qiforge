@@ -110,6 +110,20 @@ function defaultToAgentSpec(
     forwardTools = subAgent.forwardTools;
   }
 
+  // Audit hook: refusal retries land on the ambient audit sink when one is
+  // wired. Captured here (not inside the spec) so the wrapper stays free of
+  // ambient knowledge.
+  const audit = ambient.audit;
+  const emitAudit = audit
+    ? (record: Parameters<typeof audit.append>[0]): void => {
+        void Promise.resolve(audit.append(record)).catch((err: unknown) => {
+          ambient.logger.warn(
+            `[sub-agent] audit append failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
+    : undefined;
+
   return {
     name: subAgent.name,
     description: subAgent.description,
@@ -120,6 +134,12 @@ function defaultToAgentSpec(
     userDid,
     sessionId,
     ...(forwardTools ? { forwardTools } : {}),
+    ...(subAgent.onRefusal ? { onRefusal: subAgent.onRefusal } : {}),
+    ...(subAgent.readOnly !== undefined ? { readOnly: subAgent.readOnly } : {}),
+    ...(subAgent.recursionLimit !== undefined
+      ? { recursionLimit: subAgent.recursionLimit }
+      : {}),
+    ...(emitAudit ? { emitAudit } : {}),
   };
 }
 

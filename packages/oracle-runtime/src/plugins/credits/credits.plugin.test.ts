@@ -137,13 +137,14 @@ describe('CreditsPlugin', () => {
       { context: DEFAULT_RUNTIME_CONTEXT },
     );
 
-    // Flat-rate devnet: tokensPerMillion=1000, markup=5 → cost = (300/1000) * (0.75*5) = 1.125 → round = 1
+    // Flat-rate devnet: usd = (300 / 1M) × $0.75 = $0.000225, then
+    // usdCostToCredits: round(0.000225 × 10 000 credits/USD × 4 markup) = 9.
     expect(redis.eval).toHaveBeenCalledTimes(1);
     const lastEvalArgs = redis.eval.mock.calls.at(-1)!;
     // numKeys=2, then balanceKey, heldKey, userDid, credits
     expect(lastEvalArgs[1]).toBe(2);
     expect(lastEvalArgs[4]).toBe('did:ixo:user-1');
-    expect(lastEvalArgs[5]).toBe('1');
+    expect(lastEvalArgs[5]).toBe('9');
     await rt.close();
   });
 

@@ -169,4 +169,74 @@ describe('SubAgentRegistry', () => {
       'fast_agent',
     ]);
   });
+
+  it("rejects onRefusal 'retry-once' without readOnly at boot collection", () => {
+    const reg = new SubAgentRegistry();
+    reg.register(
+      makePlugin({
+        name: 'editor',
+        getSubAgents: () => [
+          makeSubAgent('call_editor_agent', { onRefusal: 'retry-once' }),
+        ],
+      }),
+    );
+
+    expect(() => reg.collectBoot(makeBuildCtx())).toThrow(
+      /retry-once.*readOnly/,
+    );
+  });
+
+  it("rejects onRefusal 'retry-once' without readOnly at request collection", async () => {
+    const reg = new SubAgentRegistry();
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        getRequestSubAgents: () => [
+          makeSubAgent('call_agui_agent', { onRefusal: 'retry-once' }),
+        ],
+      }),
+    );
+
+    await expect(reg.collectRequest(makeRuntimeContext())).rejects.toThrow(
+      /retry-once.*readOnly/,
+    );
+  });
+
+  it("accepts onRefusal 'retry-once' when readOnly is declared", () => {
+    const reg = new SubAgentRegistry();
+    reg.register(
+      makePlugin({
+        name: 'search',
+        getSubAgents: () => [
+          makeSubAgent('call_search_agent', {
+            onRefusal: 'retry-once',
+            readOnly: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(reg.collectBoot(makeBuildCtx())).toHaveLength(1);
+  });
+
+  it('keeps request-time sub-agents out of shared boot-scoped introspection', async () => {
+    const reg = new SubAgentRegistry();
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        getSubAgents: () => [makeSubAgent('Baseline')],
+        getRequestSubAgents: () => [makeSubAgent('Request Scoped')],
+      }),
+    );
+
+    const withRequest = await reg.collect(makeBuildCtx(), makeRuntimeContext());
+    expect(withRequest.map((c) => c.subAgent.name)).toEqual([
+      'Baseline',
+      'Request Scoped',
+    ]);
+
+    // The singleton helper reflects boot-time contributions only — one
+    // request's dynamic sub-agents never leak into another's view.
+    expect(reg.subAgentNamesForPlugin('agui')).toEqual(['call_baseline_agent']);
+  });
 });

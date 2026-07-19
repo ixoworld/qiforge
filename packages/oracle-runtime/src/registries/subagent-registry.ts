@@ -13,6 +13,24 @@ export interface RegisteredSubAgent {
 }
 
 /**
+ * The automated refusal retry is only permitted for sub-agents whose entire
+ * toolset is declared non-mutating. Enforced at collection time (boot for
+ * `getSubAgents`, per-request for `getRequestSubAgents`) so a mis-declared
+ * plugin fails loudly instead of silently gaining a retry on write tools.
+ */
+function assertValidRefusalPolicy(
+  pluginName: string,
+  subAgent: PluginSubAgent,
+): void {
+  if (subAgent.onRefusal === 'retry-once' && subAgent.readOnly !== true) {
+    throw new Error(
+      `Sub-agent "${subAgent.name}" (plugin "${pluginName}") sets onRefusal 'retry-once' ` +
+        `without readOnly: true — the automated retry is only permitted for read-only sub-agents.`,
+    );
+  }
+}
+
+/**
  * Stores plugins that contribute sub-agents and resolves them by invoking
  * each plugin's `getSubAgents(buildCtx)` at collection time.
  *
@@ -26,13 +44,11 @@ export interface RegisteredSubAgent {
 export class SubAgentRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredSubAgent[] | null = null;
-  private collected: RegisteredSubAgent[] | null = null;
 
   /** Add a plugin whose `getSubAgents` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collected = null;
   }
 
   /**
@@ -45,6 +61,7 @@ export class SubAgentRegistry {
       if (!plugin.getSubAgents) continue;
       const subAgents = plugin.getSubAgents(buildCtx);
       for (const subAgent of subAgents) {
+        assertValidRefusalPolicy(plugin.name, subAgent);
         out.push({ pluginName: plugin.name, subAgent });
       }
     }
@@ -65,6 +82,9 @@ export class SubAgentRegistry {
       this.plugins.map(async (plugin) => {
         if (!plugin.getRequestSubAgents) return [];
         const requestSubAgents = await plugin.getRequestSubAgents(rtCtx);
+        for (const subAgent of requestSubAgents) {
+          assertValidRefusalPolicy(plugin.name, subAgent);
+        }
         return requestSubAgents.map((subAgent) => ({
           pluginName: plugin.name,
           subAgent,
@@ -76,6 +96,10 @@ export class SubAgentRegistry {
 
   /**
    * Combined boot + request collection used by the main agent build.
+   *
+   * The merged list is RETURNED, never stored — request-time sub-agents are
+   * per-user and writing them onto this boot-scoped singleton let concurrent
+   * requests observe each other's entries.
    */
   async collect(
     buildCtx: PluginContext,
@@ -83,23 +107,21 @@ export class SubAgentRegistry {
   ): Promise<RegisteredSubAgent[]> {
     const boot = this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
-    const out = [...boot, ...request];
-    this.collected = out;
-    return out;
+    return [...boot, ...request];
   }
 
   /**
-   * The *wrapped* tool names contributed by a given plugin in the most recent
-   * collection (boot-only if a full request collection has not yet happened).
-   * Mirrors `ToolRegistry.toolNamesForPlugin` so the manifest validator can
-   * treat sub-agents as the tools they become to the agent.
+   * The *wrapped* tool names contributed by a given plugin at boot. Mirrors
+   * `ToolRegistry.toolNamesForPlugin` so the manifest validator can treat
+   * sub-agents as the tools they become to the agent. Request-time
+   * sub-agents are per-request values and never appear here.
    *
    * Each entry passes through `computeSubAgentToolName` — the same transform
    * `createSubagentAsTool` applies when building the StructuredTool — so the
    * names returned here match what the agent will actually see.
    */
   subAgentNamesForPlugin(pluginName: string): string[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return (this.bootCache ?? [])
       .filter((entry) => entry.pluginName === pluginName)
       .map((entry) => computeSubAgentToolName(entry.subAgent.name));
   }
@@ -109,10 +131,10 @@ export class SubAgentRegistry {
    * message names both plugin names so the boot log points at the conflict.
    */
   assertNoCollisions(): void {
-    const source = this.collected ?? this.bootCache;
+    const source = this.bootCache;
     if (source === null) {
       throw new Error(
-        'SubAgentRegistry.assertNoCollisions called before collect',
+        'SubAgentRegistry.assertNoCollisions called before collectBoot',
       );
     }
     const seen = new Map<string, string>();

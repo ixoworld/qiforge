@@ -176,12 +176,17 @@ export class TokenLimiter {
     return (params.totalTokens / 1_000_000) * 0.75 * markup;
   }
 
-  /** Flat-rate fallback: $0.75 per 1M tokens × network markup. */
+  /**
+   * Flat-rate fallback: $0.75 per 1M tokens, converted to credits via
+   * `usdCostToCredits` (which applies the network markup and the
+   * credits-per-USD rate). Converting through the shared function keeps
+   * every billing path on one conversion — the previous implementation
+   * rounded the raw USD amount, which deducted 0 credits for any turn
+   * under ~400k tokens.
+   */
   llmTokenToCredits(tokenCount: number): number {
-    const markup = 1.6;
-    const costPerMillionTokens = 0.75 * markup;
     const tokensPerMillion = 1_000_000;
-    return Math.round((tokenCount / tokensPerMillion) * costPerMillionTokens);
+    return this.usdCostToCredits((tokenCount / tokensPerMillion) * 0.75);
   }
 
   /**
@@ -200,13 +205,15 @@ export class TokenLimiter {
       return this.llmTokenToCredits(inputTokens + outputTokens);
     }
 
-    const markup = 1.6;
     const divisor = 1_000_000;
     const inputCost =
       (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
     const outputCost =
       (outputTokens / divisor) * pricing.outputPricePerMillionTokens;
-    return Math.round((inputCost + outputCost) * markup);
+    // `usdCostToCredits` applies the network markup and credits-per-USD
+    // rate — the same conversion the provider-cost branch uses, so all
+    // three billing paths agree on scale.
+    return this.usdCostToCredits(inputCost + outputCost);
   }
 
   /**

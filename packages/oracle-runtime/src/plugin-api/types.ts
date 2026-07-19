@@ -447,6 +447,21 @@ export interface PluginSubAgent {
   /** Sub-agent-scoped middleware (e.g. summarization for long conversations). */
   middlewares?: AgentMiddleware[];
   /**
+   * Refusal policy. `'surface'` (default) returns a refusal verbatim to the
+   * main agent. `'retry-once'` retries once with an honest automated-retry
+   * preamble — only valid together with `readOnly: true`; the runtime
+   * rejects the combination at boot otherwise, and every retry is written
+   * to the audit trail.
+   */
+  onRefusal?: 'surface' | 'retry-once';
+  /**
+   * Declares that every tool this sub-agent holds is non-mutating (pure
+   * reads/queries). Prerequisite for `onRefusal: 'retry-once'`.
+   */
+  readOnly?: boolean;
+  /** Inner-loop recursion limit; defaults to the runtime's sub-agent bound. */
+  recursionLimit?: number;
+  /**
    * Forward this sub-agent's internal tool calls + results into the parent
    * graph's message history so the UI renders them in the main chat.
    *

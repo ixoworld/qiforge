@@ -88,6 +88,11 @@ export const baseEnvSchema = z.object({
   LANGSMITH_PROJECT: z.string().optional(),
   LANGSMITH_ENDPOINT: z.string().optional(),
 
+  // Append-only JSONL audit trail (authority decisions, refusal retries,
+  // model receipts). The audit stream always flows through the logger;
+  // setting a path additionally persists it to disk.
+  AUDIT_LOG_PATH: z.string().optional(),
+
   /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first
    * token, at some cost to hard multi-step reasoning. Default `medium`

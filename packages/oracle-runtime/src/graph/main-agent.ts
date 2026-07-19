@@ -190,9 +190,12 @@ export async function createMainAgent(
   const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
 
   // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
+  // The meta-tools receive THIS request's collected tool list as a value —
+  // never the registry — so concurrent requests cannot observe each other's
+  // request-time tools through `load_capability`.
   const metaTools = buildMetaTools({
     manifestRegistry: registries.manifests,
-    toolRegistry: registries.tools,
+    collectedTools: allTools,
   });
 
   const wrap = (entry: CollectedTool) =>

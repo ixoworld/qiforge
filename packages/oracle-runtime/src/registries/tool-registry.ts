@@ -38,13 +38,11 @@ export interface RegisteredTool {
 export class ToolRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredTool[] | null = null;
-  private collected: RegisteredTool[] | null = null;
 
   /** Add a plugin whose `getTools` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collected = null;
   }
 
   /**
@@ -91,6 +89,12 @@ export class ToolRegistry {
    * Combined boot + request collection used by the main agent build. Uses
    * the cached boot output when present so per-request rebuilds skip the
    * `getTools` invocations that don't depend on runtime state.
+   *
+   * The merged list is RETURNED, never stored: request-time contributions
+   * are per-user and per-request, and writing them onto this boot-scoped
+   * singleton let concurrent requests read each other's tool lists. Callers
+   * that need the request view (e.g. the meta-tools) receive the returned
+   * array explicitly.
    */
   async collect(
     buildCtx: PluginContext,
@@ -98,34 +102,30 @@ export class ToolRegistry {
   ): Promise<RegisteredTool[]> {
     const boot = await this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
-    const out = [...boot, ...request];
-    this.collected = out;
-    return out;
+    return [...boot, ...request];
   }
 
-  /** The flat list of tool names produced by the most recent `collect()`. */
+  /** The flat list of boot-time tool names (request-time tools excluded). */
   toolNames(): string[] {
-    return (this.collected ?? this.bootCache ?? []).map(
-      (entry) => entry.tool.name,
-    );
+    return (this.bootCache ?? []).map((entry) => entry.tool.name);
   }
 
   /**
-   * Tool names contributed by a given plugin in the most recent `collect()`
-   * (or `collectBoot()` if no full collection has happened yet).
+   * Boot-time tool names contributed by a given plugin. Request-time tools
+   * are per-request values and never appear here.
    */
   toolNamesForPlugin(pluginName: string): string[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return (this.bootCache ?? [])
       .filter((entry) => entry.pluginName === pluginName)
       .map((entry) => entry.tool.name);
   }
 
   /**
-   * The tools contributed by a given plugin in the most recent collection
-   * (boot-only if a full request collection has not yet happened).
+   * Boot-time tools contributed by a given plugin. Request-time tools are
+   * per-request values and never appear here.
    */
   toolsForPlugin(pluginName: string): PluginTool[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return (this.bootCache ?? [])
       .filter((entry) => entry.pluginName === pluginName)
       .map((entry) => entry.tool);
   }
@@ -136,9 +136,11 @@ export class ToolRegistry {
    * actual conflict.
    */
   assertNoCollisions(): void {
-    const source = this.collected ?? this.bootCache;
+    const source = this.bootCache;
     if (source === null) {
-      throw new Error('ToolRegistry.assertNoCollisions called before collect');
+      throw new Error(
+        'ToolRegistry.assertNoCollisions called before collectBoot',
+      );
     }
     const seen = new Map<string, string>();
     const collisions: string[] = [];

@@ -1,11 +1,17 @@
 import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import {
+  composeAuditSinks,
+  createLoggerAuditSink,
+  type AuditSink,
+} from '../kernel/audit.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
+import { createFileAuditSink } from './audit-file-sink.js';
 import type {
   Logger as PluginLogger,
   MatrixEvent,
@@ -205,6 +211,19 @@ export function buildAmbientServices(
     },
   };
 
+  // Audit trail: always through the runtime logger; additionally to an
+  // append-only JSONL file when the operator sets AUDIT_LOG_PATH.
+  const auditLogPath =
+    typeof opts.config.AUDIT_LOG_PATH === 'string' &&
+    opts.config.AUDIT_LOG_PATH.length > 0
+      ? opts.config.AUDIT_LOG_PATH
+      : undefined;
+  const auditSinks: AuditSink[] = [createLoggerAuditSink(opts.logger)];
+  if (auditLogPath) {
+    auditSinks.push(createFileAuditSink(auditLogPath, opts.logger));
+  }
+  const audit = composeAuditSinks(auditSinks, opts.logger);
+
   return {
     config: opts.config,
     identity: opts.identity,
@@ -216,5 +235,6 @@ export function buildAmbientServices(
     emit: emitAdapter,
     ucan: ucanAdapter,
     logger: opts.logger,
+    audit,
   };
 }

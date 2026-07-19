@@ -1,4 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { AuditSink } from '../kernel/audit.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -151,4 +152,11 @@ export interface AmbientServices {
   emit: EmitAdapter;
   ucan: UcanAdapter;
   logger: Logger;
+  /**
+   * Append-only audit trail for authority-relevant decisions (refusal
+   * retries, tool allow/deny, model receipts, route decisions). Optional
+   * during the migration window — hosts that omit it still log the same
+   * events through `logger`; the kernel work makes it required.
+   */
+  audit?: AuditSink;
 }
