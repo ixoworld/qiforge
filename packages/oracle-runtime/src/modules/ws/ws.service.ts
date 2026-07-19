@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type Socket } from 'socket.io';
+import type { EventEnvelope } from '../../events/event-envelope.js';
 import { SessionHistoryProcessor } from '../sessions/session-history-processor.service.js';
 import { WS_SERVICE_EVENT_NAME, wsEmitter } from './emitter.js';
 
@@ -34,8 +35,13 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /** Publish an event to all connections in a specific session. */
-  publishToSession(sessionId: string, event: AllEvents): void {
+  /**
+   * Publish an event to all connections in a specific session. Events go
+   * out under their own `eventName` — the same channel convention the
+   * `@ixo/oracles-events` gateway path uses — so the client SDK's discrete
+   * listeners and its `onAny` envelope guard both receive them.
+   */
+  publishToSession(sessionId: string, event: AllEvents | EventEnvelope): void {
     const connections = this.sessionConnections.get(sessionId);
     if (connections && connections.size > 0) {
       this.logger.log(
@@ -43,7 +49,7 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
       );
       connections.forEach((socket) => {
         if (socket.connected) {
-          socket.emit('event', event);
+          socket.emit(event.eventName, event);
         } else {
           connections.delete(socket);
         }
@@ -116,7 +122,7 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     this.logger.log('WebSocket service initialized');
-    wsEmitter.on(WS_SERVICE_EVENT_NAME, (event: AllEvents) => {
+    wsEmitter.on(WS_SERVICE_EVENT_NAME, (event: AllEvents | EventEnvelope) => {
       this.publishToSession(event.payload.sessionId, event);
     });
   }

@@ -304,6 +304,9 @@ export class WsGateway
         'tool_call',
         'action_call',
         'browser_tool_call',
+        // Canonical router event name plus the legacy misspelling, kept in
+        // the listing for one migration window while older clients update.
+        'router.update',
         'router_update',
         'message_cache_invalidation',
       ],

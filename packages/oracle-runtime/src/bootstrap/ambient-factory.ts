@@ -1,6 +1,6 @@
 import { MatrixManager } from '@ixo/matrix';
-import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import { toEventEnvelope } from '../events/event-envelope.js';
 import {
   composeAuditSinks,
   createLoggerAuditSink,
@@ -201,13 +201,19 @@ export function buildAmbientServices(
 
   const emitAdapter: EmitAdapter = {
     emit(eventName, payload) {
-      // The scoped emitter has already attached session/request ids to the
-      // payload. The cross-module `wsEmitter` expects `(sessionId, event)`
-      // where the event carries its own `type` discriminator.
-      const sessionId =
-        typeof payload?.sessionId === 'string' ? payload.sessionId : 'unknown';
-      const event = { type: eventName, ...payload };
-      wsEmitter.emit(sessionId, event as unknown as AllEvents);
+      // The scoped emitter attaches sessionId/requestId before this sink
+      // runs; the envelope builder validates both and produces the same
+      // `{ eventName, payload }` wire shape as the event classes. An
+      // unroutable payload is dropped loudly instead of being sent in a
+      // shape every consumer would reject.
+      const envelope = toEventEnvelope(eventName, payload);
+      if (!envelope) {
+        opts.logger.warn(
+          `[emit] dropped '${eventName}' event without sessionId/requestId`,
+        );
+        return;
+      }
+      wsEmitter.emit(envelope.payload.sessionId, envelope);
     },
   };
 
