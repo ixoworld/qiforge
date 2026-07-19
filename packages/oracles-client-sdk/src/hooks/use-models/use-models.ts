@@ -63,6 +63,10 @@ export function useModels(
     defaultModel,
     isLoading,
     error: error ?? null,
-    refetch,
+    // Wrap so the public signature stays `() => void` (react-query's refetch
+    // returns a Promise; a bare pass-through trips no-misused-promises).
+    refetch: () => {
+      void refetch();
+    },
   };
 }
