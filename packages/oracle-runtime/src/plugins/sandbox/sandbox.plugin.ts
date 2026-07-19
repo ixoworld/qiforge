@@ -235,6 +235,12 @@ export class SandboxPlugin extends OraclePlugin {
   /** Cached upstream tool definitions, keyed by sandbox MCP URL. */
   private readonly toolDefsCache = new Map<string, CachedSandboxDefs>();
 
+  /**
+   * URLs with a background definition refresh in flight — guards a burst of
+   * turns from each spawning its own connect when an entry expires.
+   */
+  private readonly defsRefreshInFlight = new Set<string>();
+
   override async getRequestTools(rtCtx: RuntimeContext): Promise<PluginTool[]> {
     const parsed = configSchema.safeParse(rtCtx.config);
     if (!parsed.success) {
@@ -257,11 +263,14 @@ export class SandboxPlugin extends OraclePlugin {
     const sandboxMcpUrl = parsed.data.SANDBOX_MCP_URL;
 
     const cached = this.toolDefsCache.get(sandboxMcpUrl);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (cached) {
       // Warm path — definitions are known, so skip the per-turn secrets
       // fetch and MCP connect. The auth *gate* still runs every request:
       // minting is local (service-DID resolution is cached upstream), so an
-      // unauthorized user sees no sandbox tools, exactly as before.
+      // unauthorized user sees no sandbox tools, exactly as before. An
+      // expired entry is served as-is (definitions only change on upstream
+      // deploys) while a background refresh re-snapshots it, so TTL expiry
+      // never puts the secrets fetch + connect chain back on a chat turn.
       const gateHeaders = await this.authBuilder(
         { sandboxMcpUrl, skillsServiceUrl, oracleSecrets: {}, userSecrets: {} },
         rtCtx,
@@ -271,6 +280,38 @@ export class SandboxPlugin extends OraclePlugin {
           '[sandbox] skipping — no UCAN invocation (user not authorized); not connecting to the sandbox MCP server.',
         );
         return [];
+      }
+      if (
+        cached.expiresAt <= Date.now() &&
+        !this.defsRefreshInFlight.has(sandboxMcpUrl)
+      ) {
+        this.defsRefreshInFlight.add(sandboxMcpUrl);
+        void this.connectWithFullHeaders({
+          sandboxMcpUrl,
+          skillsServiceUrl,
+          oracleSecrets,
+          rtCtx,
+        })
+          .then((upstream) => {
+            this.toolDefsCache.set(sandboxMcpUrl, {
+              defs: upstream.map(({ name, description, schema }) => ({
+                name,
+                description,
+                schema,
+              })),
+              expiresAt: Date.now() + SANDBOX_TOOL_DEFS_TTL_MS,
+            });
+          })
+          .catch((err: unknown) => {
+            // Keep serving the stale defs; the next expired-cache turn
+            // retries the refresh.
+            rtCtx.logger.warn(
+              `[sandbox] background tool-defs refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          })
+          .finally(() => {
+            this.defsRefreshInFlight.delete(sandboxMcpUrl);
+          });
       }
       const lazyUpstream = this.buildLazyUpstreamTools(cached.defs, {
         sandboxMcpUrl,

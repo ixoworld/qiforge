@@ -176,6 +176,17 @@ export class SendMessageDto {
   message!: string;
 
   @ApiProperty({
+    description:
+      'Optional model id to answer this message with. Must be one of the ids returned by GET /models; an unknown or omitted value falls back to the oracle default model.',
+    required: false,
+    example: 'openai/gpt-5.4-nano',
+    type: String,
+  })
+  @IsOptional()
+  @IsString()
+  model?: string;
+
+  @ApiProperty({
     description: 'The tool list to be passed to the LLM',
     required: false,
     type: [BrowserToolCallDto],
@@ -261,6 +272,15 @@ export class SendMessagePayload {
   message!: string;
   sessionId!: string;
   did!: string;
+  /**
+   * Client-supplied request id for streaming requests (the SDK sends one so
+   * it can correlate SSE events). Resolved to a fresh UUID by
+   * `MessagesService` when absent, BEFORE the SSE headers flush — the id is
+   * part of the `X-Request-Id` response header.
+   */
+  requestId?: string;
+  /** Optional per-request model id; validated against the catalog allow-list. */
+  model?: string;
   tools?: BrowserToolCallDto[];
   agActions?: AgActionDto[];
   timezone?: string;

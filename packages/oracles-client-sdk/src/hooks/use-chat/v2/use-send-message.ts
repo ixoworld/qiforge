@@ -39,6 +39,7 @@ export function useSendMessage({
   browserTools,
   chatRef,
   refetchQueries,
+  model,
   onToolCall,
   onError,
   onReasoning,
@@ -155,6 +156,7 @@ export function useSendMessage({
           delegation,
           invocation,
           sessionId,
+          model,
           metadata,
           attachments,
           browserTools: browserTools
@@ -276,6 +278,8 @@ const askOracleStream = async (props: {
   sessionId: string;
   delegation: string;
   invocation?: string | null;
+  /** Model id to answer with; omitted → the oracle's default model. */
+  model?: string;
   metadata?: Record<string, unknown>;
   attachments?: Attachment[];
   browserTools?: {
@@ -326,6 +330,7 @@ const askOracleStream = async (props: {
     body: JSON.stringify({
       message: props.message,
       stream: true,
+      ...(props.model && { model: props.model }),
       ...(props.metadata && { metadata: props.metadata }),
       ...(props.attachments?.length && { attachments: props.attachments }),
       ...(props.browserTools && { tools: props.browserTools }),

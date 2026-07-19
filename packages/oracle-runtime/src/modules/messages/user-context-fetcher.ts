@@ -17,6 +17,22 @@ type UserContextRecord = Record<string, unknown>;
 const CACHE_TTL_MS = minutes(5);
 
 /**
+ * Negative-cache TTL. A failed fetch (mint error, engine down, timeout) is
+ * remembered briefly so a degraded Memory Engine costs ONE slow attempt per
+ * window instead of stalling every turn.
+ */
+const FAILURE_TTL_MS = 60 * 1000;
+
+/**
+ * How long the awaited path is willing to block the agent build. The
+ * transport-level deadlines in `MemoryEngineService` (30s soft / 60s hard)
+ * exist to protect sockets, not chat latency — a prompt enrichment that
+ * hasn't answered in 3s isn't worth delaying the model call for. The
+ * request keeps running past this cap and warms the cache for later turns.
+ */
+const BLOCKING_FETCH_CAP_MS = 3 * 1000;
+
+/**
  * Cache key for the fetched context. The Memory-Engine result is a function of
  * the room (and oracle), not the session — so keying by `roomId` lets a new
  * session for the same room reuse the cached value instead of paying a fresh
@@ -24,6 +40,10 @@ const CACHE_TTL_MS = minutes(5);
  */
 function cacheKey(roomId: string): string {
   return `user-context:room:${roomId}`;
+}
+
+function failureCacheKey(roomId: string): string {
+  return `user-context:room:${roomId}:unavailable`;
 }
 
 /**
@@ -37,8 +57,13 @@ function cacheKey(roomId: string): string {
  * Returns `undefined` when:
  *  - `MEMORY_ENGINE_URL` is not configured (`MemoryEngineService` is null)
  *  - UCAN signing key is missing (Matrix listener path, no per-user UCAN)
- *  - the Memory Engine call throws — userContext is best-effort, missing
- *    enrichment must never break a chat.
+ *  - the Memory Engine call throws or exceeds the blocking cap — userContext
+ *    is best-effort, missing enrichment must never break (or stall) a chat.
+ *
+ * Failures are negative-cached for {@link FAILURE_TTL_MS} so a degraded
+ * Memory Engine costs one attempt per window, not one per turn. A fetch that
+ * outlives {@link BLOCKING_FETCH_CAP_MS} stops blocking the caller but keeps
+ * running and still warms the cache for subsequent turns.
  */
 @Injectable()
 export class UserContextFetcher {
@@ -89,6 +114,19 @@ export class UserContextFetcher {
       );
       return cached;
     }
+
+    // Negative cache checked AFTER the positive one: a late-completing
+    // background fetch warms the positive cache, which must win over an
+    // earlier failure marker.
+    const recentlyFailed = await this.cache.get<boolean>(
+      failureCacheKey(roomId),
+    );
+    if (recentlyFailed) {
+      this.logger.log(
+        `[UserContextFetcher] skip — recent fetch failure for room=${roomId} (retry in <${FAILURE_TTL_MS / 1000}s)`,
+      );
+      return undefined;
+    }
     this.logger.log(`[UserContextFetcher] cache miss — room=${roomId}`);
 
     const engineUrl = this.configService.get<string>('MEMORY_ENGINE_URL');
@@ -112,12 +150,14 @@ export class UserContextFetcher {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      await this.rememberFailure(roomId);
       return undefined;
     }
     if (!invocation) {
       this.logger.warn(
         `[UserContextFetcher] UCAN invocation returned null for room ${roomId} (did:web resolution failed?)`,
       );
+      await this.rememberFailure(roomId);
       return undefined;
     }
 
@@ -126,30 +166,56 @@ export class UserContextFetcher {
       `[UserContextFetcher] calling gatherUserContext — engine=${engineUrl}, room=${roomId}, oracle=${oracleDid}`,
     );
 
-    try {
-      const context = await this.memoryEngine.gatherUserContext({
-        oracleDid,
-        roomId,
-        oracleToken: '',
-        userToken: '',
-        oracleHomeServer: '',
-        userHomeServer: '',
-        ucanInvocation: invocation,
-      });
-      const widened: UserContextRecord = { ...context };
-      const keyCount = Object.keys(widened).length;
-      this.logger.log(
-        `[UserContextFetcher] gather returned ${keyCount} key(s) for room ${roomId}: ${keyCount > 0 ? Object.keys(widened).join(', ') : '(empty)'}`,
-      );
-      await this.cache.set(key, widened, CACHE_TTL_MS);
-      return widened;
-    } catch (err) {
+    // The gather itself caches its own result (or a failure marker) whenever
+    // it settles — even after the blocking cap below has given up — so a slow
+    // engine still warms the cache for the NEXT turn.
+    const gatherPromise: Promise<UserContextRecord | undefined> =
+      this.memoryEngine
+        .gatherUserContext({
+          oracleDid,
+          roomId,
+          oracleToken: '',
+          userToken: '',
+          oracleHomeServer: '',
+          userHomeServer: '',
+          ucanInvocation: invocation,
+        })
+        .then(async (context) => {
+          const widened: UserContextRecord = { ...context };
+          const keyCount = Object.keys(widened).length;
+          this.logger.log(
+            `[UserContextFetcher] gather returned ${keyCount} key(s) for room ${roomId}: ${keyCount > 0 ? Object.keys(widened).join(', ') : '(empty)'}`,
+          );
+          await this.cache.set(key, widened, CACHE_TTL_MS);
+          return widened;
+        })
+        .catch(async (err: unknown) => {
+          this.logger.warn(
+            `[UserContextFetcher] gatherUserContext threw for room ${roomId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          await this.rememberFailure(roomId);
+          return undefined;
+        });
+
+    let capTimer: ReturnType<typeof setTimeout> | undefined;
+    const cap = new Promise<'timeout'>((resolve) => {
+      capTimer = setTimeout(() => resolve('timeout'), BLOCKING_FETCH_CAP_MS);
+    });
+    const outcome = await Promise.race([gatherPromise, cap]);
+    if (capTimer) clearTimeout(capTimer);
+
+    if (outcome === 'timeout') {
       this.logger.warn(
-        `[UserContextFetcher] gatherUserContext threw for room ${roomId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[UserContextFetcher] gather exceeded ${BLOCKING_FETCH_CAP_MS}ms for room ${roomId} — proceeding without fresh context; fetch continues in background`,
       );
       return undefined;
     }
+    return outcome;
+  }
+
+  private async rememberFailure(roomId: string): Promise<void> {
+    await this.cache.set(failureCacheKey(roomId), true, FAILURE_TTL_MS);
   }
 }

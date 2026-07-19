@@ -35,6 +35,7 @@ export function useChat({
   browserTools,
   uiComponents,
   streamingMode,
+  model,
 }: IChatOptions) {
   // Create chat instance with lazy initialization
   const chatRef = useRef<OracleChat | null>(null);
@@ -310,6 +311,7 @@ export function useChat({
     browserTools,
     chatRef: chatRef as MutableRefObject<OracleChat>,
     refetchQueries: revalidate,
+    model,
     onToolCall: handleToolCall,
     onActionCall: handleActionCall,
     onError: handleError,

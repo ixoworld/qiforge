@@ -129,6 +129,34 @@ describe('createDefaultMemoryMcpFactory tool-definition cache', () => {
     expect(clientCtorSpy).not.toHaveBeenCalled();
   });
 
+  it('serves expired definitions stale and refreshes them in the background', async () => {
+    vi.useFakeTimers();
+    try {
+      getToolsSpy.mockResolvedValue([upstreamTool(MEMORY_SEARCH_MCP_NAME)]);
+      await createDefaultMemoryMcpFactory(MEMORY_MCP_URL)(ctx());
+      expect(getToolsSpy).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+      // The expired entry still binds immediately — the turn never waits on
+      // a reconnect...
+      const stale = await createDefaultMemoryMcpFactory(MEMORY_MCP_URL)(ctx());
+      expect(stale?.map((t) => t.name)).toEqual([MEMORY_SEARCH_MCP_NAME]);
+
+      // ...while exactly one background refresh re-snapshots the defs.
+      await vi.runAllTimersAsync();
+      expect(getToolsSpy).toHaveBeenCalledTimes(2);
+
+      // The refreshed entry serves the next turn with no further connect.
+      const refreshed =
+        await createDefaultMemoryMcpFactory(MEMORY_MCP_URL)(ctx());
+      expect(refreshed?.map((t) => t.name)).toEqual([MEMORY_SEARCH_MCP_NAME]);
+      expect(getToolsSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('a failed lazy connect does not poison later invocations', async () => {
     const invoke = vi.fn(async () => ({ ok: true }));
     getToolsSpy.mockResolvedValue([

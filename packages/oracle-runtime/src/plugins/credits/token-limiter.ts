@@ -60,6 +60,12 @@ const KEY_HELD_AMOUNTS = 'held_amounts';
 const KEY_SUBSCRIPTION_PAYLOAD = 'subscription_payload';
 const KEY_PENDING_CLAIM = 'pending_claim';
 
+/**
+ * Flat-rate fallback price ($/1M tokens), used only when neither a provider
+ * USD cost nor per-model pricing is available.
+ */
+const FLAT_RATE_USD_PER_MILLION_TOKENS = 0.75;
+
 // Atomic balance decrement + held-amount increment, with rollback on overdraft.
 const LIMIT_TOKENS_SCRIPT = `
     local balanceKey = KEYS[1]
@@ -135,15 +141,25 @@ export class TokenLimiter {
   }
 
   /**
+   * Credits granted per USD of provider cost.
+   * All environments (mainnet, testnet, devnet): 1 USD = 1000 credits.
+   * This ensures consistency of credits-per-USD in every environment.
+   */
+  private get creditsPerUsd(): number {
+    return 1000;
+  }
+
+  /** Platform markup over raw provider cost. */
+  private get markup(): number {
+    return 1.6;
+  }
+
+  /**
    * Convert raw USD cost (e.g. OpenRouter `response_metadata.usage.cost`)
-   * into credits. On mainnet 1 USD = 1000 credits; devnet uses a 10x
-   * multiplier so micro-costs are visible during testing.
+   * into credits. Uses the universal rate of 1 USD = 1000 credits and applies markup.
    */
   usdCostToCredits(usdCost: number): number {
-    const isMainnet = this.network === 'mainnet';
-    const creditsPerUsd = isMainnet ? 1000 : 10_000;
-    const markup = isMainnet ? 1.6 : 4;
-    return Math.round(usdCost * creditsPerUsd * markup);
+    return Math.round(usdCost * this.creditsPerUsd * this.markup);
   }
 
   /**
@@ -158,10 +174,8 @@ export class TokenLimiter {
     totalTokens: number;
     model?: string;
   }): number {
-    const markup = 1.6;
-
     if (params.providerCost != null && params.providerCost > 0) {
-      return params.providerCost * markup;
+      return params.providerCost * this.markup;
     }
 
     const pricing = params.model ? this.lookupModelPricing(params.model) : null;
@@ -170,23 +184,29 @@ export class TokenLimiter {
         (params.inputTokens / 1_000_000) * pricing.inputPricePerMillionTokens;
       const outputCost =
         (params.outputTokens / 1_000_000) * pricing.outputPricePerMillionTokens;
-      return (inputCost + outputCost) * markup;
+      return (inputCost + outputCost) * this.markup;
     }
 
-    return (params.totalTokens / 1_000_000) * 0.75 * markup;
+    return (
+      (params.totalTokens / 1_000_000) *
+      FLAT_RATE_USD_PER_MILLION_TOKENS *
+      this.markup
+    );
   }
 
-  /** Flat-rate fallback: $0.75 per 1M tokens × network markup. */
+  /**
+   * Flat-rate fallback: $0.75 per 1M tokens, then the standard USD→credits
+   * conversion (× creditsPerUsd × markup) so it matches the provider-cost path.
+   */
   llmTokenToCredits(tokenCount: number): number {
-    const markup = 1.6;
-    const costPerMillionTokens = 0.75 * markup;
-    const tokensPerMillion = 1_000_000;
-    return Math.round((tokenCount / tokensPerMillion) * costPerMillionTokens);
+    const usd = (tokenCount / 1_000_000) * FLAT_RATE_USD_PER_MILLION_TOKENS;
+    return this.usdCostToCredits(usd);
   }
 
   /**
    * Credits using per-model pricing (separate input/output rates). Falls
-   * through to the flat-rate fallback when pricing is `null`.
+   * through to the flat-rate fallback when pricing is `null`. Routes through
+   * `usdCostToCredits` so the USD→credits conversion is applied exactly once.
    */
   llmTokenToCreditsWithPricing(
     inputTokens: number,
@@ -200,13 +220,11 @@ export class TokenLimiter {
       return this.llmTokenToCredits(inputTokens + outputTokens);
     }
 
-    const markup = 1.6;
     const divisor = 1_000_000;
-    const inputCost =
-      (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
-    const outputCost =
+    const usd =
+      (inputTokens / divisor) * pricing.inputPricePerMillionTokens +
       (outputTokens / divisor) * pricing.outputPricePerMillionTokens;
-    return Math.round((inputCost + outputCost) * markup);
+    return this.usdCostToCredits(usd);
   }
 
   /**

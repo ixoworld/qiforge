@@ -5,6 +5,7 @@ import { validateManifest } from '../../manifest/validator.js';
 import { makeBuildCtx } from '../../registries/test-fixtures.js';
 import { createTestRuntime } from '../../testing/create-test-runtime.js';
 import { CreditsPlugin } from './credits.plugin.js';
+import { TokenLimiter } from './token-limiter.js';
 
 /**
  * Build a fake Redis client whose `eval` (Lua atomic limit) decrements an
@@ -137,13 +138,15 @@ describe('CreditsPlugin', () => {
       { context: DEFAULT_RUNTIME_CONTEXT },
     );
 
-    // Flat-rate devnet: tokensPerMillion=1000, markup=5 → cost = (300/1000) * (0.75*5) = 1.125 → round = 1
+    // Flat-rate (uniform across networks): usd = (300 / 1e6) * 0.75 =
+    // 0.000225; credits = round(0.000225 * creditsPerUsd(1000) * markup(1.6))
+    // = round(0.36) = 0 — a 300-token turn is below one credit.
     expect(redis.eval).toHaveBeenCalledTimes(1);
     const lastEvalArgs = redis.eval.mock.calls.at(-1)!;
     // numKeys=2, then balanceKey, heldKey, userDid, credits
     expect(lastEvalArgs[1]).toBe(2);
     expect(lastEvalArgs[4]).toBe('did:ixo:user-1');
-    expect(lastEvalArgs[5]).toBe('1');
+    expect(lastEvalArgs[5]).toBe('0');
     await rt.close();
   });
 
@@ -215,5 +218,41 @@ describe('CreditsPlugin', () => {
       const plugin = new CreditsPlugin({ redis: makeRedisStub(100) });
       expect(plugin.getNestModules()).toEqual([]);
     });
+  });
+});
+
+describe('TokenLimiter — USD→credits conversion', () => {
+  const redis = makeRedisStub(1_000_000);
+
+  it('applies creditsPerUsd + markup consistently across all three paths (mainnet)', () => {
+    const limiter = new TokenLimiter({ redis, network: 'mainnet' });
+
+    // provider cost: $1 → 1 * 1000 * 1.6 = 1600
+    expect(limiter.usdCostToCredits(1)).toBe(1600);
+    // flat-rate: 1M tokens = $0.75 → 0.75 * 1000 * 1.6 = 1200
+    expect(limiter.llmTokenToCredits(1_000_000)).toBe(1200);
+    // per-model: 1M in @ $1/M + 1M out @ $2/M = $3 → 3 * 1000 * 1.6 = 4800
+    expect(
+      limiter.llmTokenToCreditsWithPricing(1_000_000, 1_000_000, {
+        inputPricePerMillionTokens: 1,
+        outputPricePerMillionTokens: 2,
+      }),
+    ).toBe(4800);
+  });
+
+  it('the flat-rate path equals the provider-cost path for the same USD', () => {
+    const limiter = new TokenLimiter({ redis, network: 'mainnet' });
+    // 1M tokens flat-rate is $0.75 of cost; both routes must agree.
+    expect(limiter.llmTokenToCredits(1_000_000)).toBe(
+      limiter.usdCostToCredits(0.75),
+    );
+  });
+
+  it('uses the same uniform rate on devnet as mainnet (1000/USD, markup 1.6)', () => {
+    const limiter = new TokenLimiter({ redis, network: 'devnet' });
+
+    expect(limiter.usdCostToCredits(1)).toBe(1600);
+    // flat-rate: $0.75 → 0.75 * 1000 * 1.6 = 1200 — identical to mainnet.
+    expect(limiter.llmTokenToCredits(1_000_000)).toBe(1200);
   });
 });

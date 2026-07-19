@@ -5,6 +5,7 @@ import {
   type LLMProvider,
 } from '@ixo/common';
 import { Logger } from '@nestjs/common';
+import { DEFAULT_MODEL_ID, getDefaultModelId } from './model-catalog.js';
 
 // Re-use ChatOpenAIFields type via the return type of getChatOpenAiModel
 type ChatOpenAIFields = Parameters<typeof getChatOpenAiModel>[0];
@@ -41,13 +42,13 @@ export type ProviderModelRole =
 
 const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
   openrouter: {
-    main: 'z-ai/glm-5.2:nitro',
-    // main: 'moonshotai/kimi-k2-thinking',
-    skills: 'z-ai/glm-5.2:nitro',
-    // skills: 'moonshotai/kimi-k2-thinking',
-    subagent: 'z-ai/glm-5.2:nitro',
-    // subagent: 'moonshotai/kimi-k2-thinking',
-    vision: 'google/gemini-2.5-flash-lite',
+    // The user-facing default. Overridable per deployment via DEFAULT_MODEL and
+    // per request via the model field on a send — both resolved in
+    // `getModelForRole('main')` / `getProviderChatModel`.
+    main: DEFAULT_MODEL_ID,
+    skills: 'openai/gpt-5.4-nano',
+    subagent: 'openai/gpt-5.4-nano',
+    vision: 'google/gemini-3.1-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
     routing: 'openai/gpt-oss-20b',
     custom_low: 'openai/gpt-oss-120b',
@@ -100,6 +101,12 @@ function resolveMainReasoningEffort(): 'low' | 'medium' | 'high' {
 export function getModelForRole(role: ProviderModelRole | string): string {
   const provider = getLLMProvider();
   const map = MODEL_MAP[provider];
+  // The `main` model is deployment-configurable via DEFAULT_MODEL. Only
+  // OpenRouter participates in model selection today; Nebius keeps its fixed
+  // role map so its self-hosted deployments are unaffected.
+  if (role === 'main' && provider === 'openrouter') {
+    return getDefaultModelId();
+  }
   return map[role as ProviderModelRole] ?? map.subagent;
 }
 
@@ -134,19 +141,34 @@ export const getProviderChatModel = (
           }
         : {};
 
+    // Reasoning must go through modelKwargs (spread verbatim into the
+    // request body), never ChatOpenAI's top-level `reasoning` field: that
+    // field is dropped for OpenRouter-prefixed ids (`openai/gpt-…` fails the
+    // library's gpt-5/o-series model-name check), and a top-level
+    // `reasoning.summary` silently reroutes the call to the Responses API,
+    // whose stream shape the SSE runner and saver don't parse. `summary:
+    // 'auto'` is what makes OpenAI models return readable thinking
+    // (otherwise: encrypted blobs only); OpenRouter strips the field for
+    // providers that don't support it.
+    const { reasoning: paramsReasoning, ...restParams } = params ?? {};
+    const reasoningKwargs = {
+      effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
+      summary: 'auto',
+      ...paramsReasoning,
+    };
+    logger.log(
+      `OpenRouter reasoning config — model=${model}, reasoning=${JSON.stringify(reasoningKwargs)}`,
+    );
     return getOpenRouterChatModel({
-      ...params,
+      ...restParams,
       model,
       __includeRawResponse: true,
       modelKwargs: {
         require_parameters: true,
         include_reasoning: true,
         ...fallbackKwargs,
+        reasoning: reasoningKwargs,
         ...params?.modelKwargs,
-      },
-      reasoning: {
-        effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
-        ...params?.reasoning,
       },
     });
   }

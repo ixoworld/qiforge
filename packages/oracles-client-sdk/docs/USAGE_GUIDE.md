@@ -236,6 +236,66 @@ await sendMessage('Hello', {
 });
 ```
 
+## Choosing a Model
+
+Let users pick which model answers their messages — like the model switcher in
+ChatGPT or Claude. `useModels` fetches the oracle's catalog (each model comes
+with a friendly name, a `$` / `$$` / `$$$` cost cue and a `Fast` / `Balanced` /
+`Smartest` badge), and you pass the chosen `model` id to `useChat`.
+
+Model is a conversation-level setting: the value in effect when a message is
+sent is the one used to answer it, and the user can switch anytime.
+
+```tsx
+import { useState } from 'react';
+import { useModels, useChat } from '@ixo/oracles-client-sdk';
+
+function Chat({
+  oracleDid,
+  sessionId,
+}: {
+  oracleDid: string;
+  sessionId: string;
+}) {
+  const { models, defaultModelId, isLoading } = useModels(oracleDid);
+  const [model, setModel] = useState<string | undefined>(undefined);
+
+  const { sendMessage } = useChat({
+    oracleDid,
+    sessionId,
+    model: model ?? defaultModelId, // omit → the oracle's default (GPT-5.4 Nano)
+    onPaymentRequiredError: (claimIds) => {
+      /* prompt to top up */
+    },
+  });
+
+  return (
+    <select
+      value={model ?? defaultModelId ?? ''}
+      onChange={(e) => setModel(e.target.value)}
+      disabled={isLoading}
+    >
+      {models.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.label} · {m.costLabel} {m.badge}
+        </option>
+      ))}
+    </select>
+  );
+}
+```
+
+Notes:
+
+- The endpoint is public, so the picker renders before the user has an active
+  subscription.
+- `useModels` returns `{ models, defaultModelId, defaultModel, isLoading, error, refetch }`.
+- Each `ModelInfo` has `id`, `label`, `family`, `tier`, `costLabel`, `badge`,
+  `blurb`, `vision`, `pricing` (the price the user pays, markup included) and
+  `isDefault`. For a non-technical audience, show `costLabel` + `badge` rather
+  than raw token prices.
+- Persisting the choice (e.g. in `localStorage`) is up to your app.
+
 ## Rendering Messages
 
 Messages are stored as **plain data** (not React elements) for performance. Use `renderMessageContent` to transform them into UI.

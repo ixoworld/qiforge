@@ -61,7 +61,12 @@ const manifest: PluginManifest = {
   summary:
     "The user's Virtual Filesystem (VFS) — their persistent, secure, governed filesystem: the canonical home for their real documents, notes, datasets, and artifacts, in folders, searchable and versioned linked to their domain. Reusable context that lives across sessions — not scratch files, not chat attachments, not the web. Securely stored and access-controlled (managed encryption); authorized IXO services can read content to power search, previews, and these tools, so it is NOT end-to-end encrypted — never describe it as zero-knowledge or unreadable by IXO.",
   category: 'data',
-  visibility: 'always',
+  // On-demand with two exceptions: `vfs_search` and `vfs_read` carry per-tool
+  // `visibility: 'always'` so recall ("what did my notes say…") works with no
+  // load step. The write/organise/share surface (and the sandbox bridges)
+  // loads via `load_capability(['vfs'])` — keeping ~11 tool schemas out of
+  // every unrelated chat turn.
+  visibility: 'on-demand',
   whenToUse: [
     "The user refers to a document, note, file, folder, or something they 'saved', 'uploaded', or 'shared with you'.",
     'You need to create, update, or organise a file for the user (draft, report, notes, export) that should persist.',

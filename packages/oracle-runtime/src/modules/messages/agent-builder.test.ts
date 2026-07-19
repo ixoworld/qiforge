@@ -420,6 +420,40 @@ describe('AgentBuilder', () => {
       expect(result.stateInput.editorRoomId).toBe('!editor-from-payload:home');
     });
 
+    it('seeds loadedPlugins with "editor" when an editor session is active (plugin is on-demand)', async () => {
+      const getTuple = vi.fn().mockResolvedValue({
+        checkpoint: { channel_values: { loadedPlugins: ['flows'] } },
+      });
+      const checkpointer = { getTuple } as unknown as BaseCheckpointSaver;
+      const checkpointerForUser = vi.fn(async () => checkpointer);
+      const { builder } = buildHarness({
+        bundle: makeBundle({ hooks: { checkpointerForUser } }),
+      });
+
+      const result = await builder.build(
+        makeArgs({
+          payload: { metadata: { editorRoomId: '!editor:home' } },
+        }),
+      );
+
+      // Build-time state carries prior loads + the seed; the stateInput seed
+      // unions into the thread's checkpoint via the set-union reducer so the
+      // capability gate exposes `call_editor_agent` without a load step.
+      expect(lastMainAgentArgs().state.loadedPlugins).toEqual([
+        'flows',
+        'editor',
+      ]);
+      expect(result.stateInput.loadedPlugins).toEqual(['editor']);
+    });
+
+    it('does not seed loadedPlugins when no editor session is active', async () => {
+      const { builder } = buildHarness();
+
+      const result = await builder.build(makeArgs());
+
+      expect(result.stateInput.loadedPlugins).toBeUndefined();
+    });
+
     it('maps ucanDelegation.capabilities from {can, with} to {action, resource}', async () => {
       const ucanDelegation: AuthUcanDelegation = {
         raw: 'raw-ucan',

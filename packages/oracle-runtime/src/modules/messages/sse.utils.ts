@@ -9,6 +9,35 @@ interface SSEContext {
 
 const sseContextStorage = new AsyncLocalStorage<SSEContext>();
 
+const THINKING_PHRASES = [
+  'Thinking...',
+  'Working...',
+  'Analyzing...',
+  'Processing...',
+  'Computing...',
+  'Crunching...',
+  'Deliberating...',
+  'Reasoning...',
+  'Calculating...',
+  'Evaluating...',
+  'Pondering...',
+  'Reading...',
+  'Synthesizing...',
+  'Formulating...',
+  'Considering...',
+  'Exploring ideas...',
+  'Investigating...',
+  'Brainstorming...',
+  'Solving...',
+  'Reviewing...',
+  'Reflecting...',
+];
+
+/** Random instant-ack phrase for the moment the SSE connection opens. */
+export function pickThinkingPhrase(): string {
+  return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)]!;
+}
+
 /** SSE event format: `event: <name>\ndata: <jsonPayload>\n\n` */
 export function formatSSEEvent(event: AllEvents): string {
   return `event: ${event.eventName}\ndata: ${JSON.stringify(event.payload)}\n\n`;

@@ -13,6 +13,9 @@ const SESSION_ID = 'sess-1';
 const ROOM_ID = '!room:home.server';
 const INVOCATION = 'ucan-invocation-base64';
 
+const CACHE_KEY = `user-context:room:${ROOM_ID}`;
+const FAILURE_KEY = `user-context:room:${ROOM_ID}:unavailable`;
+
 function makeCache() {
   return {
     get: vi.fn(),
@@ -134,13 +137,13 @@ describe('UserContextFetcher.fetch', () => {
     });
     expect(result).toEqual(fetched);
     expect(cache.set).toHaveBeenCalledWith(
-      `user-context:${SESSION_ID}`,
+      CACHE_KEY,
       fetched,
       expect.any(Number),
     );
   });
 
-  it('returns undefined and does not rethrow when createServiceInvocation throws', async () => {
+  it('returns undefined, negative-caches, and does not rethrow when createServiceInvocation throws', async () => {
     cache.get.mockResolvedValue(undefined);
     ucanService.createServiceInvocation.mockRejectedValue(
       new Error('did:web resolution failed'),
@@ -155,10 +158,19 @@ describe('UserContextFetcher.fetch', () => {
 
     expect(result).toBeUndefined();
     expect(memoryEngine.gatherUserContext).not.toHaveBeenCalled();
-    expect(cache.set).not.toHaveBeenCalled();
+    expect(cache.set).toHaveBeenCalledWith(
+      FAILURE_KEY,
+      true,
+      expect.any(Number),
+    );
+    expect(cache.set).not.toHaveBeenCalledWith(
+      CACHE_KEY,
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
-  it('returns undefined when createServiceInvocation resolves to null', async () => {
+  it('returns undefined and negative-caches when createServiceInvocation resolves to null', async () => {
     cache.get.mockResolvedValue(undefined);
     ucanService.createServiceInvocation.mockResolvedValue(null);
     const fetcher = makeFetcher({ cache, memoryEngine, ucanService });
@@ -171,10 +183,14 @@ describe('UserContextFetcher.fetch', () => {
 
     expect(result).toBeUndefined();
     expect(memoryEngine.gatherUserContext).not.toHaveBeenCalled();
-    expect(cache.set).not.toHaveBeenCalled();
+    expect(cache.set).toHaveBeenCalledWith(
+      FAILURE_KEY,
+      true,
+      expect.any(Number),
+    );
   });
 
-  it('returns undefined and does NOT cache when gatherUserContext throws', async () => {
+  it('returns undefined and negative-caches (never the positive key) when gatherUserContext throws', async () => {
     cache.get.mockResolvedValue(undefined);
     memoryEngine.gatherUserContext.mockRejectedValue(new Error('engine boom'));
     const fetcher = makeFetcher({ cache, memoryEngine, ucanService });
@@ -186,10 +202,36 @@ describe('UserContextFetcher.fetch', () => {
     });
 
     expect(result).toBeUndefined();
-    expect(cache.set).not.toHaveBeenCalled();
+    expect(cache.set).toHaveBeenCalledWith(
+      FAILURE_KEY,
+      true,
+      expect.any(Number),
+    );
+    expect(cache.set).not.toHaveBeenCalledWith(
+      CACHE_KEY,
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
-  it('uses sessionId (not roomId) for the cache key — regression check', async () => {
+  it('short-circuits without minting when the failure marker is cached', async () => {
+    cache.get.mockImplementation((key: string) =>
+      Promise.resolve(key === FAILURE_KEY ? true : undefined),
+    );
+    const fetcher = makeFetcher({ cache, memoryEngine, ucanService });
+
+    const result = await fetcher.fetch({
+      roomId: ROOM_ID,
+      userDid: USER_DID,
+      sessionId: SESSION_ID,
+    });
+
+    expect(result).toBeUndefined();
+    expect(ucanService.createServiceInvocation).not.toHaveBeenCalled();
+    expect(memoryEngine.gatherUserContext).not.toHaveBeenCalled();
+  });
+
+  it('keys the cache by roomId (not sessionId) so a new session in the same room reuses it', async () => {
     cache.get.mockResolvedValue(undefined);
     const fetched = { identity: { name: 'Carol' } };
     memoryEngine.gatherUserContext.mockResolvedValue(fetched);
@@ -201,12 +243,51 @@ describe('UserContextFetcher.fetch', () => {
       sessionId: SESSION_ID,
     });
 
-    expect(cache.get).toHaveBeenCalledWith(`user-context:${SESSION_ID}`);
-    expect(cache.get).not.toHaveBeenCalledWith(`user-context:${ROOM_ID}`);
+    expect(cache.get).toHaveBeenCalledWith(CACHE_KEY);
+    expect(cache.get).not.toHaveBeenCalledWith(`user-context:${SESSION_ID}`);
     expect(cache.set).toHaveBeenCalledWith(
-      `user-context:${SESSION_ID}`,
+      CACHE_KEY,
       fetched,
       expect.any(Number),
     );
+  });
+
+  it('stops blocking at the cap but the late gather still warms the cache', async () => {
+    vi.useFakeTimers();
+    try {
+      cache.get.mockResolvedValue(undefined);
+      const fetched = { identity: { name: 'Slowpoke' } };
+      // Resolves after 5s — past the 3s blocking cap.
+      memoryEngine.gatherUserContext.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve(fetched), 5_000);
+          }),
+      );
+      const fetcher = makeFetcher({ cache, memoryEngine, ucanService });
+
+      const fetchPromise = fetcher.fetch({
+        roomId: ROOM_ID,
+        userDid: USER_DID,
+        sessionId: SESSION_ID,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      await expect(fetchPromise).resolves.toBeUndefined();
+      expect(cache.set).not.toHaveBeenCalledWith(
+        CACHE_KEY,
+        expect.anything(),
+        expect.anything(),
+      );
+
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(cache.set).toHaveBeenCalledWith(
+        CACHE_KEY,
+        fetched,
+        expect.any(Number),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

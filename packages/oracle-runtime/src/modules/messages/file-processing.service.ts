@@ -438,6 +438,90 @@ export class FileProcessingService {
     return { texts, metadata, totalUsage };
   }
 
+  /**
+   * Download an attachment's raw bytes for the NATIVE path — the selected model
+   * receives the file/image directly, so there is no AI extraction here.
+   * Sandbox archival still happens, but off the hot path via
+   * `archiveAttachmentInBackground`. Reuses the same Matrix-decrypt /
+   * SSRF-guarded download and magic-byte verification as `processAttachment`,
+   * so the security checks are identical; only the post-download processing is
+   * skipped.
+   */
+  async loadAttachmentBytes(
+    attachment: AttachmentDto,
+    roomId: string,
+  ): Promise<{ buffer: Buffer; mimetype: string }> {
+    if (!attachment.eventId && !attachment.mxcUri) {
+      throw new Error('Either mxcUri or eventId must be provided');
+    }
+    if (attachment.mxcUri && !ALLOWED_URI_SCHEMES.test(attachment.mxcUri)) {
+      throw new Error('Invalid URI scheme');
+    }
+    if (attachment.size && attachment.size > MAX_FILE_SIZE) {
+      throw new Error('File exceeds maximum size');
+    }
+
+    let buffer: Buffer;
+    if (attachment.eventId) {
+      buffer = await this.downloadFromMatrixEvent(roomId, attachment.eventId);
+    } else if (attachment.mxcUri!.startsWith('mxc://')) {
+      buffer = await this.downloadFromMatrix(attachment.mxcUri!);
+    } else {
+      const result = await this.downloadFromUrl(attachment.mxcUri!);
+      buffer = result.data;
+    }
+
+    if (buffer.length > MAX_FILE_SIZE) {
+      throw new Error('File exceeds maximum size');
+    }
+
+    this.verifyMagicBytes(
+      buffer,
+      this.categorizeFile(attachment.mimetype),
+      attachment,
+    );
+
+    return { buffer, mimetype: attachment.mimetype };
+  }
+
+  /**
+   * Fire-and-forget sandbox archival for natively-sent attachments. The
+   * native path hands the raw bytes straight to the model, but the sandbox
+   * copy must still exist so later file-processing (sandbox tools, scripts)
+   * can reach the original. Deliberately not awaited on the request path and
+   * never throws — an archive failure only logs; same destination convention
+   * as `processAttachment` (`/workspace/output/<sanitized-filename>`).
+   */
+  archiveAttachmentInBackground(
+    attachment: AttachmentDto,
+    buffer: Buffer,
+    userDid: string,
+  ): void {
+    void (async () => {
+      try {
+        const sandboxConfig = await this.buildSandboxConfig(userDid);
+        const safeName = this.sanitizeFilename(attachment.filename);
+        const destPath = `${SANDBOX_OUTPUT_PREFIX}/${safeName}`;
+        await this.uploadToSandbox(
+          buffer,
+          safeName,
+          destPath,
+          sandboxConfig,
+          attachment.mimetype,
+        );
+        this.logger.log(
+          `[attachments] background sandbox archive OK — "${attachment.filename}" at ${this.sanitizeSandboxPath(destPath)}`,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[attachments] background sandbox archive failed for "${attachment.filename}": ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    })();
+  }
+
   private async processAttachment(
     attachment: AttachmentDto,
     currentTotalSize: number,

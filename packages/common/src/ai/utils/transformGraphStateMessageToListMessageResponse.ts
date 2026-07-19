@@ -32,7 +32,9 @@ interface MessageDto {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /** First attachment — kept for clients that only read the singular field. */
   attachment?: AttachmentMeta;
+  attachments?: AttachmentMeta[];
 }
 
 export interface ListOracleMessagesResponse {
@@ -48,7 +50,31 @@ export interface CleanAdditionalKwargs {
     text: string;
   }>;
   attachment?: AttachmentMeta;
+  attachments?: AttachmentMeta[];
   [key: string]: unknown; // Allow additional properties for LangChain compatibility
+}
+
+/**
+ * Flatten message content to display text. Multimodal human messages (native
+ * image/file attachments) carry an array of content blocks — only the text
+ * blocks are surfaced; base64 data blocks must never reach the client (the
+ * attachment chip renders from `attachment` metadata instead).
+ */
+function contentToText(content: BaseMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (part && typeof part === 'object' && 'text' in part) {
+          const text = (part as { text?: unknown }).text;
+          return typeof text === 'string' ? text : '';
+        }
+        return '';
+      })
+      .join('');
+  }
+  return String(content);
 }
 
 export function transformGraphStateMessageToListMessageResponse(
@@ -57,24 +83,43 @@ export function transformGraphStateMessageToListMessageResponse(
   return {
     messages: messages.reduce<MessageDto[]>((acc, message) => {
       const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
+      // Synthetic extraction messages (AI-typed, carrying an attachment) are
+      // internal model context — the file's extracted text. The file itself
+      // renders as a chip from the human message's `attachments`; the raw
+      // text dump must not surface as an assistant reply.
+      const isExtractionContext =
+        message.type === 'ai' &&
+        Boolean(
+          (message.additional_kwargs as CleanAdditionalKwargs)?.attachment,
+        );
+
       if (
         message.type !== 'system' &&
         message.type !== 'tool' &&
-        !message.additional_kwargs?.isError
+        !message.additional_kwargs?.isError &&
+        !isExtractionContext
       ) {
         // Extract reasoning from additional_kwargs
         const additionalKwargs =
           message.additional_kwargs as CleanAdditionalKwargs;
         const reasoning = additionalKwargs?.reasoning;
 
-        // Extract attachment metadata for human messages
-        const attachment =
-          message.type === 'human' ? additionalKwargs?.attachment : undefined;
+        // Extract attachment metadata for human messages. Older checkpoints
+        // only carry the singular `attachment`; fold it into the array form.
+        const attachments =
+          message.type === 'human'
+            ? (additionalKwargs?.attachments ??
+              (additionalKwargs?.attachment
+                ? [additionalKwargs.attachment]
+                : undefined))
+            : undefined;
+        const attachment = attachments?.[0];
 
+        const textContent = contentToText(message.content);
         acc.push({
           type: message.type === 'ai' ? 'ai' : 'human',
-          content: emojify(String(message.content)),
-          id: uuidFromString(message.id ?? String(message.content)),
+          content: emojify(textContent),
+          id: uuidFromString(message.id ?? textContent),
           toolCalls: (message as AIMessage).tool_calls?.map((toolCall) => ({
             name: toolCall.name,
             args: toolCall.args,
@@ -85,6 +130,7 @@ export function transformGraphStateMessageToListMessageResponse(
           isComplete: true, // Messages from DB are always complete
           isReasoning: false, // since this is not a reasoning message and the request is done
           ...(attachment && { attachment }),
+          ...(attachments?.length && { attachments }),
         });
       }
       if (toolMsg) {

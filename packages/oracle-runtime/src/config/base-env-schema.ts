@@ -75,6 +75,23 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
+  /**
+   * Default model for new chats — an OpenRouter slug (e.g.
+   * `openai/gpt-5.4-nano`), ideally one returned by `GET /models`. When unset
+   * the runtime uses its built-in default (GPT-5.4 Nano). Lets an operator
+   * change the default per deployment without a code change. Only applies to
+   * the OpenRouter provider.
+   */
+  DEFAULT_MODEL: z.string().optional(),
+
+  /**
+   * Markup applied to raw OpenRouter list prices when the catalog is shown to
+   * users, so the displayed number is what they actually pay. Mirrors the
+   * credit-billing markup (1.6× on mainnet). Display-only — it does not change
+   * how credits are deducted.
+   */
+  MODEL_PRICE_MARKUP: z.coerce.number().default(1.6),
+
   // Operator-defined secrets surfaced to capabilities as `x-os-*` headers.
   // Format: `KEY1=value1,KEY2=value2`. Defaults to empty.
   ORACLE_SECRETS: z.string().default(''),

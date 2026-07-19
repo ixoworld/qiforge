@@ -5,24 +5,45 @@ import {
   type ListOracleMessagesResponse,
 } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
+import { ReasoningEvent } from '@ixo/oracles-events';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
+import * as crypto from 'node:crypto';
 
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { BatchInvoker } from './batch-invoker.js';
 import { type ListMessagesDto } from './dto/list-messages.dto.js';
 import {
+  type AttachmentDto,
   type SendMessagePayload,
   type SendMessageResponse,
 } from './dto/send-message.dto.js';
+import {
+  getDefaultModelId,
+  getModelCapabilities,
+  isAllowedModel,
+} from '../../llm/index.js';
+import { classifyAttachment } from './attachments/classify.js';
+import {
+  buildUserMessageContent,
+  type NativeAttachment,
+} from './attachments/content-blocks.js';
+import { routeAttachment } from './attachments/route.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
+import {
+  formatSSE,
+  pickThinkingPhrase,
+  sendSSEDone,
+  sendSSEError,
+  setSSEHeaders,
+} from './sse.utils.js';
 import { isSyntheticSessionId } from './synthetic-session.js';
 
 /**
@@ -164,6 +185,22 @@ export class MessagesService implements OnModuleInit {
   ): Promise<SendMessageReply | undefined> {
     this.checkpointSync.markUserActive(params.did);
 
+    // Streaming: open the SSE connection BEFORE any pre-flight work (session
+    // lookup, attachment processing, agent build) so the client gets headers
+    // + an instant "Thinking..." ack in milliseconds instead of seconds. The
+    // requestId is resolvable up front — the SDK sends one, and we mint a
+    // UUID otherwise — so `X-Request-Id` still goes out on the headers.
+    // `RequestPreparer` reuses `params.requestId`, keeping the header and
+    // the runnableConfig in agreement.
+    const streaming = Boolean(params.stream && params.res);
+    if (streaming && params.res) {
+      params.requestId =
+        typeof params.requestId === 'string' && params.requestId.length > 0
+          ? params.requestId
+          : crypto.randomUUID();
+      this.openStream(params.res, params.sessionId, params.requestId);
+    }
+
     try {
       const prepared = await this.preparer.prepare(params);
       const inputMessages = await this.assembleInput(params, prepared);
@@ -244,9 +281,55 @@ export class MessagesService implements OnModuleInit {
       }
       if (!skipPostSync) this.firePostSync(params, prepared);
       return result;
+    } catch (error) {
+      // Once the SSE headers have flushed, an HTTP error status can no
+      // longer reach the client — pre-flight failures (session not found,
+      // attachment load, agent build) must go out as SSE `error` events on
+      // the open stream instead of propagating to the controller.
+      if (streaming && params.res && params.res.headersSent) {
+        this.logger.error(
+          `Pre-flight failed after SSE flush — session=${params.sessionId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+        sendSSEError(
+          params.res,
+          error instanceof Error ? error : 'Something went wrong',
+        );
+        sendSSEDone(params.res);
+        if (!params.res.writableEnded) params.res.end();
+        return undefined;
+      }
+      throw error;
     } finally {
       this.checkpointSync.markUserInactive(params.did);
     }
+  }
+
+  /**
+   * Flush SSE headers and the instant "Thinking..." ack. Runs before ANY
+   * pre-flight work so the perceived time-to-first-byte is the network
+   * round-trip, not the pre-flight latency. Stage-specific progress (e.g.
+   * "Recalling your memories...") is emitted later by the components that
+   * actually know a slow stage is running.
+   */
+  private openStream(
+    res: Response,
+    sessionId: string,
+    requestId: string,
+  ): void {
+    if (res.headersSent) return;
+    setSSEHeaders(res, requestId);
+    res.flushHeaders();
+    const thinkingText = pickThinkingPhrase();
+    const thinkingEvent = ReasoningEvent.createChunk(
+      sessionId,
+      requestId,
+      thinkingText,
+      [{ type: 'thinking', text: thinkingText }],
+      false,
+    );
+    res.write(formatSSE(thinkingEvent.eventName, thinkingEvent.payload));
+    thinkingEvent.emit();
   }
 
   private async assembleInput(
@@ -256,51 +339,153 @@ export class MessagesService implements OnModuleInit {
     const msgFromMatrixRoom = params.msgFromMatrixRoom ?? false;
     const timestamp = new Date().toISOString();
 
-    const { content, additionalKwargs } = await this.buildHumanMessageParts(
-      params,
-      prepared,
-      msgFromMatrixRoom,
-      timestamp,
-    );
+    const { content: baseText, additionalKwargs } =
+      await this.buildHumanMessageParts(
+        params,
+        prepared,
+        msgFromMatrixRoom,
+        timestamp,
+      );
+
+    if (!params.attachments?.length) {
+      return [
+        new HumanMessage({
+          content: baseText,
+          additional_kwargs: additionalKwargs,
+        }),
+      ];
+    }
+
+    // Route each attachment by the selected model's native capabilities. The
+    // effective model here MUST match what the agent resolves (agent-builder
+    // validates the same way), so a supported model receives its images/files
+    // directly instead of the helper model turning them into text.
+    const effectiveModel = isAllowedModel(params.model)
+      ? params.model
+      : getDefaultModelId();
+    const caps = getModelCapabilities(effectiveModel);
+
+    const nativeAttachments: AttachmentDto[] = [];
+    const extractAttachments: AttachmentDto[] = [];
+    for (const attachment of params.attachments) {
+      const kind = classifyAttachment({
+        mimetype: attachment.mimetype,
+        filename: attachment.filename,
+      });
+      const strategy = routeAttachment(kind, caps);
+      this.logger.log(
+        `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${effectiveModel} → ${strategy}`,
+      );
+      if (strategy === 'send-native') nativeAttachments.push(attachment);
+      else extractAttachments.push(attachment);
+    }
+
+    // Download + base64 the native attachments. On any failure, fall that one
+    // file back to extraction so a bad download never drops the whole message.
+    const natives: NativeAttachment[] = [];
+    for (const attachment of nativeAttachments) {
+      try {
+        const { buffer, mimetype } =
+          await this.fileProcessing.loadAttachmentBytes(
+            attachment,
+            prepared.roomId,
+          );
+        const kind = classifyAttachment({
+          mimetype,
+          filename: attachment.filename,
+        });
+        natives.push({
+          kind: kind === 'image' ? 'image' : 'file',
+          mimeType: mimetype,
+          base64: buffer.toString('base64'),
+          filename: attachment.filename,
+        });
+        this.logger.log(
+          `[attachments] NATIVE → "${attachment.filename}" sent directly to ${effectiveModel} (${buffer.length} bytes, ${kind}); skipping helper-model extraction`,
+        );
+        // Archive the original to the sandbox off the hot path — the agent's
+        // file-processing tools can still reach it later, without delaying
+        // this request.
+        this.fileProcessing.archiveAttachmentInBackground(
+          attachment,
+          buffer,
+          params.did,
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[attachments] native load failed for "${attachment.filename}", falling back to extraction: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        extractAttachments.push(attachment);
+      }
+    }
+
+    // Surface EVERY attachment's metadata on the human message — the
+    // list-messages transform reads these off human messages, so the client
+    // can render the file/image chips after a refetch. Built from the request
+    // payload (not the routing outcome): the user attached these files to
+    // THIS message regardless of whether the model consumed them natively or
+    // via text extraction. `attachment` (first entry) is kept for older
+    // clients that only read the singular field.
+    const attachmentMetas = params.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      mimetype: attachment.mimetype,
+      size: attachment.size,
+      mxcUri: attachment.mxcUri,
+      eventId: attachment.eventId,
+      category: classifyAttachment({
+        mimetype: attachment.mimetype,
+        filename: attachment.filename,
+      }),
+    }));
+    const humanKwargs = {
+      ...additionalKwargs,
+      attachment: attachmentMetas[0],
+      attachments: attachmentMetas,
+    };
 
     const out: BaseMessage[] = [
       new HumanMessage({
-        content,
-        additional_kwargs: additionalKwargs,
+        content: buildUserMessageContent(baseText, natives),
+        additional_kwargs: humanKwargs,
       }),
     ];
 
-    if (!params.attachments?.length) return out;
-
-    this.logger.log(
-      `sendMessage: ${params.attachments.length} attachment(s) for session ${prepared.sessionId}`,
-    );
-    const { texts, metadata } = await this.fileProcessing.processAttachments(
-      params.attachments,
-      prepared.roomId,
-      params.did,
-    );
-
-    texts.forEach((text, i) => {
-      const meta = metadata[i];
-      if (!meta) return;
-      const sourceRef = meta.eventId
-        ? `[source: eventId="${meta.eventId}"]`
-        : meta.mxcUri
-          ? `[source: url="${meta.mxcUri}"]`
-          : '';
-      const content = sourceRef ? `${sourceRef}\n${text}` : text;
-      out.push(
-        new AIMessage({
-          content,
-          additional_kwargs: {
-            msgFromMatrixRoom,
-            timestamp: new Date().toISOString(),
-            attachment: meta,
-          },
-        }),
+    // Everything not sent natively (plain text, and anything a text-only model
+    // can't read) is turned into text by the existing pipeline and appended.
+    if (extractAttachments.length > 0) {
+      this.logger.log(
+        `[attachments] EXTRACT ${extractAttachments.length} attachment(s) via file-processing pipeline (local parse for text, helper model otherwise) for session ${prepared.sessionId}`,
       );
-    });
+      const { texts, metadata } = await this.fileProcessing.processAttachments(
+        extractAttachments,
+        prepared.roomId,
+        params.did,
+      );
+
+      texts.forEach((text, i) => {
+        const meta = metadata[i];
+        if (!meta) return;
+        const sourceRef = meta.eventId
+          ? `[source: eventId="${meta.eventId}"]`
+          : meta.mxcUri
+            ? `[source: url="${meta.mxcUri}"]`
+            : '';
+        const content = sourceRef ? `${sourceRef}\n${text}` : text;
+        out.push(
+          new AIMessage({
+            content,
+            additional_kwargs: {
+              msgFromMatrixRoom,
+              timestamp: new Date().toISOString(),
+              attachment: meta,
+            },
+          }),
+        );
+      });
+    }
+
     return out;
   }
 

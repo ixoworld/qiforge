@@ -44,7 +44,7 @@ describe('EditorPlugin', () => {
     expect(plugin.name).toBe(EditorPlugin.NAME);
     expect(plugin.version).toBe('1.0.0');
     expect(plugin.manifest.title).toBe('Editor');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.manifest.category).toBe('data');
     expect(plugin.manifest.whenToUse.length).toBeGreaterThan(0);

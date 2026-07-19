@@ -103,14 +103,23 @@ function defsCacheKey(baseUrl: string, userId: string): string {
 }
 
 /**
- * Drop expired entries (and, if still over the cap, the soonest-to-expire
- * ones). Runs on every cache write, so in a long-running multi-tenant
- * process one-off users' schemas are reclaimed instead of accumulating for
- * the process lifetime.
+ * Cache keys with a background definition refresh in flight — guards a burst
+ * of turns from each opening its own session when an entry expires.
+ */
+const refreshInFlight = new Set<string>();
+
+/**
+ * Drop long-expired entries (and, if still over the cap, the
+ * soonest-to-expire ones). Runs on every cache write, so in a long-running
+ * multi-tenant process one-off users' schemas are reclaimed instead of
+ * accumulating for the process lifetime. Entries get one extra TTL of grace
+ * past expiry — a recently-expired entry is still served stale while its
+ * background refresh runs, so reclaiming it immediately would put the
+ * session-open round-trip back on that user's next turn.
  */
 function pruneDefsCache(cache: ComposioDefsCache, now: number): void {
   for (const [key, entry] of cache) {
-    if (entry.expiresAt <= now) cache.delete(key);
+    if (entry.expiresAt + COMPOSIO_TOOL_DEFS_TTL_MS <= now) cache.delete(key);
   }
   const surplus = cache.size - COMPOSIO_DEFS_CACHE_MAX_ENTRIES;
   if (surplus <= 0) return;
@@ -135,6 +144,8 @@ export interface CreateComposioToolsOptions {
    * behaviour.
    */
   defsCache?: ComposioDefsCache;
+  /** Logger for background-refresh failures; defaults to silent. */
+  logger?: { warn(message: string): void };
 }
 
 /**
@@ -299,7 +310,41 @@ export async function createComposioTools(
 
   const cacheKey = defsCacheKey(opts.baseUrl, opts.userId);
   const cached = opts.defsCache?.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached) {
+    // An expired entry is served as-is (the session meta-toolset only shifts
+    // when the user's connected-account state flips) while a background
+    // refresh re-snapshots it — TTL expiry never puts the session-open +
+    // tools-list round-trips back on a chat turn.
+    const defsCache = opts.defsCache;
+    if (
+      defsCache &&
+      cached.expiresAt <= Date.now() &&
+      !refreshInFlight.has(cacheKey)
+    ) {
+      refreshInFlight.add(cacheKey);
+      void sessionFactory(sessionArgs)
+        .then((sessionTools) => {
+          defsCache.set(cacheKey, {
+            defs: sessionTools.map(({ name, description, schema }) => ({
+              name,
+              description,
+              schema,
+            })),
+            expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
+          });
+          pruneDefsCache(defsCache, Date.now());
+        })
+        .catch((err: unknown) => {
+          // Keep serving the stale defs; the next expired-cache turn
+          // retries the refresh.
+          opts.logger?.warn(
+            `[composio] background tool-defs refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        })
+        .finally(() => {
+          refreshInFlight.delete(cacheKey);
+        });
+    }
     return buildLazySessionTools(cached.defs, sessionArgs, sessionFactory);
   }
 

@@ -295,6 +295,7 @@ export interface CleanAdditionalKwargs {
     text: string;
   }>;
   attachment?: AttachmentMeta;
+  attachments?: AttachmentMeta[];
   // Group-chat speaker + threading metadata. The Matrix transport stashes
   // these so the group-chat gating middleware can find them across turns —
   // without this allowlist entry, the saver would strip them and the gate
@@ -343,6 +344,10 @@ export function cleanAdditionalKwargs(
     ...(additionalKwargs.attachment && {
       attachment: additionalKwargs.attachment as AttachmentMeta,
     }),
+    ...(Array.isArray(additionalKwargs.attachments) &&
+      additionalKwargs.attachments.length > 0 && {
+        attachments: additionalKwargs.attachments as AttachmentMeta[],
+      }),
     // Preserve group-chat speaker + threading metadata when present —
     // the group-chat gating middleware needs these to decide whether
     // the bot should reply, and they're cheap to keep.

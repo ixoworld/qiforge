@@ -346,22 +346,22 @@ describe('SseStreamRunner', () => {
   });
 
   describe('event loop translation', () => {
-    it('emits initial thinking ReasoningEvent before streamEvents iterates', async () => {
+    it('does not emit the initial thinking event — MessagesService flushes it before run()', async () => {
       const res = new FakeResponse();
-      // Empty agent — only the thinking + done events should land.
+      // Empty agent — only the completion marker + done should land; the
+      // instant "Thinking..." ack is owned by MessagesService.openStream so
+      // it reaches the client before ANY pre-flight work, not here.
       const { input, runner } = makeInput(makeFakeAgent([]), res);
 
       await runner.run(input);
 
       const events = eventsFromWrites(res.writes);
+      expect(events).toHaveLength(2);
       expect(events[0]?.event).toBe('reasoning');
-      const firstData = events[0]?.data as {
-        reasoning: string;
-        isComplete: boolean;
-      };
-      expect(typeof firstData.reasoning).toBe('string');
-      expect(firstData.reasoning.length).toBeGreaterThan(0);
-      expect(firstData.isComplete).toBe(false);
+      expect((events[0]?.data as { isComplete: boolean }).isComplete).toBe(
+        true,
+      );
+      expect(events[1]?.event).toBe('done');
     });
 
     it('on_tool_start (non-action) emits ToolCallEvent isRunning keyed by run_id', async () => {
@@ -613,13 +613,14 @@ describe('SseStreamRunner', () => {
 
       await runner.run(input);
 
-      // First reasoning event is the "thinking" greeting; the chunk reasoning
-      // is the next one with isComplete=false and our details.
+      // The chunk reasoning is the first reasoning event (isComplete=false,
+      // with our details) — the terminal completion marker follows it. The
+      // "thinking" greeting is emitted upstream by MessagesService, not here.
       const reasonings = eventsFromWrites(res.writes).filter(
         (e) => e.event === 'reasoning',
       );
       expect(reasonings.length).toBeGreaterThanOrEqual(2);
-      const chunk = reasonings[1]!.data as {
+      const chunk = reasonings[0]!.data as {
         reasoning: string;
         isComplete: boolean;
         reasoningDetails?: Array<{ type: string; text: string }>;

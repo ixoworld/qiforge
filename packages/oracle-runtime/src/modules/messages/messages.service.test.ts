@@ -68,7 +68,11 @@ interface ServiceUnderTest {
   };
   streamer: { run: ReturnType<typeof vi.fn> };
   batchInvoker: { invoke: ReturnType<typeof vi.fn> };
-  fileProcessing: { processAttachments: ReturnType<typeof vi.fn> };
+  fileProcessing: {
+    processAttachments: ReturnType<typeof vi.fn>;
+    loadAttachmentBytes: ReturnType<typeof vi.fn>;
+    archiveAttachmentInBackground: ReturnType<typeof vi.fn>;
+  };
   checkpointSync: ReturnType<typeof makeCheckpointSync>;
   postSync: { run: ReturnType<typeof vi.fn> };
   matrixBridge: { setDeliverHandler: ReturnType<typeof vi.fn> };
@@ -87,7 +91,11 @@ function build(): ServiceUnderTest {
       sessionId: SESSION_ID,
     }),
   };
-  const fileProcessing = { processAttachments: vi.fn() };
+  const fileProcessing = {
+    processAttachments: vi.fn(),
+    loadAttachmentBytes: vi.fn(),
+    archiveAttachmentInBackground: vi.fn(),
+  };
   const checkpointSync = makeCheckpointSync();
   const postSync = { run: vi.fn() };
   const matrixBridge = { setDeliverHandler: vi.fn() };
@@ -227,6 +235,56 @@ describe('MessagesService', () => {
       const runArg = streamer.run.mock.calls[0]![0] as StreamRunInput;
       expect(runArg.res).toBe(res);
       expect(runArg.payload.message).toBe('hello');
+    });
+
+    it('flushes SSE headers + instant thinking ack BEFORE any pre-flight work', async () => {
+      const { svc, preparer } = build();
+      const res = new FakeResponse();
+      let headersSentWhenPrepareRan: boolean | undefined;
+      let writesWhenPrepareRan = 0;
+      preparer.prepare.mockImplementation(async () => {
+        headersSentWhenPrepareRan = res.headersSent;
+        writesWhenPrepareRan = res.writes.length;
+        return makePrepared();
+      });
+      const params = makeSendPayload({
+        stream: true,
+        res: res as unknown as Response,
+      });
+
+      await svc.sendMessage(params);
+
+      expect(headersSentWhenPrepareRan).toBe(true);
+      expect(writesWhenPrepareRan).toBeGreaterThanOrEqual(1);
+      expect(res.writes[0]).toContain('event: reasoning');
+      // The resolved requestId is on the headers AND threaded into prepare —
+      // header and runnableConfig must agree.
+      const requestId = res.setHeaders['X-Request-Id'];
+      expect(requestId).toBeTruthy();
+      const prepareArg = preparer.prepare.mock.calls[0]![0] as {
+        requestId?: string;
+      };
+      expect(prepareArg.requestId).toBe(requestId);
+    });
+
+    it('turns a pre-flight failure into SSE error + done instead of throwing (stream path)', async () => {
+      const { svc, preparer, streamer } = build();
+      const res = new FakeResponse();
+      preparer.prepare.mockRejectedValue(new Error('Session not found'));
+      const params = makeSendPayload({
+        stream: true,
+        res: res as unknown as Response,
+      });
+
+      const result = await svc.sendMessage(params);
+
+      expect(result).toBeUndefined();
+      expect(streamer.run).not.toHaveBeenCalled();
+      const wire = res.writes.join('');
+      expect(wire).toContain('event: error');
+      expect(wire).toContain('Session not found');
+      expect(wire).toContain('event: done');
+      expect(res.writableEnded).toBe(true);
     });
 
     it('increments active count once on entry with matching decrement in finally', async () => {
@@ -433,7 +491,13 @@ describe('MessagesService', () => {
       });
 
       await svc.sendMessage(
-        makeSendPayload({ stream: false, attachments: [attachment] }),
+        // A text-only model (GLM) routes every attachment to extraction —
+        // this test pins the extract path deliberately.
+        makeSendPayload({
+          stream: false,
+          attachments: [attachment],
+          model: 'z-ai/glm-5.2',
+        }),
       );
 
       expect(fileProcessing.processAttachments).toHaveBeenCalledWith(
@@ -470,6 +534,7 @@ describe('MessagesService', () => {
         makeSendPayload({
           stream: false,
           attachments: [attachment, urlAttachment],
+          model: 'z-ai/glm-5.2',
         }),
       );
 
@@ -487,6 +552,94 @@ describe('MessagesService', () => {
         '[source: url="mxc://home/abc"]',
       );
       expect(String(urlBodied.content)).toContain('from url');
+    });
+
+    it('sends an image NATIVELY (no extraction) when the model supports it', async () => {
+      const { svc, fileProcessing, batchInvoker } = build();
+      const imageAttachment: AttachmentDto = {
+        eventId: '$img-1',
+        filename: 'photo.png',
+        mimetype: 'image/png',
+      };
+      fileProcessing.loadAttachmentBytes.mockResolvedValueOnce({
+        buffer: Buffer.from('png-bytes'),
+        mimetype: 'image/png',
+      });
+
+      await svc.sendMessage(
+        // No model → default (GPT-5.4 Nano), which accepts images natively.
+        makeSendPayload({ stream: false, attachments: [imageAttachment] }),
+      );
+
+      // The old flow must NOT run for a natively-sent image.
+      expect(fileProcessing.processAttachments).not.toHaveBeenCalled();
+      expect(fileProcessing.loadAttachmentBytes).toHaveBeenCalledWith(
+        imageAttachment,
+        ROOM_ID,
+      );
+      // The original is still archived to the sandbox, off the hot path.
+      expect(fileProcessing.archiveAttachmentInBackground).toHaveBeenCalledWith(
+        imageAttachment,
+        Buffer.from('png-bytes'),
+        USER_DID,
+      );
+
+      const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
+        inputMessages: BaseMessage[];
+      };
+      // Single multimodal HumanMessage — no injected AIMessage.
+      expect(invokeArg.inputMessages).toHaveLength(1);
+      const human = invokeArg.inputMessages[0]!;
+      expect(human).toBeInstanceOf(HumanMessage);
+      const content = human.content as Array<Record<string, unknown>>;
+      expect(Array.isArray(content)).toBe(true);
+      expect(content[0]).toEqual({ type: 'text', text: 'hello' });
+      expect(content[1]).toMatchObject({
+        type: 'image',
+        source_type: 'base64',
+        mime_type: 'image/png',
+        data: Buffer.from('png-bytes').toString('base64'),
+      });
+      // Attachment metadata rides on the human message for the client.
+      expect(human.additional_kwargs.attachment).toMatchObject({
+        filename: 'photo.png',
+        mimetype: 'image/png',
+        eventId: '$img-1',
+      });
+    });
+
+    it('falls back to extraction when the native download fails', async () => {
+      const { svc, fileProcessing, batchInvoker } = build();
+      const imageAttachment: AttachmentDto = {
+        eventId: '$img-2',
+        filename: 'broken.png',
+        mimetype: 'image/png',
+      };
+      fileProcessing.loadAttachmentBytes.mockRejectedValueOnce(
+        new Error('download failed'),
+      );
+      fileProcessing.processAttachments.mockResolvedValueOnce({
+        texts: ['described image'],
+        metadata: [{ eventId: '$img-2', filename: 'broken.png' }],
+        totalUsage: { cost: 0, promptTokens: 0, completionTokens: 0 },
+      });
+
+      await svc.sendMessage(
+        makeSendPayload({ stream: false, attachments: [imageAttachment] }),
+      );
+
+      // Failed native load → that file goes through the extract pipeline.
+      expect(fileProcessing.processAttachments).toHaveBeenCalledWith(
+        [imageAttachment],
+        ROOM_ID,
+        USER_DID,
+      );
+      const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
+        inputMessages: BaseMessage[];
+      };
+      expect(invokeArg.inputMessages).toHaveLength(2);
+      // Human content stays a plain string — nothing was sent natively.
+      expect(typeof invokeArg.inputMessages[0]!.content).toBe('string');
     });
   });
 

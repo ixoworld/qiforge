@@ -17,6 +17,7 @@ import { AuthModule } from '../modules/auth/auth.module.js';
 import { BlobStoreModule } from '../modules/blob-store/blob-store.module.js';
 import { HealthModule } from '../modules/health/health.module.js';
 import { MessagesModule } from '../modules/messages/messages.module.js';
+import { ModelsModule } from '../modules/models/models.module.js';
 import { SessionsModule } from '../modules/sessions/sessions.module.js';
 import { SubscriptionMiddleware } from '../modules/subscription/subscription.middleware.js';
 import { SubscriptionModule } from '../modules/subscription/subscription.module.js';
@@ -50,6 +51,9 @@ const AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
   { path: '/health', method: RequestMethod.ALL },
   { path: '/docs', method: RequestMethod.ALL },
   { path: '/docs/(.*)', method: RequestMethod.ALL },
+  // The model catalog is non-sensitive and must be readable before a user has
+  // an active subscription, so the picker can render up front.
+  { path: '/models', method: RequestMethod.GET },
 ];
 
 /**
@@ -112,6 +116,7 @@ export class RuntimeAppModule implements NestModule {
       SubscriptionModule,
       SessionsModule,
       MessagesModule,
+      ModelsModule,
       WsModule,
       HealthModule,
       ...(opts.pluginNestModules ?? []),

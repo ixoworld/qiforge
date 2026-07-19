@@ -44,6 +44,11 @@ export const mainAgentRequestContextSchema = z.object({
   history: z.object({
     userContext: z.record(z.string(), z.unknown()).optional(),
   }),
+  /**
+   * Per-request model override, already validated against the catalog
+   * allow-list. Absent → the agent uses the default `main` model.
+   */
+  model: z.string().optional(),
 });
 /** Per-request shape — exposes only what the main-agent build needs. */
 export type MainAgentRequestContext = z.infer<

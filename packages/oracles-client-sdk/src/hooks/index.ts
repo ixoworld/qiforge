@@ -15,6 +15,7 @@ export {
   type AgAction,
 } from './use-ag-action.js';
 export { useOraclesConfig } from './use-oracles-config.js';
+export { useModels, type UseModelsResult } from './use-models/index.js';
 
 export type {
   AnyEvent,

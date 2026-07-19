@@ -54,7 +54,13 @@ function buildRecordingConsumer(): {
   return { consumer: chain as unknown as MiddlewareConsumer, recorded };
 }
 
-const DEFAULT_EXCLUDED_PATHS = ['/', '/health', '/docs', '/docs/(.*)'];
+const DEFAULT_EXCLUDED_ROUTES = [
+  { path: '/', method: RequestMethod.ALL },
+  { path: '/health', method: RequestMethod.ALL },
+  { path: '/docs', method: RequestMethod.ALL },
+  { path: '/docs/(.*)', method: RequestMethod.ALL },
+  { path: '/models', method: RequestMethod.GET },
+];
 
 describe('RuntimeAppModule — auth-excluded routes', () => {
   it('keeps the runtime defaults when no plugin exclusions are supplied', () => {
@@ -66,12 +72,7 @@ describe('RuntimeAppModule — auth-excluded routes', () => {
     const { consumer, recorded } = buildRecordingConsumer();
     new RuntimeAppModule().configure(consumer);
 
-    expect(recorded.excludeArgs).toEqual(
-      DEFAULT_EXCLUDED_PATHS.map((path) => ({
-        path,
-        method: RequestMethod.ALL,
-      })),
-    );
+    expect(recorded.excludeArgs).toEqual(DEFAULT_EXCLUDED_ROUTES);
     expect(recorded.forRoutesArgs).toEqual(['*']);
   });
 
@@ -85,12 +86,9 @@ describe('RuntimeAppModule — auth-excluded routes', () => {
     const { consumer, recorded } = buildRecordingConsumer();
     new RuntimeAppModule().configure(consumer);
 
-    expect(recorded.excludeArgs).toHaveLength(DEFAULT_EXCLUDED_PATHS.length);
-    for (const path of DEFAULT_EXCLUDED_PATHS) {
-      expect(recorded.excludeArgs).toContainEqual({
-        path,
-        method: RequestMethod.ALL,
-      });
+    expect(recorded.excludeArgs).toHaveLength(DEFAULT_EXCLUDED_ROUTES.length);
+    for (const route of DEFAULT_EXCLUDED_ROUTES) {
+      expect(recorded.excludeArgs).toContainEqual(route);
     }
   });
 
@@ -113,11 +111,8 @@ describe('RuntimeAppModule — auth-excluded routes', () => {
       method: RequestMethod.GET,
     });
     // Runtime defaults still present.
-    for (const path of DEFAULT_EXCLUDED_PATHS) {
-      expect(recorded.excludeArgs).toContainEqual({
-        path,
-        method: RequestMethod.ALL,
-      });
+    for (const route of DEFAULT_EXCLUDED_ROUTES) {
+      expect(recorded.excludeArgs).toContainEqual(route);
     }
   });
 
@@ -181,11 +176,8 @@ describe('RuntimeAppModule — auth-excluded routes', () => {
       method: RequestMethod.POST,
     });
     // Runtime defaults preserved.
-    for (const path of DEFAULT_EXCLUDED_PATHS) {
-      expect(recorded.excludeArgs).toContainEqual({
-        path,
-        method: RequestMethod.ALL,
-      });
+    for (const route of DEFAULT_EXCLUDED_ROUTES) {
+      expect(recorded.excludeArgs).toContainEqual(route);
     }
   });
 });
