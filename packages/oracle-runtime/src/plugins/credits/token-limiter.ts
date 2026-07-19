@@ -141,24 +141,22 @@ export class TokenLimiter {
   }
 
   /**
-   * Credits granted per USD of provider cost. Mainnet: 1 USD = 1000 credits.
-   * Devnet/testnet use 10× so micro-costs stay visible during testing. Every
-   * credit-producing path must apply this — otherwise token-based fallbacks
-   * would bill ~1000× less than the provider-cost path.
+   * Credits granted per USD of provider cost.
+   * All environments (mainnet, testnet, devnet): 1 USD = 1000 credits.
+   * This ensures consistency of credits-per-USD in every environment.
    */
   private get creditsPerUsd(): number {
-    return this.network === 'mainnet' ? 1000 : 10_000;
+    return 1000;
   }
 
   /** Platform markup over raw provider cost. */
   private get markup(): number {
-    return this.network === 'mainnet' ? 1.6 : 4;
+    return 1.6
   }
 
   /**
    * Convert raw USD cost (e.g. OpenRouter `response_metadata.usage.cost`)
-   * into credits. On mainnet 1 USD = 1000 credits; devnet uses a 10x
-   * multiplier so micro-costs are visible during testing.
+   * into credits. Uses the universal rate of 1 USD = 1000 credits and applies markup.
    */
   usdCostToCredits(usdCost: number): number {
     return Math.round(usdCost * this.creditsPerUsd * this.markup);
