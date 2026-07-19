@@ -1,7 +1,4 @@
-import type {
-  MessageContent,
-  MessageContentComplex,
-} from '@langchain/core/messages';
+import type { MessageContent } from '@langchain/core/messages';
 
 /**
  * An attachment we send to the model natively (base64). Only `image` and `file`
@@ -23,7 +20,7 @@ export interface NativeAttachment {
  * the only shape the `@langchain/openai` completions converter (the OpenRouter
  * path) recognises; it emits `image_url: data:<mime>;base64,<data>` for images
  * and `file_data` for files. camelCase or a missing `source_type` silently
- * drops the attachment.
+ * drops the attachment. Mirrors the VFS renderer's block construction.
  */
 export function buildUserMessageContent(
   text: string,
@@ -31,24 +28,24 @@ export function buildUserMessageContent(
 ): MessageContent {
   if (natives.length === 0) return text;
 
-  const blocks: MessageContentComplex[] = [{ type: 'text', text }];
-  for (const native of natives) {
-    if (native.kind === 'image') {
-      blocks.push({
-        type: 'image',
-        source_type: 'base64',
-        mime_type: native.mimeType,
-        data: native.base64,
-      });
-    } else {
-      blocks.push({
-        type: 'file',
-        source_type: 'base64',
-        mime_type: native.mimeType,
-        data: native.base64,
-        filename: native.filename,
-      });
-    }
-  }
-  return blocks;
+  const content: MessageContent = [
+    { type: 'text', text },
+    ...natives.map((native) =>
+      native.kind === 'image'
+        ? {
+            type: 'image',
+            source_type: 'base64',
+            mime_type: native.mimeType,
+            data: native.base64,
+          }
+        : {
+            type: 'file',
+            source_type: 'base64',
+            mime_type: native.mimeType,
+            data: native.base64,
+            filename: native.filename,
+          },
+    ),
+  ];
+  return content;
 }
