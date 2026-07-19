@@ -1,12 +1,10 @@
-import {
-  ActionCallEvent,
-  ReasoningEvent,
-  ToolCallEvent,
-} from '@ixo/oracles-events';
+import { ReasoningEvent } from '@ixo/oracles-events';
 import { Injectable, Logger } from '@nestjs/common';
+import { once } from 'node:events';
 import type { Response } from 'express';
-import { AIMessageChunk, type BaseMessage, ToolMessage } from 'langchain';
-import { emojify } from '../../utils/emoji.js';
+import { type BaseMessage } from 'langchain';
+import { handleTurn } from '../../turn/handle-turn.js';
+import type { TurnStreamSink } from '../../turn/turn-stream.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
 import { type PreparedRequest } from './request-preparer.js';
@@ -19,16 +17,6 @@ import {
   setSSEHeaders,
   startSSEHeartbeat,
 } from './sse.utils.js';
-
-interface RawDelta {
-  reasoning?: string;
-  reasoning_content?: string | null;
-  reasoning_details?: unknown;
-}
-
-interface RawResponse {
-  choices?: Array<{ delta?: RawDelta }>;
-}
 
 const THINKING_PHRASES = [
   'Thinking...',
@@ -58,62 +46,6 @@ function pickThinkingPhrase(): string {
   return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)]!;
 }
 
-/**
- * Parse a `ToolMessage.content` payload into a JSON object when possible.
- * Returns `null` if the content is a non-JSON string, an array of content
- * blocks (LangChain multi-modal output), or anything else we can't reason
- * about. Used by the action-call status decoder to detect failures.
- */
-function safeParseToolContent(
-  content: unknown,
-): Record<string, unknown> | null {
-  if (typeof content === 'string') {
-    try {
-      const parsed: unknown = JSON.parse(content);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Non-JSON text — fall through.
-    }
-    return null;
-  }
-  if (content && typeof content === 'object' && !Array.isArray(content)) {
-    return content as Record<string, unknown>;
-  }
-  return null;
-}
-
-/**
- * Unwrap the args object emitted on `on_tool_start.data.input`. MCP tools
- * surface their args as `{ input: "<json-string>" }` because their schema
- * accepts a single stringified payload — parse the inner JSON so the
- * frontend sees the real fields. For native tools, `input` is already
- * the parsed args object and is returned as-is.
- */
-function extractToolArgs(input: unknown): Record<string, unknown> | undefined {
-  if (input == null || typeof input !== 'object' || Array.isArray(input)) {
-    return undefined;
-  }
-  const obj = input as Record<string, unknown>;
-  const keys = Object.keys(obj);
-  if (
-    keys.length === 1 &&
-    keys[0] === 'input' &&
-    typeof obj.input === 'string'
-  ) {
-    try {
-      const parsed: unknown = JSON.parse(obj.input);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Not JSON — fall through and return the wrapper as-is.
-    }
-  }
-  return obj;
-}
-
 export interface StreamRunInput {
   payload: SendMessagePayload & {
     msgFromMatrixRoom?: boolean;
@@ -132,16 +64,19 @@ export interface StreamRunInput {
 }
 
 /**
- * Owns the SSE side of the chat request: headers, heartbeat, abort
- * controller registration, and the for-await loop translating
- * `streamEvents` output into the wire format the frontend consumes.
+ * The Node/express TRANSPORT SHELL of the chat request: headers, heartbeat,
+ * abort-controller registration, the ALS SSE context, and the terminal
+ * `done`/`error` wire frames. The turn itself — translating `streamEvents`
+ * output into ordered wire events, flushing orphaned tool calls, the
+ * completion marker — lives in the transport-neutral `handleTurn`
+ * (`src/turn/`), which this class drives through an SSE `TurnStreamSink`.
  *
- * Event types preserved verbatim from the legacy implementation:
+ * Wire format is unchanged from the legacy implementation:
  *
  *   - `ReasoningEvent` (thinking + chunked reasoning + completion marker)
- *   - `ToolCallEvent`  (server-executed tools — fired on `tool_calls`)
- *   - `ActionCallEvent` (AG-UI actions — same `tool_calls` channel but
- *      named in `payload.agActions`; the runner branches on the name)
+ *   - `ToolCallEvent`  (server-executed tools — fired on `on_tool_start`)
+ *   - `ActionCallEvent` (AG-UI actions — same channel, named in
+ *      `payload.agActions`; the translator branches on the name)
  *   - `message` chunk (plain assistant text)
  *   - `error` + `done`
  *
@@ -204,86 +139,18 @@ export class SseStreamRunner {
           // default for ReactAgent in langchain@1.4, no extra option needed.
           const stream = agent.streamEvents(stateInput, langGraphConfig);
 
-          let fullContent = '';
-          const toolCallMap = new Map<string, ToolCallEvent>();
-          const actionCallMap = new Map<string, ActionCallEvent>();
-          const agActionNames = new Set(
-            (payload.agActions ?? []).map((a) => a.name),
-          );
+          const { fullContent, aborted } = await handleTurn({
+            stream,
+            sessionId,
+            requestId,
+            agActionNames: new Set(
+              (payload.agActions ?? []).map((a) => a.name),
+            ),
+            signal: abortController.signal,
+            sink: this.createSseSink(res, abortController),
+          });
 
-          for await (const evt of stream) {
-            if (abortController.signal.aborted) break;
-            const { data, event, run_id, name } = evt as {
-              data: unknown;
-              event: string;
-              run_id: string;
-              name?: string;
-            };
-
-            if (event === 'on_tool_start') {
-              this.handleToolStart(
-                run_id,
-                name ?? 'tool',
-                data as { input: unknown },
-                sessionId,
-                requestId,
-                agActionNames,
-                toolCallMap,
-                actionCallMap,
-                res,
-                abortController,
-              );
-              continue;
-            }
-
-            if (event === 'on_tool_end') {
-              this.handleToolEnd(
-                run_id,
-                data as { output: ToolMessage },
-                toolCallMap,
-                actionCallMap,
-                res,
-                abortController,
-              );
-              continue;
-            }
-
-            if (event === 'on_chat_model_stream') {
-              const chunkContent = this.handleChatStream(
-                data as { chunk: AIMessageChunk },
-                sessionId,
-                requestId,
-                res,
-                abortController,
-              );
-              if (chunkContent) fullContent += chunkContent;
-            }
-          }
-
-          if (!abortController.signal.aborted) {
-            // Flush any tool/action calls that started but never received a
-            // matching `on_tool_end`. Without this, the frontend keeps the
-            // tool stuck in `isRunning` forever — the run completed cleanly
-            // but the UI has no signal to clear it.
-            this.flushOrphanedToolCalls(
-              toolCallMap,
-              actionCallMap,
-              res,
-              abortController,
-            );
-
-            const completeEvent = ReasoningEvent.createChunk(
-              sessionId,
-              requestId,
-              '',
-              undefined,
-              true,
-            );
-            if (!res.writableEnded) {
-              res.write(
-                formatSSE(completeEvent.eventName, completeEvent.payload),
-              );
-            }
+          if (!aborted) {
             sendSSEDone(res);
             input.onComplete?.(fullContent);
           }
@@ -323,211 +190,27 @@ export class SseStreamRunner {
   }
 
   /**
-   * Fires when an agent invokes a tool. `data.input` carries the fully
-   * parsed args — the right place to emit the `isRunning` event with
-   * complete args. We key the map by `run_id` from the event envelope so
-   * the matching `on_tool_end` (which shares the same `run_id`) can pair
-   * with it regardless of how the model formatted the original
-   * `tool_call_id`.
+   * Frames → SSE lines. The write guard mirrors the legacy runner exactly
+   * (`writableEnded`/aborted are silent skips, not errors). A saturated
+   * socket (`res.write` returning `false`) pauses the turn loop until
+   * `drain` instead of buffering unboundedly; the wait is tied to the
+   * abort signal so a client disconnect mid-backpressure aborts the turn
+   * rather than hanging it. Terminal `done`/`error` wire frames belong to
+   * the shell, so `close` has nothing to add here.
    */
-  private handleToolStart(
-    runId: string,
-    toolName: string,
-    data: { input: unknown },
-    sessionId: string,
-    requestId: string,
-    agActionNames: Set<string>,
-    toolCallMap: Map<string, ToolCallEvent>,
-    actionCallMap: Map<string, ActionCallEvent>,
+  private createSseSink(
     res: Response,
     abortController: AbortController,
-  ): void {
-    const args = extractToolArgs(data.input);
-    const isAction = agActionNames.has(toolName);
-
-    if (isAction) {
-      const actionCallEvent = new ActionCallEvent({
-        requestId,
-        sessionId,
-        toolCallId: runId,
-        toolName,
-        args,
-        status: 'isRunning',
-      });
-      this.writeSse(
-        res,
-        abortController,
-        actionCallEvent.eventName,
-        actionCallEvent.payload,
-      );
-      actionCallMap.set(runId, actionCallEvent);
-      return;
-    }
-
-    const toolCallEvent = new ToolCallEvent({
-      requestId,
-      sessionId,
-      toolName,
-      args: args ?? {},
-      status: 'isRunning',
-    });
-    (toolCallEvent.payload.args as Record<string, unknown>).toolName = toolName;
-    toolCallEvent.payload.eventId = runId;
-    this.writeSse(
-      res,
-      abortController,
-      toolCallEvent.eventName,
-      toolCallEvent.payload,
-    );
-    toolCallMap.set(runId, toolCallEvent);
-  }
-
-  private handleToolEnd(
-    runId: string,
-    data: { output: ToolMessage },
-    toolCallMap: Map<string, ToolCallEvent>,
-    actionCallMap: Map<string, ActionCallEvent>,
-    res: Response,
-    abortController: AbortController,
-  ): void {
-    const toolMessage = data.output;
-
-    const actionCallEvent = actionCallMap.get(runId);
-    if (actionCallEvent) {
-      actionCallEvent.payload.output = emojify(toolMessage.content.toString());
-      actionCallEvent.payload.toolCallId = runId;
-      const parsed = safeParseToolContent(toolMessage.content);
-      if (parsed?.success === false || parsed?.error) {
-        actionCallEvent.payload.status = 'error';
-        actionCallEvent.payload.error =
-          (parsed.error as string) || 'Action failed';
-      } else {
-        actionCallEvent.payload.status = 'done';
-      }
-      this.writeSse(
-        res,
-        abortController,
-        actionCallEvent.eventName,
-        actionCallEvent.payload,
-      );
-      actionCallMap.delete(runId);
-      return;
-    }
-
-    const toolCallEvent = toolCallMap.get(runId);
-    if (!toolCallEvent) return;
-    toolCallEvent.payload.output = emojify(toolMessage.content);
-    toolCallEvent.payload.status = 'done';
-    (toolCallEvent.payload.args as Record<string, unknown>).toolName =
-      toolMessage.name;
-    toolCallEvent.payload.eventId = runId;
-    this.writeSse(
-      res,
-      abortController,
-      toolCallEvent.eventName,
-      toolCallEvent.payload,
-    );
-    toolCallMap.delete(runId);
-  }
-
-  /**
-   * Emit a terminal `error` event for any tool/action call that started but
-   * never received a matching `on_tool_end`. Keeps the frontend from
-   * showing a perpetually-spinning tool when the agent ends a turn with
-   * unresolved tool runs in flight.
-   */
-  private flushOrphanedToolCalls(
-    toolCallMap: Map<string, ToolCallEvent>,
-    actionCallMap: Map<string, ActionCallEvent>,
-    res: Response,
-    abortController: AbortController,
-  ): void {
-    for (const [runId, evt] of actionCallMap) {
-      evt.payload.status = 'error';
-      evt.payload.error = 'Action did not complete';
-      evt.payload.toolCallId = runId;
-      this.writeSse(res, abortController, evt.eventName, evt.payload);
-    }
-    actionCallMap.clear();
-
-    for (const [runId, evt] of toolCallMap) {
-      // `IToolCallEvent.status` only allows 'isRunning' | 'done' — there's
-      // no error variant on tool calls (unlike actions). Mark as 'done'
-      // with a sentinel output so the FE clears its spinner but the user
-      // sees the call didn't actually produce a result.
-      evt.payload.status = 'done';
-      evt.payload.output = '⏱️ Tool did not complete';
-      evt.payload.eventId = runId;
-      this.writeSse(res, abortController, evt.eventName, evt.payload);
-    }
-    toolCallMap.clear();
-  }
-
-  /**
-   * Emits reasoning + text chunks. Tool-call emission has moved to
-   * `handleToolStart` (which fires on `on_tool_start` with full,
-   * finalized args) — the chunk's partial `tool_calls` deltas are
-   * intentionally ignored here to avoid emitting an `isRunning` event
-   * with empty args before the model finishes producing the call.
-   */
-  private handleChatStream(
-    data: { chunk: AIMessageChunk },
-    sessionId: string,
-    requestId: string,
-    res: Response,
-    abortController: AbortController,
-  ): string | undefined {
-    const chunk = data.chunk;
-    const rawResponse = chunk.additional_kwargs?.__raw_response as
-      | RawResponse
-      | undefined;
-    const delta = rawResponse?.choices?.[0]?.delta;
-    const reasoning = delta?.reasoning ?? delta?.reasoning_content;
-    if (reasoning && reasoning.trim()) {
-      const reasoningDetails = Array.isArray(delta?.reasoning_details)
-        ? delta.reasoning_details
-            .filter(
-              (d): d is { type: string; text: string } =>
-                d != null &&
-                typeof d === 'object' &&
-                typeof (d as { type?: unknown }).type === 'string' &&
-                typeof (d as { text?: unknown }).text === 'string' &&
-                (d as { text: string }).text.trim().length > 0,
-            )
-            .map((d) => ({ type: d.type, text: d.text }))
-        : undefined;
-      const reasoningEvent = ReasoningEvent.createChunk(
-        sessionId,
-        requestId,
-        reasoning,
-        reasoningDetails,
-        false,
-      );
-      this.writeSse(
-        res,
-        abortController,
-        reasoningEvent.eventName,
-        reasoningEvent.payload,
-      );
-    }
-
-    const content = chunk.content;
-    if (!content) return undefined;
-    const parsed = emojify(String(content));
-    this.writeSse(res, abortController, 'message', {
-      content: parsed,
-      timestamp: new Date().toISOString(),
-    });
-    return parsed;
-  }
-
-  private writeSse(
-    res: Response,
-    abortController: AbortController,
-    eventName: string,
-    payload: unknown,
-  ): void {
-    if (res.writableEnded || abortController.signal.aborted) return;
-    res.write(formatSSE(eventName, payload));
+  ): TurnStreamSink {
+    return {
+      write: async (frame) => {
+        if (res.writableEnded || abortController.signal.aborted) return;
+        const flushed = res.write(formatSSE(frame.event, frame.payload));
+        if (flushed === false) {
+          await once(res, 'drain', { signal: abortController.signal });
+        }
+      },
+      close: async () => undefined,
+    };
   }
 }
