@@ -32,7 +32,9 @@ interface MessageDto {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /** First attachment — kept for clients that only read the singular field. */
   attachment?: AttachmentMeta;
+  attachments?: AttachmentMeta[];
 }
 
 export interface ListOracleMessagesResponse {
@@ -48,6 +50,7 @@ export interface CleanAdditionalKwargs {
     text: string;
   }>;
   attachment?: AttachmentMeta;
+  attachments?: AttachmentMeta[];
   [key: string]: unknown; // Allow additional properties for LangChain compatibility
 }
 
@@ -80,19 +83,37 @@ export function transformGraphStateMessageToListMessageResponse(
   return {
     messages: messages.reduce<MessageDto[]>((acc, message) => {
       const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
+      // Synthetic extraction messages (AI-typed, carrying an attachment) are
+      // internal model context — the file's extracted text. The file itself
+      // renders as a chip from the human message's `attachments`; the raw
+      // text dump must not surface as an assistant reply.
+      const isExtractionContext =
+        message.type === 'ai' &&
+        Boolean(
+          (message.additional_kwargs as CleanAdditionalKwargs)?.attachment,
+        );
+
       if (
         message.type !== 'system' &&
         message.type !== 'tool' &&
-        !message.additional_kwargs?.isError
+        !message.additional_kwargs?.isError &&
+        !isExtractionContext
       ) {
         // Extract reasoning from additional_kwargs
         const additionalKwargs =
           message.additional_kwargs as CleanAdditionalKwargs;
         const reasoning = additionalKwargs?.reasoning;
 
-        // Extract attachment metadata for human messages
-        const attachment =
-          message.type === 'human' ? additionalKwargs?.attachment : undefined;
+        // Extract attachment metadata for human messages. Older checkpoints
+        // only carry the singular `attachment`; fold it into the array form.
+        const attachments =
+          message.type === 'human'
+            ? (additionalKwargs?.attachments ??
+              (additionalKwargs?.attachment
+                ? [additionalKwargs.attachment]
+                : undefined))
+            : undefined;
+        const attachment = attachments?.[0];
 
         const textContent = contentToText(message.content);
         acc.push({
@@ -109,6 +130,7 @@ export function transformGraphStateMessageToListMessageResponse(
           isComplete: true, // Messages from DB are always complete
           isReasoning: false, // since this is not a reasoning message and the request is done
           ...(attachment && { attachment }),
+          ...(attachments?.length && { attachments }),
         });
       }
       if (toolMsg) {

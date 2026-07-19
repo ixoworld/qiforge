@@ -364,10 +364,17 @@ describe('ComposioPlugin.getRequestTools — session tool-definition cache', () 
     expect(sessionFactory).toHaveBeenCalledTimes(2);
   });
 
-  it('evicts expired entries on write, so one-off users do not accumulate for the process lifetime', async () => {
+  it('evicts long-expired entries on write but keeps recently-expired ones (still served stale)', async () => {
     const defsCache: ComposioDefsCache = new Map();
+    // Expired past the one-TTL grace window → reclaimed.
     defsCache.set(`${COMPOSIO_URL}::did:ixo:departed-user`, {
       defs: [{ name: 'STALE', description: 'stale', schema: undefined }],
+      expiresAt: Date.now() - COMPOSIO_TOOL_DEFS_TTL_MS - 1,
+    });
+    // Expired, but within the grace window → kept: it's still being served
+    // stale while its background refresh runs.
+    defsCache.set(`${COMPOSIO_URL}::did:ixo:recent-user`, {
+      defs: [{ name: 'RECENT', description: 'recent', schema: undefined }],
       expiresAt: Date.now() - 1,
     });
 
@@ -381,7 +388,50 @@ describe('ComposioPlugin.getRequestTools — session tool-definition cache', () 
     });
 
     expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:departed-user`)).toBe(false);
+    expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:recent-user`)).toBe(true);
     expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:fresh-user`)).toBe(true);
+  });
+
+  it('serves an expired entry stale and refreshes the defs in the background', async () => {
+    const defsCache: ComposioDefsCache = new Map();
+    const cacheKey = `${COMPOSIO_URL}::did:ixo:swr-user`;
+    defsCache.set(cacheKey, {
+      defs: [
+        {
+          name: 'COMPOSIO_SEARCH_TOOLS',
+          description: 'stale description',
+          schema: undefined,
+        },
+      ],
+      expiresAt: Date.now() - 1,
+    });
+    let resolveSession: (tools: ComposioSessionTool[]) => void = () => {};
+    const sessionOpened = new Promise<ComposioSessionTool[]>((resolve) => {
+      resolveSession = resolve;
+    });
+    const sessionFactory: ComposioSessionFactory = vi.fn(() => sessionOpened);
+
+    const tools = await createComposioTools({
+      apiKey: COMPOSIO_API_KEY,
+      baseUrl: COMPOSIO_URL,
+      ucanInvocation: 'ucan-token-swr',
+      userId: 'did:ixo:swr-user',
+      sessionFactory,
+      defsCache,
+    });
+
+    // The stale defs bind immediately — the turn never waited on a session.
+    expect(tools.map((t) => t.name)).toEqual(['COMPOSIO_SEARCH_TOOLS']);
+    expect(tools[0]!.description).toBe('stale description');
+    expect(sessionFactory).toHaveBeenCalledTimes(1);
+
+    // Background refresh lands → the cache entry is re-snapshotted.
+    resolveSession([fakeSessionTool('COMPOSIO_SEARCH_TOOLS')]);
+    await sessionOpened;
+    await new Promise((resolve) => setImmediate(resolve));
+    const refreshed = defsCache.get(cacheKey);
+    expect(refreshed).toBeDefined();
+    expect(refreshed!.expiresAt).toBeGreaterThan(Date.now());
   });
 
   it('caps the cache size, evicting the soonest-to-expire entries first', async () => {

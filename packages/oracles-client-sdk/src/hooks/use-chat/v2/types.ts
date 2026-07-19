@@ -59,7 +59,9 @@ export interface IMessage {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /** First attachment — kept for clients that only read the singular field. */
   attachment?: Attachment;
+  attachments?: Attachment[];
 }
 
 export type ChatStatus = 'submitted' | 'streaming' | 'ready' | 'error';

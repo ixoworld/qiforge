@@ -139,7 +139,7 @@ describe('VfsPlugin — identity, config, manifest', () => {
     expect(p.name).toBe('vfs');
     expect(p.version).toBe('1.0.0');
     expect(p.manifest.title).toBe('Files');
-    expect(p.manifest.visibility).toBe('always');
+    expect(p.manifest.visibility).toBe('on-demand');
     expect(p.manifest.category).toBe('data');
     // Always-on: the worker URLs come from NETWORK, so there is no env var to
     // detect and no autoDetect gate. A fork opts out via features.

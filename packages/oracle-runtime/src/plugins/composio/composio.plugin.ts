@@ -196,6 +196,7 @@ export class ComposioPlugin extends OraclePlugin {
         network,
         sessionFactory: this.sessionFactoryOverride,
         defsCache: this.toolDefsCache,
+        logger: rtCtx.logger,
       });
     } catch (error) {
       const detail =

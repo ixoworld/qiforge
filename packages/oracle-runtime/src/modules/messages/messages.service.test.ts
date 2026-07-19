@@ -237,6 +237,56 @@ describe('MessagesService', () => {
       expect(runArg.payload.message).toBe('hello');
     });
 
+    it('flushes SSE headers + instant thinking ack BEFORE any pre-flight work', async () => {
+      const { svc, preparer } = build();
+      const res = new FakeResponse();
+      let headersSentWhenPrepareRan: boolean | undefined;
+      let writesWhenPrepareRan = 0;
+      preparer.prepare.mockImplementation(async () => {
+        headersSentWhenPrepareRan = res.headersSent;
+        writesWhenPrepareRan = res.writes.length;
+        return makePrepared();
+      });
+      const params = makeSendPayload({
+        stream: true,
+        res: res as unknown as Response,
+      });
+
+      await svc.sendMessage(params);
+
+      expect(headersSentWhenPrepareRan).toBe(true);
+      expect(writesWhenPrepareRan).toBeGreaterThanOrEqual(1);
+      expect(res.writes[0]).toContain('event: reasoning');
+      // The resolved requestId is on the headers AND threaded into prepare —
+      // header and runnableConfig must agree.
+      const requestId = res.setHeaders['X-Request-Id'];
+      expect(requestId).toBeTruthy();
+      const prepareArg = preparer.prepare.mock.calls[0]![0] as {
+        requestId?: string;
+      };
+      expect(prepareArg.requestId).toBe(requestId);
+    });
+
+    it('turns a pre-flight failure into SSE error + done instead of throwing (stream path)', async () => {
+      const { svc, preparer, streamer } = build();
+      const res = new FakeResponse();
+      preparer.prepare.mockRejectedValue(new Error('Session not found'));
+      const params = makeSendPayload({
+        stream: true,
+        res: res as unknown as Response,
+      });
+
+      const result = await svc.sendMessage(params);
+
+      expect(result).toBeUndefined();
+      expect(streamer.run).not.toHaveBeenCalled();
+      const wire = res.writes.join('');
+      expect(wire).toContain('event: error');
+      expect(wire).toContain('Session not found');
+      expect(wire).toContain('event: done');
+      expect(res.writableEnded).toBe(true);
+    });
+
     it('increments active count once on entry with matching decrement in finally', async () => {
       const { svc, checkpointSync } = build();
       const res = new FakeResponse();

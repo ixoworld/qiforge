@@ -11,7 +11,6 @@ import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
 import { type PreparedRequest } from './request-preparer.js';
 import {
-  emitSSEEvent,
   formatSSE,
   runWithSSEContext,
   sendSSEDone,
@@ -30,32 +29,21 @@ interface RawResponse {
   choices?: Array<{ delta?: RawDelta }>;
 }
 
-const THINKING_PHRASES = [
-  'Thinking...',
-  'Working...',
-  'Analyzing...',
-  'Processing...',
-  'Computing...',
-  'Crunching...',
-  'Deliberating...',
-  'Reasoning...',
-  'Calculating...',
-  'Evaluating...',
-  'Pondering...',
-  'Reading...',
-  'Synthesizing...',
-  'Formulating...',
-  'Considering...',
-  'Exploring ideas...',
-  'Investigating...',
-  'Brainstorming...',
-  'Solving...',
-  'Reviewing...',
-  'Reflecting...',
-];
-
-function pickThinkingPhrase(): string {
-  return THINKING_PHRASES[Math.floor(Math.random() * THINKING_PHRASES.length)]!;
+/** Per-request model-stream diagnostics, logged once when the stream ends. */
+interface StreamStats {
+  chunks: number;
+  reasoning: number;
+  /** Chunks carrying reasoning_details but no readable reasoning text (e.g. OpenAI encrypted blobs). */
+  detailsOnly: number;
+  content: number;
+  firstDeltaLogged: boolean;
+  /**
+   * Token usage from the final chunk of each model call (summed across the
+   * run's calls). `inputTokens` is the prefill — prompt + tool schemas +
+   * history — the number to watch when TTFT degrades.
+   */
+  inputTokens: number;
+  outputTokens: number;
 }
 
 /**
@@ -146,9 +134,10 @@ export interface StreamRunInput {
  *   - `error` + `done`
  *
  * The SSE headers and the first `Thinking...` event are emitted by
- * `MessagesController` BEFORE the orchestrator hands off — this class
- * picks up after the connection is open, so we don't pay the pre-flight
- * latency before the client knows the request was accepted.
+ * `MessagesService.sendMessage` BEFORE any pre-flight work (prepare,
+ * attachment assembly, agent build) — this class picks up after the
+ * connection is open, so the client sees the request was accepted within
+ * milliseconds instead of after the pre-flight latency.
  */
 @Injectable()
 export class SseStreamRunner {
@@ -182,17 +171,6 @@ export class SseStreamRunner {
       await runWithSSEContext(
         res,
         async () => {
-          const thinkingText = pickThinkingPhrase();
-          const thinkingEvent = ReasoningEvent.createChunk(
-            sessionId,
-            requestId,
-            thinkingText,
-            [{ type: 'thinking', text: thinkingText }],
-            false,
-          );
-          emitSSEEvent(thinkingEvent);
-          thinkingEvent.emit();
-
           const { agent, stateInput, langGraphConfig } =
             await this.agentBuilder.build(
               { payload, prepared, inputMessages },
@@ -205,6 +183,15 @@ export class SseStreamRunner {
           const stream = agent.streamEvents(stateInput, langGraphConfig);
 
           let fullContent = '';
+          const streamStats: StreamStats = {
+            chunks: 0,
+            reasoning: 0,
+            detailsOnly: 0,
+            content: 0,
+            firstDeltaLogged: false,
+            inputTokens: 0,
+            outputTokens: 0,
+          };
           const toolCallMap = new Map<string, ToolCallEvent>();
           const actionCallMap = new Map<string, ActionCallEvent>();
           const agActionNames = new Set(
@@ -255,10 +242,17 @@ export class SseStreamRunner {
                 requestId,
                 res,
                 abortController,
+                streamStats,
               );
               if (chunkContent) fullContent += chunkContent;
             }
           }
+
+          this.logger.log(
+            `Model stream summary — chunks=${streamStats.chunks}, reasoningChunks=${streamStats.reasoning}, ` +
+              `reasoningDetailsWithoutText=${streamStats.detailsOnly}, contentChunks=${streamStats.content}, ` +
+              `inputTokens=${streamStats.inputTokens}, outputTokens=${streamStats.outputTokens}`,
+          );
 
           if (!abortController.signal.aborted) {
             // Flush any tool/action calls that started but never received a
@@ -476,14 +470,36 @@ export class SseStreamRunner {
     requestId: string,
     res: Response,
     abortController: AbortController,
+    stats: StreamStats,
   ): string | undefined {
     const chunk = data.chunk;
     const rawResponse = chunk.additional_kwargs?.__raw_response as
       | RawResponse
       | undefined;
     const delta = rawResponse?.choices?.[0]?.delta;
+    stats.chunks++;
+    // Usage rides on the final chunk of each model call; summing across
+    // chunks therefore totals the run's calls without double-counting.
+    if (chunk.usage_metadata) {
+      stats.inputTokens += chunk.usage_metadata.input_tokens;
+      stats.outputTokens += chunk.usage_metadata.output_tokens;
+    }
+    if (delta && !stats.firstDeltaLogged) {
+      stats.firstDeltaLogged = true;
+      this.logger.log(
+        `First model delta: ${JSON.stringify(delta).slice(0, 300)}`,
+      );
+    }
     const reasoning = delta?.reasoning ?? delta?.reasoning_content;
+    if (
+      !(reasoning && reasoning.trim()) &&
+      Array.isArray(delta?.reasoning_details) &&
+      delta.reasoning_details.length > 0
+    ) {
+      stats.detailsOnly++;
+    }
     if (reasoning && reasoning.trim()) {
+      stats.reasoning++;
       const reasoningDetails = Array.isArray(delta?.reasoning_details)
         ? delta.reasoning_details
             .filter(
@@ -513,6 +529,7 @@ export class SseStreamRunner {
 
     const content = chunk.content;
     if (!content) return undefined;
+    stats.content++;
     const parsed = emojify(String(content));
     this.writeSse(res, abortController, 'message', {
       content: parsed,

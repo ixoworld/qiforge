@@ -56,7 +56,7 @@ describe('DomainIndexerPlugin', () => {
     expect(plugin.name).toBe('domain-indexer');
     expect(plugin.version).toBe('1.0.0');
     expect(plugin.manifest.title).toBe('Domain Indexer');
-    expect(plugin.manifest.visibility).toBe('always');
+    expect(plugin.manifest.visibility).toBe('on-demand');
     expect(plugin.manifest.stability).toBe('stable');
     expect(plugin.manifest.category).toBe('data');
     expect(plugin.manifest.whenToUse.length).toBeGreaterThan(0);
@@ -139,8 +139,8 @@ describe('DomainIndexerPlugin', () => {
       .listCapabilities()
       .find((c) => c.name === 'domain-indexer');
     expect(listing).toBeDefined();
-    expect(listing?.visibility).toBe('always');
-    expect(listing?.loaded).toBe(true);
+    expect(listing?.visibility).toBe('on-demand');
+    expect(listing?.loaded).toBe(false);
     await rt.close();
   });
 

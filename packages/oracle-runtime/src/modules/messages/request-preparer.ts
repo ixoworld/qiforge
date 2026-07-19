@@ -61,9 +61,12 @@ export class RequestPreparer {
   async prepare(payload: PrepareInput): Promise<PreparedRequest> {
     const did = payload.did;
     const sessionId = payload.sessionId;
+    // Streaming requests arrive with `requestId` already resolved by
+    // `MessagesService` (it flushes the SSE headers, which carry the id,
+    // before this runs). Batch requests mint theirs here.
     const requestId =
-      payload.stream && 'requestId' in payload
-        ? (payload.requestId as string)
+      payload.stream && payload.requestId
+        ? payload.requestId
         : crypto.randomUUID();
 
     // Home-server lookup, SQLite warm-up, and session read are mutually

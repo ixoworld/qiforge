@@ -65,11 +65,12 @@ export class MessagesController {
     };
 
     if (sendMessageDto.stream) {
-      // SSE headers are set inside `SseStreamRunner` *after* prepareForQuery
-      // resolves the requestId — that lets us include `X-Request-Id` in the
-      // response and the matching `Access-Control-Expose-Headers` so the FE
-      // can read it. The earlier "flush before pre-flight" optimization
-      // dropped those headers and broke FE clients that expect them.
+      // SSE headers (incl. `X-Request-Id` + its `Access-Control-Expose-
+      // Headers`) flush inside `MessagesService.sendMessage` BEFORE any
+      // pre-flight work — the service resolves the requestId up front, so
+      // the early flush no longer costs the header the FE depends on.
+      // Consequence: pre-flight failures on this path arrive as SSE `error`
+      // events on an HTTP 200 stream, not as HTTP error statuses.
       await this.messagesService.sendMessage({ ...payload, res, req });
       // The service ends the response in its `finally` — nothing to return.
       return;

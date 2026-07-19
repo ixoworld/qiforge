@@ -272,6 +272,13 @@ export class SendMessagePayload {
   message!: string;
   sessionId!: string;
   did!: string;
+  /**
+   * Client-supplied request id for streaming requests (the SDK sends one so
+   * it can correlate SSE events). Resolved to a fresh UUID by
+   * `MessagesService` when absent, BEFORE the SSE headers flush — the id is
+   * part of the `X-Request-Id` response header.
+   */
+  requestId?: string;
   /** Optional per-request model id; validated against the catalog allow-list. */
   model?: string;
   tools?: BrowserToolCallDto[];

@@ -503,6 +503,41 @@ describe('SandboxPlugin', () => {
       expect(lazyHeaders['x-us-database_url']).toBe('pg://real');
     });
 
+    it('serves expired definitions stale and refreshes them in the background', async () => {
+      vi.useFakeTimers();
+      try {
+        const upstream = [makeUpstreamTool('sandbox_run')];
+        const { factory, seenConfigs } = makeMcpFactory(upstream);
+        const plugin = new SandboxPlugin({
+          authBuilder,
+          mcpClientFactory: factory,
+        });
+
+        await plugin.getRequestTools(makeSandboxRuntimeContext());
+        expect(seenConfigs).toHaveLength(1);
+
+        vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+        // The expired entry still binds immediately — the turn never waits
+        // on the secrets fetch + connect chain...
+        const stale = await plugin.getRequestTools(makeSandboxRuntimeContext());
+        expect(stale.map((t) => t.name)).toEqual(['sandbox_run']);
+
+        // ...while one background refresh re-snapshots the defs.
+        await vi.runAllTimersAsync();
+        expect(seenConfigs).toHaveLength(2);
+
+        // The refreshed entry serves the next turn with no further connect.
+        const refreshed = await plugin.getRequestTools(
+          makeSandboxRuntimeContext(),
+        );
+        expect(refreshed.map((t) => t.name)).toEqual(['sandbox_run']);
+        expect(seenConfigs).toHaveLength(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('warm path still contributes zero tools when the auth gate fails', async () => {
       const upstream = [makeUpstreamTool('sandbox_run')];
       const { factory, seenConfigs } = makeMcpFactory(upstream);

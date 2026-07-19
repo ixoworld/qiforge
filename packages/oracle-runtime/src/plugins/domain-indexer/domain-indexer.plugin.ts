@@ -71,7 +71,10 @@ const manifest: PluginManifest = {
   ],
   tags: ['ixo', 'entities', 'search', 'dids'],
   category: 'data',
-  visibility: 'always',
+  // On-demand: IXO entity lookups are a niche flow — the agent loads this
+  // via `load_capability` when the conversation actually needs it, keeping
+  // the sub-agent schema out of every unrelated chat turn.
+  visibility: 'on-demand',
   stability: 'stable',
 };
 

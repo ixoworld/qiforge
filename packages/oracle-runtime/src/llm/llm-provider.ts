@@ -141,19 +141,34 @@ export const getProviderChatModel = (
           }
         : {};
 
+    // Reasoning must go through modelKwargs (spread verbatim into the
+    // request body), never ChatOpenAI's top-level `reasoning` field: that
+    // field is dropped for OpenRouter-prefixed ids (`openai/gpt-…` fails the
+    // library's gpt-5/o-series model-name check), and a top-level
+    // `reasoning.summary` silently reroutes the call to the Responses API,
+    // whose stream shape the SSE runner and saver don't parse. `summary:
+    // 'auto'` is what makes OpenAI models return readable thinking
+    // (otherwise: encrypted blobs only); OpenRouter strips the field for
+    // providers that don't support it.
+    const { reasoning: paramsReasoning, ...restParams } = params ?? {};
+    const reasoningKwargs = {
+      effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
+      summary: 'auto',
+      ...paramsReasoning,
+    };
+    logger.log(
+      `OpenRouter reasoning config — model=${model}, reasoning=${JSON.stringify(reasoningKwargs)}`,
+    );
     return getOpenRouterChatModel({
-      ...params,
+      ...restParams,
       model,
       __includeRawResponse: true,
       modelKwargs: {
         require_parameters: true,
         include_reasoning: true,
         ...fallbackKwargs,
+        reasoning: reasoningKwargs,
         ...params?.modelKwargs,
-      },
-      reasoning: {
-        effort: role === 'main' ? resolveMainReasoningEffort() : 'medium',
-        ...params?.reasoning,
       },
     });
   }

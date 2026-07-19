@@ -5,11 +5,13 @@ import {
   type ListOracleMessagesResponse,
 } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
+import { ReasoningEvent } from '@ixo/oracles-events';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
+import * as crypto from 'node:crypto';
 
 import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
 import { BatchInvoker } from './batch-invoker.js';
@@ -35,6 +37,13 @@ import { MatrixListenerBridge } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
+import {
+  formatSSE,
+  pickThinkingPhrase,
+  sendSSEDone,
+  sendSSEError,
+  setSSEHeaders,
+} from './sse.utils.js';
 import { isSyntheticSessionId } from './synthetic-session.js';
 
 /**
@@ -176,6 +185,22 @@ export class MessagesService implements OnModuleInit {
   ): Promise<SendMessageReply | undefined> {
     this.checkpointSync.markUserActive(params.did);
 
+    // Streaming: open the SSE connection BEFORE any pre-flight work (session
+    // lookup, attachment processing, agent build) so the client gets headers
+    // + an instant "Thinking..." ack in milliseconds instead of seconds. The
+    // requestId is resolvable up front — the SDK sends one, and we mint a
+    // UUID otherwise — so `X-Request-Id` still goes out on the headers.
+    // `RequestPreparer` reuses `params.requestId`, keeping the header and
+    // the runnableConfig in agreement.
+    const streaming = Boolean(params.stream && params.res);
+    if (streaming && params.res) {
+      params.requestId =
+        typeof params.requestId === 'string' && params.requestId.length > 0
+          ? params.requestId
+          : crypto.randomUUID();
+      this.openStream(params.res, params.sessionId, params.requestId);
+    }
+
     try {
       const prepared = await this.preparer.prepare(params);
       const inputMessages = await this.assembleInput(params, prepared);
@@ -256,9 +281,55 @@ export class MessagesService implements OnModuleInit {
       }
       if (!skipPostSync) this.firePostSync(params, prepared);
       return result;
+    } catch (error) {
+      // Once the SSE headers have flushed, an HTTP error status can no
+      // longer reach the client — pre-flight failures (session not found,
+      // attachment load, agent build) must go out as SSE `error` events on
+      // the open stream instead of propagating to the controller.
+      if (streaming && params.res && params.res.headersSent) {
+        this.logger.error(
+          `Pre-flight failed after SSE flush — session=${params.sessionId}`,
+          error instanceof Error ? error.stack : String(error),
+        );
+        sendSSEError(
+          params.res,
+          error instanceof Error ? error : 'Something went wrong',
+        );
+        sendSSEDone(params.res);
+        if (!params.res.writableEnded) params.res.end();
+        return undefined;
+      }
+      throw error;
     } finally {
       this.checkpointSync.markUserInactive(params.did);
     }
+  }
+
+  /**
+   * Flush SSE headers and the instant "Thinking..." ack. Runs before ANY
+   * pre-flight work so the perceived time-to-first-byte is the network
+   * round-trip, not the pre-flight latency. Stage-specific progress (e.g.
+   * "Recalling your memories...") is emitted later by the components that
+   * actually know a slow stage is running.
+   */
+  private openStream(
+    res: Response,
+    sessionId: string,
+    requestId: string,
+  ): void {
+    if (res.headersSent) return;
+    setSSEHeaders(res, requestId);
+    res.flushHeaders();
+    const thinkingText = pickThinkingPhrase();
+    const thinkingEvent = ReasoningEvent.createChunk(
+      sessionId,
+      requestId,
+      thinkingText,
+      [{ type: 'thinking', text: thinkingText }],
+      false,
+    );
+    res.write(formatSSE(thinkingEvent.eventName, thinkingEvent.payload));
+    thinkingEvent.emit();
   }
 
   private async assembleInput(
@@ -312,7 +383,6 @@ export class MessagesService implements OnModuleInit {
     // Download + base64 the native attachments. On any failure, fall that one
     // file back to extraction so a bad download never drops the whole message.
     const natives: NativeAttachment[] = [];
-    const nativeSent: AttachmentDto[] = [];
     for (const attachment of nativeAttachments) {
       try {
         const { buffer, mimetype } =
@@ -330,7 +400,6 @@ export class MessagesService implements OnModuleInit {
           base64: buffer.toString('base64'),
           filename: attachment.filename,
         });
-        nativeSent.push(attachment);
         this.logger.log(
           `[attachments] NATIVE → "${attachment.filename}" sent directly to ${effectiveModel} (${buffer.length} bytes, ${kind}); skipping helper-model extraction`,
         );
@@ -352,26 +421,29 @@ export class MessagesService implements OnModuleInit {
       }
     }
 
-    // Surface the first natively-sent attachment's metadata on the human
-    // message — the list-messages transform reads `attachment` off human
-    // messages, so the client can render the file/image chip after a refetch.
-    const firstNative = nativeSent[0];
-    const humanKwargs = firstNative
-      ? {
-          ...additionalKwargs,
-          attachment: {
-            filename: firstNative.filename,
-            mimetype: firstNative.mimetype,
-            size: firstNative.size,
-            mxcUri: firstNative.mxcUri,
-            eventId: firstNative.eventId,
-            category: classifyAttachment({
-              mimetype: firstNative.mimetype,
-              filename: firstNative.filename,
-            }),
-          },
-        }
-      : additionalKwargs;
+    // Surface EVERY attachment's metadata on the human message — the
+    // list-messages transform reads these off human messages, so the client
+    // can render the file/image chips after a refetch. Built from the request
+    // payload (not the routing outcome): the user attached these files to
+    // THIS message regardless of whether the model consumed them natively or
+    // via text extraction. `attachment` (first entry) is kept for older
+    // clients that only read the singular field.
+    const attachmentMetas = params.attachments.map((attachment) => ({
+      filename: attachment.filename,
+      mimetype: attachment.mimetype,
+      size: attachment.size,
+      mxcUri: attachment.mxcUri,
+      eventId: attachment.eventId,
+      category: classifyAttachment({
+        mimetype: attachment.mimetype,
+        filename: attachment.filename,
+      }),
+    }));
+    const humanKwargs = {
+      ...additionalKwargs,
+      attachment: attachmentMetas[0],
+      attachments: attachmentMetas,
+    };
 
     const out: BaseMessage[] = [
       new HumanMessage({

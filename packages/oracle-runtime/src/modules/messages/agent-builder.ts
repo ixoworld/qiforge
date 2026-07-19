@@ -1,4 +1,5 @@
 import { MatrixManager } from '@ixo/matrix';
+import { ReasoningEvent } from '@ixo/oracles-events';
 import { type Cache, CACHE_MANAGER } from '@nestjs/cache-manager';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { Inject, Injectable, Logger } from '@nestjs/common';
@@ -14,10 +15,12 @@ import { isAllowedModel } from '../../llm/model-catalog.js';
 import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
 import { UcanService } from '../ucan/ucan.service.js';
+import { EditorPlugin } from '../../plugins/editor/editor.plugin.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
+import { emitSSEEvent } from './sse.utils.js';
 import { UserContextFetcher } from './user-context-fetcher.js';
 
 export interface BuildAgentArgs {
@@ -72,9 +75,12 @@ export interface BuiltAgent {
  * `userContext` (Memory Engine batch) and `userPreferences` (Matrix room
  * state) are fetched HERE — before `createMainAgent` — and merged into the
  * build-time state so the system prompt includes them on turn 1.
- * `UserContextFetcher` caches per room for 3 minutes; `UserPreferencesService`
+ * `UserContextFetcher` caches per room for 5 minutes; `UserPreferencesService`
  * caches internally too. Both fall through to `priorState` if the fetch
- * fails or the upstream is unconfigured.
+ * fails or the upstream is unconfigured. The userContext fetch only BLOCKS
+ * the build on true first contact (no checkpointed value) — on every later
+ * turn the checkpointed value is served and the fetch refreshes the cache
+ * in the background (stale-while-revalidate).
  *
  * Reads the prior checkpoint for OTHER build-time decisions: which
  * on-demand plugins are loaded (`state.loadedPlugins`) and the remembered
@@ -178,26 +184,30 @@ export class AgentBuilder {
     // The checkpoint read and the enrichment fetches touch disjoint stores
     // (local SQLite vs Memory Engine / Matrix room state), so they run in a
     // single Promise.all — the slowest leg gates the build, not the sum.
+    //
+    // The userContext fetch is started here but NOT awaited in the batch:
+    // whether we wait for it depends on the checkpoint (stale-while-
+    // revalidate below), and the checkpoint is one of the batch's own legs.
+    const userContextPromise = this.userContextFetcher
+      .fetch({
+        roomId: prepared.roomId,
+        userDid: payload.did,
+        sessionId: prepared.sessionId,
+      })
+      .catch((err: unknown) => {
+        this.logger.warn(
+          `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return undefined;
+      });
+
     const userPrefsService = UserPreferencesService.getInstance();
     const [
       { checkpointer, priorState },
-      freshUserContext,
       freshUserPreferences,
       matrixDelegationRaw,
     ] = await Promise.all([
       readPriorState(),
-      this.userContextFetcher
-        .fetch({
-          roomId: prepared.roomId,
-          userDid: payload.did,
-          sessionId: prepared.sessionId,
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `[AgentBuilder] userContext fetch failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-          return undefined;
-        }),
       userPrefsService.get(prepared.roomId).catch((err) => {
         this.logger.warn(
           `[AgentBuilder] userPreferences fetch failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -213,6 +223,36 @@ export class AgentBuilder {
           })
         : Promise.resolve(null),
     ]);
+
+    // Stale-while-revalidate: when the checkpoint already carries a
+    // userContext (every turn but the first), serve it immediately and let
+    // the in-flight fetch warm the fetcher's cache for the NEXT turn instead
+    // of gating this one — the Memory Engine round-trip was the single
+    // largest pre-model cost on the chat hot path. Only a thread with no
+    // prior context (true first contact) waits, and `UserContextFetcher`
+    // caps that wait internally.
+    let freshUserContext: Record<string, unknown> | undefined;
+    if (priorState.userContext !== undefined) {
+      void userContextPromise;
+      freshUserContext = undefined;
+    } else {
+      // Surface an honest progress note IF the fetch is actually slow —
+      // emitted only past a short grace so a warm cache never flashes it.
+      // No-op outside an SSE request context (batch path, Matrix path).
+      const noticeTimer = setTimeout(() => {
+        emitSSEEvent(
+          ReasoningEvent.createChunk(
+            prepared.sessionId,
+            prepared.requestId,
+            'Recalling your memories...',
+            [{ type: 'thinking', text: 'Recalling your memories...' }],
+            false,
+          ),
+        );
+      }, 300);
+      freshUserContext = await userContextPromise;
+      clearTimeout(noticeTimer);
+    }
 
     const userContext = freshUserContext ?? priorState.userContext;
     const userPreferences = freshUserPreferences ?? priorState.userPreferences;
@@ -295,6 +335,22 @@ export class AgentBuilder {
       model: requestedModel,
     };
 
+    // The editor plugin is `on-demand` (so ordinary chats carry none of its
+    // surface), but an open editor session must expose `call_editor_agent`
+    // WITHOUT an explicit `load_capability` step — the capability gate reads
+    // `loadedPlugins`, so seed it whenever the request (or the thread's
+    // checkpoint) carries an active editor context. The state reducer is a
+    // set-union, so re-seeding on later turns is a no-op.
+    const editorSessionActive = Boolean(
+      (payload.metadata?.editorRoomId ?? priorState.editorRoomId) ||
+      (payload.metadata?.spaceId ?? priorState.spaceId),
+    );
+    const seededLoadedPlugins = editorSessionActive
+      ? Array.from(
+          new Set([...(priorState.loadedPlugins ?? []), EditorPlugin.NAME]),
+        )
+      : priorState.loadedPlugins;
+
     const buildTimeState: Partial<TMainAgentGraphState> = {
       ...priorState,
       userContext,
@@ -305,6 +361,9 @@ export class AgentBuilder {
         payload.metadata?.currentEntityDid ?? priorState.currentEntityDid,
       browserTools: payload.tools ?? priorState.browserTools,
       agActions: payload.agActions ?? priorState.agActions,
+      ...(seededLoadedPlugins !== undefined && {
+        loadedPlugins: seededLoadedPlugins,
+      }),
     };
 
     // The build resolves `checkpointerForUser` again for the compiled agent;
@@ -342,6 +401,7 @@ export class AgentBuilder {
       }),
       ...(payload.tools !== undefined && { browserTools: payload.tools }),
       ...(payload.agActions !== undefined && { agActions: payload.agActions }),
+      ...(editorSessionActive && { loadedPlugins: [EditorPlugin.NAME] }),
     };
 
     // `version: 'v2'` is REQUIRED for `agent.streamEvents` to emit the

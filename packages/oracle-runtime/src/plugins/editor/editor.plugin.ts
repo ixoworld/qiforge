@@ -80,7 +80,12 @@ const manifest: PluginManifest = {
   ],
   tags: ['editor', 'blocknote', 'pages', 'documents'],
   category: 'data',
-  visibility: 'always',
+  // On-demand so ordinary chats carry no editor Tier-1 entry or gated tools.
+  // Editor sessions still work with zero load steps: `AgentBuilder` seeds
+  // `loadedPlugins` with this plugin's name whenever the request carries an
+  // `editorRoomId`/`spaceId`, so the capability gate exposes
+  // `call_editor_agent` exactly when a page is open.
+  visibility: 'on-demand',
   stability: 'stable',
 };
 

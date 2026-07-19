@@ -20,9 +20,10 @@ export const MEMORY_DELETE_EDGE_MCP_NAME = 'memory-engine__delete_edge';
 export const MEMORY_CLEAR_MCP_NAME = 'memory-engine__clear';
 
 /**
- * Default selection — mirrors the old `apps/app` Memory Agent default: search,
- * add, and delete-episode. Forks that need org-owner knowledge writes or the
- * destructive `clear` op pass an explicit list via plugin options.
+ * Default selection: search, add, delete-episode, and clear — the user must
+ * always be able to ask for a full memory wipe, so the destructive `clear`
+ * stays in the default set. Forks that need org-owner knowledge writes (or
+ * want to drop `clear`) pass an explicit list via plugin options.
  */
 export const DEFAULT_MEMORY_TOOLS = [
   MEMORY_SEARCH_MCP_NAME,
@@ -74,9 +75,16 @@ const TOOL_DEFS_TTL_MS = 5 * 60 * 1000;
 /** Cached upstream definitions, keyed by MCP URL. */
 const toolDefsCache = new Map<string, CachedToolDefs>();
 
+/**
+ * MCP URLs with a background definition refresh in flight. Guards against a
+ * burst of turns each spawning its own connect when an entry expires.
+ */
+const refreshInFlight = new Set<string>();
+
 /** Test hook: drop all cached upstream tool definitions. */
 export function clearMemoryToolDefsCache(): void {
   toolDefsCache.clear();
+  refreshInFlight.clear();
 }
 
 async function connectAndListTools(
@@ -151,12 +159,15 @@ function buildLazyUpstreamTools(
  * Default factory: authenticates with the per-request UCAN headers from
  * {@link buildMemoryHeaders}, then serves the upstream tool list.
  *
- * The first request per process (and after each TTL expiry) connects and
- * lists tools exactly like the old always-fetch path, then snapshots the
- * definitions. Subsequent requests skip the network entirely and bind lazy
- * tools that open their own authenticated client only when the agent
- * actually calls one. Auth semantics are unchanged: header minting still
- * happens (and gates the tool surface) on every request.
+ * The first request per process connects and lists tools exactly like the
+ * old always-fetch path, then snapshots the definitions. Subsequent requests
+ * skip the network entirely and bind lazy tools that open their own
+ * authenticated client only when the agent actually calls one. An EXPIRED
+ * entry is served as-is (definitions only change on upstream deploys) while
+ * a background refresh re-snapshots it — TTL expiry never lands the
+ * connect + tools/list round-trip on a chat turn. Auth semantics are
+ * unchanged: header minting still happens (and gates the tool surface) on
+ * every request.
  */
 export function createDefaultMemoryMcpFactory(
   memoryMcpUrl: string,
@@ -166,7 +177,34 @@ export function createDefaultMemoryMcpFactory(
     if (!headers) return null;
 
     const cached = toolDefsCache.get(memoryMcpUrl);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (cached) {
+      if (
+        cached.expiresAt <= Date.now() &&
+        !refreshInFlight.has(memoryMcpUrl)
+      ) {
+        refreshInFlight.add(memoryMcpUrl);
+        void connectAndListTools(memoryMcpUrl, headers)
+          .then((tools) => {
+            toolDefsCache.set(memoryMcpUrl, {
+              defs: tools.map(({ name, description, schema }) => ({
+                name,
+                description,
+                schema,
+              })),
+              expiresAt: Date.now() + TOOL_DEFS_TTL_MS,
+            });
+          })
+          .catch((err: unknown) => {
+            // Keep serving the stale defs; the next expired-cache turn
+            // retries the refresh.
+            runCtx.logger.warn(
+              `[memory] background tool-defs refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          })
+          .finally(() => {
+            refreshInFlight.delete(memoryMcpUrl);
+          });
+      }
       return buildLazyUpstreamTools(cached.defs, memoryMcpUrl, headers);
     }
 

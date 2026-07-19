@@ -342,8 +342,11 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
     {
       name: 'vfs_search',
       description:
-        "Find files by meaning across the user's filesystem. Use for questions and paraphrases ('the doc about pricing'). Returns file paths + cited line ranges. Follow with `vfs_read` to see the actual lines before answering or editing.",
+        "Find files by meaning across the user's filesystem. Use for questions and paraphrases ('the doc about pricing'). Returns file paths + cited line ranges. Follow with `vfs_read` to see the actual lines before answering or editing. For writing, editing, organising, or sharing files, load the `vfs` capability first.",
       schema: searchSchema,
+      // Recall must work with zero load steps — this tool and `vfs_read`
+      // stay visible while the rest of the plugin is on-demand.
+      visibility: 'always',
     },
   );
 
@@ -426,6 +429,8 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
       description:
         "Read a file's contents by path. Text files come back a window of numbered lines at a time (default first 2000; page with `offset` when `hasMore`). Images and PDFs are read too — described/transcribed for you. Always read before editing or answering from a file; do not guess its contents. Reading an image costs an extra step, so read it only when you need to see it.",
       schema: readSchema,
+      // See vfs_search — the read half of the always-available recall pair.
+      visibility: 'always',
     },
   );
 
