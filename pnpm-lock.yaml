@@ -26,8 +26,6 @@ overrides:
 
 packageExtensionsChecksum: sha256-HzD4b9oFt2aZPg2ZLMf05+8Y4A1cyEdz+89p1KB79Y0=
 
-pnpmfileChecksum: sha256-UFvaYCFY4HSDpFAD4sLVlkgXPebHEAuLkbk4/P/BqZk=
-
 importers:
 
   .:
@@ -6010,8 +6008,8 @@ packages:
     resolution: {integrity: sha512-i9/9Si4AQ8awls+YGAKkByFbeAsOPgUNeLoYeh2SQ3ddjxJ5ZJDtq/I74clDnpDcn8zS9pYlcDJ9fgVJa39Glw==}
     deprecated: 'replaced by the ''expo'' package, learn more: https://blog.expo.dev/whats-new-in-expo-modules-infrastructure-7a7cdda81ebc'
 
-  '@veramo-community/lds-ecdsa-secp256k1-recovery2020@git+https://git@github.com:uport-project/EcdsaSecp256k1RecoverySignature2020.git#ab0db52de6f4e6663ef271a48009ba26e688ef9b':
-    resolution: {commit: ab0db52de6f4e6663ef271a48009ba26e688ef9b, repo: git@github.com:uport-project/EcdsaSecp256k1RecoverySignature2020.git, type: git}
+  '@veramo-community/lds-ecdsa-secp256k1-recovery2020@https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b':
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b}
     version: 0.0.8
 
   '@veramo/core-types@5.6.0':
@@ -9326,13 +9324,13 @@ packages:
     resolution: {integrity: sha512-JymgT6Xzk5CHEmHuEyvoTNviEPxv6ihLWSPu1gFdtjSAyM6cFqNrv02yS/SIur3BBIkCf0HjizRc24d8/FfQKw==}
     engines: {node: '>=12'}
 
-  jsonld@git+https://git@github.com:digitalcredentials/jsonld.js.git#14357f7a1181ae769ecc50fee9303468f17665ff:
-    resolution: {commit: 14357f7a1181ae769ecc50fee9303468f17665ff, repo: git@github.com:digitalcredentials/jsonld.js.git, type: git}
+  jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff:
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff}
     version: 8.3.3-0
     engines: {node: '>=14'}
 
-  jsonld@git+https://git@github.com:digitalcredentials/jsonld.js.git#da0794d863eeb65faf27673d46d9cffa32e1b65a:
-    resolution: {commit: da0794d863eeb65faf27673d46d9cffa32e1b65a, repo: git@github.com:digitalcredentials/jsonld.js.git, type: git}
+  jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a:
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a}
     version: 8.3.3-0
     engines: {node: '>=14'}
 
@@ -12598,8 +12596,8 @@ packages:
   unl-core@3.0.1:
     resolution: {integrity: sha512-nSc4HxWvpW1m0xLOGDcTV7X3PrSgm3cUhQDvEPBXErjvW48njfI0Vow1qcbjwOlgeO0ugyqJeBuVOdP7rLa5Rw==}
 
-  unl-core@git+https://git@github.com:u-n-l/core-js.git#59e4e48c97c6d0a907da9bf0c0c597eb78abe19f:
-    resolution: {commit: 59e4e48c97c6d0a907da9bf0c0c597eb78abe19f, repo: git@github.com:u-n-l/core-js.git, type: git}
+  unl-core@https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f:
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f}
     version: 3.0.1
 
   unl-map-js@0.1.7:
@@ -14722,7 +14720,7 @@ snapshots:
       '@digitalbazaar/security-context': 1.0.1
       '@sphereon/isomorphic-webcrypto': 2.5.0-unstable.0(expo@56.0.12)(msrcrypto@1.5.8)
       fast-text-encoding: 1.0.6
-      jsonld: git+https://git@github.com:digitalcredentials/jsonld.js.git#da0794d863eeb65faf27673d46d9cffa32e1b65a
+      jsonld: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a
       serialize-error: 8.1.0
     transitivePeerDependencies:
       - expo
@@ -14787,7 +14785,7 @@ snapshots:
       '@digitalcredentials/open-badges-context': 2.1.0
       credentials-context: 2.0.0
       fix-esm: 1.0.1
-      jsonld: git+https://git@github.com:digitalcredentials/jsonld.js.git#14357f7a1181ae769ecc50fee9303468f17665ff
+      jsonld: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff
     transitivePeerDependencies:
       - expo
       - expo-crypto
@@ -19563,7 +19561,7 @@ snapshots:
       invariant: 2.2.4
     optional: true
 
-  '@veramo-community/lds-ecdsa-secp256k1-recovery2020@git+https://git@github.com:uport-project/EcdsaSecp256k1RecoverySignature2020.git#ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)':
+  '@veramo-community/lds-ecdsa-secp256k1-recovery2020@https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)':
     dependencies:
       '@bitauth/libauth': 1.19.1
       '@digitalcredentials/jsonld': 5.2.2(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
@@ -19643,7 +19641,7 @@ snapshots:
       '@transmute/credentials-context': 0.7.0-unstable.82
       '@transmute/ed25519-signature-2018': 0.7.0-unstable.82
       '@transmute/json-web-signature': 0.7.0-unstable.82
-      '@veramo-community/lds-ecdsa-secp256k1-recovery2020': git+https://git@github.com:uport-project/EcdsaSecp256k1RecoverySignature2020.git#ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
+      '@veramo-community/lds-ecdsa-secp256k1-recovery2020': https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
       '@veramo/core-types': 6.0.2
       '@veramo/utils': 6.0.2
       cross-fetch: 4.1.0
@@ -19673,7 +19671,7 @@ snapshots:
       '@transmute/credentials-context': 0.7.0-unstable.82
       '@transmute/ed25519-signature-2018': 0.7.0-unstable.82
       '@transmute/json-web-signature': 0.7.0-unstable.82
-      '@veramo-community/lds-ecdsa-secp256k1-recovery2020': git+https://git@github.com:uport-project/EcdsaSecp256k1RecoverySignature2020.git#ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
+      '@veramo-community/lds-ecdsa-secp256k1-recovery2020': https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b(expo@56.0.12)(react-native@0.86.0(@babel/core@7.29.7)(react@18.3.1))(web-streams-polyfill@3.3.3)
       '@veramo/core-types': 7.0.0
       '@veramo/credential-w3c': 7.0.0
       '@veramo/utils': 7.0.0
@@ -24039,14 +24037,14 @@ snapshots:
       lru-cache: 6.0.0
       rdf-canonize: 3.4.0
 
-  jsonld@git+https://git@github.com:digitalcredentials/jsonld.js.git#14357f7a1181ae769ecc50fee9303468f17665ff:
+  jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff:
     dependencies:
       '@digitalbazaar/http-client': 4.2.0
       canonicalize: 1.0.8
       lru-cache: 6.0.0
       rdf-canonize: 4.0.1
 
-  jsonld@git+https://git@github.com:digitalcredentials/jsonld.js.git#da0794d863eeb65faf27673d46d9cffa32e1b65a:
+  jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a:
     dependencies:
       '@digitalbazaar/http-client': 4.2.0
       canonicalize: 1.0.8
@@ -28012,7 +28010,7 @@ snapshots:
       '@turf/invariant': 6.5.0
       '@turf/meta': 6.5.0
 
-  unl-core@git+https://git@github.com:u-n-l/core-js.git#59e4e48c97c6d0a907da9bf0c0c597eb78abe19f:
+  unl-core@https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f:
     dependencies:
       '@turf/bbox-polygon': 6.5.0
       '@turf/boolean-contains': 6.5.0
@@ -28031,7 +28029,7 @@ snapshots:
       isomorphic-fetch: 3.0.0
       mapbox-gl-draw-rectangle-mode: 1.0.4
       maplibre-gl: 2.1.9
-      unl-core: git+https://git@github.com:u-n-l/core-js.git#59e4e48c97c6d0a907da9bf0c0c597eb78abe19f
+      unl-core: https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f
       url-join: 4.0.1
     transitivePeerDependencies:
       - encoding
