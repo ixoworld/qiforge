@@ -151,7 +151,7 @@ export class TokenLimiter {
 
   /** Platform markup over raw provider cost. */
   private get markup(): number {
-    return 1.6
+    return 1.6;
   }
 
   /**

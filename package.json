@@ -6,7 +6,7 @@
   "author": "",
   "license": "UNLICENSED",
   "scripts": {
-    "dev": "turbo dev --filter=app",
+    "dev": "turbo dev --filter=qiforge-example",
     "build": "turbo build --filter=!app",
     "test": "turbo test",
     "test:e2e": "turbo test:e2e",
