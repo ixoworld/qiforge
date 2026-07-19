@@ -8,9 +8,9 @@ describe('buildMetaTools', () => {
   it('returns the two meta-tools in a stable order', async () => {
     const manifestRegistry = new ManifestRegistry();
     const toolRegistry = new ToolRegistry();
-    await toolRegistry.collect(makeBuildCtx());
+    const collectedTools = await toolRegistry.collect(makeBuildCtx());
 
-    const metas = buildMetaTools({ manifestRegistry, toolRegistry });
+    const metas = buildMetaTools({ manifestRegistry, collectedTools });
     expect(metas.map((t) => t.name)).toEqual([
       'load_capability',
       'list_capabilities',

@@ -145,19 +145,26 @@ describe('buildAmbientServices', () => {
   });
 
   it('LlmAdapter.get resolves a chat model for a known role', () => {
-    const ambient = buildAmbientServices({
-      nestApp: makeNestAppStub(
-        makeFakeUcanService(),
-        makeFakeBlobStoreService(),
-      ),
-      config: {},
-      identity: IDENTITY,
-      availablePlugins: new Set(),
-      logger: console,
-    });
+    // The model policy resolves credentials through the broker at
+    // construction time — a missing key is a loud error, so provide one.
+    vi.stubEnv('OPEN_ROUTER_API_KEY', 'test-key');
+    try {
+      const ambient = buildAmbientServices({
+        nestApp: makeNestAppStub(
+          makeFakeUcanService(),
+          makeFakeBlobStoreService(),
+        ),
+        config: {},
+        identity: IDENTITY,
+        availablePlugins: new Set(),
+        logger: console,
+      });
 
-    const model = ambient.llm.get('subagent');
-    expect(model).toBeDefined();
-    expect(typeof model.invoke).toBe('function');
+      const model = ambient.llm.get('subagent');
+      expect(model).toBeDefined();
+      expect(typeof model.invoke).toBe('function');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

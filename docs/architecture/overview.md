@@ -56,7 +56,7 @@ graph TD
 
 ## The three lines that make the runtime
 
-1. **Plugins contribute to registries.** Every hook on every plugin populates one of six registries (`tools`, `subAgents`, `middlewares`, `manifests`, `configSchema`, `sharedState`).
+1. **Plugins contribute to registries.** Every hook on every plugin populates one of seven registries (`tools`, `subAgents`, `middlewares`, `manifests`, `configSchema`, `sharedState`, `promptContributions`).
 2. **`createMainAgent` reads registries and composes an agent per request.** Tools, sub-agents, middlewares, the prompt — all assembled fresh per turn from the cached boot snapshot plus any request-time hooks.
 3. **The graph state is unchanged from the legacy runtime, except for one field.** The plugin runtime added `loadedPlugins` (for dynamic capability loading). Every other state field is identical — same reducers, same lifetime, same checkpointer.
 

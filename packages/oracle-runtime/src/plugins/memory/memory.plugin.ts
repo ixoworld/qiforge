@@ -42,6 +42,7 @@ const manifest: PluginManifest = {
   category: 'memory',
   visibility: 'always',
   stability: 'stable',
+  permissions: { ucan: { invoke: true } },
 };
 
 export interface MemoryPluginOptions {

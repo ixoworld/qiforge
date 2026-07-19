@@ -117,11 +117,17 @@ describe('baseEnvSchema', () => {
       'OPENAI_API_KEY',
       'OPEN_ROUTER_API_KEY',
       'NEBIUS_API_KEY',
+      'MODEL_POLICY_JSON',
+      'ROUTER_CONFIG_JSON',
+      'CF_AIG_TOKEN',
       'LIVE_AGENT_AUTH_API_KEY',
       'LANGSMITH_TRACING',
       'LANGSMITH_API_KEY',
       'LANGSMITH_PROJECT',
       'LANGSMITH_ENDPOINT',
+      'AUDIT_LOG_PATH',
+      'PERMISSIONS_ENFORCEMENT',
+      'TURN_BUDGET_JSON',
       'MAIN_REASONING_EFFORT',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);

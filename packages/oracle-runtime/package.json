@@ -67,6 +67,7 @@
     "@ixo/editor": "6.0.1",
     "@ixo/matrix": "workspace:*",
     "@ixo/matrix-crdt": "^1.2.5",
+    "@ixo/oracle-core": "workspace:*",
     "@ixo/oracles-chain-client": "workspace:*",
     "@ixo/oracles-events": "workspace:*",
     "@ixo/slack": "1.0.0",

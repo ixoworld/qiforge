@@ -4,8 +4,10 @@ import type {
   AgentMiddleware,
   PluginContext,
   PluginManifest,
+  PluginPromptContribution,
   PluginSubAgent,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from '../plugin-api/types.js';
 
@@ -111,6 +113,15 @@ export interface TestPluginInit {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (state: any, runCtx: RuntimeContext) => unknown
   >;
+  sharedStateVisibility?: Record<string, readonly string[]>;
+  getSubAgentMiddlewares?: (ctx: PluginContext) => AgentMiddleware[];
+  getPromptContribution?: (
+    rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ) =>
+    | PluginPromptContribution
+    | undefined
+    | Promise<PluginPromptContribution | undefined>;
 }
 
 /**
@@ -212,6 +223,10 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     override readonly configSchema?: z.ZodObject<any> = init.configSchema;
     override readonly autoDetectHint?: string = init.autoDetectHint;
+    override readonly sharedStateVisibility?: Record<
+      string,
+      readonly string[]
+    > = init.sharedStateVisibility;
 
     override autoDetect(env: NodeJS.ProcessEnv): boolean {
       return init.autoDetect ? init.autoDetect(env) : true;
@@ -231,8 +246,15 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
       return init.getMiddlewares ? init.getMiddlewares(ctx) : [];
     }
 
+    override getSubAgentMiddlewares(ctx: PluginContext): AgentMiddleware[] {
+      return init.getSubAgentMiddlewares
+        ? init.getSubAgentMiddlewares(ctx)
+        : [];
+    }
+
     override getRequestTools = init.getRequestTools;
     override getRequestSubAgents = init.getRequestSubAgents;
+    override getPromptContribution = init.getPromptContribution;
 
     override getSharedState(): Record<
       string,

@@ -4,7 +4,7 @@ import { ToolMessage } from '@langchain/core/messages';
 import { tool } from '../plugin-api/tool-helper.js';
 import type { PluginManifest, PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
-import type { ToolRegistry } from '../registries/tool-registry.js';
+import type { RegisteredTool } from '../registries/tool-registry.js';
 import { acquireToolLock } from '../utils/tool-lock.js';
 
 const loadCapabilitySchema = z.object({
@@ -55,7 +55,7 @@ interface LoadCapabilityResult extends PluginManifest {
  */
 export function buildLoadCapabilityTool(
   manifestRegistry: ManifestRegistry,
-  toolRegistry: ToolRegistry,
+  collectedTools: readonly RegisteredTool[],
 ): PluginTool {
   return tool(
     async (args, ctx) => {
@@ -83,9 +83,9 @@ export function buildLoadCapabilityTool(
             );
           }
 
-          const tools: ToolDetail[] = toolRegistry
-            .toolsForPlugin(name)
-            .map((t) => ({
+          const tools: ToolDetail[] = collectedTools
+            .filter((entry) => entry.pluginName === name)
+            .map(({ tool: t }) => ({
               name: t.name,
               description: t.description,
             }));

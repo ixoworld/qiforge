@@ -87,6 +87,7 @@ export class CreditsPlugin extends OraclePlugin {
     visibility: 'silent',
     stability: 'stable',
     category: 'core',
+    providesRequestGate: true,
   };
 
   override readonly configSchema = CreditsConfigSchema;
@@ -111,6 +112,24 @@ export class CreditsPlugin extends OraclePlugin {
   }
 
   override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {
+    return [this.resolveMeteringMiddleware(ctx)];
+  }
+
+  /**
+   * The SAME metering middleware instance also runs inside every sub-agent
+   * loop — a credit gate that guards only the outer loop is a gate the
+   * outer loop can walk around by delegating. Sharing one instance keeps
+   * reservation pairing on one map across both stacks.
+   */
+  override getSubAgentMiddlewares(ctx: PluginContext): AgentMiddleware[] {
+    return [this.resolveMeteringMiddleware(ctx)];
+  }
+
+  private meteringMiddleware: AgentMiddleware | null = null;
+
+  private resolveMeteringMiddleware(ctx: PluginContext): AgentMiddleware {
+    if (this.meteringMiddleware) return this.meteringMiddleware;
+
     const config = ctx.config as AppliedConfig;
     const redis = this.redis;
 
@@ -118,7 +137,11 @@ export class CreditsPlugin extends OraclePlugin {
       ctx.logger.warn?.(
         '[CreditsPlugin] No Redis client available — credit limiting disabled at runtime.',
       );
-      return [createCreditsMiddleware({ limiter: null, logger: ctx.logger })];
+      this.meteringMiddleware = createCreditsMiddleware({
+        limiter: null,
+        logger: ctx.logger,
+      });
+      return this.meteringMiddleware;
     }
 
     const limiter = new TokenLimiter({
@@ -129,7 +152,11 @@ export class CreditsPlugin extends OraclePlugin {
       logger: ctx.logger,
     });
 
-    return [createCreditsMiddleware({ limiter, logger: ctx.logger })];
+    this.meteringMiddleware = createCreditsMiddleware({
+      limiter,
+      logger: ctx.logger,
+    });
+    return this.meteringMiddleware;
   }
 
   override getNestModules(): Array<Type | DynamicModule> {

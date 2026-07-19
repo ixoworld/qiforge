@@ -1,4 +1,10 @@
-import type { StructuredTool } from 'langchain';
+import type { AgentMiddleware, StructuredTool } from 'langchain';
+import type { TurnBudgetTracker } from '../kernel/budget.js';
+import type { ExecutionBrokerPort } from '../kernel/execution-broker.js';
+import type {
+  PermissionsEnforcement,
+  PluginPermissions,
+} from '../kernel/permissions.js';
 import type {
   PluginContext,
   PluginSubAgent,
@@ -11,8 +17,24 @@ import type {
 } from '../registries/subagent-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
+import { buildSubAgentMiddlewareStack } from './middlewares/subagent-stack.js';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
+
+/**
+ * Kernel services threaded into every sub-agent build: the shared turn
+ * budget tracker, the execution broker, permission enforcement inputs, and
+ * the plugin-declared sub-agent middlewares (metering). Optional as a bag —
+ * lightweight test paths omit it — but when present its pieces are applied
+ * without per-sub-agent opt-outs.
+ */
+export interface SubAgentKernel {
+  tracker?: TurnBudgetTracker;
+  broker?: ExecutionBrokerPort;
+  enforcement?: PermissionsEnforcement;
+  permissionsFor?: (pluginName: string) => PluginPermissions | undefined;
+  subAgentMiddlewares: AgentMiddleware[];
+}
 
 /** Inputs for collecting and wrapping sub-agents. */
 export interface CollectSubAgentsInput {
@@ -58,6 +80,9 @@ export interface CollectSubAgentsInput {
    * and pass the result here.
    */
   subAgents?: RegisteredSubAgent[];
+  /** Kernel services applied to every sub-agent build (budget, broker,
+   * permission enforcement, plugin sub-agent middlewares). */
+  kernel?: SubAgentKernel;
 }
 
 /**
@@ -82,6 +107,8 @@ function defaultToAgentSpec(
   state: RuntimeStateInput,
   userDid: string,
   sessionId: string,
+  pluginName: string,
+  kernel?: SubAgentKernel,
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -92,11 +119,40 @@ function defaultToAgentSpec(
     ? subAgent.tools
     : subAgent.tools(buildCtx);
 
+  // Inner tools go through the same kernel path as main-agent tools: the
+  // owning plugin's grant attenuates the context and the shared broker
+  // applies budget/timeout/audit. Delegation is not an escape hatch.
   const tools: StructuredTool[] = pluginTools.map((t) =>
-    wrapPluginTool(t, { ambient, state }),
+    wrapPluginTool(t, {
+      ambient,
+      state,
+      ...(kernel?.enforcement !== undefined
+        ? {
+            pluginName,
+            permissions: kernel.permissionsFor?.(pluginName),
+            enforcement: kernel.enforcement,
+          }
+        : {}),
+      ...(kernel?.broker ? { broker: kernel.broker } : {}),
+    }),
   );
 
   const model = ambient.llm.get(subAgent.model ?? 'subagent');
+
+  // Kernel middlewares (budget, metering) always compose; convenience
+  // middlewares (validation, repetition, retry) honor inheritMiddlewares;
+  // the sub-agent's own middlewares come last.
+  const middleware: AgentMiddleware[] = [
+    ...(kernel
+      ? buildSubAgentMiddlewareStack({
+          logger: ambient.logger,
+          tracker: kernel.tracker,
+          kernelInherited: kernel.subAgentMiddlewares,
+          inheritConvenience: subAgent.inheritMiddlewares !== false,
+        })
+      : []),
+    ...(subAgent.middlewares ?? []),
+  ];
 
   // Normalize `forwardTools`:
   //   true       → all of this sub-agent's own tool names
@@ -110,16 +166,36 @@ function defaultToAgentSpec(
     forwardTools = subAgent.forwardTools;
   }
 
+  // Audit hook: refusal retries land on the ambient audit sink when one is
+  // wired. Captured here (not inside the spec) so the wrapper stays free of
+  // ambient knowledge.
+  const audit = ambient.audit;
+  const emitAudit = audit
+    ? (record: Parameters<typeof audit.append>[0]): void => {
+        void Promise.resolve(audit.append(record)).catch((err: unknown) => {
+          ambient.logger.warn(
+            `[sub-agent] audit append failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      }
+    : undefined;
+
   return {
     name: subAgent.name,
     description: subAgent.description,
     systemPrompt,
     tools,
     model,
-    middleware: subAgent.middlewares,
+    middleware,
     userDid,
     sessionId,
     ...(forwardTools ? { forwardTools } : {}),
+    ...(subAgent.onRefusal ? { onRefusal: subAgent.onRefusal } : {}),
+    ...(subAgent.readOnly !== undefined ? { readOnly: subAgent.readOnly } : {}),
+    ...(subAgent.recursionLimit !== undefined
+      ? { recursionLimit: subAgent.recursionLimit }
+      : {}),
+    ...(emitAudit ? { emitAudit } : {}),
   };
 }
 
@@ -144,6 +220,7 @@ export async function collectSubAgentsWithFallback(
     toAgentSpec,
     passthroughTools,
     subAgents,
+    kernel,
   } = input;
 
   const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
@@ -160,6 +237,8 @@ export async function collectSubAgentsWithFallback(
               state,
               userDid,
               sessionId,
+              pluginName,
+              kernel,
             );
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }

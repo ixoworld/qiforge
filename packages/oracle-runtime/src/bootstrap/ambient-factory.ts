@@ -1,11 +1,18 @@
 import { MatrixManager } from '@ixo/matrix';
-import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import { toEventEnvelope } from '../events/event-envelope.js';
+import {
+  composeAuditSinks,
+  createLoggerAuditSink,
+  type AuditSink,
+} from '../kernel/audit.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
+import type { SharedStateRegistry } from '../registries/shared-state-registry.js';
+import { createFileAuditSink } from './audit-file-sink.js';
 import type {
   Logger as PluginLogger,
   MatrixEvent,
@@ -35,6 +42,8 @@ export interface BuildAmbientOptions {
   availablePlugins: ReadonlySet<string>;
   /** Boot-time logger; reused across adapters that don't get their own. */
   logger: PluginLogger;
+  /** Cross-plugin shared-state registry; wired into `ctx.shared`. */
+  sharedStateRegistry?: SharedStateRegistry;
 }
 
 /**
@@ -195,15 +204,36 @@ export function buildAmbientServices(
 
   const emitAdapter: EmitAdapter = {
     emit(eventName, payload) {
-      // The scoped emitter has already attached session/request ids to the
-      // payload. The cross-module `wsEmitter` expects `(sessionId, event)`
-      // where the event carries its own `type` discriminator.
-      const sessionId =
-        typeof payload?.sessionId === 'string' ? payload.sessionId : 'unknown';
-      const event = { type: eventName, ...payload };
-      wsEmitter.emit(sessionId, event as unknown as AllEvents);
+      // The scoped emitter attaches sessionId/requestId before this sink
+      // runs; the envelope builder validates both and produces the same
+      // `{ eventName, payload }` wire shape as the event classes. An
+      // unroutable payload is dropped loudly instead of being sent in a
+      // shape every consumer would reject.
+      const envelope = toEventEnvelope(eventName, payload);
+      if (!envelope) {
+        opts.logger.warn(
+          `[emit] dropped '${eventName}' event without sessionId/requestId`,
+        );
+        return;
+      }
+      wsEmitter.emit(envelope.payload.sessionId, envelope);
     },
   };
+
+  // Audit trail: always through the runtime logger; additionally to an
+  // append-only JSONL file when the operator sets AUDIT_LOG_PATH.
+  const auditLogPath =
+    typeof opts.config.AUDIT_LOG_PATH === 'string' &&
+    opts.config.AUDIT_LOG_PATH.length > 0
+      ? opts.config.AUDIT_LOG_PATH
+      : undefined;
+  const auditSinks: AuditSink[] = [createLoggerAuditSink(opts.logger)];
+  if (auditLogPath) {
+    auditSinks.push(createFileAuditSink(auditLogPath, opts.logger));
+  }
+  const audit = composeAuditSinks(auditSinks, opts.logger);
+
+  const sharedStateRegistry = opts.sharedStateRegistry;
 
   return {
     config: opts.config,
@@ -216,5 +246,14 @@ export function buildAmbientServices(
     emit: emitAdapter,
     ucan: ucanAdapter,
     logger: opts.logger,
+    audit,
+    ...(sharedStateRegistry
+      ? {
+          sharedState: {
+            build: (state, runCtx, consumerPluginName) =>
+              sharedStateRegistry.build(state, runCtx, consumerPluginName),
+          },
+        }
+      : {}),
   };
 }

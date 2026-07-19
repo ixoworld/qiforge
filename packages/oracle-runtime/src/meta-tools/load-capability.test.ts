@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { Command } from '@langchain/langgraph';
 import { type ToolMessage } from '@langchain/core/messages';
 import { ManifestRegistry } from '../registries/manifest-registry.js';
-import { ToolRegistry } from '../registries/tool-registry.js';
+import {
+  ToolRegistry,
+  type RegisteredTool,
+} from '../registries/tool-registry.js';
 import {
   makeBuildCtx,
   makeManifest,
@@ -21,10 +24,10 @@ interface LoadResult extends PluginManifest {
 
 async function buildRegistries(): Promise<{
   manifests: ManifestRegistry;
-  tools: ToolRegistry;
+  tools: RegisteredTool[];
 }> {
   const manifests = new ManifestRegistry();
-  const tools = new ToolRegistry();
+  const toolRegistry = new ToolRegistry();
 
   const composio = makePlugin({
     name: 'composio',
@@ -66,10 +69,10 @@ async function buildRegistries(): Promise<{
   manifests.register(memory);
   manifests.register(tracing);
 
-  tools.register(composio);
-  tools.register(memory);
-  tools.register(tracing);
-  await tools.collect(makeBuildCtx());
+  toolRegistry.register(composio);
+  toolRegistry.register(memory);
+  toolRegistry.register(tracing);
+  const tools = await toolRegistry.collect(makeBuildCtx());
 
   return { manifests, tools };
 }
@@ -132,7 +135,6 @@ describe('load_capability', () => {
 
   it('batches multiple capabilities into a single Command', async () => {
     const { manifests, tools } = await buildRegistries();
-    const loadTool = buildLoadCapabilityTool(manifests, tools);
 
     // Register a second on-demand plugin to batch with composio
     const analytics = makePlugin({
@@ -148,8 +150,13 @@ describe('load_capability', () => {
       ],
     });
     manifests.register(analytics);
-    tools.register(analytics);
-    await tools.collect(makeBuildCtx());
+    const analyticsRegistry = new ToolRegistry();
+    analyticsRegistry.register(analytics);
+    const combinedTools = [
+      ...tools,
+      ...(await analyticsRegistry.collect(makeBuildCtx())),
+    ];
+    const loadTool = buildLoadCapabilityTool(manifests, combinedTools);
 
     const result = await loadTool.handler(
       { names: ['composio', 'analytics'] },
@@ -275,5 +282,49 @@ describe('load_capability', () => {
     } finally {
       release();
     }
+  });
+
+  it("lists only the requesting build's collected tools — no cross-request leakage", async () => {
+    const { manifests, tools } = await buildRegistries();
+    // Simulate a second concurrent user whose request-time build contributed
+    // an extra composio tool. Each build passes ITS OWN collected list.
+    const otherUsersTools = [
+      ...tools,
+      {
+        pluginName: 'composio',
+        tool: makeTool('composio_private_action', {
+          description: 'Request-scoped tool of another user.',
+        }),
+      },
+    ];
+
+    const loadForThisUser = buildLoadCapabilityTool(manifests, tools);
+    const loadForOtherUser = buildLoadCapabilityTool(
+      manifests,
+      otherUsersTools,
+    );
+
+    const mine = (await loadForThisUser.handler(
+      { names: ['composio'] },
+      makeRuntimeContext({
+        loadedPlugins: new Set(['composio']),
+        session: { id: 'session-a', client: 'portal', requestId: 'req-a' },
+      }),
+    )) as LoadResult[];
+    const theirs = (await loadForOtherUser.handler(
+      { names: ['composio'] },
+      makeRuntimeContext({
+        loadedPlugins: new Set(['composio']),
+        session: { id: 'session-b', client: 'portal', requestId: 'req-b' },
+      }),
+    )) as LoadResult[];
+
+    expect(mine[0]!.tools.map((t) => t.name)).toEqual([
+      'composio_send_email',
+      'composio_create_card',
+    ]);
+    expect(theirs[0]!.tools.map((t) => t.name)).toContain(
+      'composio_private_action',
+    );
   });
 });

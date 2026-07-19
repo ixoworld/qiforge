@@ -2,6 +2,7 @@ import { type GetMySubscriptionsResponseDto } from '@ixo/common';
 import type { Redis } from 'ioredis';
 import crypto from 'node:crypto';
 import { z } from 'zod';
+import type { LedgerPort } from '../../kernel/ledger.js';
 import type { Logger } from '../../plugin-api/types.js';
 
 /** Network tier — drives the credits-per-USD multiplier. */
@@ -90,7 +91,7 @@ const LIMIT_TOKENS_SCRIPT = `
  *   2. cached per-model pricing × tokens
  *   3. flat-rate `$0.75 / 1M tokens` fallback
  */
-export class TokenLimiter {
+export class TokenLimiter implements LedgerPort {
   private readonly redis: Redis;
   private readonly network: CreditsNetwork;
   private readonly disableCredits: boolean;
@@ -176,12 +177,17 @@ export class TokenLimiter {
     return (params.totalTokens / 1_000_000) * 0.75 * markup;
   }
 
-  /** Flat-rate fallback: $0.75 per 1M tokens × network markup. */
+  /**
+   * Flat-rate fallback: $0.75 per 1M tokens, converted to credits via
+   * `usdCostToCredits` (which applies the network markup and the
+   * credits-per-USD rate). Converting through the shared function keeps
+   * every billing path on one conversion — the previous implementation
+   * rounded the raw USD amount, which deducted 0 credits for any turn
+   * under ~400k tokens.
+   */
   llmTokenToCredits(tokenCount: number): number {
-    const markup = 1.6;
-    const costPerMillionTokens = 0.75 * markup;
     const tokensPerMillion = 1_000_000;
-    return Math.round((tokenCount / tokensPerMillion) * costPerMillionTokens);
+    return this.usdCostToCredits((tokenCount / tokensPerMillion) * 0.75);
   }
 
   /**
@@ -200,13 +206,15 @@ export class TokenLimiter {
       return this.llmTokenToCredits(inputTokens + outputTokens);
     }
 
-    const markup = 1.6;
     const divisor = 1_000_000;
     const inputCost =
       (inputTokens / divisor) * pricing.inputPricePerMillionTokens;
     const outputCost =
       (outputTokens / divisor) * pricing.outputPricePerMillionTokens;
-    return Math.round((inputCost + outputCost) * markup);
+    // `usdCostToCredits` applies the network markup and credits-per-USD
+    // rate — the same conversion the provider-cost branch uses, so all
+    // three billing paths agree on scale.
+    return this.usdCostToCredits(inputCost + outputCost);
   }
 
   /**
@@ -424,6 +432,50 @@ export class TokenLimiter {
         credits,
       );
     }
+  }
+
+  /**
+   * Reserve the estimated cost of a call BEFORE it runs — an atomic deduct +
+   * hold through the same Lua script as `limit`. A caller that cannot cover
+   * the estimate never starts; two callers racing a balance that covers only
+   * one cannot both pass.
+   */
+  async reserve(userDid: string, estimateCredits: number): Promise<void> {
+    if (estimateCredits <= 0) return;
+    await this.limit(userDid, estimateCredits);
+  }
+
+  /**
+   * Settle a reservation against the actual cost. The delta rides the same
+   * atomic script — positive charges the shortfall, negative refunds the
+   * surplus (the script's balance-floor branch only triggers on decrements,
+   * so refunds always apply). An uncoverable shortfall floors at zero and is
+   * logged: the spend has already happened upstream.
+   */
+  async commit(
+    userDid: string,
+    estimateCredits: number,
+    actualCredits: number,
+  ): Promise<void> {
+    const delta = actualCredits - estimateCredits;
+    if (delta === 0) return;
+    try {
+      await this.limit(userDid, delta);
+    } catch (error) {
+      if (error instanceof TokenLimiterError) {
+        this.logger.warn(
+          `[TokenLimiter] commit shortfall not coverable for ${userDid}: reserved=${estimateCredits}, actual=${actualCredits}`,
+        );
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /** Return an unused reservation in full (the call produced nothing billable). */
+  async release(userDid: string, estimateCredits: number): Promise<void> {
+    if (estimateCredits <= 0) return;
+    await this.limit(userDid, -estimateCredits);
   }
 
   async setPendingClaim(

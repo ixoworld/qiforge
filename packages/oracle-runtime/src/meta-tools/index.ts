@@ -1,16 +1,18 @@
 import type { PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
-import type { ToolRegistry } from '../registries/tool-registry.js';
+import type { RegisteredTool } from '../registries/tool-registry.js';
 import { buildLoadCapabilityTool } from './load-capability.js';
 import { buildListCapabilitiesTool } from './list-capabilities.js';
 
 /**
- * Inputs for `buildMetaTools`. The runtime passes its already-collected
- * registries; the meta-tools read manifests and tool descriptors from them.
+ * Inputs for `buildMetaTools`. The manifests come from the boot-scoped
+ * registry; the tool descriptors are THIS REQUEST's collected list, passed
+ * as a value so one user's request-time tools can never leak into another
+ * user's `load_capability` listing through shared registry state.
  */
 export interface BuildMetaToolsOptions {
   manifestRegistry: ManifestRegistry;
-  toolRegistry: ToolRegistry;
+  collectedTools: readonly RegisteredTool[];
 }
 
 /**
@@ -27,9 +29,9 @@ export interface BuildMetaToolsOptions {
  * plugins.
  */
 export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
-  const { manifestRegistry, toolRegistry } = opts;
+  const { manifestRegistry, collectedTools } = opts;
   return [
-    buildLoadCapabilityTool(manifestRegistry, toolRegistry),
+    buildLoadCapabilityTool(manifestRegistry, collectedTools),
     buildListCapabilitiesTool(manifestRegistry),
   ];
 }

@@ -556,7 +556,7 @@ export async function createIntegrationRuntime(
   // them; same instance the agent would see at runtime.
   const metaToolEntries = buildMetaTools({
     manifestRegistry: manifests,
-    toolRegistry: tools,
+    collectedTools: pluginCollectedTools,
   }).map((tool) => ({ pluginName: '__meta__', tool }));
   const collectedTools = [...pluginCollectedTools, ...metaToolEntries];
 

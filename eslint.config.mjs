@@ -17,6 +17,8 @@ export default [
       'apps/app/**',
       'packages/vitest-config/**',
       'packages/eslint-config/prettier-base.cjs',
+      // Node-run build/check scripts (not part of any package's source).
+      'packages/*/scripts/**',
     ],
   },
 

@@ -24,6 +24,12 @@ export interface CapabilityGateMiddlewareOptions {
    * middleware does not need access to the registries at runtime.
    */
   visibilityByToolName: Map<string, Visibility>;
+  /**
+   * Per-turn capability grants from the semantic router. Request-scoped and
+   * never checkpointed — read live on every model call so a route decision
+   * expands the visible surface for THIS turn only.
+   */
+  routedCapabilities?: ReadonlySet<string>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -44,7 +50,8 @@ export interface CapabilityGateMiddlewareOptions {
 export const createCapabilityGateMiddleware = (
   options: CapabilityGateMiddlewareOptions,
 ): AgentMiddleware => {
-  const { pluginByToolName, visibilityByToolName } = options;
+  const { pluginByToolName, visibilityByToolName, routedCapabilities } =
+    options;
   const logger = options.logger ?? NOOP_LOGGER;
 
   return createMiddleware({
@@ -65,7 +72,7 @@ export const createCapabilityGateMiddleware = (
         if (!plugin) return true;
         const viz = visibilityByToolName.get(name) ?? 'on-demand';
         if (viz === 'always' || viz === 'silent') return true;
-        return loaded.has(plugin);
+        return loaded.has(plugin) || routedCapabilities?.has(plugin) === true;
       });
 
       if (filtered.length !== request.tools.length) {

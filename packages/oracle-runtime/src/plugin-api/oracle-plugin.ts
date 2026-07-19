@@ -5,8 +5,10 @@ import type {
   AuthExcludedRoute,
   PluginContext,
   PluginManifest,
+  PluginPromptContribution,
   PluginSubAgent,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from './types.js';
 
@@ -72,10 +74,38 @@ export abstract class OraclePlugin {
   ): PluginSubAgent[] | Promise<PluginSubAgent[]>;
 
   /**
+   * Request-time prompt contributions. Called once per `createMainAgent`
+   * build AFTER tools and sub-agents are bound, so the plugin can see
+   * whether its surface actually attached (`info.boundToolNames`) and which
+   * capabilities this thread has loaded (`info.loadedPlugins`), and react —
+   * contribute a richer operational mode, a mode section, custom
+   * instructions, or stub tools explaining a refusal.
+   *
+   * The runtime composes contributions generically; it knows nothing about
+   * any specific plugin's modes.
+   */
+  getPromptContribution?(
+    rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ):
+    | PluginPromptContribution
+    | undefined
+    | Promise<PluginPromptContribution | undefined>;
+
+  /**
    * LangChain middlewares inserted after the four always-on middlewares
    * (tool-validation, retry, page-context, safety-guardrail).
    */
   getMiddlewares?(ctx: PluginContext): AgentMiddleware[];
+
+  /**
+   * Middlewares that must ALSO run inside every sub-agent's inner loop —
+   * not just the main agent's. Metering is the canonical case: a credit
+   * gate that only guards the outer loop is a gate the outer loop can walk
+   * around by delegating. Keep these self-contained (they receive the same
+   * forwarded runtime context sub-agent invocations carry).
+   */
+  getSubAgentMiddlewares?(ctx: PluginContext): AgentMiddleware[];
 
   /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.
@@ -87,6 +117,14 @@ export abstract class OraclePlugin {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (state: any, runCtx: RuntimeContext) => unknown
   >;
+
+  /**
+   * Consumer allow-lists for `getSharedState` keys. A key listed here is
+   * readable only by the named plugins (and its producer); keys not listed
+   * stay readable by every plugin. Declare this when a shared value carries
+   * anything another plugin shouldn't casually read.
+   */
+  readonly sharedStateVisibility?: Record<string, readonly string[]>;
 
   /**
    * NestJS modules the plugin contributes. Spread into `RuntimeAppModule.imports`,

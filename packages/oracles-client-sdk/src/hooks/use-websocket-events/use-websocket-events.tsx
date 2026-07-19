@@ -282,7 +282,13 @@ export const evNames = {
   ActionCall: 'action_call',
   RenderComponent: 'render_component',
   MessageCacheInvalidation: 'message_cache_invalidation',
-  RouterUpdate: 'router_update',
+  // Canonical wire name — the server has always emitted `router.update`
+  // (both over SSE and WS); the previous `router_update` value never
+  // matched a real event.
+  RouterUpdate: 'router.update',
+  /** Legacy misspelling kept for one migration window; compare against both
+   * while older servers/clients coexist. */
+  RouterUpdateLegacy: 'router_update',
   BrowserToolCall: 'browser_tool_call',
 } as const;
 

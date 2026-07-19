@@ -1,0 +1,19 @@
+{
+  "name": "@ixo/oracle-worker",
+  "version": "0.0.1",
+  "private": true,
+  "description": "FAIL-CLOSED COMPILE SPIKE of the Cloudflare Workers oracle adapter. Not deployable: every route answers 503, no model adapter is registered, no billable call is possible. Exists to prove @ixo/oracle-core compiles into a workerd-shaped entry with no Node dependencies.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check:neutral-bundle": "node scripts/check-neutral-bundle.mjs"
+  },
+  "dependencies": {
+    "@ixo/oracle-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@ixo/typescript-config": "workspace:*",
+    "esbuild": "^0.27.7",
+    "typescript": "^5.9.3"
+  }
+}

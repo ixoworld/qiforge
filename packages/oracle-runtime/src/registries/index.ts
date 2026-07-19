@@ -18,3 +18,6 @@ export type { RegisteredConfigSchema } from './config-schema-registry.js';
 
 export { SharedStateRegistry } from './shared-state-registry.js';
 export type { RegisteredSharedAccessor } from './shared-state-registry.js';
+
+export { PromptContributionRegistry } from './prompt-contribution-registry.js';
+export type { RegisteredPromptContribution } from './prompt-contribution-registry.js';

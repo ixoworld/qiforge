@@ -22,6 +22,7 @@ export interface RegisteredMiddleware {
 export class MiddlewareRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredMiddleware[] | null = null;
+  private subAgentBootCache: RegisteredMiddleware[] | null = null;
 
   /**
    * Add a plugin whose `getMiddlewares` will be called at `collect()` time.
@@ -30,6 +31,7 @@ export class MiddlewareRegistry {
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
+    this.subAgentBootCache = null;
   }
 
   /**
@@ -49,6 +51,25 @@ export class MiddlewareRegistry {
       }
     }
     this.bootCache = out;
+    return out;
+  }
+
+  /**
+   * Invoke `getSubAgentMiddlewares(buildCtx)` on every registered plugin —
+   * the middlewares that must ALSO run inside every sub-agent's inner loop
+   * (metering being the canonical case). Cached like `collect`.
+   */
+  collectSubAgent(buildCtx: PluginContext): RegisteredMiddleware[] {
+    if (this.subAgentBootCache !== null) return this.subAgentBootCache;
+    const out: RegisteredMiddleware[] = [];
+    for (const plugin of this.plugins) {
+      if (!plugin.getSubAgentMiddlewares) continue;
+      const middlewares = plugin.getSubAgentMiddlewares(buildCtx);
+      for (const middleware of middlewares) {
+        out.push({ pluginName: plugin.name, middleware });
+      }
+    }
+    this.subAgentBootCache = out;
     return out;
   }
 

@@ -14,7 +14,9 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   PluginManifest,
+  PluginPromptContribution,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from '../../plugin-api/types.js';
 import { buildAuthoringTools } from './tools/authoring.js';
@@ -32,7 +34,7 @@ import {
 } from './tools/inspect.js';
 import { buildLinkageTools } from './tools/linkage.js';
 import { buildSettingsTools } from './tools/settings.js';
-import { FLOWS_PLUGIN_NAME } from './prompts.js';
+import { FLOWS_OPERATING_GUIDE, FLOWS_PLUGIN_NAME } from './prompts.js';
 
 export interface FlowsPluginOptions {
   /** A long-lived Matrix client owned by the host app, shared across rooms. */
@@ -96,6 +98,20 @@ export class FlowsPlugin extends OraclePlugin {
   constructor(options: FlowsPluginOptions = {}) {
     super();
     this.matrixClient = options.matrixClient;
+  }
+
+  /**
+   * The full Flow Builder operating contract, injected into the system
+   * prompt's Custom Instructions only once this capability is loaded for the
+   * thread — so it costs no tokens on turns where flows is never used.
+   */
+  override getPromptContribution(
+    _rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ): PluginPromptContribution | undefined {
+    return info.loadedPlugins.has(this.name)
+      ? { customInstructions: FLOWS_OPERATING_GUIDE }
+      : undefined;
   }
 
   override getRequestTools(_rtCtx: RuntimeContext): PluginTool[] {

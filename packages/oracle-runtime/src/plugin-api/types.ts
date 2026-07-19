@@ -2,6 +2,9 @@ import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { PluginPermissions } from '../kernel/permissions.js';
+
+export type { PluginPermissions };
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Mirrors the
@@ -18,19 +21,9 @@ export interface AuthExcludedRoute {
 /** Merged Zod-validated env vars (core schema + every loaded plugin's `configSchema`). */
 export type MergedConfig = Record<string, unknown>;
 
-/** Plugin-scoped logger. */
-export interface Logger {
-  log(message: unknown, ...optional: unknown[]): void;
-  error(message: unknown, ...optional: unknown[]): void;
-  warn(message: unknown, ...optional: unknown[]): void;
-  debug?(message: unknown, ...optional: unknown[]): void;
-  verbose?(message: unknown, ...optional: unknown[]): void;
-  /**
-   * Returns a new logger that auto-prefixes records with the given context.
-   * Optional — when absent, the same logger is returned unchanged.
-   */
-  child?(bindings: Record<string, unknown>): Logger;
-}
+/** Plugin-scoped logger — canonical definition lives in @ixo/oracle-core. */
+import type { Logger } from '@ixo/oracle-core/types';
+export type { Logger };
 
 /** LLM role tag used by `ctx.llm.get(role)`. Aligned with current `ModelRole`. */
 export type ModelRole = 'main' | 'subagent' | 'utility' | (string & {});
@@ -144,6 +137,22 @@ export interface PluginManifest {
 
   /** Stability hint surfaced to the agent (`experimental` → warning footnote). */
   stability?: 'stable' | 'beta' | 'experimental';
+
+  /**
+   * Least-authority declaration: which `RuntimeContext` surfaces this
+   * plugin's request-time code may touch. Undeclared surfaces are replaced
+   * with throwing guards when the runtime wraps the plugin's tools. Omit
+   * entirely for plugins whose tools are pure fetch/compute.
+   */
+  permissions?: PluginPermissions;
+
+  /**
+   * Declares that this plugin gates requests before the agent runs (billing
+   * / subscription enforcement). The bootstrap enables the request-gate
+   * middleware pipeline when ANY loaded plugin declares this — it never
+   * matches on plugin names.
+   */
+  providesRequestGate?: boolean;
 }
 
 export interface ManifestExample {
@@ -434,6 +443,59 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Inbound UCAN capability this tool requires. When set, the kernel checks
+   * the authenticated user's delegation BEFORE the handler runs — the check
+   * is no longer up to the handler's discretion — and a miss is returned to
+   * the agent as a denial plus an audit record.
+   */
+  requiresCapability?: { resource: string; action: string };
+  /** Per-tool execution timeout override (defaults to the turn budget's). */
+  timeoutMs?: number;
+  /**
+   * When `true`, this tool is ALSO forwarded into every sub-agent's tool
+   * list, so sub-agents can use it without round-tripping through the main
+   * agent. Reserve it for non-destructive, broadly useful tools (memory
+   * recall/save is the canonical case) — a passthrough tool is reachable
+   * from every delegation the oracle performs.
+   */
+  subAgentPassthrough?: boolean;
+}
+
+/**
+ * What the runtime tells plugins about the request's final binding before
+ * asking for prompt contributions. Built AFTER tool/sub-agent collection, so
+ * a plugin can see whether its surface actually bound (a sub-agent build may
+ * have refused) and react.
+ */
+export interface PromptContributionInfo {
+  /** Names of every tool (incl. sub-agents-as-tools) bound for this request. */
+  boundToolNames: ReadonlySet<string>;
+  /** Plugins loaded for this thread via `load_capability`. */
+  loadedPlugins: ReadonlySet<string>;
+}
+
+/**
+ * A plugin's contribution to the composed system prompt for one request.
+ * All fields optional — return `undefined` to contribute nothing this turn.
+ */
+export interface PluginPromptContribution {
+  /**
+   * Operational-mode override (the "richer mode" slot). At most one plugin
+   * should contribute this per request; when several do, the first
+   * registered plugin wins and the runtime logs the conflict.
+   */
+  operationalMode?: string;
+  /** Extra mode-specific prompt section rendered after the operational mode. */
+  modeSection?: string;
+  /** Appended to the Custom Instructions section (joined across plugins). */
+  customInstructions?: string;
+  /**
+   * Extra tools to bind for this request (e.g. an access-denied stub that
+   * explains why the plugin's real surface refused to bind). Wrapped with
+   * the contributing plugin's permissions like any other plugin tool.
+   */
+  extraTools?: PluginTool[];
 }
 
 export interface PluginSubAgent {
@@ -446,6 +508,28 @@ export interface PluginSubAgent {
   model?: ModelRole;
   /** Sub-agent-scoped middleware (e.g. summarization for long conversations). */
   middlewares?: AgentMiddleware[];
+  /**
+   * Whether this sub-agent inherits the runtime's convenience middlewares
+   * (tool validation, repetition guard, retry). Default `true`. Kernel
+   * middlewares — the turn-budget gate and plugin-declared sub-agent
+   * middlewares such as metering — always run regardless of this flag.
+   */
+  inheritMiddlewares?: boolean;
+  /**
+   * Refusal policy. `'surface'` (default) returns a refusal verbatim to the
+   * main agent. `'retry-once'` retries once with an honest automated-retry
+   * preamble — only valid together with `readOnly: true`; the runtime
+   * rejects the combination at boot otherwise, and every retry is written
+   * to the audit trail.
+   */
+  onRefusal?: 'surface' | 'retry-once';
+  /**
+   * Declares that every tool this sub-agent holds is non-mutating (pure
+   * reads/queries). Prerequisite for `onRefusal: 'retry-once'`.
+   */
+  readOnly?: boolean;
+  /** Inner-loop recursion limit; defaults to the runtime's sub-agent bound. */
+  recursionLimit?: number;
   /**
    * Forward this sub-agent's internal tool calls + results into the parent
    * graph's message history so the UI renders them in the main chat.

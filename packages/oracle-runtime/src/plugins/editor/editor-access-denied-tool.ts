@@ -1,6 +1,5 @@
-import { tool } from '@langchain/core/tools';
-import type { StructuredTool } from 'langchain';
 import { z } from 'zod';
+import type { PluginTool } from '../../plugin-api/types.js';
 import { EDITOR_AGENT_TOOL_NAME } from './editor-agent.js';
 import type { EditorUnavailableReason } from './prompts.js';
 
@@ -30,7 +29,7 @@ export interface EditorAccessDeniedToolOptions {
  */
 export function createEditorAccessDeniedTool(
   options: EditorAccessDeniedToolOptions,
-): StructuredTool {
+): PluginTool {
   const { editorRoomId, reason } = options;
 
   // Membership is resolved with the oracle's admin identity, so a failed
@@ -45,10 +44,11 @@ export function createEditorAccessDeniedTool(
       : `Editor unavailable: the editor service failed to attach to the page's room (${editorRoomId}). ` +
         `Tell the user the page editor is currently unavailable and they can retry shortly. Do not retry this tool.`;
 
-  return tool(async () => message, {
+  return {
     name: EDITOR_AGENT_TOOL_NAME,
     description:
       'Editor Agent (unavailable for this request — calls return the denial reason).',
     schema: taskSchema,
-  });
+    handler: async () => message,
+  };
 }

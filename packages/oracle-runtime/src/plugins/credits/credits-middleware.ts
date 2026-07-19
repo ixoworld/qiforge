@@ -15,7 +15,17 @@ export interface CreditsMiddlewareOptions {
   limiter: TokenLimiter | null;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
+  /**
+   * Credits reserved atomically BEFORE each model call and settled against
+   * the actual cost afterwards. Closes the check-then-charge-later gap:
+   * concurrent calls racing one balance cannot all pass, and a user who
+   * cannot cover the estimate never starts the call.
+   */
+  reserveEstimateCredits?: number;
 }
+
+/** Default per-call reservation (settled to actual cost afterwards). */
+export const DEFAULT_RESERVE_ESTIMATE_CREDITS = 20;
 
 /**
  * Extract `user.did` from the LangGraph runtime context without trusting
@@ -32,6 +42,21 @@ function extractUserDid(context: unknown): string | undefined {
   }
   const { did } = user;
   return typeof did === 'string' && did.length > 0 ? did : undefined;
+}
+
+/** Extract `session.requestId` the same narrowing way (reservation pairing key). */
+function extractRequestId(context: unknown): string {
+  if (!context || typeof context !== 'object' || !('session' in context)) {
+    return 'unknown';
+  }
+  const { session } = context;
+  if (!session || typeof session !== 'object' || !('requestId' in session)) {
+    return 'unknown';
+  }
+  const { requestId } = session;
+  return typeof requestId === 'string' && requestId.length > 0
+    ? requestId
+    : 'unknown';
 }
 
 interface UsageMetadata {
@@ -97,13 +122,20 @@ function extractResponseMeta(message: unknown): ResponseMeta {
 }
 
 /**
- * Per-user credit-budget guard. Runs on every model call:
+ * Per-user credit metering with reservation semantics. Runs on every model
+ * call — in the main agent AND inside sub-agent loops (the plugin registers
+ * the same instance through both middleware hooks):
  *
- *   - `beforeModel` aborts the call with a polite message when the user
- *     has no remaining balance.
- *   - `afterModel` computes the credit cost of the completion (3-priority
- *     fallback: provider USD cost → per-model pricing → flat rate) and
- *     deducts it atomically via `TokenLimiter.limit`.
+ *   - `beforeModel` atomically RESERVES the estimated cost. A user who
+ *     cannot cover the estimate gets a polite message instead of a call,
+ *     and concurrent calls racing one balance cannot all pass.
+ *   - `afterModel` settles the reservation against the actual cost of the
+ *     completion (3-priority fallback: provider USD cost → per-model
+ *     pricing → flat rate): shortfalls are charged, surpluses refunded,
+ *     and a call that produced nothing billable releases in full.
+ *
+ * Reservations pair strictly per request (model calls within one request
+ * are sequential), keyed by `did:requestId`.
  *
  * Silently passes through when `limiter` is `null` — that's how the credits
  * plugin signals "disabled or no Redis" without breaking the graph.
@@ -113,6 +145,28 @@ export const createCreditsMiddleware = (
 ): AgentMiddleware => {
   const logger = options.logger ?? NOOP_LOGGER;
   const { limiter } = options;
+  const estimate =
+    options.reserveEstimateCredits ?? DEFAULT_RESERVE_ESTIMATE_CREDITS;
+
+  /** Open reservations per `did:requestId` (LIFO; calls are sequential). */
+  const openReservations = new Map<string, number[]>();
+
+  const reservationKey = (context: unknown): string =>
+    `${extractUserDid(context) ?? 'unknown'}:${extractRequestId(context)}`;
+
+  const pushReservation = (key: string, amount: number): void => {
+    const stack = openReservations.get(key) ?? [];
+    stack.push(amount);
+    openReservations.set(key, stack);
+  };
+
+  const popReservation = (key: string): number => {
+    const stack = openReservations.get(key);
+    if (!stack || stack.length === 0) return 0;
+    const amount = stack.pop() ?? 0;
+    if (stack.length === 0) openReservations.delete(key);
+    return amount;
+  };
 
   return createMiddleware({
     name: 'TokenLimiterMiddleware',
@@ -129,18 +183,28 @@ export const createCreditsMiddleware = (
         throw new Error('User DID is required for credit limiting');
       }
 
-      const remaining = await limiter.getRemaining(userDid);
-      logger.debug?.(`Remaining credits: ${remaining} for user ${userDid}`);
-
-      if (remaining <= 0) {
-        return {
-          messages: [
-            ...state.messages,
-            new AIMessageChunk({
-              content: `Looks like you have run out of tokens. Please upgrade your plan or topup your balance. You have ${remaining} tokens remaining.`,
-            }),
-          ],
-        };
+      try {
+        await limiter.reserve(userDid, estimate);
+        pushReservation(reservationKey(runtime.context), estimate);
+        return;
+      } catch (error) {
+        if (error instanceof TokenLimiterError) {
+          // Nothing was deducted (the script rolled back). Record a zero
+          // reservation so afterModel settlement stays paired.
+          pushReservation(reservationKey(runtime.context), 0);
+          logger.warn(
+            `[Credits] reservation declined for ${userDid}: ${error.message}`,
+          );
+          return {
+            messages: [
+              ...state.messages,
+              new AIMessageChunk({
+                content: `Looks like you have run out of tokens. Please upgrade your plan or topup your balance. You have ${error.currentBalance?.toFixed(2) ?? '0'} tokens remaining.`,
+              }),
+            ],
+          };
+        }
+        throw error;
       }
     },
 
@@ -153,12 +217,15 @@ export const createCreditsMiddleware = (
           throw new Error('User DID is required for credit limiting');
         }
 
+        const reserved = popReservation(reservationKey(runtime.context));
+
         const lastMessage = state.messages.at(-1);
         const usage = extractUsageMetadata(lastMessage);
         if (!usage) {
-          // No AI response with usage metadata to deduct against — happens
-          // when `beforeModel` short-circuited the call, or when the graph
-          // resumed on a non-AI message. Nothing to bill, skip silently.
+          // No AI response with usage metadata — the call was declined or
+          // the graph resumed on a non-AI message. Return the unused
+          // reservation and stop.
+          if (reserved > 0) await limiter.release(userDid, reserved);
           return;
         }
 
@@ -173,11 +240,10 @@ export const createCreditsMiddleware = (
         });
 
         logger.log(
-          `[Credits] input=${usage.input_tokens} output=${usage.output_tokens} total=${usage.total_tokens} | credits=${credits}`,
+          `[Credits] input=${usage.input_tokens} output=${usage.output_tokens} total=${usage.total_tokens} | reserved=${reserved} actual=${credits}`,
         );
 
-        const result = await limiter.limit(userDid, credits);
-        logger.debug?.(`Credit limit result: ${JSON.stringify(result)}`);
+        await limiter.commit(userDid, reserved, credits);
       } catch (error) {
         if (error instanceof TokenLimiterError) {
           logger.error(`Credit limit error: ${error.message}`);

@@ -75,6 +75,19 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
+  // Operator model policy overlay (JSON, layered over the built-in table):
+  // role→model targets with opaque credentialRefs, constraint sets,
+  // disclosed fallbacks, optional AI Gateway transport.
+  MODEL_POLICY_JSON: z.string().optional(),
+
+  // Semantic router configuration (JSON): strategy, routes with exemplars,
+  // per-strategy confidence thresholds.
+  ROUTER_CONFIG_JSON: z.string().optional(),
+
+  // Cloudflare AI Gateway auth token (`cf-aig-authorization`), referenced
+  // from model policy via the broker ref 'cf-aig-token'.
+  CF_AIG_TOKEN: z.string().optional(),
+
   // Operator-defined secrets surfaced to capabilities as `x-os-*` headers.
   // Format: `KEY1=value1,KEY2=value2`. Defaults to empty.
   ORACLE_SECRETS: z.string().default(''),
@@ -87,6 +100,22 @@ export const baseEnvSchema = z.object({
   LANGSMITH_API_KEY: z.string().optional(),
   LANGSMITH_PROJECT: z.string().optional(),
   LANGSMITH_ENDPOINT: z.string().optional(),
+
+  // Append-only JSONL audit trail (authority decisions, refusal retries,
+  // model receipts). The audit stream always flows through the logger;
+  // setting a path additionally persists it to disk.
+  AUDIT_LOG_PATH: z.string().optional(),
+
+  // Manifest-permission enforcement. 'enforce' (default) replaces
+  // undeclared RuntimeContext surfaces with throwing guards; 'warn' logs
+  // the first undeclared access per surface and allows it — a loudly-
+  // logged migration escape for forks whose plugins predate declarations.
+  PERMISSIONS_ENFORCEMENT: z.enum(['enforce', 'warn']).default('enforce'),
+
+  // Per-turn resource ceilings as JSON (partial TurnBudget: wallMs,
+  // maxModelCalls, maxToolCalls, maxOutputBytes, perToolTimeoutMs,
+  // maxConcurrency). Missing fields use the runtime defaults.
+  TURN_BUDGET_JSON: z.string().optional(),
 
   /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first

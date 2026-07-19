@@ -159,6 +159,48 @@ describe('ToolRegistry', () => {
     expect(requestCalls).toBe(0);
   });
 
+  it('keeps concurrent request collections isolated from each other and from boot introspection', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        getTools: () => [makeTool('agui_baseline')],
+        getRequestTools: (rtCtx) => {
+          const actions =
+            (rtCtx.history.state as { agActions?: string[] }).agActions ?? [];
+          return actions.map((name) => makeTool(`agui_${name}`));
+        },
+      }),
+    );
+
+    const rtCtxFor = (action: string) =>
+      makeRuntimeContext({
+        history: {
+          messages: [],
+          recent: () => [],
+          userContext: {},
+          state: { messages: [], agActions: [action] },
+        },
+      });
+
+    // Two "requests" collect back-to-back — as concurrent users would.
+    const forUserA = await reg.collect(makeBuildCtx(), rtCtxFor('submit'));
+    const forUserB = await reg.collect(makeBuildCtx(), rtCtxFor('cancel'));
+
+    expect(forUserA.map((c) => c.tool.name)).toEqual([
+      'agui_baseline',
+      'agui_submit',
+    ]);
+    expect(forUserB.map((c) => c.tool.name)).toEqual([
+      'agui_baseline',
+      'agui_cancel',
+    ]);
+    // User B's collection did not mutate user A's returned list...
+    expect(forUserA.map((c) => c.tool.name)).not.toContain('agui_cancel');
+    // ...and the shared registry exposes boot-time contributions only.
+    expect(reg.toolNamesForPlugin('agui')).toEqual(['agui_baseline']);
+  });
+
   it('exposes per-plugin tool names after collect', async () => {
     const reg = new ToolRegistry();
     reg.register(

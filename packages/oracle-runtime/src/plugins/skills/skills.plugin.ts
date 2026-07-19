@@ -51,6 +51,7 @@ const manifest: PluginManifest = {
   category: 'data',
   visibility: 'always',
   stability: 'stable',
+  permissions: { ucan: { invoke: true } },
 };
 
 export interface SkillsPluginOptions {

@@ -19,7 +19,12 @@ import {
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
-import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
+import {
+  getModelForRole,
+  getProviderConfig,
+  setHostModelPolicy,
+} from '../llm/llm-provider.js';
+import type { ModelPolicyInput } from '../llm/model-policy.js';
 import {
   mergeManifestOverride,
   type PluginManifestOverride,
@@ -45,6 +50,7 @@ import {
   ConfigSchemaRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
+  PromptContributionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -126,6 +132,13 @@ export interface CreateOracleAppOptions {
    * swap it for an alternate implementation.
    */
   hooks?: MainAgentHooks;
+  /**
+   * Host layer of the model policy — layered over the built-in table and
+   * `MODEL_POLICY_JSON`. The signed oracle config document feeds this same
+   * slot once the config loader lands, so forks adopting it now need no
+   * further changes.
+   */
+  modelPolicy?: ModelPolicyInput;
 }
 
 export interface PluginStatusReport {
@@ -185,6 +198,10 @@ export async function createOracleApp(
   opts: CreateOracleAppOptions,
 ): Promise<OracleApp> {
   validateConfig(opts.config);
+
+  // Install the host model-policy layer before anything resolves a model —
+  // the policy is memoized on first use.
+  setHostModelPolicy(opts.modelPolicy);
 
   const logger: PluginLogger = opts.logger ?? new Logger('createOracleApp');
   const env = opts.env ?? process.env;
@@ -298,6 +315,7 @@ export async function createOracleApp(
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
+    promptContributions: new PromptContributionRegistry(),
   };
   for (const plugin of resolved.loaded) {
     registries.tools.register(plugin);
@@ -306,10 +324,15 @@ export async function createOracleApp(
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
+    registries.promptContributions.register(plugin);
   }
 
   // 7. NestJS bootstrap
-  const enableSubscription = resolved.loaded.some((p) => p.name === 'credits');
+  // The subscription/request-gate pipeline turns on when any loaded plugin
+  // declares it provides one — a manifest capability, never a name match.
+  const enableSubscription = resolved.loaded.some(
+    (p) => p.manifest.providesRequestGate === true,
+  );
   const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
   const pluginNestModules = resolved.loaded.flatMap((p) => {
     const ctx = buildPluginContext({
@@ -442,6 +465,7 @@ export async function createOracleApp(
     identity,
     availablePlugins: loadedPluginNames,
     logger,
+    sharedStateRegistry: registries.sharedState,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent

@@ -45,6 +45,26 @@ describe('FlowsPlugin', () => {
     expect(BUNDLED_PLUGINS.some((p) => p.name === 'flows')).toBe(false);
   }, 30_000);
 
+  it('contributes the operating guide only once the capability is loaded for the thread', () => {
+    const plugin = new FlowsPlugin();
+    const rtCtx = makeRuntimeContext();
+
+    const loaded = plugin.getPromptContribution(rtCtx, {
+      boundToolNames: new Set(),
+      loadedPlugins: new Set(['flows']),
+    });
+    expect(loaded?.customInstructions).toContain('### Flow Builder mode');
+    expect(loaded?.customInstructions).toContain(
+      'discover → plan → confirm → build → hand off',
+    );
+
+    const unloaded = plugin.getPromptContribution(rtCtx, {
+      boundToolNames: new Set(),
+      loadedPlugins: new Set(),
+    });
+    expect(unloaded).toBeUndefined();
+  });
+
   it('contributes the discovery, inspect, authoring, settings, and form tools', () => {
     const plugin = new FlowsPlugin();
     const tools = plugin.getRequestTools(makeRuntimeContext());
