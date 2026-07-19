@@ -45,7 +45,20 @@ import {
   type RuntimeStateInput,
 } from '../runtime-context/build-runtime.js';
 import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
+import {
+  createEmbeddingRouteClassifier,
+  createLlmRouteClassifier,
+} from '../routing/classifiers.js';
+import {
+  parseRouterConfigEnv,
+  routerConfigSchema,
+  validateRouterConfig,
+  type RouteClassifier,
+} from '../routing/route-config.js';
+import { createSemanticRouterMiddleware } from '../routing/semantic-router-middleware.js';
+import { createScopedEmitter } from '../events/scoped-emitter.js';
 import { createBudgetMiddleware } from './middlewares/budget-middleware.js';
+import { createModelReceiptMiddleware } from './middlewares/model-receipt-middleware.js';
 import {
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
@@ -343,11 +356,102 @@ export async function createMainAgent(
     .collect(buildCtx)
     .map(({ middleware }) => middleware);
 
+  // ── 6a. Semantic router (per-turn, ephemeral, kernel-authorized) ────────
+  // Route decisions live in a request-scoped set the CapabilityGate reads —
+  // never in checkpointed graph state, so classification cannot become
+  // persistent authority. Targets were validated against loaded plugins and
+  // the model policy below; failures leave the turn unrouted.
+  const routedCapabilities = new Set<string>();
+  const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
+  const routerLayer =
+    hooks?.routerConfig ?? parseRouterConfigEnv(config.ROUTER_CONFIG_JSON);
+  const routerConfig = routerConfigSchema.parse(routerLayer ?? {});
+  let routerMiddleware: ReturnType<
+    typeof createSemanticRouterMiddleware
+  > | null = null;
+  if (routerConfig.strategy !== 'off') {
+    // Model-role existence is proven by resolving each declared role once —
+    // an unresolvable role is a configuration error surfaced up front, not
+    // a mid-conversation surprise.
+    const resolvableRoles = new Set<string>();
+    const roleErrors: string[] = [];
+    for (const route of routerConfig.routes) {
+      const role = route.target.modelRole;
+      if (!role || resolvableRoles.has(role)) continue;
+      try {
+        resolveModel(role);
+        resolvableRoles.add(role);
+      } catch (err) {
+        roleErrors.push(
+          `Route '${route.name}' model role '${role}': ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const routerErrors = [
+      ...validateRouterConfig(routerConfig, {
+        availablePlugins,
+        policyRoles: resolvableRoles,
+      }),
+      ...roleErrors,
+    ];
+    if (routerErrors.length > 0) {
+      throw new Error(
+        `Semantic router configuration invalid:\n  - ${routerErrors.join('\n  - ')}`,
+      );
+    }
+    let classify: RouteClassifier;
+    if (routerConfig.strategy === 'embedding') {
+      const embed = hooks?.embedTexts;
+      if (!embed) {
+        throw new Error(
+          "Semantic router strategy 'embedding' requires hooks.embedTexts (the Node adapter wires a provider-backed default).",
+        );
+      }
+      classify = createEmbeddingRouteClassifier({
+        embed,
+        embedderId: 'policy:embedding',
+        config: routerConfig,
+      });
+    } else {
+      classify = createLlmRouteClassifier({
+        model: resolveModel('routing'),
+        config: routerConfig,
+      });
+    }
+    const scopedEmit = createScopedEmitter(
+      {
+        sessionId: requestCtx.session.id,
+        requestId: requestCtx.session.requestId,
+      },
+      ambient.emit,
+    );
+    routerMiddleware = createSemanticRouterMiddleware({
+      config: routerConfig,
+      classify,
+      routedCapabilities,
+      resolveModel,
+      emitRouter: (payload) => scopedEmit.router(payload),
+      audit: ambient.audit,
+      sessionId: requestCtx.session.id,
+      requestId: requestCtx.session.requestId,
+      logger: ambient.logger,
+    });
+  }
+
   const middleware = [
     createBudgetMiddleware({ tracker, logger: ambient.logger }),
+    ...(routerMiddleware ? [routerMiddleware] : []),
+    createModelReceiptMiddleware({
+      audit: ambient.audit,
+      role: 'main',
+      expected: hooks?.resolveModelTarget?.('main'),
+      sessionId: requestCtx.session.id,
+      requestId: requestCtx.session.requestId,
+    }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
+      routedCapabilities,
       logger: ambient.logger,
     }),
     createToolValidationMiddleware({
@@ -478,7 +582,6 @@ export async function createMainAgent(
   });
 
   // ── 8. Model + checkpointer ─────────────────────────────────────────────
-  const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
   const model = resolveModel('main');
   const checkpointer = hooks?.checkpointerForUser
     ? await hooks.checkpointerForUser(requestCtx.user.did)

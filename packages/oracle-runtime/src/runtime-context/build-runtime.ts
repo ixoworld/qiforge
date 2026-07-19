@@ -1,6 +1,5 @@
 import type { BaseMessage } from '@langchain/core/messages';
 import type {
-  MergedConfig,
   ReadonlyState,
   RuntimeContext,
   SharedAccessors,

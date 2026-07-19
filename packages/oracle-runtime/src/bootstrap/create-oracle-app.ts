@@ -19,7 +19,12 @@ import {
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
-import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
+import {
+  getModelForRole,
+  getProviderConfig,
+  setHostModelPolicy,
+} from '../llm/llm-provider.js';
+import type { ModelPolicyInput } from '../llm/model-policy.js';
 import {
   mergeManifestOverride,
   type PluginManifestOverride,
@@ -126,6 +131,13 @@ export interface CreateOracleAppOptions {
    * swap it for an alternate implementation.
    */
   hooks?: MainAgentHooks;
+  /**
+   * Host layer of the model policy — layered over the built-in table and
+   * `MODEL_POLICY_JSON`. The signed oracle config document feeds this same
+   * slot once the config loader lands, so forks adopting it now need no
+   * further changes.
+   */
+  modelPolicy?: ModelPolicyInput;
 }
 
 export interface PluginStatusReport {
@@ -185,6 +197,10 @@ export async function createOracleApp(
   opts: CreateOracleAppOptions,
 ): Promise<OracleApp> {
   validateConfig(opts.config);
+
+  // Install the host model-policy layer before anything resolves a model —
+  // the policy is memoized on first use.
+  setHostModelPolicy(opts.modelPolicy);
 
   const logger: PluginLogger = opts.logger ?? new Logger('createOracleApp');
   const env = opts.env ?? process.env;

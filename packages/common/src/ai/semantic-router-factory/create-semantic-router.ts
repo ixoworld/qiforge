@@ -1,14 +1,15 @@
 import { Logger } from '@ixo/logger';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { PromptTemplate } from '@langchain/core/prompts';
-import { OpenAI } from 'openai';
-import { zodResponseFormat } from 'openai/helpers/zod';
 import z from 'zod';
+import {
+  getChatOpenAiModel,
+  getOpenRouterChatModel,
+} from '../models/openai.js';
 import { type EnsureKeys } from '../types.js';
 import { jsonToYaml } from '../utils/index.js';
 import { semanticRouterPrompt } from './semantic-router-prompt.js';
 import { validateRoutes } from './validate-routes.js';
-import { type APIPromise } from 'openai/index.js';
-import { type ParsedChatCompletion } from 'openai/resources/chat/completions.mjs';
 
 /**
  * Creates a semantic router that resolves the path based on the given routes and basedOn value.
@@ -26,6 +27,15 @@ import { type ParsedChatCompletion } from 'openai/resources/chat/completions.mjs
  * const intentRouter = createSemanticRouter(routes, ['intent']);
  * ```
  */
+export interface CreateSemanticRouterOptions {
+  /**
+   * Chat model used for classification. When omitted, a provider-aware
+   * default is built from `LLM_PROVIDER` — never a raw OpenAI client bound
+   * to OpenAI-only environment assumptions.
+   */
+  chatModel?: BaseChatModel;
+}
+
 export const createSemanticRouter = <
   K extends string[],
   R extends Record<string, string> = Record<string, string>,
@@ -38,7 +48,11 @@ export const createSemanticRouter = <
     | 'gpt-4.1-nano'
     | 'gpt-4.1-mini' = 'gpt-4.1-mini',
   isComplex = false,
+  options: CreateSemanticRouterOptions = {},
 ): ((state: EnsureKeys<Record<string, unknown>, K>) => Promise<keyof R>) => {
+  // Structured output covers the "complex" double-pass the raw client
+  // needed; the flag stays for signature compatibility.
+  void isComplex;
   const keys = validateRoutes(routes, basedOn);
   const schema = z.object({
     nextRoute: z.enum(
@@ -46,6 +60,15 @@ export const createSemanticRouter = <
       'The routes that will be used to resolve the path',
     ),
   });
+
+  const resolveChatModel = (): BaseChatModel => {
+    if (options.chatModel) return options.chatModel;
+    if (process.env.LLM_PROVIDER === 'nebius') {
+      return getChatOpenAiModel({ model, temperature: 0 });
+    }
+    return getOpenRouterChatModel({ model: `openai/${model}`, temperature: 0 });
+  };
+
   return async <T extends Record<string, unknown>>(
     state: EnsureKeys<T, K>,
   ): Promise<keyof R> => {
@@ -66,47 +89,13 @@ export const createSemanticRouter = <
 
     // find the route that matches the state
     const prompt = PromptTemplate.fromTemplate(semanticRouterPrompt);
-
-    const client = new OpenAI();
     const promptWithState = await prompt.format({
       routes: jsonToYaml(routes),
       state: jsonToYaml(selectedValues),
     });
 
-    const getRoute = async (
-      messages: (
-        | { role: 'system'; content: string }
-        | { role: 'user'; content: string }
-      )[],
-    ): Promise<
-      APIPromise<
-        ParsedChatCompletion<{
-          nextRoute: string;
-        }>
-      >
-    > => {
-      if (model === 'gpt-4.1-nano' && isComplex) {
-        const { choices } = await client.chat.completions.create({
-          messages,
-          model,
-        });
-
-        const route = choices[0]?.message?.content?.toString();
-        Logger.debug('🚀 ~ route:', route);
-        return client.chat.completions.parse({
-          model,
-          messages,
-          response_format: zodResponseFormat(schema, 'routesResponse'),
-        });
-      }
-      return client.chat.completions.parse({
-        model,
-        messages,
-        response_format: zodResponseFormat(schema, 'routesResponse'),
-      });
-    };
-
-    const completion = await getRoute([
+    const structured = resolveChatModel().withStructuredOutput(schema);
+    const parsed = await structured.invoke([
       { role: 'system', content: promptWithState },
       {
         role: 'user',
@@ -114,21 +103,8 @@ export const createSemanticRouter = <
           'Think and analyze the routes and messages then select the next route',
       },
     ]);
-    const message = completion.choices[0]?.message;
 
-    if (message?.parsed) {
-      const nextRoute = message.parsed.nextRoute;
-      Logger.debug(
-        `🚀 ~ nextRoute: ${message.parsed.nextRoute.toString()}`,
-        message.parsed,
-      );
-
-      return nextRoute;
-    }
-
-    Logger.error('Error parsing the response from the semantic router');
-    throw new Error('Error parsing the response from the semantic router');
+    Logger.debug(`semantic router selected route: ${parsed.nextRoute}`);
+    return parsed.nextRoute;
   };
 };
-
-export { zodResponseFormat, type ParsedChatCompletion };

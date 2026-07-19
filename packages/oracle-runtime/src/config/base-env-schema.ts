@@ -75,6 +75,19 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
+  // Operator model policy overlay (JSON, layered over the built-in table):
+  // role→model targets with opaque credentialRefs, constraint sets,
+  // disclosed fallbacks, optional AI Gateway transport.
+  MODEL_POLICY_JSON: z.string().optional(),
+
+  // Semantic router configuration (JSON): strategy, routes with exemplars,
+  // per-strategy confidence thresholds.
+  ROUTER_CONFIG_JSON: z.string().optional(),
+
+  // Cloudflare AI Gateway auth token (`cf-aig-authorization`), referenced
+  // from model policy via the broker ref 'cf-aig-token'.
+  CF_AIG_TOKEN: z.string().optional(),
+
   // Operator-defined secrets surfaced to capabilities as `x-os-*` headers.
   // Format: `KEY1=value1,KEY2=value2`. Defaults to empty.
   ORACLE_SECRETS: z.string().default(''),

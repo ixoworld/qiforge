@@ -9,6 +9,7 @@ import type {
   OracleIdentity,
 } from '../plugin-api/types.js';
 import type { ConfigSchemaRegistry } from '../registries/config-schema-registry.js';
+import type { RouterConfigInput } from '../routing/route-config.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import type { MiddlewareRegistry } from '../registries/middleware-registry.js';
 import type { SharedStateRegistry } from '../registries/shared-state-registry.js';
@@ -60,6 +61,23 @@ export type MainAgentRequestContext = z.infer<
 export interface MainAgentHooks {
   /** Resolve a checkpointer for a user. Mirrors apps/app's per-user SQLite store. */
   checkpointerForUser?: (userDid: string) => Promise<BaseCheckpointSaver>;
+  /**
+   * Semantic-router configuration (strategy, routes, thresholds). Layered:
+   * this hook wins over `ROUTER_CONFIG_JSON`. Populated by the host today
+   * and by the signed config document later.
+   */
+  routerConfig?: RouterConfigInput;
+  /**
+   * Embedding function for the router's `embedding` strategy. The Node
+   * adapter wires the provider-backed default; the Worker adapter supplies
+   * its own. Required only when the strategy is `embedding`.
+   */
+  embedTexts?: (texts: string[]) => Promise<number[][]>;
+  /**
+   * Resolve a role to its policy target for model receipts — best-effort
+   * expected-model metadata on `model.receipt` audit records.
+   */
+  resolveModelTarget?: (role: string) => { provider: string; model: string };
   /** Optional model resolver. Default: `ambient.llm.get('main')`. */
   resolveModel?: (
     role: ModelRole,

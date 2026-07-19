@@ -1,4 +1,4 @@
-import { EVENT_NAMES } from './scoped-emitter.js';
+import type { EVENT_NAMES } from './scoped-emitter.js';
 
 /** Canonical wire names of the runtime's session-scoped events. */
 export type RuntimeEventName = (typeof EVENT_NAMES)[keyof typeof EVENT_NAMES];
