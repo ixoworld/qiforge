@@ -211,6 +211,10 @@ export async function createTestRuntime(
     emit: emitAdapter,
     ucan: ucanAdapter,
     logger,
+    sharedState: {
+      build: (state, runCtx, consumerPluginName) =>
+        sharedState.build(state, runCtx, consumerPluginName),
+    },
   };
 
   // 4. Build the per-plugin PluginContexts (used to collect tools/subagents/etc).

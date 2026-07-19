@@ -8,7 +8,22 @@ import type {
   OracleIdentity,
   RoomStateSnapshot,
   SecretIndex,
+  SharedAccessors,
 } from '../plugin-api/types.js';
+import type { ReadonlyState, RuntimeContext } from '../plugin-api/types.js';
+
+/**
+ * Builder for the cross-plugin `ctx.shared` surface. Wraps
+ * `SharedStateRegistry.build` so the context factory can populate `shared`
+ * per consumer without importing the registry directly.
+ */
+export interface SharedStateBuilder {
+  build(
+    state: ReadonlyState,
+    runCtx: RuntimeContext,
+    consumerPluginName?: string,
+  ): SharedAccessors;
+}
 
 /**
  * Per-room secrets adapter. Wraps the host's secrets service so plugins
@@ -159,4 +174,10 @@ export interface AmbientServices {
    * events through `logger`; the kernel work makes it required.
    */
   audit?: AuditSink;
+  /**
+   * Cross-plugin shared-state builder. When present, `buildRuntimeContext`
+   * populates `ctx.shared` from it (filtered per consumer plugin);
+   * otherwise `ctx.shared` stays empty.
+   */
+  sharedState?: SharedStateBuilder;
 }

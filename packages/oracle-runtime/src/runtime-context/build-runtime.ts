@@ -68,11 +68,13 @@ export interface RuntimeStateInput {
  * handlers and plugin-middleware hooks. Synthesizes user/session from the
  * LangGraph runtime channel, history from state, and the rest from ambient.
  */
-export function buildRuntimeContext<TConfig = MergedConfig>(
+export function buildRuntimeContext(
   runConfig: RunConfig,
   ambient: AmbientServices,
   state: RuntimeStateInput,
-): RuntimeContext<TConfig> {
+  /** Reading plugin, for consumer-filtered `ctx.shared`. Omit for runtime-internal callers. */
+  consumerPluginName?: string,
+): RuntimeContext {
   const session = runConfig.context.session;
   const user = runConfig.context.user;
 
@@ -100,7 +102,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
 
   const delegation = user.ucanDelegation;
 
-  return {
+  const ctx: RuntimeContext = {
     user,
     session,
     history: {
@@ -109,7 +111,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       userContext,
       state: readonlyState,
     },
-    config: ambient.config as TConfig,
+    config: ambient.config,
     availablePlugins: ambient.availablePlugins,
     loadedPlugins,
     secrets: {
@@ -171,6 +173,20 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     shared: EMPTY_SHARED,
     ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
   };
+
+  // Shared accessors receive the finished context, so `shared` is assigned
+  // after construction. Producers' lazy getters mean a throwing accessor
+  // cannot break unrelated keys; consumer filtering applies the producers'
+  // `visibleTo` declarations.
+  if (ambient.sharedState) {
+    ctx.shared = ambient.sharedState.build(
+      readonlyState,
+      ctx,
+      consumerPluginName,
+    );
+  }
+
+  return ctx;
 }
 
 export { EMPTY_SHARED };

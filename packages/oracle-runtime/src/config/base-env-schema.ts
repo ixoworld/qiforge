@@ -93,6 +93,17 @@ export const baseEnvSchema = z.object({
   // setting a path additionally persists it to disk.
   AUDIT_LOG_PATH: z.string().optional(),
 
+  // Manifest-permission enforcement. 'enforce' (default) replaces
+  // undeclared RuntimeContext surfaces with throwing guards; 'warn' logs
+  // the first undeclared access per surface and allows it — a loudly-
+  // logged migration escape for forks whose plugins predate declarations.
+  PERMISSIONS_ENFORCEMENT: z.enum(['enforce', 'warn']).default('enforce'),
+
+  // Per-turn resource ceilings as JSON (partial TurnBudget: wallMs,
+  // maxModelCalls, maxToolCalls, maxOutputBytes, perToolTimeoutMs,
+  // maxConcurrency). Missing fields use the runtime defaults.
+  TURN_BUDGET_JSON: z.string().optional(),
+
   /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first
    * token, at some cost to hard multi-step reasoning. Default `medium`

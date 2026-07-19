@@ -110,4 +110,38 @@ describe('SharedStateRegistry', () => {
     );
     expect(reg.collect()).toHaveLength(1);
   });
+
+  it('filters keys by producer-declared visibleTo per consuming plugin', () => {
+    const reg = new SharedStateRegistry();
+    reg.register(
+      makePlugin({
+        name: 'profile',
+        getSharedState: () => ({
+          userProfile: () => ({ name: 'A' }),
+          publicFlag: () => true,
+        }),
+        sharedStateVisibility: { userProfile: ['memory'] },
+      }),
+    );
+
+    const ctx = makeRuntimeContext();
+
+    // Allow-listed consumer sees the restricted key…
+    expect(Object.keys(reg.build({}, ctx, 'memory'))).toEqual([
+      'userProfile',
+      'publicFlag',
+    ]);
+    // …an unlisted consumer sees only the unrestricted key…
+    expect(Object.keys(reg.build({}, ctx, 'weather'))).toEqual(['publicFlag']);
+    // …the producer always sees its own keys…
+    expect(Object.keys(reg.build({}, ctx, 'profile'))).toEqual([
+      'userProfile',
+      'publicFlag',
+    ]);
+    // …and runtime-internal readers (no consumer) see everything.
+    expect(Object.keys(reg.build({}, ctx))).toEqual([
+      'userProfile',
+      'publicFlag',
+    ]);
+  });
 });

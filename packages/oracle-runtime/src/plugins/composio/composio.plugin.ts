@@ -99,6 +99,7 @@ const manifest: PluginManifest = {
   category: 'integration',
   visibility: 'on-demand',
   stability: 'stable',
+  permissions: { ucan: { invoke: true } },
 };
 
 export interface ComposioPluginOptions {

@@ -82,6 +82,12 @@ const manifest: PluginManifest = {
   category: 'data',
   visibility: 'always',
   stability: 'stable',
+  permissions: {
+    secrets: true,
+    blobStore: true,
+    ucan: { invoke: true },
+    llm: true,
+  },
 };
 
 function parseToolsConfig(

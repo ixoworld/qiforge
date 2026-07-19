@@ -11,6 +11,7 @@ import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
+import type { SharedStateRegistry } from '../registries/shared-state-registry.js';
 import { createFileAuditSink } from './audit-file-sink.js';
 import type {
   Logger as PluginLogger,
@@ -41,6 +42,8 @@ export interface BuildAmbientOptions {
   availablePlugins: ReadonlySet<string>;
   /** Boot-time logger; reused across adapters that don't get their own. */
   logger: PluginLogger;
+  /** Cross-plugin shared-state registry; wired into `ctx.shared`. */
+  sharedStateRegistry?: SharedStateRegistry;
 }
 
 /**
@@ -230,6 +233,8 @@ export function buildAmbientServices(
   }
   const audit = composeAuditSinks(auditSinks, opts.logger);
 
+  const sharedStateRegistry = opts.sharedStateRegistry;
+
   return {
     config: opts.config,
     identity: opts.identity,
@@ -242,5 +247,13 @@ export function buildAmbientServices(
     ucan: ucanAdapter,
     logger: opts.logger,
     audit,
+    ...(sharedStateRegistry
+      ? {
+          sharedState: {
+            build: (state, runCtx, consumerPluginName) =>
+              sharedStateRegistry.build(state, runCtx, consumerPluginName),
+          },
+        }
+      : {}),
   };
 }

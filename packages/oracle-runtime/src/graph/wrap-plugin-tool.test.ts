@@ -340,3 +340,64 @@ describe('wrapPluginTool — end-to-end through createAgent + fakeModel', () => 
     expect(model.callCount).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe('wrapPluginTool — kernel enforcement', () => {
+  const realCapabilityCheck = (
+    delegation:
+      | { capabilities?: ReadonlyArray<{ resource: string; action: string }> }
+      | undefined,
+    resource: string,
+    action: string,
+  ): boolean =>
+    Boolean(
+      delegation?.capabilities?.some(
+        (cap) => cap.resource === resource && cap.action === action,
+      ),
+    );
+
+  const gatedTool: PluginTool = {
+    name: 'delete_page',
+    description: 'Destructive tool gated on an inbound capability.',
+    schema: z.object({}),
+    handler: async () => 'deleted',
+    requiresCapability: { resource: 'ixo:editor', action: 'write' },
+  };
+
+  it('denies the handler and audits when the delegation lacks the declared capability', async () => {
+    const audits: Array<{ kind: string; detail: Record<string, unknown> }> = [];
+    const ambient = makeAmbient({
+      ucan: { ...mockUcan(), hasCapability: vi.fn(realCapabilityCheck) },
+      audit: {
+        append: (record) =>
+          void audits.push({ kind: record.kind, detail: record.detail }),
+      },
+    });
+    const wrapped = wrapPluginTool(gatedTool, { ambient, state: STATE });
+
+    // The runConfig delegation only carries { resource: 'r', action: 'a' }.
+    await expect(
+      wrapped.invoke({}, makeRunConfig() as unknown as ToolRuntime),
+    ).rejects.toThrow(/requires UCAN capability 'write' on 'ixo:editor'/);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(audits.at(-1)?.kind).toBe('tool.deny');
+    expect(audits.at(-1)?.detail.reason).toBe('ucan');
+  });
+
+  it('runs the handler when the delegation covers the declared capability', async () => {
+    const ambient = makeAmbient({
+      ucan: { ...mockUcan(), hasCapability: vi.fn(realCapabilityCheck) },
+    });
+    const coveredTool: PluginTool = {
+      ...gatedTool,
+      requiresCapability: { resource: 'r', action: 'a' },
+    };
+    const wrapped = wrapPluginTool(coveredTool, { ambient, state: STATE });
+
+    const result = await wrapped.invoke(
+      {},
+      makeRunConfig() as unknown as ToolRuntime,
+    );
+    expect(String(result)).toBe('deleted');
+  });
+});

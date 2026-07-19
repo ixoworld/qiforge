@@ -13,6 +13,11 @@ export interface RegisteredSharedAccessor {
   pluginName: string;
   key: string;
   accessor: SharedAccessorFn;
+  /**
+   * Consumer allow-list from the producing plugin's
+   * `sharedStateVisibility`. `undefined` = readable by every plugin.
+   */
+  visibleTo?: readonly string[];
 }
 
 /**
@@ -30,8 +35,15 @@ export class SharedStateRegistry {
   register(plugin: OraclePlugin): void {
     if (!plugin.getSharedState) return;
     const map = plugin.getSharedState();
+    const visibility = plugin.sharedStateVisibility ?? {};
     for (const [key, accessor] of Object.entries(map)) {
-      this.entries.push({ pluginName: plugin.name, key, accessor });
+      const visibleTo = visibility[key];
+      this.entries.push({
+        pluginName: plugin.name,
+        key,
+        accessor,
+        ...(visibleTo ? { visibleTo } : {}),
+      });
     }
   }
 
@@ -52,9 +64,21 @@ export class SharedStateRegistry {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     state: any,
     runCtx: RuntimeContext,
+    /**
+     * The reading plugin. Keys whose producer declared `visibleTo` are
+     * exposed only to the listed consumers (the producer always sees its
+     * own keys). Omit for runtime-internal readers, which see everything.
+     */
+    consumerPluginName?: string,
   ): SharedAccessors {
     const target: Record<string, unknown> = {};
-    for (const { key, accessor } of this.entries) {
+    for (const { pluginName, key, accessor, visibleTo } of this.entries) {
+      const visible =
+        consumerPluginName === undefined ||
+        visibleTo === undefined ||
+        consumerPluginName === pluginName ||
+        visibleTo.includes(consumerPluginName);
+      if (!visible) continue;
       Object.defineProperty(target, key, {
         enumerable: true,
         configurable: false,

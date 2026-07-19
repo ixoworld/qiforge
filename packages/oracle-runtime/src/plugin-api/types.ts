@@ -2,6 +2,9 @@ import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { PluginPermissions } from '../kernel/permissions.js';
+
+export type { PluginPermissions };
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Mirrors the
@@ -144,6 +147,14 @@ export interface PluginManifest {
 
   /** Stability hint surfaced to the agent (`experimental` → warning footnote). */
   stability?: 'stable' | 'beta' | 'experimental';
+
+  /**
+   * Least-authority declaration: which `RuntimeContext` surfaces this
+   * plugin's request-time code may touch. Undeclared surfaces are replaced
+   * with throwing guards when the runtime wraps the plugin's tools. Omit
+   * entirely for plugins whose tools are pure fetch/compute.
+   */
+  permissions?: PluginPermissions;
 }
 
 export interface ManifestExample {
@@ -434,6 +445,15 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Inbound UCAN capability this tool requires. When set, the kernel checks
+   * the authenticated user's delegation BEFORE the handler runs — the check
+   * is no longer up to the handler's discretion — and a miss is returned to
+   * the agent as a denial plus an audit record.
+   */
+  requiresCapability?: { resource: string; action: string };
+  /** Per-tool execution timeout override (defaults to the turn budget's). */
+  timeoutMs?: number;
 }
 
 export interface PluginSubAgent {
@@ -446,6 +466,13 @@ export interface PluginSubAgent {
   model?: ModelRole;
   /** Sub-agent-scoped middleware (e.g. summarization for long conversations). */
   middlewares?: AgentMiddleware[];
+  /**
+   * Whether this sub-agent inherits the runtime's convenience middlewares
+   * (tool validation, repetition guard, retry). Default `true`. Kernel
+   * middlewares — the turn-budget gate and plugin-declared sub-agent
+   * middlewares such as metering — always run regardless of this flag.
+   */
+  inheritMiddlewares?: boolean;
   /**
    * Refusal policy. `'surface'` (default) returns a refusal verbatim to the
    * main agent. `'retry-once'` retries once with an honest automated-retry

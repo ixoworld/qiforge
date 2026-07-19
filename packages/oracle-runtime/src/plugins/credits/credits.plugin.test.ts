@@ -104,8 +104,10 @@ describe('CreditsPlugin', () => {
     const before = result.before as { messages: AIMessageChunk[] };
     expect(before.messages).toHaveLength(1);
     expect(String(before.messages[0]!.content)).toMatch(/run out of tokens/i);
-    // No deduction call when we short-circuit on empty balance.
-    expect(redis.eval).not.toHaveBeenCalled();
+    // The reservation attempt runs (and is atomically declined by the Lua
+    // script — its rollback branch leaves the balance untouched); nothing
+    // else touches the ledger.
+    expect(redis.eval).toHaveBeenCalledTimes(1);
     await rt.close();
   });
 
@@ -137,14 +139,20 @@ describe('CreditsPlugin', () => {
       { context: DEFAULT_RUNTIME_CONTEXT },
     );
 
-    // Flat-rate devnet: usd = (300 / 1M) × $0.75 = $0.000225, then
-    // usdCostToCredits: round(0.000225 × 10 000 credits/USD × 4 markup) = 9.
-    expect(redis.eval).toHaveBeenCalledTimes(1);
-    const lastEvalArgs = redis.eval.mock.calls.at(-1)!;
+    // Reservation flow: beforeModel atomically reserves the 20-credit
+    // estimate; afterModel settles against the flat-rate actual —
+    // usd = (300 / 1M) × $0.75 = $0.000225, then usdCostToCredits:
+    // round(0.000225 × 10 000 credits/USD × 4 markup) = 9 credits — so the
+    // 11-credit surplus is refunded (negative delta through the same
+    // atomic script).
+    expect(redis.eval).toHaveBeenCalledTimes(2);
+    const calls = redis.eval.mock.calls;
     // numKeys=2, then balanceKey, heldKey, userDid, credits
-    expect(lastEvalArgs[1]).toBe(2);
-    expect(lastEvalArgs[4]).toBe('did:ixo:user-1');
-    expect(lastEvalArgs[5]).toBe('9');
+    expect(calls[0]![1]).toBe(2);
+    expect(calls[0]![4]).toBe('did:ixo:user-1');
+    expect(calls[0]![5]).toBe('20');
+    expect(calls[1]![4]).toBe('did:ixo:user-1');
+    expect(calls[1]![5]).toBe('-11');
     await rt.close();
   });
 

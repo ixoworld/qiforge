@@ -1,5 +1,5 @@
 import { AIMessage } from '@langchain/core/messages';
-import { fakeModel, type ToolRuntime } from 'langchain';
+import { createMiddleware, fakeModel, type ToolRuntime } from 'langchain';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
@@ -382,5 +382,53 @@ describe('collectSubAgentsWithFallback — forwardTools plumbing', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     const opts = spy.mock.calls[0]![1];
     expect(opts?.forwardTools).toBeUndefined();
+  });
+});
+
+describe('collectSubAgentsWithFallback — kernel middleware inheritance', () => {
+  it('runs kernel sub-agent middlewares (metering) inside the inner loop even with inheritMiddlewares: false', async () => {
+    let meterRuns = 0;
+    const countingMeter = createMiddleware({
+      name: 'CountingMeter',
+      beforeModel: () => {
+        meterRuns += 1;
+        return undefined;
+      },
+    });
+
+    const ambient = makeAmbient({
+      llm: {
+        get: vi.fn(() => fakeModel().respond(new AIMessage('done'))),
+      },
+    });
+
+    const registry = new SubAgentRegistry();
+    registry.register(
+      makePlugin({
+        name: 'probe-plugin',
+        manifest: makeManifest({ visibility: 'silent' }),
+        getSubAgents: () => [
+          makeSubAgent('Meter Probe', {
+            tools: [makeTool('noop_probe')],
+            // Shedding convenience middlewares must NOT shed the kernel.
+            inheritMiddlewares: false,
+          }),
+        ],
+      }),
+    );
+
+    const [subAgentTool] = await collectSubAgentsWithFallback({
+      registry,
+      buildCtx: makeBuildCtx(),
+      ambient,
+      state: STATE,
+      userDid: 'did:ixo:user1',
+      sessionId: 'sess-1',
+      kernel: { subAgentMiddlewares: [countingMeter] },
+    });
+
+    await subAgentTool!.invoke({ task: 'probe' });
+
+    expect(meterRuns).toBeGreaterThan(0);
   });
 });

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { pluginPermissionsSchema } from '../kernel/permissions.js';
 import type { ManifestExample, PluginManifest } from '../plugin-api/types.js';
 
 /** Few-shot example teaching the agent how to invoke the plugin. */
@@ -47,4 +48,5 @@ export const pluginManifestSchema: z.ZodType<PluginManifest> = z.object({
   category: manifestCategorySchema.optional(),
   visibility: manifestVisibilitySchema.optional(),
   stability: manifestStabilitySchema.optional(),
+  permissions: pluginPermissionsSchema.optional(),
 });

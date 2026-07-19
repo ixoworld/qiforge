@@ -442,6 +442,7 @@ export async function createOracleApp(
     identity,
     availablePlugins: loadedPluginNames,
     logger,
+    sharedStateRegistry: registries.sharedState,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent

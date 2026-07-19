@@ -111,6 +111,7 @@ const manifest: PluginManifest = {
   ],
   visibility: 'always',
   stability: 'stable',
+  permissions: { secrets: true, blobStore: true, ucan: { invoke: true } },
   category: 'core',
   tags: ['sandbox', 'execution', 'workspace', 'artifacts'],
 };

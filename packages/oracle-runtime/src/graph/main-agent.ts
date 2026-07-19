@@ -3,6 +3,17 @@ import {
   toolRetryMiddleware,
   type StructuredTool,
 } from 'langchain';
+import {
+  createTurnBudgetTracker,
+  parseTurnBudgetEnv,
+  resolveTurnBudget,
+} from '../kernel/budget.js';
+import { createInProcessExecutionBroker } from '../kernel/execution-broker.js';
+import {
+  RUNTIME_INTERNAL_PERMISSIONS,
+  type PermissionsEnforcement,
+  type PluginPermissions,
+} from '../kernel/permissions.js';
 import { renderTier1, type Tier1Entry } from '../manifest/tier1-renderer.js';
 import { buildMetaTools } from '../meta-tools/index.js';
 import type {
@@ -34,6 +45,7 @@ import {
   type RuntimeStateInput,
 } from '../runtime-context/build-runtime.js';
 import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
+import { createBudgetMiddleware } from './middlewares/budget-middleware.js';
 import {
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
@@ -181,6 +193,30 @@ export async function createMainAgent(
     ]),
   );
 
+  // ── 3a. Kernel: per-turn budget tracker + execution broker + grants ─────
+  // One tracker for the whole turn — main agent and every sub-agent share
+  // its counters, so delegation cannot escape the ceilings. The broker
+  // wraps every tool execution with the budget gate, per-tool timeout, and
+  // an audit record.
+  const permissionsByPlugin = new Map<string, PluginPermissions | undefined>(
+    manifestEntries.map(({ pluginName, manifest }) => [
+      pluginName,
+      manifest.permissions,
+    ]),
+  );
+  const permissionsFor = (name: string): PluginPermissions | undefined =>
+    permissionsByPlugin.get(name);
+  const enforcement: PermissionsEnforcement =
+    config.PERMISSIONS_ENFORCEMENT === 'warn' ? 'warn' : 'enforce';
+  const tracker = createTurnBudgetTracker(
+    resolveTurnBudget(parseTurnBudgetEnv(config.TURN_BUDGET_JSON)),
+  );
+  const broker = createInProcessExecutionBroker({
+    tracker,
+    audit: ambient.audit,
+    logger: ambient.logger,
+  });
+
   const eagerTools = selectByVisibility(allTools, manifestViz, 'always');
   // Bind ALL on-demand tools at compile time — gating happens per model call
   // in `CapabilityGateMiddleware` based on the live `loadedPlugins` state.
@@ -203,6 +239,10 @@ export async function createMainAgent(
       ambient,
       state: wrapState,
       pluginTitle: titleByPlugin.get(entry.pluginName),
+      pluginName: entry.pluginName,
+      permissions: permissionsFor(entry.pluginName),
+      enforcement,
+      broker,
     });
 
   // Memory tools are eligible to flow into every sub-agent's tool list, so
@@ -229,6 +269,15 @@ export async function createMainAgent(
     rtCtx,
     passthroughTools: memoryPassthrough,
     subAgents: allSubAgents,
+    kernel: {
+      tracker,
+      broker,
+      enforcement,
+      permissionsFor,
+      subAgentMiddlewares: registries.middlewares
+        .collectSubAgent(buildCtx)
+        .map(({ middleware }) => middleware),
+    },
   });
 
   ambient.logger.log(
@@ -250,7 +299,16 @@ export async function createMainAgent(
   );
 
   const tools: StructuredTool[] = [
-    ...metaTools.map((t) => wrapPluginTool(t, { ambient, state: wrapState })),
+    ...metaTools.map((t) =>
+      wrapPluginTool(t, {
+        ambient,
+        state: wrapState,
+        pluginName: '__meta__',
+        permissions: RUNTIME_INTERNAL_PERMISSIONS,
+        enforcement,
+        broker,
+      }),
+    ),
     ...eagerTools.map(wrap),
     ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
@@ -286,6 +344,7 @@ export async function createMainAgent(
     .map(({ middleware }) => middleware);
 
   const middleware = [
+    createBudgetMiddleware({ tracker, logger: ambient.logger }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,

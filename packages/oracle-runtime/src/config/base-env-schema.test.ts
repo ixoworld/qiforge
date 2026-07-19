@@ -123,6 +123,8 @@ describe('baseEnvSchema', () => {
       'LANGSMITH_PROJECT',
       'LANGSMITH_ENDPOINT',
       'AUDIT_LOG_PATH',
+      'PERMISSIONS_ENFORCEMENT',
+      'TURN_BUDGET_JSON',
       'MAIN_REASONING_EFFORT',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);

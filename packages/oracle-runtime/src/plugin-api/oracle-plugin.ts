@@ -78,6 +78,15 @@ export abstract class OraclePlugin {
   getMiddlewares?(ctx: PluginContext): AgentMiddleware[];
 
   /**
+   * Middlewares that must ALSO run inside every sub-agent's inner loop —
+   * not just the main agent's. Metering is the canonical case: a credit
+   * gate that only guards the outer loop is a gate the outer loop can walk
+   * around by delegating. Keep these self-contained (they receive the same
+   * forwarded runtime context sub-agent invocations carry).
+   */
+  getSubAgentMiddlewares?(ctx: PluginContext): AgentMiddleware[];
+
+  /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.
    * Pattern: this plugin computes/owns some derived value from state; others
    * read it.
@@ -87,6 +96,14 @@ export abstract class OraclePlugin {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (state: any, runCtx: RuntimeContext) => unknown
   >;
+
+  /**
+   * Consumer allow-lists for `getSharedState` keys. A key listed here is
+   * readable only by the named plugins (and its producer); keys not listed
+   * stay readable by every plugin. Declare this when a shared value carries
+   * anything another plugin shouldn't casually read.
+   */
+  readonly sharedStateVisibility?: Record<string, readonly string[]>;
 
   /**
    * NestJS modules the plugin contributes. Spread into `RuntimeAppModule.imports`,
