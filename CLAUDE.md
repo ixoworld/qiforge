@@ -8,7 +8,8 @@ QiForge — a plugin-based framework for building Agentic Oracles on the IXO net
 
 Active codebase:
 
-- `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 14 bundled plugins).
+- `packages/oracle-core/` — the portable, web-standard core (authority-kernel primitives, transport-neutral turn seam, semantic routing, operator model policy, signed-config/data-policy schemas). No Node/Nest dependencies; guarded by a neutral-bundle CI gate.
+- `packages/oracle-runtime/` — the Node/Nest adapter over the core (bootstrap, registries, graph, modules, bundled plugins). Re-exports the core surface at its 1.x paths.
 - `apps/qiforge-example/` — reference oracle wiring the bundled plugin set + a custom Weather plugin. Use as the canonical "how a fork is built".
 
 `apps/app/` is legacy and being removed (TASK-32). Do not touch prompts, tools, or middlewares there. Scope edits to the runtime package and the example app.
@@ -59,7 +60,7 @@ A fork's `main.ts` calls `createOracleApp(opts)`. The runtime:
 2. Topologically sorts by `dependsOn`.
 3. Validates every plugin manifest.
 4. Composes the env schema from base + every plugin's `configSchema`; validates `process.env`.
-5. Populates six registries (tools, sub-agents, middlewares, manifests, configSchema, sharedState).
+5. Populates seven registries (tools, sub-agents, middlewares, manifests, configSchema, sharedState, promptContributions).
 6. Builds `RuntimeAppModule` with the runtime's always-on modules + plugin Nest modules + user Nest modules.
 7. Bootstraps NestJS.
 8. Schedules Matrix init in the background.
@@ -92,7 +93,10 @@ Single new state field: `loadedPlugins` — populated by the `load_capability` m
 | Public types           | `packages/oracle-runtime/src/plugin-api/types.ts`                                                                     |
 | Meta-tools             | `packages/oracle-runtime/src/meta-tools/` (load-capability, list-capabilities)                                        |
 | Always-on middlewares  | `packages/oracle-runtime/src/graph/middlewares/`                                                                      |
-| Six registries         | `packages/oracle-runtime/src/registries/`                                                                             |
+| Seven registries       | `packages/oracle-runtime/src/registries/`                                                                             |
+| Portable core          | `packages/oracle-core/` (kernel, turn seam, routing, model policy, config envelopes; web-standard deps only)          |
+| Turn seam              | `packages/oracle-core/src/turn/` (`handleTurn`, stream translator, `TurnStreamSink`)                                  |
+| Worker compile spike   | `apps/oracle-worker/` (fail-closed; not deployable)                                                                   |
 | Bundled plugins        | `packages/oracle-runtime/src/plugins/` (14 dirs)                                                                      |
 | Bundled plugin index   | `packages/oracle-runtime/src/plugins/index.ts` (`BUNDLED_PLUGINS`)                                                    |
 | Always-on Nest modules | `packages/oracle-runtime/src/modules/` (sessions, messages, ws, secrets, ucan, auth, subscription, throttler, health) |

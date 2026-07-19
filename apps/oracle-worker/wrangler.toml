@@ -1,0 +1,17 @@
+# COMPILE SPIKE — intentionally not deployable.
+# The entry boots fail-closed (every route 503) and registers no model
+# adapter; deploying it would serve a refusal wall, nothing more. The real
+# adapter arrives with Phase 5 (specs/phase-5-authenticated-config-and-cf-adapter.md)
+# behind a signed config envelope and per-oracle Workers-for-Platforms
+# user Workers. NOTE: no `nodejs_compat` flag — core portability is proven
+# by the neutral-bundle gate, never by compat stubs.
+name = "qiforge-oracle-worker-spike"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+[durable_objects]
+bindings = [{ name = "ORACLE_SESSION", class_name = "OracleSessionDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OracleSessionDO"]
