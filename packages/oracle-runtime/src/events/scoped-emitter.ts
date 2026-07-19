@@ -1,3 +1,4 @@
+import { EVENT_NAMES } from '@ixo/oracle-core/events/event-names';
 import type {
   ActionCallEventPayload,
   BrowserToolCallEventPayload,
@@ -29,16 +30,7 @@ export interface ScopedEmitter {
   messageCacheInvalidation(payload: MessageCacheInvalidationPayload): void;
 }
 
-/** Event names exposed by `@ixo/oracles-events`. */
-export const EVENT_NAMES = {
-  toolCall: 'tool_call',
-  actionCall: 'action_call',
-  renderComponent: 'render_component',
-  reasoning: 'reasoning',
-  browserToolCall: 'browser_tool_call',
-  router: 'router.update',
-  messageCacheInvalidation: 'message_cache_invalidation',
-} as const;
+export { EVENT_NAMES } from '@ixo/oracle-core/events/event-names';
 
 /**
  * Build a scoped emitter that injects the current `sessionId`/`requestId`

@@ -21,19 +21,9 @@ export interface AuthExcludedRoute {
 /** Merged Zod-validated env vars (core schema + every loaded plugin's `configSchema`). */
 export type MergedConfig = Record<string, unknown>;
 
-/** Plugin-scoped logger. */
-export interface Logger {
-  log(message: unknown, ...optional: unknown[]): void;
-  error(message: unknown, ...optional: unknown[]): void;
-  warn(message: unknown, ...optional: unknown[]): void;
-  debug?(message: unknown, ...optional: unknown[]): void;
-  verbose?(message: unknown, ...optional: unknown[]): void;
-  /**
-   * Returns a new logger that auto-prefixes records with the given context.
-   * Optional — when absent, the same logger is returned unchanged.
-   */
-  child?(bindings: Record<string, unknown>): Logger;
-}
+/** Plugin-scoped logger — canonical definition lives in @ixo/oracle-core. */
+import type { Logger } from '@ixo/oracle-core/types';
+export type { Logger };
 
 /** LLM role tag used by `ctx.llm.get(role)`. Aligned with current `ModelRole`. */
 export type ModelRole = 'main' | 'subagent' | 'utility' | (string & {});

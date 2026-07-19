@@ -1,0 +1,36 @@
+{
+  "name": "@ixo/oracle-core",
+  "version": "0.1.0",
+  "description": "Portable, web-standard core of the QiForge oracle harness: turn seam, authority-kernel primitives, semantic routing, operator model policy, and config/data-policy envelopes. No Node, Nest, or Cloudflare dependencies.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "check:neutral-bundle": "node scripts/check-neutral-bundle.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ixo/oracles-events": "workspace:*",
+    "@langchain/core": "1.1.48",
+    "langchain": "1.4.2",
+    "node-emoji": "^2.2.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ixo/typescript-config": "workspace:*",
+    "esbuild": "^0.27.7",
+    "typescript": "^5.9.3"
+  }
+}

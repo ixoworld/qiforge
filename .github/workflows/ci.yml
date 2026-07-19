@@ -46,6 +46,12 @@ jobs:
       - name: Format check
         run: pnpm format:check
 
+      # Portability gate for @ixo/oracle-core: neutral-platform esbuild
+      # bundle with NO nodejs_compat — any node:* import in core source is
+      # a hard failure here, not a runtime surprise in workerd.
+      - name: Core portability (neutral bundle)
+        run: pnpm --filter @ixo/oracle-core check:neutral-bundle
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
