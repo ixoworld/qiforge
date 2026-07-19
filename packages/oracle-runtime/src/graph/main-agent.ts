@@ -22,22 +22,6 @@ import type {
   PluginTool,
 } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
-import {
-  MEMORY_CLEAR_MCP_NAME,
-  MemoryPlugin,
-} from '../plugins/memory/index.js';
-import { isUserInRoom } from '../matrix/room-membership.js';
-import { createEditorAccessDeniedTool } from '../plugins/editor/editor-access-denied-tool.js';
-import { EDITOR_AGENT_TOOL_NAME } from '../plugins/editor/editor-agent.js';
-import {
-  EDITOR_MODE_PROMPTS,
-  editorUnavailableMode,
-  STANDALONE_EDITOR_PROMPTS,
-} from '../plugins/editor/prompts.js';
-import {
-  FLOWS_OPERATING_GUIDE,
-  FLOWS_PLUGIN_NAME,
-} from '../plugins/flows/prompts.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -258,13 +242,12 @@ export async function createMainAgent(
       broker,
     });
 
-  // Memory tools are eligible to flow into every sub-agent's tool list, so
-  // any sub-agent can recall/save memory without round-tripping through the
-  // main agent. The destructive upstream `memory-engine__clear` is excluded —
-  // main-agent-only (and not in the default selectedTools anyway).
-  const memoryPassthrough = allTools
-    .filter(({ pluginName }) => pluginName === MemoryPlugin.NAME)
-    .filter(({ tool }) => tool.name !== MEMORY_CLEAR_MCP_NAME)
+  // Tools flagged `subAgentPassthrough` flow into every sub-agent's tool
+  // list, so sub-agents can use them without round-tripping through the main
+  // agent. The flag is a plugin declaration (the memory plugin marks its
+  // non-destructive tools); the runtime knows no plugin names here.
+  const passthroughTools = allTools
+    .filter(({ tool }) => tool.subAgentPassthrough === true)
     .map(wrap);
 
   // ── 5. Sub-agents — bind all at compile time; gating happens at runtime ─
@@ -280,7 +263,7 @@ export async function createMainAgent(
     userDid: requestCtx.user.did,
     sessionId: requestCtx.session.id,
     rtCtx,
-    passthroughTools: memoryPassthrough,
+    passthroughTools,
     subAgents: allSubAgents,
     kernel: {
       tracker,
@@ -486,70 +469,55 @@ export async function createMainAgent(
   const tier1 = renderTier1({ manifests: eagerEntries });
   for (const warning of tier1.warnings) ambient.logger.warn(warning);
 
-  // Editor mode is selected per-request from the live state (the static
-  // `hooks` from the bundle can't carry request-scoped editorRoomId/spaceId).
-  // When a page is open (`editorRoomId`) the editor prompt is the "richer mode"
-  // that overrides the fork's operationalMode; with only a `spaceId` the
-  // standalone variant applies. Falls back to hooks/defaults otherwise.
-  //
-  // Gated on `call_editor_agent` actually being bound: the editor plugin can
-  // refuse to contribute its surface even when the state fields are set (room
-  // membership check failed, Matrix unavailable, sub-agent build error).
-  // Injecting "EDITOR MODE ACTIVE — use the Editor Agent tool" without the
-  // tool bound makes the model emit its sub-agent task as user-facing text
-  // instead of calling anything.
-  const editorToolBound = tools.some((t) => t.name === EDITOR_AGENT_TOOL_NAME);
+  // Plugin prompt contributions run AFTER binding, so a plugin can see
+  // whether its surface actually attached (a sub-agent build may have
+  // refused) and react — the editor plugin contributes its mode prompts, or
+  // an explanatory operational mode plus a denial stub tool when its surface
+  // refused to bind. The runtime composes these generically; it knows
+  // nothing about any specific plugin's modes.
+  const boundToolNames: ReadonlySet<string> = new Set(tools.map((t) => t.name));
+  const contributions = await registries.promptContributions.collect(rtCtx, {
+    boundToolNames,
+    loadedPlugins: loadedSet,
+  });
 
-  // A page is open but the editor refused to bind. Tell the model WHY via a
-  // dedicated operational mode AND bind a stub `call_editor_agent` that
-  // returns the same denial — so even a model that ignores the prompt and
-  // calls the editor learns the truth from the tool result. The membership
-  // re-check hits the cache the editor plugin's own guard just populated
-  // (60s TTL), so this costs no extra Matrix round-trip; `isUserInRoom`
-  // fails closed, matching the plugin's decision.
-  let editorUnavailableBlock: string | null = null;
-  if (!editorToolBound && state.editorRoomId) {
-    const isMember = await isUserInRoom(
-      state.editorRoomId,
-      requestCtx.user.matrixUserId,
-    );
-    const reason = isMember ? 'bind-error' : 'not-member';
-    editorUnavailableBlock = editorUnavailableMode({
-      editorRoomId: state.editorRoomId,
-      reason,
-    });
-    tools.push(
-      createEditorAccessDeniedTool({
-        editorRoomId: state.editorRoomId,
-        reason,
-      }),
-    );
-    ambient.logger.warn(
-      `[main-agent] editorRoomId=${state.editorRoomId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind (reason: ${reason}, user: ${requestCtx.user.matrixUserId}) — ` +
-        `binding access-denied stub and injecting the unavailable notice`,
-    );
-  } else if (!editorToolBound && state.spaceId) {
-    ambient.logger.warn(
-      `[main-agent] spaceId=${state.spaceId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind — suppressing editor prompts; ` +
-        `see preceding [editor] log lines for the refusal reason`,
-    );
+  let contributedOperationalMode: string | undefined;
+  let contributedModeSection: string | undefined;
+  const contributedInstructions: string[] = [];
+  for (const { pluginName, contribution } of contributions) {
+    if (contribution.operationalMode !== undefined) {
+      if (contributedOperationalMode === undefined) {
+        contributedOperationalMode = contribution.operationalMode;
+      } else {
+        ambient.logger.warn(
+          `[main-agent] plugin '${pluginName}' also contributed an operational mode — first contribution wins`,
+        );
+      }
+    }
+    if (contribution.modeSection !== undefined) {
+      if (contributedModeSection === undefined) {
+        contributedModeSection = contribution.modeSection;
+      } else {
+        ambient.logger.warn(
+          `[main-agent] plugin '${pluginName}' also contributed a mode section — first contribution wins`,
+        );
+      }
+    }
+    if (contribution.customInstructions) {
+      contributedInstructions.push(contribution.customInstructions);
+    }
+    for (const tool of contribution.extraTools ?? []) {
+      tools.push(wrap({ pluginName, tool }));
+    }
   }
 
-  const editorPrompts =
-    editorToolBound && state.editorRoomId
-      ? EDITOR_MODE_PROMPTS
-      : editorToolBound && state.spaceId
-        ? STANDALONE_EDITOR_PROMPTS
-        : null;
-
   // Custom Instructions section: author-supplied standing guidance
-  // (config.prompt.customInstructions) plus operating guides contributed by
-  // on-demand capabilities the agent has loaded for this thread (e.g. the Flow
-  // Builder guide, which appears only once `flows` is in `loadedPlugins`, so it
-  // costs no tokens on turns where flows is never used).
+  // (config.prompt.customInstructions) plus whatever loaded capabilities
+  // contribute (e.g. an operating guide that appears only once its plugin is
+  // in `loadedPlugins`, so it costs no tokens on turns where it's unused).
   const customInstructions = [
     identity.prompt?.customInstructions?.trim(),
-    loadedSet.has(FLOWS_PLUGIN_NAME) ? FLOWS_OPERATING_GUIDE : '',
+    ...contributedInstructions,
   ]
     .filter((part): part is string => Boolean(part && part.length > 0))
     .join('\n\n');
@@ -559,11 +527,10 @@ export async function createMainAgent(
     capabilityBlock: tier1.block,
     customInstructions,
     operationalMode:
-      editorPrompts?.operationalMode ??
-      editorUnavailableBlock ??
+      contributedOperationalMode ??
       hooks?.operationalMode ??
       DEFAULT_OPERATIONAL_MODE,
-    editorSection: editorPrompts?.editorSection ?? hooks?.editorSection ?? '',
+    editorSection: contributedModeSection ?? hooks?.editorSection ?? '',
     composioContext: hooks?.composioContext ?? '',
     slackFormattingConstraints:
       requestCtx.session.client === 'slack'

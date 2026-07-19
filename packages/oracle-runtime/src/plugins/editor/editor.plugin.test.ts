@@ -241,3 +241,92 @@ describe('EditorPlugin: standalone tool schema', () => {
     expect(badRoom.success).toBe(false);
   });
 });
+
+describe('EditorPlugin: prompt contribution (mode selection + denial stub)', () => {
+  const roomState = {
+    messages: [],
+    editorRoomId: '!room:matrix.test.ixo.world',
+  };
+
+  function ctxWithState(state: Record<string, unknown>) {
+    return makeRuntimeContext({
+      config: MATRIX_CONFIG,
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: { messages: [], ...state },
+      },
+    });
+  }
+
+  it('contributes the editor mode when the sub-agent bound and a page is open', async () => {
+    const plugin = new EditorPlugin();
+    const contribution = await plugin.getPromptContribution(
+      ctxWithState(roomState),
+      {
+        boundToolNames: new Set(['call_editor_agent']),
+        loadedPlugins: new Set(),
+      },
+    );
+    expect(contribution?.operationalMode).toContain('EDITOR MODE ACTIVE');
+    expect(contribution?.modeSection).toContain('### Editor Agent');
+    expect(contribution?.extraTools).toBeUndefined();
+  });
+
+  it('contributes the standalone mode when bound with only a space in scope', async () => {
+    const plugin = new EditorPlugin();
+    const contribution = await plugin.getPromptContribution(
+      ctxWithState({ spaceId: '!space:matrix.test.ixo.world' }),
+      {
+        boundToolNames: new Set(['call_editor_agent']),
+        loadedPlugins: new Set(),
+      },
+    );
+    expect(contribution?.operationalMode).toContain('Page Editor Available');
+  });
+
+  it('contributes the unavailable notice plus the denial stub when a page is open but nothing bound', async () => {
+    vi.mocked(isUserInRoom).mockResolvedValueOnce(false);
+    const plugin = new EditorPlugin();
+    const contribution = await plugin.getPromptContribution(
+      ctxWithState(roomState),
+      { boundToolNames: new Set(), loadedPlugins: new Set() },
+    );
+
+    expect(contribution?.operationalMode).toContain(
+      'PAGE OPEN BUT NOT ACCESSIBLE',
+    );
+    expect(contribution?.operationalMode).toContain('could not be verified');
+
+    const stub = contribution?.extraTools?.find(
+      (t) => t.name === 'call_editor_agent',
+    );
+    expect(stub).toBeDefined();
+    const denial = await stub!.handler(
+      { task: 'read the page' },
+      ctxWithState(roomState),
+    );
+    expect(String(denial)).toContain('could not be verified');
+    expect(String(denial)).toContain('!room:matrix.test.ixo.world');
+  });
+
+  it('reports bind-error wording when the user IS a member but the surface still failed', async () => {
+    vi.mocked(isUserInRoom).mockResolvedValueOnce(true);
+    const plugin = new EditorPlugin();
+    const contribution = await plugin.getPromptContribution(
+      ctxWithState(roomState),
+      { boundToolNames: new Set(), loadedPlugins: new Set() },
+    );
+    expect(contribution?.operationalMode).toContain('failed to attach');
+  });
+
+  it('contributes nothing without editor state', async () => {
+    const plugin = new EditorPlugin();
+    const contribution = await plugin.getPromptContribution(ctxWithState({}), {
+      boundToolNames: new Set(),
+      loadedPlugins: new Set(),
+    });
+    expect(contribution).toBeUndefined();
+  });
+});

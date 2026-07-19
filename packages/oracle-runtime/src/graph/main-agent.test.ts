@@ -4,6 +4,7 @@ import {
   ConfigSchemaRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
+  PromptContributionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -110,6 +111,7 @@ function emptyRegistries(): MainAgentArgs['registries'] {
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
+    promptContributions: new PromptContributionRegistry(),
   };
 }
 
@@ -313,77 +315,109 @@ describe('createMainAgent', () => {
     }
   });
 
-  it('binds the access-denied stub and the unavailable notice when editorRoomId is set but the editor did not bind', async () => {
-    // Regression: the editor plugin can refuse to contribute its sub-agent
-    // even when `state.editorRoomId` is set (membership check failed, Matrix
-    // down, build error). Injecting "EDITOR MODE ACTIVE — use the Editor
-    // Agent tool" without the tool bound makes the model emit its sub-agent
-    // task as user-facing text instead of calling anything. The runtime now
-    // (a) swaps the editor-mode prompt for an explicit unavailable notice and
-    // (b) binds a stub `call_editor_agent` that returns the denial reason.
-    const ambient = makeAmbient();
-    await createMainAgent(
-      baseArgs({
-        ambient,
-        state: { editorRoomId: '!room:ixo.world' },
-      }),
-    );
+  it('applies a plugin prompt contribution: operational mode, mode section, and extra stub tools', async () => {
+    // The contribution hook is how a plugin reacts to its surface NOT
+    // binding (the editor's access-denied stub is the canonical case): it
+    // can override the operational mode, add a mode section, and bind extra
+    // tools — the runtime composes these without knowing the plugin.
+    const registries = emptyRegistries();
+    const plugin = makePlugin({
+      name: 'pages',
+      manifest: makeManifest({ title: 'Pages', visibility: 'silent' }),
+      getPromptContribution: (_rtCtx, info) =>
+        info.boundToolNames.has('call_pages_agent')
+          ? undefined
+          : {
+              operationalMode: 'PAGES SURFACE UNAVAILABLE',
+              modeSection: '### Pages\n\nExplain the denial to the user.',
+              extraTools: [
+                {
+                  name: 'call_pages_agent',
+                  description: 'Pages stub (returns the denial).',
+                  schema: z.object({ task: z.string() }),
+                  handler: async () => 'pages denied: not a member',
+                },
+              ],
+            },
+    });
+    registries.promptContributions.register(plugin);
+    registries.manifests.register(plugin);
+
+    await createMainAgent(baseArgs({ registries }));
 
     const params = createAgentCalls[0];
     if (!params) throw new Error('createAgent was not called');
 
     const prompt = params.systemPrompt as string;
-    expect(prompt).not.toContain('EDITOR MODE ACTIVE');
-    expect(prompt).toContain('PAGE OPEN BUT NOT ACCESSIBLE');
-    // MatrixManager is not initialised in unit tests, so the membership
-    // re-check fails closed — same as the plugin's own guard. The wording is
-    // unified (user OR oracle missing) because the lookup runs with the
-    // oracle's admin identity and can't tell which side is absent.
-    expect(prompt).toContain('could not be verified');
-    expect(prompt).toContain('BOTH must be members');
+    expect(prompt).toContain('PAGES SURFACE UNAVAILABLE');
+    expect(prompt).toContain('### Pages');
+    expect(prompt).not.toContain('General conversation mode');
 
-    // The stub is bound under the real tool name and answers with the denial.
+    // The stub is bound (kernel-wrapped like any plugin tool, so invoking it
+    // needs the per-request context channel) and answers with the denial.
     const boundTools = params.tools as {
       name: string;
-      invoke: (args: { task: string }) => Promise<string>;
+      invoke: (args: { task: string }, config?: unknown) => Promise<string>;
     }[];
-    const stub = boundTools.find((t) => t.name === 'call_editor_agent');
-    if (!stub) throw new Error('access-denied stub was not bound');
-    const denial = await stub.invoke({ task: 'read the current page' });
-    expect(denial).toContain('could not be verified');
-    expect(denial).toContain('!room:ixo.world');
-
-    // The desync is loud, not silent.
-    expect(ambient.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining('call_editor_agent did not bind'),
+    const stub = boundTools.find((t) => t.name === 'call_pages_agent');
+    if (!stub) throw new Error('contributed stub tool was not bound');
+    const denial = await stub.invoke(
+      { task: 'open the page' },
+      {
+        context: {
+          user: {
+            did: 'did:ixo:user1',
+            matrixUserId: '@did-ixo-user1:ixo.world',
+            ucanDelegation: { raw: 'test-ucan' },
+          },
+          session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
+        },
+      },
     );
+    expect(denial).toContain('pages denied');
   });
 
-  it('renders the editor-mode prompt when editorRoomId is set and call_editor_agent is bound', async () => {
+  it('tells contribution hooks which tools actually bound, and first operational mode wins', async () => {
     const registries = emptyRegistries();
-    const editorPlugin = makePlugin({
-      name: 'editor',
-      manifest: makeManifest({ title: 'Editor', visibility: 'always' }),
+    const seenBound: string[][] = [];
+    const boundModePlugin = makePlugin({
+      name: 'bound-mode',
+      manifest: makeManifest({ title: 'BoundMode', visibility: 'always' }),
       // 'Editor Agent' → computeSubAgentToolName → 'call_editor_agent'.
       getSubAgents: () => [makeSubAgent('Editor Agent')],
+      getPromptContribution: (_rtCtx, info) => {
+        seenBound.push([...info.boundToolNames]);
+        return info.boundToolNames.has('call_editor_agent')
+          ? { operationalMode: 'RICH MODE ACTIVE' }
+          : undefined;
+      },
     });
-    registries.subAgents.register(editorPlugin);
-    registries.manifests.register(editorPlugin);
+    const secondModePlugin = makePlugin({
+      name: 'second-mode',
+      manifest: makeManifest({ title: 'SecondMode', visibility: 'silent' }),
+      getPromptContribution: () => ({ operationalMode: 'LOSING MODE' }),
+    });
+    for (const plugin of [boundModePlugin, secondModePlugin]) {
+      registries.subAgents.register(plugin);
+      registries.manifests.register(plugin);
+      registries.promptContributions.register(plugin);
+    }
 
-    await createMainAgent(
-      baseArgs({
-        registries,
-        state: { editorRoomId: '!room:ixo.world' },
-      }),
-    );
+    const ambient = makeAmbient();
+    await createMainAgent(baseArgs({ registries, ambient }));
 
     const params = createAgentCalls[0];
     if (!params) throw new Error('createAgent was not called');
     const toolNames = (params.tools as { name: string }[]).map((t) => t.name);
     expect(toolNames).toContain('call_editor_agent');
+    expect(seenBound[0]).toContain('call_editor_agent');
 
     const prompt = params.systemPrompt as string;
-    expect(prompt).toContain('EDITOR MODE ACTIVE');
+    expect(prompt).toContain('RICH MODE ACTIVE');
+    expect(prompt).not.toContain('LOSING MODE');
+    expect(ambient.logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('first contribution wins'),
+    );
   });
 
   it('renders the Tier-1 capability block in the prompt for visibility=always plugins', async () => {
@@ -415,16 +449,35 @@ describe('createMainAgent', () => {
     expect(prompt).toContain('General conversation mode');
   });
 
-  it('injects the Flow Builder guide under Custom Instructions when flows is loaded', async () => {
-    await createMainAgent(baseArgs({ state: { loadedPlugins: ['flows'] } }));
+  it('injects contributed custom instructions only when the plugin is loaded for the thread', async () => {
+    const registries = emptyRegistries();
+    const plugin = makePlugin({
+      name: 'guides',
+      manifest: makeManifest({ title: 'Guides', visibility: 'on-demand' }),
+      getPromptContribution: (_rtCtx, info) =>
+        info.loadedPlugins.has('guides')
+          ? { customInstructions: '### Guides operating mode\n\nUse guides.' }
+          : undefined,
+    });
+    registries.promptContributions.register(plugin);
+    registries.manifests.register(plugin);
 
-    const params = createAgentCalls[0];
-    if (!params) throw new Error('createAgent was not called');
-    const prompt = params.systemPrompt as string;
+    await createMainAgent(
+      baseArgs({ registries, state: { loadedPlugins: ['guides'] } }),
+    );
+    const loadedParams = createAgentCalls[0];
+    if (!loadedParams) throw new Error('createAgent was not called');
+    const loadedPrompt = loadedParams.systemPrompt as string;
+    expect(loadedPrompt).toContain('## Custom Instructions');
+    expect(loadedPrompt).toContain('### Guides operating mode');
 
-    expect(prompt).toContain('## Custom Instructions');
-    expect(prompt).toContain('### Flow Builder mode');
-    expect(prompt).toContain('discover → plan → confirm → build → hand off');
+    createAgentCalls.length = 0;
+    await createMainAgent(baseArgs({ registries }));
+    const unloadedParams = createAgentCalls[0];
+    if (!unloadedParams) throw new Error('createAgent was not called');
+    expect(unloadedParams.systemPrompt as string).not.toContain(
+      '### Guides operating mode',
+    );
   });
 
   it('omits the Custom Instructions section when nothing contributes to it', async () => {

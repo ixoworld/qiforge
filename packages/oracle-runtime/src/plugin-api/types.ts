@@ -155,6 +155,14 @@ export interface PluginManifest {
    * entirely for plugins whose tools are pure fetch/compute.
    */
   permissions?: PluginPermissions;
+
+  /**
+   * Declares that this plugin gates requests before the agent runs (billing
+   * / subscription enforcement). The bootstrap enables the request-gate
+   * middleware pipeline when ANY loaded plugin declares this — it never
+   * matches on plugin names.
+   */
+  providesRequestGate?: boolean;
 }
 
 export interface ManifestExample {
@@ -454,6 +462,50 @@ export interface PluginTool {
   requiresCapability?: { resource: string; action: string };
   /** Per-tool execution timeout override (defaults to the turn budget's). */
   timeoutMs?: number;
+  /**
+   * When `true`, this tool is ALSO forwarded into every sub-agent's tool
+   * list, so sub-agents can use it without round-tripping through the main
+   * agent. Reserve it for non-destructive, broadly useful tools (memory
+   * recall/save is the canonical case) — a passthrough tool is reachable
+   * from every delegation the oracle performs.
+   */
+  subAgentPassthrough?: boolean;
+}
+
+/**
+ * What the runtime tells plugins about the request's final binding before
+ * asking for prompt contributions. Built AFTER tool/sub-agent collection, so
+ * a plugin can see whether its surface actually bound (a sub-agent build may
+ * have refused) and react.
+ */
+export interface PromptContributionInfo {
+  /** Names of every tool (incl. sub-agents-as-tools) bound for this request. */
+  boundToolNames: ReadonlySet<string>;
+  /** Plugins loaded for this thread via `load_capability`. */
+  loadedPlugins: ReadonlySet<string>;
+}
+
+/**
+ * A plugin's contribution to the composed system prompt for one request.
+ * All fields optional — return `undefined` to contribute nothing this turn.
+ */
+export interface PluginPromptContribution {
+  /**
+   * Operational-mode override (the "richer mode" slot). At most one plugin
+   * should contribute this per request; when several do, the first
+   * registered plugin wins and the runtime logs the conflict.
+   */
+  operationalMode?: string;
+  /** Extra mode-specific prompt section rendered after the operational mode. */
+  modeSection?: string;
+  /** Appended to the Custom Instructions section (joined across plugins). */
+  customInstructions?: string;
+  /**
+   * Extra tools to bind for this request (e.g. an access-denied stub that
+   * explains why the plugin's real surface refused to bind). Wrapped with
+   * the contributing plugin's permissions like any other plugin tool.
+   */
+  extraTools?: PluginTool[];
 }
 
 export interface PluginSubAgent {

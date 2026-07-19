@@ -188,6 +188,10 @@ export function createDefaultMemoryMcpFactory(
  * schema are taken VERBATIM from upstream — the agent sees the same contract
  * the Memory Engine server publishes, and our handler is a thin passthrough
  * to `mcpTool.invoke`.
+ *
+ * Every memory tool except the destructive `clear` is flagged
+ * `subAgentPassthrough`, so sub-agents can recall/save memory without
+ * round-tripping through the main agent; `clear` stays main-agent-only.
  */
 function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
   return {
@@ -195,6 +199,7 @@ function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
     description: mcpTool.description,
     schema: mcpTool.schema,
     handler: async (args) => mcpTool.invoke(args),
+    subAgentPassthrough: mcpTool.name !== MEMORY_CLEAR_MCP_NAME,
   };
 }
 

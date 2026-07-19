@@ -5,8 +5,10 @@ import type {
   AuthExcludedRoute,
   PluginContext,
   PluginManifest,
+  PluginPromptContribution,
   PluginSubAgent,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from './types.js';
 
@@ -70,6 +72,25 @@ export abstract class OraclePlugin {
   getRequestSubAgents?(
     rtCtx: RuntimeContext,
   ): PluginSubAgent[] | Promise<PluginSubAgent[]>;
+
+  /**
+   * Request-time prompt contributions. Called once per `createMainAgent`
+   * build AFTER tools and sub-agents are bound, so the plugin can see
+   * whether its surface actually attached (`info.boundToolNames`) and which
+   * capabilities this thread has loaded (`info.loadedPlugins`), and react —
+   * contribute a richer operational mode, a mode section, custom
+   * instructions, or stub tools explaining a refusal.
+   *
+   * The runtime composes contributions generically; it knows nothing about
+   * any specific plugin's modes.
+   */
+  getPromptContribution?(
+    rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ):
+    | PluginPromptContribution
+    | undefined
+    | Promise<PluginPromptContribution | undefined>;
 
   /**
    * LangChain middlewares inserted after the four always-on middlewares

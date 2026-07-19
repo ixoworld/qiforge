@@ -49,4 +49,5 @@ export const pluginManifestSchema: z.ZodType<PluginManifest> = z.object({
   visibility: manifestVisibilitySchema.optional(),
   stability: manifestStabilitySchema.optional(),
   permissions: pluginPermissionsSchema.optional(),
+  providesRequestGate: z.boolean().optional(),
 });

@@ -6,6 +6,7 @@ import {
   ConfigSchemaRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
+  PromptContributionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -115,6 +116,7 @@ function emptyRegistries(): MainAgentArgs['registries'] {
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
+    promptContributions: new PromptContributionRegistry(),
   };
 }
 
@@ -153,18 +155,25 @@ function registriesWith({
   const registries = emptyRegistries();
 
   if (includeMemory) {
+    // Mirrors the real memory plugin's declaration: every tool except the
+    // destructive `clear` is flagged `subAgentPassthrough` (see
+    // `adaptMcpTool` in plugins/memory/memory-tools.ts). The runtime only
+    // reads the flag — it knows no plugin or tool names.
     const memoryPlugin = makePlugin({
       name: 'memory',
       manifest: makeManifest({ visibility: 'always', title: 'Memory' }),
       getTools: () => [
         makeTool('memory-engine__search_memory_engine', {
           schema: z.object({ q: z.string() }),
+          subAgentPassthrough: true,
         }),
         makeTool('memory-engine__add_memory', {
           schema: z.object({ c: z.string() }),
+          subAgentPassthrough: true,
         }),
         makeTool('memory-engine__delete_episode', {
           schema: z.object({ id: z.string() }),
+          subAgentPassthrough: true,
         }),
         makeTool('memory-engine__clear', {
           schema: z.object({ confirm: z.boolean() }),

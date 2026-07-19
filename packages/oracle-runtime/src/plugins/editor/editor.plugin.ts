@@ -4,8 +4,10 @@ import { isUserInRoom } from '../../matrix/room-membership.js';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   PluginManifest,
+  PluginPromptContribution,
   PluginSubAgent,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from '../../plugin-api/types.js';
 import { SandboxPlugin } from '../sandbox/index.js';
@@ -18,6 +20,12 @@ import {
   createEditorSubAgent,
   EDITOR_AGENT_TOOL_NAME,
 } from './editor-agent.js';
+import { createEditorAccessDeniedTool } from './editor-access-denied-tool.js';
+import {
+  EDITOR_MODE_PROMPTS,
+  editorUnavailableMode,
+  STANDALONE_EDITOR_PROMPTS,
+} from './prompts.js';
 import { createStandaloneEditorTool } from './standalone-editor-tool.js';
 
 /**
@@ -251,5 +259,65 @@ export class EditorPlugin extends OraclePlugin {
     }
 
     return tools;
+  }
+
+  /**
+   * Editor mode selection, previously hard-coded in the agent builder.
+   *
+   * With a page open (`editorRoomId`) and the editor sub-agent bound, the
+   * editor prompt is the "richer mode" that overrides the fork's
+   * operationalMode; with only a `spaceId`, the standalone variant applies.
+   *
+   * When a page is open but the sub-agent did NOT bind (membership check
+   * failed, Matrix unavailable, build error), the contribution explains WHY
+   * via a dedicated operational mode AND a stub `call_editor_agent` tool
+   * that returns the same denial — so even a model that ignores the prompt
+   * and calls the editor learns the truth from the tool result. The
+   * membership re-check hits the cache this plugin's own guard just
+   * populated (60s TTL), so it costs no extra Matrix round-trip;
+   * `isUserInRoom` fails closed, matching the guard's decision.
+   */
+  override async getPromptContribution(
+    rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ): Promise<PluginPromptContribution | undefined> {
+    const editorRoomId = readEditorRoomId(rtCtx);
+    const spaceId = readSpaceId(rtCtx);
+    const bound = info.boundToolNames.has(EDITOR_AGENT_TOOL_NAME);
+
+    if (bound && editorRoomId) {
+      return {
+        operationalMode: EDITOR_MODE_PROMPTS.operationalMode,
+        modeSection: EDITOR_MODE_PROMPTS.editorSection,
+      };
+    }
+    if (bound && spaceId) {
+      return {
+        operationalMode: STANDALONE_EDITOR_PROMPTS.operationalMode,
+        modeSection: STANDALONE_EDITOR_PROMPTS.editorSection,
+      };
+    }
+    if (editorRoomId) {
+      const isMember = await isUserInRoom(
+        editorRoomId,
+        rtCtx.user.matrixUserId,
+      );
+      const reason = isMember ? 'bind-error' : 'not-member';
+      rtCtx.logger.warn(
+        `[editor] editorRoomId=${editorRoomId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind (reason: ${reason}, user: ${rtCtx.user.matrixUserId}) — ` +
+          `contributing access-denied stub and the unavailable notice`,
+      );
+      return {
+        operationalMode: editorUnavailableMode({ editorRoomId, reason }),
+        extraTools: [createEditorAccessDeniedTool({ editorRoomId, reason })],
+      };
+    }
+    if (spaceId) {
+      rtCtx.logger.warn(
+        `[editor] spaceId=${spaceId} set but ${EDITOR_AGENT_TOOL_NAME} did not bind — suppressing editor prompts; ` +
+          `see preceding [editor] log lines for the refusal reason`,
+      );
+    }
+    return undefined;
   }
 }

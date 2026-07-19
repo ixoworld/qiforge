@@ -279,14 +279,38 @@ describe('createOracleApp — Matrix lifecycle', () => {
   });
 });
 
-describe('createOracleApp — credits + subscription middleware', () => {
-  it('enables subscription middleware only when the credits plugin is loaded', async () => {
-    class CreditsLikePlugin extends OraclePlugin {
+describe('createOracleApp — request gate + subscription middleware', () => {
+  it('enables subscription middleware only when a loaded plugin declares providesRequestGate', async () => {
+    // The bootstrap keys on the manifest capability, never on a plugin name —
+    // the plugin here is deliberately NOT called 'credits'.
+    class GateProvidingPlugin extends OraclePlugin {
+      readonly name = 'billing-gate';
+      readonly version = '1.0.0';
+      readonly manifest: PluginManifest = {
+        title: 'Billing Gate',
+        summary: 'Subscription / credits enforcement.',
+        whenToUse: ['always'],
+        visibility: 'silent',
+        providesRequestGate: true,
+      };
+    }
+
+    await createOracleApp({
+      ...defaultOpts,
+      plugins: [new GateProvidingPlugin()],
+    });
+
+    const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
+    expect(registerArg.enableSubscriptionMiddleware).toBe(true);
+  });
+
+  it('keeps the gate off for plugins that merely resemble a billing plugin by name', async () => {
+    class NamedCreditsPlugin extends OraclePlugin {
       readonly name = 'credits';
       readonly version = '1.0.0';
       readonly manifest: PluginManifest = {
         title: 'Credits',
-        summary: 'Subscription / credits enforcement.',
+        summary: 'Same name, no gate declaration.',
         whenToUse: ['always'],
         visibility: 'silent',
       };
@@ -294,11 +318,11 @@ describe('createOracleApp — credits + subscription middleware', () => {
 
     await createOracleApp({
       ...defaultOpts,
-      plugins: [new CreditsLikePlugin()],
+      plugins: [new NamedCreditsPlugin()],
     });
 
     const registerArg = vi.mocked(RuntimeAppModule.register).mock.calls[0]![0];
-    expect(registerArg.enableSubscriptionMiddleware).toBe(true);
+    expect(registerArg.enableSubscriptionMiddleware).toBe(false);
   });
 });
 

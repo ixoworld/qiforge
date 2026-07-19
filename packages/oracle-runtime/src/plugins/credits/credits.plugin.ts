@@ -87,6 +87,7 @@ export class CreditsPlugin extends OraclePlugin {
     visibility: 'silent',
     stability: 'stable',
     category: 'core',
+    providesRequestGate: true,
   };
 
   override readonly configSchema = CreditsConfigSchema;

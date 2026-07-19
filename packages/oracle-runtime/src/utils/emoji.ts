@@ -1,7 +1,19 @@
-import { Logger } from '@nestjs/common';
 import { emojify as nodeEmojify, unemojify as nodeUnemojify } from 'node-emoji';
 
-const logger = new Logger('Emoji');
+/**
+ * Optional debug sink for the fallback paths below. Dependency-free so this
+ * module stays importable from web-standard runtimes; the Node host may wire
+ * its structured logger in at boot. Silent by default — these are
+ * diagnostics, not user-facing errors.
+ */
+type EmojiDebugLogger = (message: string, ...rest: unknown[]) => void;
+let debugLog: EmojiDebugLogger | undefined;
+
+export function setEmojiDebugLogger(
+  logger: EmojiDebugLogger | undefined,
+): void {
+  debugLog = logger;
+}
 
 function toStringSafe(input: unknown): string {
   if (typeof input === 'string') return input;
@@ -14,7 +26,7 @@ function toStringSafe(input: unknown): string {
 
 export function emojify(input: unknown): string {
   if (typeof input !== 'string') {
-    logger.debug(
+    debugLog?.(
       'emojify received non-string input; returning input as-is.',
       input,
     );
@@ -23,7 +35,7 @@ export function emojify(input: unknown): string {
     return nodeEmojify(String(input));
   } catch (err) {
     const str = toStringSafe(input);
-    logger.debug(
+    debugLog?.(
       `emojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
       err,
@@ -35,10 +47,13 @@ export function emojify(input: unknown): string {
 
 export function unemojify(input: unknown): string {
   try {
-    return nodeUnemojify(input as string);
+    if (typeof input !== 'string') {
+      throw new TypeError('unemojify expects a string');
+    }
+    return nodeUnemojify(input);
   } catch (err) {
     const str = toStringSafe(input);
-    logger.debug(
+    debugLog?.(
       `unemojify failed (${err instanceof Error ? err.message : String(err)}); returning input as-is. input=${str}`,
       input,
       err,

@@ -12,12 +12,13 @@ import type { ConfigSchemaRegistry } from '../registries/config-schema-registry.
 import type { RouterConfigInput } from '../routing/route-config.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import type { MiddlewareRegistry } from '../registries/middleware-registry.js';
+import type { PromptContributionRegistry } from '../registries/prompt-contribution-registry.js';
 import type { SharedStateRegistry } from '../registries/shared-state-registry.js';
 import type { SubAgentRegistry } from '../registries/subagent-registry.js';
 import type { ToolRegistry } from '../registries/tool-registry.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { TMainAgentGraphState } from './state.js';
-/** The 6 internal registries the runtime composes. */
+/** The internal registries the runtime composes. */
 export interface MainAgentRegistries {
   tools: ToolRegistry;
   subAgents: SubAgentRegistry;
@@ -25,6 +26,7 @@ export interface MainAgentRegistries {
   manifests: ManifestRegistry;
   configSchema: ConfigSchemaRegistry;
   sharedState: SharedStateRegistry;
+  promptContributions: PromptContributionRegistry;
 }
 
 export const mainAgentRequestContextSchema = z.object({

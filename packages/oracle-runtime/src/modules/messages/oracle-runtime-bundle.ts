@@ -1,27 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import type { MainAgentHooks } from '../../graph/main-agent-types.js';
-import type { MergedConfig, OracleIdentity } from '../../plugin-api/types.js';
 import type {
-  ConfigSchemaRegistry,
-  ManifestRegistry,
-  MiddlewareRegistry,
-  SharedStateRegistry,
-  SubAgentRegistry,
-  ToolRegistry,
-} from '../../registries/index.js';
+  MainAgentHooks,
+  MainAgentRegistries,
+} from '../../graph/main-agent-types.js';
+import type { MergedConfig, OracleIdentity } from '../../plugin-api/types.js';
 import type { AmbientServices } from '../../runtime-context/ambient.js';
 
 /** Snapshot of everything `createMainAgent` needs at request time. */
 export interface OracleRuntimeBundle {
   ambient: AmbientServices;
-  registries: {
-    tools: ToolRegistry;
-    subAgents: SubAgentRegistry;
-    middlewares: MiddlewareRegistry;
-    manifests: ManifestRegistry;
-    configSchema: ConfigSchemaRegistry;
-    sharedState: SharedStateRegistry;
-  };
+  registries: MainAgentRegistries;
   identity: OracleIdentity;
   config: MergedConfig;
   availablePlugins: ReadonlySet<string>;

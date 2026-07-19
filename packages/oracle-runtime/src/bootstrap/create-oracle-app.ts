@@ -50,6 +50,7 @@ import {
   ConfigSchemaRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
+  PromptContributionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -314,6 +315,7 @@ export async function createOracleApp(
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
+    promptContributions: new PromptContributionRegistry(),
   };
   for (const plugin of resolved.loaded) {
     registries.tools.register(plugin);
@@ -322,10 +324,15 @@ export async function createOracleApp(
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
+    registries.promptContributions.register(plugin);
   }
 
   // 7. NestJS bootstrap
-  const enableSubscription = resolved.loaded.some((p) => p.name === 'credits');
+  // The subscription/request-gate pipeline turns on when any loaded plugin
+  // declares it provides one — a manifest capability, never a name match.
+  const enableSubscription = resolved.loaded.some(
+    (p) => p.manifest.providesRequestGate === true,
+  );
   const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
   const pluginNestModules = resolved.loaded.flatMap((p) => {
     const ctx = buildPluginContext({

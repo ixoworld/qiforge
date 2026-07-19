@@ -4,8 +4,10 @@ import type {
   AgentMiddleware,
   PluginContext,
   PluginManifest,
+  PluginPromptContribution,
   PluginSubAgent,
   PluginTool,
+  PromptContributionInfo,
   RuntimeContext,
 } from '../plugin-api/types.js';
 
@@ -113,6 +115,13 @@ export interface TestPluginInit {
   >;
   sharedStateVisibility?: Record<string, readonly string[]>;
   getSubAgentMiddlewares?: (ctx: PluginContext) => AgentMiddleware[];
+  getPromptContribution?: (
+    rtCtx: RuntimeContext,
+    info: PromptContributionInfo,
+  ) =>
+    | PluginPromptContribution
+    | undefined
+    | Promise<PluginPromptContribution | undefined>;
 }
 
 /**
@@ -245,6 +254,7 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
 
     override getRequestTools = init.getRequestTools;
     override getRequestSubAgents = init.getRequestSubAgents;
+    override getPromptContribution = init.getPromptContribution;
 
     override getSharedState(): Record<
       string,
