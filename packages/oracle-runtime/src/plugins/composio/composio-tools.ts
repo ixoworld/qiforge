@@ -104,9 +104,9 @@ function defsCacheKey(baseUrl: string, userId: string): string {
 
 /**
  * Drop expired entries (and, if still over the cap, the soonest-to-expire
- * ones). Runs on every cache write, so in a long-running multi-tenant
- * process one-off users' schemas are reclaimed instead of accumulating for
- * the process lifetime.
+ * ones). Runs on cache reads and writes, so in a long-running multi-tenant
+ * process one-off users' schemas are reclaimed even when opening a replacement
+ * session fails.
  */
 function pruneDefsCache(cache: ComposioDefsCache, now: number): void {
   for (const [key, entry] of cache) {
@@ -298,8 +298,11 @@ export async function createComposioTools(
   };
 
   const cacheKey = defsCacheKey(opts.baseUrl, opts.userId);
+  const now = Date.now();
+  if (opts.defsCache) pruneDefsCache(opts.defsCache, now);
+
   const cached = opts.defsCache?.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached && cached.expiresAt > now) {
     return buildLazySessionTools(cached.defs, sessionArgs, sessionFactory);
   }
 

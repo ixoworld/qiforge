@@ -384,6 +384,34 @@ describe('ComposioPlugin.getRequestTools — session tool-definition cache', () 
     expect(defsCache.has(`${COMPOSIO_URL}::did:ixo:fresh-user`)).toBe(true);
   });
 
+  it('evicts an expired entry before opening its replacement session', async () => {
+    const cacheKey = `${COMPOSIO_URL}::did:ixo:offline-user`;
+    const defsCache: ComposioDefsCache = new Map([
+      [
+        cacheKey,
+        {
+          defs: [{ name: 'STALE', description: 'stale', schema: undefined }],
+          expiresAt: Date.now() - 1,
+        },
+      ],
+    ]);
+
+    await expect(
+      createComposioTools({
+        apiKey: COMPOSIO_API_KEY,
+        baseUrl: COMPOSIO_URL,
+        ucanInvocation: 'ucan-token-offline',
+        userId: 'did:ixo:offline-user',
+        sessionFactory: async () => {
+          throw new Error('composio unavailable');
+        },
+        defsCache,
+      }),
+    ).rejects.toThrow('composio unavailable');
+
+    expect(defsCache.has(cacheKey)).toBe(false);
+  });
+
   it('caps the cache size, evicting the soonest-to-expire entries first', async () => {
     const defsCache: ComposioDefsCache = new Map();
     const base = Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS;
