@@ -776,6 +776,791 @@ describe('UCAN Validator', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // SECURITY — wildcard root issuers (`rootIssuers: ['*']`, i.e. "accept any
+  // root"). A naive '*' implementation makes canIssue() return true for the
+  // INVOKER, so ucanto treats every invocation as self-issued and never walks
+  // or verifies the attached delegation proofs — yet buildProofChain() reads
+  // proofs[0] blindly and callers trust proofChain[0] as the root (row owner).
+  // That let an attacker forge a delegation naming any victim as root and have
+  // the request attributed to that victim (identity-theft IDOR). These tests
+  // pin the fix: wildcard mode must still cryptographically verify the whole
+  // chain (signatures + attenuation) up to the claimed root.
+  // ---------------------------------------------------------------------------
+  describe('wildcard root issuers (security)', () => {
+    it('accepts a self-issued invocation (no proofs) and roots it at the invoker', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([user.did]);
+    });
+
+    it('accepts a legitimately delegated invocation and roots it at the real root', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      const delegation = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          {
+            can: 'test/read' as const,
+            with: 'ixo:resource:123' as const,
+          },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([root.did, user.did]);
+    });
+
+    it('REJECTS an invocation carrying a FORGED delegation proof (attacker signs as victim)', async () => {
+      const server = await keygen();
+      const victim = await keygen();
+      const attacker = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // The attacker forges a delegation that CLAIMS to come from the victim
+      // but is signed with the attacker's OWN key (victim never signed it).
+      const forgedProof = await Client.delegate({
+        issuer: attacker.signer.withDID(victim.did),
+        audience: attacker.signer,
+        capabilities: [
+          {
+            can: 'test/read' as const,
+            with: 'ixo:resource:123' as const,
+          },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [forgedProof],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      // And crucially, the request is NOT attributed to the victim.
+      expect(result.proofChain).toBeUndefined();
+      expect(result.invoker).toBeUndefined();
+    });
+
+    it('REJECTS a forged proof naming an unresolvable (never-registered) victim DID', async () => {
+      const server = await keygen();
+      const attacker = await keygen();
+      const victimDid = 'did:ixo:victimNeverRegistered000' as const;
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        // No resolver entry for the victim — it cannot be resolved to a key.
+        didResolver: async (did) => ({
+          error: { name: 'NotFound', did, message: `Unknown DID: ${did}` },
+        }),
+      });
+
+      const forgedProof = await Client.delegate({
+        issuer: attacker.signer.withDID(victimDid),
+        audience: attacker.signer,
+        capabilities: [
+          {
+            can: 'test/read' as const,
+            with: 'ixo:resource:123' as const,
+          },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [forgedProof],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.proofChain).toBeUndefined();
+    });
+
+    it('REJECTS a broken proof chain (proof audience is not the invoker)', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+      const unrelated = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // Root delegated to `unrelated`, but `user` tries to invoke with it.
+      const rootToUnrelated = await Client.delegate({
+        issuer: root.signer,
+        audience: unrelated.signer,
+        capabilities: [
+          {
+            can: 'test/read' as const,
+            with: 'ixo:resource:123' as const,
+          },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [rootToUnrelated],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+    });
+
+    it('ENFORCES caveat attenuation across the chain (invoker cannot exceed delegated limit)', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+
+      const resource = `myapp:${server.did}` as const;
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // Root delegates limit=25 to user.
+      const delegation = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          {
+            can: 'employees/read' as const,
+            with: resource,
+            nb: { limit: 25 },
+          },
+        ],
+      });
+
+      // User invokes with limit=100 (exceeds the delegated 25).
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'employees/read' as const,
+          with: resource,
+          nb: { limit: 100 },
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        EmployeesRead,
+        resource,
+      );
+
+      expect(result.ok).toBe(false);
+    });
+
+    it('accepts a did:ixo-rooted delegated invocation under wildcard (resolver equivalence)', async () => {
+      const server = await keygen();
+      const rootKey = await keygen();
+      const user = await keygen();
+      const ixoRoot = 'did:ixo:ixo1wildcardroot' as const;
+      const ixoRootSigner = rootKey.signer.withDID(ixoRoot);
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        didResolver: async (did) => {
+          if (did === ixoRoot) return { ok: [rootKey.did] };
+          return { error: { name: 'NotFound', did, message: 'Unknown DID' } };
+        },
+      });
+
+      const delegation = await Client.delegate({
+        issuer: ixoRootSigner,
+        audience: user.signer,
+        capabilities: [
+          {
+            can: 'test/read' as const,
+            with: 'ixo:resource:123' as const,
+          },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([ixoRoot, user.did]);
+    });
+
+    it('does NOT surface a forged proof as root even when the resource embeds the invoker DID', async () => {
+      // Regression for the resource-scoped self-issue short-circuit: when
+      // `cap.with` contains the invoker DID, ucanto authorizes on the
+      // invocation alone and never walks the stapled proofs — so proofChain
+      // must be derived from the VERIFIED authorization, not the raw proofs,
+      // or a forged victim would be reported as the row-owning root.
+      const server = await keygen();
+      const victim = await keygen();
+      const attacker = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // The resource names the ATTACKER's own DID (self-owned resource).
+      const resource = `ixo:${attacker.did}` as const;
+
+      const forgedProof = await Client.delegate({
+        issuer: attacker.signer.withDID(victim.did),
+        audience: attacker.signer,
+        capabilities: [{ can: 'test/read' as const, with: resource }],
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: { can: 'test/read' as const, with: resource },
+        proofs: [forgedProof],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(serialized, TestRead, resource);
+
+      // The attacker owns their own resource, so the invocation authorizes —
+      // but rooted at the ATTACKER, never the forged victim.
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([attacker.did]);
+      expect(result.proofChain).not.toContain(victim.did);
+    });
+
+    it('REJECTS a forged proof naming a RESOLVABLE did:ixo victim (real key ≠ attacker key)', async () => {
+      const server = await keygen();
+      const victimKey = await keygen(); // the victim's REAL registered key
+      const attacker = await keygen();
+      const victimDid = 'did:ixo:ixo1realvictim' as const;
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        didResolver: async (did) => {
+          if (did === victimDid) return { ok: [victimKey.did] };
+          return { error: { name: 'NotFound', did, message: 'Unknown DID' } };
+        },
+      });
+
+      // Attacker forges a delegation CLAIMING to be the did:ixo victim but
+      // signs it with the attacker's own key (not the victim's real key).
+      const forgedProof = await Client.delegate({
+        issuer: attacker.signer.withDID(victimDid),
+        audience: attacker.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [forgedProof],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.proofChain).toBeUndefined();
+      expect(result.invoker).toBeUndefined();
+    });
+
+    it('REJECTS a self-issued invocation forged as another did:key identity (invalid invocation signature)', async () => {
+      const server = await keygen();
+      const victim = await keygen();
+      const attacker = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // Attacker mints an invocation CLAIMING issuer = victim (no proofs) but
+      // signs with their own key. structuralRoot === the (claimed) invoker, so
+      // canIssue would accept it — but ucanto still verifies the invocation's
+      // signature against the victim's key, which fails.
+      const invocation = Client.invoke({
+        issuer: attacker.signer.withDID(victim.did),
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.invoker).toBeUndefined();
+    });
+
+    it('REJECTS a self-issued invocation forged as a resolvable did:ixo identity', async () => {
+      const server = await keygen();
+      const victimKey = await keygen();
+      const attacker = await keygen();
+      const victimDid = 'did:ixo:ixo1victimselfissue' as const;
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        didResolver: async (did) => {
+          if (did === victimDid) return { ok: [victimKey.did] };
+          return { error: { name: 'NotFound', did, message: 'Unknown DID' } };
+        },
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer.withDID(victimDid),
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+    });
+
+    it('REJECTS a 3-hop chain whose middle delegation is forged', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const alice = await keygen();
+      const bob = await keygen();
+      const attacker = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // Legit: root -> alice
+      const rootToAlice = await Client.delegate({
+        issuer: root.signer,
+        audience: alice.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      // FORGED middle link: CLAIMS alice -> bob but is signed by attacker.
+      const forgedAliceToBob = await Client.delegate({
+        issuer: attacker.signer.withDID(alice.did),
+        audience: bob.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+        proofs: [rootToAlice],
+      });
+
+      const invocation = Client.invoke({
+        issuer: bob.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [forgedAliceToBob],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+    });
+
+    it('accepts a legit 3-hop delegation under wildcard and roots it correctly', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const alice = await keygen();
+      const bob = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      const rootToAlice = await Client.delegate({
+        issuer: root.signer,
+        audience: alice.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const aliceToBob = await Client.delegate({
+        issuer: alice.signer,
+        audience: bob.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+        proofs: [rootToAlice],
+      });
+      const invocation = Client.invoke({
+        issuer: bob.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [aliceToBob],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([root.did, alice.did, bob.did]);
+    });
+
+    it('REJECTS a wildcard invocation whose delegation has expired', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      const expiredDelegation = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+        expiration: Math.floor(Date.now() / 1000) - 60, // expired a minute ago
+      });
+
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [expiredDelegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+    });
+
+    it('REJECTS replay of a delegated invocation under wildcard', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      const delegation = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const first = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(first.ok).toBe(true);
+      expect(first.proofChain).toEqual([root.did, user.did]);
+
+      const second = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(second.ok).toBe(false);
+      expect(second.error?.code).toBe('REPLAY');
+    });
+
+    it('does not let a self-issuer bypass verification by stapling an unrelated proof', async () => {
+      const server = await keygen();
+      const user = await keygen();
+      const other = await keygen();
+      const someoneElse = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+
+      // A real, correctly-signed delegation — but NOT addressed to `user`.
+      const unrelated = await Client.delegate({
+        issuer: other.signer,
+        audience: someoneElse.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      // `user` staples the unrelated proof onto a self-issued invocation.
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [unrelated],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      // Fail-closed: the stapled proof does not chain to `user`, and `user` is
+      // not the structural root, so authorization is refused rather than
+      // mis-attributed to `other`.
+      expect(result.ok).toBe(false);
+      expect(result.proofChain).toBeUndefined();
+    });
+
+    it('accepts a delegated invocation whose did:ixo root publishes multiple keys', async () => {
+      const server = await keygen();
+      const rootKeyA = await keygen();
+      const rootKeyB = await keygen();
+      const user = await keygen();
+      const ixoRoot = 'did:ixo:ixo1multikey' as const;
+      // The root delegation is signed with the SECOND published key.
+      const ixoRootSigner = rootKeyB.signer.withDID(ixoRoot);
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        didResolver: async (did) => {
+          if (did === ixoRoot) return { ok: [rootKeyA.did, rootKeyB.did] };
+          return { error: { name: 'NotFound', did, message: 'Unknown DID' } };
+        },
+      });
+
+      const delegation = await Client.delegate({
+        issuer: ixoRootSigner,
+        audience: user.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([ixoRoot, user.did]);
+    });
+
+    it('treats wildcard combined with explicit root DIDs as wildcard', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const user = await keygen();
+      const someExplicitDid = (await keygen()).did;
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*', someExplicitDid],
+      });
+
+      const delegation = await Client.delegate({
+        issuer: root.signer,
+        audience: user.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const invocation = Client.invoke({
+        issuer: user.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [delegation],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([root.did, user.did]);
+    });
+  });
+
   describe('validateDelegation', () => {
     it('should validate a simple delegation with did:key', async () => {
       const server = await keygen();
