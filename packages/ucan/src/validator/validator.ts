@@ -324,6 +324,35 @@ export async function createUCANValidator(
   }
 
   /**
+   * Build the delegation chain (root first) from ucanto's VERIFIED authorization
+   * result rather than from the invocation's raw attached proofs.
+   *
+   * SECURITY — this is what buildProofChain() must NOT be used for on the
+   * validate() success path. buildProofChain() walks whatever proofs are
+   * stapled to the invocation, verified or not. The Authorization returned by
+   * ucanto's claim() instead exposes only the proof path ucanto actually walked
+   * and cryptographically verified (each `.proofs` entry is itself a verified
+   * Authorization; the array is empty at a self-issued/canIssue root). Deriving
+   * the reported chain from it guarantees a forged or unverified proof can never
+   * appear in proofChain — even when a canIssue short-circuit (e.g. the
+   * resource-scoped `cap.with.includes(issuer)` self-issue path) stops ucanto
+   * from walking the stapled proofs at all. ucanto only ever attaches a single
+   * parent per level, so following proofs[0] captures the whole verified chain.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's Authorization type is internal/union-heavy; we treat it structurally
+  function verifiedProofChain(authorization: any): string[] {
+    const chain: string[] = [];
+    let node: unknown = authorization;
+    while (node) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- structural walk over ucanto Authorization nodes
+      const auth = node as any;
+      chain.unshift(auth.issuer.did());
+      node = auth.proofs?.[0];
+    }
+    return chain;
+  }
+
+  /**
    * Compute the effective (earliest) expiration across the entire delegation chain.
    * Returns undefined if no expiration is set anywhere in the chain.
    */
@@ -525,7 +554,29 @@ export async function createUCANValidator(
           };
         }
 
-        // 6. Use ucanto's claim() to validate
+        // 6. Determine the authorization policy for ucanto's claim().
+        //
+        // SECURITY — the wildcard policy (`rootIssuers: ['*']`, "accept any
+        // root") must NOT be expressed as `canIssue = () => true`. That makes
+        // ucanto treat the INVOKER as a self-issuing root, so it authorizes on
+        // the invocation's own signature alone and NEVER walks or verifies the
+        // attached delegation proofs — while buildProofChain() still reads
+        // proofs[0] blindly and callers trust proofChain[0] as the root (the
+        // row owner). An attacker could then forge a delegation naming any
+        // victim as root and have the request attributed to that victim.
+        //
+        // Instead, in wildcard mode we accept ONLY the structural root of THIS
+        // invocation's proof chain as a root. canIssue returns false for the
+        // invoker and every intermediate, so ucanto is forced to walk the
+        // entire chain and cryptographically verify it (signatures + caveat
+        // attenuation) up to that root. A forged or over-broad proof fails that
+        // verification. Self-issued invocations (no proofs) are unaffected:
+        // their structural root IS the invoker, so canIssue accepts them.
+        const wildcard = options.rootIssuers.includes('*');
+        const structuralRoot = wildcard
+          ? buildProofChain(invocation)[0]
+          : undefined;
+
         // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
         const resolvedVerifier = await getServerVerifier();
         const claimResult = claim(capabilityDef, [invocation], {
@@ -534,13 +585,20 @@ export async function createUCANValidator(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto claim() expects a specific DID resolver signature incompatible with our async resolver
           resolveDIDKey: resolveDIDKey as any,
           canIssue: (cap: { with: string }, issuer: string) => {
-            // Wildcard: any DID with a valid signature chain is trusted as root
-            if (options.rootIssuers.includes('*')) return true;
-            // Root issuers can issue any capability
+            // Explicitly allowlisted roots (non-wildcard config). ucanto still
+            // verifies the chain up to one of these because canIssue is false
+            // for everyone else.
             if (options.rootIssuers.includes(issuer)) return true;
-            // Allow self-issued capabilities where resource contains issuer DID
+            // Resource-scoped self-issue: the resource URI names the issuer.
             if (typeof cap.with === 'string' && cap.with.includes(issuer))
               return true;
+            // Wildcard: accept ONLY the structural root of this invocation's
+            // proof chain — never the invoker or an intermediate link (see the
+            // SECURITY note above). ucanto always calls canIssue with the
+            // delegation's DECLARED issuer DID (never a resolved did:key), and
+            // structuralRoot is read from that same declared DID, so a string
+            // match is correct for every DID method (did:key, did:ixo, did:web).
+            if (wildcard && issuer === structuralRoot) return true;
             return false;
           },
           validateAuthorization: () => ({ ok: {} }),
@@ -593,8 +651,11 @@ export async function createUCANValidator(
           await invocationStore.add(invocationCid);
         }
 
-        // 9. Build proof chain and compute effective expiration
-        const proofChain = buildProofChain(invocation);
+        // 9. Build proof chain and compute effective expiration.
+        // proofChain MUST come from the VERIFIED authorization (see
+        // verifiedProofChain) — never from the invocation's raw stapled proofs
+        // — so a forged proof can never be reported as the row-owning root.
+        const proofChain = verifiedProofChain(accessResult.ok);
         const expiration = computeEffectiveExpiration(invocation);
 
         // 10. Extract facts from the invocation
