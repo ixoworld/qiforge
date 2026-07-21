@@ -170,6 +170,23 @@ export class MatrixManager {
       this.mxClient = createSimpleMatrixClient(config);
       await this.mxClient.start();
 
+      // Publish (or restore from Secret Storage) the client's cross-signing
+      // identity. Required for MSC4268 history sharing in both directions:
+      // key bundles this client sends are only trusted from a cross-signed
+      // device, and bundles it receives are only delivered to cross-signed
+      // devices.
+      const crypto = this.mxClient.mxClient.crypto;
+      if (crypto?.isReady) {
+        try {
+          await crypto.ensureCrossSigningBootstrapped();
+        } catch (e) {
+          Logger.warn(
+            'Failed to bootstrap cross-signing; history sharing on invite will not work:',
+            e,
+          );
+        }
+      }
+
       this.stateManager = MatrixStateManager.getInstance();
 
       // Mark as initialized only after everything succeeds
