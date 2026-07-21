@@ -52,7 +52,7 @@
     "@langchain/langgraph-checkpoint": "1.0.2",
     "dotenv": "^17.2.0",
     "marked": "^16.4.0",
-    "matrix-bot-sdk": "npm:@ixo/matrix-bot-sdk@^0.8.0-ixo.12",
+    "matrix-bot-sdk": "npm:@ixo/matrix-bot-sdk@^0.8.0-ixo.14",
     "matrix-js-sdk": "^37.11.0",
     "superjson": "1.13.3"
   }
