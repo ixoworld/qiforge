@@ -45,6 +45,10 @@ export function createDefaultSkillsUcanBuilder(): SkillsUcanBuilder {
       runCtx,
       { did: skillsDid, capability: 'ixo:skills' },
       'skills',
+      // Claim the ability the user's delegation actually grants. A `'*'` claim
+      // is satisfiable only by a `'*'` grant — `'*'.startsWith('skills/')` is
+      // false.
+      { can: 'skills/*' },
     );
     return invocation ?? undefined;
   };

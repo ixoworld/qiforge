@@ -144,10 +144,12 @@ describe('createDefaultSkillsUcanBuilder', () => {
     const token = await builder(SKILLS_URL, runCtx);
 
     expect(resolveSpy).toHaveBeenCalledWith(SKILLS_URL);
-    expect(mintSpy).toHaveBeenCalledWith({
-      did: 'did:web:skills.test',
-      capability: 'ixo:skills',
-    });
+    expect(mintSpy).toHaveBeenCalledWith(
+      { did: 'did:web:skills.test', capability: 'ixo:skills' },
+      // Must claim the granted ability, not '*' — a '*' claim is satisfiable
+      // only by a '*' grant, and the delegation grants 'skills/*'.
+      { can: 'skills/*' },
+    );
     expect(token).toBe('minted-token');
 
     // When DID resolution returns null the builder returns undefined and
