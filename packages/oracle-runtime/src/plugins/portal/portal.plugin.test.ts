@@ -28,6 +28,36 @@ const CLICK_TOOL: BrowserToolCall = {
   },
 };
 
+/** What `zod-to-json-schema`'s default `$refStrategy: 'root'` emits for a
+ * subschema used twice — a JSON pointer `z.fromJSONSchema` cannot resolve. */
+const POINTER_REF_TOOL: BrowserToolCall = {
+  name: 'apply_survey_ops',
+  description: 'Apply a batch of operations to an open survey.',
+  schema: {
+    type: 'object',
+    properties: {
+      ops: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { questionId: { type: 'string' } },
+        },
+      },
+      focus: { $ref: '#/properties/ops/items/properties/questionId' },
+    },
+    required: ['ops'],
+  },
+};
+
+const UNCONVERTIBLE_TOOL: BrowserToolCall = {
+  name: 'broken_tool',
+  description: 'Declares a schema the runtime cannot convert.',
+  schema: {
+    type: 'object',
+    properties: { x: { $ref: 'https://example.com/remote.json' } },
+  },
+};
+
 vi.mock('@ixo/common', () => ({
   callBrowserTool: vi.fn(async () => ({ ok: true })),
   logActionToMatrix: vi.fn(),
@@ -103,6 +133,43 @@ describe('PortalPlugin', () => {
     );
     expect(openUrlSchema?.safeParse({ url: 123 }).success).toBe(false);
     expect(openUrlSchema?.safeParse({}).success).toBe(false);
+  });
+
+  it('builds a tool from a schema carrying JSON-pointer $refs', async () => {
+    const plugin = new PortalPlugin();
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: { messages: [], browserTools: [POINTER_REF_TOOL] },
+      },
+    });
+
+    const tools = await plugin.getRequestTools(rtCtx);
+    expect(tools.map((t) => t.name)).toEqual([POINTER_REF_TOOL.name]);
+    expect(
+      tools[0]?.schema.safeParse({ ops: [{ questionId: 'q1' }], focus: 'q1' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('drops a tool whose schema cannot be converted, keeping the others', async () => {
+    const plugin = new PortalPlugin();
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: {
+          messages: [],
+          browserTools: [UNCONVERTIBLE_TOOL, OPEN_URL_TOOL],
+        },
+      },
+    });
+
+    const tools = await plugin.getRequestTools(rtCtx);
+    expect(tools.map((t) => t.name)).toEqual([OPEN_URL_TOOL.name]);
   });
 
   it('tool handler dispatches via callBrowserTool with session id, requestId-derived toolCallId, and matrix logging when roomId is set', async () => {
