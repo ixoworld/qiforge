@@ -19,6 +19,19 @@ import {
   type ISendMessageOptions,
 } from './types.js';
 
+/**
+ * Inline every repeated subschema instead of emitting a JSON-pointer back
+ * reference to it.
+ *
+ * `zod-to-json-schema` defaults to `$refStrategy: 'root'`, which turns the
+ * second occurrence of a shared subschema into `$ref:
+ * '#/properties/ops/items/anyOf/2/...'`. The oracle rebuilds these schemas with
+ * `z.fromJSONSchema`, which resolves only `#` and `#/$defs/*` and throws
+ * `Reference not found` on anything else — killing the turn before the agent
+ * runs.
+ */
+const JSON_SCHEMA_OPTIONS = { $refStrategy: 'none' } as const;
+
 interface IUseSendMessageReturn {
   sendMessage: (
     message: string,
@@ -163,7 +176,7 @@ export function useSendMessage({
             ? Object.values(browserTools).map((tool) => ({
                 name: tool.toolName,
                 description: tool.description,
-                schema: zodToJsonSchema(tool.schema),
+                schema: zodToJsonSchema(tool.schema, JSON_SCHEMA_OPTIONS),
               }))
             : undefined,
           agActions:
@@ -171,7 +184,10 @@ export function useSendMessage({
               ? agActions.map((action) => ({
                   name: action.name,
                   description: action.description,
-                  schema: zodToJsonSchema(action.parameters),
+                  schema: zodToJsonSchema(
+                    action.parameters,
+                    JSON_SCHEMA_OPTIONS,
+                  ),
                   hasRender: action.hasRender,
                 }))
               : undefined,

@@ -10,6 +10,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
+import { clientSchemaToZod } from '../../utils/client-tool-schema.js';
 import { createAguiSubAgent } from './agui-agent.js';
 
 const manifest: PluginManifest = {
@@ -72,8 +73,14 @@ function parseArgs(input: unknown): Record<string, unknown> {
  * success, unique tool-call id per invocation) but sources `sessionId`,
  * `requestId`, and `roomId` from `RuntimeContext` instead of LangChain'
  * configurable bag.
+ *
+ * Returns `null` when the FE declared a schema the runtime cannot convert —
+ * that action is dropped rather than failing the whole request.
  */
-function buildActionTool(action: AgAction): PluginTool {
+function buildActionTool(action: AgAction): PluginTool | null {
+  const schema = clientSchemaToZod(action.schema, action.name);
+  if (!schema) return null;
+
   return tool(
     async (input, ctx: RuntimeContext) => {
       const sessionId = ctx.session.id;
@@ -113,7 +120,7 @@ function buildActionTool(action: AgAction): PluginTool {
     {
       name: action.name,
       description: action.description,
-      schema: z.fromJSONSchema(action.schema),
+      schema,
     },
   );
 }
@@ -142,7 +149,11 @@ export class AGUIPlugin extends OraclePlugin {
     const actions = readAgActions(rtCtx);
     if (actions.length === 0) return [];
 
-    const tools = actions.map(buildActionTool);
+    const tools = actions
+      .map(buildActionTool)
+      .filter((tool): tool is PluginTool => tool !== null);
+    if (tools.length === 0) return [];
+
     return [createAguiSubAgent(tools)];
   }
 }

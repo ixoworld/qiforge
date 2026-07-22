@@ -25,6 +25,36 @@ const CHART_ACTION: AgAction = {
   schema: { type: 'object', properties: {}, required: [] },
 };
 
+/** What `zod-to-json-schema`'s default `$refStrategy: 'root'` emits for a
+ * subschema used twice — a JSON pointer `z.fromJSONSchema` cannot resolve. */
+const POINTER_REF_ACTION: AgAction = {
+  name: 'render_survey_ops',
+  description: 'Render a batch of survey operations.',
+  schema: {
+    type: 'object',
+    properties: {
+      ops: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { questionId: { type: 'string' } },
+        },
+      },
+      focus: { $ref: '#/properties/ops/items/properties/questionId' },
+    },
+    required: ['ops'],
+  },
+};
+
+const UNCONVERTIBLE_ACTION: AgAction = {
+  name: 'broken_action',
+  description: 'Declares a schema the runtime cannot convert.',
+  schema: {
+    type: 'object',
+    properties: { x: { $ref: 'https://example.com/remote.json' } },
+  },
+};
+
 vi.mock('@ixo/common', () => ({
   callAgAction: vi.fn(async () => ({ ok: true })),
   logActionToMatrix: vi.fn(),
@@ -102,6 +132,61 @@ describe('AGUIPlugin', () => {
     expect(prompt).toContain('AG-UI Agent');
     expect(prompt).toContain(TABLE_ACTION.name);
     expect(prompt).toContain(CHART_ACTION.name);
+  });
+
+  it('builds an action tool from a schema carrying JSON-pointer $refs', async () => {
+    const plugin = new AGUIPlugin();
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: { messages: [], agActions: [POINTER_REF_ACTION] },
+      },
+    });
+
+    const [sub] = await plugin.getRequestSubAgents(rtCtx);
+    if (!sub) throw new Error('expected one sub-agent');
+    const tools = Array.isArray(sub.tools) ? sub.tools : [];
+    expect(tools.map((t) => t.name)).toEqual([POINTER_REF_ACTION.name]);
+    expect(
+      tools[0]?.schema.safeParse({ ops: [{ questionId: 'q1' }], focus: 'q1' })
+        .success,
+    ).toBe(true);
+  });
+
+  it('drops an action whose schema cannot be converted, keeping the others', async () => {
+    const plugin = new AGUIPlugin();
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: {
+          messages: [],
+          agActions: [UNCONVERTIBLE_ACTION, TABLE_ACTION],
+        },
+      },
+    });
+
+    const [sub] = await plugin.getRequestSubAgents(rtCtx);
+    if (!sub) throw new Error('expected one sub-agent');
+    const tools = Array.isArray(sub.tools) ? sub.tools : [];
+    expect(tools.map((t) => t.name)).toEqual([TABLE_ACTION.name]);
+  });
+
+  it('returns no sub-agent when every declared action has an unconvertible schema', async () => {
+    const plugin = new AGUIPlugin();
+    const rtCtx = makeRuntimeContext({
+      history: {
+        messages: [],
+        recent: () => [],
+        userContext: {},
+        state: { messages: [], agActions: [UNCONVERTIBLE_ACTION] },
+      },
+    });
+
+    await expect(plugin.getRequestSubAgents(rtCtx)).resolves.toEqual([]);
   });
 
   it('action tool handler dispatches via callAgAction with the session id and tags args + roomId logging', async () => {
