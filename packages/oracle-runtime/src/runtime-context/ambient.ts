@@ -68,7 +68,7 @@ export interface UcanAdapter {
   mintInvocation(
     userDid: string,
     target: { did: string; capability: string },
-    opts?: { skipCache?: boolean },
+    opts?: { skipCache?: boolean; can?: string },
   ): Promise<string>;
   /**
    * Resolve a downstream service URL to its did:web identifier (fetched
