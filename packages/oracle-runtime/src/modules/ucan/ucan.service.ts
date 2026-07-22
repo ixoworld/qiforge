@@ -636,12 +636,19 @@ export class UcanService implements OnModuleDestroy {
    * @param serviceUrl - URL of the downstream service (used to resolve did:web)
    * @param userDid - The user's DID (used to look up cached delegation)
    * @param resource - The capability resource URI (e.g., 'ixo:sandbox')
+   * @param opts.can - The ability to invoke. Defaults to `'*'`. Must be an
+   *   ability the user's delegation actually covers: ucanto resolves a claim
+   *   against a proof only when the delegated ability is `'*'`, equals the
+   *   claimed ability, or is a `prefix/*` pattern covering it. A `'*'` claim is
+   *   therefore ONLY satisfiable by a `'*'` grant — pass the concrete ability
+   *   (e.g. `'subscriptions/read'`) whenever the delegation grants one.
    * @returns Base64-encoded invocation CAR, or null if unavailable
    */
   async createServiceInvocation(
     serviceUrl: string,
     userDid: string,
     resource = 'ixo:sandbox',
+    opts: { can?: string; skipCache?: boolean } = {},
   ): Promise<string | null> {
     const serviceDid = await this.resolveServiceDid(serviceUrl);
     if (!serviceDid) {
@@ -650,7 +657,12 @@ export class UcanService implements OnModuleDestroy {
       );
       return null;
     }
-    return this.mintInvocationForServiceDid(userDid, serviceDid, resource);
+    return this.mintInvocationForServiceDid(
+      userDid,
+      serviceDid,
+      resource,
+      opts,
+    );
   }
 
   /**
@@ -663,13 +675,18 @@ export class UcanService implements OnModuleDestroy {
    * services that enforce single-use replay protection per invocation CID
    * (e.g. composio-worker). Without this flag a cached CID would be reused
    * across requests and rejected as a replay.
+   *
+   * `opts.can` — the ability to invoke, default `'*'`. See
+   * {@link createServiceInvocation} for why this must line up with what the
+   * user's delegation grants.
    */
   async mintInvocationForServiceDid(
     userDid: string,
     serviceDid: string,
     resource = 'ixo:sandbox',
-    opts: { skipCache?: boolean } = {},
+    opts: { skipCache?: boolean; can?: string } = {},
   ): Promise<string | null> {
+    const can = opts.can ?? '*';
     if (!this.signingMnemonic || !this.oracleDid) {
       this.logger.debug('[UCAN] No signing key available, skipping invocation');
       return null;
@@ -683,8 +700,10 @@ export class UcanService implements OnModuleDestroy {
       return null;
     }
 
-    // Check invocation cache (skipped for replay-protected services)
-    const cacheKey = `${INVOCATION_CACHE_PREFIX}${userDid}:${serviceDid}`;
+    // Check invocation cache (skipped for replay-protected services). The
+    // ability is part of the key — two mints for the same service with
+    // different `can` values are different invocations.
+    const cacheKey = `${INVOCATION_CACHE_PREFIX}${userDid}:${serviceDid}:${can}`;
     if (!opts.skipCache) {
       const cached = await this.cacheManager.get<{
         invocation: string;
@@ -721,7 +740,10 @@ export class UcanService implements OnModuleDestroy {
       const invocation = await createInvocation({
         issuer: signer,
         audience: serviceDid,
-        capability: { can: '*', with: resource as `${string}:${string}` },
+        capability: {
+          can: can as `${string}/${string}`,
+          with: resource as `${string}:${string}`,
+        },
         proofs: [delegation],
         expiration: expirationSeconds,
         // Unique nonce → unique invocation CID even for two mints in the same
@@ -746,7 +768,7 @@ export class UcanService implements OnModuleDestroy {
       }
 
       this.logger.debug(
-        `[UCAN] Created invocation: iss=${this.oracleDid} aud=${serviceDid} user=${userDid}`,
+        `[UCAN] Created invocation: iss=${this.oracleDid} aud=${serviceDid} user=${userDid} can=${can} with=${resource}`,
       );
       return serialized;
     } catch (error) {

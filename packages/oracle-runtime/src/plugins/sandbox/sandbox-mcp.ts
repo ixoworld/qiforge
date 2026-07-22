@@ -70,10 +70,12 @@ export function createDefaultAuthBuilder(): SandboxAuthBuilder {
     );
     if (sandboxDid) {
       try {
-        const invocation = await runCtx.ucan.mintInvocation({
-          did: sandboxDid,
-          capability: 'ixo:sandbox',
-        });
+        const invocation = await runCtx.ucan.mintInvocation(
+          { did: sandboxDid, capability: 'ixo:sandbox' },
+          // Claim the ability the user's delegation actually grants. A `'*'`
+          // claim is satisfiable only by a `'*'` grant.
+          { can: 'sandbox/*' },
+        );
         if (invocation) {
           headers.Authorization = `Bearer ${invocation}`;
           headers['X-Auth-Type'] = 'ucan';
@@ -95,10 +97,10 @@ export function createDefaultAuthBuilder(): SandboxAuthBuilder {
       );
       if (skillsDid) {
         try {
-          const skillsInvocation = await runCtx.ucan.mintInvocation({
-            did: skillsDid,
-            capability: 'ixo:skills',
-          });
+          const skillsInvocation = await runCtx.ucan.mintInvocation(
+            { did: skillsDid, capability: 'ixo:skills' },
+            { can: 'skills/*' },
+          );
           if (skillsInvocation) {
             headers['X-Skills-Invocation'] = skillsInvocation;
           }

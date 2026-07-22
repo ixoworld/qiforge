@@ -143,6 +143,9 @@ export class UserContextFetcher {
         engineUrl,
         userDid,
         'ixo:memory',
+        // Claim the ability the user's delegation actually grants. A `'*'`
+        // claim is satisfiable only by a `'*'` grant.
+        { can: 'memory/*' },
       );
     } catch (err) {
       this.logger.warn(

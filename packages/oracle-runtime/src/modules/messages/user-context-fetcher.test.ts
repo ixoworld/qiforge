@@ -125,6 +125,9 @@ describe('UserContextFetcher.fetch', () => {
       MEMORY_ENGINE_URL,
       USER_DID,
       'ixo:memory',
+      // Must claim the granted ability, not '*' — a '*' claim is satisfiable
+      // only by a '*' grant, and the delegation grants 'memory/*'.
+      { can: 'memory/*' },
     );
     expect(memoryEngine.gatherUserContext).toHaveBeenCalledWith({
       oracleDid: ORACLE_DID,

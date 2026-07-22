@@ -106,7 +106,9 @@ describe('ComposioPlugin.getRequestTools — UCAN minting flow', () => {
     expect(resolveSpy).toHaveBeenCalledWith(COMPOSIO_URL);
     expect(mintSpy).toHaveBeenCalledWith(
       { did: 'did:web:composio.test', capability: 'ixo:sandbox' },
-      { skipCache: true },
+      // Composio routes through the sandbox capability; must claim the granted
+      // ability, not '*', since a '*' claim needs a '*' grant.
+      { skipCache: true, can: 'sandbox/*' },
     );
     expect(sessionFactory).toHaveBeenCalledWith({
       apiKey: COMPOSIO_API_KEY,

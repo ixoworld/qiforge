@@ -197,10 +197,12 @@ describe('MemoryPlugin', () => {
 
     const headers = await buildMemoryHeaders(ctx, MEMORY_MCP_URL);
     expect(resolveServiceDid).toHaveBeenCalledWith(MEMORY_MCP_URL);
-    expect(mintInvocation).toHaveBeenCalledWith({
-      did: 'did:web:memory.test',
-      capability: 'ixo:memory',
-    });
+    expect(mintInvocation).toHaveBeenCalledWith(
+      { did: 'did:web:memory.test', capability: 'ixo:memory' },
+      // Must claim the granted ability, not '*' — a '*' claim is satisfiable
+      // only by a '*' grant, and the delegation grants 'memory/*'.
+      { can: 'memory/*' },
+    );
     expect(headers).toEqual({
       Authorization: 'Bearer inv-token',
       'X-Auth-Type': 'ucan',

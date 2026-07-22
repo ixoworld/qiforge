@@ -170,10 +170,15 @@ export class SubscriptionMiddleware implements NestMiddleware {
         );
       }
 
+      // `subscriptions/read` — the exact ability the user's delegation grants.
+      // Claiming `'*'` here would be unsatisfiable: ucanto only resolves a
+      // `'*'` claim against a `'*'` grant, so the read-scoped delegation the
+      // portal issues would be reported as an unknown capability.
       const invocation = await this.ucanService.createServiceInvocation(
         subscriptionUrl,
         did,
         'ixo:subscriptions',
+        { can: 'subscriptions/read' },
       );
       if (!invocation) {
         throw new HttpException(

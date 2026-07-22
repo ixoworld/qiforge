@@ -38,6 +38,9 @@ export async function mintComposioInvocation(
     runCtx,
     { did: composioDid, capability: 'ixo:sandbox' },
     'composio',
-    { skipCache: true },
+    // can: composio routes through the sandbox capability, and the user's
+    // delegation grants `sandbox/*`. A `'*'` claim is satisfiable only by a
+    // `'*'` grant — `'*'.startsWith('sandbox/')` is false.
+    { skipCache: true, can: 'sandbox/*' },
   );
 }

@@ -337,7 +337,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     hasCapability: (resource: string, action: string) => boolean;
     mintInvocation: (
       target: { did: string; capability: string },
-      opts?: { skipCache?: boolean },
+      opts?: { skipCache?: boolean; can?: string },
     ) => Promise<string>;
     /**
      * Resolve a downstream service URL to its did:web identifier. Returns

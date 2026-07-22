@@ -100,7 +100,7 @@ export async function mintInvocationSafely(
   runCtx: RuntimeContext,
   target: { did: string; capability: string },
   plugin: string,
-  opts?: { skipCache?: boolean },
+  opts?: { skipCache?: boolean; can?: string },
 ): Promise<string | null> {
   try {
     // Forward `opts` only when supplied so the no-opts call signature stays

@@ -197,6 +197,9 @@ export class SessionHistoryProcessor {
         this.configService.getOrThrow('MEMORY_ENGINE_URL'),
         did,
         'ixo:memory',
+        // Claim the ability the user's delegation actually grants. A `'*'`
+        // claim is satisfiable only by a `'*'` grant.
+        { can: 'memory/*' },
       );
       if (invocation) {
         memoryUcanInvocation = invocation;

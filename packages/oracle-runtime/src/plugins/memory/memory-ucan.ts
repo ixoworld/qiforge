@@ -36,6 +36,9 @@ export async function buildMemoryHeaders(
     runCtx,
     { did: memoryDid, capability: 'ixo:memory' },
     'memory',
+    // Claim the ability the user's delegation actually grants. A `'*'` claim is
+    // satisfiable only by a `'*'` grant — `'*'.startsWith('memory/')` is false.
+    { can: 'memory/*' },
   );
   if (!invocation) return null;
 
