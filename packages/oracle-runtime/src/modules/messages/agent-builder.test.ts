@@ -82,6 +82,7 @@ function makeAmbient(): AmbientServices {
     },
     matrix: {
       postToRoom: vi.fn(async () => 'event-id'),
+      postEvent: vi.fn(async () => 'event-id'),
       getRoomState: vi.fn(async (roomId: string) => ({ roomId, state: [] })),
       getEventById: vi.fn(async (_roomId: string, eventId: string) => ({
         eventId,

@@ -8,6 +8,10 @@ import {
   FILE_PROCESSING_CREDIT_SINK,
   type FileProcessingCreditSink,
 } from './file-processing-credit-sink.port.js';
+import {
+  SANDBOX_OUTPUT_PREFIX,
+  sanitizeAttachmentFilename,
+} from './attachment-archive.js';
 
 interface AiProcessUsage {
   cost?: number;
@@ -28,7 +32,6 @@ const AI_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_ERROR_BODY_LENGTH = 1024;
 
 const SANDBOX_TRUNCATE_LIMIT = 500;
-const SANDBOX_OUTPUT_PREFIX = '/workspace/output';
 
 const ALLOWED_URI_SCHEMES = /^(mxc|https?):\/\//i;
 const MAX_REDIRECT_COUNT = 5;
@@ -1369,13 +1372,7 @@ export class FileProcessingService {
    * to prevent prompt injection when interpolated into LLM context.
    */
   private sanitizeFilename(filename: string): string {
-    return (
-      filename
-        // eslint-disable-next-line no-control-regex
-        .replace(/[ -]/g, '')
-        .replace(/[[\]]/g, '')
-        .slice(0, 255)
-    );
+    return sanitizeAttachmentFilename(filename);
   }
 
   /**

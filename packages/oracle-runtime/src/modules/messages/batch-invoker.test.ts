@@ -39,12 +39,16 @@ function makeInput(
   overrides: {
     payload?: Partial<SendMessagePayload>;
     inputMessages?: BaseMessage[];
+    abortController?: AbortController;
   } = {},
 ): BatchInvokeInput {
   return {
     payload: makePayload(overrides.payload),
     prepared: makePrepared(),
     inputMessages: overrides.inputMessages ?? [new HumanMessage('hello')],
+    ...(overrides.abortController && {
+      abortController: overrides.abortController,
+    }),
   };
 }
 
@@ -124,6 +128,26 @@ describe('BatchInvoker', () => {
         context: { user: { did: USER_DID } },
         signal: abortController.signal,
       });
+    });
+  });
+
+  describe('invoke — abort controller', () => {
+    it('hands the per-turn AbortController to agentBuilder.build', async () => {
+      const { svc, build: buildFn } = build();
+      const turnController = new AbortController();
+
+      await svc.invoke(makeInput({ abortController: turnController }));
+
+      expect(buildFn).toHaveBeenCalledTimes(1);
+      expect(buildFn.mock.calls[0]?.[1]).toBe(turnController);
+    });
+
+    it('passes no controller when the input carries none', async () => {
+      const { svc, build: buildFn } = build();
+
+      await svc.invoke(makeInput());
+
+      expect(buildFn.mock.calls[0]?.[1]).toBeUndefined();
     });
   });
 

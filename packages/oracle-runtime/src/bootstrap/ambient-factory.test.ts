@@ -1,8 +1,26 @@
+import type * as IxoMatrix from '@ixo/matrix';
 import { describe, expect, it, vi } from 'vitest';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OracleIdentity } from '../plugin-api/types.js';
 import { buildAmbientServices } from './ambient-factory.js';
+
+// Mock MatrixManager.getInstance().sendMatrixEvent so the MatrixAdapter's
+// send paths can be asserted without a real Matrix client. Keep the rest of
+// @ixo/matrix intact by spreading the actual module.
+const { sendMatrixEventMock } = vi.hoisted(() => ({
+  sendMatrixEventMock: vi.fn(async () => 'sent-event-id'),
+}));
+vi.mock('@ixo/matrix', async (importOriginal) => {
+  const actual = await importOriginal<typeof IxoMatrix>();
+  return {
+    ...actual,
+    MatrixManager: {
+      ...actual.MatrixManager,
+      getInstance: () => ({ sendMatrixEvent: sendMatrixEventMock }),
+    },
+  };
+});
 
 /**
  * The factory is wired into `createOracleApp` after Nest creates the DI
@@ -69,6 +87,7 @@ describe('buildAmbientServices', () => {
     expect(typeof ambient.ucan.hasCapability).toBe('function');
     expect(typeof ambient.ucan.requireCapability).toBe('function');
     expect(typeof ambient.matrix.postToRoom).toBe('function');
+    expect(typeof ambient.matrix.postEvent).toBe('function');
     expect(typeof ambient.matrix.getRoomState).toBe('function');
     expect(typeof ambient.matrix.getEventById).toBe('function');
     expect(typeof ambient.secrets.getIndex).toBe('function');
@@ -142,6 +161,41 @@ describe('buildAmbientServices', () => {
         capability: 'ixo:memory',
       }),
     ).rejects.toThrow(/mint returned null/i);
+  });
+
+  it('MatrixAdapter.postEvent sends the caller-typed event; postToRoom stays m.room.message', async () => {
+    const ambient = buildAmbientServices({
+      nestApp: makeNestAppStub(
+        makeFakeUcanService(),
+        makeFakeBlobStoreService(),
+      ),
+      config: {},
+      identity: IDENTITY,
+      availablePlugins: new Set(),
+      logger: console,
+    });
+
+    const eventId = await ambient.matrix.postEvent(
+      '!room:ixo.world',
+      'ixo.oracle.component',
+      { component: 'work_status' },
+    );
+    expect(eventId).toBe('sent-event-id');
+    expect(sendMatrixEventMock).toHaveBeenCalledWith(
+      '!room:ixo.world',
+      'ixo.oracle.component',
+      { component: 'work_status' },
+    );
+
+    await ambient.matrix.postToRoom('!room:ixo.world', {
+      msgtype: 'm.text',
+      body: 'hi',
+    });
+    expect(sendMatrixEventMock).toHaveBeenCalledWith(
+      '!room:ixo.world',
+      'm.room.message',
+      { msgtype: 'm.text', body: 'hi' },
+    );
   });
 
   it('LlmAdapter.get resolves a chat model for a known role', () => {

@@ -78,6 +78,7 @@ function baseInput(overrides: Partial<ComposePromptInput>): ComposePromptInput {
     capabilityBlock: '',
     customInstructions: '',
     operationalMode: 'General conversation mode',
+    commerceOverlay: '',
     editorSection: '',
     composioContext: '',
     slackFormattingConstraints: '',
@@ -170,5 +171,26 @@ describe('composePrompt — compact memory context', () => {
     // Early facts survive; the long tail is trimmed under the budget.
     expect(prompt).toContain('distinct durable fact number 0 ');
     expect(prompt).not.toContain('distinct durable fact number 399 ');
+  });
+});
+
+describe('composePrompt — commerce overlay slot', () => {
+  it('renders the overlay after the operational mode when provided', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        commerceOverlay: '## Commerce mode\n\nYou are the front desk.',
+      }),
+    );
+
+    expect(prompt).toContain('You are the front desk.');
+    expect(prompt.indexOf('General conversation mode')).toBeLessThan(
+      prompt.indexOf('You are the front desk.'),
+    );
+  });
+
+  it('renders nothing for the empty overlay', async () => {
+    const prompt = await composePrompt(baseInput({}));
+
+    expect(prompt).not.toContain('Commerce mode');
   });
 });

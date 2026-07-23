@@ -86,6 +86,130 @@ export interface SharedAccessors {
   readonly [key: string]: unknown;
 }
 
+/** Which commerce persona a Matrix turn runs as. */
+export type CommerceMode = 'support' | 'work';
+
+/** Lifecycle of a thread-scoped work engagement. */
+export type CommerceEngagementStatus = 'active' | 'delivered' | 'closed';
+
+/**
+ * A thread-scoped work engagement: one per Matrix thread, keyed by the thread
+ * root event id (= session id). Stored in the room's state by the
+ * oracle-payments plugin; surfaced read-only on `ctx.commerce.engagement`.
+ */
+export interface CommerceEngagement {
+  status: CommerceEngagementStatus;
+  serviceId: string;
+  serviceName: string;
+  priceUsd: number;
+  collectionId: string;
+  adminAddress: string;
+  /** ISO timestamp of engagement start. */
+  startedAt: string;
+  /**
+   * ISO timestamp of a user cancellation (`cancel_work`). Stamped when the
+   * cancellation is requested, before its release claim reaches the chain — an
+   * engagement that still reads `active` while carrying this timestamp is one
+   * whose release failed and needs another `cancel_work`.
+   */
+  cancelledAt?: string;
+  /** Free-text reason the user gave `cancel_work`, when any. */
+  cancelReason?: string;
+  /**
+   * Escrow intent locked on-chain at engagement start. `expiresAt` is the
+   * derived deadline (start + the grant's `intentDurationNs`) after which the
+   * reserved amount auto-releases. Expiry is the passive cleanup; the active
+   * one is a claim — submitting any claim against the intent (a delivery, or
+   * the release claim `cancel_work` files) settles it immediately.
+   */
+  intent?: { txHash: string; submittedAt: string; expiresAt?: string };
+  /** Work claim recorded by `deliver_work` (set by a later lane). */
+  claim?: { cid: string; txHash?: string; submittedAt: string };
+  /**
+   * The evaluation outcome already reported to the user in chat, stamped by
+   * the claim-status watcher. Its `status` is the raw on-chain
+   * `EvaluationStatus`, so a re-evaluation (a flagged claim later resolved)
+   * posts a second card while an unchanged status never re-posts.
+   */
+  paymentOutcome?: {
+    status: number;
+    outcome: CommercePaymentOutcome;
+    reportedAt: string;
+  };
+}
+
+/**
+ * How a submitted claim was settled, as rendered on the `payment_update` card.
+ * `under_review` is the chain's non-terminal FLAGGED status; `rejected` covers
+ * both a rejected and an invalidated claim — either way the escrow goes back.
+ */
+export type CommercePaymentOutcome =
+  | 'approved'
+  | 'rejected'
+  | 'under_review'
+  | 'disputed';
+
+/**
+ * Why a work-classified turn did not start an engagement. The first four are
+ * contract-gate failures (the user needs to contract or fix their contract);
+ * the last two are different in kind — the contract is fine, but the user
+ * already has a job running (`engagement_in_progress`) or the on-chain payment
+ * reservation itself failed (`intent_failed`).
+ */
+export type CommerceGateFailureReason =
+  | 'not_contracted'
+  | 'quota_exhausted'
+  | 'max_amount_too_low'
+  | 'service_not_contracted'
+  | 'engagement_in_progress'
+  | 'intent_failed';
+
+/**
+ * The job already running when a new one is refused with
+ * `engagement_in_progress`. The chain accepts one active claim intent per
+ * (agent, user claim collection), so a user can have exactly one paid job with
+ * an oracle at a time — a second reservation could never be locked.
+ */
+export interface CommerceInProgressEngagement {
+  serviceId: string;
+  serviceName: string;
+  /**
+   * Thread root event id the running job lives in — the only thread its
+   * `cancel_work` can be called from.
+   */
+  threadId: string;
+  /**
+   * The user already cancelled this job but its on-chain release did not land,
+   * so the reservation is still held. Retrying `cancel_work` in that thread
+   * completes the release; nothing else frees it before expiry.
+   */
+  releaseFailed?: boolean;
+}
+
+/** Gate-failure context attached when a work request lacked a usable contract. */
+export interface CommerceGateFailure {
+  reason: CommerceGateFailureReason;
+  serviceId: string;
+  /** Display name of the requested service, when the agent card provides one. */
+  serviceName?: string;
+  /** The blocking job — present only for `engagement_in_progress`. */
+  inProgress?: CommerceInProgressEngagement;
+}
+
+/**
+ * Per-turn commerce routing outcome, produced by the Matrix message router
+ * and threaded into `RuntimeContext.commerce`. Absent entirely on HTTP turns
+ * and on Matrix turns where the commerce router is inert (no oracle-payments
+ * plugin registered).
+ */
+export interface CommerceContext {
+  mode: CommerceMode;
+  /** The thread's active engagement — present in work mode. */
+  engagement?: CommerceEngagement;
+  /** Present when the user asked for work but the contract gate failed. */
+  gate?: CommerceGateFailure;
+}
+
 export type ToolCallEventPayload = Record<string, unknown>;
 export type ActionCallEventPayload = Record<string, unknown>;
 export type RenderComponentEventPayload = Record<string, unknown>;
@@ -327,6 +451,16 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   /** Matrix client, scoped operations only. */
   matrix: {
     postToRoom: (roomId: string, content: unknown) => Promise<string>;
+    /**
+     * Post a timeline event with a caller-chosen event type (e.g. the
+     * `ixo.oracle.*` protocol events). `postToRoom` is the `m.room.message`
+     * shorthand; this is the general form. Returns the new event id.
+     */
+    postEvent: (
+      roomId: string,
+      eventType: string,
+      content: object,
+    ) => Promise<string>;
     getRoomState: (roomId: string) => Promise<RoomStateSnapshot>;
     getEventById: (roomId: string, eventId: string) => Promise<MatrixEvent>;
   };
@@ -415,6 +549,13 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   /** Propagates from the HTTP request / graph invocation. */
   abortSignal: AbortSignal;
 
+  /**
+   * Commerce routing outcome for this Matrix turn (support vs work persona,
+   * active engagement, gate failure, cancellation). Absent on HTTP turns and
+   * whenever the commerce router is inert.
+   */
+  commerce?: CommerceContext;
+
   /** Read accessors for state owned by other plugins. */
   shared: SharedAccessors;
 
@@ -434,6 +575,13 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Billing gate. `'contracted'` marks a tool that performs paid contracted
+   * work: the runtime binds it only while the turn runs inside an active work
+   * engagement (`ctx.commerce.mode === 'work'`) and hides it from the model
+   * otherwise — a hard code gate on top of the prompt overlay.
+   */
+  billing?: 'contracted';
 }
 
 export interface PluginSubAgent {

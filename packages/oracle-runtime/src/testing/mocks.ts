@@ -62,6 +62,7 @@ export type MockMatrixOverrides = Partial<MatrixAdapter>;
 export function mockMatrix(overrides: MockMatrixOverrides = {}): MatrixAdapter {
   const defaults: MatrixAdapter = {
     postToRoom: vi.fn(async () => 'mock-event-id'),
+    postEvent: vi.fn(async () => 'mock-event-id'),
     getRoomState: vi.fn(
       async (roomId: string): Promise<RoomStateSnapshot> => ({
         roomId,

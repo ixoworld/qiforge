@@ -158,4 +158,16 @@ export type GrantClaimSubmitAuthorizationParams = {
   oracleName: string;
   adminAddress: string;
   maxAmount?: Coin[];
+  /**
+   * How long each claim intent created under this authorization stays alive,
+   * in nanoseconds, as a decimal string. Defaults to
+   * `DEFAULT_INTENT_DURATION_NS` (1 hour) when omitted.
+   *
+   * Set a longer window only when the contracted work genuinely takes longer
+   * than the default: an intent cannot be renewed or cancelled once created, so
+   * a job that outlives its window loses its escrowed payment reservation
+   * mid-flight. Agree the longer window up front rather than trying to replace
+   * an expired intent while the job is running.
+   */
+  intentDurationNs?: string;
 };

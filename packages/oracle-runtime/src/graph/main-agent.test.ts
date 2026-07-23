@@ -59,6 +59,7 @@ function makeAmbient(): AmbientServices {
     },
     matrix: {
       postToRoom: vi.fn(async () => 'event-id'),
+      postEvent: vi.fn(async () => 'event-id'),
       getRoomState: vi.fn(async (roomId: string) => ({ roomId, state: [] })),
       getEventById: vi.fn(async (_roomId: string, eventId: string) => ({
         eventId,
@@ -308,6 +309,107 @@ describe('createMainAgent', () => {
       if (!params) throw new Error('createAgent was not called');
       const names = (params.tools as { name: string }[]).map((t) => t.name);
       expect(names).toContain('composio_search');
+    }
+  });
+
+  it("drops billing:'contracted' tools unless the turn runs in work mode", async () => {
+    const makeRegistriesWithBilledTool = () => {
+      const registries = emptyRegistries();
+      registries.tools.register(
+        makePlugin({
+          name: 'tax-fork',
+          manifest: makeManifest({ visibility: 'always' }),
+          getTools: () => [
+            makeTool('generate_tax_report', { billing: 'contracted' }),
+            makeTool('free_faq'),
+          ],
+        }),
+      );
+      registries.manifests.register(
+        makePlugin({
+          name: 'tax-fork',
+          manifest: makeManifest({ visibility: 'always' }),
+        }),
+      );
+      return registries;
+    };
+    const workCommerce = {
+      mode: 'work' as const,
+      engagement: {
+        status: 'active' as const,
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        priceUsd: 20,
+        collectionId: '42',
+        adminAddress: 'ixo1admin',
+        startedAt: '2026-07-22T00:00:00.000Z',
+      },
+    };
+    const withCommerce = (commerce?: typeof workCommerce) => {
+      const args = baseArgs({ registries: makeRegistriesWithBilledTool() });
+      return {
+        ...args,
+        requestCtx: {
+          ...args.requestCtx,
+          session: { ...args.requestCtx.session, client: 'matrix' as const },
+          ...(commerce ? { commerce } : {}),
+        },
+      };
+    };
+    const boundNames = () => {
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
+      return (params.tools as { name: string }[]).map((t) => t.name);
+    };
+
+    // No commerce context (HTTP turn / inert router): the billed tool is hidden.
+    await createMainAgent(withCommerce(undefined));
+    expect(boundNames()).not.toContain('generate_tax_report');
+    expect(boundNames()).toContain('free_faq');
+
+    // Support mode: still hidden.
+    createAgentCalls.length = 0;
+    await createMainAgent(withCommerce({ ...workCommerce, mode: 'support' }));
+    expect(boundNames()).not.toContain('generate_tax_report');
+
+    // Work mode: the billed tool binds.
+    createAgentCalls.length = 0;
+    await createMainAgent(withCommerce(workCommerce));
+    expect(boundNames()).toContain('generate_tax_report');
+  });
+
+  it('renders the commerce overlay only on Matrix turns carrying ctx.commerce', async () => {
+    const commerce = { mode: 'support' as const };
+    const matrixArgs = baseArgs();
+    await createMainAgent({
+      ...matrixArgs,
+      requestCtx: {
+        ...matrixArgs.requestCtx,
+        session: {
+          ...matrixArgs.requestCtx.session,
+          client: 'matrix' as const,
+        },
+        commerce,
+      },
+    });
+    {
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
+      expect(String(params.systemPrompt)).toContain('## Commerce mode');
+      expect(String(params.systemPrompt)).toContain('front desk');
+    }
+
+    // A portal turn never renders the overlay, commerce context or not.
+    createAgentCalls.length = 0;
+    const portalArgs = baseArgs();
+    await createMainAgent({
+      ...portalArgs,
+      requestCtx: { ...portalArgs.requestCtx, commerce },
+    });
+    {
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
+      expect(String(params.systemPrompt)).not.toContain('## Commerce mode');
     }
   });
 

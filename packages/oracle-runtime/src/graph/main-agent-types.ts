@@ -4,6 +4,7 @@ import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
 import type {
   ChatOpenAIFields,
+  CommerceContext,
   MergedConfig,
   ModelRole,
   OracleIdentity,
@@ -49,6 +50,12 @@ export const mainAgentRequestContextSchema = z.object({
    * allow-list. Absent → the agent uses the default `main` model.
    */
   model: z.string().optional(),
+  /**
+   * Commerce routing outcome produced by the Matrix message router. Shape is
+   * owned by `CommerceContext` (plugin-api); the schema passes it through
+   * unvalidated — it never crosses a trust boundary (bridge → runtime only).
+   */
+  commerce: z.custom<CommerceContext>().optional(),
 });
 /** Per-request shape — exposes only what the main-agent build needs. */
 export type MainAgentRequestContext = z.infer<

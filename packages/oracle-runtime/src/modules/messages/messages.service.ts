@@ -9,6 +9,7 @@ import { ReasoningEvent } from '@ixo/oracles-events';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { CommerceContext } from '../../plugin-api/types.js';
 import type { Request, Response } from 'express';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import * as crypto from 'node:crypto';
@@ -86,6 +87,13 @@ export interface SendMessageRequest extends SendMessagePayload {
    */
   ucanDelegation?: AuthUcanDelegation;
   // ── Matrix-listener path metadata ──────────────────────────────────────
+  /**
+   * Per-turn abort controller from the Matrix listener bridge. Its signal is
+   * threaded into the LangGraph invoke config (and so into
+   * `RuntimeContext.abortSignal`) so aborting it cancels the graph run —
+   * mirroring the per-turn controller the SSE path constructs itself.
+   */
+  abortController?: AbortController;
   /** Sender's full Matrix user id (e.g. `@alice:matrix.example`). */
   senderMatrixUserId?: string;
   /** Matrix event id of the latest text event the user sent. */
@@ -96,6 +104,13 @@ export interface SendMessageRequest extends SendMessagePayload {
   matrixRelatesTo?: { 'm.in_reply_to'?: { event_id: string } };
   /** Room id (mirrors the bridge call) — used for display-name + roomInfo lookups. */
   matrixRoomId?: string;
+  /**
+   * Commerce routing outcome from the Matrix message router (support vs work
+   * persona, engagement, gate failure, cancellation). Threaded through the
+   * agent build into `RuntimeContext.commerce`. Absent on HTTP turns and on
+   * Matrix turns where the router is inert.
+   */
+  commerce?: CommerceContext;
 }
 
 type SendMessageReply = SendMessageResponse;
@@ -139,11 +154,16 @@ export class MessagesService implements OnModuleInit {
         overrideLangchainThreadId: msg.langchainThreadId,
         homeServer: msg.homeServer,
         msgFromMatrixRoom: true,
+        abortController: msg.abortController,
+        // The bridge's per-turn id keeps the work_status card, the runnable
+        // config, and ctx.session.requestId in agreement.
+        requestId: msg.requestId,
         senderMatrixUserId: msg.senderMatrixUserId,
         matrixEventId: msg.eventId,
         matrixMentions: msg.mentions,
         matrixRelatesTo: msg.relatesTo,
         matrixRoomId: msg.roomId,
+        ...(msg.commerce && { commerce: msg.commerce }),
         ...(msg.attachments && { attachments: msg.attachments }),
       }),
     );
@@ -262,6 +282,7 @@ export class MessagesService implements OnModuleInit {
         payload: { ...params },
         prepared,
         inputMessages,
+        abortController: params.abortController,
       });
 
       if (!msgFromMatrixRoom) {

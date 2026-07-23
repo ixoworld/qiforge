@@ -697,9 +697,11 @@ describe('MessagesService', () => {
         langchainThreadId?: string;
         roomId: string;
         homeServer?: string;
+        abortController?: AbortController;
         attachments?: AttachmentDto[];
       }) => Promise<unknown>;
 
+      const turnController = new AbortController();
       await handler({
         did: USER_DID,
         message: 'from-matrix',
@@ -707,19 +709,57 @@ describe('MessagesService', () => {
         langchainThreadId: 'lc-thread-1',
         roomId: ROOM_ID,
         homeServer: HOME_SERVER,
+        abortController: turnController,
       });
 
       expect(batchInvoker.invoke).toHaveBeenCalledTimes(1);
       const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
         payload: SendMessageRequest;
+        abortController?: AbortController;
       };
       expect(invokeArg.payload.clientType).toBe('matrix');
       expect(invokeArg.payload.msgFromMatrixRoom).toBe(true);
       expect(invokeArg.payload.message).toBe('from-matrix');
       expect(invokeArg.payload.overrideLangchainThreadId).toBe('lc-thread-1');
+      // The bridge's per-turn controller must reach the batch invoker so an
+      // abort cancels the LangGraph run.
+      expect(invokeArg.abortController).toBe(turnController);
       // msgFromMatrixRoom=true must SHORT-CIRCUIT the user/AI Matrix replay
       // — otherwise we'd echo the user's own Matrix message back into the room.
       expect(sessions.matrixManger.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('threads the bridge requestId and commerce context into the payload', async () => {
+      const { svc, matrixBridge, batchInvoker } = build();
+      svc.onModuleInit();
+      const handler = matrixBridge.setDeliverHandler.mock
+        .calls[0]![0] as (msg: {
+        did: string;
+        message: string;
+        threadId: string;
+        roomId: string;
+        homeServer?: string;
+        abortController?: AbortController;
+        requestId?: string;
+        commerce?: SendMessageRequest['commerce'];
+      }) => Promise<unknown>;
+
+      await handler({
+        did: USER_DID,
+        message: 'do my taxes',
+        threadId: SESSION_ID,
+        roomId: ROOM_ID,
+        homeServer: HOME_SERVER,
+        abortController: new AbortController(),
+        requestId: 'bridge-req-42',
+        commerce: { mode: 'support' },
+      });
+
+      const invokeArg = batchInvoker.invoke.mock.calls[0]![0] as {
+        payload: SendMessageRequest;
+      };
+      expect(invokeArg.payload.requestId).toBe('bridge-req-42');
+      expect(invokeArg.payload.commerce).toEqual({ mode: 'support' });
     });
   });
 });

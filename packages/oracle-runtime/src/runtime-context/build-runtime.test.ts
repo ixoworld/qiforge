@@ -43,6 +43,7 @@ function makeAmbient(overrides: AmbientMockOverrides = {}): AmbientServices {
     },
     matrix: {
       postToRoom: vi.fn(async () => 'event-id-1'),
+      postEvent: vi.fn(async () => 'event-id-2'),
       getRoomState: vi.fn(
         async (roomId: string): Promise<RoomStateSnapshot> => ({
           roomId,
@@ -168,6 +169,15 @@ describe('buildRuntimeContext', () => {
       hello: 'world',
     });
 
+    await ctx.matrix.postEvent('!room:ixo.world', 'ixo.oracle.component', {
+      component: 'work_status',
+    });
+    expect(ambient.matrix.postEvent).toHaveBeenCalledWith(
+      '!room:ixo.world',
+      'ixo.oracle.component',
+      { component: 'work_status' },
+    );
+
     await ctx.matrix.getRoomState('!room:ixo.world');
     expect(ambient.matrix.getRoomState).toHaveBeenCalledWith('!room:ixo.world');
 
@@ -237,6 +247,26 @@ describe('buildRuntimeContext', () => {
 
     const ctx = buildRuntimeContext(runConfig, ambient, { messages: [] });
     expect(ctx.abortSignal).toBe(controller.signal);
+  });
+
+  it('copies runtime.context.commerce onto ctx.commerce; absent otherwise', () => {
+    const ambient = makeAmbient();
+
+    const plain = buildRuntimeContext(makeRunConfig(), ambient, {
+      messages: [],
+    });
+    expect(plain.commerce).toBeUndefined();
+
+    const runConfig = makeRunConfig();
+    runConfig.context.commerce = {
+      mode: 'support',
+      gate: { reason: 'not_contracted', serviceId: 'tax-report' },
+    };
+    const routed = buildRuntimeContext(runConfig, ambient, { messages: [] });
+    expect(routed.commerce).toEqual({
+      mode: 'support',
+      gate: { reason: 'not_contracted', serviceId: 'tax-report' },
+    });
   });
 
   describe('emit', () => {

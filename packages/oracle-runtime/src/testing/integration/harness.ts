@@ -441,6 +441,9 @@ export async function createIntegrationRuntime(
     async postToRoom() {
       return 'integration-noop-event-id';
     },
+    async postEvent() {
+      return 'integration-noop-event-id';
+    },
     async getRoomState(roomId) {
       return { roomId, state: [] };
     },

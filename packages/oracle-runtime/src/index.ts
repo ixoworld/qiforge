@@ -31,6 +31,13 @@ export type {
   SecretIndex,
   RoomStateSnapshot,
   MatrixEvent,
+  CommerceContext,
+  CommerceEngagement,
+  CommerceEngagementStatus,
+  CommerceGateFailure,
+  CommerceGateFailureReason,
+  CommerceInProgressEngagement,
+  CommerceMode,
   UserContextData,
   ReadonlyState,
   SharedAccessors,
@@ -138,6 +145,7 @@ export * from './plugins/firecrawl/index.js';
 export * from './plugins/flows/index.js';
 export * from './plugins/matrix-group-chats/index.js';
 export * from './plugins/memory/index.js';
+export * from './plugins/oracle-payments/index.js';
 export * from './plugins/portal/index.js';
 export * from './plugins/sandbox/index.js';
 export * from './plugins/skills/index.js';

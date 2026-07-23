@@ -18,6 +18,14 @@ const EVENTS = {
   MEDIA: 'm.ixo.media',
 } as const;
 
+/** Message subtypes whose content addresses uploaded bytes. */
+export const MEDIA_MSGTYPES: readonly string[] = [
+  'm.file',
+  'm.image',
+  'm.video',
+  'm.audio',
+];
+
 export type MatrixMediaEvent = MatrixEvent<{
   msgtype: 'm.file';
   body: string;
@@ -34,6 +42,42 @@ export type MatrixMediaEvent = MatrixEvent<{
     size: number;
   };
 }>;
+
+/**
+ * The half of an `m.file` / `m.image` content that points at the uploaded
+ * bytes: a plain `url` in an unencrypted room, an encrypted `file` descriptor
+ * (mxc url + decryption keys) in an encrypted one.
+ */
+export type MatrixMediaSource =
+  | { url: string }
+  | { file: Record<string, unknown> };
+
+/**
+ * Upload raw bytes to the room's media repository, honoring room encryption,
+ * and return the content fragment that addresses them. Spread into any media
+ * event's content — the checkpointer's own media lane and chat-facing file
+ * sends share this one code path.
+ */
+export async function uploadMediaContent(
+  roomId: string,
+  bytes: Buffer,
+): Promise<MatrixMediaSource> {
+  const client = getClient();
+  const isRoomEncrypted = await client.mxClient.crypto.isRoomEncrypted(roomId);
+
+  logger.debug(
+    `Room ${roomId} is ${isRoomEncrypted ? 'encrypted' : 'unencrypted'}, proceeding with ${isRoomEncrypted ? 'encrypted' : 'unencrypted'} upload`,
+  );
+
+  if (!isRoomEncrypted) {
+    const mxc = await client.mxClient.uploadContent(bytes);
+    return { url: mxc };
+  }
+
+  const encrypted = await client.mxClient.crypto.encryptMedia(bytes);
+  const mxc = await client.mxClient.uploadContent(encrypted.buffer);
+  return { file: { url: mxc, ...encrypted.file } };
+}
 
 /**
  * Uploads media to a Matrix room
@@ -74,66 +118,31 @@ export async function uploadMediaToRoom(
     );
   }
 
-  // Check if room is encrypted and upload media
-  const isRoomEncrypted = await client.mxClient.crypto.isRoomEncrypted(roomId);
-
-  logger.debug(
-    `Room ${roomId} is ${isRoomEncrypted ? 'encrypted' : 'unencrypted'}, proceeding with ${isRoomEncrypted ? 'encrypted' : 'unencrypted'} upload`,
+  const source = await uploadMediaContent(
+    roomId,
+    Buffer.from(await file.arrayBuffer()),
   );
 
-  let event: MatrixMediaEvent;
-  let eventId: string;
-  if (isRoomEncrypted) {
-    // For encrypted rooms
-    logger.debug(`Encrypting media for storageKey ${storageKey}`);
-    const encrypted = await client.mxClient.crypto.encryptMedia(
-      Buffer.from(await file.arrayBuffer()),
-    );
-    logger.debug(`Uploading encrypted content for storageKey ${storageKey}`);
-    const mxc = await client.mxClient.uploadContent(encrypted.buffer);
-    eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
-      msgtype: 'm.file',
-      body: storageKey,
-      filename: storageKey,
-      cid: storageKey,
-      sender: client.mxClient.getUserId(),
-      info: {
-        mimetype: 'application/x-sqlite3',
-        size: file.size,
-      },
-      file: {
-        url: mxc,
-        ...encrypted.file,
-      },
-    });
+  const eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
+    msgtype: 'm.file',
+    body: storageKey,
+    filename: storageKey,
+    cid: storageKey,
+    sender: client.mxClient.getUserId(),
+    info: {
+      mimetype: 'application/x-sqlite3',
+      size: file.size,
+    },
+    ...source,
+  });
 
-    logger.debug(
-      `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
-    );
-    event = await client.mxClient.getEvent(roomId, eventId);
-  } else {
-    // For unencrypted rooms
-    logger.debug(`Uploading unencrypted content for storageKey ${storageKey}`);
-    const mxc = await client.mxClient.uploadContent(
-      Buffer.from(await file.arrayBuffer()),
-    );
-    eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
-      msgtype: 'm.file',
-      body: storageKey,
-      filename: storageKey,
-      cid: storageKey,
-      sender: client.mxClient.getUserId(),
-      info: {
-        mimetype: 'application/x-sqlite3',
-        size: file.size,
-      },
-      url: mxc,
-    });
-    logger.debug(
-      `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
-    );
-    event = await client.mxClient.getEvent(roomId, eventId);
-  }
+  logger.debug(
+    `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
+  );
+  const event: MatrixMediaEvent = await client.mxClient.getEvent(
+    roomId,
+    eventId,
+  );
 
   // Save the media event ID in the room state with storageKey as the key
   logger.debug(
@@ -277,10 +286,7 @@ export async function getMediaFromRoom(
   const event =
     cachedEvent || (await client.mxClient.getEvent(roomId!, eventId!));
 
-  if (
-    !event.content ||
-    !['m.file', 'm.image'].includes(event.content.msgtype)
-  ) {
+  if (!event.content || !MEDIA_MSGTYPES.includes(event.content.msgtype)) {
     throw new Error('Event is not a media event.');
   }
 

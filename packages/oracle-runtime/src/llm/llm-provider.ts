@@ -52,7 +52,7 @@ const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
     guard: 'meta-llama/llama-3.1-8b-instruct',
     routing: 'openai/gpt-oss-20b',
     custom_low: 'openai/gpt-oss-120b',
-    custom_medium: 'moonshotai/kimi-k2-thinking',
+    custom_medium: 'google/gemini-3.1-flash-lite',
     'session-title': 'meta-llama/llama-3.1-8b-instruct',
     embedding: 'text-embedding-3-small',
   },

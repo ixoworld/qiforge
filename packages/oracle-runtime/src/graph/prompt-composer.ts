@@ -37,6 +37,11 @@ export interface ComposePromptInput {
   customInstructions: string;
   /** Operational-mode block — typically a multi-line string. */
   operationalMode: string;
+  /**
+   * Commerce-mode overlay (support vs work persona) for routed Matrix turns.
+   * Empty string on HTTP turns and whenever the commerce router is inert.
+   */
+  commerceOverlay: string;
   /** Editor block — empty string when no editor session is active. */
   editorSection: string;
   /** Composio guidance block — empty when composio isn't loaded. */
@@ -400,6 +405,10 @@ These are auto-injected — don't ask the user for them. If a skill needs a secr
 ## Operational mode
 
 {{{OPERATIONAL_MODE}}}
+{{#COMMERCE_OVERLAY}}
+
+{{{COMMERCE_OVERLAY}}}
+{{/COMMERCE_OVERLAY}}
 {{#COMPOSIO_CONTEXT}}
 
 {{{COMPOSIO_CONTEXT}}}
@@ -424,6 +433,7 @@ interface TemplateVariables {
   TIME_CONTEXT: string;
   CURRENT_ENTITY_DID: string;
   OPERATIONAL_MODE: string;
+  COMMERCE_OVERLAY: string;
   EDITOR_SECTION: string;
   SLACK_FORMATTING_CONSTRAINTS: string;
   USER_SECRETS_CONTEXT: string;
@@ -443,6 +453,7 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'TIME_CONTEXT',
     'CURRENT_ENTITY_DID',
     'OPERATIONAL_MODE',
+    'COMMERCE_OVERLAY',
     'EDITOR_SECTION',
     'SLACK_FORMATTING_CONSTRAINTS',
     'USER_SECRETS_CONTEXT',
@@ -486,6 +497,7 @@ export async function composePrompt(
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,
     OPERATIONAL_MODE: input.operationalMode,
+    COMMERCE_OVERLAY: input.commerceOverlay,
     EDITOR_SECTION: input.editorSection,
     SLACK_FORMATTING_CONSTRAINTS: input.slackFormattingConstraints,
     USER_SECRETS_CONTEXT: input.userSecretsContext,

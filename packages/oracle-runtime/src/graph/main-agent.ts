@@ -28,6 +28,7 @@ import {
   FLOWS_PLUGIN_NAME,
 } from '../plugins/flows/prompts.js';
 import { buildPluginContext } from '../runtime-context/build-plugin.js';
+import { buildCommerceOverlay } from './commerce-overlay.js';
 import {
   buildRuntimeContext,
   type RunConfig,
@@ -160,6 +161,7 @@ export async function createMainAgent(
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
       },
+      commerce: requestCtx.commerce,
     },
   };
   const rtCtx = buildRuntimeContext(runConfig, ambient, wrapState);
@@ -168,10 +170,18 @@ export async function createMainAgent(
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
   // slower of the two — not their sum — gates the build.
-  const [allTools, allSubAgents] = await Promise.all([
+  const [collectedTools, allSubAgents] = await Promise.all([
     registries.tools.collect(buildCtx, rtCtx),
     registries.subAgents.collect(buildCtx, rtCtx),
   ]);
+  // Billing gate: a tool marked `billing: 'contracted'` performs paid work
+  // and exists only while the turn runs inside an active work engagement.
+  // Applied at collection so no later stage (visibility selection, wrapping,
+  // capability-gate maps) ever sees a gated tool.
+  const workMode = rtCtx.commerce?.mode === 'work';
+  const allTools = collectedTools.filter(
+    ({ tool }) => tool.billing !== 'contracted' || workMode,
+  );
   const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
   const titleByPlugin = new Map(
@@ -388,10 +398,18 @@ export async function createMainAgent(
     .filter((part): part is string => Boolean(part && part.length > 0))
     .join('\n\n');
 
+  // Commerce overlay: only routed Matrix turns carry `requestCtx.commerce`;
+  // HTTP turns and inert-router Matrix turns render nothing here.
+  const commerceOverlay =
+    requestCtx.session.client === 'matrix' && requestCtx.commerce
+      ? buildCommerceOverlay(requestCtx.commerce)
+      : '';
+
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
     customInstructions,
+    commerceOverlay,
     operationalMode:
       editorPrompts?.operationalMode ??
       editorUnavailableBlock ??

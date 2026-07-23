@@ -333,6 +333,7 @@ export class AgentBuilder {
       },
       history: { userContext },
       model: requestedModel,
+      ...(payload.commerce && { commerce: payload.commerce }),
     };
 
     // The editor plugin is `on-demand` (so ordinary chats carry none of its

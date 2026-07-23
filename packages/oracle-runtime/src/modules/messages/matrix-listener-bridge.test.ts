@@ -6,6 +6,12 @@ import {
   MatrixListenerBridge,
   type MatrixIncomingMessage,
 } from './matrix-listener-bridge.js';
+import {
+  clearCommerceRouterPort,
+  setCommerceRouterPort,
+  type CommerceRouterPort,
+} from './commerce-router-port.js';
+import { MessageRouterService } from './message-router.service.js';
 import { makeSessionManagerStub } from './__test-fixtures__/deps.js';
 
 const ORACLE_DID = 'did:ixo:oracle';
@@ -82,6 +88,9 @@ async function build(): Promise<Harness> {
   const bridge = new MatrixListenerBridge(
     sessions as unknown as SessionManagerService,
     config,
+    // No commerce port is registered in unit tests, so the router is inert —
+    // exactly the pre-commerce behavior every existing test asserts.
+    new MessageRouterService(),
   );
   bridge.onModuleInit();
   // onModuleInit awaits matrixManager.init() in a .then() — drain microtasks.
@@ -560,6 +569,90 @@ describe('MatrixListenerBridge', () => {
     });
   });
 
+  describe('per-turn abort controller', () => {
+    it('flush delivers a live, un-aborted AbortController with the turn', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { type: 'ai', content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'work on this' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        const payload = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
+        expect(payload.abortController).toBeInstanceOf(AbortController);
+        expect(payload.abortController.signal.aborted).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('each flushed turn gets its own controller — aborting one leaves the next live', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { type: 'ai', content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'turn one' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        const first = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
+        first.abortController.abort();
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'turn-2',
+            content: {
+              msgtype: 'm.text',
+              body: 'turn two',
+              'm.relates_to': { 'm.in_reply_to': { event_id: 'root' } },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        const second = deliverHandler.mock
+          .calls[1]?.[0] as MatrixIncomingMessage;
+        expect(second.abortController).not.toBe(first.abortController);
+        expect(second.abortController.signal.aborted).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('deliverHandler missing', () => {
     it('flush logs warn and drops the message when setDeliverHandler never called', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -828,6 +921,304 @@ describe('MatrixListenerBridge', () => {
         const payload = deliverHandler.mock
           .calls[0]?.[0] as MatrixIncomingMessage;
         expect(payload.did).toBe('did:ixo:abc');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('processed-event dedup', () => {
+    it('drops a re-delivered eventId so the turn is never double-answered', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { type: 'ai', content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        const event = makeEvent({
+          event_id: 'root',
+          content: { msgtype: 'm.text', body: 'hello once' },
+        });
+        await deliver(h, event);
+        // Homeserver re-delivery of the SAME event id.
+        await deliver(h, event);
+
+        // The duplicate was dropped before session/bootstrap work.
+        expect(h.sessions.getSession).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+        expect(deliverHandler).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('per-turn requestId', () => {
+    it('mints a UUID requestId and delivers it with the turn', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { type: 'ai', content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'hi' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        const payload = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
+        expect(payload.requestId).toMatch(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('double-text supersede', () => {
+    it('aborts the in-flight turn and prepends its unanswered text to the new one', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+
+        // Turn 1 hangs until its abort signal fires (like a LangGraph run
+        // cancelled mid-flight), then rejects the way an aborted invoke does.
+        const deliverHandler = vi
+          .fn()
+          .mockImplementationOnce(
+            (msg: MatrixIncomingMessage) =>
+              new Promise((_resolve, reject) => {
+                msg.abortController.signal.addEventListener('abort', () =>
+                  reject(new Error('Aborted')),
+                );
+              }),
+          )
+          .mockResolvedValue({
+            message: { type: 'ai', content: 'answer to both' },
+          });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'first question' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+        expect(deliverHandler).toHaveBeenCalledTimes(1);
+
+        // Double-text into the same thread while turn 1 is in flight.
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'turn-2',
+            content: {
+              msgtype: 'm.text',
+              body: 'second question',
+              'm.relates_to': { 'm.in_reply_to': { event_id: 'root' } },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+        const first = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
+        expect(first.abortController.signal.aborted).toBe(true);
+
+        expect(deliverHandler).toHaveBeenCalledTimes(2);
+        const second = deliverHandler.mock
+          .calls[1]?.[0] as MatrixIncomingMessage;
+        expect(second.threadId).toBe('root');
+        // Nothing the user said is lost: the aborted turn's text rides along.
+        expect(second.message).toBe('first question\nsecond question');
+        expect(second.requestId).not.toBe(first.requestId);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('commerce routing across supersede', () => {
+    it('a superseded work turn re-routes to WORK with the engagement untouched', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const engagement = {
+          status: 'active' as const,
+          serviceId: 'tax-report',
+          serviceName: 'Tax report',
+          priceUsd: 20,
+          collectionId: '42',
+          adminAddress: 'ixo1admin',
+          startedAt: '2026-07-22T00:00:00.000Z',
+        };
+        const port: CommerceRouterPort = {
+          getServices: vi.fn(async () => []),
+          getActiveEngagement: vi.fn(async () => engagement),
+          checkContractGate: vi.fn(async () => ({
+            ok: false as const,
+            reason: 'not_contracted' as const,
+          })),
+          startEngagement: vi.fn(async () => ({
+            ok: true as const,
+            engagement,
+          })),
+        };
+        setCommerceRouterPort(port);
+
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+
+        const deliverHandler = vi
+          .fn()
+          .mockImplementationOnce(
+            (msg: MatrixIncomingMessage) =>
+              new Promise((_resolve, reject) => {
+                msg.abortController.signal.addEventListener('abort', () =>
+                  reject(new Error('Aborted')),
+                );
+              }),
+          )
+          .mockResolvedValue({
+            message: { type: 'ai', content: 'continued the work' },
+          });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'do my tax report' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+
+        // Double-text while the work turn is in flight.
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'turn-2',
+            content: {
+              msgtype: 'm.text',
+              body: 'now edit the report',
+              'm.relates_to': { 'm.in_reply_to': { event_id: 'root' } },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+        expect(deliverHandler).toHaveBeenCalledTimes(2);
+        const first = deliverHandler.mock
+          .calls[0]?.[0] as MatrixIncomingMessage;
+        const second = deliverHandler.mock
+          .calls[1]?.[0] as MatrixIncomingMessage;
+
+        // Both turns routed to the work agent — sticky engagement.
+        expect(first.commerce).toEqual({ mode: 'work', engagement });
+        expect(second.commerce).toEqual({ mode: 'work', engagement });
+        // The follow-up simply continues the work with nothing lost.
+        expect(first.abortController.signal.aborted).toBe(true);
+        expect(second.message).toBe('do my tax report\nnow edit the report');
+        // Supersede must never touch engagement state: nothing was started
+        // (and the port exposes no way to close — ending an engagement is
+        // the agent's cancel_work/deliver_work decision).
+        expect(port.startEngagement).not.toHaveBeenCalled();
+      } finally {
+        clearCommerceRouterPort();
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('typing keepalive', () => {
+    it('refreshes the typing indicator every ~20s while a turn is in flight and stops on settle', async () => {
+      vi.useFakeTimers({
+        toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+      });
+      try {
+        const h = await build();
+        const setTyping = vi.fn().mockResolvedValue(undefined);
+        h.sessions.matrixManger.getClient.mockReturnValue({
+          mxClient: { setTyping },
+        });
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        // A 50s turn — long enough for two keepalive refreshes.
+        const deliverHandler = vi.fn().mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              setTimeout(
+                () =>
+                  resolve({ message: { type: 'ai', content: 'slow reply' } }),
+                50_000,
+              );
+            }),
+        );
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'long job' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        const trueCalls = () =>
+          setTyping.mock.calls.filter(([, typing]) => typing === true).length;
+
+        expect(trueCalls()).toBe(1); // initial
+
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(trueCalls()).toBe(2);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(trueCalls()).toBe(3);
+
+        // Turn settles at 50s: typing off, keepalive cleared.
+        await vi.advanceTimersByTimeAsync(10_000);
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+        expect(
+          setTyping.mock.calls.filter(([, typing]) => typing === false).length,
+        ).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(40_000);
+        expect(trueCalls()).toBe(3);
       } finally {
         vi.useRealTimers();
       }

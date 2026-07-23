@@ -1,0 +1,232 @@
+import { describe, expect, it } from 'vitest';
+import type { CommerceRoutedService } from '../../modules/messages/commerce-router-port.js';
+import {
+  makeContractRecord,
+  makeContractRecordService,
+  makeEngagement,
+  makeEngagementService,
+  USER_DID,
+} from './__test-fixtures__/oracle-payments-fixtures.js';
+import { ContractGateService } from './contract-gate.service.js';
+import type { EngagementService } from './engagement.service.js';
+import type { ContractRecord } from './types.js';
+
+const ROOM_ID = '!room:home.server';
+const THREAD_ID = '$thread-root:home.server';
+const OTHER_THREAD_ID = '$other-thread:home.server';
+const ENGINE_URL = 'https://engine.example';
+
+const TAX_SERVICE: CommerceRoutedService = {
+  id: 'tax-report',
+  name: 'Tax report',
+  priceUsd: 20,
+};
+
+function makeGate(
+  record: ContractRecord | null,
+  opts: { network?: string; now?: () => number } = {},
+): {
+  gate: ContractGateService;
+  fetchCalls: string[];
+  engagement: EngagementService;
+} {
+  const { service, fetchCalls } = makeContractRecordService(record);
+  const engagement = makeEngagementService();
+  const gate = new ContractGateService({
+    contractRecord: service,
+    engagement,
+    engineUrl: ENGINE_URL,
+    network: opts.network ?? 'devnet',
+    clock: opts.now,
+  });
+  return { gate, fetchCalls, engagement };
+}
+
+function check(gate: ContractGateService, service = TAX_SERVICE) {
+  return gate.check({
+    roomId: ROOM_ID,
+    threadId: THREAD_ID,
+    senderDid: USER_DID,
+    service,
+  });
+}
+
+describe('ContractGateService', () => {
+  it('fails not_contracted when the engine has no record', async () => {
+    const { gate } = makeGate(null);
+
+    expect(await check(gate)).toEqual({ ok: false, reason: 'not_contracted' });
+  });
+
+  it('fails not_contracted when the AuthZ snapshot says not granted', async () => {
+    const record = makeContractRecord();
+    record.authz.granted = false;
+    const { gate } = makeGate(record);
+
+    expect(await check(gate)).toEqual({ ok: false, reason: 'not_contracted' });
+  });
+
+  it('fails quota_exhausted when no agent quota remains', async () => {
+    const record = makeContractRecord();
+    record.authz.agentQuotaRemaining = 0;
+    const { gate } = makeGate(record);
+
+    expect(await check(gate)).toEqual({ ok: false, reason: 'quota_exhausted' });
+  });
+
+  it('fails max_amount_too_low when the grant cap is under the price', async () => {
+    const record = makeContractRecord();
+    // 20 USD on devnet = 20_000_000 uixo; cap it below.
+    record.authz.maxAmount = { amount: '19999999', denom: 'uixo' };
+    const { gate } = makeGate(record);
+
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'max_amount_too_low',
+    });
+  });
+
+  it('fails max_amount_too_low on a denom mismatch', async () => {
+    const record = makeContractRecord();
+    record.authz.maxAmount = { amount: '999999999', denom: 'uusdc' };
+    const { gate } = makeGate(record);
+
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'max_amount_too_low',
+    });
+  });
+
+  it('fails service_not_contracted when the serviceId is outside the contract', async () => {
+    const { gate } = makeGate(makeContractRecord());
+
+    const result = await check(gate, {
+      id: 'quick-estimate',
+      name: 'Quick estimate',
+      priceUsd: 5,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'service_not_contracted' });
+  });
+
+  it('passes with the engagement-start data from the record, carrying the intent window', async () => {
+    const { gate } = makeGate(makeContractRecord());
+
+    expect(await check(gate)).toEqual({
+      ok: true,
+      start: {
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        priceUsd: 20,
+        collectionId: '42',
+        adminAddress: 'ixo1admincollectionadmin',
+        // Carried through so the start lane stamps the escrow deadline
+        // without a second lookup.
+        intentDurationNs: '604800000000000',
+      },
+    });
+  });
+
+  it('caches the record ~60s per (room, sender); invalidate busts it', async () => {
+    let now = 0;
+    const { gate, fetchCalls } = makeGate(makeContractRecord(), {
+      now: () => now,
+    });
+
+    await check(gate);
+    await check(gate);
+    expect(fetchCalls).toHaveLength(1);
+
+    // Past the gate TTL (60s) but inside the record service's own 300s TTL —
+    // the second layer answers, so still one engine round-trip.
+    now = 61_000;
+    await check(gate);
+    expect(fetchCalls).toHaveLength(1);
+
+    // The contracted cache-buster drops BOTH layers → fresh engine query.
+    gate.invalidate(USER_DID);
+    // (only the gate layer here; the listener busts the record service too)
+    await check(gate);
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  it('refuses engagement_in_progress when another thread already has a live job', async () => {
+    const { gate, engagement, fetchCalls } = makeGate(makeContractRecord());
+    await engagement.start(ROOM_ID, OTHER_THREAD_ID, makeEngagement());
+
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'engagement_in_progress',
+      inProgress: {
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        threadId: OTHER_THREAD_ID,
+      },
+    });
+    // Short-circuits ahead of the contract lookup — nothing else is consulted.
+    expect(fetchCalls).toHaveLength(0);
+  });
+
+  it('passes once the other thread’s engagement is delivered', async () => {
+    const { gate, engagement } = makeGate(makeContractRecord());
+    await engagement.start(ROOM_ID, OTHER_THREAD_ID, makeEngagement());
+    await engagement.transition(ROOM_ID, OTHER_THREAD_ID, 'delivered');
+
+    expect(await check(gate)).toMatchObject({ ok: true });
+  });
+
+  it('passes once the other thread’s engagement is closed', async () => {
+    const { gate, engagement } = makeGate(makeContractRecord());
+    await engagement.start(ROOM_ID, OTHER_THREAD_ID, makeEngagement());
+    await engagement.cancel(ROOM_ID, OTHER_THREAD_ID, 'changed my mind');
+
+    expect(await check(gate)).toMatchObject({ ok: true });
+  });
+
+  it('flags a cancelled engagement whose release never landed as still blocking', async () => {
+    const { gate, engagement } = makeGate(makeContractRecord());
+    await engagement.start(ROOM_ID, OTHER_THREAD_ID, makeEngagement());
+    // `cancel_work` stamped the request but its release claim never reached
+    // the chain: the reservation is genuinely still held.
+    await engagement.markCancelRequested(ROOM_ID, OTHER_THREAD_ID, 'stop');
+
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'engagement_in_progress',
+      inProgress: {
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        threadId: OTHER_THREAD_ID,
+        releaseFailed: true,
+      },
+    });
+  });
+
+  it('does not treat the requesting thread’s own engagement as a conflict', async () => {
+    const { gate, engagement } = makeGate(makeContractRecord());
+    // The delivery lane re-checks the gate from inside the working thread.
+    await engagement.start(ROOM_ID, THREAD_ID, makeEngagement());
+
+    expect(await check(gate)).toMatchObject({ ok: true });
+  });
+
+  it('ignores an active engagement in a different room', async () => {
+    const { gate, engagement } = makeGate(makeContractRecord());
+    await engagement.start(
+      '!other:home.server',
+      OTHER_THREAD_ID,
+      makeEngagement(),
+    );
+
+    expect(await check(gate)).toMatchObject({ ok: true });
+  });
+
+  it('caches a null record too — repeat misses do not re-query inside the TTL', async () => {
+    const { gate, fetchCalls } = makeGate(null);
+
+    await check(gate);
+    await check(gate);
+
+    expect(fetchCalls).toHaveLength(1);
+  });
+});

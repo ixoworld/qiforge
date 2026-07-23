@@ -1,5 +1,6 @@
 import type { BaseMessage } from '@langchain/core/messages';
 import type {
+  CommerceContext,
   MergedConfig,
   ReadonlyState,
   RuntimeContext,
@@ -38,6 +39,8 @@ export interface RuntimeSessionContext {
 export interface RunConfigContext {
   user: RuntimeUserContext;
   session: RuntimeSessionContext;
+  /** Commerce routing outcome for routed Matrix turns; absent otherwise. */
+  commerce?: CommerceContext;
 }
 
 /**
@@ -135,6 +138,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     matrix: {
       postToRoom: (roomId, content) =>
         ambient.matrix.postToRoom(roomId, content),
+      postEvent: (roomId, eventType, content) =>
+        ambient.matrix.postEvent(roomId, eventType, content),
       getRoomState: (roomId) => ambient.matrix.getRoomState(roomId),
       getEventById: (roomId, eventId) =>
         ambient.matrix.getEventById(roomId, eventId),
@@ -169,6 +174,9 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     logger: ambient.logger,
     abortSignal,
     shared: EMPTY_SHARED,
+    ...(runConfig.context.commerce
+      ? { commerce: runConfig.context.commerce }
+      : {}),
     ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
   };
 }
