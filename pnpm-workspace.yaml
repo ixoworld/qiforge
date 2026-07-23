@@ -25,6 +25,9 @@ overrides:
   # which has a critical predictable-boundary advisory (GHSA-fjxv-7rqg-78g4
   # family). 2.5.4+ is the patched drop-in within the same major.
   'form-data@<2.5.4': '^2.5.4'
+  # LangSmith before 0.6.0 can trust public prompt pulls implicitly
+  # (CVE-2026-45134). Keep all compatible LangChain paths on the patched line.
+  'langsmith@<0.6.0': '^0.6.0'
   # @ixo/did-provider-x 0.1.x pins did-resolver@5 while the veramo 6/7
   # ecosystem (and this repo) type against ^4.1.0 — the runtime API is
   # identical; collapse to one version so resolver types line up.
