@@ -17,6 +17,7 @@ import type { UcanDelegation } from '../../plugin-api/types.js';
 import { UcanService } from '../ucan/ucan.service.js';
 import { EditorPlugin } from '../../plugins/editor/editor.plugin.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
+import { resolveLangsmithTracing } from './langsmith-tracing.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
@@ -116,6 +117,7 @@ export class AgentBuilder {
     args: BuildAgentArgs,
     abortController?: AbortController,
   ): Promise<BuiltAgent> {
+    const buildStartedAt = performance.now();
     const { payload, prepared, inputMessages } = args;
     const bundle = this.bundleHolder.get();
     const hooks = bundle.hooks ?? {};
@@ -404,6 +406,28 @@ export class AgentBuilder {
       ...(editorSessionActive && { loadedPlugins: [EditorPlugin.NAME] }),
     };
 
+    // LangSmith: metadata (user DID, ingress client, pre-graph timings) is
+    // attached unconditionally so any active tracer — the global env-driven
+    // one or the selective per-DID one — can filter and aggregate per user;
+    // it is inert when no tracer runs. `callbacks` appears only when this
+    // user's DID is in the `LANGSMITH_TRACED_DIDS` allowlist, and the
+    // explicit tracer propagates through the whole turn (model calls, tools,
+    // sub-agents) via LangGraph's config inheritance.
+    const tracing = resolveLangsmithTracing({
+      userDid: payload.did,
+      client: clientType,
+      env: {
+        tracing: this.config.get<string>('LANGSMITH_TRACING'),
+        apiKey: this.config.get<string>('LANGSMITH_API_KEY'),
+        project: this.config.get<string>('LANGSMITH_PROJECT'),
+        tracedDids: this.config.get<string>('LANGSMITH_TRACED_DIDS'),
+      },
+      timings: {
+        prepareDurationMs: prepared.prepareDurationMs,
+        agentBuildDurationMs: Math.round(performance.now() - buildStartedAt),
+      },
+    });
+
     // `version: 'v2'` is REQUIRED for `agent.streamEvents` to emit the
     // `{event, data, tags}` envelope the SSE loop expects. Without it,
     // langchain defaults to v1 (or emits nothing) and the FE sees a
@@ -417,6 +441,8 @@ export class AgentBuilder {
       recursionLimit: 200,
       configurable: prepared.runnableConfig.configurable,
       context: requestCtx,
+      metadata: tracing.metadata,
+      ...(tracing.callbacks && { callbacks: tracing.callbacks }),
       ...(abortController && { signal: abortController.signal }),
     };
 

@@ -1,5 +1,6 @@
 import type { Cache } from '@nestjs/cache-manager';
 import type { ConfigService } from '@nestjs/config';
+import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { HumanMessage, fakeModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -610,6 +611,83 @@ describe('AgentBuilder', () => {
 
       expect(result.langGraphConfig.version).toBe('v2');
       expect(result.langGraphConfig).not.toHaveProperty('signal');
+    });
+
+    it('always attaches user + timing metadata to langGraphConfig, without callbacks when LangSmith is unconfigured', async () => {
+      const { builder } = buildHarness();
+
+      const result = await builder.build(makeArgs());
+
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.user_did).toBe(USER_DID);
+      expect(metadata.client).toBe('portal');
+      expect(typeof metadata.agent_build_duration_ms).toBe('number');
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+    });
+
+    it('attaches a LangChainTracer callback when the user DID is in LANGSMITH_TRACED_DIDS', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_API_KEY: 'ls-key',
+          LANGSMITH_PROJECT: 'test-project',
+          LANGSMITH_TRACED_DIDS: `did:ixo:someone-else,${USER_DID}`,
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      const callbacks = result.langGraphConfig.callbacks as LangChainTracer[];
+      expect(callbacks).toHaveLength(1);
+      expect(callbacks[0]).toBeInstanceOf(LangChainTracer);
+      expect(callbacks[0]?.projectName).toBe('test-project');
+    });
+
+    it('does not attach a tracer for a DID outside the allowlist', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_API_KEY: 'ls-key',
+          LANGSMITH_TRACED_DIDS: 'did:ixo:someone-else',
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+    });
+
+    it('does not attach an explicit tracer when global LANGSMITH_TRACING=true (LangChain auto-attaches)', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_TRACING: 'true',
+          LANGSMITH_API_KEY: 'ls-key',
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.user_did).toBe(USER_DID);
+    });
+
+    it('carries prepareDurationMs from the prepared request into trace metadata', async () => {
+      const { builder } = buildHarness();
+
+      const result = await builder.build(
+        makeArgs({ prepared: { prepareDurationMs: 77 } }),
+      );
+
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.prepare_duration_ms).toBe(77);
     });
   });
 });
