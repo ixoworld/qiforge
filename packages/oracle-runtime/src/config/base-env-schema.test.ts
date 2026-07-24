@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { baseEnvSchema } from './base-env-schema.js';
+import { baseEnvSchema, validateLangsmithTracing } from './base-env-schema.js';
 
 describe('baseEnvSchema', () => {
   const requiredTier0Vars = {
@@ -124,8 +124,93 @@ describe('baseEnvSchema', () => {
       'LANGSMITH_API_KEY',
       'LANGSMITH_PROJECT',
       'LANGSMITH_ENDPOINT',
+      'LANGSMITH_TRACED_DIDS',
       'MAIN_REASONING_EFFORT',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);
+  });
+});
+
+describe('validateLangsmithTracing', () => {
+  const USER_DID = 'did:ixo:ixo1traceduser';
+
+  it('returns no errors when LANGSMITH_TRACED_DIDS is unset', () => {
+    expect(validateLangsmithTracing({})).toEqual([]);
+    expect(validateLangsmithTracing({ LANGSMITH_TRACING: 'true' })).toEqual([]);
+  });
+
+  it('returns no errors when the allowlist is only whitespace', () => {
+    expect(validateLangsmithTracing({ LANGSMITH_TRACED_DIDS: '  ' })).toEqual(
+      [],
+    );
+  });
+
+  it('accepts a valid allowlist with an API key', () => {
+    expect(
+      validateLangsmithTracing({
+        LANGSMITH_TRACED_DIDS: `${USER_DID},did:x:zQ3shabc`,
+        LANGSMITH_API_KEY: 'ls-key',
+      }),
+    ).toEqual([]);
+  });
+
+  it('accepts the * wildcard', () => {
+    expect(
+      validateLangsmithTracing({
+        LANGSMITH_TRACED_DIDS: '*',
+        LANGSMITH_API_KEY: 'ls-key',
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects an allowlist without LANGSMITH_API_KEY', () => {
+    const errors = validateLangsmithTracing({
+      LANGSMITH_TRACED_DIDS: USER_DID,
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.field).toBe('LANGSMITH_API_KEY');
+  });
+
+  it('rejects the allowlist combined with global LANGSMITH_TRACING=true', () => {
+    const errors = validateLangsmithTracing({
+      LANGSMITH_TRACED_DIDS: USER_DID,
+      LANGSMITH_API_KEY: 'ls-key',
+      LANGSMITH_TRACING: 'true',
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.field).toBe('LANGSMITH_TRACED_DIDS');
+    expect(errors[0]?.message).toContain('LANGSMITH_TRACING=true');
+  });
+
+  it('allows the allowlist alongside LANGSMITH_TRACING=false', () => {
+    expect(
+      validateLangsmithTracing({
+        LANGSMITH_TRACED_DIDS: USER_DID,
+        LANGSMITH_API_KEY: 'ls-key',
+        LANGSMITH_TRACING: 'false',
+      }),
+    ).toEqual([]);
+  });
+
+  it('rejects entries that are neither * nor DIDs, naming the offenders', () => {
+    const errors = validateLangsmithTracing({
+      LANGSMITH_TRACED_DIDS: `${USER_DID},ixo1notadid did:ixo:ixo1space`,
+      LANGSMITH_API_KEY: 'ls-key',
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.field).toBe('LANGSMITH_TRACED_DIDS');
+    expect(errors[0]?.message).toContain('ixo1notadid');
+  });
+
+  it('reports every violated rule at once', () => {
+    const errors = validateLangsmithTracing({
+      LANGSMITH_TRACED_DIDS: 'not-a-did',
+      LANGSMITH_TRACING: 'true',
+    });
+    expect(errors.map((e) => e.field).sort()).toEqual([
+      'LANGSMITH_API_KEY',
+      'LANGSMITH_TRACED_DIDS',
+      'LANGSMITH_TRACED_DIDS',
+    ]);
   });
 });

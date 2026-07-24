@@ -16,6 +16,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import pkg from '../../package.json' with { type: 'json' };
 import {
   baseEnvSchema,
+  validateLangsmithTracing,
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
@@ -270,6 +271,23 @@ export async function createOracleApp(
     }
     throw new Error(
       `Env validation failed (${llmKeyErrors.length} issue${llmKeyErrors.length === 1 ? '' : 's'}).`,
+    );
+  }
+
+  // Cross-field check for the LangSmith selective-tracing allowlist —
+  // `LANGSMITH_TRACED_DIDS` requires an API key and must not be combined
+  // with the global `LANGSMITH_TRACING=true` switch. Failing here beats
+  // an operator believing per-user tracing is on while nothing uploads.
+  const langsmithErrors = validateLangsmithTracing(validated.config);
+  if (langsmithErrors.length > 0) {
+    for (const issue of langsmithErrors) {
+      reportBootError(
+        logger,
+        `LangSmith tracing env validation failed for '${issue.field}': ${issue.message}`,
+      );
+    }
+    throw new Error(
+      `Env validation failed (${langsmithErrors.length} issue${langsmithErrors.length === 1 ? '' : 's'}).`,
     );
   }
 
