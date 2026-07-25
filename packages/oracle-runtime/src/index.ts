@@ -130,6 +130,7 @@ export {
 // cover the no-arg case; pass your own instance via `plugins: [...]` to
 // `createOracleApp` to override.
 export * from './plugins/agui/index.js';
+export * from './plugins/codex/index.js';
 export * from './plugins/composio/index.js';
 export * from './plugins/credits/index.js';
 export * from './plugins/domain-indexer/index.js';

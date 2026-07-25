@@ -1,6 +1,7 @@
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginManifest } from '../plugin-api/types.js';
 import { AGUIPlugin } from './agui/index.js';
+import { CodexPlugin } from './codex/index.js';
 import { ComposioPlugin } from './composio/index.js';
 import { CreditsPlugin } from './credits/index.js';
 import { DomainIndexerPlugin } from './domain-indexer/index.js';
@@ -40,6 +41,7 @@ export const portalPlugin = new PortalPlugin();
 export const firecrawlPlugin = new FirecrawlPlugin();
 export const domainIndexerPlugin = new DomainIndexerPlugin();
 export const composioPlugin = new ComposioPlugin();
+export const codexPlugin = new CodexPlugin();
 export const sandboxPlugin = new SandboxPlugin();
 export const skillsPlugin = new SkillsPlugin();
 export const editorPlugin = new EditorPlugin();
@@ -71,6 +73,7 @@ export const BUNDLED_PLUGINS = [
   firecrawlPlugin,
   domainIndexerPlugin,
   composioPlugin,
+  codexPlugin,
   sandboxPlugin,
   skillsPlugin,
   editorPlugin,

@@ -19,6 +19,7 @@ The structure mirrors the parts of the codebase a maintainer touches:
 - **Touching `packages/oracle-runtime/src/modules/`?** → update `architecture/modules.md`.
 - **Adding a graph state field?** → follow `contributing/adding-a-state-field.md`. Document the field in `ixo-docs/build-an-oracle/reference/state-schema.mdx`.
 - **Touching the meta-tools?** → update `architecture/meta-tools-and-discovery.md` and `ixo-docs/build-an-oracle/concepts/meta-tools.mdx`.
+- **Touching the Codex provider?** → update `architecture/codex-provider.md`. Method-name changes in the App Server protocol table go there too.
 - **Adding a follow-up ticket?** → append to `spec-and-roadmap/follow-ups.md`.
 
 ## What this directory is NOT
