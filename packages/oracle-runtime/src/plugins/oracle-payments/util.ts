@@ -1,9 +1,44 @@
-import type { MergedConfig } from '../../plugin-api/types.js';
+import { z } from 'zod';
+import type { CommerceRoutedService } from '../../modules/messages/commerce-router-port.js';
+import type {
+  CommerceEngagement,
+  MergedConfig,
+} from '../../plugin-api/types.js';
 import {
   MAINNET_USDC_IBC_DENOM,
   MICRO_UNITS_PER_UNIT,
   type AgentCardServiceView,
 } from './types.js';
+
+/** Just the reservation — everything the expiry helpers need to read. */
+type Reserved = Pick<CommerceEngagement, 'intent'>;
+
+/**
+ * The engagement's escrow deadline in epoch milliseconds, or `undefined` when
+ * the job carries no reservation or an unparseable one. An unknown deadline is
+ * deliberately not a passed one: the chain is the authority, and guessing
+ * "expired" would close a job whose escrow is still held.
+ */
+function intentDeadlineMs(engagement: Reserved): number | undefined {
+  const expiresAt = engagement.intent?.expiresAt;
+  if (expiresAt === undefined) return undefined;
+  const deadline = Date.parse(expiresAt);
+  return Number.isFinite(deadline) ? deadline : undefined;
+}
+
+/**
+ * `true` once the escrow reserved for this job has auto-released on-chain.
+ *
+ * The one predicate for "this engagement is dead", shared by the active-engagement
+ * lookup, the contract gate, and both claim lanes — an expired reservation holds
+ * nothing, so the job it belongs to must never block a new one and must never be
+ * claimed against without being re-reserved first. Three call sites reading the
+ * deadline three ways is how a user ends up wedged in work mode.
+ */
+export function isEngagementExpired(engagement: Reserved, now: Date): boolean {
+  const deadline = intentDeadlineMs(engagement);
+  return deadline !== undefined && deadline <= now.getTime();
+}
 
 /**
  * Convert a USD price to the collection payment denom + micro-unit amount.
@@ -22,13 +57,47 @@ export function priceToCoin(
   };
 }
 
-/** Read a string env var out of the merged config, or `undefined` if absent. */
+/**
+ * Read a string env var out of the merged config, or `undefined` if absent.
+ * Deliberately silent: most callers read legitimately-optional keys
+ * (`EVAL_ENGINE_URL`, `PORTAL_URL`, `SANDBOX_MCP_URL`), so a miss is not an
+ * event. The callers for which a key IS required already fail loudly and name
+ * it (`requireConfig`), which is where that diagnostic belongs.
+ */
 export function readConfigString(
   config: MergedConfig,
   key: string,
 ): string | undefined {
   const value = config[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The shape of a Matrix HTTP error, as either SDK in the tree reports it:
+ * `matrix-js-sdk` (what `MatrixStateManager` uses) carries `httpStatus`,
+ * `matrix-bot-sdk` carries `statusCode`, and both carry `errcode`.
+ */
+const matrixErrorShape = z.object({
+  errcode: z.string().optional(),
+  httpStatus: z.number().optional(),
+  statusCode: z.number().optional(),
+});
+
+/**
+ * `true` when a Matrix read failed because the thing simply is not there.
+ *
+ * Structural on purpose. `instanceof MatrixError` cannot answer this: the
+ * state manager throws `matrix-js-sdk`'s `MatrixError` while `@ixo/matrix`
+ * re-exports `matrix-bot-sdk`'s, so the check is always false in production
+ * and every empty read is reported as a failure. Reading `errcode`/status off
+ * the error works for either class — and for neither, when the failure is a
+ * genuine transport error with no Matrix response at all.
+ */
+export function isMatrixNotFound(error: unknown): boolean {
+  const parsed = matrixErrorShape.safeParse(error);
+  if (!parsed.success) return false;
+  const { errcode, httpStatus, statusCode } = parsed.data;
+  return errcode === 'M_NOT_FOUND' || httpStatus === 404 || statusCode === 404;
 }
 
 /**
@@ -80,6 +149,26 @@ export function toContractServiceProp(
     },
     deliverables: service.deliverables,
     ...(service.doneMeans !== undefined && { doneMeans: service.doneMeans }),
+  };
+}
+
+/**
+ * Reduce a card service to what the router's classifier and the contract gate
+ * read. Shared by the port registrar (classification) and `start_work` (an
+ * in-turn gate check), so both gate the identical view of a service.
+ */
+export function toRoutedService(
+  service: AgentCardServiceView,
+): CommerceRoutedService {
+  return {
+    id: service.id,
+    name: service.name,
+    ...(service.description !== undefined && {
+      description: service.description,
+    }),
+    ...(service.tags !== undefined && { tags: service.tags }),
+    ...(service.examples !== undefined && { examples: service.examples }),
+    priceUsd: service.price.amount,
   };
 }
 

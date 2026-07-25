@@ -27,14 +27,31 @@ const TYPING_REFRESH_MS = 20_000;
 const PROCESSED_EVENTS_CAP = 500;
 
 /**
+ * Spec-standard `m.relates_to` payload. Two shapes matter here:
+ *   - a thread relation — `rel_type: 'm.thread'` plus the thread root's
+ *     `event_id`; clients that thread natively send this
+ *   - a reply-chain pointer — a bare `m.in_reply_to`
+ *
+ * They co-occur: a threaded client also sets `m.in_reply_to` (with
+ * `is_falling_back`) at the *newest* message in the thread so non-threaded
+ * clients render something sensible. That pointer is not the thread root.
+ */
+export interface MatrixRelatesTo {
+  rel_type?: string;
+  event_id?: string;
+  is_falling_back?: boolean;
+  'm.in_reply_to'?: { event_id: string };
+}
+
+/**
  * Matrix text-event content. Spec-standard fields the base
  * `MessageEventContent` type from `@ixo/matrix` doesn't enumerate:
  *   - `m.mentions` — explicit mention list (since MSC3952)
- *   - `m.relates_to.m.in_reply_to` — reply chain pointer
+ *   - `m.relates_to` — thread relation / reply chain pointer
  */
 interface MatrixTextContent extends MessageEventContent {
   'm.mentions'?: { user_ids?: string[] };
-  'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
+  'm.relates_to'?: MatrixRelatesTo;
 }
 
 interface BufferedEvent {
@@ -61,7 +78,7 @@ export interface MatrixIncomingMessage {
   /** Raw `m.mentions` payload from the event, if present. */
   mentions?: { user_ids?: string[] };
   /** Raw `m.relates_to` payload from the event, if present. */
-  relatesTo?: { 'm.in_reply_to'?: { event_id: string } };
+  relatesTo?: MatrixRelatesTo;
   attachments?: Array<{
     eventId: string;
     filename: string;
@@ -504,16 +521,25 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
 
   private async getThreadRoot(
     event: MessageEvent<
-      MessageEventContent & {
-        'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
-      }
+      MessageEventContent & { 'm.relates_to'?: MatrixRelatesTo }
     >,
     roomId: string,
   ): Promise<string | undefined> {
     const eventId = event.eventId;
     if (!eventId) return undefined;
-    const inReplyTo =
-      event.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+    const relatesTo = event.content['m.relates_to'];
+    // A thread relation names its root outright — take it and skip the walk.
+    // Falling through to the reply chain would root the thread on this event,
+    // and a homeserver refuses to root a thread on an event that already
+    // carries a relation ("Cannot start threads from an event with a
+    // relation"), failing every send for the rest of the turn. The sibling
+    // `m.in_reply_to` points at the newest message in the thread, not the
+    // root, so it must not win here.
+    if (relatesTo?.rel_type === 'm.thread' && relatesTo.event_id) {
+      this.threadRootCache.set(eventId, relatesTo.event_id);
+      return relatesTo.event_id;
+    }
+    const inReplyTo = relatesTo?.['m.in_reply_to']?.event_id;
     if (!inReplyTo) {
       this.threadRootCache.set(eventId, eventId);
       return eventId;
@@ -537,10 +563,20 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         return root;
       }
       const parent = await this.matrixManager.getEventById<{
-        'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
+        'm.relates_to'?: MatrixRelatesTo;
       }>(roomId, cursor);
-      const parentReply =
-        parent.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+      const parentRelatesTo = parent.content['m.relates_to'];
+      // Quote-reply aimed at a message that itself lives in a thread: that
+      // thread's root is the root, and `cursor` is unusable as one.
+      if (
+        parentRelatesTo?.rel_type === 'm.thread' &&
+        parentRelatesTo.event_id
+      ) {
+        const root = parentRelatesTo.event_id;
+        pathToCache.forEach((id) => this.threadRootCache.set(id, root));
+        return root;
+      }
+      const parentReply = parentRelatesTo?.['m.in_reply_to']?.event_id;
       if (!parentReply) {
         pathToCache.forEach((id) => this.threadRootCache.set(id, cursor));
         return cursor;

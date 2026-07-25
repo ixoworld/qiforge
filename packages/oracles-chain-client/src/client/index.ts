@@ -8,6 +8,7 @@ export const IXO = {
   client: Client,
 };
 
+export * from './agent-card/index.js';
 export * from './authz/index.js';
 export * from './claims/index.js';
 export * from './client.js';

@@ -4,6 +4,7 @@ import type { SubmitClaimResult } from './claim-lane.js';
 import {
   COLLECTION_ID,
   makeEngagementService,
+  makeEngagementStore,
   ROOM_ID,
   THREAD_ID,
 } from './__test-fixtures__/oracle-payments-fixtures.js';
@@ -26,8 +27,22 @@ function makeService(options: {
   result?: SubmitClaimResult;
   throws?: Error;
   network?: string;
+  /** Fails the durable engagement write, as a Matrix outage would. */
+  setState?: (payload: {
+    roomId: string;
+    stateKey: string;
+    data: unknown;
+  }) => Promise<void>;
+  error?: ReturnType<typeof vi.fn>;
 }) {
-  const engagement = makeEngagementService(NOW);
+  const store = makeEngagementStore();
+  const engagement = makeEngagementService(NOW, undefined, {
+    getState: store.getState,
+    setState: async (payload) => {
+      await options.setState?.(payload);
+      await store.setState(payload);
+    },
+  });
   const sendIntent = vi.fn(async (): Promise<SubmitClaimResult> => {
     if (options.throws) throw options.throws;
     return options.result ?? { code: 0, transactionHash: 'INTENT-TX-1' };
@@ -37,7 +52,13 @@ function makeService(options: {
     network: options.network ?? 'devnet',
     chain: { sendIntent },
     clock: () => new Date(NOW),
-    logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    sleep: async () => {},
+    logger: {
+      log: vi.fn(),
+      warn: vi.fn(),
+      error: options.error ?? vi.fn(),
+      debug: vi.fn(),
+    },
   });
   return { service, engagement, sendIntent };
 }
@@ -126,6 +147,46 @@ describe('WorkIntentService.startEngagement', () => {
       txHash: 'INTENT-TX-1',
       submittedAt: NOW,
     });
+  });
+
+  it('retries a failed engagement write before giving up on the turn', async () => {
+    // The engagement record IS the persisted "this user is in work mode"
+    // state: lose it and the next message re-classifies straight back to
+    // support while the escrow stays locked.
+    let attempts = 0;
+    const { service, engagement } = makeService({
+      setState: async () => {
+        attempts += 1;
+        if (attempts < 2) throw new Error('matrix 502');
+      },
+    });
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
+
+    expect(result.ok).toBe(true);
+    expect(await engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'active',
+    });
+  });
+
+  it('reports a failed start loudly when the engagement cannot be persisted', async () => {
+    const error = vi.fn();
+    const { service } = makeService({
+      setState: async () => {
+        throw new Error('matrix down');
+      },
+      error,
+    });
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
+
+    // Never "ok" — the turn must not carry on as work with no record of it.
+    expect(result).toEqual({ ok: false, reason: 'intent_failed' });
+    // And the escrow that IS locked is named, so an operator can reconcile it.
+    const logged = String(error.mock.calls[0]?.[0]);
+    expect(logged).toContain('INTENT-TX-1');
+    expect(logged).toContain(COLLECTION_ID);
+    expect(logged).toContain('could not be persisted');
   });
 
   it('never persists the router-only intentDurationNs onto the engagement', async () => {

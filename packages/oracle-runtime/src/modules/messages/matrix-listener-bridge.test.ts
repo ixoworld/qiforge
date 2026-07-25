@@ -216,6 +216,102 @@ describe('MatrixListenerBridge', () => {
       }
     });
 
+    it("uses m.relates_to.event_id when the event carries an 'm.thread' relation", async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread-1' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'card-evt' });
+
+        // Clients that thread natively (e.g. the portal's chat cards) send a
+        // bare thread relation with no reply-chain pointer. Rooting the thread
+        // on this event instead of its declared root makes the homeserver
+        // reject every downstream send with M_UNKNOWN "Cannot start threads
+        // from an event with a relation".
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'thread-reply-evt',
+            content: {
+              msgtype: 'm.text',
+              body: 'Tell me more about Research',
+              'm.relates_to': {
+                rel_type: 'm.thread',
+                event_id: 'card-evt',
+                is_falling_back: true,
+              },
+            },
+          }),
+        );
+
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        expect(deliverHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ threadId: 'card-evt' }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("prefers the 'm.thread' root over a fallback m.in_reply_to pointer", async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const h = await build();
+        const deliverHandler = vi.fn().mockResolvedValue({
+          message: { content: 'ai reply' },
+        });
+        h.bridge.setDeliverHandler(deliverHandler);
+
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread-1' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'card-evt' });
+
+        // Spec-shaped thread reply: `m.in_reply_to` points at the latest
+        // message in the thread (reply fallback for non-threaded clients), so
+        // walking it would land on a leaf, not the root.
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'thread-reply-evt',
+            content: {
+              msgtype: 'm.text',
+              body: 'and the next one?',
+              'm.relates_to': {
+                rel_type: 'm.thread',
+                event_id: 'card-evt',
+                is_falling_back: true,
+                'm.in_reply_to': { event_id: 'latest-in-thread-evt' },
+              },
+            },
+          }),
+        );
+
+        await vi.advanceTimersByTimeAsync(500);
+        for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+        expect(deliverHandler).toHaveBeenCalledWith(
+          expect.objectContaining({ threadId: 'card-evt' }),
+        );
+        // The fallback pointer must not trigger a reply-chain walk.
+        const walked = h.sessions.matrixManger.getEventById.mock.calls.map(
+          (c) => c[1],
+        );
+        expect(walked).not.toContain('latest-in-thread-evt');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('walks the reply chain to the root and caches every visited id', async () => {
       const h = await build();
       // Chain: leaf -> mid -> root (no m.in_reply_to on root).
@@ -1081,7 +1177,11 @@ describe('MatrixListenerBridge', () => {
         };
         const port: CommerceRouterPort = {
           getServices: vi.fn(async () => []),
-          getActiveEngagement: vi.fn(async () => engagement),
+          findActiveEngagement: vi.fn(async ({ roomId, threadId }) => ({
+            roomId,
+            threadId,
+            engagement,
+          })),
           checkContractGate: vi.fn(async () => ({
             ok: false as const,
             reason: 'not_contracted' as const,
@@ -1146,8 +1246,14 @@ describe('MatrixListenerBridge', () => {
           .calls[1]?.[0] as MatrixIncomingMessage;
 
         // Both turns routed to the work agent — sticky engagement.
-        expect(first.commerce).toEqual({ mode: 'work', engagement });
-        expect(second.commerce).toEqual({ mode: 'work', engagement });
+        const inWorkMode = {
+          mode: 'work',
+          engagement,
+          engagementRoomId: first.roomId,
+          engagementThreadId: first.threadId,
+        };
+        expect(first.commerce).toEqual(inWorkMode);
+        expect(second.commerce).toEqual(inWorkMode);
         // The follow-up simply continues the work with nothing lost.
         expect(first.abortController.signal.aborted).toBe(true);
         expect(second.message).toBe('do my tax report\nnow edit the report');

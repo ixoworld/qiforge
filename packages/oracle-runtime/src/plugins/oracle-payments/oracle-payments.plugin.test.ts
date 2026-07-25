@@ -20,9 +20,13 @@ import {
   makeContractRecord,
   makeContractRecordService,
   ORACLE_ENTITY_DID,
+  ROOM_ID,
+  THREAD_ID,
   type PostedEvent,
 } from './__test-fixtures__/oracle-payments-fixtures.js';
 import { ContractRecordService } from './contract-record.service.js';
+import type { ContractRecord } from './types.js';
+import { WorkIntentService } from './work-intent.service.js';
 
 /** A card service that always resolves to no card (no published services). */
 function makeNullCardService(): AgentCardService {
@@ -117,54 +121,59 @@ describe('OraclePaymentsPlugin — registration', () => {
 });
 
 describe('OraclePaymentsPlugin — commerce mode gating', () => {
-  it('exposes the support tools without a commerce context', () => {
+  /** The read-only surface both Matrix modes carry. */
+  const SHARED_TOOLS = [
+    'get_contract_status',
+    'get_thread_attachment',
+    'list_services',
+    'show_contract',
+  ];
+
+  it('contributes NOTHING on a non-Matrix turn', () => {
+    // Every tool here speaks Matrix — component cards, thread-keyed
+    // engagements, room uploads. On HTTP/portal/Slack they are meaningless at
+    // best, so the plugin stays out of the surface entirely.
     const plugin = new OraclePaymentsPlugin({ agentCard: makeCardService() });
-    const { tools } = toolsOf(plugin, makeCommerceCtx());
-    expect(tools.map((t) => t.name).sort()).toEqual([
-      'get_contract_status',
-      'get_thread_attachment',
-      'list_services',
-      'show_contract',
-    ]);
+    for (const client of ['http', 'portal', 'slack'] as const) {
+      const ctx = makeRuntimeContext({
+        session: { id: 's1', client, requestId: 'r1' },
+        commerce: { mode: 'support' },
+      });
+      expect(plugin.getRequestTools(ctx)).toEqual([]);
+    }
   });
 
-  it('exposes the same support tools in support mode', () => {
+  it('exposes the read-only tools on a Matrix turn the router left inert', () => {
+    // No commerce context (no agent card yet): the user can still ask what is
+    // on offer, but `start_work` — which would open an escrowed engagement
+    // nothing reads — is not there.
     const plugin = new OraclePaymentsPlugin({ agentCard: makeCardService() });
-    const ctx = makeRuntimeContext({ commerce: { mode: 'support' } });
+    const { tools } = toolsOf(plugin, makeCommerceCtx());
+    expect(tools.map((t) => t.name).sort()).toEqual(SHARED_TOOLS);
+  });
+
+  it('adds start_work — the only route into work mode — in support mode', () => {
+    const plugin = new OraclePaymentsPlugin({ agentCard: makeCardService() });
+    const ctx = makeCommerceCtx({ commerce: { mode: 'support' } });
     expect(
       plugin
         .getRequestTools(ctx)
         .map((t) => t.name)
         .sort(),
-    ).toEqual([
-      'get_contract_status',
-      'get_thread_attachment',
-      'list_services',
-      'show_contract',
-    ]);
+    ).toEqual([...SHARED_TOOLS, 'start_work'].sort());
   });
 
-  it('swaps to the work surface in work mode', () => {
+  it('keeps the read-only tools in work mode and adds delivery + cancellation', () => {
+    // A locked-in user still gets to ask "what am I paying for?" without
+    // abandoning the job — so the shared surface travels into work mode.
     const plugin = new OraclePaymentsPlugin({ agentCard: makeCardService() });
-    const ctx = makeRuntimeContext({
-      commerce: {
-        mode: 'work',
-        engagement: {
-          status: 'active',
-          serviceId: 'tax-report',
-          serviceName: 'Tax report',
-          priceUsd: 20,
-          collectionId: '42',
-          adminAddress: 'ixo1admin',
-          startedAt: '2026-07-22T00:00:00.000Z',
-        },
-      },
+    const ctx = makeCommerceCtx({
+      commerce: { mode: 'work', engagement: makeEngagement() },
     });
-    expect(plugin.getRequestTools(ctx).map((t) => t.name)).toEqual([
-      'deliver_work',
-      'cancel_work',
-      'get_thread_attachment',
-    ]);
+    const names = plugin.getRequestTools(ctx).map((t) => t.name);
+    expect(names.slice(0, 2)).toEqual(['deliver_work', 'cancel_work']);
+    expect(names.slice(2).sort()).toEqual(SHARED_TOOLS);
+    expect(names).not.toContain('start_work');
   });
 });
 
@@ -234,6 +243,148 @@ describe('OraclePaymentsPlugin — cancel_work wiring', () => {
       toolsOf(plugin, ctx).get('cancel_work').handler({ reason: 7 }, ctx),
     ).rejects.toThrow();
     expect(release).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * `start_work` is the ONLY route from support mode into work mode, and it runs
+ * the same gate + escrow lane the router runs. These pin both halves: a job
+ * really opens when the gate passes, and NOTHING happens — no chain write, no
+ * engagement — when it does not.
+ */
+describe('OraclePaymentsPlugin — start_work', () => {
+  /** `intentCode` non-zero models the chain rejecting the reservation. */
+  function makeStartWorkPlugin(
+    record: ContractRecord | null,
+    intentCode = 0,
+  ): {
+    plugin: OraclePaymentsPlugin;
+    engagement: EngagementService;
+    sendIntent: ReturnType<typeof vi.fn>;
+  } {
+    const engagement = makeEngagementService();
+    const contractGate = new ContractGateService({
+      contractRecord: makeContractRecordService(record).service,
+      engagement,
+      engineUrl: 'https://engine.example',
+      network: 'devnet',
+    });
+    const sendIntent = vi.fn(async () => ({
+      code: intentCode,
+      transactionHash: intentCode === 0 ? 'TX-INTENT-1' : '',
+      rawLog: intentCode === 0 ? '' : 'insufficient funds',
+    }));
+    const workIntent = new WorkIntentService({
+      engagement,
+      network: 'devnet',
+      chain: { sendIntent },
+      clock: () => new Date('2026-07-22T12:00:00.000Z'),
+    });
+    const plugin = new OraclePaymentsPlugin({
+      agentCard: makeCardService(),
+      engagement,
+      contractGate,
+      workIntent,
+    });
+    return { plugin, engagement, sendIntent };
+  }
+
+  const supportCtx = (): RuntimeContext =>
+    makeCommerceCtx({ commerce: { mode: 'support' } });
+
+  it('opens the engagement when the contract gate passes', async () => {
+    const { plugin, engagement, sendIntent } =
+      makeStartWorkPlugin(makeContractRecord());
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({
+      started: true,
+      serviceId: 'tax-report',
+      serviceName: 'Tax report',
+    });
+    expect(sendIntent).toHaveBeenCalledTimes(1);
+    // The engagement is live from here on, so the NEXT turn routes to work.
+    const active = await engagement.getActive(ROOM_ID, THREAD_ID);
+    expect(active).toMatchObject({
+      status: 'active',
+      serviceId: 'tax-report',
+      intent: { txHash: 'TX-INTENT-1' },
+    });
+    // …but this turn's tools were bound in support mode, and the result has to
+    // say so or the model will narrate work it cannot do.
+    expect(String((result as { note: string }).note)).toContain(
+      'not bound in this reply',
+    );
+  });
+
+  it('starts nothing and reports the gate reason when the user is not contracted', async () => {
+    const { plugin, engagement, sendIntent } = makeStartWorkPlugin(null);
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({
+      started: false,
+      reason: 'not_contracted',
+      serviceId: 'tax-report',
+    });
+    // The refusal is the router's own wording, so a gate failure reads the
+    // same whether it happened before the turn or inside it.
+    expect(String((result as { message: string }).message)).toContain(
+      'show_contract',
+    );
+    expect(sendIntent).not.toHaveBeenCalled();
+    expect(await engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('reports service_not_contracted for a service outside the contract', async () => {
+    const { plugin, sendIntent } = makeStartWorkPlugin(
+      makeContractRecord({ serviceIds: ['something-else'] }),
+    );
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({
+      started: false,
+      reason: 'service_not_contracted',
+    });
+    expect(sendIntent).not.toHaveBeenCalled();
+  });
+
+  it('reports intent_failed and starts nothing when the reservation is rejected', async () => {
+    // The contract is fine; the escrow write is what failed. Nothing may be
+    // left behind — an engagement with no reservation would route the user
+    // into work mode for a job that was never paid for.
+    const { plugin, engagement } = makeStartWorkPlugin(makeContractRecord(), 5);
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({ started: false, reason: 'intent_failed' });
+    expect(await engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('throws with the valid ids for an unknown serviceId', async () => {
+    const { plugin, sendIntent } = makeStartWorkPlugin(makeContractRecord());
+    const ctx = supportCtx();
+
+    await expect(
+      toolsOf(plugin, ctx)
+        .get('start_work')
+        .handler({ serviceId: 'not-a-service' }, ctx),
+    ).rejects.toThrow(/tax-report, quick-estimate/);
+    expect(sendIntent).not.toHaveBeenCalled();
   });
 });
 

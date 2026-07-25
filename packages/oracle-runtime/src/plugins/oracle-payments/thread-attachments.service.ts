@@ -1,3 +1,4 @@
+import { Logger as NestLogger } from '@nestjs/common';
 import {
   listThreadAttachments,
   type ThreadAttachment,
@@ -74,11 +75,11 @@ export class ThreadAttachmentService {
     ThreadAttachmentDeps['listAttachments']
   >;
 
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
 
   constructor(deps: ThreadAttachmentDeps = {}) {
     this.listAttachments = deps.listAttachments ?? listThreadAttachments;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(ThreadAttachmentService.name);
   }
 
   async list(ctx: RuntimeContext): Promise<ThreadAttachmentListing> {
@@ -95,7 +96,7 @@ export class ThreadAttachmentService {
     try {
       attachments = await this.listAttachments(roomId, threadId);
     } catch (error) {
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] thread attachment listing failed for ${roomId}/${threadId}: ${errorMessage(error)}`,
       );
       return { attachments: [], note: READ_FAILED_NOTE };

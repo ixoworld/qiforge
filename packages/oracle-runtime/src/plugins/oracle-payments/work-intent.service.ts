@@ -1,3 +1,4 @@
+import { Logger as NestLogger } from '@nestjs/common';
 import type {
   CommerceEngagementStart,
   CommerceEngagementStartResult,
@@ -13,7 +14,7 @@ import type {
   EngagementService,
   EngagementStartData,
 } from './engagement.service.js';
-import { errorMessage, priceToCoin } from './util.js';
+import { errorMessage, priceToCoin, retry } from './util.js';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
@@ -23,6 +24,8 @@ export interface WorkIntentServiceDeps {
   network: string;
   chain?: IntentChainClient;
   clock?: () => Date;
+  /** Sleep seam for the engagement-persist retry; tests pass a no-op. */
+  sleep?: (ms: number) => Promise<void>;
   logger?: Logger;
 }
 
@@ -51,14 +54,16 @@ export class WorkIntentService {
   private readonly network: string;
   private readonly chain: IntentChainClient;
   private readonly clock: () => Date;
-  private readonly logger?: Logger;
+  private readonly sleep?: (ms: number) => Promise<void>;
+  private readonly logger: Logger;
 
   constructor(deps: WorkIntentServiceDeps) {
     this.engagement = deps.engagement;
     this.network = deps.network;
     this.chain = deps.chain ?? defaultIntentChainClient;
     this.clock = deps.clock ?? (() => new Date());
-    this.logger = deps.logger;
+    this.sleep = deps.sleep;
+    this.logger = deps.logger ?? new NestLogger(WorkIntentService.name);
   }
 
   async startEngagement(
@@ -72,25 +77,56 @@ export class WorkIntentService {
       priceUsd: start.priceUsd,
       collectionId: start.collectionId,
       adminAddress: start.adminAddress,
+      ...(start.userDid !== undefined && { userDid: start.userDid }),
     };
 
     const intent = await this.reserve(start);
     if (!intent) return { ok: false, reason: 'intent_failed' };
 
-    return {
-      ok: true,
-      engagement: await this.engagement.start(roomId, threadId, {
-        ...data,
-        intent,
-      }),
-    };
+    // The engagement record IS the persisted "this user is in work mode"
+    // state: the router reads it before anything else, so a reservation whose
+    // engagement never landed routes the very next message back to support
+    // while the escrow stays locked on-chain. Worth a bounded retry, and worth
+    // an error line naming the tx when it still fails — the turn then reports
+    // a failed start instead of quietly proceeding as if nothing happened.
+    let engagement: CommerceEngagement;
+    try {
+      engagement = await retry(
+        () => this.engagement.start(roomId, threadId, { ...data, intent }),
+        {
+          attempts: 3,
+          delayMs: 500,
+          ...(this.sleep !== undefined && { sleep: this.sleep }),
+          onRetry: (error, attempt) => {
+            this.logger.warn(
+              `[oracle-payments] could not persist the engagement for thread ${threadId} (attempt ${attempt}), retrying: ${errorMessage(error)}`,
+            );
+          },
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `[oracle-payments] escrow ${intent.txHash} is reserved on-chain for collection ` +
+          `${start.collectionId} but the engagement for thread ${threadId} could not be persisted ` +
+          `(${errorMessage(error)}). The user holds a live reservation with no job record: they ` +
+          'cannot start new paid work until it lapses, and cancel_work has nothing to release.',
+      );
+      return { ok: false, reason: 'intent_failed' };
+    }
+
+    return { ok: true, engagement };
   }
 
   /**
    * Lock the service price on-chain. Returns `null` on any failure — a thrown
    * transport error and a non-zero tx code both mean nothing is reserved.
+   *
+   * Public because the delivery lane reserves again on its own account: a job
+   * that outran its window needs a fresh intent before its claim can settle,
+   * and that must be the same chain write with the same failure handling, not
+   * a second copy of it.
    */
-  private async reserve(
+  async reserve(
     start: CommerceEngagementStart,
   ): Promise<CommerceEngagement['intent'] | null> {
     const price = priceToCoin(start.priceUsd, this.network);
@@ -105,14 +141,14 @@ export class WorkIntentService {
         amount,
       });
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] claim intent failed for collection ${start.collectionId}: ${errorMessage(error)}`,
       );
       return null;
     }
 
     if (result.code !== 0) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] claim intent rejected for collection ${start.collectionId} (code ${result.code}): ${
           result.rawLog || 'unknown chain error'
         }`,

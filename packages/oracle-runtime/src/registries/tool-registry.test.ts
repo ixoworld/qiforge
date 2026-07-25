@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   makeBuildCtx,
   makePlugin,
@@ -227,7 +227,7 @@ describe('ToolRegistry', () => {
     expect(tools.map((t) => t.tool.name)).toEqual(['slow_tool', 'fast_tool']);
   });
 
-  it('propagates a request-time hook rejection as a collection failure', async () => {
+  it('isolates a request-time hook rejection to its own plugin and logs it', async () => {
     const reg = new ToolRegistry();
     reg.register(
       makePlugin({
@@ -240,9 +240,47 @@ describe('ToolRegistry', () => {
     reg.register(
       makePlugin({ name: 'ok', getRequestTools: () => [makeTool('ok_tool')] }),
     );
-
-    await expect(reg.collectRequest(makeRuntimeContext())).rejects.toThrow(
-      'hook exploded',
+    reg.register(
+      makePlugin({
+        name: 'oracle-payments',
+        getRequestTools: () => [makeTool('deliver_work')],
+      }),
     );
+    const error = vi.fn();
+    const rtCtx = makeRuntimeContext({
+      logger: { log: vi.fn(), warn: vi.fn(), error, debug: vi.fn() },
+    });
+
+    const collected = await reg.collectRequest(rtCtx);
+
+    // One plugin's transient failure must not strip every other plugin's
+    // request tools — that turns a single upstream blip into a turn-wide
+    // capability outage.
+    expect(collected.map((c) => c.tool.name)).toEqual([
+      'ok_tool',
+      'deliver_work',
+    ]);
+    // And it must never be silent: the failing plugin is named.
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(String(error.mock.calls[0]?.[0])).toContain('"broken"');
+    expect(String(error.mock.calls[0]?.[0])).toContain('hook exploded');
+  });
+
+  it('tags each collected tool with the hook that produced it', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'agui',
+        getTools: () => [makeTool('agui_baseline')],
+        getRequestTools: () => [makeTool('agui_dynamic')],
+      }),
+    );
+
+    const collected = await reg.collect(makeBuildCtx(), makeRuntimeContext());
+
+    expect(collected.map((c) => `${c.tool.name}:${c.origin}`)).toEqual([
+      'agui_baseline:boot',
+      'agui_dynamic:request',
+    ]);
   });
 });

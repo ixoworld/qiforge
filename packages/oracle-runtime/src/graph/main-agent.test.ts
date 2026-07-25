@@ -1,3 +1,4 @@
+import { HumanMessage, AIMessage } from '@langchain/core/messages';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
@@ -42,6 +43,8 @@ vi.mock('langchain', async () => {
 });
 
 import { createMainAgent, type MainAgentArgs } from './main-agent.js';
+import { MemoryPlugin } from '../plugins/memory/index.js';
+import { OraclePaymentsPlugin } from '../plugins/oracle-payments/oracle-payments.plugin.js';
 
 function makeAmbient(): AmbientServices {
   return {
@@ -263,6 +266,69 @@ describe('createMainAgent', () => {
     expect(toolNames).not.toContain('call_broken_agent');
   });
 
+  it('gives a wrapped tool the LIVE turn’s message history', async () => {
+    // The guard for a bug this suite could not see. `ctx.history.messages`
+    // used to come from the agent's build-time state snapshot, which is
+    // empty in production — the checkpoint is read WITHOUT its messages
+    // (`getTupleWithoutMessages`) and, even when it isn't, the snapshot
+    // predates the turn. `deliver_work`'s work-summary extractor reads
+    // exactly this and refuses to sign a claim without it, so delivery died
+    // after the work was already done. It now comes from LangGraph's live
+    // `ToolRuntime.state`.
+    const registries = emptyRegistries();
+    let seen: readonly unknown[] | undefined;
+    let recent: readonly unknown[] | undefined;
+    registries.tools.register(
+      makePlugin({
+        name: 'transcript-reader',
+        manifest: makeManifest({ visibility: 'always' }),
+        getTools: () => [
+          makeTool('read_transcript', {
+            schema: z.object({}),
+            handler: async (_args, ctx) => {
+              seen = ctx.history.messages;
+              recent = ctx.history.recent(1);
+              return 'ok';
+            },
+          }),
+        ],
+      }),
+    );
+
+    // Built from a state with no history at all — exactly what the light
+    // checkpoint read gives the builder in production.
+    await createMainAgent(baseArgs({ registries, state: {} }));
+
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const wrapped = (
+      params.tools as {
+        name: string;
+        invoke: (args: unknown, runtime: unknown) => Promise<unknown>;
+      }[]
+    ).find((t) => t.name === 'read_transcript');
+    if (!wrapped) throw new Error('read_transcript was not bound');
+
+    const messages = [
+      new HumanMessage('do my 2025 tax report'),
+      new AIMessage('On it — reading your receipts.'),
+    ];
+    await wrapped.invoke(
+      {},
+      {
+        context: {
+          user: { did: 'did:ixo:user1', matrixUserId: '@u:ixo.world' },
+          session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
+        },
+        // What LangGraph hands a tool: the state of the turn in flight.
+        state: { messages },
+      },
+    );
+
+    expect(seen).toEqual(messages);
+    expect(recent).toEqual([messages[1]]);
+  });
+
   it('binds all on-demand plugins at compile time; gating happens via CapabilityGateMiddleware', async () => {
     const registries = emptyRegistries();
     registries.tools.register(
@@ -362,12 +428,14 @@ describe('createMainAgent', () => {
       return (params.tools as { name: string }[]).map((t) => t.name);
     };
 
-    // No commerce context (HTTP turn / inert router): the billed tool is hidden.
+    // No commerce context (HTTP turn / inert router): the gate belongs to the
+    // commerce lane, and off the lane there is no engagement to be inside — so
+    // a contracted tool is just a tool and binds with everything else.
     await createMainAgent(withCommerce(undefined));
-    expect(boundNames()).not.toContain('generate_tax_report');
+    expect(boundNames()).toContain('generate_tax_report');
     expect(boundNames()).toContain('free_faq');
 
-    // Support mode: still hidden.
+    // Support mode: hidden — this IS the lane, and no job is open.
     createAgentCalls.length = 0;
     await createMainAgent(withCommerce({ ...workCommerce, mode: 'support' }));
     expect(boundNames()).not.toContain('generate_tax_report');
@@ -557,5 +625,261 @@ describe('createMainAgent', () => {
 
     expect(prompt).toContain('## Custom Instructions');
     expect(prompt).toContain('Always greet the user in French.');
+  });
+
+  /**
+   * The commerce personas swap their whole tool surface through the plugin's
+   * `getRequestTools(rtCtx)` hook, and the prompt overlay is chosen from the
+   * SAME per-turn value a few lines later in the same build. Testing the
+   * plugin hook in isolation proves nothing about that: it was always correct
+   * in isolation. These exercise the seam — real plugin, real registries, real
+   * `createMainAgent` — so a regression anywhere between `requestCtx.commerce`
+   * and the bound tool list fails here.
+   */
+  describe('commerce personas (oracle-payments through the real build)', () => {
+    const WORK_TOOLS = ['deliver_work', 'cancel_work'];
+    /** Read-only commerce surface — bound in BOTH modes. */
+    const SHARED_COMMERCE_TOOLS = [
+      'list_services',
+      'show_contract',
+      'get_contract_status',
+      'get_thread_attachment',
+    ];
+    const META_TOOLS = ['load_capability', 'list_capabilities'];
+
+    const workCommerce = {
+      mode: 'work' as const,
+      engagement: {
+        status: 'active' as const,
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        priceUsd: 20,
+        collectionId: '42',
+        adminAddress: 'ixo1admin',
+        startedAt: '2026-07-22T00:00:00.000Z',
+      },
+    };
+
+    /**
+     * A fork's own tools, as a fork actually contributes them: a plugin the
+     * support allowlist has never heard of, with an eager manifest. One tool
+     * carries `billing: 'contracted'` so the same fixture pins the billing
+     * gate; the other is plain. Their presence or absence proves which
+     * filters ran.
+     */
+    function forkPlugin() {
+      return makePlugin({
+        name: 'tax-fork',
+        manifest: makeManifest({ visibility: 'always' }),
+        getTools: () => [
+          makeTool('generate_tax_report', { billing: 'contracted' }),
+          makeTool('free_faq'),
+        ],
+      });
+    }
+
+    /** Stands in for the memory plugin — the other allowlisted contributor. */
+    function memoryPlugin() {
+      return makePlugin({
+        name: MemoryPlugin.NAME,
+        manifest: makeManifest({ visibility: 'always' }),
+        getTools: () => [makeTool('memory_recall')],
+      });
+    }
+
+    async function buildWith(
+      commerce?: { mode: 'work' | 'support' } & Record<string, unknown>,
+      client: 'matrix' | 'portal' | 'slack' = 'matrix',
+    ): Promise<{ toolNames: string[]; prompt: string; name?: string }> {
+      const registries = emptyRegistries();
+      for (const plugin of [
+        new OraclePaymentsPlugin(),
+        memoryPlugin(),
+        forkPlugin(),
+      ]) {
+        registries.tools.register(plugin);
+        registries.manifests.register(plugin);
+      }
+
+      const args = baseArgs({ registries });
+      await createMainAgent({
+        ...args,
+        requestCtx: {
+          ...args.requestCtx,
+          session: { ...args.requestCtx.session, client, roomId: '!r:ixo' },
+          ...(commerce ? { commerce } : {}),
+        },
+      });
+
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
+      return {
+        toolNames: (params.tools as { name: string }[]).map((t) => t.name),
+        prompt: String(params.systemPrompt),
+        name: params.name,
+      };
+    }
+
+    it('binds the work surface plus the shared commerce tools on a work turn', async () => {
+      const { toolNames, prompt } = await buildWith(workCommerce);
+
+      expect(toolNames).toEqual(expect.arrayContaining(WORK_TOOLS));
+      // "What am I paying for again?" must be answerable without abandoning
+      // the job, so the read-only commerce tools travel into work mode.
+      expect(toolNames).toEqual(expect.arrayContaining(SHARED_COMMERCE_TOOLS));
+      // Work mode is the wide surface: meta-tools and the fork's own tools.
+      expect(toolNames).toEqual(expect.arrayContaining(META_TOOLS));
+      expect(toolNames).toContain('generate_tax_report');
+      // Already in work — there is nothing to transition into.
+      expect(toolNames).not.toContain('start_work');
+      // The overlay and the tool list are read from the same per-turn value:
+      // a work prompt over a support tool surface is the exact divergence this
+      // guards against.
+      expect(prompt).toContain('under an active contract');
+    });
+
+    it('binds only memory + oracle-payments — no meta-tools, no fork tools — on a support turn', async () => {
+      const { toolNames, prompt } = await buildWith({ mode: 'support' });
+
+      expect(toolNames).toEqual(
+        expect.arrayContaining([...SHARED_COMMERCE_TOOLS, 'start_work']),
+      );
+      for (const work of WORK_TOOLS) {
+        expect(toolNames).not.toContain(work);
+      }
+      // The fork's tools are work tools by definition, whatever they are
+      // called — the allowlist is keyed by plugin, so both of these go.
+      expect(toolNames).not.toContain('generate_tax_report');
+      expect(toolNames).not.toContain('free_faq');
+      // Memory is the other allowlisted contributor — the front desk still
+      // remembers who it is talking to.
+      expect(toolNames).toContain('memory_recall');
+      // Meta-tools are dropped with the rest: `load_capability` cannot reach
+      // past the allowlist, so advertising capabilities would only mislead.
+      for (const meta of META_TOOLS) {
+        expect(toolNames).not.toContain(meta);
+      }
+      // …and the prompt must not describe the loading flow that just went away.
+      expect(prompt).not.toContain('load_capability');
+      expect(prompt).not.toContain('list_capabilities');
+      expect(prompt).toContain('front desk');
+    });
+
+    it('binds the read-only commerce surface on a Matrix turn the router left inert', async () => {
+      // No agent card published yet ⇒ no commerce context, but the user can
+      // still ask what the oracle offers and get an honest answer.
+      const { toolNames, prompt } = await buildWith(undefined, 'matrix');
+
+      expect(toolNames).toEqual(
+        expect.arrayContaining([
+          ...SHARED_COMMERCE_TOOLS,
+          ...META_TOOLS,
+          'generate_tax_report',
+        ]),
+      );
+      for (const work of WORK_TOOLS) {
+        expect(toolNames).not.toContain(work);
+      }
+      // `start_work` opens an escrowed engagement nothing would read on an
+      // unrouted turn, so it exists only where the router actually ran.
+      expect(toolNames).not.toContain('start_work');
+      expect(prompt).not.toContain('## Commerce mode');
+    });
+
+    /**
+     * THE guard, both halves at once. `requestCtx.commerce` is set by the
+     * Matrix router alone, but nothing stops it arriving on another transport
+     * — and if it did, the support allowlist would strip every tool from an
+     * oracle that has no commerce lane at all. Meanwhile the commerce tools
+     * themselves are Matrix-shaped and must not leak the other way. One case
+     * per non-Matrix client, because a regression here is silent.
+     */
+    it.each(['portal', 'slack'] as const)(
+      'ignores a commerce context on a %s turn — full surface, no commerce tools, no overlay',
+      async (client) => {
+        const { toolNames, prompt } = await buildWith(
+          { mode: 'support' },
+          client,
+        );
+
+        // Every other plugin's tools survive untouched — including the
+        // `billing: 'contracted'` one, whose gate belongs to the commerce lane.
+        expect(toolNames).toEqual(
+          expect.arrayContaining([
+            ...META_TOOLS,
+            'memory_recall',
+            'generate_tax_report',
+            'free_faq',
+          ]),
+        );
+        // …and oracle-payments contributes nothing off Matrix.
+        for (const commerceTool of [
+          ...SHARED_COMMERCE_TOOLS,
+          ...WORK_TOOLS,
+          'start_work',
+        ]) {
+          expect(toolNames).not.toContain(commerceTool);
+        }
+        expect(prompt).not.toContain('## Commerce mode');
+        // The discovery mandate is part of that full surface.
+        expect(prompt).toContain('Search first, build second');
+      },
+    );
+
+    it('names the compiled graph per persona so a trace shows which one ran', async () => {
+      // LangSmith shows the graph name; two personas with different prompts
+      // and different tools must not share one.
+      expect((await buildWith(workCommerce)).name).toBe('TestOracle-work');
+
+      createAgentCalls.length = 0;
+      expect((await buildWith({ mode: 'support' })).name).toBe(
+        'TestOracle-support',
+      );
+
+      // Non-commerce turns keep the plain oracle name they have always had.
+      createAgentCalls.length = 0;
+      expect((await buildWith(undefined, 'portal')).name).toBe('TestOracle');
+      createAgentCalls.length = 0;
+      expect((await buildWith(workCommerce, 'portal')).name).toBe('TestOracle');
+    });
+
+    it('logs the per-turn tool surface with the commerce mode and the request tools by plugin', async () => {
+      // The line that makes "which tools did this turn actually get?"
+      // answerable from a production log instead of from the source.
+      const lines: string[] = [];
+      const ambient: AmbientServices = {
+        ...makeAmbient(),
+        logger: {
+          log: (message) => {
+            lines.push(String(message));
+          },
+          warn: vi.fn(),
+          error: vi.fn(),
+        },
+      };
+      const plugin = new OraclePaymentsPlugin();
+      const registries = emptyRegistries();
+      registries.tools.register(plugin);
+      registries.manifests.register(plugin);
+
+      const args = baseArgs({ registries, ambient });
+      await createMainAgent({
+        ...args,
+        requestCtx: {
+          ...args.requestCtx,
+          session: {
+            ...args.requestCtx.session,
+            client: 'matrix' as const,
+            roomId: '!r:ixo',
+          },
+          commerce: workCommerce,
+        },
+      });
+
+      const surfaceLine = lines.find((line) => line.includes('tool surface'));
+      expect(surfaceLine).toBeDefined();
+      expect(surfaceLine).toContain('commerce=work');
+      expect(surfaceLine).toContain('oracle-payments=[deliver_work');
+    });
   });
 });

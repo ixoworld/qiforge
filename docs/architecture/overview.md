@@ -78,4 +78,5 @@ graph TD
 - [Graph and state](graph-and-state.md) — `MainAgentGraphState`, reducers, and how plugin contributions reach the agent.
 - [Meta-tools and discovery](meta-tools-and-discovery.md) — `list_capabilities` and `load_capability`.
 - [Matrix and checkpointer](matrix-and-checkpointer.md) — the persistence layer.
+- [Matrix commerce](matrix-commerce.md) — the core seam behind the `oracle-payments` plugin: the commerce router port, `ctx.commerce`, the in-flight turn registry, `work_status`.
 - [Runtime context](runtime-context.md) — how `RuntimeContext` is built per request.

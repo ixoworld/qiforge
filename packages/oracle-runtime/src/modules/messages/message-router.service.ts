@@ -48,7 +48,45 @@ export interface MessageRouterDeps {
   getModel?: RoutingModelFactory;
   /** Status-card sink — only `emit` is used (the `routing` phase). */
   producer?: Pick<WorkStatusProducer, 'emit'>;
-  logger?: Pick<Logger, 'warn' | 'debug'>;
+  logger?: Pick<Logger, 'log' | 'warn' | 'debug'>;
+}
+
+/** Log prefix shared by every routing line, so one grep shows the whole lane. */
+const LOG_PREFIX = '[commerce-router]';
+
+/**
+ * Why a turn ended up in the mode it did. One value per branch of `decide`,
+ * so the decision line reads back the exact path taken.
+ */
+type RoutingDecision =
+  | 'inactive'
+  | 'sticky-engagement'
+  | 'continued-engagement'
+  | 'no-services'
+  | 'classifier-unavailable'
+  | 'classifier-support'
+  | 'low-confidence'
+  | 'unknown-service'
+  | 'gate-failed'
+  | 'start-failed'
+  | 'engagement-started'
+  | 'error';
+
+/** Routing metadata for the per-turn decision line. Never carries user text. */
+interface RoutingDecisionFields {
+  decision: RoutingDecision;
+  mode: 'support' | 'work';
+  serviceId?: string;
+  reason?: string;
+  /**
+   * `intent/confidence` as the classifier returned it, pre-threshold — or the
+   * literal `skipped`, which is how the line states that no classification ran
+   * at all because the user is already locked into a job.
+   */
+  classifier?: string;
+  /** Where a continued engagement actually lives, when it is not this thread. */
+  engagementRoomId?: string;
+  engagementThreadId?: string;
 }
 
 /** One coalesced Matrix turn, as the bridge hands it over pre-delivery. */
@@ -67,8 +105,13 @@ export interface RouteTurnInput {
  * Routes each coalesced Matrix turn between the free support persona and the
  * contracted work persona (spec-style dual-role routing):
  *
- *   1. Active engagement for the thread → PURE sticky work mode: every
- *      message goes to the work agent, no scanning of any kind. The router
+ *   1. Active engagement for the SENDER — in this thread, another thread, or
+ *      another room → PURE sticky work mode: every message goes to the work
+ *      agent, no scanning of any kind. Stickiness follows the user because
+ *      the escrow does: the chain holds one active claim intent per (agent,
+ *      user), and a bare main-timeline message is its own thread root, so a
+ *      thread-scoped check would drop a live paid job back to the free
+ *      persona the moment the user answered outside the thread. The router
  *      never cancels — cancellation is an agent decision via the plugin's
  *      `cancel_work` tool (transport-level cancel phrase detection was
  *      rejected: false positives are catastrophic when a follow-up like
@@ -87,11 +130,18 @@ export interface RouteTurnInput {
  * by the oracle-payments plugin. No port ⇒ `route` returns `undefined` and
  * the turn is delivered exactly as before this router existed. HTTP turns
  * never come through here.
+ *
+ * Every branch above ends in one decision line at normal log level (routing
+ * metadata only, never message content). The mode it reports is the mode the
+ * agent build reads: it decides which prompt overlay renders AND which tool
+ * set binds, so this line is where a "wrong persona" report gets answered.
  */
 export class MessageRouterService {
   private readonly getModel: RoutingModelFactory;
   private readonly producer: Pick<WorkStatusProducer, 'emit'>;
-  private readonly logger: Pick<Logger, 'warn' | 'debug'>;
+  private readonly logger: Pick<Logger, 'log' | 'warn' | 'debug'>;
+  /** One-shot guard for the "commerce is off" first-use notice. */
+  private inactiveNoticeLogged = false;
 
   constructor(deps: MessageRouterDeps = {}) {
     this.getModel = deps.getModel ?? defaultModelFactory;
@@ -99,17 +149,30 @@ export class MessageRouterService {
     this.logger = deps.logger ?? new Logger(MessageRouterService.name);
   }
 
-  /** `true` when a commerce port is registered — the bridge gates status-card setup on this. */
+  /**
+   * `true` when a commerce port is registered — the bridge gates status-card
+   * setup on this. The first `false` answer says so out loud: an inert router
+   * makes every Matrix turn plain support with no overlay and no commerce
+   * tools, which is indistinguishable from a routing bug in the chat itself.
+   */
   isActive(): boolean {
-    return getCommerceRouterPort() !== null;
+    const active = getCommerceRouterPort() !== null;
+    if (!active && !this.inactiveNoticeLogged) {
+      this.inactiveNoticeLogged = true;
+      this.logger.log(
+        `${LOG_PREFIX} inactive — no commerce router port is registered, so every Matrix turn ` +
+          'runs as plain support with no commerce overlay and no commerce tools. Expected when ' +
+          'the oracle-payments plugin is disabled (ORACLE_PAYMENTS_DISABLED=true) or its Nest ' +
+          'module never initialised.',
+      );
+    }
+    return active;
   }
 
   async route(input: RouteTurnInput): Promise<CommerceContext | undefined> {
     const port = getCommerceRouterPort();
     if (!port) {
-      this.logger.debug(
-        `No commerce port registered for thread ${input.threadId} — falling back to support.`,
-      );
+      this.logDecision(input, { decision: 'inactive', mode: 'support' });
       return undefined;
     }
 
@@ -118,10 +181,11 @@ export class MessageRouterService {
     } catch (error) {
       // Fail open to the free persona: routing must never error a turn.
       this.logger.warn(
-        `commerce routing failed for thread ${input.threadId} — falling back to support: ${
+        `${LOG_PREFIX} routing failed for thread ${input.threadId} — falling back to support: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      this.logDecision(input, { decision: 'error', mode: 'support' });
       return { mode: 'support' };
     }
   }
@@ -130,31 +194,98 @@ export class MessageRouterService {
     port: CommerceRouterPort,
     input: RouteTurnInput,
   ): Promise<CommerceContext> {
-    const engagement = await port.getActiveEngagement(
-      input.roomId,
-      input.threadId,
-    );
-    if (engagement) {
-      return { mode: 'work', engagement };
+    const active = await port.findActiveEngagement({
+      senderDid: input.senderDid,
+      roomId: input.roomId,
+      threadId: input.threadId,
+    });
+    if (active) {
+      // Same thread or not, live work stays work: the engagement is the
+      // user's, not the thread's. A message typed on the main timeline (its
+      // own thread root, per the Matrix ingress rules) must not drop a paid
+      // job back to the free persona.
+      //
+      // This returns BEFORE `getServices` and before `classify`, and that is
+      // the contract, not an optimisation: once a user is locked into a job
+      // the classifier is never consulted again for them — not this turn, not
+      // any turn until the engagement ends. Nothing below this line runs.
+      const sameThread =
+        active.roomId === input.roomId && active.threadId === input.threadId;
+      this.logDecision(input, {
+        decision: sameThread ? 'sticky-engagement' : 'continued-engagement',
+        mode: 'work',
+        serviceId: active.engagement.serviceId,
+        classifier: 'skipped',
+        ...(sameThread
+          ? {}
+          : {
+              engagementRoomId: active.roomId,
+              engagementThreadId: active.threadId,
+            }),
+      });
+      return {
+        mode: 'work',
+        engagement: active.engagement,
+        engagementRoomId: active.roomId,
+        engagementThreadId: active.threadId,
+      };
     }
 
     const services = await port.getServices();
     if (!services || services.length === 0) {
       // No agent card ⇒ classifier off — plain support, no model call.
+      this.logDecision(input, { decision: 'no-services', mode: 'support' });
       return { mode: 'support' };
     }
+    this.logger.debug?.(
+      `${LOG_PREFIX} classifying thread ${input.threadId} against ${services.length} published service(s)`,
+    );
 
     this.producer.emit(input.requestId, 'routing');
     const classification = await this.classify(port, input.text, services);
-    if (!classification || classification.intent === 'support') {
+    if (!classification) {
+      this.logDecision(input, {
+        decision: 'classifier-unavailable',
+        mode: 'support',
+      });
+      return { mode: 'support' };
+    }
+
+    const verdict = `${classification.intent}/${classification.confidence}`;
+    if (classification.intent === 'support') {
+      this.logDecision(input, {
+        decision: 'classifier-support',
+        mode: 'support',
+        classifier: verdict,
+      });
+      return { mode: 'support' };
+    }
+    if (classification.confidence < MIN_WORK_CONFIDENCE) {
+      // Fail open: a hesitant work verdict never spends the user's money.
+      this.logDecision(input, {
+        decision: 'low-confidence',
+        mode: 'support',
+        classifier: verdict,
+        ...(classification.serviceId !== undefined && {
+          serviceId: classification.serviceId,
+        }),
+      });
       return { mode: 'support' };
     }
 
     const service = services.find((s) => s.id === classification.serviceId);
     if (!service) {
       this.logger.warn(
-        `classifier picked unknown serviceId "${classification.serviceId ?? ''}" — routing to support`,
+        `${LOG_PREFIX} classifier picked unknown serviceId "${classification.serviceId ?? ''}" — routing to support`,
       );
+      this.logDecision(input, {
+        decision: 'unknown-service',
+        mode: 'support',
+        classifier: verdict,
+        ...(classification.serviceId !== undefined && {
+          serviceId: classification.serviceId,
+        }),
+      });
       return { mode: 'support' };
     }
 
@@ -165,6 +296,13 @@ export class MessageRouterService {
       service,
     });
     if (!gate.ok) {
+      this.logDecision(input, {
+        decision: 'gate-failed',
+        mode: 'support',
+        serviceId: service.id,
+        reason: gate.reason,
+        classifier: verdict,
+      });
       return {
         mode: 'support',
         gate: {
@@ -185,6 +323,13 @@ export class MessageRouterService {
       // The contract is fine but the job could not be started (the payment
       // reservation is a chain write). Same shape as a gate failure so the
       // agent explains rather than working unpaid.
+      this.logDecision(input, {
+        decision: 'start-failed',
+        mode: 'support',
+        serviceId: service.id,
+        reason: started.reason,
+        classifier: verdict,
+      });
       return {
         mode: 'support',
         gate: {
@@ -194,13 +339,52 @@ export class MessageRouterService {
         },
       };
     }
-    return { mode: 'work', engagement: started.engagement };
+    this.logDecision(input, {
+      decision: 'engagement-started',
+      mode: 'work',
+      serviceId: service.id,
+      classifier: verdict,
+    });
+    return {
+      mode: 'work',
+      engagement: started.engagement,
+      engagementRoomId: input.roomId,
+      engagementThreadId: input.threadId,
+    };
   }
 
   /**
-   * Classify support vs work. Returns `null` on any model failure, timeout,
-   * malformed output, or sub-threshold confidence — all of which mean
-   * "support".
+   * One line per routed turn — routing metadata only, never message content.
+   * Visible at normal log level: it is the record of which persona ran and
+   * why, which is otherwise only recoverable by re-reading the source.
+   */
+  private logDecision(
+    input: RouteTurnInput,
+    fields: RoutingDecisionFields,
+  ): void {
+    this.logger.log(
+      [
+        `${LOG_PREFIX} thread=${input.threadId}`,
+        `mode=${fields.mode}`,
+        `decision=${fields.decision}`,
+        ...(fields.serviceId ? [`service=${fields.serviceId}`] : []),
+        ...(fields.reason ? [`reason=${fields.reason}`] : []),
+        ...(fields.classifier ? [`classifier=${fields.classifier}`] : []),
+        ...(fields.engagementRoomId
+          ? [`engagementRoom=${fields.engagementRoomId}`]
+          : []),
+        ...(fields.engagementThreadId
+          ? [`engagementThread=${fields.engagementThreadId}`]
+          : []),
+      ].join(' '),
+    );
+  }
+
+  /**
+   * Classify support vs work. Returns the verdict verbatim — the confidence
+   * threshold is applied by `decide`, so the decision log can report what the
+   * model actually said. `null` on any model failure, timeout, or malformed
+   * output, all of which mean "support".
    */
   private async classify(
     port: CommerceRouterPort,
@@ -222,7 +406,7 @@ export class MessageRouterService {
       );
     } catch (error) {
       this.logger.warn(
-        `commerce classifier failed — routing to support: ${
+        `${LOG_PREFIX} classifier failed — routing to support: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -232,18 +416,9 @@ export class MessageRouterService {
     const parsed = classificationSchema.safeParse(raw);
     if (!parsed.success) {
       this.logger.warn(
-        'commerce classifier returned a malformed verdict — routing to support',
+        `${LOG_PREFIX} classifier returned a malformed verdict — routing to support`,
       );
       return null;
-    }
-    if (
-      parsed.data.intent === 'work' &&
-      parsed.data.confidence < MIN_WORK_CONFIDENCE
-    ) {
-      this.logger.debug?.(
-        `work verdict below confidence threshold (${parsed.data.confidence}) — routing to support`,
-      );
-      return { ...parsed.data, intent: 'support' };
     }
     return parsed.data;
   }

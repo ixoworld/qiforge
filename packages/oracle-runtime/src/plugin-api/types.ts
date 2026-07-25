@@ -104,6 +104,14 @@ export interface CommerceEngagement {
   priceUsd: number;
   collectionId: string;
   adminAddress: string;
+  /**
+   * DID of the user this job belongs to. The chain accepts one active claim
+   * intent per (agent, user claim collection), so "is there live work?" is a
+   * question about a USER, not a room — this is what lets the same engagement
+   * be found again from another room or another thread. Optional because
+   * engagements written before it existed are still readable.
+   */
+  userDid?: string;
   /** ISO timestamp of engagement start. */
   startedAt: string;
   /**
@@ -204,8 +212,18 @@ export interface CommerceGateFailure {
  */
 export interface CommerceContext {
   mode: CommerceMode;
-  /** The thread's active engagement — present in work mode. */
+  /** The user's active engagement — present in work mode. */
   engagement?: CommerceEngagement;
+  /**
+   * Room the active engagement's durable record lives in. Usually the room the
+   * turn arrived in, but NOT when the user continued live work from somewhere
+   * else — the engagement record stays where it started, so everything that
+   * settles it (`deliver_work`, `cancel_work`) must address it here rather
+   * than at `ctx.session.roomId`.
+   */
+  engagementRoomId?: string;
+  /** Thread root the active engagement's record is keyed by. Same rule. */
+  engagementThreadId?: string;
   /** Present when the user asked for work but the contract gate failed. */
   gate?: CommerceGateFailure;
 }

@@ -1,3 +1,4 @@
+import { Logger as NestLogger } from '@nestjs/common';
 import type {
   CommerceGateResult,
   CommerceRoutedService,
@@ -6,13 +7,16 @@ import type { Logger } from '../../plugin-api/types.js';
 import type { ContractRecordService } from './contract-record.service.js';
 import type { EngagementService } from './engagement.service.js';
 import type { ContractRecord } from './types.js';
-import { priceToCoin } from './util.js';
+import { isEngagementExpired, priceToCoin } from './util.js';
 
 /** How long a gate consults the same contract record before re-asking. */
 const GATE_CACHE_TTL_MS = 60_000;
 
-/** The engagement lookup the gate needs: the room's one live job, if any. */
-export type ActiveEngagementLookup = Pick<EngagementService, 'findActive'>;
+/** The engagement lookup the gate needs: the user's one live job, if any. */
+export type ActiveEngagementLookup = Pick<
+  EngagementService,
+  'findActiveForUser'
+>;
 
 export interface ContractGateServiceDeps {
   contractRecord: ContractRecordService;
@@ -47,7 +51,7 @@ export class ContractGateService {
   private readonly engineUrl?: string;
   private readonly network: string;
   private readonly clock: () => number;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
   private readonly cache = new Map<string, GateCacheEntry>();
 
   constructor(deps: ContractGateServiceDeps) {
@@ -56,7 +60,12 @@ export class ContractGateService {
     this.engineUrl = deps.engineUrl;
     this.network = deps.network;
     this.clock = deps.clock ?? Date.now;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(ContractGateService.name);
+  }
+
+  /** The gate's clock as a `Date` — the shape the shared expiry predicate reads. */
+  private now(): Date {
+    return new Date(this.clock());
   }
 
   /** Drop a sender's cached gate record (all rooms) so the next check re-queries. */
@@ -78,12 +87,23 @@ export class ContractGateService {
     // The chain accepts one active claim intent per (agent, user claim
     // collection), so a second concurrent job could never reserve its payment.
     // Refuse before the chain write rather than let `sendClaimIntent` fail and
-    // surface as a payment problem. A cancelled job releases its reservation by
-    // claiming against it and stops being active, so the only cancelled jobs
-    // still seen here are ones whose release never reached the chain — the
-    // reservation really is still held, and the overlay says so.
-    const inProgress = await this.engagement.findActive(roomId, threadId);
-    if (inProgress) {
+    // surface as a payment problem. Scoped to the user, not the room: the
+    // reservation the check protects is the user's, wherever they opened it.
+    // A cancelled job releases its reservation by claiming against it and
+    // stops being active, so the only cancelled jobs still seen here are ones
+    // whose release never reached the chain — the reservation really is still
+    // held, and the overlay says so.
+    const inProgress = await this.engagement.findActiveForUser({
+      userDid: senderDid,
+      roomId,
+      exclude: { roomId, threadId },
+    });
+    // An expired reservation blocks nothing: the escrow auto-released, so the
+    // chain would accept a new intent right now. The lookup closes such a job
+    // on sight, but the deadline is re-read here rather than assumed — a job
+    // that can no longer be delivered must never be the reason a user is told
+    // to wait, which is exactly the dead end this check exists to prevent.
+    if (inProgress && !isEngagementExpired(inProgress.engagement, this.now())) {
       return {
         ok: false,
         reason: 'engagement_in_progress',
@@ -129,6 +149,7 @@ export class ContractGateService {
         priceUsd: service.priceUsd,
         collectionId: record.collectionId,
         adminAddress: record.adminAddress,
+        userDid: senderDid,
         intentDurationNs: record.authz.intentDurationNs,
       },
     };
@@ -152,7 +173,7 @@ export class ContractGateService {
       });
     } catch (error) {
       // The record service is non-throwing by contract; belt-and-braces.
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] contract gate lookup failed for ${senderDid}: ${
           error instanceof Error ? error.message : String(error)
         }`,

@@ -120,6 +120,9 @@ describe('ContractGateService', () => {
         priceUsd: 20,
         collectionId: '42',
         adminAddress: 'ixo1admincollectionadmin',
+        // Stamped on the engagement so the replica that keeps the user in
+        // work mode can be keyed by them.
+        userDid: USER_DID,
         // Carried through so the start lane stamps the escrow deadline
         // without a second lookup.
         intentDurationNs: '604800000000000',
@@ -199,6 +202,51 @@ describe('ContractGateService', () => {
         threadId: OTHER_THREAD_ID,
         releaseFailed: true,
       },
+    });
+  });
+
+  it('does not block on another thread’s job once its reservation lapsed', async () => {
+    // The escrow auto-released, so the chain would take a new intent right
+    // now — refusing here would leave the user wedged behind a dead job.
+    const now = () => Date.parse('2026-07-22T12:00:00.000Z');
+    const { gate, engagement } = makeGate(makeContractRecord(), { now });
+    await engagement.start(
+      ROOM_ID,
+      OTHER_THREAD_ID,
+      makeEngagement({
+        intent: {
+          txHash: 'INTENT-TX-1',
+          submittedAt: '2026-07-22T10:00:00.000Z',
+          expiresAt: '2026-07-22T11:00:00.000Z',
+        },
+      }),
+    );
+
+    expect(await check(gate)).toMatchObject({ ok: true });
+    // And the dead job is gone, not just ignored.
+    expect(await engagement.get(ROOM_ID, OTHER_THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('still blocks on another thread’s job while its reservation holds', async () => {
+    const now = () => Date.parse('2026-07-22T12:00:00.000Z');
+    const { gate, engagement } = makeGate(makeContractRecord(), { now });
+    await engagement.start(
+      ROOM_ID,
+      OTHER_THREAD_ID,
+      makeEngagement({
+        intent: {
+          txHash: 'INTENT-TX-1',
+          submittedAt: '2026-07-22T10:00:00.000Z',
+          expiresAt: '2026-07-22T23:00:00.000Z',
+        },
+      }),
+    );
+
+    expect(await check(gate)).toMatchObject({
+      ok: false,
+      reason: 'engagement_in_progress',
     });
   });
 

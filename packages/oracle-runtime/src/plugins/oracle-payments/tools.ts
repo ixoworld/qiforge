@@ -1,10 +1,19 @@
 import { z } from 'zod';
+import { buildGateFailureInstruction } from '../../graph/commerce-overlay.js';
 import { postOracleComponent } from '../../matrix/oracle-component-event.js';
 import { tool } from '../../plugin-api/tool-helper.js';
-import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
+import type {
+  CommerceGateFailureReason,
+  CommerceInProgressEngagement,
+  PluginTool,
+  RuntimeContext,
+} from '../../plugin-api/types.js';
+import type { CommerceRoutedService } from '../../modules/messages/commerce-router-port.js';
 import type { AgentCardService } from './agent-card.service.js';
+import type { ContractGateService } from './contract-gate.service.js';
 import type { ContractRecordService } from './contract-record.service.js';
 import type { ThreadAttachmentService } from './thread-attachments.service.js';
+import type { WorkIntentService } from './work-intent.service.js';
 import {
   cancelWorkSchema,
   deliverWorkSchema,
@@ -16,6 +25,7 @@ import {
   summarizeServices,
   toContractServiceProp,
   toListServiceProp,
+  toRoutedService,
 } from './util.js';
 
 export interface OraclePaymentsToolDeps {
@@ -24,9 +34,23 @@ export interface OraclePaymentsToolDeps {
   threadAttachments: ThreadAttachmentService;
 }
 
+/** What `start_work` needs to gate and open an engagement itself. */
+export interface StartWorkToolDeps {
+  agentCard: AgentCardService;
+  contractGate: ContractGateService;
+  workIntent: WorkIntentService;
+}
+
 const noArgsSchema = z.object({});
 const showContractSchema = z.object({
   serviceId: z.string().describe('The id of the service to contract.'),
+});
+const startWorkSchema = z.object({
+  serviceId: z
+    .string()
+    .describe(
+      'Id of the published service to start, exactly as `list_services` reports it.',
+    ),
 });
 
 /**
@@ -151,6 +175,9 @@ function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
         subscriberDid: ctx.user.did,
       });
       if (!record) {
+        ctx.logger.debug?.(
+          `[oracle-payments] no contract record for ${ctx.user.did} (engine ${engineUrl ?? 'unset'}) — reporting uncontracted`,
+        );
         return { contracted: false };
       }
       return {
@@ -234,7 +261,129 @@ function createGetThreadAttachmentTool(deps: {
   );
 }
 
-/** The support-mode commerce tools, built request-time. */
+const START_WORK_DESCRIPTION =
+  "Start a paid job for one of this oracle's services — the only way work " +
+  'begins. Call it once the user has decided they want a specific service ' +
+  'performed. It verifies their contract and reserves the payment on-chain ' +
+  'before anything starts, and refuses with a reason when it cannot. Your work ' +
+  "tools bind on the user's NEXT message, so never do any of the work in the " +
+  'same reply — confirm the job is open and ask for what you need to begin.';
+
+/** A refusal the model can relay verbatim, worded exactly like the router's. */
+function refuseStart(
+  reason: CommerceGateFailureReason,
+  service: CommerceRoutedService,
+  inProgress?: CommerceInProgressEngagement,
+): Record<string, unknown> {
+  return {
+    started: false,
+    reason,
+    serviceId: service.id,
+    serviceName: service.name,
+    message: buildGateFailureInstruction({
+      reason,
+      serviceId: service.id,
+      serviceName: service.name,
+      ...(inProgress !== undefined && { inProgress }),
+    }),
+  };
+}
+
+/**
+ * The explicit, gated route from support mode into work mode.
+ *
+ * Support mode answers questions and never works, so entering work has to be a
+ * deliberate act rather than something inferred from phrasing. This tool runs
+ * the SAME contract gate and the SAME escrow-first engagement start the router
+ * runs (`ContractGateService.check` → `WorkIntentService.startEngagement`), so
+ * there is exactly one way a job opens and one set of refusal reasons.
+ *
+ * Sequencing: the engagement is live the moment this returns, but the turn it
+ * runs in was built with the support tool surface — the work tools are not
+ * bound and cannot be bound mid-run. The next message routes to work mode
+ * (the router finds the active engagement before it classifies anything), so
+ * the result says so and the overlay tells the model not to pretend otherwise.
+ */
+function createStartWorkTool(deps: StartWorkToolDeps): PluginTool {
+  return tool(
+    async (rawArgs, ctx: RuntimeContext) => {
+      const { serviceId } = startWorkSchema.parse(rawArgs);
+      const entityDid = readConfigString(ctx.config, 'ORACLE_ENTITY_DID');
+      const card = entityDid ? await deps.agentCard.getCard(entityDid) : null;
+      const service = card?.services.find((s) => s.id === serviceId);
+      if (!service) {
+        const validIds = card?.services.map((s) => s.id) ?? [];
+        throw new Error(
+          `Unknown serviceId "${serviceId}". Valid service ids: ${
+            validIds.join(', ') || '(none)'
+          }.`,
+        );
+      }
+
+      const roomId = ctx.session.roomId;
+      const threadId = threadIdFor(ctx);
+      if (!roomId || !threadId) {
+        return 'Paid work can only be started from a chat thread in this room.';
+      }
+
+      const routed = toRoutedService(service);
+      const gate = await deps.contractGate.check({
+        roomId,
+        threadId,
+        senderDid: ctx.user.did,
+        service: routed,
+      });
+      if (!gate.ok) {
+        ctx.logger.log(
+          `[oracle-payments] start_work refused ${routed.id} in thread ${threadId}: ${gate.reason}`,
+        );
+        return refuseStart(gate.reason, routed, gate.inProgress);
+      }
+
+      const started = await deps.workIntent.startEngagement(
+        roomId,
+        threadId,
+        gate.start,
+      );
+      if (!started.ok) {
+        ctx.logger.log(
+          `[oracle-payments] start_work could not open ${routed.id} in thread ${threadId}: ${started.reason}`,
+        );
+        return refuseStart(started.reason, routed);
+      }
+
+      ctx.logger.log(
+        `[oracle-payments] start_work opened an engagement for ${routed.id} in thread ${threadId}`,
+      );
+      return {
+        started: true,
+        serviceId: routed.id,
+        serviceName: routed.name,
+        priceUsd: routed.priceUsd,
+        note:
+          'The job is open and its payment is reserved. Your work tools are ' +
+          "not bound in this reply — they bind on the user's next message, " +
+          'which routes to work mode automatically. Tell the user the job has ' +
+          'started, say what you need from them, and ask them to send it in ' +
+          'this thread. Do not start, sample, or describe having done any of ' +
+          'the work now.',
+      };
+    },
+    {
+      name: 'start_work',
+      description: START_WORK_DESCRIPTION,
+      schema: startWorkSchema,
+    },
+  );
+}
+
+/**
+ * The commerce tools available in BOTH modes: the catalog, the contract card,
+ * contract status, and this thread's attachments. They answer "what am I
+ * paying for?" / "how much quota is left?", which a user in the middle of a
+ * job asks as readily as one at the front desk — so work mode binds them too
+ * rather than making the user abandon the job to find out.
+ */
 export function createOraclePaymentsTools(
   deps: OraclePaymentsToolDeps,
 ): PluginTool[] {
@@ -246,14 +395,23 @@ export function createOraclePaymentsTools(
   ];
 }
 
-/** The work-mode commerce tools, built request-time. */
-export function createOraclePaymentsWorkTools(deps: {
-  workClaim: WorkClaimService;
-  threadAttachments: ThreadAttachmentService;
-}): PluginTool[] {
+/** The support surface: the shared tools plus the gated route into work. */
+export function createOraclePaymentsSupportTools(
+  deps: OraclePaymentsToolDeps & { startWork: StartWorkToolDeps },
+): PluginTool[] {
+  return [
+    ...createOraclePaymentsTools(deps),
+    createStartWorkTool(deps.startWork),
+  ];
+}
+
+/** The work surface: the shared tools plus delivery and cancellation. */
+export function createOraclePaymentsWorkTools(
+  deps: OraclePaymentsToolDeps & { workClaim: WorkClaimService },
+): PluginTool[] {
   return [
     createDeliverWorkTool(deps),
     createCancelWorkTool(deps),
-    createGetThreadAttachmentTool(deps),
+    ...createOraclePaymentsTools(deps),
   ];
 }

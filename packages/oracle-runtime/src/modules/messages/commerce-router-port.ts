@@ -17,6 +17,15 @@ export interface CommerceRoutedService {
   priceUsd: number;
 }
 
+/** A user's live engagement, together with where its durable record lives. */
+export interface CommerceActiveEngagement {
+  /** Room holding the engagement — not always the room the turn arrived in. */
+  roomId: string;
+  /** Thread root the engagement is keyed by. */
+  threadId: string;
+  engagement: CommerceEngagement;
+}
+
 /** The data an engagement starts from once the contract gate passes. */
 export interface CommerceEngagementStart {
   serviceId: string;
@@ -24,6 +33,8 @@ export interface CommerceEngagementStart {
   priceUsd: number;
   collectionId: string;
   adminAddress: string;
+  /** The user the job belongs to — engagements are one-active-per-user. */
+  userDid?: string;
   /**
    * How long the contract's authorization keeps an escrowed intent alive, in
    * nanoseconds, as the AuthZ snapshot reports it. Carried on the gate result
@@ -69,11 +80,20 @@ export interface CommerceRouterPort {
   /** The oracle's published services, or `null` when no agent card resolves. */
   getServices(): Promise<CommerceRoutedService[] | null>;
 
-  /** The thread's active engagement, or `null`. */
-  getActiveEngagement(
-    roomId: string,
-    threadId: string,
-  ): Promise<CommerceEngagement | null>;
+  /**
+   * The sender's live engagement, or `null`. Answered from the plugin's
+   * per-user replica when it has one (no Matrix read), otherwise from the
+   * durable record for this thread and then the room's active-engagement
+   * index. Scoped to the USER rather than to `roomId`/`threadId` because the
+   * chain allows exactly one active claim intent per (agent, user) — so live
+   * work must keep routing as work from whichever thread or room the user's
+   * next message lands in.
+   */
+  findActiveEngagement(params: {
+    senderDid: string;
+    roomId: string;
+    threadId: string;
+  }): Promise<CommerceActiveEngagement | null>;
 
   /**
    * Contract + AuthZ gate for a work-classified turn, plus the one-job-at-a-time

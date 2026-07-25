@@ -1,7 +1,7 @@
+import { Logger as NestLogger } from '@nestjs/common';
 import type { Logger } from '../../plugin-api/types.js';
 import { ContractRecordSchema, type ContractRecord } from './types.js';
 import { errorMessage } from './util.js';
-
 /** Per-subscriber cache lifetime — matches the engine's own ~5 min cache. */
 const RECORD_CACHE_TTL_MS = 300_000;
 
@@ -45,7 +45,7 @@ export class ContractRecordService {
   private readonly fetchImpl: typeof fetch;
   private tokenProvider?: EngineTokenProvider;
   private readonly clock: () => number;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
   private readonly cache = new Map<string, CacheEntry>();
   private disabledLogged = false;
 
@@ -53,7 +53,7 @@ export class ContractRecordService {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.tokenProvider = deps.tokenProvider;
     this.clock = deps.clock ?? Date.now;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(ContractRecordService.name);
   }
 
   /** Wire the oracle-signed token minter (done once at module init). */
@@ -76,11 +76,14 @@ export class ContractRecordService {
     subscriberDid: string;
   }): Promise<ContractRecord | null> {
     const { engineUrl, subscriberDid } = params;
+    this.logger.debug?.(
+      `[oracle-payments] contract lookup for ${subscriberDid} (engine ${engineUrl ?? 'unset'})`,
+    );
 
     if (!engineUrl) {
       if (!this.disabledLogged) {
         this.disabledLogged = true;
-        this.logger?.warn?.(
+        this.logger.warn(
           '[oracle-payments] EVAL_ENGINE_URL is unset — contract lookups are disabled.',
         );
       }
@@ -93,7 +96,7 @@ export class ContractRecordService {
     }
 
     if (!this.tokenProvider) {
-      this.logger?.warn?.(
+      this.logger.warn(
         '[oracle-payments] no engine token provider wired — cannot look up contracts.',
       );
       return null;
@@ -103,13 +106,13 @@ export class ContractRecordService {
     try {
       token = await this.tokenProvider(engineUrl, EVAL_ENGINE_RESOURCE);
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] failed to mint engine token: ${errorMessage(error)}`,
       );
       return null;
     }
     if (!token) {
-      this.logger?.warn?.(
+      this.logger.warn(
         '[oracle-payments] engine token unavailable (no signing key yet) — skipping lookup.',
       );
       return null;
@@ -127,7 +130,7 @@ export class ContractRecordService {
         },
       });
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] contract lookup network error: ${errorMessage(error)}`,
       );
       return null;
@@ -138,7 +141,7 @@ export class ContractRecordService {
       return null;
     }
     if (!res.ok) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] contract lookup returned ${res.status} for ${subscriberDid}.`,
       );
       return null;
@@ -148,15 +151,19 @@ export class ContractRecordService {
     try {
       body = await res.json();
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] contract lookup returned invalid JSON: ${errorMessage(error)}`,
       );
       return null;
     }
 
     const parsed = ContractRecordSchema.safeParse(body);
+    this.logger.debug?.(
+      `[oracle-payments] contract record parsed for ${subscriberDid}:`,
+      parsed,
+    );
     if (!parsed.success) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] contract record failed validation for ${subscriberDid}.`,
       );
       return null;

@@ -42,6 +42,13 @@ export interface ComposePromptInput {
    * Empty string on HTTP turns and whenever the commerce router is inert.
    */
   commerceOverlay: string;
+  /**
+   * Whether the discovery meta-tools (`search_skills`, `list_capabilities`,
+   * `load_capability`) are bound this turn. Default `true`. Pass `false` when
+   * the turn runs on a closed tool surface (Matrix support mode) so the
+   * Operating principles do not mandate a discovery flow the model cannot run.
+   */
+  capabilityDiscovery?: boolean;
   /** Editor block — empty string when no editor session is active. */
   editorSection: string;
   /** Composio guidance block — empty when composio isn't loaded. */
@@ -333,6 +340,17 @@ export function buildOracleSection(input: {
   return `You are ${oracleName}, an AI agent built on QiForge.`;
 }
 
+/**
+ * The discovery mandate. Rendered on every turn whose surface can actually
+ * grow — i.e. wherever the meta-tools are bound. A turn on a closed surface
+ * (Matrix support mode) renders nothing here rather than ordering the model to
+ * call tools it does not have.
+ */
+const DISCOVERY_PRINCIPLE = `- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. That means:
+  1. Call \`search_skills\` against the user's request whenever a packaged skill could plausibly do the job (anything that involves generating a file, document, report, page, integration, calculation, lookup, or multi-step workflow).
+  2. Call \`list_capabilities\` to scan loaded + on-demand plugins when the task could be served by a plugin you haven't loaded yet. Then call \`load_capability({ names: [...] })\` with ALL the capabilities you need in a single call — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
+  Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.`;
+
 const TEMPLATE = `{{{ORACLE_SECTION}}}
 
 {{#CAPABILITIES_NOTE}}
@@ -346,10 +364,9 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 ## Operating principles
 
 - The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
-- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. That means:
-  1. Call \`search_skills\` against the user's request whenever a packaged skill could plausibly do the job (anything that involves generating a file, document, report, page, integration, calculation, lookup, or multi-step workflow).
-  2. Call \`list_capabilities\` to scan loaded + on-demand plugins when the task could be served by a plugin you haven't loaded yet. Then call \`load_capability({ names: [...] })\` with ALL the capabilities you need in a single call — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
-  Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.
+{{#DISCOVERY_PRINCIPLE}}
+{{{DISCOVERY_PRINCIPLE}}}
+{{/DISCOVERY_PRINCIPLE}}
 - Being proactive does **not** mean charging ahead blind. Pause and ask the user a short clarifying question when: (a) the request has multiple plausible interpretations and picking wrong would waste their time, (b) a capability scan surfaces several equally-good fits and you can't tell which they want, (c) you're about to take an irreversible or costly action (deleting data, sending a message, publishing, spending tokens on a long job), or (d) a required input is missing and you'd have to guess. One clarifying question beats five minutes of wrong work — but don't ask for things you can reasonably infer from context.
 - When a tool or sub-agent succeeds, report the result. Never refuse after a successful tool call — including for credentials, tokens, identity data, or block/document operations.
 - When a tool or sub-agent fails, surface the failure to the user and ask how to proceed. Don't silently retry.
@@ -427,6 +444,7 @@ interface TemplateVariables {
   ORACLE_SECTION: string;
   CAPABILITIES_NOTE: string;
   CAPABILITY_BLOCK: string;
+  DISCOVERY_PRINCIPLE: string;
   CUSTOM_INSTRUCTIONS: string;
   COMMUNICATION_STYLE: string;
   CONTEXT_BLOCK: string;
@@ -447,6 +465,7 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'ORACLE_SECTION',
     'CAPABILITIES_NOTE',
     'CAPABILITY_BLOCK',
+    'DISCOVERY_PRINCIPLE',
     'CUSTOM_INSTRUCTIONS',
     'COMMUNICATION_STYLE',
     'CONTEXT_BLOCK',
@@ -491,6 +510,8 @@ export async function composePrompt(
     ORACLE_SECTION: oracleSection,
     CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
+    DISCOVERY_PRINCIPLE:
+      input.capabilityDiscovery === false ? '' : DISCOVERY_PRINCIPLE,
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),

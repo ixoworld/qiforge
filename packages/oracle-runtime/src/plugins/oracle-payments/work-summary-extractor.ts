@@ -40,13 +40,16 @@ export interface ExtractorModel {
   withStructuredOutput(schema: z.ZodType): ExtractorStructuredModel;
 }
 
-/** Model factory — `params.model` carries the plugin's extractor override. */
-export type ExtractorModelFactory = (params?: {
-  model?: string;
-}) => ExtractorModel;
+/** Model factory for the extraction call. Tests inject a stub. */
+export type ExtractorModelFactory = () => ExtractorModel;
 
-const defaultModelFactory: ExtractorModelFactory = (params) => {
-  const model = getProviderChatModel('custom_medium', params);
+/**
+ * The extractor always runs on the provider's `custom_medium` role — it reads
+ * a whole work thread and writes the two fields a claim is judged on, so the
+ * model is a property of the job, not of the deployment.
+ */
+const defaultModelFactory: ExtractorModelFactory = () => {
+  const model = getProviderChatModel('custom_medium');
   return {
     withStructuredOutput: (schema) => model.withStructuredOutput(schema),
   };
@@ -62,8 +65,6 @@ export interface WorkSummaryExtractInput {
   messages: readonly BaseMessage[];
   serviceId: string;
   serviceName: string;
-  /** Model override (`ORACLE_PAYMENTS_EXTRACTOR_MODEL`). */
-  model?: string;
 }
 
 /**
@@ -78,11 +79,11 @@ export interface WorkSummaryExtractInput {
  */
 export class WorkSummaryExtractor {
   private readonly getModel: ExtractorModelFactory;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
 
   constructor(deps: WorkSummaryExtractorDeps = {}) {
     this.getModel = deps.getModel ?? defaultModelFactory;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(WorkSummaryExtractor.name);
   }
 
   async extract(
@@ -97,9 +98,7 @@ export class WorkSummaryExtractor {
 
     let raw: unknown;
     try {
-      const model = this.getModel(
-        input.model ? { model: input.model } : undefined,
-      ).withStructuredOutput(extractionSchema);
+      const model = this.getModel().withStructuredOutput(extractionSchema);
       raw = await withTimeout(
         model.invoke([
           new SystemMessage(buildExtractorPrompt(input)),
@@ -108,7 +107,7 @@ export class WorkSummaryExtractor {
         EXTRACTOR_TIMEOUT_MS,
       );
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] work summary extraction failed: ${errorMessage(error)}`,
       );
       throw new Error(

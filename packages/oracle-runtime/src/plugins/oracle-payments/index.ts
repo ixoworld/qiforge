@@ -44,9 +44,11 @@ export {
   type OraclePaymentsModuleServices,
 } from './oracle-payments.module.js';
 export {
+  createOraclePaymentsSupportTools,
   createOraclePaymentsTools,
   createOraclePaymentsWorkTools,
   type OraclePaymentsToolDeps,
+  type StartWorkToolDeps,
 } from './tools.js';
 export {
   WorkClaimService,

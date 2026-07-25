@@ -1,11 +1,18 @@
-import { MatrixError, MatrixManager } from '@ixo/matrix';
+import { MatrixManager } from '@ixo/matrix';
+import { Logger as NestLogger } from '@nestjs/common';
 import { z } from 'zod';
 import type {
   CommerceEngagement,
   CommerceEngagementStatus,
   Logger,
 } from '../../plugin-api/types.js';
-import { errorMessage } from './util.js';
+import {
+  activeEngagementCacheKey,
+  engagementCacheTtlSeconds,
+  InMemoryActiveEngagementCache,
+  type ActiveEngagementCacheStore,
+} from './active-engagement-cache.js';
+import { errorMessage, isEngagementExpired, isMatrixNotFound } from './util.js';
 
 /**
  * Room-state key prefix — one state event per engagement, keyed by the thread
@@ -48,8 +55,11 @@ const PendingClaimsSchema = z.object({
   ),
 });
 
-/** An active engagement together with the thread it lives in. */
+/** An active engagement together with the room and thread it lives in. */
 export interface ActiveEngagementRef {
+  /** Room holding the engagement's durable record — not necessarily the room
+   * the current turn arrived in. */
+  roomId: string;
   threadId: string;
   engagement: CommerceEngagement;
 }
@@ -61,6 +71,7 @@ const EngagementSchema: z.ZodType<CommerceEngagement> = z.object({
   priceUsd: z.number(),
   collectionId: z.string(),
   adminAddress: z.string(),
+  userDid: z.string().optional(),
   startedAt: z.string(),
   cancelledAt: z.string().optional(),
   cancelReason: z.string().optional(),
@@ -94,9 +105,18 @@ export interface EngagementStartData {
   priceUsd: number;
   collectionId: string;
   adminAddress: string;
+  /** The user the job belongs to — the key the active-engagement replica uses. */
+  userDid?: string;
   /** The escrow reserved for this job, when the engagement is intent-backed. */
   intent?: CommerceEngagement['intent'];
 }
+
+/** The replica payload: the engagement plus where its durable record lives. */
+const CachedActiveEngagementSchema = z.object({
+  roomId: z.string().min(1),
+  threadId: z.string().min(1),
+  engagement: EngagementSchema,
+});
 
 /**
  * Narrow view over `MatrixStateManager` — injectable for tests. `getState`
@@ -115,6 +135,11 @@ export interface EngagementStateStore {
 export interface EngagementServiceDeps {
   /** Defaults to `MatrixManager.getInstance().stateManager`, resolved lazily. */
   stateStore?: () => EngagementStateStore;
+  /**
+   * Where the per-user active-engagement replica lives. Defaults to an
+   * in-process map; the Nest module swaps in Redis when the oracle has one.
+   */
+  cacheStore?: ActiveEngagementCacheStore;
   clock?: () => Date;
   logger?: Logger;
   /**
@@ -132,12 +157,19 @@ export interface EngagementServiceDeps {
  * zero new infra. An in-process cache in front avoids a state read per
  * message; every write refreshes the cache.
  *
- * Engagements stay thread-keyed, but only ONE may be active in a room at a
+ * Engagements stay thread-keyed, but only ONE may be active per USER at a
  * time: the chain accepts a single active claim intent per (agent, user claim
- * collection), and a room is one user's channel with one oracle. The active
- * thread is indexed under {@link ACTIVE_ENGAGEMENT_INDEX_STATE_KEY} so
- * {@link EngagementService.findActive} answers that question without walking
- * the room's state.
+ * collection). The active thread is indexed under
+ * {@link ACTIVE_ENGAGEMENT_INDEX_STATE_KEY} so {@link EngagementService.findActive}
+ * answers that question for a room without walking its state, and every active
+ * engagement is additionally replicated — keyed by the user's DID — into the
+ * fast store behind {@link ActiveEngagementCacheStore} (Redis when the oracle
+ * has one, an in-process map otherwise). The replica is what answers "work or
+ * support?" per turn without a Matrix round-trip, and it is what lets a user
+ * continue live work from a different thread or a different room. Matrix room
+ * state remains the durable, authoritative record: every write goes there
+ * first, and a replica that is missing, stale, or unreadable only costs a
+ * lookup.
  *
  * Reads never break a turn: a missing state event, an invalid payload, and
  * transport errors all read as "no engagement". Writes throw — the router
@@ -145,8 +177,9 @@ export interface EngagementServiceDeps {
  */
 export class EngagementService {
   private readonly stateStore: () => EngagementStateStore;
+  private cacheStore: ActiveEngagementCacheStore;
   private readonly clock: () => Date;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
   private readonly cache = new Map<string, CommerceEngagement | null>();
   /** roomId → thread id of the room's active engagement, or `null` for none. */
   private readonly activeIndexCache = new Map<string, string | null>();
@@ -157,8 +190,9 @@ export class EngagementService {
   constructor(deps: EngagementServiceDeps = {}) {
     this.stateStore =
       deps.stateStore ?? (() => MatrixManager.getInstance().stateManager);
+    this.cacheStore = deps.cacheStore ?? new InMemoryActiveEngagementCache();
     this.clock = deps.clock ?? (() => new Date());
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(EngagementService.name);
     this.claimIndexRoomId = deps.claimIndexRoomId;
   }
 
@@ -168,6 +202,15 @@ export class EngagementService {
    */
   setClaimIndexRoom(roomId: string): void {
     this.claimIndexRoomId = roomId;
+  }
+
+  /**
+   * Swap the active-engagement replica for a shared one (Redis). Called at
+   * boot, where `REDIS_URL` is known; the in-process map stands in until then
+   * and whenever the oracle runs without Redis.
+   */
+  setCacheStore(store: ActiveEngagementCacheStore): void {
+    this.cacheStore = store;
   }
 
   /** The thread's engagement in any status, or `null`. */
@@ -186,13 +229,18 @@ export class EngagementService {
         engagementStateKey(threadId),
       );
     } catch (error) {
-      if (error instanceof MatrixError && error.errcode === 'M_NOT_FOUND') {
+      if (isMatrixNotFound(error)) {
+        // The overwhelmingly common case — most threads never hold an
+        // engagement — so it is not a warning.
+        this.logger.debug?.(
+          `[oracle-payments] no engagement state for thread ${threadId} — the thread routes as support`,
+        );
         this.cache.set(cacheKey, null);
         return null;
       }
       // Transient read failure: report "none" but do NOT cache — a live
       // engagement must not be masked past the outage.
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] engagement read failed for ${threadId}: ${errorMessage(error)}`,
       );
       return null;
@@ -201,7 +249,16 @@ export class EngagementService {
     const parsed = EngagementSchema.safeParse(raw);
     if (!parsed.success) {
       // Empty/overwritten state (the Matrix "delete") or a corrupt payload —
-      // both mean no engagement.
+      // both mean no engagement. Named because "no engagement" is what flips a
+      // thread back to the support persona, and a corrupt payload doing that
+      // looks identical to a correct routing decision from the chat side.
+      this.logger.debug?.(
+        `[oracle-payments] no readable engagement state for thread ${threadId} (${
+          raw && Object.keys(raw).length > 0
+            ? 'payload did not match the engagement shape'
+            : 'state is empty'
+        }) — the thread routes as support`,
+      );
       this.cache.set(cacheKey, null);
       return null;
     }
@@ -210,7 +267,16 @@ export class EngagementService {
     return parsed.data;
   }
 
-  /** The thread's engagement only while `active`, or `null`. */
+  /**
+   * The thread's engagement only while `active`, or `null`.
+   *
+   * Deliberately NOT filtered by the escrow deadline: the claim lanes ask this
+   * question about their own job, and an expired reservation is something they
+   * recover from (re-reserve and settle) or close honestly — they cannot do
+   * either if the lookup hides it. The lookups that answer "is this user
+   * blocked?" ({@link findActive}, {@link findActiveForUser}) do apply the
+   * deadline, because there a dead reservation must never block anything.
+   */
   async getActive(
     roomId: string,
     threadId: string,
@@ -227,7 +293,8 @@ export class EngagementService {
    * Answered from the in-process cache whenever a live engagement has already
    * been seen in this room; otherwise from the room's active-thread index (one
    * cached state read). A pointer left behind by a crashed write resolves to a
-   * non-active engagement and reads as "none".
+   * non-active engagement and reads as "none", and an engagement whose escrow
+   * deadline has passed is closed on the spot rather than returned.
    */
   async findActive(
     roomId: string,
@@ -237,7 +304,12 @@ export class EngagementService {
       if (!cached || cached.status !== 'active') continue;
       const threadId = this.threadIdFromCacheKey(key, roomId);
       if (threadId === undefined || threadId === excludeThreadId) continue;
-      return { threadId, engagement: cached };
+      const live = await this.liveOrHeal({
+        roomId,
+        threadId,
+        engagement: cached,
+      });
+      if (live) return live;
     }
 
     const indexed = await this.readActiveIndex(roomId);
@@ -245,7 +317,71 @@ export class EngagementService {
 
     const engagement = await this.get(roomId, indexed);
     if (engagement?.status !== 'active') return null;
-    return { threadId: indexed, engagement };
+    return this.liveOrHeal({ roomId, threadId: indexed, engagement });
+  }
+
+  /**
+   * The USER's live engagement, wherever it lives — the question the router
+   * and the contract gate actually ask. One active job per user is what the
+   * chain enforces (one active claim intent per agent + user claim
+   * collection), so there is at most one answer, and it is not scoped to the
+   * room or thread the current message happens to have arrived in.
+   *
+   * Answer order:
+   *   1. the per-user replica (Redis or in-process) — no Matrix call at all,
+   *      and the only lane that can see an engagement in ANOTHER room;
+   *   2. the durable record for `threadId`, when the caller named one;
+   *   3. the room's durable active-thread index.
+   *
+   * Steps 2 and 3 refresh the replica, so a cold cache costs one turn's
+   * lookup and heals itself. A replica entry that no longer reads as `active`
+   * is dropped rather than trusted, and an engagement whose escrow deadline has
+   * passed is closed and reported as none — it holds nothing, so it must not
+   * route a turn into work mode or block a new job.
+   */
+  async findActiveForUser(params: {
+    userDid?: string;
+    roomId: string;
+    /** The turn's own thread, checked directly before the room index. */
+    threadId?: string;
+    /** A (room, thread) whose own engagement must not count as a conflict. */
+    exclude?: { roomId: string; threadId: string };
+  }): Promise<ActiveEngagementRef | null> {
+    const { userDid, roomId, threadId, exclude } = params;
+
+    if (userDid !== undefined) {
+      const replica = await this.readCachedActive(userDid);
+      // One active engagement per user: if the replica names the excluded
+      // thread, there is nothing else to find.
+      if (replica) {
+        return isExcluded(replica, exclude) ? null : this.liveOrHeal(replica);
+      }
+    }
+
+    if (threadId !== undefined && !isExcluded({ roomId, threadId }, exclude)) {
+      const engagement = await this.getActive(roomId, threadId);
+      if (engagement) {
+        const ref = { roomId, threadId, engagement };
+        const live = await this.liveOrHeal(ref);
+        if (live) {
+          await this.cacheActive(live);
+          return live;
+        }
+      }
+    }
+
+    const excludeInRoom =
+      exclude?.roomId === roomId ? exclude.threadId : undefined;
+    const inRoom = await this.findActive(roomId, excludeInRoom);
+    if (!inRoom) return null;
+    // A room is one user's channel with one oracle, but never route one user's
+    // turn into another user's paid job on the strength of that.
+    const owner = inRoom.engagement.userDid;
+    if (owner !== undefined && userDid !== undefined && owner !== userDid) {
+      return null;
+    }
+    await this.cacheActive(inRoom);
+    return inRoom;
   }
 
   /** Persist a new `active` engagement for the thread. Throws on write failure. */
@@ -282,6 +418,26 @@ export class EngagementService {
     const current = await this.get(roomId, threadId);
     if (!current) return null;
     const updated: CommerceEngagement = { ...current, status };
+    await this.write(roomId, threadId, updated);
+    return updated;
+  }
+
+  /**
+   * Replace the escrow reservation recorded on the thread's engagement. Called
+   * by the delivery lane when a job outlived its window and the reservation was
+   * minted again so the finished work can still settle — the new deadline is
+   * what every later check reads. Returns `null` when the thread has no
+   * engagement. Throws on write failure: an unrecorded reservation is invisible
+   * to the gate, the router, and the next delivery attempt.
+   */
+  async recordIntent(
+    roomId: string,
+    threadId: string,
+    intent: NonNullable<CommerceEngagement['intent']>,
+  ): Promise<CommerceEngagement | null> {
+    const current = await this.get(roomId, threadId);
+    if (!current) return null;
+    const updated: CommerceEngagement = { ...current, intent };
     await this.write(roomId, threadId, updated);
     return updated;
   }
@@ -351,13 +507,15 @@ export class EngagementService {
         PENDING_CLAIMS_STATE_KEY,
       );
     } catch (error) {
-      if (error instanceof MatrixError && error.errcode === 'M_NOT_FOUND') {
+      if (isMatrixNotFound(error)) {
+        // No index yet: nothing has ever been submitted from this oracle.
+        // Silent — the claim watcher asks every two minutes.
         this.pendingClaimsCache = [];
         return [];
       }
       // Transient read failure: report "none" but do NOT cache — the next
       // tick retries rather than dropping every watched claim.
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] pending-claim index read failed: ${errorMessage(error)}`,
       );
       return [];
@@ -394,7 +552,7 @@ export class EngagementService {
       }
       await this.writePendingClaims([...claims, { roomId, threadId }]);
     } catch (error) {
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] could not index the pending claim for ${threadId}: ${errorMessage(error)}`,
       );
     }
@@ -459,6 +617,13 @@ export class EngagementService {
     return updated;
   }
 
+  /**
+   * The one write funnel: durable Matrix room state first (it is the record
+   * that matters — it carries the escrow tx, the deadline, and the claim cid),
+   * then the process cache, then the per-user replica. Replica maintenance is
+   * best-effort by construction: its stores swallow their own failures, so a
+   * Redis outage costs a lookup and never a persisted engagement.
+   */
   private async write(
     roomId: string,
     threadId: string,
@@ -471,9 +636,79 @@ export class EngagementService {
     });
     this.cache.set(this.cacheKey(roomId, threadId), engagement);
 
-    if (engagement.status !== 'active') {
+    if (engagement.status === 'active') {
+      await this.cacheActive({ roomId, threadId, engagement });
+    } else {
+      await this.clearCachedActive(engagement.userDid);
       await this.releaseActiveIndex(roomId, threadId);
     }
+  }
+
+  /**
+   * The candidate engagement, or `null` once its escrow deadline has passed.
+   *
+   * An expired reservation has already auto-released on-chain, so the job holds
+   * nothing: the chain would accept a fresh intent immediately, and leaving the
+   * engagement `active` only wedges the user — every new work request reads as
+   * `engagement_in_progress` while the job it names can no longer be delivered.
+   * So it is closed here rather than reported. Best-effort by design: if the
+   * write fails the answer is still "not active", and the next lookup tries
+   * again.
+   */
+  private async liveOrHeal(
+    ref: ActiveEngagementRef,
+  ): Promise<ActiveEngagementRef | null> {
+    if (!isEngagementExpired(ref.engagement, this.clock())) return ref;
+
+    this.logger.warn(
+      `[oracle-payments] engagement ${ref.threadId} held a reservation that expired at ` +
+        `${ref.engagement.intent?.expiresAt ?? 'an unknown time'} — closing it so it stops blocking new work.`,
+    );
+    try {
+      await this.transition(ref.roomId, ref.threadId, 'closed');
+    } catch (error) {
+      this.logger.warn(
+        `[oracle-payments] could not close the expired engagement ${ref.threadId}: ${errorMessage(error)}`,
+      );
+      await this.clearCachedActive(ref.engagement.userDid);
+    }
+    return null;
+  }
+
+  /** Refresh the user's replica from a live engagement. */
+  private async cacheActive(ref: ActiveEngagementRef): Promise<void> {
+    const userDid = ref.engagement.userDid;
+    if (userDid === undefined) return;
+    await this.cacheStore.set(
+      activeEngagementCacheKey(userDid),
+      ref,
+      engagementCacheTtlSeconds(ref.engagement.intent?.expiresAt, this.clock()),
+    );
+  }
+
+  private async clearCachedActive(userDid: string | undefined): Promise<void> {
+    if (userDid === undefined) return;
+    await this.cacheStore.delete(activeEngagementCacheKey(userDid));
+  }
+
+  /**
+   * The user's replicated engagement, or `null`. Anything that does not parse
+   * as a live engagement is deleted rather than returned — a replica pointing
+   * at a job that has since been delivered or cancelled would otherwise keep
+   * routing turns into work mode.
+   */
+  private async readCachedActive(
+    userDid: string,
+  ): Promise<ActiveEngagementRef | null> {
+    const raw = await this.cacheStore.get(activeEngagementCacheKey(userDid));
+    if (raw === null || raw === undefined) return null;
+
+    const parsed = CachedActiveEngagementSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.engagement.status !== 'active') {
+      await this.clearCachedActive(userDid);
+      return null;
+    }
+    return parsed.data;
   }
 
   /**
@@ -490,7 +725,7 @@ export class EngagementService {
     try {
       await this.writeActiveIndex(roomId, null);
     } catch (error) {
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] could not clear the active-engagement index for ${roomId}: ${errorMessage(error)}`,
       );
     }
@@ -507,13 +742,14 @@ export class EngagementService {
         ACTIVE_ENGAGEMENT_INDEX_STATE_KEY,
       );
     } catch (error) {
-      if (error instanceof MatrixError && error.errcode === 'M_NOT_FOUND') {
+      if (isMatrixNotFound(error)) {
+        // No pointer yet: this room has never held an engagement.
         this.activeIndexCache.set(roomId, null);
         return null;
       }
       // Transient read failure: report "none" but do NOT cache it — the chain
       // still refuses a second reservation, so nothing is lost by retrying.
-      this.logger?.warn(
+      this.logger.warn(
         `[oracle-payments] active-engagement index read failed for ${roomId}: ${errorMessage(error)}`,
       );
       return null;
@@ -551,6 +787,18 @@ export class EngagementService {
     const prefix = `${roomId}|`;
     return key.startsWith(prefix) ? key.slice(prefix.length) : undefined;
   }
+}
+
+/** `true` when a found engagement is the caller's own, not a conflicting one. */
+function isExcluded(
+  found: { roomId: string; threadId: string },
+  exclude?: { roomId: string; threadId: string },
+): boolean {
+  return (
+    exclude !== undefined &&
+    exclude.roomId === found.roomId &&
+    exclude.threadId === found.threadId
+  );
 }
 
 /**

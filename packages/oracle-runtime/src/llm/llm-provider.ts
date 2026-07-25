@@ -50,7 +50,7 @@ const MODEL_MAP: Record<LLMProvider, Record<ProviderModelRole, string>> = {
     subagent: 'openai/gpt-5.4-nano',
     vision: 'google/gemini-3.1-flash-lite',
     guard: 'meta-llama/llama-3.1-8b-instruct',
-    routing: 'openai/gpt-oss-20b',
+    routing: 'openai/gpt-oss-120b',
     custom_low: 'openai/gpt-oss-120b',
     custom_medium: 'google/gemini-3.1-flash-lite',
     'session-title': 'meta-llama/llama-3.1-8b-instruct',

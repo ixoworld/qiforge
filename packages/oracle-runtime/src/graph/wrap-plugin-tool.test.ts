@@ -245,6 +245,33 @@ describe('wrapPluginTool — direct invocation', () => {
       wrapped.invoke({}, makeRunConfig() as unknown as ToolRuntime),
     ).rejects.toThrow('boom');
   });
+
+  it('updates the turn status card with a human label on every tool call', async () => {
+    // "Send an update about the tool being used" — the wrapper is the single
+    // seam every plugin tool passes through, so the card must move once per
+    // call, named. (The producer no-ops for turns the Matrix bridge never
+    // registered, which is what keeps HTTP turns silent.)
+    const emit = vi.fn();
+    const wrapped = wrapPluginTool(climateTool, {
+      ambient: makeAmbient(),
+      state: STATE,
+      producer: { emit },
+    });
+
+    await wrapped.invoke(
+      { facilityId: 'f-1', period: '2026' },
+      makeRunConfig() as unknown as ToolRuntime,
+    );
+    await wrapped.invoke(
+      { facilityId: 'f-2', period: '2026' },
+      makeRunConfig() as unknown as ToolRuntime,
+    );
+
+    expect(emit.mock.calls).toEqual([
+      ['req-1', 'working', 'Get emissions…'],
+      ['req-1', 'working', 'Get emissions…'],
+    ]);
+  });
 });
 
 describe('wrapPluginTool — end-to-end through createAgent + fakeModel', () => {

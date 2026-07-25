@@ -12,6 +12,7 @@ import type { EngagementService } from './engagement.service.js';
 import type {
   ClaimBotUploadInput,
   ClaimDeliverable,
+  SendIntentInput,
   SignClaimInput,
   SubmitClaimInput,
   SubmitClaimResult,
@@ -21,6 +22,7 @@ import {
   WorkClaimService,
   type DeliverWorkArgs,
 } from './work-claim.service.js';
+import { WorkIntentService } from './work-intent.service.js';
 import { WorkSummaryExtractor } from './work-summary-extractor.js';
 import {
   COLLECTION_ID,
@@ -77,9 +79,24 @@ interface Harness {
   >;
   signAndSave: Mock<(input: SignClaimInput) => Promise<string>>;
   submit: Mock<(input: SubmitClaimInput) => Promise<SubmitClaimResult>>;
+  sendIntent: Mock<(input: SendIntentInput) => Promise<SubmitClaimResult>>;
   emit: Mock<(...args: unknown[]) => void>;
   ctx: RuntimeContext;
 }
+
+/** The engagement clock every harness shares — `NOW` is "right now". */
+const NOW = '2026-07-22T13:00:00.000Z';
+
+/** A reservation that lapsed a minute before the delivery attempt. */
+const LAPSED_INTENT = {
+  txHash: 'INTENT-TX-1',
+  submittedAt: '2026-07-22T00:00:00.000Z',
+  expiresAt: '2026-07-22T12:59:00.000Z',
+};
+
+/** The chain's own wording when a claim names a reservation it no longer holds. */
+const INTENT_GONE_LOG =
+  'failed to execute message; message index: 0: for agent ixo1oracleaddr and collection 42: intent not found';
 
 interface HarnessOptions {
   engagement?: CommerceEngagement | null;
@@ -91,6 +108,12 @@ interface HarnessOptions {
   sandbox?: SandboxStubHandlers;
   postEventFails?: boolean;
   abortSignal?: AbortSignal;
+  /** Override the extractor — e.g. to record the transcript it is handed. */
+  extractor?: WorkSummaryExtractor;
+  /** What the chain answers when the delivery reserves payment again. */
+  intentResult?: SubmitClaimResult;
+  /** Drop the escrow lane, as an oracle wired without one would. */
+  withoutIntentLane?: boolean;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -113,11 +136,13 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     network: String(options.config?.NETWORK ?? BASE_CONFIG.NETWORK),
   });
 
-  const extractor = new WorkSummaryExtractor({
-    getModel: () => ({
-      withStructuredOutput: () => ({ invoke: async () => EXTRACTION }),
-    }),
-  });
+  const extractor =
+    options.extractor ??
+    new WorkSummaryExtractor({
+      getModel: () => ({
+        withStructuredOutput: () => ({ invoke: async () => EXTRACTION }),
+      }),
+    });
 
   const uploadToRoom = vi.fn(async (_input: RoomFileSend) => '$file-event');
   const uploadToClaimBot = vi.fn(
@@ -148,10 +173,24 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     });
   }
 
+  // The real escrow lane over a stub chain: the delivery must re-reserve
+  // through `WorkIntentService`, not through a second copy of the chain write.
+  const sendIntent = vi.fn(
+    async (_input: SendIntentInput): Promise<SubmitClaimResult> =>
+      options.intentResult ?? { code: 0, transactionHash: 'INTENT-TX-2' },
+  );
+  const workIntent = new WorkIntentService({
+    engagement,
+    network: String(options.config?.NETWORK ?? BASE_CONFIG.NETWORK),
+    chain: { sendIntent },
+    clock: () => new Date(NOW),
+  });
+
   const service = new WorkClaimService({
     engagement,
     contractGate,
     extractor,
+    ...(options.withoutIntentLane ? {} : { intent: workIntent }),
     getSigningMnemonic: () =>
       options.signingMnemonic === undefined
         ? 'signing mnemonic'
@@ -161,7 +200,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     chain: { signAndSave, submit },
     mcpClientFactory: makeSandboxFactory(options.sandbox ?? {}),
     statusProducer: { emit },
-    clock: () => new Date('2026-07-22T13:00:00.000Z'),
+    clock: () => new Date(NOW),
     sleep: async () => {},
   });
 
@@ -174,6 +213,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     uploadToClaimBot,
     signAndSave,
     submit,
+    sendIntent,
     emit,
     ctx,
   };
@@ -212,26 +252,6 @@ describe('WorkClaimService — guards', () => {
     await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
       /signing key is not loaded/i,
     );
-  });
-
-  it('refuses to deliver once the escrowed intent window has expired', async () => {
-    // The reservation released before the work landed — claiming against it
-    // would only fail settlement.
-    const h = await makeHarness({
-      engagement: makeEngagement({
-        intent: {
-          txHash: 'INTENT-TX-1',
-          submittedAt: '2026-07-22T00:00:00.000Z',
-          expiresAt: '2026-07-22T12:59:00.000Z',
-        },
-      }),
-    });
-
-    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
-      /expired at 2026-07-22T12:59:00.000Z/,
-    );
-    expect(h.signAndSave).not.toHaveBeenCalled();
-    expect(h.submit).not.toHaveBeenCalled();
   });
 
   it('delivers normally while the intent window is still open', async () => {
@@ -273,6 +293,203 @@ describe('WorkClaimService — guards', () => {
       note: expect.stringContaining('already delivered'),
     });
     expect(h.submit).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkClaimService — a reservation that lapsed mid-job', () => {
+  it('re-reserves and settles instead of dead-ending finished work', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+    });
+
+    const result = await h.service.deliver(TEXT_ARGS, h.ctx);
+
+    // The lapsed intent freed the chain's one-active-intent slot, so a fresh
+    // reservation carries the delivery through.
+    expect(h.sendIntent).toHaveBeenCalledTimes(1);
+    expect(h.sendIntent.mock.calls[0]?.[0]).toMatchObject({
+      collectionId: COLLECTION_ID,
+      amount: [{ denom: 'uixo', amount: '20000000' }],
+    });
+    expect(result).toMatchObject({ delivered: true, txHash: 'TX-1' });
+    expect(result.note).toMatch(/ran out while the work was still running/);
+    expect(result.note).toMatch(/charged once/);
+
+    // The new reservation is on the record, and the job closed out normally.
+    const stored = await h.engagement.get(ROOM_ID, THREAD_ID);
+    expect(stored).toMatchObject({
+      status: 'delivered',
+      intent: { txHash: 'INTENT-TX-2', submittedAt: NOW },
+      claim: { cid: 'claim-cid-1', txHash: 'TX-1' },
+    });
+  });
+
+  it('closes the engagement honestly when the contract no longer covers the work', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      contract: makeContractRecord({
+        authz: {
+          granted: true,
+          agentQuotaRemaining: 0,
+          maxAmount: { amount: '20000000', denom: 'uixo' },
+          intentDurationNs: '604800000000000',
+        },
+      }),
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /could not be reserved again: the user's contract no longer covers it \(quota_exhausted\)/,
+    );
+
+    // Nothing was reserved or claimed, and — the whole point — the dead job
+    // stops blocking: it is closed, not left active.
+    expect(h.sendIntent).not.toHaveBeenCalled();
+    expect(h.submit).not.toHaveBeenCalled();
+    expect(await h.engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('closes the engagement when reserving again is refused on-chain', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      intentResult: { code: 12, transactionHash: '', rawLog: 'out of gas' },
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /could not be reserved again: reserving the payment again was refused on-chain/,
+    );
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('closes the engagement when no escrow lane is wired at all', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      withoutIntentLane: true,
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /no escrow lane wired/,
+    );
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('reserves once and only once, even if the chain still refuses the claim', async () => {
+    // Already re-reserved before submitting; a refusal that survives that is
+    // not fixed by reserving again, and looping would burn the user's escrow.
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      submitResult: {
+        code: 1500,
+        transactionHash: '',
+        rawLog: INTENT_GONE_LOG,
+      },
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /the chain refused the payment record because its reservation is gone/,
+    );
+    expect(h.sendIntent).toHaveBeenCalledTimes(1);
+    expect(h.submit).toHaveBeenCalledTimes(1);
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('tells the user the work is theirs even though it could not be billed', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      contract: null,
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /Nothing was charged[\s\S]*Hand the finished work over anyway/,
+    );
+  });
+});
+
+describe('WorkClaimService — a submit the chain refuses for a gone reservation', () => {
+  it('re-reserves and retries once, then settles', async () => {
+    // The window closed between the pre-flight check and the block: the
+    // engagement still reads open, so only the chain's wording says otherwise.
+    const h = await makeHarness({
+      engagement: makeEngagement({
+        intent: { ...LAPSED_INTENT, expiresAt: '2026-07-29T00:00:00.000Z' },
+      }),
+    });
+    h.submit.mockResolvedValueOnce({
+      code: 1500,
+      transactionHash: '',
+      rawLog: INTENT_GONE_LOG,
+    });
+
+    const result = await h.service.deliver(TEXT_ARGS, h.ctx);
+
+    expect(h.sendIntent).toHaveBeenCalledTimes(1);
+    expect(h.submit).toHaveBeenCalledTimes(2);
+    // Never re-signed: the same claim settles against the new reservation.
+    expect(h.signAndSave).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ claimId: 'claim-cid-1', delivered: true });
+  });
+
+  it('recovers from the thrown simulate error the wallet client raises', async () => {
+    // `signAndBroadcast` simulates first, so the chain's objection normally
+    // arrives as a rejection rather than a non-zero tx code.
+    const h = await makeHarness({
+      engagement: makeEngagement({
+        intent: { ...LAPSED_INTENT, expiresAt: '2026-07-29T00:00:00.000Z' },
+      }),
+    });
+    h.submit.mockRejectedValueOnce(
+      new Error(`Query failed with (6): ${INTENT_GONE_LOG}`),
+    );
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).resolves.toMatchObject({
+      delivered: true,
+    });
+    expect(h.sendIntent).toHaveBeenCalledTimes(1);
+    expect(h.submit).toHaveBeenCalledTimes(2);
+  });
+
+  it('closes the engagement when the retry is refused the same way', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({
+        intent: { ...LAPSED_INTENT, expiresAt: '2026-07-29T00:00:00.000Z' },
+      }),
+      submitResult: {
+        code: 1500,
+        transactionHash: '',
+        rawLog: INTENT_GONE_LOG,
+      },
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /the chain refused the payment record because its reservation is gone/,
+    );
+    // Exactly one recovery attempt, then the job ends — it never loops.
+    expect(h.sendIntent).toHaveBeenCalledTimes(1);
+    expect(h.submit).toHaveBeenCalledTimes(2);
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
+  it('leaves an ordinary chain refusal alone — engagement active, claim resumable', async () => {
+    const h = await makeHarness({
+      submitResult: { code: 5, transactionHash: '', rawLog: 'out of quota' },
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /out of quota/,
+    );
+    expect(h.sendIntent).not.toHaveBeenCalled();
+    expect(h.submit).toHaveBeenCalledTimes(1);
+    expect(await h.engagement.getActive(ROOM_ID, THREAD_ID)).not.toBeNull();
   });
 });
 
@@ -341,6 +558,33 @@ describe('WorkClaimService — text deliverable', () => {
     expect(signed.collectionId).toBe(COLLECTION_ID);
     expect(signed.matrixRoomId).toBe(BASE_CONFIG.MATRIX_ACCOUNT_ROOM_ID);
     expect(signed.decryptedSigningMnemonic).toBe('signing mnemonic');
+  });
+
+  it('summarizes the claim from the turn’s own message history', async () => {
+    // The delivery lane reads `ctx.history.messages`. When the tool-wrapper
+    // state was built with an empty `messages` array, this transcript was
+    // empty on every real turn and the extractor refused to summarize —
+    // failing delivery after the work was already done.
+    const transcripts: string[] = [];
+    const h = await makeHarness({
+      extractor: new WorkSummaryExtractor({
+        getModel: () => ({
+          withStructuredOutput: () => ({
+            invoke: async (messages) => {
+              transcripts.push(String(messages.at(-1)?.content));
+              return EXTRACTION;
+            },
+          }),
+        }),
+      }),
+    });
+
+    await h.service.deliver(TEXT_ARGS, h.ctx);
+
+    expect(transcripts).toHaveLength(1);
+    expect(transcripts[0]).toContain('Summarize my Q2 spending in USD.');
+    expect(transcripts[0]).toContain('Done — the report is built.');
+    expect(h.submit).toHaveBeenCalled();
   });
 
   it('omits proofs from the body when the agent supplied none', async () => {

@@ -76,14 +76,14 @@ async function buildClaimAuthorization(
 }
 
 describe('Authz.grantClaimSubmitAuthorization intent duration', () => {
-  it('exports a one-hour default expressed in nanoseconds', () => {
-    expect(DEFAULT_INTENT_DURATION_NS).toBe('3600000000000');
+  it('exports a three-hour default expressed in nanoseconds', () => {
+    expect(DEFAULT_INTENT_DURATION_NS).toBe('10800000000000');
   });
 
-  it('defaults the intent duration to one hour when the param is omitted', async () => {
+  it('defaults the intent duration to three hours when the param is omitted', async () => {
     const msg = await buildClaimAuthorization(baseParams);
 
-    expect(msg.intentDurationNs?.seconds.toString()).toBe('3600');
+    expect(msg.intentDurationNs?.seconds.toString()).toBe('10800');
     expect(msg.intentDurationNs?.nanos).toBe(0);
   });
 

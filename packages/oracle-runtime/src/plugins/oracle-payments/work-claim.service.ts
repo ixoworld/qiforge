@@ -1,3 +1,4 @@
+import { Logger as NestLogger } from '@nestjs/common';
 import { z } from 'zod';
 import { postOracleComponent } from '../../matrix/oracle-component-event.js';
 import { sendFileToRoom, type RoomFileSend } from '../../matrix/room-file.js';
@@ -18,9 +19,11 @@ import {
   readSandboxFile,
 } from '../sandbox/sandbox-bridge.js';
 import type { SandboxMcpClientFactory } from '../sandbox/sandbox.plugin.js';
+import type { CommerceEngagementStart } from '../../modules/messages/commerce-router-port.js';
 import {
   defaultClaimBotUploader,
   defaultClaimChainClient,
+  isExpiredIntentFailure,
   type ClaimBotUploader,
   type ClaimChainClient,
   type ClaimCoin,
@@ -30,10 +33,12 @@ import {
 } from './claim-lane.js';
 import type { ContractGateService } from './contract-gate.service.js';
 import type { EngagementService } from './engagement.service.js';
+import type { WorkIntentService } from './work-intent.service.js';
 import type { WorkSummaryExtractor } from './work-summary-extractor.js';
 import {
   claimDeepLink,
   errorMessage,
+  isEngagementExpired,
   priceToCoin,
   readConfigNumber,
   readConfigString,
@@ -130,10 +135,22 @@ export interface DeliverWorkResult {
 /** Uploads the deliverable into the user's room. Injected for tests. */
 export type RoomFileUploader = (input: RoomFileSend) => Promise<string>;
 
+/**
+ * The escrow lane the delivery uses to reserve payment again when a job
+ * outlived its window. Narrowed to the one call so the two services share the
+ * chain write without the delivery lane gaining a way to start engagements.
+ */
+export type WorkIntentReserver = Pick<WorkIntentService, 'reserve'>;
+
 export interface WorkClaimServiceDeps {
   engagement: EngagementService;
   contractGate: ContractGateService;
   extractor: WorkSummaryExtractor;
+  /**
+   * Reserves payment on-chain. Without it a job whose reservation lapsed can
+   * only be closed honestly, never recovered.
+   */
+  intent?: WorkIntentReserver;
   /** Reads the oracle's decrypted claim-signing mnemonic (wired at boot). */
   getSigningMnemonic?: () => string | null;
   uploadToRoom?: RoomFileUploader;
@@ -156,6 +173,53 @@ const NO_ENGAGEMENT_MESSAGE =
 
 const CLOSED_PREFIX =
   'The engagement is closed; this thread returns to support from the next message.';
+
+/** What the model tells the user when the delivery had to re-reserve payment. */
+const RENEWED_NOTE =
+  'The payment reserved when this job started ran out while the work was still running, so a ' +
+  'fresh reservation was made and the work was billed against that one. The user is charged ' +
+  'once, the normal amount — say so plainly if the delay came up, and do not imply anything ' +
+  'was charged twice.';
+
+/** One submit attempt: the accepted tx, or why the chain would not take it. */
+type SubmitAttempt = { ok: true; tx: SubmitClaimResult } | FailedSubmit;
+
+interface FailedSubmit {
+  ok: false;
+  /** Raw chain wording, matched against to tell a lapsed reservation apart. */
+  detail: string;
+  /** The same failure as the sentence the tool reports it with. */
+  failure: string;
+}
+
+/**
+ * Run one submit and normalize both refusal shapes into one value. A doomed
+ * claim can come back either way: the wallet client simulates before it
+ * broadcasts, so the chain's objection usually arrives as a thrown simulate
+ * error, and only a tx that made it into a block reports a non-zero code.
+ */
+async function attemptSubmit(
+  submit: () => Promise<SubmitClaimResult>,
+): Promise<SubmitAttempt> {
+  let tx: SubmitClaimResult;
+  try {
+    tx = await submit();
+  } catch (error) {
+    const detail = errorMessage(error);
+    return {
+      ok: false,
+      detail,
+      failure: `The payment record could not be submitted on-chain (${detail}).`,
+    };
+  }
+  if (tx.code === 0) return { ok: true, tx };
+  const rawLog = tx.rawLog || 'unknown chain error';
+  return {
+    ok: false,
+    detail: `code ${tx.code}: ${rawLog}`,
+    failure: `The payment record could not be submitted on-chain (code ${tx.code}): ${rawLog}.`,
+  };
+}
 
 /**
  * What the model must tell the user when the release did not reach the chain.
@@ -180,11 +244,20 @@ const RELEASE_FAILED_SUFFIX =
  * re-uploads. Everything after a successful submit (receipt card, engagement
  * transition) is best-effort — a claim is never un-submitted because a card
  * failed to post.
+ *
+ * One failure is not a failure lane at all: a job whose escrow reservation
+ * lapsed while the work ran. The lapsed intent frees the chain's one-active-
+ * intent slot, so delivery re-reserves and settles against the new reservation
+ * instead of refusing finished work. Only when the reservation cannot be
+ * renewed does the job end — and then the engagement is CLOSED, never left
+ * `active`, because an engagement holding a reservation that no longer exists
+ * blocks every future request for a job that can never be delivered.
  */
 export class WorkClaimService {
   private readonly engagement: EngagementService;
   private readonly contractGate: ContractGateService;
   private readonly extractor: WorkSummaryExtractor;
+  private readonly intent?: WorkIntentReserver;
   private getSigningMnemonic: () => string | null;
   private readonly uploadToRoom: RoomFileUploader;
   private readonly uploadToClaimBot: ClaimBotUploader;
@@ -193,12 +266,13 @@ export class WorkClaimService {
   private readonly statusProducer: Pick<WorkStatusProducer, 'emit'>;
   private readonly clock: () => Date;
   private readonly sleep?: (ms: number) => Promise<void>;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
 
   constructor(deps: WorkClaimServiceDeps) {
     this.engagement = deps.engagement;
     this.contractGate = deps.contractGate;
     this.extractor = deps.extractor;
+    this.intent = deps.intent;
     this.getSigningMnemonic = deps.getSigningMnemonic ?? (() => null);
     this.uploadToRoom = deps.uploadToRoom ?? sendFileToRoom;
     this.uploadToClaimBot = deps.uploadToClaimBot ?? defaultClaimBotUploader;
@@ -207,7 +281,7 @@ export class WorkClaimService {
     this.statusProducer = deps.statusProducer ?? workStatusProducer;
     this.clock = deps.clock ?? (() => new Date());
     this.sleep = deps.sleep;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(WorkClaimService.name);
   }
 
   /** Wire the oracle's signing-key reader (done once at module init). */
@@ -219,16 +293,30 @@ export class WorkClaimService {
     args: DeliverWorkArgs,
     ctx: RuntimeContext,
   ): Promise<DeliverWorkResult> {
-    const roomId = ctx.session.roomId;
-    if (!roomId) {
-      throw new Error(
-        'deliver_work applies only to Matrix work threads — no room on this session.',
-      );
-    }
-    const threadId = ctx.session.id;
+    const chat = this.chatLocation(ctx, 'deliver_work');
+    const { roomId, threadId } = this.engagementLocation(ctx, chat);
 
     const engagement = await this.engagement.getActive(roomId, threadId);
     if (!engagement) throw new Error(NO_ENGAGEMENT_MESSAGE);
+
+    // Already submitted: never re-sign, never re-submit, never double-charge.
+    // Ahead of everything else on purpose — a claim already on the chain is a
+    // fact no later check can change, so reporting it must not depend on the
+    // reservation still being open or the contract still passing.
+    if (engagement.claim?.cid && engagement.claim.txHash) {
+      return {
+        claimId: engagement.claim.cid,
+        txHash: engagement.claim.txHash,
+        delivered: true,
+        note: 'This work was already delivered and its payment record already submitted — nothing was resubmitted.',
+      };
+    }
+
+    // The escrow reserved at start released while the work was still running.
+    // It is recovered from below rather than refused here: the work is done,
+    // and dead-ending it would leave the user unbilled, the oracle unpaid, and
+    // the engagement blocking every future request.
+    const expired = isEngagementExpired(engagement, this.clock());
 
     // The quota may have drained since the engagement started; the chain is
     // the final word at submission, but failing here keeps the claim honest.
@@ -243,6 +331,17 @@ export class WorkClaimService {
       },
     });
     if (!gate.ok) {
+      // A live reservation is still held, so the job keeps blocking and the
+      // agent may retry once the user fixes their contract. A lapsed one holds
+      // nothing and can never be renewed through a gate that refuses it — that
+      // job ends here rather than wedging the thread.
+      if (expired) {
+        throw await this.abandon({
+          roomId,
+          threadId,
+          reason: `the user's contract no longer covers it (${gate.reason})`,
+        });
+      }
       throw new Error(
         `This work can't be billed right now: the user's contract check failed (${gate.reason}). ` +
           'Explain this to the user and call show_contract so they can fix it — the work itself is not lost.',
@@ -264,28 +363,18 @@ export class WorkClaimService {
       { denom: price.denom, amount: String(price.amount) },
     ];
 
-    // Already submitted: never re-sign, never re-submit, never double-charge.
-    // Ahead of the expiry guard on purpose — reporting a claim that is already
-    // on-chain must not depend on the reservation still being open.
-    if (engagement.claim?.cid && engagement.claim.txHash) {
-      return {
-        claimId: engagement.claim.cid,
-        txHash: engagement.claim.txHash,
-        delivered: true,
-        note: 'This work was already delivered and its payment record already submitted — nothing was resubmitted.',
-      };
-    }
-
-    // The escrow reserved at start has auto-released; a claim submitted against
-    // it now would fail settlement, so fail here with something the agent can
-    // actually explain.
-    const expiresAt = engagement.intent?.expiresAt;
-    if (expiresAt && Date.parse(expiresAt) <= this.clock().getTime()) {
-      throw new Error(
-        `The payment reserved for this work expired at ${expiresAt}, so it can no longer be claimed. ` +
-          'Tell the user plainly that the reservation window closed, offer them the finished work, ' +
-          'and explain they need to start the request again for it to be billable.',
-      );
+    // The lapsed intent no longer occupies the chain's one-active-intent slot
+    // for this (agent, collection), so a fresh one can be minted right now and
+    // the finished work can still settle against it.
+    let renewed = false;
+    if (expired) {
+      await this.renewReservation({
+        roomId,
+        threadId,
+        engagement,
+        gate: gate.start,
+      });
+      renewed = true;
     }
 
     let claimId = engagement.claim?.cid;
@@ -296,24 +385,21 @@ export class WorkClaimService {
 
     if (!claimId) {
       const file = await this.materialize(args, ctx, engagement);
-      const extractorModel = readConfigString(
-        ctx.config,
-        'ORACLE_PAYMENTS_EXTRACTOR_MODEL',
-      );
       const extraction = await this.extractor.extract({
         messages: ctx.history.messages,
         serviceId: engagement.serviceId,
         serviceName: engagement.serviceName,
-        ...(extractorModel !== undefined && { model: extractorModel }),
       });
       workSummary = extraction.workSummary;
 
+      // The work goes where the conversation is, which is not necessarily
+      // where the engagement's record lives.
       const matrixEventId = await this.uploadToRoom({
-        roomId,
+        roomId: chat.roomId,
         fileName: file.fileName,
         mediaType: file.mediaType,
         bytes: file.bytes,
-        ...(ctx.session.client === 'matrix' ? { threadId } : {}),
+        ...(ctx.session.client === 'matrix' ? { threadId: chat.threadId } : {}),
       });
       deliverable = {
         fileName: file.fileName,
@@ -367,23 +453,19 @@ export class WorkClaimService {
       });
     }
 
-    // Always settles against the escrow locked at engagement start — the two
-    // halves are unconditional, so a reserved job is never settled as an
-    // unreserved one. Requires an evaluation engine that accepts
-    // `useIntent: true` agent-work claims.
-    const tx = await this.chain.submit({
+    // Always settles against the escrow locked for this job — the two halves
+    // are unconditional, so a reserved job is never settled as an unreserved
+    // one. Requires an evaluation engine that accepts `useIntent: true`
+    // agent-work claims.
+    const tx = await this.settle({
+      roomId,
+      threadId,
+      engagement,
+      gate: gate.start,
       claimId,
-      collectionId: engagement.collectionId,
-      useIntent: true,
       amount,
+      renewed,
     });
-    if (tx.code !== 0) {
-      throw new Error(
-        `The payment record could not be submitted on-chain (code ${tx.code}): ${
-          tx.rawLog || 'unknown chain error'
-        }. The work is saved — deliver again to retry the submission.`,
-      );
-    }
 
     // Everything below is best-effort: the claim is submitted and must never
     // be reported as failed because a follow-up step did.
@@ -397,8 +479,8 @@ export class WorkClaimService {
 
     await this.safely('post work_delivered card', () =>
       this.postReceipt(ctx, {
-        roomId,
-        threadId,
+        roomId: chat.roomId,
+        threadId: chat.threadId,
         engagement,
         args,
         claimId,
@@ -412,7 +494,185 @@ export class WorkClaimService {
       this.engagement.transition(roomId, threadId, 'delivered'),
     );
 
-    return { claimId, txHash: tx.transactionHash, delivered: true };
+    return {
+      claimId,
+      txHash: tx.transactionHash,
+      delivered: true,
+      ...(renewed && { note: RENEWED_NOTE }),
+    };
+  }
+
+  /**
+   * Submit the claim against this job's escrow, recovering once from the one
+   * failure a correct claim can still hit: the chain refusing it because the
+   * reservation is gone. The pre-flight deadline check cannot rule that out —
+   * the window can close between the check and the block, the oracle's clock
+   * can drift from the chain's, and the intent may have been settled by another
+   * claim — so the refusal is handled where it actually happens.
+   *
+   * Recovery is once per delivery: re-reserve, submit again. A second refusal
+   * closes the engagement rather than leaving a job nobody can finish.
+   */
+  private async settle(input: {
+    roomId: string;
+    threadId: string;
+    engagement: CommerceEngagement;
+    gate: CommerceEngagementStart;
+    claimId: string;
+    amount: ClaimCoin[];
+    renewed: boolean;
+  }): Promise<SubmitClaimResult> {
+    const { roomId, threadId, engagement, claimId, amount } = input;
+    const submit = (): Promise<SubmitAttempt> =>
+      attemptSubmit(() =>
+        this.chain.submit({
+          claimId,
+          collectionId: engagement.collectionId,
+          useIntent: true,
+          amount,
+        }),
+      );
+
+    let renewed = input.renewed;
+    let attempt = await submit();
+    // `!renewed` bounds this to one recovery per delivery: a refusal that
+    // survives a fresh reservation is not going to survive another one, and
+    // reserving in a loop would burn the user's escrow, not their patience.
+    if (
+      !attempt.ok &&
+      !renewed &&
+      this.isLapsedReservation(attempt, engagement, renewed)
+    ) {
+      this.logger.warn(
+        `[oracle-payments] the chain refused claim ${claimId} because its reservation is gone ` +
+          `(${attempt.detail}) — re-reserving and submitting once more.`,
+      );
+      await this.renewReservation(input);
+      renewed = true;
+      attempt = await submit();
+    }
+
+    if (!attempt.ok) {
+      if (this.isLapsedReservation(attempt, engagement, renewed)) {
+        throw await this.abandon({
+          roomId,
+          threadId,
+          reason: `the chain refused the payment record because its reservation is gone (${attempt.detail})`,
+        });
+      }
+      throw new Error(
+        `${attempt.failure} The work is saved — deliver again to retry the submission.`,
+      );
+    }
+    return attempt.tx;
+  }
+
+  /**
+   * `true` when a failed submit is about the reservation rather than the claim.
+   *
+   * The chain's own wording is the primary signal. The fallback — the job is
+   * already past the deadline stamped on it — covers a window that closed
+   * between the pre-flight check and the block, and is only consulted before a
+   * renewal: afterwards the stamped deadline describes the reservation that was
+   * just replaced, and reading it would misfile every later failure.
+   */
+  private isLapsedReservation(
+    attempt: FailedSubmit,
+    engagement: CommerceEngagement,
+    renewed: boolean,
+  ): boolean {
+    if (isExpiredIntentFailure(attempt.detail)) return true;
+    return !renewed && isEngagementExpired(engagement, this.clock());
+  }
+
+  /**
+   * Reserve payment again for a job that outlived its window, and stamp the
+   * fresh reservation on the engagement so every later read sees the new
+   * deadline. The chain write is {@link WorkIntentService}'s, not a second copy
+   * of it.
+   *
+   * Throws — with the engagement already closed — when the reservation cannot
+   * be renewed. The work is finished either way, but it is no longer billable,
+   * and an engagement left `active` around a reservation that does not exist is
+   * exactly what wedges a user out of every future request.
+   */
+  private async renewReservation(input: {
+    roomId: string;
+    threadId: string;
+    engagement: CommerceEngagement;
+    gate: CommerceEngagementStart;
+  }): Promise<void> {
+    const { roomId, threadId, engagement, gate } = input;
+
+    if (!this.intent) {
+      throw await this.abandon({
+        roomId,
+        threadId,
+        reason:
+          'this oracle has no escrow lane wired, so payment could not be reserved again',
+      });
+    }
+    // The gate answered from a fresh contract record. A different collection
+    // means the user re-contracted mid-job: reserving there and claiming here
+    // would settle against an escrow that belongs to a different agreement.
+    if (gate.collectionId !== engagement.collectionId) {
+      throw await this.abandon({
+        roomId,
+        threadId,
+        reason:
+          "the user's claim collection changed while the work was running, so this job can no longer be billed against it",
+      });
+    }
+
+    const fresh = await this.intent.reserve(gate);
+    if (!fresh) {
+      throw await this.abandon({
+        roomId,
+        threadId,
+        reason: 'reserving the payment again was refused on-chain',
+      });
+    }
+
+    this.logger.warn(
+      `[oracle-payments] the reservation for thread ${threadId} lapsed mid-job — re-reserved on-chain ` +
+        `(tx ${fresh.txHash}, expires ${fresh.expiresAt ?? 'unbounded'}); continuing the delivery.`,
+    );
+    // Best-effort: the reservation is already on-chain and the claim settles
+    // against it whether or not the record catches up. A failed write only
+    // costs bookkeeping, and failing the delivery over it would throw away a
+    // reservation the user just paid for.
+    await this.safely('record the renewed reservation', () =>
+      this.engagement.recordIntent(roomId, threadId, fresh),
+    );
+  }
+
+  /**
+   * End a job whose reservation is gone and cannot be renewed. Closing it is
+   * the whole point: the escrow released on its own, so the engagement holds
+   * nothing, and every turn that finds it `active` refuses new work for a job
+   * that can never be delivered. The returned error is what the tool throws, so
+   * every give-up branch tells the user the same honest story.
+   */
+  private async abandon(input: {
+    roomId: string;
+    threadId: string;
+    reason: string;
+  }): Promise<Error> {
+    await this.safely('close the engagement whose reservation lapsed', () =>
+      this.engagement.transition(input.roomId, input.threadId, 'closed'),
+    );
+    this.logger.warn(
+      `[oracle-payments] could not recover the lapsed reservation for thread ${input.threadId} ` +
+        `(${input.reason}) — the engagement is closed so the user is not blocked.`,
+    );
+    return new Error(
+      `The payment reserved for this work ran out before it was delivered, and it could not be ` +
+        `reserved again: ${input.reason}. Nothing was charged and this job is now closed, so the ` +
+        'user can start a new one whenever they like. Tell them plainly that the work is finished ' +
+        'but could not be billed, and why. Hand the finished work over anyway — paste it into the ' +
+        'chat if it is text — and offer to run the request again, or to contract the service ' +
+        'again, if they want it recorded.',
+    );
   }
 
   /**
@@ -433,13 +693,8 @@ export class WorkClaimService {
     args: CancelWorkArgs,
     ctx: RuntimeContext,
   ): Promise<CancelWorkResult> {
-    const roomId = ctx.session.roomId;
-    if (!roomId) {
-      throw new Error(
-        'cancel_work applies only to Matrix work threads — no room on this session.',
-      );
-    }
-    const threadId = ctx.session.id;
+    const chat = this.chatLocation(ctx, 'cancel_work');
+    const { roomId, threadId } = this.engagementLocation(ctx, chat);
 
     const engagement = await this.engagement.getActive(roomId, threadId);
     if (!engagement) {
@@ -482,7 +737,7 @@ export class WorkClaimService {
     // the chain no longer holds would only be rejected — and would leave the
     // engagement blocking a user nothing is actually blocking.
     const expiresAt = engagement.intent.expiresAt;
-    if (expiresAt && Date.parse(expiresAt) <= this.clock().getTime()) {
+    if (isEngagementExpired(engagement, this.clock())) {
       await this.engagement.cancel(roomId, threadId, args.reason);
       return {
         cancelled: true,
@@ -615,6 +870,42 @@ export class WorkClaimService {
     };
   }
 
+  /** Where the conversation is happening — where the user will look for the
+   * delivered file and the receipt card. */
+  private chatLocation(
+    ctx: RuntimeContext,
+    toolName: string,
+  ): { roomId: string; threadId: string } {
+    const roomId = ctx.session.roomId;
+    if (!roomId) {
+      throw new Error(
+        `${toolName} applies only to Matrix work threads — no room on this session.`,
+      );
+    }
+    return { roomId, threadId: ctx.session.id };
+  }
+
+  /**
+   * Where the engagement's durable record lives — the room and thread every
+   * read and write against it must address.
+   *
+   * Usually the same as the chat location, but not when the user continued
+   * live work from another thread or another room: the router reports the
+   * engagement's own home on `ctx.commerce`, and settling the escrow against
+   * the room the message happened to arrive in would find no engagement (or,
+   * worse, someone else's). The chat location is the fallback for turns that
+   * never went through the router.
+   */
+  private engagementLocation(
+    ctx: RuntimeContext,
+    chat: { roomId: string; threadId: string },
+  ): { roomId: string; threadId: string } {
+    return {
+      roomId: ctx.commerce?.engagementRoomId ?? chat.roomId,
+      threadId: ctx.commerce?.engagementThreadId ?? chat.threadId,
+    };
+  }
+
   /** Sign a claim as a VC and stash it, returning its cid (= the claim id). */
   private signClaim(input: {
     ctx: RuntimeContext;
@@ -650,7 +941,7 @@ export class WorkClaimService {
       delayMs: 500,
       ...(this.sleep !== undefined && { sleep: this.sleep }),
       onRetry: (error, attempt) => {
-        this.logger?.warn?.(
+        this.logger.warn(
           `[oracle-payments] could not ${what} (attempt ${attempt}), retrying: ${errorMessage(error)}`,
         );
       },
@@ -813,7 +1104,7 @@ export class WorkClaimService {
     try {
       await run();
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] failed to ${what} after a submitted claim: ${errorMessage(error)}`,
       );
     }

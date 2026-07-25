@@ -161,13 +161,14 @@ export type GrantClaimSubmitAuthorizationParams = {
   /**
    * How long each claim intent created under this authorization stays alive,
    * in nanoseconds, as a decimal string. Defaults to
-   * `DEFAULT_INTENT_DURATION_NS` (1 hour) when omitted.
+   * `DEFAULT_INTENT_DURATION_NS` (3 hours) when omitted.
    *
-   * Set a longer window only when the contracted work genuinely takes longer
-   * than the default: an intent cannot be renewed or cancelled once created, so
-   * a job that outlives its window loses its escrowed payment reservation
-   * mid-flight. Agree the longer window up front rather than trying to replace
-   * an expired intent while the job is running.
+   * Set a longer window when the contracted work genuinely runs longer: an
+   * intent cannot be cancelled once created, and a job that outlives its window
+   * loses its escrowed payment reservation mid-flight. The window also gates
+   * how long a user waits for a refund after cancelling, since the escrow only
+   * returns when the intent is consumed by a claim or expires — so prefer the
+   * shortest window that comfortably covers the work.
    */
   intentDurationNs?: string;
 };

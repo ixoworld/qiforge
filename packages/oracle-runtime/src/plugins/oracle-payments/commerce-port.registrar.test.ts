@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getCommerceRouterPort } from '../../modules/messages/commerce-router-port.js';
+import { MessageRouterService } from '../../modules/messages/message-router.service.js';
 import { makeConfig } from '../../testing/nest-doubles.js';
 import {
   makeCardService,
@@ -77,6 +78,7 @@ describe('CommerceRouterPortRegistrar', () => {
       priceUsd: 20,
       collectionId: '42',
       adminAddress: 'ixo1admin',
+      userDid: USER_DID,
     });
     expect(sendIntent).toHaveBeenCalledWith({
       collectionId: '42',
@@ -85,8 +87,26 @@ describe('CommerceRouterPortRegistrar', () => {
     expect(started.ok).toBe(true);
     expect(started.ok && started.engagement.status).toBe('active');
     expect(
-      await port!.getActiveEngagement('!room:home', 'thread-1'),
-    ).toMatchObject({ serviceId: 'tax-report' });
+      await port!.findActiveEngagement({
+        senderDid: USER_DID,
+        roomId: '!room:home',
+        threadId: 'thread-1',
+      }),
+    ).toMatchObject({
+      roomId: '!room:home',
+      threadId: 'thread-1',
+      engagement: { serviceId: 'tax-report' },
+    });
+
+    // The same live job is found from another room entirely: engagements are
+    // one-per-user, and the user's next message may land anywhere.
+    expect(
+      await port!.findActiveEngagement({
+        senderDid: USER_DID,
+        roomId: '!elsewhere:home',
+        threadId: 'thread-9',
+      }),
+    ).toMatchObject({ roomId: '!room:home', threadId: 'thread-1' });
 
     // The gate consults the contract record service. Checked from the working
     // thread itself, the live engagement is not a conflict with itself.
@@ -118,6 +138,60 @@ describe('CommerceRouterPortRegistrar', () => {
 
     registrar.onModuleDestroy();
     expect(getCommerceRouterPort()).toBeNull();
+  });
+
+  it('persists work mode, so the next turn routes to work with no classifier call', async () => {
+    // The sequence a live run wedged on: a contracted user starts a job, then
+    // types again. The engagement IS the persisted mode, and the router reads
+    // it before anything else — if it were not durable (or not user-keyed) the
+    // second message would re-classify and land back in support.
+    const { registrar } = makeRegistrar({ ORACLE_ENTITY_DID });
+    registrar.onModuleInit();
+
+    const classify = vi.fn(async () => ({
+      intent: 'work',
+      serviceId: 'tax-report',
+      confidence: 0.95,
+    }));
+    const router = new MessageRouterService({
+      getModel: () => ({
+        withStructuredOutput: () => ({ invoke: classify }),
+      }),
+      producer: { emit: vi.fn() },
+      logger: { log: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    });
+
+    const first = await router.route({
+      roomId: '!room:home',
+      threadId: 'thread-1',
+      senderDid: USER_DID,
+      text: 'file my 2025 taxes',
+      requestId: 'req-1',
+    });
+
+    expect(first?.mode).toBe('work');
+    expect(first?.engagement?.status).toBe('active');
+    expect(classify).toHaveBeenCalledTimes(1);
+
+    // A different room AND a different thread — the message a user types on
+    // the main timeline, which is its own thread root.
+    const second = await router.route({
+      roomId: '!elsewhere:home',
+      threadId: 'thread-9',
+      senderDid: USER_DID,
+      text: 'also include my rental income',
+      requestId: 'req-2',
+    });
+
+    expect(second).toMatchObject({
+      mode: 'work',
+      engagementRoomId: '!room:home',
+      engagementThreadId: 'thread-1',
+    });
+    // The whole point: the classifier is never consulted again.
+    expect(classify).toHaveBeenCalledTimes(1);
+
+    registrar.onModuleDestroy();
   });
 
   it('refuses to register without the base-required ORACLE_ENTITY_DID', () => {

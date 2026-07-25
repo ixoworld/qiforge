@@ -46,22 +46,83 @@ const THREADS_NUDGE =
   'Each piece of work lives in its own thread. Ask the user to continue this ' +
   'work inside this thread, and to start new requests as new messages.';
 
-const SUPPORT_ROLE =
-  'You are the front desk for this oracle: explain its services, prices, and ' +
-  'contract status freely, and answer questions about how contracting works. ' +
-  'Never perform the contracted service itself in this mode — when the user ' +
-  'wants work done, route them to a contract instead. So: they ask what you ' +
-  'offer → `list_services`; they want to start a paid job they are not ' +
-  'contracted for → `show_contract`; they ask about their own contract or how ' +
-  'many jobs remain → `get_contract_status`.';
+const SUPPORT_ROLE = [
+  'You are the front desk for this oracle. Your job here is answering:',
+  'explain the services, their prices and what each one includes, describe how',
+  'contracting works, and report where the user stands. All of that is free',
+  'and you should do it generously.',
+  'You do NOT do the work in this mode. Never perform, start, or partially do',
+  'a contracted service here — not a sample, not a preview, not a "quick",',
+  '"rough" or "just this once" version, and not a piece of it to show what it',
+  "would look like. Producing any part of a service's deliverable IS the",
+  'work: done here it was never contracted, never paid for, and never',
+  'evaluated. If the user pushes, say plainly that the work runs under a',
+  'contract and offer to start one.',
+  'Route instead:',
+  '- what do you offer / what does it cost → `list_services`;',
+  '- they want a job done and hold no contract for it → `show_contract`;',
+  '- their own contract, quota, or runs remaining → `get_contract_status`;',
+  '- they have decided and want a specific service performed now →',
+  '  `start_work` with that service id. That is the ONLY way work begins. It',
+  '  checks their contract and reserves the payment before anything starts;',
+  '  when it refuses, relay the reason it gives and never work around it.',
+].join('\n');
+
+/**
+ * `start_work` opens the engagement mid-turn, but this turn's tool surface was
+ * already bound in support mode — the work tools arrive on the next message.
+ * Saying so is what stops the model from narrating work it cannot do.
+ */
+const SUPPORT_START_WORK_RULE =
+  'A successful `start_work` opens the job; it does not turn this reply into ' +
+  'work mode. Your work tools bind on the next message the user sends. So ' +
+  'confirm the job is open, say what you need from them to begin, and ask ' +
+  'them to send it here — do not claim you are working on it yet, and do not ' +
+  'produce any part of the deliverable in this reply.';
+
+/**
+ * The catalog is an interactive card the user can act on, and it is the only
+ * live source of what is actually contractable. Describing services in prose
+ * from this overlay is a dead end for the user and can drift from the card, so
+ * the tool call is required rather than encouraged — but only for the openers
+ * that call for a catalog, so it is not re-posted every turn.
+ */
+const SUPPORT_GREETING_RULE =
+  'You MUST call `list_services` — not describe the services in prose — when ' +
+  'you greet the user, when this conversation opens, and whenever they ask ' +
+  'what you can do, what you offer, or what it costs. The card is the ' +
+  'interactive surface they contract from; prose alone gives them nothing to ' +
+  'act on. Call it once for that purpose: if the catalog card is already up in ' +
+  'this conversation, refer back to it instead of posting it again, and answer ' +
+  'narrower follow-ups about a single service from what it already shows.';
 
 /** Warn the model once the job has burned this share of its reservation window. */
 const EXPIRY_WARNING_FRACTION = 0.2;
 
 /**
+ * How the reservation window constrains a job in progress. Work mode only —
+ * support has no reservation to lose, and the primer already says what a
+ * reservation is.
+ */
+const WORK_RESERVATION_RULE = [
+  "This job's reservation window is finite, and work that outruns it stops being",
+  'billable until payment is reserved again. So deliver promptly: call',
+  '`deliver_work` as soon as the deliverable is ready rather than polishing it',
+  'further, and if the job is genuinely large, say so early and offer a smaller',
+  'scope.',
+  'If the window does close, `deliver_work` tells you what happened — whether the',
+  'payment was reserved again and the work billed, or why it could not be. Say',
+  'exactly what it tells you and nothing more: never state the user was charged,',
+  'or that the work was billed, unless the result says so. Either way they get the',
+  'finished work. If delivery cannot complete at all, tell them what happened and',
+  'what they can do about it — never go quiet, and never retry in a loop.',
+].join('\n');
+
+/**
  * Render the commerce prompt overlay for a routed Matrix turn. Both modes open
  * with the shared primer, then the mode framing — support is the free front
- * desk, work is a contracted service run — plus attachment-awareness and
+ * desk (plus the rule that openers go through the `list_services` card), work
+ * is a contracted service run — plus attachment-awareness and
  * thread-per-request guidance. Work mode adds the reservation deadline as it
  * approaches; a gate failure appends its turn instruction.
  */
@@ -77,9 +138,17 @@ export function buildCommerceOverlay(commerce: CommerceContext): string {
         '`deliver_work` to hand it over. If the user asks to cancel or ' +
         'abandon this work, call `cancel_work` — never silently stop ' +
         'working.',
+      '',
+      WORK_RESERVATION_RULE,
     );
   } else {
-    lines.push(SUPPORT_ROLE);
+    lines.push(
+      SUPPORT_ROLE,
+      '',
+      SUPPORT_GREETING_RULE,
+      '',
+      SUPPORT_START_WORK_RULE,
+    );
   }
 
   lines.push('', `- ${ATTACHMENT_AWARENESS}`, `- ${THREADS_NUDGE}`);
@@ -90,16 +159,21 @@ export function buildCommerceOverlay(commerce: CommerceContext): string {
   }
 
   if (commerce.gate) {
-    lines.push('', gateInstruction(commerce.gate));
+    lines.push('', buildGateFailureInstruction(commerce.gate));
   }
 
   return lines.join('\n');
 }
 
 /**
- * The reservation deadline, surfaced only once it is close (or past). Read
- * straight off the engagement — the deadline was stamped at start precisely so
- * no chain or engine call is needed to check it mid-turn.
+ * The reservation deadline, surfaced only once it is close (or past), with how
+ * long is actually left — the model can only warn a user concretely if it knows
+ * the number. Read straight off the engagement: the deadline was stamped at
+ * start precisely so no chain or engine call is needed to check it mid-turn.
+ *
+ * Rendered once per turn, so a long unbroken turn never sees it move. Wrapping
+ * up early is the behaviour that matters, which is why the rule above says so
+ * unconditionally rather than relying on this notice arriving in time.
  */
 function expiryNotice(engagement: CommerceEngagement): string | null {
   const expiresAt = engagement.intent?.expiresAt;
@@ -112,9 +186,11 @@ function expiryNotice(engagement: CommerceEngagement): string | null {
   const now = Date.now();
   if (deadline <= now) {
     return (
-      `The payment reserved for this work expired at ${expiresAt}, so this job ` +
-      'can no longer be billed. Do not keep working on it: tell the user the ' +
-      'reservation window closed and that they need to start the request again.'
+      `The payment reserved for this work expired at ${expiresAt}, ` +
+      `${humanizeMs(now - deadline)} ago. Do not keep working on it — deliver what ` +
+      'you have now: `deliver_work` will try to reserve the payment again so the ' +
+      'finished work can still be billed, and will tell you if it could not. Do not ' +
+      'promise the user it was billed until the result says so.'
     );
   }
 
@@ -123,14 +199,29 @@ function expiryNotice(engagement: CommerceEngagement): string | null {
   if ((deadline - now) / window > EXPIRY_WARNING_FRACTION) return null;
 
   return (
-    `The payment reserved for this work releases at ${expiresAt} and this job ` +
-    'must be delivered before then. Tell the user you are close to that ' +
-    'deadline, wrap up, and call `deliver_work` with what you have.'
+    `The payment reserved for this work releases at ${expiresAt}, in about ` +
+    `${humanizeMs(deadline - now)}, and this job must be delivered before then. Tell ` +
+    'the user how long is left, wrap up now, and call `deliver_work` with what you have.'
   );
 }
 
-/** The turn instruction for a work request that did not start an engagement. */
-function gateInstruction(gate: CommerceGateFailure): string {
+/** A duration in words, coarse on purpose: this steers urgency, not a timer. */
+function humanizeMs(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return 'less than a minute';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
+}
+
+/**
+ * The instruction for a work request that did not start an engagement.
+ *
+ * Two callers, one wording: the overlay appends it when the ROUTER's gate
+ * failed before the turn was built, and `start_work` returns it when the SAME
+ * gate refuses inside the turn. A refusal must read the same either way.
+ */
+export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
   const { reason, serviceId, serviceName } = gate;
   const display = serviceName ?? serviceId;
 

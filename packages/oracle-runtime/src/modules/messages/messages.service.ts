@@ -34,7 +34,10 @@ import {
 } from './attachments/content-blocks.js';
 import { routeAttachment } from './attachments/route.js';
 import { FileProcessingService } from './file-processing.service.js';
-import { MatrixListenerBridge } from './matrix-listener-bridge.js';
+import {
+  MatrixListenerBridge,
+  type MatrixRelatesTo,
+} from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
@@ -101,7 +104,7 @@ export interface SendMessageRequest extends SendMessagePayload {
   /** Raw `m.mentions` payload from the Matrix event, used by group-chat gating. */
   matrixMentions?: { user_ids?: string[] };
   /** Raw `m.relates_to` payload, used to detect reply-to-bot. */
-  matrixRelatesTo?: { 'm.in_reply_to'?: { event_id: string } };
+  matrixRelatesTo?: MatrixRelatesTo;
   /** Room id (mirrors the bridge call) — used for display-name + roomInfo lookups. */
   matrixRoomId?: string;
   /**

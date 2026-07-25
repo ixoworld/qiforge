@@ -3425,10 +3425,6 @@ packages:
   '@ixo/logger@0.0.2':
     resolution: {integrity: sha512-HRoYZXXVoyKRoLXTFhY6wKE/nHcYddzEfk5L9gbcdkPF9+IQ7pQnXzL5yQtuiO8yWP2f6VamP8JAWTlASBTW/w==}
 
-  '@ixo/matrix-bot-sdk@0.8.0-ixo.12':
-    resolution: {integrity: sha512-T3gQb2MwytN+A+hzLrOmrIsROOOU9S4mHEJ68O/U86s+3R3vqTtQTwum4tetGXqg2pwJHXCVn8F449Xh/ybc4g==}
-    engines: {node: '>=22.0.0'}
-
   '@ixo/matrix-bot-sdk@0.8.0-ixo.14':
     resolution: {integrity: sha512-Uf4HflULYYrWudPEdzzFBTpXhMd0Flo0IbNdcMt3T+YGQBQl5xzzv8RCN8FWWz02YrWBzPO73ZsaSgn6cUFMBA==}
     engines: {node: '>=22.0.0'}
@@ -3440,10 +3436,6 @@ packages:
       matrix-js-sdk: ^37.5.0
       y-protocols: '*'
       yjs: '*'
-
-  '@ixo/matrix-sdk-crypto-nodejs@0.4.2':
-    resolution: {integrity: sha512-kzDNrsr9CojYX+8JfrND+/KbNRDcliwkaY9FTxo8OCM3ye7a4n2RmV6qo4jfRA4V9IqYA0G++s2Sr7XLMEhdng==}
-    engines: {node: '>= 22'}
 
   '@ixo/matrix-sdk-crypto-nodejs@0.6.1-ixo.1':
     resolution: {integrity: sha512-YQJ1wbnDgcJ32aCiIgypXXcyqUdciNhIPKCHTfmklUuI0JDgWIoXr7QwSpNMhIVx1O+fIBGQWZIJd2AePj5eXQ==}
@@ -16722,30 +16714,6 @@ snapshots:
     dependencies:
       winston: 3.19.0
 
-  '@ixo/matrix-bot-sdk@0.8.0-ixo.12':
-    dependencies:
-      '@ixo/matrix-sdk-crypto-nodejs': 0.4.2
-      '@types/express': 4.17.25
-      another-json: 0.2.0
-      async-lock: 1.4.1
-      bs58: 6.0.0
-      chalk: 4.1.2
-      express: 4.22.2
-      glob-to-regexp: 0.4.1
-      hash.js: 1.1.7
-      html-to-text: 9.0.5
-      htmlencode: 0.0.4
-      lowdb: 1.0.0
-      lru-cache: 10.4.3
-      mkdirp: 3.0.1
-      morgan: 1.11.0
-      postgres: 3.4.9
-      request: 2.88.2
-      request-promise: 4.2.6(request@2.88.2)
-      sanitize-html: 2.17.5
-    transitivePeerDependencies:
-      - supports-color
-
   '@ixo/matrix-bot-sdk@0.8.0-ixo.14':
     dependencies:
       '@ixo/matrix-sdk-crypto-nodejs': 0.6.1-ixo.1
@@ -16783,13 +16751,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@ixo/matrix-sdk-crypto-nodejs@0.4.2':
-    dependencies:
-      https-proxy-agent: 7.0.6
-      node-downloader-helper: 2.1.11
-    transitivePeerDependencies:
-      - supports-color
-
   '@ixo/matrix-sdk-crypto-nodejs@0.6.1-ixo.1':
     dependencies:
       https-proxy-agent: 7.0.6
@@ -16803,7 +16764,7 @@ snapshots:
       '@langchain/langgraph-checkpoint': 1.0.2(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@3.25.76))(ws@8.18.2))
       dotenv: 17.4.2
       marked: 16.4.2
-      matrix-bot-sdk: '@ixo/matrix-bot-sdk@0.8.0-ixo.12'
+      matrix-bot-sdk: '@ixo/matrix-bot-sdk@0.8.0-ixo.14'
       matrix-js-sdk: 37.13.0
       superjson: 1.13.3
     transitivePeerDependencies:
@@ -16816,7 +16777,7 @@ snapshots:
       '@langchain/langgraph-checkpoint': 1.0.2(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       dotenv: 17.4.2
       marked: 16.4.2
-      matrix-bot-sdk: '@ixo/matrix-bot-sdk@0.8.0-ixo.12'
+      matrix-bot-sdk: '@ixo/matrix-bot-sdk@0.8.0-ixo.14'
       matrix-js-sdk: 37.13.0
       superjson: 1.13.3
     transitivePeerDependencies:

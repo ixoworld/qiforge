@@ -21,7 +21,7 @@ import {
 } from './types.js';
 
 /**
- * Default lifetime of a claim intent, in nanoseconds (1 hour).
+ * Default lifetime of a claim intent, in nanoseconds (3 hours).
  *
  * When an agent reserves payment for a job, the chain escrows the funds and
  * holds them for this long. If no claim is submitted before the window closes,
@@ -32,7 +32,12 @@ import {
  * there is no way to cancel one early, so the user cannot start another paid
  * job with that oracle until the window expires.
  */
-export const DEFAULT_INTENT_DURATION_NS = (1_000_000_000 * 60 * 60).toString();
+export const DEFAULT_INTENT_DURATION_NS = (
+  1_000_000_000 *
+  60 *
+  60 *
+  3
+).toString();
 
 export class Authz {
   constructor(

@@ -8,16 +8,16 @@ import {
 
 interface Recorder {
   factory: ExtractorModelFactory;
-  calls: { params?: { model?: string }; messages: BaseMessage[] }[];
+  calls: { messages: BaseMessage[] }[];
 }
 
 /** A factory whose model returns `result` (or throws it, when it's an Error). */
 function recordingFactory(result: unknown): Recorder {
   const calls: Recorder['calls'] = [];
-  const factory: ExtractorModelFactory = (params) => ({
+  const factory: ExtractorModelFactory = () => ({
     withStructuredOutput: () => ({
       invoke: async (messages: BaseMessage[]) => {
-        calls.push({ ...(params !== undefined && { params }), messages });
+        calls.push({ messages });
         if (result instanceof Error) throw result;
         return result;
       },
@@ -65,17 +65,6 @@ describe('WorkSummaryExtractor', () => {
     const transcript = String(call?.messages[1]?.content);
     expect(transcript).toContain('Summarize my Q2 spending in USD.');
     expect(transcript).toContain('grand total');
-  });
-
-  it('passes the configured model override through to the factory', async () => {
-    const { extractor, recorder } = extractorFor(GOOD);
-    await extractor.extract({
-      messages: THREAD,
-      serviceId: 'tax-report',
-      serviceName: 'Tax report',
-      model: 'google/gemini-flash',
-    });
-    expect(recorder.calls[0]?.params).toEqual({ model: 'google/gemini-flash' });
   });
 
   it('keeps the newest messages when the thread exceeds the budget', async () => {

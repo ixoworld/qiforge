@@ -69,6 +69,28 @@ export interface SubmitClaimResult {
 }
 
 /**
+ * `true` when a failed `submit` is the chain refusing the claim because the
+ * escrow intent it settles against is gone or past its deadline, rather than
+ * anything about the claim itself.
+ *
+ * Two distinct chain refusals, both from `x/claims/keeper/msg_server.go`'s
+ * `SubmitClaim` when `useIntent` is set: `ErrIntentNotFound` ("intent not
+ * found", claims 1500) when the store no longer holds an active intent for
+ * (agent, collection), and an invalid-request wrap reading "intent <id> is
+ * expired" when it does but the block time is past `ExpireAt`.
+ *
+ * Matched on text because that is the only carrier: the wallet client
+ * simulates before broadcasting, so a doomed claim usually surfaces as a THROWN
+ * simulate error rather than a tx with a non-zero code — the module error
+ * string is the one thing present in both.
+ */
+export function isExpiredIntentFailure(detail: string): boolean {
+  const text = detail.toLowerCase();
+  if (!text.includes('intent')) return false;
+  return text.includes('not found') || text.includes('expired');
+}
+
+/**
  * The chain's evaluation of a submitted claim. `status` is the raw
  * `EvaluationStatus` enum value from `ixo/claims/v1beta1` (0 PENDING,
  * 1 APPROVED, 2 REJECTED, 3 DISPUTED, 4 INVALIDATED, 5 FLAGGED).

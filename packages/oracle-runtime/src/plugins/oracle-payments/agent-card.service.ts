@@ -1,4 +1,5 @@
 import { IXO } from '@ixo/oracles-chain-client';
+import { Logger as NestLogger } from '@nestjs/common';
 import { z } from 'zod';
 import type { Logger } from '../../plugin-api/types.js';
 import {
@@ -74,7 +75,7 @@ export class AgentCardService {
   private readonly getEntity: EntityFetcher;
   private readonly fetchCard: CardFetcher;
   private readonly clock: () => number;
-  private readonly logger?: Logger;
+  private readonly logger: Logger;
   private readonly cache = new Map<string, CacheEntry>();
   private localSeed: ResolvedAgentCard | null = null;
   private driftWarnedForProof?: string;
@@ -83,7 +84,7 @@ export class AgentCardService {
     this.getEntity = deps.getEntity ?? defaultGetEntity;
     this.fetchCard = deps.fetchCard ?? defaultFetchCard;
     this.clock = deps.clock ?? Date.now;
-    this.logger = deps.logger;
+    this.logger = deps.logger ?? new NestLogger(AgentCardService.name);
   }
 
   /**
@@ -137,7 +138,7 @@ export class AgentCardService {
       JSON.stringify(onChain.services);
     if (differs) {
       this.driftWarnedForProof = onChain.cardProof;
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] local agent card (AGENT_CARD_PATH) differs from the on-chain #acard (proof ${onChain.cardProof}) — republish or update the local file; the manifest may advertise services users cannot contract`,
       );
     }
@@ -154,26 +155,45 @@ export class AgentCardService {
     try {
       rawEntity = await this.getEntity(entityDid);
     } catch (error) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] entity read failed for ${entityDid}: ${errorMessage(error)}`,
       );
       return null;
     }
 
+    // Every `null` below is "this oracle publishes no usable card", which
+    // makes the message router skip its classifier and run every Matrix turn
+    // as support. Each reason is named: silence here is indistinguishable
+    // from a routing bug once it reaches the chat.
     const entity = EntitySchema.safeParse(rawEntity);
-    if (!entity.success) return null;
+    if (!entity.success) {
+      this.logger.warn(
+        `[oracle-payments] entity doc for ${entityDid} has no readable linkedResource list — no agent card`,
+      );
+      return null;
+    }
 
     const resource = (entity.data.linkedResource ?? []).find(
       (r) => r.type === 'agentCard' && (r.id?.endsWith('#acard') ?? false),
     );
-    if (!resource?.serviceEndpoint) return null;
+    if (!resource?.serviceEndpoint) {
+      this.logger.warn(
+        `[oracle-payments] entity ${entityDid} has no agentCard '#acard' linked resource with a serviceEndpoint — no agent card, so every turn routes as support`,
+      );
+      return null;
+    }
 
     const rawCard = await this.fetchCard(resource.serviceEndpoint);
-    if (rawCard === null || rawCard === undefined) return null;
+    if (rawCard === null || rawCard === undefined) {
+      this.logger.warn(
+        `[oracle-payments] agent card fetch returned nothing from ${resource.serviceEndpoint}`,
+      );
+      return null;
+    }
 
     const parsed = DisplayCardSchema.safeParse(rawCard);
     if (!parsed.success) {
-      this.logger?.warn?.(
+      this.logger.warn(
         `[oracle-payments] agent card for ${entityDid} failed shape check`,
       );
       return null;
@@ -181,7 +201,12 @@ export class AgentCardService {
 
     const subject = parsed.data.credentialSubject;
     // The card must be ABOUT the entity it is anchored on.
-    if (subject.id !== entityDid) return null;
+    if (subject.id !== entityDid) {
+      this.logger.warn(
+        `[oracle-payments] agent card at ${resource.serviceEndpoint} describes ${subject.id} but is anchored on ${entityDid} — ignoring it`,
+      );
+      return null;
+    }
 
     return {
       oracleEntityDid: entityDid,

@@ -20,6 +20,7 @@ import {
 import { OraclePaymentsModule } from './oracle-payments.module.js';
 import { ThreadAttachmentService } from './thread-attachments.service.js';
 import {
+  createOraclePaymentsSupportTools,
   createOraclePaymentsTools,
   createOraclePaymentsWorkTools,
 } from './tools.js';
@@ -41,8 +42,6 @@ const configSchema = z.object({
   AGENT_CARD_PATH: z.string().optional(),
   /** Classifier model override for the commerce message router. */
   ORACLE_PAYMENTS_ROUTER_MODEL: z.string().optional(),
-  /** Model override for the trusted request/workSummary extractor. */
-  ORACLE_PAYMENTS_EXTRACTOR_MODEL: z.string().optional(),
   /** Size ceiling for a single delivered file. */
   ORACLE_PAYMENTS_MAX_DELIVERABLE_MB: z.coerce
     .number()
@@ -60,10 +59,11 @@ const manifest: PluginManifest = {
     'User asks what you can do for them, what services you offer, or how much something costs.',
     'User wants to hire or contract you for a specific task, or asks how to get started with paid work.',
     'User asks whether they are already contracted, or how much of their quota / runs remain.',
+    'User has decided they want a specific service performed — `start_work` is the only way a paid job begins.',
   ],
   whenNotToUse: [
-    'Answering a free support question itself — reply normally; reach for these tools only to show services, propose a contract, or check status.',
-    'Performing the contracted work — that is the work persona, not these support tools.',
+    'Answering a free support question itself — reply normally; reach for these tools only to show services, propose a contract, check status, or start a job.',
+    'Doing the contracted work — the work tools bind once a job is open, never before.',
   ],
   examples: [
     {
@@ -81,6 +81,13 @@ const manifest: PluginManifest = {
       user: 'Am I already contracted? How many runs do I have left?',
       thought: 'Read-only status question.',
       tool: 'get_contract_status',
+    },
+    {
+      user: "I'm contracted — go ahead and do my tax report.",
+      thought:
+        'They want the service performed now: open the job through the gate.',
+      tool: 'start_work',
+      args: { serviceId: 'tax-report' },
     },
   ],
   tags: ['payments', 'contracting', 'services', 'commerce'],
@@ -112,10 +119,11 @@ export interface OraclePaymentsPluginOptions {
  * The Matrix agent-commerce plugin. Resolves the oracle's Agent Card, looks
  * up per-subscriber contract records from the engine, stores thread-scoped
  * work engagements, and registers the commerce router port so the core
- * message router can classify support vs work per turn. Support mode exposes
- * `list_services` / `show_contract` / `get_contract_status`; work mode swaps
- * them for the work surface — `cancel_work` now, `deliver_work` in the
- * delivery lane.
+ * message router can classify support vs work per turn. Both modes expose the
+ * read-only commerce surface (`list_services`, `show_contract`,
+ * `get_contract_status`, `get_thread_attachment`); support adds `start_work`,
+ * the one gated route into work mode, and work adds `deliver_work` /
+ * `cancel_work`.
  *
  * `autoDetect` keeps the plugin on wherever the oracle has an entity DID (always
  * true today, base-required); runtime behavior is a no-op until a card resolves.
@@ -152,8 +160,10 @@ export class OraclePaymentsPlugin extends OraclePlugin {
 
   constructor(options: OraclePaymentsPluginOptions = {}) {
     super();
-    this.agentCard =
-      options.agentCard ?? new AgentCardService({ logger: console });
+    // No `logger` overrides here: every service defaults to its own
+    // class-named Nest logger, so production diagnostics are never silent and
+    // every line is attributable. Tests inject a spy through the deps.
+    this.agentCard = options.agentCard ?? new AgentCardService();
     this.contractRecord = options.contractRecord ?? new ContractRecordService();
     this.engagement = options.engagement ?? new EngagementService();
     this.contractGate = options.contractGate;
@@ -189,7 +199,6 @@ export class OraclePaymentsPlugin extends OraclePlugin {
       engagement: this.engagement,
       network:
         (config ? readConfigString(config, 'NETWORK') : undefined) ?? 'devnet',
-      logger: console,
     });
     return this.workIntent;
   }
@@ -199,6 +208,10 @@ export class OraclePaymentsPlugin extends OraclePlugin {
       engagement: this.engagement,
       contractGate: this.resolveContractGate(config),
       extractor: this.extractor,
+      // The same escrow lane the router starts jobs with: delivery reserves
+      // again when a job outlives its window, and both must be the one chain
+      // write.
+      intent: this.resolveWorkIntent(config),
     });
     return this.workClaim;
   }
@@ -229,19 +242,61 @@ export class OraclePaymentsPlugin extends OraclePlugin {
   }
 
   override getRequestTools(rtCtx: RuntimeContext): PluginTool[] {
-    if (rtCtx.commerce?.mode === 'work') {
-      // Work-mode surface: deliver or cancel. Cancellation is an agent
-      // decision (the router is pure sticky); the fork's own work tools carry
-      // the actual service.
-      return createOraclePaymentsWorkTools({
-        workClaim: this.resolveWorkClaim(rtCtx.config),
-        threadAttachments: this.threadAttachments,
-      });
+    // Never log `rtCtx.config` — it is the validated env, mnemonics and access
+    // tokens included. The mode is the only part worth tracing here.
+
+    // RULE: the commerce surface is Matrix-only, and contributes nothing at
+    // all anywhere else. Every tool here speaks Matrix — the cards post
+    // `ixo.oracle.component` events into a room, engagements are keyed to
+    // thread roots, `deliver_work` uploads into the room the job started in,
+    // `get_thread_attachment` reads a thread's timeline. On HTTP, portal or
+    // Slack they are meaningless at best and broken at worst.
+    //
+    // Deliberately keyed on `session.client` and NOT on `ctx.commerce`: a
+    // Matrix turn the router left inert (no agent card published yet) must
+    // still be able to answer "what do you offer?" — with "nothing published
+    // yet" when that is the truth.
+    if (rtCtx.session.client !== 'matrix') {
+      rtCtx.logger.debug?.('[oracle-payments] non-Matrix turn — no tools');
+      return [];
     }
-    return createOraclePaymentsTools({
+
+    const shared = {
       agentCard: this.agentCard,
       contractRecord: this.contractRecord,
       threadAttachments: this.threadAttachments,
+    };
+
+    if (rtCtx.commerce?.mode === 'work') {
+      // Work-mode surface: deliver or cancel, plus the shared read-only
+      // commerce tools so a locked-in user can still ask what they are paying
+      // for. Cancellation is an agent decision (the router is pure sticky);
+      // the fork's own work tools carry the actual service.
+      rtCtx.logger.debug?.('[oracle-payments] work-mode tools');
+      return createOraclePaymentsWorkTools({
+        ...shared,
+        workClaim: this.resolveWorkClaim(rtCtx.config),
+      });
+    }
+
+    // `start_work` opens an escrowed engagement, so it exists only where an
+    // engagement means something: a turn the commerce router actually routed.
+    // On an inert-router turn nothing would ever read the engagement it
+    // started, while the reservation would still block the user's real paid
+    // work — so the read-only surface stands alone there.
+    if (!rtCtx.commerce) {
+      rtCtx.logger.debug?.('[oracle-payments] unrouted turn — read-only tools');
+      return createOraclePaymentsTools(shared);
+    }
+
+    rtCtx.logger.debug?.('[oracle-payments] support-mode tools');
+    return createOraclePaymentsSupportTools({
+      ...shared,
+      startWork: {
+        agentCard: this.agentCard,
+        contractGate: this.resolveContractGate(rtCtx.config),
+        workIntent: this.resolveWorkIntent(rtCtx.config),
+      },
     });
   }
 

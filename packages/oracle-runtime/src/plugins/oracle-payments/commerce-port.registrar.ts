@@ -8,24 +8,12 @@ import { ConfigService } from '@nestjs/config';
 import {
   clearCommerceRouterPort,
   setCommerceRouterPort,
-  type CommerceRoutedService,
 } from '../../modules/messages/commerce-router-port.js';
 import { AgentCardService } from './agent-card.service.js';
 import { ContractGateService } from './contract-gate.service.js';
 import { EngagementService } from './engagement.service.js';
-import type { AgentCardServiceView } from './types.js';
+import { toRoutedService } from './util.js';
 import { WorkIntentService } from './work-intent.service.js';
-
-function toRoutedService(view: AgentCardServiceView): CommerceRoutedService {
-  return {
-    id: view.id,
-    name: view.name,
-    ...(view.description !== undefined && { description: view.description }),
-    ...(view.tags !== undefined && { tags: view.tags }),
-    ...(view.examples !== undefined && { examples: view.examples }),
-    priceUsd: view.price.amount,
-  };
-}
 
 /**
  * Registers the plugin's commerce knowledge on the core `CommerceRouterPort`
@@ -61,8 +49,12 @@ export class CommerceRouterPortRegistrar
         const services = await this.agentCard.getServices(entityDid);
         return services ? services.map(toRoutedService) : null;
       },
-      getActiveEngagement: (roomId, threadId) =>
-        this.engagement.getActive(roomId, threadId),
+      findActiveEngagement: ({ senderDid, roomId, threadId }) =>
+        this.engagement.findActiveForUser({
+          userDid: senderDid,
+          roomId,
+          threadId,
+        }),
       checkContractGate: (params) => this.gate.check(params),
       startEngagement: (roomId, threadId, start) =>
         this.intent.startEngagement(roomId, threadId, start),
