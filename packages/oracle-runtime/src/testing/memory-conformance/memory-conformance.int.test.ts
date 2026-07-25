@@ -97,51 +97,58 @@ describe('Memory Engine Contract v1 — live conformance', () => {
 
     // Always print: a conformance run's value is the per-check evidence, not
     // the boolean. Reviewers need to see which rule failed and why.
+    // eslint-disable-next-line no-console -- the report IS the deliverable of this run
     console.log(`\n${formatReport(report)}\n`);
   });
 
+  /** `MEC-07 Missing x-room-id is rejected: call succeeded without …` */
+  const describeFailure = (r: {
+    id: string;
+    title: string;
+    detail: string;
+  }): string => `${r.id} ${r.title}: ${r.detail}`;
+
   it('passes every Core check', () => {
-    const coreFailures = report.results.filter(
-      (r) => r.level === 'core' && r.status === 'fail',
-    );
-    expect(
-      coreFailures.map((r) => `${r.id} ${r.title}: ${r.detail}`),
-      'Core conformance failures',
-    ).toEqual([]);
+    // Asserting on the descriptions rather than a boolean so a failure names
+    // the rule and the evidence in the diff, not just `false !== true`.
+    const coreFailures = report.results
+      .filter((r) => r.level === 'core' && r.status === 'fail')
+      .map(describeFailure);
+
+    expect(coreFailures).toEqual([]);
     expect(report.coreConformant).toBe(true);
   });
 
   it('enforces cross-user isolation', () => {
     const isolation = report.results.find((r) => r.id === 'MEC-13');
-    expect(isolation).toBeDefined();
 
-    // A skip here means the run had no second identity — the sovereignty
-    // guarantee is then simply unverified, and this test says so out loud
-    // rather than letting a green run imply isolation was checked.
-    expect(
-      isolation?.status,
-      'MEC-13 was not verified — set TEST_USER_B_MNEMONIC and TEST_USER_B_ROOM_ID. ' +
-        'Cross-user isolation is the one check whose absence invalidates the run.',
-    ).not.toBe('skip');
-    expect(isolation?.status).toBe('pass');
+    // A skip means the run had no second identity — the sovereignty guarantee
+    // is then simply unverified, and this test says so out loud rather than
+    // letting a green run imply isolation was checked.
+    const problem =
+      isolation === undefined
+        ? 'MEC-13 did not run at all'
+        : isolation.status === 'skip'
+          ? `MEC-13 was NOT VERIFIED — set TEST_USER_B_MNEMONIC and TEST_USER_B_ROOM_ID. Cross-user isolation is the one check whose absence invalidates the run. (${isolation.detail})`
+          : isolation.status === 'fail'
+            ? describeFailure(isolation)
+            : null;
+
+    expect(problem).toBeNull();
   });
 
   it('passes every Full check when a REST URL is configured', () => {
-    if (!process.env.MEMORY_ENGINE_URL) {
-      // Core-only engines are legitimate (§1.1). Nothing to assert.
-      expect(
-        report.results
-          .filter((r) => r.level === 'full')
-          .every((r) => r.status === 'skip'),
-      ).toBe(true);
-      return;
-    }
-    const fullFailures = report.results.filter(
-      (r) => r.level === 'full' && r.status === 'fail',
-    );
-    expect(
-      fullFailures.map((r) => `${r.id} ${r.title}: ${r.detail}`),
-      'Full conformance failures',
-    ).toEqual([]);
+    const fullResults = report.results.filter((r) => r.level === 'full');
+
+    // Core-only engines are legitimate (§1.1): with no REST URL every
+    // Full check must SKIP. With one, none may fail. Both cases reduce to a
+    // single unconditional assertion on the offending checks.
+    const violations = process.env.MEMORY_ENGINE_URL
+      ? fullResults.filter((r) => r.status === 'fail').map(describeFailure)
+      : fullResults
+          .filter((r) => r.status !== 'skip')
+          .map((r) => `${r.id} ran without MEMORY_ENGINE_URL (${r.status})`);
+
+    expect(violations).toEqual([]);
   });
 });
