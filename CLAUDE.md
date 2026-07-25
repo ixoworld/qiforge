@@ -59,7 +59,7 @@ CI (`.github/workflows/ci.yml`, on every PR) runs `pnpm install --frozen-lockfil
 
 ### Monorepo structure
 
-- **`packages/oracle-runtime/`** — `@ixo/oracle-runtime`, the framework. Bootstrap (`createOracleApp`), agent build, graph, always-on Nest modules, bundled plugins. Three public entry points: `.`, `./testing`, `./testing/integration`.
+- **`packages/oracle-runtime/`** — `@ixo/oracle-runtime`, the framework. Bootstrap (`createOracleApp`), agent build, graph, always-on Nest modules, bundled plugins. Four public entry points: `.`, `./testing`, `./testing/integration`, `./testing/memory-conformance`.
 - **`apps/qiforge-example/`** — reference oracle. Boots the bundled set + `WeatherPlugin`, demos `nestModules`, `authExcludedRoutes`, `manifestOverrides`, and a dev-only BullMQ dashboard.
 - **`apps/app/`** — legacy monolith, being removed.
 - **`packages/`** — shared packages: `@ixo/common`, `@ixo/logger`, `@ixo/matrix`, `@ixo/oracles-events` (`packages/events`), `@ixo/slack`, `@ixo/sqlite-saver`, `@ixo/ucan`, `@ixo/oracles-chain-client`, `@ixo/oracles-client-sdk`, plus the shared configs `@ixo/eslint-config`, `@ixo/typescript-config`, `@ixo/vitest-config`.
@@ -154,6 +154,7 @@ The base (Tier-0) schema lives in `packages/oracle-runtime/src/config/base-env-s
 | LLM + model catalog       | `packages/oracle-runtime/src/llm/`                                                                                                        |
 | Matrix checkpointer       | `packages/oracle-runtime/src/matrix/checkpointer/`                                                                                        |
 | Unit test harness         | `packages/oracle-runtime/src/testing/create-test-runtime.ts`                                                                              |
+| Memory contract + suite   | `specs/memory-engine-contract-v1.md`, `packages/oracle-runtime/src/testing/memory-conformance/`                                           |
 | Integration harness       | `packages/oracle-runtime/src/testing/integration/`                                                                                        |
 | Reference oracle          | `apps/qiforge-example/src/main.ts`                                                                                                        |
 | Reference plugin          | `apps/qiforge-example/src/plugins/weather/weather.plugin.ts`                                                                              |

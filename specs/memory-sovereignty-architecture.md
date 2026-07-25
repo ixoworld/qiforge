@@ -29,11 +29,11 @@
 
 **Recommendation — three tiers behind one frozen contract:**
 
-| Tier  | What                                                                                               | Sovereignty                                         | When                                            |
-| ----- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------- |
-| **0** | Freeze the Memory Engine contract as a versioned `ixo:memory` spec + conformance suite             | Protocol-level federation — anyone can implement    | First. Unblocks everything else.                |
-| **1** | Replace shared Neo4j with **Postgres + Apache AGE + pgvector**, one instance per oracle deployment | Self-hosted, Apache-2.0 top to bottom, no shared DB | Next. Kills the SPOF and the vendor dependency. |
-| **2** | Per-user memory graph in **the user's own Matrix room**, riding the existing checkpointer rail     | The user holds their memory. Genuine sovereignty.   | The actual promise. Build on Tier 1.            |
+| Tier  | What                                                                                                                                                                         | Sovereignty                                         | When                                            |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------- |
+| **0** | Freeze the Memory Engine contract as a versioned `ixo:memory` spec + conformance suite — **delivered**, see [`memory-engine-contract-v1.md`](./memory-engine-contract-v1.md) | Protocol-level federation — anyone can implement    | Done, pending a run against the live engine     |
+| **1** | Replace shared Neo4j with **Postgres + Apache AGE + pgvector**, one instance per oracle deployment                                                                           | Self-hosted, Apache-2.0 top to bottom, no shared DB | Next. Kills the SPOF and the vendor dependency. |
+| **2** | Per-user memory graph in **the user's own Matrix room**, riding the existing checkpointer rail                                                                               | The user holds their memory. Genuine sovereignty.   | The actual promise. Build on Tier 1.            |
 
 **Do not adopt FalkorDB.** It is the best technical fit for multi-tenant graph density, but it is SSPLv1 — a license whose entire purpose is to constrain offering the software as a service, which is exactly what an oracle does. That relocates the vendor dependency rather than removing it.
 
