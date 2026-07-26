@@ -408,17 +408,25 @@ const connectSchema = z.object({
   toStep: z.string().min(1),
   input: z.string().min(1),
 });
+const stepPatchSchema = flowStepSchema.partial().extend({
+  phase: z
+    .string()
+    .min(1)
+    .nullable()
+    .optional()
+    .describe('Set the step phase, or use null to clear an existing phase.'),
+});
 const updateStepSchema = z.object({
   ...base,
   stepId: z.string().min(1),
-  patch: flowStepSchema.partial(),
+  patch: stepPatchSchema,
 });
 
 /** Route an update_step patch to the focused per-block edits. */
 export function applyStepPatch(
   doc: YDoc,
   stepId: string,
-  patch: Partial<FlowStep>,
+  patch: z.infer<typeof stepPatchSchema>,
 ): void {
   if (patch.inputs) setStepInputs(doc, stepId, patch.inputs);
   if (patch.runWhen !== undefined || patch.conditions !== undefined) {
@@ -433,7 +441,8 @@ export function applyStepPatch(
     setStepAssignment(doc, stepId, patch.assignTo);
   if (patch.requireConfirmation !== undefined)
     setStepConfirmation(doc, stepId, patch.requireConfirmation);
-  if (patch.phase !== undefined) setStepPhase(doc, stepId, patch.phase);
+  if (patch.phase !== undefined)
+    setStepPhase(doc, stepId, patch.phase ?? undefined);
   if (patch.execution !== undefined)
     setStepExecution(doc, stepId, patch.execution);
   if (patch.skills !== undefined) setStepSkills(doc, stepId, patch.skills);
@@ -552,7 +561,7 @@ export function buildAuthoringTools(
         description:
           "Update any subset of a step's settings in one call (phase, execution boundary, required skills, inputs, conditions, schedule, assignee, confirmation, " +
           'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
-          'clear an onEvent auto-trigger.',
+          'clear an onEvent auto-trigger. Set phase to null to clear an existing phase.',
         schema: updateStepSchema,
       },
     ),
