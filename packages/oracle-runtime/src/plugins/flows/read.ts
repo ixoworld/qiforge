@@ -77,6 +77,7 @@ interface FlowNode {
   registryType?: string;
   title?: string;
   description?: string;
+  phase?: string;
 }
 interface CompiledStructure {
   meta: { title: string; goal?: string };
@@ -103,6 +104,7 @@ function readCompiledStructure(doc: YDoc): CompiledStructure | null {
       registryType: asString(value.get('registryType')),
       title: asString(value.get('title')),
       description: asString(value.get('description')),
+      phase: asString(value.get('phase')),
     };
   });
 
@@ -150,6 +152,20 @@ function firstActor(value: unknown): string | undefined {
     /* ignore */
   }
   return undefined;
+}
+
+function stringList(value: unknown): string[] {
+  if (typeof value !== 'string' || value.length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+          (item): item is string => typeof item === 'string' && item.length > 0,
+        )
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The assignee DID from the `assignment` prop (`{ assignedActor: { did } }` JSON). */
@@ -275,6 +291,19 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
     };
     if (node.title && node.title !== node.can) step.title = node.title;
     if (node.description) step.description = node.description;
+    if (node.phase) step.phase = node.phase;
+    if (props.flowAgentExecutionMode === 'human-only') {
+      step.execution = 'human-only';
+    } else if (
+      props.flowAgentExecutionMode === 'saved-input' ||
+      props.flowAgentExecutionMode === 'runtime-input-required'
+    ) {
+      step.execution = 'agent-capable';
+    }
+    const skills = stringList(props.requiredSkills);
+    const primarySkill = asString(props.requiredSkill);
+    if (skills.length > 0) step.skills = skills;
+    else if (primarySkill) step.skills = [primarySkill];
     if (inputs) step.inputs = inputs;
     if (conditions.length === 1 && conditions[0]) step.runWhen = conditions[0];
     else if (conditions.length > 1) step.conditions = conditions;

@@ -175,7 +175,7 @@ describe('translator: flowSpecToBaseUcan', () => {
       title: 'Test flow',
       goal: 'do a thing',
       steps: [
-        { id: 'one', action, inputs: { x: 1 } },
+        { id: 'one', action, phase: 'discovery', inputs: { x: 1 } },
         {
           id: 'two',
           action,
@@ -198,6 +198,7 @@ describe('translator: flowSpecToBaseUcan', () => {
     expect(plan.capabilities.map((c) => c.id)).toEqual(['one', 'two']);
     expect(plan.capabilities[0]?.with).toBe('ixo:flow:test-flow:one');
     expect(plan.capabilities[0]?.nb).toEqual({ x: 1 });
+    expect(plan.capabilities[0]?.phase).toBe('discovery');
     // Conditions are NEVER emitted onto the capability — they are written to props directly.
     expect(plan.capabilities[1]?.condition).toBeUndefined();
   });

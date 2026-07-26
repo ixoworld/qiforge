@@ -13,7 +13,10 @@ import {
   setStepConfirmation,
   setStepEventTrigger,
   setStepInputs,
+  setStepPhase,
   setStepSchedule,
+  setStepExecution,
+  setStepSkills,
   setStepTrigger,
   updateFlowMeta,
 } from './edit.js';
@@ -88,6 +91,30 @@ describe('edit: settings round-trip via read', () => {
     expect(step.due).toEqual({ at: '2026-07-01T00:00:00Z', within: 'PT1H' });
     expect(step.assignTo).toBe('did:ixo:assignee');
     expect(step.requireConfirmation).toBe(true);
+  });
+
+  it('phase edits round-trip without changing sibling steps', () => {
+    const doc = threeStepDoc();
+    setStepPhase(doc, 'b', 'validation');
+
+    const flow = readFlowSpec(doc, 'r')!;
+    expect(flow.steps.find((step) => step.id === 'b')?.phase).toBe(
+      'validation',
+    );
+    expect(flow.steps.find((step) => step.id === 'a')?.phase).toBeUndefined();
+
+    setStepPhase(doc, 'b', undefined);
+    expect(readStep(doc, 'r', 'b')?.phase).toBeUndefined();
+  });
+
+  it('execution and governed skill metadata round-trip', () => {
+    const doc = threeStepDoc();
+    setStepExecution(doc, 'b', 'human-only');
+    setStepSkills(doc, 'b', ['assessment-review', 'evidence-check']);
+
+    const step = readStep(doc, 'r', 'b');
+    expect(step?.execution).toBe('human-only');
+    expect(step?.skills).toEqual(['assessment-review', 'evidence-check']);
   });
 
   it('trigger round-trips flow-start and clears back to the manual default', () => {

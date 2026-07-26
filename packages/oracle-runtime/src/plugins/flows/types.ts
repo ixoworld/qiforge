@@ -78,6 +78,19 @@ export const flowStepSchema = z.object({
     .describe('Action name from list_actions (e.g. "qi/email.send").'),
   title: z.string().optional(),
   description: z.string().optional(),
+  phase: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Stable semantic group for this step, such as "discovery" or "deployment".',
+    ),
+  execution: z
+    .enum(['human-only', 'agent-capable'])
+    .optional()
+    .describe(
+      'Whether only a person may run this step or a suitably skilled, authorised Flow Agent may run it.',
+    ),
 
   inputs: z
     .record(z.string(), z.unknown())
@@ -132,7 +145,12 @@ export const flowStepSchema = z.object({
     .record(z.string(), z.array(hookSchema))
     .optional()
     .describe('Lifecycle hooks: event name -> hooks.'),
-  skills: z.array(z.string()).optional(),
+  skills: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Governed skill ids required for agent-capable execution. The first is used for Flow Agent matching.',
+    ),
   requireConfirmation: z
     .boolean()
     .optional()
