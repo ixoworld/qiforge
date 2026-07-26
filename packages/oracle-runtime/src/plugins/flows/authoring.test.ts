@@ -136,4 +136,22 @@ describe('update_step patch routing', () => {
     expect(cleared?.onEvent).toBeUndefined();
     expect(cleared?.trigger).toBeUndefined();
   });
+
+  it('routes phase updates through the friendly FlowSpec patch', () => {
+    const doc = twoStepDoc();
+    applyStepPatch(doc, 'notify', { phase: 'deployment' });
+    expect(readStep(doc, 'r', 'notify')?.phase).toBe('deployment');
+  });
+
+  it('routes execution boundaries and governed skill requirements', () => {
+    const doc = twoStepDoc();
+    applyStepPatch(doc, 'notify', {
+      execution: 'agent-capable',
+      skills: ['send-provider-update'],
+    });
+    expect(readStep(doc, 'r', 'notify')).toMatchObject({
+      execution: 'agent-capable',
+      skills: ['send-provider-update'],
+    });
+  });
 });

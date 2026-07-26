@@ -25,7 +25,13 @@ describe('readFlowSpec: multi-source round-trip', () => {
       title: 'Round trip',
       goal: 'prove the read recovers props the node map drops',
       steps: [
-        { id: 'one', action, title: 'First', inputs: { name: 'alice' } },
+        {
+          id: 'one',
+          action,
+          title: 'First',
+          phase: 'discovery',
+          inputs: { name: 'alice' },
+        },
         {
           id: 'two',
           action,
@@ -44,6 +50,7 @@ describe('readFlowSpec: multi-source round-trip', () => {
 
     const [one, two] = flow!.steps;
     expect(one?.action).toBe(action);
+    expect(one?.phase).toBe('discovery');
     expect(one?.inputs).toEqual({ name: 'alice' });
     expect(two?.inputs).toEqual({ batches: '{{one.output.items}}', limit: 5 });
 
