@@ -209,6 +209,7 @@ describe('createMainAgent', () => {
     const names = middleware.map((m) => m.name);
 
     expect(names).toEqual([
+      'WorkStatusMiddleware',
       'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
       'ToolRepetitionGuardMiddleware',

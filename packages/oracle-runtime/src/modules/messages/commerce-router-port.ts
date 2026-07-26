@@ -50,6 +50,8 @@ export type CommerceGateResult =
   | {
       ok: false;
       reason: CommerceGateFailureReason;
+      /** What went wrong, in words the agent can relay. See {@link CommerceGateFailure.detail}. */
+      detail?: string;
       /** The blocking job, when the reason is `engagement_in_progress`. */
       inProgress?: CommerceInProgressEngagement;
     };
@@ -58,11 +60,11 @@ export type CommerceGateResult =
  * Outcome of starting an engagement. Starting can fail on its own terms even
  * after the gate passed — reserving the payment on-chain is a chain write —
  * so the failure carries a reason the router surfaces exactly like a gate
- * failure.
+ * failure, plus the chain's own words for why.
  */
 export type CommerceEngagementStartResult =
   | { ok: true; engagement: CommerceEngagement }
-  | { ok: false; reason: CommerceGateFailureReason };
+  | { ok: false; reason: CommerceGateFailureReason; detail?: string };
 
 /**
  * Commerce knowledge the message router consults, registered by the

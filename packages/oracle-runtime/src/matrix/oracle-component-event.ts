@@ -37,8 +37,12 @@ export interface OracleComponentReplaceRelation {
   event_id: string;
 }
 
-/** The `content` of an `ixo.oracle.component` timeline event. */
-export interface OracleComponentEventContent {
+/**
+ * The component payload of an `ixo.oracle.component` event, carrying no Matrix
+ * relation. It appears twice on an edit: once at the top level as the fallback
+ * body, and once under `m.new_content` as the replacement content.
+ */
+export interface OracleComponentEnvelope {
   component: OracleComponentName;
   /** Per-component payload consumed by the matching portal card. */
   props: Record<string, unknown>;
@@ -47,6 +51,16 @@ export interface OracleComponentEventContent {
   sessionId: string;
   requestId: string;
   toolCallId?: string;
+}
+
+/** The `content` of an `ixo.oracle.component` timeline event. */
+export interface OracleComponentEventContent extends OracleComponentEnvelope {
+  /**
+   * Replacement content for an `m.replace` edit. Matrix clients resolve an
+   * edited event's content from here, so it must repeat the full envelope —
+   * and must not nest a relation of its own.
+   */
+  'm.new_content'?: OracleComponentEnvelope;
   'm.relates_to'?:
     | OracleComponentThreadRelation
     | OracleComponentReplaceRelation;
@@ -74,12 +88,18 @@ export interface OracleComponentInput {
  * Build the event content for an `ixo.oracle.component` timeline event.
  * The `m.relates_to` relation is attached only when a `threadId` or
  * `replacesEventId` is provided — a top-level (unthreaded) one-shot event
- * posts without a relation.
+ * posts without a relation. An `m.replace` edit additionally repeats the
+ * envelope under `m.new_content`, which is where edit-aware clients read the
+ * replacement content from.
  */
 export function buildOracleComponentContent(
   input: OracleComponentInput,
 ): OracleComponentEventContent {
-  const { threadId, replacesEventId, toolCallId, ...envelope } = input;
+  const { threadId, replacesEventId, toolCallId, ...rest } = input;
+  const envelope: OracleComponentEnvelope = {
+    ...rest,
+    ...(toolCallId !== undefined && { toolCallId }),
+  };
   const relation: OracleComponentEventContent['m.relates_to'] | undefined =
     replacesEventId !== undefined
       ? { rel_type: 'm.replace', event_id: replacesEventId }
@@ -88,7 +108,7 @@ export function buildOracleComponentContent(
         : undefined;
   return {
     ...envelope,
-    ...(toolCallId !== undefined && { toolCallId }),
+    ...(replacesEventId !== undefined && { 'm.new_content': envelope }),
     ...(relation !== undefined && { 'm.relates_to': relation }),
   };
 }

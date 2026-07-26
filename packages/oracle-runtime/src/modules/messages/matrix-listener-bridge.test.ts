@@ -1,6 +1,7 @@
 import { type SessionManagerService } from '@ixo/common';
 import { type MessageEvent, type MessageEventContent } from '@ixo/matrix';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CommerceEngagement } from '../../plugin-api/types.js';
 import { makeConfig } from '../../testing/nest-doubles.js';
 import {
   MatrixListenerBridge,
@@ -13,6 +14,23 @@ import {
 } from './commerce-router-port.js';
 import { MessageRouterService } from './message-router.service.js';
 import { makeSessionManagerStub } from './__test-fixtures__/deps.js';
+
+/**
+ * The bridge drives the process-wide `workStatusProducer` singleton. Swap it
+ * for spies so the card's lifecycle is observable without a live Matrix
+ * connection — the posting semantics themselves are the producer's own tests.
+ * Only the methods the bridge calls are stubbed: a card lifecycle that grows a
+ * new call should surface here rather than pass unobserved.
+ */
+const workStatus = vi.hoisted(() => ({
+  beginTurn: vi.fn(),
+  emit: vi.fn(),
+  finish: vi.fn(),
+}));
+
+vi.mock('../../matrix/work-status-producer.js', () => ({
+  workStatusProducer: workStatus,
+}));
 
 const ORACLE_DID = 'did:ixo:oracle';
 const ORACLE_ENTITY_DID = 'did:ixo:oracle-entity';
@@ -114,6 +132,38 @@ async function deliver(
   for (let i = 0; i < 6; i += 1) {
     await Promise.resolve();
   }
+}
+
+const ENGAGEMENT: CommerceEngagement = {
+  status: 'active',
+  serviceId: 'tax-report',
+  serviceName: 'Tax report',
+  priceUsd: 20,
+  collectionId: '42',
+  adminAddress: 'ixo1admin',
+  startedAt: '2026-07-22T00:00:00.000Z',
+};
+
+/**
+ * A registered commerce port, so `router.isActive()` answers true. Defaults
+ * route every turn to plain support (no engagement, no published services).
+ */
+function makeCommercePort(
+  overrides: Partial<CommerceRouterPort> = {},
+): CommerceRouterPort {
+  return {
+    getServices: vi.fn(async () => []),
+    findActiveEngagement: vi.fn(async () => null),
+    checkContractGate: vi.fn(async () => ({
+      ok: false as const,
+      reason: 'not_contracted' as const,
+    })),
+    startEngagement: vi.fn(async () => ({
+      ok: true as const,
+      engagement: ENGAGEMENT,
+    })),
+    ...overrides,
+  };
 }
 
 describe('MatrixListenerBridge', () => {
@@ -1162,35 +1212,204 @@ describe('MatrixListenerBridge', () => {
     });
   });
 
+  describe('work_status liveness card', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /**
+     * Run one text turn end to end through the bridge and answer with the
+     * requestId it minted — the key every card phase is posted under.
+     */
+    async function runTurn(
+      deliverHandler: ReturnType<typeof vi.fn>,
+    ): Promise<string> {
+      const h = await build();
+      h.sessions.matrixManger.getEventById.mockResolvedValue({
+        content: { sessionId: 'lc-thread' },
+      });
+      h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+      h.bridge.setDeliverHandler(deliverHandler);
+
+      await deliver(
+        h,
+        makeEvent({
+          event_id: 'root',
+          content: { msgtype: 'm.text', body: 'do the thing' },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+
+      const payload = deliverHandler.mock
+        .calls[0]?.[0] as MatrixIncomingMessage;
+      return payload.requestId;
+    }
+
+    it('opens a card on every turn, with no commerce port registered', async () => {
+      const deliverHandler = vi.fn().mockResolvedValue({
+        message: { type: 'ai', content: 'ai reply' },
+      });
+
+      const requestId = await runTurn(deliverHandler);
+
+      // The router is inert here: a card is a property of the Matrix
+      // transport, not of the oracle-payments plugin being loaded.
+      const payload = deliverHandler.mock
+        .calls[0]?.[0] as MatrixIncomingMessage;
+      expect(payload.commerce).toBeUndefined();
+      expect(workStatus.beginTurn).toHaveBeenCalledWith({
+        requestId,
+        roomId: ROOM_ID,
+        threadId: 'root',
+        sessionId: 'root',
+        forEventId: 'root',
+      });
+      expect(workStatus.emit).toHaveBeenCalledWith(requestId, 'routing');
+    });
+
+    it('opens the card before routing, so the routing beat is on screen while it runs', async () => {
+      const beginTurnCallsWhenRouting: number[] = [];
+      setCommerceRouterPort(
+        makeCommercePort({
+          findActiveEngagement: vi.fn(async () => {
+            beginTurnCallsWhenRouting.push(
+              workStatus.beginTurn.mock.calls.length,
+            );
+            return null;
+          }),
+        }),
+      );
+      try {
+        const requestId = await runTurn(
+          vi
+            .fn()
+            .mockResolvedValue({ message: { type: 'ai', content: 'reply' } }),
+        );
+
+        // The router only ran once the turn already had a card to drive.
+        expect(beginTurnCallsWhenRouting).toEqual([1]);
+        expect(workStatus.emit).toHaveBeenCalledWith(requestId, 'routing');
+      } finally {
+        clearCommerceRouterPort();
+      }
+    });
+
+    it('posts `done` once the reply is sent', async () => {
+      const requestId = await runTurn(
+        vi
+          .fn()
+          .mockResolvedValue({ message: { type: 'ai', content: 'ai reply' } }),
+      );
+
+      expect(workStatus.emit).toHaveBeenCalledWith(requestId, 'delivering');
+      expect(workStatus.finish).toHaveBeenCalledWith(requestId, 'done');
+    });
+
+    it('posts `done` when the turn throws', async () => {
+      const requestId = await runTurn(
+        vi.fn().mockRejectedValue(new Error('graph blew up')),
+      );
+
+      // The failure path used to unregister the turn silently, stranding the
+      // last "Working…" frame in the room forever.
+      expect(workStatus.finish).toHaveBeenCalledWith(requestId, 'done');
+      expect(workStatus.emit).not.toHaveBeenCalledWith(requestId, 'delivering');
+    });
+
+    it('posts `done` when the handler returns no response', async () => {
+      const requestId = await runTurn(vi.fn().mockResolvedValue(undefined));
+
+      expect(workStatus.finish).toHaveBeenCalledWith(requestId, 'done');
+    });
+
+    it('posts `done` when the tail of graph state is not an AI message', async () => {
+      const requestId = await runTurn(
+        vi
+          .fn()
+          .mockResolvedValue({ message: { type: 'human', content: 'echo' } }),
+      );
+
+      // No reply is sent on this path, but the card still has to close.
+      expect(workStatus.finish).toHaveBeenCalledWith(requestId, 'done');
+    });
+
+    it('leaves a superseded turn alone instead of closing it with `done`', async () => {
+      const h = await build();
+      h.sessions.matrixManger.getEventById.mockResolvedValue({
+        content: { sessionId: 'lc-thread' },
+      });
+      h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+      const deliverHandler = vi
+        .fn()
+        .mockImplementationOnce(
+          (msg: MatrixIncomingMessage) =>
+            new Promise((_resolve, reject) => {
+              msg.abortController.signal.addEventListener('abort', () =>
+                reject(new Error('Aborted')),
+              );
+            }),
+        )
+        .mockResolvedValue({
+          message: { type: 'ai', content: 'answer to both' },
+        });
+      h.bridge.setDeliverHandler(deliverHandler);
+
+      await deliver(
+        h,
+        makeEvent({
+          event_id: 'root',
+          content: { msgtype: 'm.text', body: 'first question' },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+
+      await deliver(
+        h,
+        makeEvent({
+          event_id: 'turn-2',
+          content: {
+            msgtype: 'm.text',
+            body: 'second question',
+            'm.relates_to': { 'm.in_reply_to': { event_id: 'root' } },
+          },
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      for (let i = 0; i < 20; i += 1) await Promise.resolve();
+
+      const first = deliverHandler.mock.calls[0]?.[0] as MatrixIncomingMessage;
+      const second = deliverHandler.mock.calls[1]?.[0] as MatrixIncomingMessage;
+
+      expect(workStatus.finish).toHaveBeenCalledWith(
+        first.requestId,
+        'superseded',
+      );
+      // `superseded` is that turn's terminal phase — its own finally must not
+      // overwrite it, or the restart notice flashes away.
+      expect(workStatus.finish).not.toHaveBeenCalledWith(
+        first.requestId,
+        'done',
+      );
+      expect(workStatus.finish).toHaveBeenCalledWith(second.requestId, 'done');
+    });
+  });
+
   describe('commerce routing across supersede', () => {
     it('a superseded work turn re-routes to WORK with the engagement untouched', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
-        const engagement = {
-          status: 'active' as const,
-          serviceId: 'tax-report',
-          serviceName: 'Tax report',
-          priceUsd: 20,
-          collectionId: '42',
-          adminAddress: 'ixo1admin',
-          startedAt: '2026-07-22T00:00:00.000Z',
-        };
-        const port: CommerceRouterPort = {
-          getServices: vi.fn(async () => []),
+        const port = makeCommercePort({
           findActiveEngagement: vi.fn(async ({ roomId, threadId }) => ({
             roomId,
             threadId,
-            engagement,
+            engagement: ENGAGEMENT,
           })),
-          checkContractGate: vi.fn(async () => ({
-            ok: false as const,
-            reason: 'not_contracted' as const,
-          })),
-          startEngagement: vi.fn(async () => ({
-            ok: true as const,
-            engagement,
-          })),
-        };
+        });
         setCommerceRouterPort(port);
 
         const h = await build();
@@ -1248,7 +1467,7 @@ describe('MatrixListenerBridge', () => {
         // Both turns routed to the work agent — sticky engagement.
         const inWorkMode = {
           mode: 'work',
-          engagement,
+          engagement: ENGAGEMENT,
           engagementRoomId: first.roomId,
           engagementThreadId: first.threadId,
         };

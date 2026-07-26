@@ -9,7 +9,10 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types.js';
 import type { CommerceRoutedService } from '../../modules/messages/commerce-router-port.js';
-import type { AgentCardService } from './agent-card.service.js';
+import type {
+  AgentCardLookup,
+  AgentCardService,
+} from './agent-card.service.js';
 import type { ContractGateService } from './contract-gate.service.js';
 import type { ContractRecordService } from './contract-record.service.js';
 import type { ThreadAttachmentService } from './thread-attachments.service.js';
@@ -61,6 +64,28 @@ function threadIdFor(ctx: RuntimeContext): string | undefined {
   return ctx.session.client === 'matrix' ? ctx.session.id : undefined;
 }
 
+/**
+ * This oracle's own card, with the reason when it does not resolve. An
+ * unconfigured `ORACLE_ENTITY_DID` is a deployment fault rather than an empty
+ * catalogue, so it reports as an error like every other one: three tools read
+ * the card and all three would otherwise tell the user this oracle sells
+ * nothing whenever it simply could not look.
+ */
+async function resolveCard(
+  deps: Pick<OraclePaymentsToolDeps, 'agentCard'>,
+  ctx: RuntimeContext,
+): Promise<AgentCardLookup> {
+  const entityDid = readConfigString(ctx.config, 'ORACLE_ENTITY_DID');
+  if (!entityDid) {
+    return {
+      card: null,
+      error:
+        'this oracle has no ORACLE_ENTITY_DID configured, so it cannot look up its own published services',
+    };
+  }
+  return deps.agentCard.getCard(entityDid);
+}
+
 const LIST_SERVICES_DESCRIPTION =
   "Show the user this oracle's published, contractable services as an " +
   'interactive card in the chat, and return the same list so your reply is ' +
@@ -80,8 +105,16 @@ const GET_CONTRACT_STATUS_DESCRIPTION =
 function createListServicesTool(deps: OraclePaymentsToolDeps): PluginTool {
   return tool(
     async (_args, ctx: RuntimeContext) => {
-      const entityDid = readConfigString(ctx.config, 'ORACLE_ENTITY_DID');
-      const card = entityDid ? await deps.agentCard.getCard(entityDid) : null;
+      const { card, error } = await resolveCard(deps, ctx);
+      if (error !== undefined) {
+        return {
+          error,
+          note:
+            'The service catalogue could not be loaded, which is not the same as this oracle having ' +
+            'nothing to sell. Tell the user you could not load your services right now and why, and ' +
+            'offer to try again in a moment. Do not describe services from memory.',
+        };
+      }
       if (!card || card.services.length === 0) {
         return 'This oracle has no published services.';
       }
@@ -116,8 +149,14 @@ function createShowContractTool(deps: OraclePaymentsToolDeps): PluginTool {
   return tool(
     async (rawArgs, ctx: RuntimeContext) => {
       const { serviceId } = showContractSchema.parse(rawArgs);
-      const entityDid = readConfigString(ctx.config, 'ORACLE_ENTITY_DID');
-      const card = entityDid ? await deps.agentCard.getCard(entityDid) : null;
+      const { card, error } = await resolveCard(deps, ctx);
+      if (error !== undefined) {
+        throw new Error(
+          `The contract card for "${serviceId}" cannot be posted because ${error}. This is not a ` +
+            'problem with the service id — tell the user you could not load the contract details ' +
+            'right now, say why, and offer to try again shortly.',
+        );
+      }
       const service = card?.services.find((s) => s.id === serviceId);
       if (!card || !service) {
         const validIds = card?.services.map((s) => s.id) ?? [];
@@ -170,10 +209,25 @@ function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
   return tool(
     async (_args, ctx: RuntimeContext) => {
       const engineUrl = readConfigString(ctx.config, 'EVAL_ENGINE_URL');
-      const record = await deps.contractRecord.lookup({
+      const { record, error } = await deps.contractRecord.lookup({
         engineUrl,
         subscriberDid: ctx.user.did,
       });
+      // A check that could not run is not an answer. Reporting `contracted:
+      // false` here tells a paying user they never contracted — the one
+      // wrong answer this tool can give.
+      if (error !== undefined) {
+        ctx.logger.warn(
+          `[oracle-payments] contract status unknown for ${ctx.user.did} (engine ${engineUrl ?? 'unset'}): ${error}`,
+        );
+        return {
+          error,
+          note:
+            'Their contract status could not be checked, so it is unknown — not absent. Do not tell ' +
+            'the user they are uncontracted and do not call show_contract on the strength of this. ' +
+            'Say the check could not be completed and why, and offer to try again in a moment.',
+        };
+      }
       if (!record) {
         ctx.logger.debug?.(
           `[oracle-payments] no contract record for ${ctx.user.did} (engine ${engineUrl ?? 'unset'}) — reporting uncontracted`,
@@ -269,21 +323,33 @@ const START_WORK_DESCRIPTION =
   "tools bind on the user's NEXT message, so never do any of the work in the " +
   'same reply — confirm the job is open and ask for what you need to begin.';
 
-/** A refusal the model can relay verbatim, worded exactly like the router's. */
+/**
+ * A refusal the model can relay verbatim, worded exactly like the router's.
+ * `detail` is the part that says what actually happened — the chain's
+ * rejection, the engine's status, the quota that ran out — and it is returned
+ * as its own field as well as folded into `message`, so a model that reads
+ * only the structured result still has something true to tell the user.
+ */
 function refuseStart(
   reason: CommerceGateFailureReason,
   service: CommerceRoutedService,
-  inProgress?: CommerceInProgressEngagement,
+  failure: {
+    detail?: string;
+    inProgress?: CommerceInProgressEngagement;
+  } = {},
 ): Record<string, unknown> {
+  const { detail, inProgress } = failure;
   return {
     started: false,
     reason,
     serviceId: service.id,
     serviceName: service.name,
+    ...(detail !== undefined && { detail }),
     message: buildGateFailureInstruction({
       reason,
       serviceId: service.id,
       serviceName: service.name,
+      ...(detail !== undefined && { detail }),
       ...(inProgress !== undefined && { inProgress }),
     }),
   };
@@ -308,8 +374,14 @@ function createStartWorkTool(deps: StartWorkToolDeps): PluginTool {
   return tool(
     async (rawArgs, ctx: RuntimeContext) => {
       const { serviceId } = startWorkSchema.parse(rawArgs);
-      const entityDid = readConfigString(ctx.config, 'ORACLE_ENTITY_DID');
-      const card = entityDid ? await deps.agentCard.getCard(entityDid) : null;
+      const { card, error } = await resolveCard(deps, ctx);
+      if (error !== undefined) {
+        throw new Error(
+          `The job for "${serviceId}" could not be started because ${error}. Nothing was reserved ` +
+            'and nothing was charged. This is not a problem with the service id or with the ' +
+            "user's contract — tell them what happened and offer to try again shortly.",
+        );
+      }
       const service = card?.services.find((s) => s.id === serviceId);
       if (!service) {
         const validIds = card?.services.map((s) => s.id) ?? [];
@@ -335,9 +407,13 @@ function createStartWorkTool(deps: StartWorkToolDeps): PluginTool {
       });
       if (!gate.ok) {
         ctx.logger.log(
-          `[oracle-payments] start_work refused ${routed.id} in thread ${threadId}: ${gate.reason}`,
+          `[oracle-payments] start_work refused ${routed.id} in thread ${threadId}: ${gate.reason}` +
+            (gate.detail !== undefined ? ` — ${gate.detail}` : ''),
         );
-        return refuseStart(gate.reason, routed, gate.inProgress);
+        return refuseStart(gate.reason, routed, {
+          ...(gate.detail !== undefined && { detail: gate.detail }),
+          ...(gate.inProgress !== undefined && { inProgress: gate.inProgress }),
+        });
       }
 
       const started = await deps.workIntent.startEngagement(
@@ -347,9 +423,12 @@ function createStartWorkTool(deps: StartWorkToolDeps): PluginTool {
       );
       if (!started.ok) {
         ctx.logger.log(
-          `[oracle-payments] start_work could not open ${routed.id} in thread ${threadId}: ${started.reason}`,
+          `[oracle-payments] start_work could not open ${routed.id} in thread ${threadId}: ${started.reason}` +
+            (started.detail !== undefined ? ` — ${started.detail}` : ''),
         );
-        return refuseStart(started.reason, routed);
+        return refuseStart(started.reason, routed, {
+          ...(started.detail !== undefined && { detail: started.detail }),
+        });
       }
 
       ctx.logger.log(

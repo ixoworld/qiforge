@@ -258,6 +258,57 @@ describe('buildCommerceOverlay', () => {
     expect(overlay).toContain('do not call `show_contract`');
     expect(overlay).not.toContain('no usable contract');
   });
+
+  it("carries the failure's own words so the agent can explain the refusal", () => {
+    // Without this the agent can only report the code it was handed, which is
+    // what produces "the tool responded with intent_failed and didn't provide
+    // a more specific blockchain error" in the chat.
+    const overlay = buildCommerceOverlay({
+      mode: 'support',
+      gate: {
+        reason: 'intent_failed',
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        detail:
+          'the chain rejected the payment reservation (code 5): insufficient funds',
+      },
+    });
+
+    expect(overlay).toContain('insufficient funds');
+    expect(overlay).toContain('rather than repeating a code at them');
+  });
+
+  it('appends the detail to a contracting refusal too', () => {
+    const overlay = buildCommerceOverlay({
+      mode: 'support',
+      gate: {
+        reason: 'quota_exhausted',
+        serviceId: 'tax-report',
+        detail: 'their contract has no runs left on it',
+      },
+    });
+
+    expect(overlay).toContain('no usable contract');
+    expect(overlay).toContain('no runs left on it');
+  });
+
+  it('forbids the contract card when the contract could not be checked at all', () => {
+    const overlay = buildCommerceOverlay({
+      mode: 'support',
+      gate: {
+        reason: 'contract_check_failed',
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        detail: 'the evaluation engine could not be reached (ECONNREFUSED)',
+      },
+    });
+
+    // Nothing is known about this contract — least of all that it is absent.
+    expect(overlay).toContain('could not be checked at all');
+    expect(overlay).toContain('do NOT call `show_contract`');
+    expect(overlay).toContain('ECONNREFUSED');
+    expect(overlay).not.toContain('holds no usable contract');
+  });
 });
 
 describe('buildCommerceOverlay — reservation deadline', () => {

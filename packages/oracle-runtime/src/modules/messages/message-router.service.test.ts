@@ -16,7 +16,6 @@ import {
 const ROOM_ID = '!room:home.server';
 const THREAD_ID = 'evt-thread-root';
 const SENDER_DID = 'did:ixo:user-1';
-const REQUEST_ID = 'req-1';
 
 const TAX_SERVICE: CommerceRoutedService = {
   id: 'tax-report',
@@ -126,18 +125,12 @@ function makeRouter(verdicts: Array<unknown | Error> = []): {
   router: MessageRouterService;
   invocations: BaseMessage[][];
   modelParams: Array<{ model?: string } | undefined>;
-  producerEmit: ReturnType<typeof vi.fn>;
   logger: LoggerSpies;
 } {
   const { factory, invocations, modelParams } = makeModelFactory(verdicts);
-  const producerEmit = vi.fn();
   const logger: LoggerSpies = { log: vi.fn(), warn: vi.fn(), debug: vi.fn() };
-  const router = new MessageRouterService({
-    getModel: factory,
-    producer: { emit: producerEmit },
-    logger,
-  });
-  return { router, invocations, modelParams, producerEmit, logger };
+  const router = new MessageRouterService({ getModel: factory, logger });
+  return { router, invocations, modelParams, logger };
 }
 
 /** The single decision line the router emits for a routed turn. */
@@ -154,7 +147,6 @@ function turn(text: string) {
     threadId: THREAD_ID,
     senderDid: SENDER_DID,
     text,
-    requestId: REQUEST_ID,
   };
 }
 
@@ -175,27 +167,22 @@ describe('MessageRouterService', () => {
 
   it('routes to support with NO model call when the port has no services', async () => {
     makePort({ getServices: vi.fn(async () => null) });
-    const { router, invocations, producerEmit } = makeRouter();
+    const { router, invocations } = makeRouter();
 
     const result = await router.route(turn('do my taxes'));
 
     expect(result).toEqual({ mode: 'support' });
     expect(invocations).toHaveLength(0);
-    expect(producerEmit).not.toHaveBeenCalled();
   });
 
   it('classifies and routes a support verdict to support mode', async () => {
     const { spies } = makePort();
-    const { router, producerEmit } = makeRouter([
-      { intent: 'support', confidence: 0.9 },
-    ]);
+    const { router } = makeRouter([{ intent: 'support', confidence: 0.9 }]);
 
     const result = await router.route(turn('how much is a tax report?'));
 
     expect(result).toEqual({ mode: 'support' });
     expect(spies.checkContractGate).not.toHaveBeenCalled();
-    // The routing phase is announced on the status card when classifying.
-    expect(producerEmit).toHaveBeenCalledWith(REQUEST_ID, 'routing');
   });
 
   it('routes a confident work verdict through the gate and starts the engagement', async () => {
@@ -554,7 +541,7 @@ describe('MessageRouterService', () => {
     it('stays in work mode without a classifier call while the engagement is active', async () => {
       const findActiveEngagement = vi.fn(async () => STICKY_HERE);
       const { spies } = makePort({ findActiveEngagement });
-      const { router, invocations, producerEmit } = makeRouter();
+      const { router, invocations } = makeRouter();
 
       const result = await router.route(turn('also include my Q3 invoices'));
 
@@ -571,7 +558,6 @@ describe('MessageRouterService', () => {
       });
       expect(invocations).toHaveLength(0);
       expect(spies.getServices).not.toHaveBeenCalled();
-      expect(producerEmit).not.toHaveBeenCalled();
     });
 
     it('classifies exactly once across the turn that starts a job and the turn after it', async () => {

@@ -105,25 +105,36 @@ describe('WorkIntentService.startEngagement', () => {
     expect(sendIntent.mock.calls[0]![0].amount[0]!.denom).toMatch(/^ibc\//);
   });
 
-  it('starts no engagement when the reservation tx is rejected', async () => {
+  it("starts no engagement when the reservation tx is rejected, and carries the chain's reason", async () => {
     const { service, engagement } = makeService({
       result: { code: 5, transactionHash: '', rawLog: 'insufficient funds' },
     });
 
     const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
 
-    expect(result).toEqual({ ok: false, reason: 'intent_failed' });
+    // The rawLog is the only thing that can explain this to the user, so it
+    // travels with the refusal instead of ending its life in a log line.
+    expect(result).toEqual({
+      ok: false,
+      reason: 'intent_failed',
+      detail: expect.stringContaining('insufficient funds'),
+    });
+    expect(result.ok === false && result.detail).toContain('code 5');
     expect(await engagement.get(ROOM_ID, THREAD_ID)).toBeNull();
   });
 
-  it('starts no engagement when the reservation throws', async () => {
+  it('starts no engagement when the reservation throws, and carries the thrown message', async () => {
     const { service, engagement } = makeService({
       throws: new Error('rpc down'),
     });
 
     const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
 
-    expect(result).toEqual({ ok: false, reason: 'intent_failed' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'intent_failed',
+      detail: expect.stringContaining('rpc down'),
+    });
     expect(await engagement.get(ROOM_ID, THREAD_ID)).toBeNull();
   });
 
@@ -181,7 +192,14 @@ describe('WorkIntentService.startEngagement', () => {
     const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
 
     // Never "ok" — the turn must not carry on as work with no record of it.
-    expect(result).toEqual({ ok: false, reason: 'intent_failed' });
+    // The detail says the payment IS reserved, which is what stops the agent
+    // telling the user to simply try again.
+    expect(result).toEqual({
+      ok: false,
+      reason: 'intent_failed',
+      detail: expect.stringContaining('INTENT-TX-1'),
+    });
+    expect(result.ok === false && result.detail).toContain('matrix down');
     // And the escrow that IS locked is named, so an operator can reconcile it.
     const logged = String(error.mock.calls[0]?.[0]);
     expect(logged).toContain('INTENT-TX-1');

@@ -25,7 +25,7 @@ describe('ContractRecordService', () => {
       subscriberDid: USER_DID,
     });
 
-    expect(result).toEqual(record);
+    expect(result).toEqual({ record });
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
       `${ENGINE_URL}/v1/agents/contracts/for-oracle?subscriberDid=${encodeURIComponent(
@@ -37,17 +37,18 @@ describe('ContractRecordService', () => {
     expect(headers['X-Auth-Type']).toBe('ucan');
   });
 
-  it('returns null on 404', async () => {
+  it('answers "no contract" — with no error — on 404', async () => {
     const service = new ContractRecordService({
       tokenProvider: async () => 'engine-token',
       fetchImpl: async () => new Response(null, { status: 404 }),
     });
+    // The one lookup that genuinely establishes the user has no contract.
     expect(
       await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }),
-    ).toBeNull();
+    ).toEqual({ record: null });
   });
 
-  it('returns null and warns on a 5xx error, without caching', async () => {
+  it('reports the engine status as an error on a 5xx, without caching', async () => {
     const warn = vi.fn();
     const fetchImpl = vi.fn(async () => new Response(null, { status: 503 }));
     const service = new ContractRecordService({
@@ -56,16 +57,20 @@ describe('ContractRecordService', () => {
       logger: { log: vi.fn(), error: vi.fn(), warn },
     });
 
-    expect(
-      await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }),
-    ).toBeNull();
+    const { record, error } = await service.lookup({
+      engineUrl: ENGINE_URL,
+      subscriberDid: USER_DID,
+    });
+    expect(record).toBeNull();
+    // Never mistakable for "no contract": the caller must be able to say why.
+    expect(error).toContain('503');
     // Not cached: a second lookup hits the network again.
     await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalled();
   });
 
-  it('returns null and warns (once) when EVAL_ENGINE_URL is unset', async () => {
+  it('reports the missing EVAL_ENGINE_URL as an error and warns (once)', async () => {
     const warn = vi.fn();
     const fetchImpl = vi.fn();
     const service = new ContractRecordService({
@@ -74,24 +79,45 @@ describe('ContractRecordService', () => {
       logger: { log: vi.fn(), error: vi.fn(), warn },
     });
 
-    expect(
-      await service.lookup({ engineUrl: undefined, subscriberDid: USER_DID }),
-    ).toBeNull();
+    const { record, error } = await service.lookup({
+      engineUrl: undefined,
+      subscriberDid: USER_DID,
+    });
+    expect(record).toBeNull();
+    expect(error).toContain('EVAL_ENGINE_URL');
     await service.lookup({ engineUrl: undefined, subscriberDid: USER_DID });
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('returns null when no signing key is available (token provider yields null)', async () => {
+  it('reports an error when no signing key is available (token provider yields null)', async () => {
     const fetchImpl = vi.fn();
     const service = new ContractRecordService({
       tokenProvider: async () => null,
       fetchImpl,
     });
-    expect(
-      await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }),
-    ).toBeNull();
+    const { record, error } = await service.lookup({
+      engineUrl: ENGINE_URL,
+      subscriberDid: USER_DID,
+    });
+    expect(record).toBeNull();
+    expect(error).toMatch(/signing key/);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('reports the transport failure when the engine cannot be reached', async () => {
+    const service = new ContractRecordService({
+      tokenProvider: async () => 'engine-token',
+      fetchImpl: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    });
+    const { record, error } = await service.lookup({
+      engineUrl: ENGINE_URL,
+      subscriberDid: USER_DID,
+    });
+    expect(record).toBeNull();
+    expect(error).toContain('ECONNREFUSED');
   });
 
   it('caches a positive result per subscriber for the TTL', async () => {
@@ -137,23 +163,27 @@ describe('ContractRecordService', () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it('returns null on a malformed record body', async () => {
+  it('reports an error on a malformed record body', async () => {
     const service = new ContractRecordService({
       tokenProvider: async () => 'engine-token',
       fetchImpl: async () => jsonResponse({ collectionId: 42 }),
     });
-    expect(
-      await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }),
-    ).toBeNull();
+    const { record, error } = await service.lookup({
+      engineUrl: ENGINE_URL,
+      subscriberDid: USER_DID,
+    });
+    expect(record).toBeNull();
+    expect(error).toMatch(/could not read/);
   });
 
   it('setTokenProvider wires a provider used by subsequent lookups', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(makeContractRecord()));
     const service = new ContractRecordService({ fetchImpl });
-    // No provider yet → null, no fetch.
+    // No provider yet → an error, no fetch.
     expect(
-      await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }),
-    ).toBeNull();
+      (await service.lookup({ engineUrl: ENGINE_URL, subscriberDid: USER_DID }))
+        .error,
+    ).toBeDefined();
     expect(fetchImpl).not.toHaveBeenCalled();
 
     service.setTokenProvider(async () => 'engine-token');
@@ -161,7 +191,7 @@ describe('ContractRecordService', () => {
       engineUrl: ENGINE_URL,
       subscriberDid: USER_DID,
     });
-    expect(result).not.toBeNull();
+    expect(result.record).not.toBeNull();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

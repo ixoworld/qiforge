@@ -157,7 +157,6 @@ describe('CommerceRouterPortRegistrar', () => {
       getModel: () => ({
         withStructuredOutput: () => ({ invoke: classify }),
       }),
-      producer: { emit: vi.fn() },
       logger: { log: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     });
 
@@ -166,7 +165,6 @@ describe('CommerceRouterPortRegistrar', () => {
       threadId: 'thread-1',
       senderDid: USER_DID,
       text: 'file my 2025 taxes',
-      requestId: 'req-1',
     });
 
     expect(first?.mode).toBe('work');
@@ -180,7 +178,6 @@ describe('CommerceRouterPortRegistrar', () => {
       threadId: 'thread-9',
       senderDid: USER_DID,
       text: 'also include my rental income',
-      requestId: 'req-2',
     });
 
     expect(second).toMatchObject({

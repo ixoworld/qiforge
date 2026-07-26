@@ -16,9 +16,18 @@ const NO_ROOM_NOTE =
 const NOTHING_SHARED_NOTE =
   'No files have been shared in this thread yet. If the user did send one, ask them to send it again.';
 
-/** Shown when the timeline read failed — degraded, not "there are no files". */
-const READ_FAILED_NOTE =
-  'The thread history could not be read just now, so I cannot tell which files were shared. Ask the user to resend the file if you need it.';
+/**
+ * Shown when the timeline read failed — degraded, not "there are no files".
+ * Carries the failure itself: "I cannot tell" with no reason is what makes the
+ * agent invent one.
+ */
+function readFailedNote(detail: string): string {
+  return (
+    `The thread history could not be read just now (${detail}), so I cannot tell which files were ` +
+    'shared. Say so rather than telling the user they shared nothing, and ask them to resend the ' +
+    'file if you need it.'
+  );
+}
 
 /**
  * Attached to every non-empty listing: the archive that puts these files in
@@ -96,10 +105,11 @@ export class ThreadAttachmentService {
     try {
       attachments = await this.listAttachments(roomId, threadId);
     } catch (error) {
+      const detail = errorMessage(error);
       this.logger.warn(
-        `[oracle-payments] thread attachment listing failed for ${roomId}/${threadId}: ${errorMessage(error)}`,
+        `[oracle-payments] thread attachment listing failed for ${roomId}/${threadId}: ${detail}`,
       );
-      return { attachments: [], note: READ_FAILED_NOTE };
+      return { attachments: [], note: readFailedNote(detail) };
     }
 
     if (attachments.length === 0) {

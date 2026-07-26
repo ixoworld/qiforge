@@ -24,13 +24,20 @@ const TAX_SERVICE: CommerceRoutedService = {
 
 function makeGate(
   record: ContractRecord | null,
-  opts: { network?: string; now?: () => number } = {},
+  opts: {
+    network?: string;
+    now?: () => number;
+    fetchImpl?: typeof fetch;
+  } = {},
 ): {
   gate: ContractGateService;
   fetchCalls: string[];
   engagement: EngagementService;
 } {
-  const { service, fetchCalls } = makeContractRecordService(record);
+  const { service, fetchCalls } = makeContractRecordService(
+    record,
+    opts.fetchImpl,
+  );
   const engagement = makeEngagementService();
   const gate = new ContractGateService({
     contractRecord: service,
@@ -63,7 +70,42 @@ describe('ContractGateService', () => {
     record.authz.granted = false;
     const { gate } = makeGate(record);
 
-    expect(await check(gate)).toEqual({ ok: false, reason: 'not_contracted' });
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'not_contracted',
+      detail: expect.stringContaining('not granted'),
+    });
+  });
+
+  it('fails contract_check_failed — never not_contracted — when the lookup cannot be answered', async () => {
+    // The engine is unreachable, so nothing is known about this contract.
+    // Reporting `not_contracted` here would send a contracted user a contract
+    // card and tell them something false about their own account.
+    const { gate } = makeGate(null, {
+      fetchImpl: async () => {
+        throw new Error('ECONNREFUSED');
+      },
+    });
+
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'contract_check_failed',
+      detail: expect.stringContaining('ECONNREFUSED'),
+    });
+  });
+
+  it('does not cache a failed lookup — the next check re-asks the engine', async () => {
+    let calls = 0;
+    const { gate } = makeGate(null, {
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error('ECONNREFUSED');
+      },
+    });
+
+    await check(gate);
+    await check(gate);
+    expect(calls).toBe(2);
   });
 
   it('fails quota_exhausted when no agent quota remains', async () => {
@@ -71,7 +113,11 @@ describe('ContractGateService', () => {
     record.authz.agentQuotaRemaining = 0;
     const { gate } = makeGate(record);
 
-    expect(await check(gate)).toEqual({ ok: false, reason: 'quota_exhausted' });
+    expect(await check(gate)).toEqual({
+      ok: false,
+      reason: 'quota_exhausted',
+      detail: expect.stringContaining('no runs left'),
+    });
   });
 
   it('fails max_amount_too_low when the grant cap is under the price', async () => {
@@ -80,9 +126,11 @@ describe('ContractGateService', () => {
     record.authz.maxAmount = { amount: '19999999', denom: 'uixo' };
     const { gate } = makeGate(record);
 
+    // The numbers travel: "too low" alone is not something a user can act on.
     expect(await check(gate)).toEqual({
       ok: false,
       reason: 'max_amount_too_low',
+      detail: expect.stringContaining('19999999 uixo'),
     });
   });
 
@@ -94,6 +142,7 @@ describe('ContractGateService', () => {
     expect(await check(gate)).toEqual({
       ok: false,
       reason: 'max_amount_too_low',
+      detail: expect.stringContaining('uusdc'),
     });
   });
 
@@ -106,7 +155,11 @@ describe('ContractGateService', () => {
       priceUsd: 5,
     });
 
-    expect(result).toEqual({ ok: false, reason: 'service_not_contracted' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'service_not_contracted',
+      detail: expect.stringContaining('tax-report'),
+    });
   });
 
   it('passes with the engagement-start data from the record, carrying the intent window', async () => {

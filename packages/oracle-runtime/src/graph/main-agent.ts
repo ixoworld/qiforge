@@ -43,6 +43,7 @@ import {
   createSafetyGuardrailMiddleware,
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
+  createWorkStatusMiddleware,
 } from './middlewares/index.js';
 import {
   composePrompt,
@@ -376,12 +377,15 @@ export async function createMainAgent(
     );
   }
 
-  // ── 6. Middleware stack — 4 always-on + plugin contributions ────────────
+  // ── 6. Middleware stack — always-on + plugin contributions ──────────────
   const pluginMiddlewares = registries.middlewares
     .collect(buildCtx)
     .map(({ middleware }) => middleware);
 
   const middleware = [
+    // Outermost: one liveness beat per model/tool call the agent issues,
+    // before any inner guard can short-circuit or retry it.
+    createWorkStatusMiddleware(),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,

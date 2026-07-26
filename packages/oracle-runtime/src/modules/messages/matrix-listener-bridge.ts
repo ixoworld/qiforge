@@ -417,24 +417,28 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    // Every Matrix turn gets a liveness card, commerce or not. Registering
+    // the turn and posting the opening beat here — before any routing work —
+    // is what makes the room show progress from the instant the message
+    // lands, and gives every later phase an anchor event to replace.
+    workStatusProducer.beginTurn({
+      requestId,
+      roomId: first.roomId,
+      threadId,
+      sessionId: threadId,
+      forEventId: eventId ?? threadId,
+    });
+    workStatusProducer.emit(requestId, 'routing');
+
     // Commerce routing — Matrix-only, inert unless the oracle-payments
-    // plugin registered its port. Registering the status turn first lets the
-    // router (and later the tool wrapper) drive the liveness card.
+    // plugin registered its port.
     let commerce: CommerceContext | undefined;
     if (this.router.isActive()) {
-      workStatusProducer.beginTurn({
-        requestId,
-        roomId: first.roomId,
-        threadId,
-        sessionId: threadId,
-        forEventId: eventId ?? threadId,
-      });
       commerce = await this.router.route({
         roomId: first.roomId,
         threadId,
         senderDid: did,
         text: turnMessage,
-        requestId,
       });
     }
 
@@ -507,10 +511,14 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       this.logger.error('Failed to handle Matrix message', error);
     } finally {
       if (typingKeepalive) clearInterval(typingKeepalive);
-      // When this turn was superseded, its card was already flipped to
-      // `superseded` by the newer flush — only self-clean otherwise.
+      // Close the card on every exit — thrown error, no AI response, or a
+      // reply that was skipped — so no turn can leave a spinner running in
+      // the room. `finish` unregisters the turn, so the success path above
+      // has already consumed this and the call is a no-op there. The one
+      // turn left alone is a superseded one: the newer flush flipped its
+      // card to `superseded` and that is its terminal state.
       if (!abortController.signal.aborted) {
-        workStatusProducer.endTurn(requestId);
+        workStatusProducer.finish(requestId, 'done');
       }
       const current = this.inFlight.get(threadId);
       if (current?.requestId === requestId) this.inFlight.delete(threadId);

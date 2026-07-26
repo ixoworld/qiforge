@@ -29,9 +29,20 @@ import type { ContractRecord } from './types.js';
 import { WorkIntentService } from './work-intent.service.js';
 
 /** A card service that always resolves to no card (no published services). */
+/** An oracle whose entity doc reads fine but anchors no agent card. */
 function makeNullCardService(): AgentCardService {
   return new AgentCardService({
-    getEntity: async () => null,
+    getEntity: async () => ({ linkedResource: [] }),
+    fetchCard: async () => null,
+  });
+}
+
+/** An oracle that publishes a card but cannot reach it right now. */
+function makeUnreachableCardService(): AgentCardService {
+  return new AgentCardService({
+    getEntity: async () => {
+      throw new Error('blocksync unreachable');
+    },
     fetchCard: async () => null,
   });
 }
@@ -257,6 +268,8 @@ describe('OraclePaymentsPlugin — start_work', () => {
   function makeStartWorkPlugin(
     record: ContractRecord | null,
     intentCode = 0,
+    /** An engine that fails instead of answering the contract lookup. */
+    fetchImpl?: typeof fetch,
   ): {
     plugin: OraclePaymentsPlugin;
     engagement: EngagementService;
@@ -264,7 +277,7 @@ describe('OraclePaymentsPlugin — start_work', () => {
   } {
     const engagement = makeEngagementService();
     const contractGate = new ContractGateService({
-      contractRecord: makeContractRecordService(record).service,
+      contractRecord: makeContractRecordService(record, fetchImpl).service,
       engagement,
       engineUrl: 'https://engine.example',
       network: 'devnet',
@@ -360,7 +373,7 @@ describe('OraclePaymentsPlugin — start_work', () => {
     expect(sendIntent).not.toHaveBeenCalled();
   });
 
-  it('reports intent_failed and starts nothing when the reservation is rejected', async () => {
+  it("reports intent_failed WITH the chain's reason and starts nothing when the reservation is rejected", async () => {
     // The contract is fine; the escrow write is what failed. Nothing may be
     // left behind — an engagement with no reservation would route the user
     // into work mode for a job that was never paid for.
@@ -371,8 +384,39 @@ describe('OraclePaymentsPlugin — start_work', () => {
       .get('start_work')
       .handler({ serviceId: 'tax-report' }, ctx);
 
-    expect(result).toMatchObject({ started: false, reason: 'intent_failed' });
+    // `intent_failed` on its own is what leaves the agent saying "the tool
+    // responded with intent_failed and didn't provide a more specific error".
+    // The chain's rawLog rides along, on the result AND in the instruction.
+    expect(result).toMatchObject({
+      started: false,
+      reason: 'intent_failed',
+      detail: expect.stringContaining('insufficient funds'),
+      message: expect.stringContaining('insufficient funds'),
+    });
     expect(await engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('refuses with contract_check_failed — not not_contracted — when the engine cannot be reached', async () => {
+    const { plugin, sendIntent } = makeStartWorkPlugin(null, 0, async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({
+      started: false,
+      reason: 'contract_check_failed',
+      detail: expect.stringContaining('ECONNREFUSED'),
+    });
+    // The user may well be contracted — nothing here establishes otherwise, so
+    // the instruction has to forbid the contract card rather than prescribe it.
+    expect(String((result as { message: string }).message)).toMatch(
+      /do NOT call `show_contract`/,
+    );
+    expect(sendIntent).not.toHaveBeenCalled();
   });
 
   it('throws with the valid ids for an unknown serviceId', async () => {
@@ -503,6 +547,38 @@ describe('OraclePaymentsPlugin — tools', () => {
     expect(posted).toHaveLength(0);
   });
 
+  it('list_services reports WHY the catalogue is unavailable instead of claiming there are no services', async () => {
+    // "This oracle has no published services" for what is really an outage
+    // tells the user something false and leaves the agent nothing to explain.
+    const posted: PostedEvent[] = [];
+    const plugin = new OraclePaymentsPlugin({
+      agentCard: makeUnreachableCardService(),
+    });
+    const ctx = makeCommerceCtx({ posted });
+    const result = await toolsOf(plugin, ctx)
+      .get('list_services')
+      .handler({}, ctx);
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining('blocksync unreachable'),
+    });
+    expect(String(result)).not.toMatch(/no published services/i);
+    expect(posted).toHaveLength(0);
+  });
+
+  it('show_contract blames the outage, not the service id, when the card cannot be read', async () => {
+    const plugin = new OraclePaymentsPlugin({
+      agentCard: makeUnreachableCardService(),
+    });
+    const ctx = makeCommerceCtx();
+
+    await expect(
+      toolsOf(plugin, ctx)
+        .get('show_contract')
+        .handler({ serviceId: 'tax-report' }, ctx),
+    ).rejects.toThrow(/blocksync unreachable/);
+  });
+
   it('show_contract posts a show_contract component with reason=user_asked and returns posted:true', async () => {
     const posted: PostedEvent[] = [];
     const plugin = new OraclePaymentsPlugin({ agentCard: makeCardService() });
@@ -568,6 +644,27 @@ describe('OraclePaymentsPlugin — tools', () => {
       quotaRemaining: 3,
       maxAmount: { amount: '20000000', denom: 'uixo' },
     });
+  });
+
+  it('get_contract_status reports "unknown" — never contracted:false — when the check fails', async () => {
+    // A contracted user told "you have no contract" because the engine was
+    // down is the worst answer this tool can give, so the failure lane says
+    // what happened instead of guessing an answer.
+    const plugin = new OraclePaymentsPlugin({
+      agentCard: makeCardService(),
+      contractRecord: makeContractRecordService(null, async () => {
+        throw new Error('ECONNREFUSED');
+      }).service,
+    });
+    const ctx = makeCommerceCtx();
+    const result = await toolsOf(plugin, ctx)
+      .get('get_contract_status')
+      .handler({}, ctx);
+
+    expect(result).toMatchObject({
+      error: expect.stringContaining('ECONNREFUSED'),
+    });
+    expect(result).not.toHaveProperty('contracted');
   });
 
   it('get_contract_status returns { contracted: false } when there is no contract', async () => {

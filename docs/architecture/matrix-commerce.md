@@ -22,7 +22,7 @@ Same shape as the bridge's existing `setDeliverHandler` / `setRoomSessionResolve
 
 `CommerceRouterPort` (see the file for the full interface) exposes `getServices`, `findActiveEngagement`, `checkContractGate`, `startEngagement`, plus an optional `routerModel` override. `findActiveEngagement` is keyed by the SENDER, not by the room or thread — it returns the user's one live engagement together with the room and thread its durable record lives in. The chain write stays behind `startEngagement` — the router only ever learns pass or fail.
 
-Registered from `plugins/oracle-payments/commerce-port.registrar.ts`. **Unregistered is the default and must stay a no-op:** `MessageRouterService.route` returns `undefined` when the slot is empty, the bridge skips status-card setup because `router.isActive()` is false, and a Matrix turn behaves exactly as it did before the feature.
+Registered from `plugins/oracle-payments/commerce-port.registrar.ts`. **Unregistered is the default and must stay a no-op:** `MessageRouterService.route` returns `undefined` when the slot is empty, the bridge skips the routing call because `router.isActive()` is false, and a Matrix turn behaves exactly as it did before the feature — apart from the liveness card, which is not commerce-gated and posts on every Matrix turn.
 
 ## Per-turn routing
 
@@ -49,6 +49,7 @@ Two rules the code enforces and reviews should protect:
 
 - **Fail open to support.** Every failure lane — a thrown classifier, a timeout, sub-threshold confidence, a serviceId the card doesn't have, a gate refusal, a failed chain write — resolves to support mode. Nothing routes into billable work by accident.
 - **No model call when there's nothing to classify against.** An oracle with no agent card never pays for a routing call.
+- **Failing open is not failing silent.** Every refusal carries a `detail` — the chain's rejection text, the engine's status, the numbers that did not add up — onto `ctx.commerce.gate` and into the overlay instruction. A reason alone is a code the agent can only read back at the user, so no lane may end with the cause in a log line and a bare enum on the wire. A lookup that never got an answer refuses as `contract_check_failed`, never as `not_contracted`: an unanswered check is not evidence of a missing contract.
 
 The classifier's timeout and confidence floor are constants at the top of the file. `routerModel` from the port overrides the `routing` role model.
 
@@ -100,17 +101,19 @@ The delivery lane defends itself: `WorkClaimService` wraps signing and submissio
 
 One card per user message, anchored on `props.forEventId`. The first emission creates the event; every later phase posts the full new content with an `m.replace` relation, so clients collapse to the latest. Posts are serialized per turn so the anchor always lands before its replacements, and posting failures are logged, never thrown.
 
-| Phase                  | Emitted from                                                 |
-| ---------------------- | ------------------------------------------------------------ |
-| register (`beginTurn`) | `matrix-listener-bridge.ts` — only when `router.isActive()`  |
-| `routing`              | `message-router.service.ts`, just before the classifier call |
-| `working`              | `graph/wrap-plugin-tool.ts`, on every plugin tool invocation |
-| `delivering`           | the bridge before the final send; also `WorkClaimService`    |
-| `done` / `superseded`  | the bridge                                                   |
+Frames coalesce: one post is in flight at a time, and a frame staged behind it replaces whatever was already waiting, so a long tool-heavy turn costs a handful of Matrix events rather than one per emission. Only frames _behind_ the in-flight post collapse, so the anchor is never dropped and `finish`'s terminal phase — always the newest frame — always lands. `step(requestId, action)` bumps the turn's counter and emits `working` labelled `Step {n} · {action}`; the numbers the room sees can skip, because the counter tracks work done, not cards posted.
+
+| Phase                  | Emitted from                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| register (`beginTurn`) | `matrix-listener-bridge.ts` — every Matrix turn, commerce or not                                                                  |
+| `routing`              | the bridge, immediately after `beginTurn` and before any routing work                                                             |
+| `working`              | `graph/middlewares/work-status-middleware.ts`, one step per model call and per tool call (plugin, meta and sub-agent tools alike) |
+| `delivering`           | the bridge before the final send; also `WorkClaimService`                                                                         |
+| `done` / `superseded`  | the bridge                                                                                                                        |
 
 Only `routing` and `working` may _create_ a card — the closing phases update an existing one, so a turn that never showed progress posts nothing instead of a lone "done". Emissions for an unregistered `requestId` are silent no-ops, which is what disables the card on HTTP turns and on oracles without the plugin.
 
-Adding a new producer means calling `workStatusProducer.emit(requestId, phase, label?)`; do not post `work_status` events by hand.
+Adding a new producer means calling `workStatusProducer.emit(requestId, phase, label?)` — or `step(requestId, action)` for an agent step; do not post `work_status` events by hand.
 
 ## The component event protocol
 

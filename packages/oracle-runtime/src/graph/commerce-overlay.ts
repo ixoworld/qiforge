@@ -224,6 +224,14 @@ function humanizeMs(ms: number): string {
 export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
   const { reason, serviceId, serviceName } = gate;
   const display = serviceName ?? serviceId;
+  // The specific failure, appended to whichever instruction fires below. It is
+  // the only part the user can act on ("no runs left", "the chain rejected the
+  // reservation: …"), so it is never dropped — an unexplained refusal reads to
+  // the user as the agent making excuses.
+  const because =
+    gate.detail !== undefined && gate.detail.length > 0
+      ? ` What went wrong, specifically: ${gate.detail}. Tell the user this in your own words rather than repeating a code at them.`
+      : '';
 
   if (reason === 'engagement_in_progress') {
     // Not a contracting problem and not a transient one: the chain holds one
@@ -246,7 +254,8 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
         'request cannot start — the chain allows one reservation per user at a time. Tell them ' +
         'the earlier cancellation did not complete, and ask them to call `cancel_work` again ' +
         "from that job's thread — you cannot do it from here, and retrying is what frees them. " +
-        'Do not do the requested work, and do not call `show_contract` — their contract is fine.'
+        'Do not do the requested work, and do not call `show_contract` — their contract is fine.' +
+        because
       );
     }
 
@@ -260,7 +269,8 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
       "that job's thread — you cannot cancel it from here. Do not do the " +
       'requested work, do not call `show_contract` (their contract is fine), ' +
       'and do not tell them to try again shortly: nothing changes until the ' +
-      'other job ends.'
+      'other job ends.' +
+      because
     );
   }
 
@@ -273,7 +283,22 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
       'Apologise, say plainly that you could not reserve payment for the job ' +
       'and so cannot start it yet, and suggest they ask again shortly. Do not ' +
       'do the work, and do not call `show_contract` — nothing is wrong with ' +
-      'their contract.'
+      'their contract.' +
+      because
+    );
+  }
+
+  if (reason === 'contract_check_failed') {
+    // Nothing is known about this user's contract — least of all that they
+    // lack one. Every instruction here exists to stop the model filling that
+    // silence with "you are not contracted".
+    return (
+      `The user asked for "${display}", but their contract could not be checked at all — ` +
+      'this is a failure on our side, not a verdict on their contract. Do NOT tell them they ' +
+      'are uncontracted, do NOT call `show_contract`, and do not do the work. Say plainly that ' +
+      'you could not verify their contract just now, tell them why, and offer to try again in ' +
+      'a moment.' +
+      because
     );
   }
 
@@ -281,6 +306,6 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
     `The user asked for "${display}" but holds no usable contract ` +
     `(reason: ${reason}). Explain this plainly, then call ` +
     `\`show_contract\` for \`${serviceId}\` so they can contract it ` +
-    'from the chat.'
+    `from the chat.${because}`
   );
 }

@@ -4,7 +4,10 @@ import type {
   CommerceRoutedService,
 } from '../../modules/messages/commerce-router-port.js';
 import type { Logger } from '../../plugin-api/types.js';
-import type { ContractRecordService } from './contract-record.service.js';
+import type {
+  ContractRecordLookup,
+  ContractRecordService,
+} from './contract-record.service.js';
 import type { EngagementService } from './engagement.service.js';
 import type { ContractRecord } from './types.js';
 import { isEngagementExpired, priceToCoin } from './util.js';
@@ -44,6 +47,9 @@ interface GateCacheEntry {
  *
  * Never throws — every failure lane degrades to a gate failure, and a gate
  * failure never errors the turn (the router routes to support with context).
+ * Every refusal carries a `detail` saying what actually blocked it, and a
+ * lookup that could not be answered refuses as `contract_check_failed` rather
+ * than impersonating a missing contract.
  */
 export class ContractGateService {
   private readonly contractRecord: ContractRecordService;
@@ -118,12 +124,34 @@ export class ContractGateService {
       };
     }
 
-    const record = await this.getRecord(roomId, senderDid);
-    if (!record || !record.authz.granted) {
+    const lookup = await this.getRecord(roomId, senderDid);
+    // A lookup that never got an answer is not evidence of an absent contract.
+    // Reported as its own reason so the agent says "I could not check" — the
+    // one thing it must not do is send a contracted user a contract card.
+    if (lookup.error !== undefined) {
+      return {
+        ok: false,
+        reason: 'contract_check_failed',
+        detail: lookup.error,
+      };
+    }
+    const record = lookup.record;
+    if (!record) {
       return { ok: false, reason: 'not_contracted' };
     }
+    if (!record.authz.granted) {
+      return {
+        ok: false,
+        reason: 'not_contracted',
+        detail: `the user has a contract record (status ${record.status}) but its on-chain authorization is not granted`,
+      };
+    }
     if (record.authz.agentQuotaRemaining <= 0) {
-      return { ok: false, reason: 'quota_exhausted' };
+      return {
+        ok: false,
+        reason: 'quota_exhausted',
+        detail: 'their contract has no runs left on it',
+      };
     }
 
     const price = priceToCoin(service.priceUsd, this.network);
@@ -134,11 +162,23 @@ export class ContractGateService {
       Number.isFinite(maxAmount) &&
       maxAmount >= price.amount;
     if (!maxCovers) {
-      return { ok: false, reason: 'max_amount_too_low' };
+      return {
+        ok: false,
+        reason: 'max_amount_too_low',
+        detail:
+          `their contract authorizes at most ${max.amount} ${max.denom} per job, and this one ` +
+          `costs ${price.amount} ${price.denom}`,
+      };
     }
 
     if (!record.serviceIds.includes(service.id)) {
-      return { ok: false, reason: 'service_not_contracted' };
+      return {
+        ok: false,
+        reason: 'service_not_contracted',
+        detail:
+          `their contract covers ${record.serviceIds.join(', ') || 'no services'}, ` +
+          `which does not include "${service.id}"`,
+      };
     }
 
     return {
@@ -155,36 +195,46 @@ export class ContractGateService {
     };
   }
 
+  /**
+   * The sender's contract record, or why it could not be read. Only answered
+   * lookups are cached: caching a failure would keep telling a contracted user
+   * their contract cannot be checked for a full minute after the engine came
+   * back.
+   */
   private async getRecord(
     roomId: string,
     senderDid: string,
-  ): Promise<ContractRecord | null> {
+  ): Promise<ContractRecordLookup> {
     const key = `${roomId}|${senderDid}`;
     const cached = this.cache.get(key);
     if (cached && cached.expiresAt > this.clock()) {
-      return cached.record;
+      return { record: cached.record };
     }
 
-    let record: ContractRecord | null;
+    let lookup: ContractRecordLookup;
     try {
-      record = await this.contractRecord.lookup({
+      lookup = await this.contractRecord.lookup({
         engineUrl: this.engineUrl,
         subscriberDid: senderDid,
       });
     } catch (error) {
       // The record service is non-throwing by contract; belt-and-braces.
+      const detail = error instanceof Error ? error.message : String(error);
       this.logger.warn(
-        `[oracle-payments] contract gate lookup failed for ${senderDid}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `[oracle-payments] contract gate lookup failed for ${senderDid}: ${detail}`,
       );
-      return null;
+      return {
+        record: null,
+        error: `the contract lookup itself failed (${detail})`,
+      };
     }
 
+    if (lookup.error !== undefined) return lookup;
+
     this.cache.set(key, {
-      record,
+      record: lookup.record,
       expiresAt: this.clock() + GATE_CACHE_TTL_MS,
     });
-    return record;
+    return lookup;
   }
 }

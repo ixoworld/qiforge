@@ -17,9 +17,10 @@ describe('AgentCardService', () => {
       fetchCard,
     });
 
-    const card = await service.getCard(ORACLE_ENTITY_DID);
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
 
     expect(fetchCard).toHaveBeenCalledWith(CARD_ENDPOINT);
+    expect(error).toBeUndefined();
     expect(card).not.toBeNull();
     expect(card?.oracleEntityDid).toBe(ORACLE_ENTITY_DID);
     expect(card?.cardProof).toBe('card-proof-v1');
@@ -42,40 +43,60 @@ describe('AgentCardService', () => {
     ]);
   });
 
-  it('returns null when the entity has no agentCard #acard resource', async () => {
+  it('reports no card and NO error when the entity publishes no #acard resource', async () => {
     const service = new AgentCardService({
       getEntity: async () => ({
         linkedResource: [{ type: 'settings', id: `${ORACLE_ENTITY_DID}#orz` }],
       }),
       fetchCard: async () => makeCardDocument(),
     });
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
+    // Nothing published is an answer, not a failure — the only case the tools
+    // may report as "this oracle has no services".
+    expect(await service.getCard(ORACLE_ENTITY_DID)).toEqual({ card: null });
   });
 
-  it('returns null when the card fetch fails', async () => {
+  it('reports why the card is unavailable when the fetch fails', async () => {
     const service = new AgentCardService({
       getEntity: async () => makeEntityDoc(),
       fetchCard: async () => null,
     });
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
+    expect(card).toBeNull();
+    expect(error).toMatch(/could not be downloaded/);
   });
 
-  it('returns null when the card shape is invalid (empty services)', async () => {
+  it('reports why the card is unavailable when the entity read throws', async () => {
+    const service = new AgentCardService({
+      getEntity: async () => {
+        throw new Error('blocksync down');
+      },
+      fetchCard: async () => makeCardDocument(),
+    });
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
+    expect(card).toBeNull();
+    expect(error).toContain('blocksync down');
+  });
+
+  it('reports why the card is unavailable when its shape is invalid (empty services)', async () => {
     const service = new AgentCardService({
       getEntity: async () => makeEntityDoc(),
       fetchCard: async () => ({
         credentialSubject: { id: ORACLE_ENTITY_DID, name: 'X', services: [] },
       }),
     });
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
+    expect(card).toBeNull();
+    expect(error).toMatch(/did not match the expected shape/);
   });
 
-  it('returns null when credentialSubject.id does not match the entity DID', async () => {
+  it('reports why the card is unavailable when credentialSubject.id does not match the entity DID', async () => {
     const service = new AgentCardService({
       getEntity: async () => makeEntityDoc(),
       fetchCard: async () => makeCardDocument('did:ixo:entity:someone-else'),
     });
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
+    expect(card).toBeNull();
+    expect(error).toContain('did:ixo:entity:someone-else');
   });
 
   it('returns null when a service is missing a numeric price.amount', async () => {
@@ -96,7 +117,7 @@ describe('AgentCardService', () => {
         },
       }),
     });
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
+    expect((await service.getCard(ORACLE_ENTITY_DID)).card).toBeNull();
   });
 
   it('caches a resolved card for its TTL and re-resolves after expiry', async () => {
@@ -128,8 +149,8 @@ describe('AgentCardService', () => {
       fetchCard: async () => makeCardDocument(),
     });
 
-    expect(await service.getCard(ORACLE_ENTITY_DID)).toBeNull();
-    const card = await service.getCard(ORACLE_ENTITY_DID);
+    expect((await service.getCard(ORACLE_ENTITY_DID)).card).toBeNull();
+    const { card } = await service.getCard(ORACLE_ENTITY_DID);
     expect(card?.services).toHaveLength(2);
     expect(getEntity).toHaveBeenCalledTimes(2);
   });
@@ -154,7 +175,8 @@ describe('AgentCardService — local seed + drift guard', () => {
       services: local.services,
     });
 
-    const card = await service.getCard(ORACLE_ENTITY_DID);
+    const { card, error } = await service.getCard(ORACLE_ENTITY_DID);
+    expect(error).toBeUndefined();
     expect(card?.oracleEntityDid).toBe(ORACLE_ENTITY_DID);
     expect(card?.services.map((s) => s.id)).toEqual([
       'tax-report',
@@ -172,7 +194,7 @@ describe('AgentCardService — local seed + drift guard', () => {
       cardProof: '',
       services: loadLocalAgentCard(LOCAL_CARD_PATH).services,
     });
-    expect(await service.getCard('did:ixo:entity:other')).toBeNull();
+    expect((await service.getCard('did:ixo:entity:other')).card).toBeNull();
   });
 
   it('prefers the on-chain card over the local seed once it resolves', async () => {
@@ -188,7 +210,7 @@ describe('AgentCardService — local seed + drift guard', () => {
       ],
     });
 
-    const card = await service.getCard(ORACLE_ENTITY_DID);
+    const { card } = await service.getCard(ORACLE_ENTITY_DID);
     expect(card?.cardProof).toBe('card-proof-v1');
     expect(card?.services.map((s) => s.id)).toEqual([
       'tax-report',

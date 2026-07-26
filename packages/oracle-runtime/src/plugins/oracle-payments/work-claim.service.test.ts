@@ -8,7 +8,10 @@ import type {
 } from '../../plugin-api/types.js';
 import type { RoomFileSend } from '../../matrix/room-file.js';
 import { ContractGateService } from './contract-gate.service.js';
-import type { EngagementService } from './engagement.service.js';
+import type {
+  EngagementService,
+  EngagementStateStore,
+} from './engagement.service.js';
 import type {
   ClaimBotUploadInput,
   ClaimDeliverable,
@@ -94,6 +97,16 @@ const LAPSED_INTENT = {
   expiresAt: '2026-07-22T12:59:00.000Z',
 };
 
+/** A room-state store whose reads fail outright — not a Matrix "not found". */
+function failingStore(detail: string): EngagementStateStore {
+  return {
+    getState: async () => {
+      throw new Error(detail);
+    },
+    setState: async () => undefined,
+  };
+}
+
 /** The chain's own wording when a claim names a reservation it no longer holds. */
 const INTENT_GONE_LOG =
   'failed to execute message; message index: 0: for agent ixo1oracleaddr and collection 42: intent not found';
@@ -114,10 +127,12 @@ interface HarnessOptions {
   intentResult?: SubmitClaimResult;
   /** Drop the escrow lane, as an oracle wired without one would. */
   withoutIntentLane?: boolean;
+  /** Back the engagement records with a store that fails instead of answering. */
+  store?: EngagementStateStore;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
-  const engagement = makeEngagementService();
+  const engagement = makeEngagementService(undefined, undefined, options.store);
   const seed =
     options.engagement === undefined ? makeEngagement() : options.engagement;
   if (seed) {
@@ -337,8 +352,10 @@ describe('WorkClaimService — a reservation that lapsed mid-job', () => {
       }),
     });
 
+    // The reason AND what it means travel: "quota_exhausted" alone is a code
+    // the agent cannot turn into a sentence the user understands.
     await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
-      /could not be reserved again: the user's contract no longer covers it \(quota_exhausted\)/,
+      /could not be reserved again: the user's contract no longer covers it \(quota_exhausted: their contract has no runs left on it\)/,
     );
 
     // Nothing was reserved or claimed, and — the whole point — the dead job
@@ -357,8 +374,9 @@ describe('WorkClaimService — a reservation that lapsed mid-job', () => {
       intentResult: { code: 12, transactionHash: '', rawLog: 'out of gas' },
     });
 
+    // The chain's own rejection reaches the agent rather than dying in a log.
     await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
-      /could not be reserved again: reserving the payment again was refused on-chain/,
+      /could not be reserved again: reserving the payment again failed — the chain rejected the payment reservation \(code 12\): out of gas/,
     );
     expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
       status: 'closed',
@@ -1121,5 +1139,36 @@ describe('WorkClaimService — release lane (cancel_work)', () => {
     expect(result).toMatchObject({ cancelled: false });
     expect(h.signAndSave).not.toHaveBeenCalled();
     expect(h.submit).not.toHaveBeenCalled();
+  });
+
+  it('never reports "nothing to cancel" when the job record could not be READ', async () => {
+    // A failed read looks exactly like an absent engagement. Telling the user
+    // there is nothing to cancel would leave their reservation held while they
+    // are told they are free of it.
+    const h = await makeHarness({
+      engagement: null,
+      store: failingStore('matrix 502'),
+    });
+
+    await expect(h.service.release({}, h.ctx)).rejects.toThrow(/matrix 502/);
+    await expect(h.service.release({}, h.ctx)).rejects.toThrow(
+      /does NOT mean the user has no job running/,
+    );
+    expect(h.submit).not.toHaveBeenCalled();
+  });
+
+  it('never reports "nothing to deliver" when the job record could not be READ', async () => {
+    const h = await makeHarness({
+      engagement: null,
+      store: failingStore('matrix 502'),
+    });
+
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /could not be looked up/,
+    );
+    await expect(h.service.deliver(TEXT_ARGS, h.ctx)).rejects.toThrow(
+      /matrix 502/,
+    );
+    expect(h.signAndSave).not.toHaveBeenCalled();
   });
 });

@@ -268,6 +268,32 @@ describe('EngagementService', () => {
     expect(recovered?.status).toBe('active');
   });
 
+  it('readActive separates "no job here" from "could not read whether there is one"', async () => {
+    // Routing flattens both to null and fails open to support; the claim lanes
+    // cannot, because the two lead to opposite things being said to the user.
+    const store: EngagementStateStore = {
+      getState: async () => {
+        throw new Error('matrix unreachable');
+      },
+      setState: vi.fn(),
+    };
+    const failing = new EngagementService({
+      stateStore: () => store,
+      logger: { log: vi.fn(), error: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(await failing.readActive(ROOM_ID, THREAD_ID)).toEqual({
+      engagement: null,
+      error: expect.stringContaining('matrix unreachable'),
+    });
+
+    // A thread that genuinely holds nothing carries no error at all.
+    const { service: empty } = makeService();
+    expect(await empty.readActive(ROOM_ID, THREAD_ID)).toEqual({
+      engagement: null,
+    });
+  });
+
   it('start indexes the room’s active thread before writing the engagement', async () => {
     const { service, setState, stored } = makeService();
 

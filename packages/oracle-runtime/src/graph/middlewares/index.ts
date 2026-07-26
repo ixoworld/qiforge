@@ -27,3 +27,8 @@ export {
   createSummarizationMiddleware,
   type SummarizationMiddlewareOptions,
 } from './summarization-middleware.js';
+
+export {
+  createWorkStatusMiddleware,
+  type WorkStatusMiddlewareOptions,
+} from './work-status-middleware.js';

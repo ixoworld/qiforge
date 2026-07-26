@@ -171,6 +171,20 @@ const NO_ENGAGEMENT_MESSAGE =
   'Never call deliver_work outside a contracted engagement — the user has to contract the ' +
   'service first, which starts the engagement.';
 
+/**
+ * What to say when the job record could not be READ, as opposed to not being
+ * there. The two are indistinguishable from a `null` and lead to opposite
+ * replies: this one must never come out as "you have no job here".
+ */
+function unreadableJob(detail: string): string {
+  return (
+    `This thread's job could not be looked up, so nothing was done: ${detail}. This does NOT mean ` +
+    'the user has no job running — the record simply could not be read. Do not tell them to ' +
+    'contract anything, do not treat the work as unpaid, and do not retry in a loop: say the ' +
+    'lookup failed and why, and try again in a moment.'
+  );
+}
+
 const CLOSED_PREFIX =
   'The engagement is closed; this thread returns to support from the next message.';
 
@@ -296,7 +310,9 @@ export class WorkClaimService {
     const chat = this.chatLocation(ctx, 'deliver_work');
     const { roomId, threadId } = this.engagementLocation(ctx, chat);
 
-    const engagement = await this.engagement.getActive(roomId, threadId);
+    const read = await this.engagement.readActive(roomId, threadId);
+    if (read.error !== undefined) throw new Error(unreadableJob(read.error));
+    const engagement = read.engagement;
     if (!engagement) throw new Error(NO_ENGAGEMENT_MESSAGE);
 
     // Already submitted: never re-sign, never re-submit, never double-charge.
@@ -331,6 +347,13 @@ export class WorkClaimService {
       },
     });
     if (!gate.ok) {
+      // The reason is a code; the detail is what the user can act on. Both
+      // travel, because "the contract check failed" with nothing after it is
+      // exactly the message the agent cannot turn into an explanation.
+      const why =
+        gate.detail !== undefined
+          ? `${gate.reason}: ${gate.detail}`
+          : gate.reason;
       // A live reservation is still held, so the job keeps blocking and the
       // agent may retry once the user fixes their contract. A lapsed one holds
       // nothing and can never be renewed through a gate that refuses it — that
@@ -339,11 +362,22 @@ export class WorkClaimService {
         throw await this.abandon({
           roomId,
           threadId,
-          reason: `the user's contract no longer covers it (${gate.reason})`,
+          reason: `the user's contract no longer covers it (${why})`,
         });
       }
+      // A check that never completed says nothing about their contract, so
+      // the fix is to try again — not to send a contracted user a contract
+      // card and tell them something untrue about why their work stalled.
+      if (gate.reason === 'contract_check_failed') {
+        throw new Error(
+          `This work can't be billed right now: the user's contract could not be checked at all (${why}). ` +
+            'This is a failure on our side, not a problem with their contract — do not say they are ' +
+            'uncontracted and do not call show_contract. Tell them the work is finished but could not be ' +
+            'recorded yet, say why, and call deliver_work again shortly. The work itself is not lost.',
+        );
+      }
       throw new Error(
-        `This work can't be billed right now: the user's contract check failed (${gate.reason}). ` +
+        `This work can't be billed right now: the user's contract check failed (${why}). ` +
           'Explain this to the user and call show_contract so they can fix it — the work itself is not lost.',
       );
     }
@@ -624,14 +658,15 @@ export class WorkClaimService {
       });
     }
 
-    const fresh = await this.intent.reserve(gate);
-    if (!fresh) {
+    const reservation = await this.intent.reserve(gate);
+    if (!reservation.ok) {
       throw await this.abandon({
         roomId,
         threadId,
-        reason: 'reserving the payment again was refused on-chain',
+        reason: `reserving the payment again failed — ${reservation.detail}`,
       });
     }
+    const fresh = reservation.intent;
 
     this.logger.warn(
       `[oracle-payments] the reservation for thread ${threadId} lapsed mid-job — re-reserved on-chain ` +
@@ -696,7 +731,11 @@ export class WorkClaimService {
     const chat = this.chatLocation(ctx, 'cancel_work');
     const { roomId, threadId } = this.engagementLocation(ctx, chat);
 
-    const engagement = await this.engagement.getActive(roomId, threadId);
+    const read = await this.engagement.readActive(roomId, threadId);
+    // Reporting "nothing to cancel" for a read that failed would leave the
+    // user's reservation held while they are told they are free of it.
+    if (read.error !== undefined) throw new Error(unreadableJob(read.error));
+    const engagement = read.engagement;
     if (!engagement) {
       return {
         cancelled: false,

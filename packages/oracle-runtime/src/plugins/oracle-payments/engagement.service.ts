@@ -55,6 +55,17 @@ const PendingClaimsSchema = z.object({
   ),
 });
 
+/**
+ * One engagement read. `engagement: null` with no `error` means the thread
+ * genuinely holds no (active) job; with an `error` it means the record could
+ * not be read at all — a distinction the claim lanes cannot collapse without
+ * telling a user mid-job that they never started one.
+ */
+export interface EngagementRead {
+  engagement: CommerceEngagement | null;
+  error?: string;
+}
+
 /** An active engagement together with the room and thread it lives in. */
 export interface ActiveEngagementRef {
   /** Room holding the engagement's durable record — not necessarily the room
@@ -174,6 +185,11 @@ export interface EngagementServiceDeps {
  * Reads never break a turn: a missing state event, an invalid payload, and
  * transport errors all read as "no engagement". Writes throw — the router
  * fails open to support mode when a start cannot be persisted.
+ *
+ * {@link EngagementService.readActive} is the exception that proves the rule:
+ * it returns the same answer plus the reason when the read itself failed, for
+ * the claim lanes, where "no job here" and "could not tell" are opposite
+ * things to say to a user.
  */
 export class EngagementService {
   private readonly stateStore: () => EngagementStateStore;
@@ -218,9 +234,25 @@ export class EngagementService {
     roomId: string,
     threadId: string,
   ): Promise<CommerceEngagement | null> {
+    return (await this.read(roomId, threadId)).engagement;
+  }
+
+  /**
+   * The thread's engagement, or why the answer is not known.
+   *
+   * Routing wants a plain answer and fails open to support, which is why
+   * {@link get} flattens this. The claim lanes must not: "this thread has no
+   * job" and "I could not read whether it has one" call for opposite messages,
+   * and answering the second with the first tells a user mid-job that they
+   * never started one.
+   */
+  private async read(
+    roomId: string,
+    threadId: string,
+  ): Promise<EngagementRead> {
     const cacheKey = this.cacheKey(roomId, threadId);
     const cached = this.cache.get(cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) return { engagement: cached };
 
     let raw: unknown;
     try {
@@ -236,14 +268,19 @@ export class EngagementService {
           `[oracle-payments] no engagement state for thread ${threadId} — the thread routes as support`,
         );
         this.cache.set(cacheKey, null);
-        return null;
+        return { engagement: null };
       }
-      // Transient read failure: report "none" but do NOT cache — a live
-      // engagement must not be masked past the outage.
+      // Transient read failure: answer "none" but do NOT cache — a live
+      // engagement must not be masked past the outage — and say why, so a
+      // caller that cannot afford to guess does not have to.
+      const detail = errorMessage(error);
       this.logger.warn(
-        `[oracle-payments] engagement read failed for ${threadId}: ${errorMessage(error)}`,
+        `[oracle-payments] engagement read failed for ${threadId}: ${detail}`,
       );
-      return null;
+      return {
+        engagement: null,
+        error: `this thread's job record could not be read (${detail})`,
+      };
     }
 
     const parsed = EngagementSchema.safeParse(raw);
@@ -260,11 +297,11 @@ export class EngagementService {
         }) — the thread routes as support`,
       );
       this.cache.set(cacheKey, null);
-      return null;
+      return { engagement: null };
     }
 
     this.cache.set(cacheKey, parsed.data);
-    return parsed.data;
+    return { engagement: parsed.data };
   }
 
   /**
@@ -281,8 +318,19 @@ export class EngagementService {
     roomId: string,
     threadId: string,
   ): Promise<CommerceEngagement | null> {
-    const engagement = await this.get(roomId, threadId);
-    return engagement?.status === 'active' ? engagement : null;
+    return (await this.readActive(roomId, threadId)).engagement;
+  }
+
+  /**
+   * {@link getActive}, with the reason when the read itself failed. The claim
+   * lanes use this so a Matrix outage is reported as an outage rather than as
+   * "you have no job here, contract one first".
+   */
+  async readActive(roomId: string, threadId: string): Promise<EngagementRead> {
+    const result = await this.read(roomId, threadId);
+    return result.engagement?.status === 'active'
+      ? result
+      : { ...result, engagement: null };
   }
 
   /**

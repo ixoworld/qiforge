@@ -3,10 +3,6 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { Logger } from '@nestjs/common';
 import { z } from 'zod';
 import { getProviderChatModel } from '../../llm/llm-provider.js';
-import {
-  workStatusProducer,
-  type WorkStatusProducer,
-} from '../../matrix/work-status-producer.js';
 import type { CommerceContext } from '../../plugin-api/types.js';
 import {
   getCommerceRouterPort,
@@ -46,8 +42,6 @@ const defaultModelFactory: RoutingModelFactory = (params) => {
 
 export interface MessageRouterDeps {
   getModel?: RoutingModelFactory;
-  /** Status-card sink — only `emit` is used (the `routing` phase). */
-  producer?: Pick<WorkStatusProducer, 'emit'>;
   logger?: Pick<Logger, 'log' | 'warn' | 'debug'>;
 }
 
@@ -79,6 +73,12 @@ interface RoutingDecisionFields {
   serviceId?: string;
   reason?: string;
   /**
+   * What actually failed, when the refusal has more to it than its reason —
+   * the chain's rejection, the engine's status. Operators reading this line
+   * after a user complaint need the same sentence the agent was given.
+   */
+  detail?: string;
+  /**
    * `intent/confidence` as the classifier returned it, pre-threshold — or the
    * literal `skipped`, which is how the line states that no classification ran
    * at all because the user is already locked into a job.
@@ -97,8 +97,6 @@ export interface RouteTurnInput {
   senderDid: string;
   /** The coalesced user text of the turn. */
   text: string;
-  /** The turn's requestId — keys the `work_status` card. */
-  requestId: string;
 }
 
 /**
@@ -138,22 +136,21 @@ export interface RouteTurnInput {
  */
 export class MessageRouterService {
   private readonly getModel: RoutingModelFactory;
-  private readonly producer: Pick<WorkStatusProducer, 'emit'>;
   private readonly logger: Pick<Logger, 'log' | 'warn' | 'debug'>;
   /** One-shot guard for the "commerce is off" first-use notice. */
   private inactiveNoticeLogged = false;
 
   constructor(deps: MessageRouterDeps = {}) {
     this.getModel = deps.getModel ?? defaultModelFactory;
-    this.producer = deps.producer ?? workStatusProducer;
     this.logger = deps.logger ?? new Logger(MessageRouterService.name);
   }
 
   /**
-   * `true` when a commerce port is registered — the bridge gates status-card
-   * setup on this. The first `false` answer says so out loud: an inert router
-   * makes every Matrix turn plain support with no overlay and no commerce
-   * tools, which is indistinguishable from a routing bug in the chat itself.
+   * `true` when a commerce port is registered — the bridge gates the routing
+   * call itself on this. The first `false` answer says so out loud: an inert
+   * router makes every Matrix turn plain support with no overlay and no
+   * commerce tools, which is indistinguishable from a routing bug in the chat
+   * itself.
    */
   isActive(): boolean {
     const active = getCommerceRouterPort() !== null;
@@ -241,7 +238,6 @@ export class MessageRouterService {
       `${LOG_PREFIX} classifying thread ${input.threadId} against ${services.length} published service(s)`,
     );
 
-    this.producer.emit(input.requestId, 'routing');
     const classification = await this.classify(port, input.text, services);
     if (!classification) {
       this.logDecision(input, {
@@ -301,6 +297,7 @@ export class MessageRouterService {
         mode: 'support',
         serviceId: service.id,
         reason: gate.reason,
+        ...(gate.detail !== undefined && { detail: gate.detail }),
         classifier: verdict,
       });
       return {
@@ -309,6 +306,7 @@ export class MessageRouterService {
           reason: gate.reason,
           serviceId: service.id,
           serviceName: service.name,
+          ...(gate.detail !== undefined && { detail: gate.detail }),
           ...(gate.inProgress !== undefined && { inProgress: gate.inProgress }),
         },
       };
@@ -328,6 +326,7 @@ export class MessageRouterService {
         mode: 'support',
         serviceId: service.id,
         reason: started.reason,
+        ...(started.detail !== undefined && { detail: started.detail }),
         classifier: verdict,
       });
       return {
@@ -336,6 +335,7 @@ export class MessageRouterService {
           reason: started.reason,
           serviceId: service.id,
           serviceName: service.name,
+          ...(started.detail !== undefined && { detail: started.detail }),
         },
       };
     }
@@ -369,6 +369,7 @@ export class MessageRouterService {
         `decision=${fields.decision}`,
         ...(fields.serviceId ? [`service=${fields.serviceId}`] : []),
         ...(fields.reason ? [`reason=${fields.reason}`] : []),
+        ...(fields.detail ? [`detail="${fields.detail}"`] : []),
         ...(fields.classifier ? [`classifier=${fields.classifier}`] : []),
         ...(fields.engagementRoomId
           ? [`engagementRoom=${fields.engagementRoomId}`]

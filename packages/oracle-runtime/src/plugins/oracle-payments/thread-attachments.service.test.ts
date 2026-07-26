@@ -171,6 +171,8 @@ describe('ThreadAttachmentService', () => {
 
     expect(result.attachments).toEqual([]);
     expect(result.note).toMatch(/could not be read/);
+    // The reason reaches the agent too, not just the operator's log.
+    expect(result.note).toContain('matrix down');
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('matrix down'));
   });
 

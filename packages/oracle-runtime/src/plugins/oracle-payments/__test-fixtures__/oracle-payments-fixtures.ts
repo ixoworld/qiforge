@@ -120,16 +120,22 @@ export function makeContractRecord(
 /**
  * A `ContractRecordService` wired to a stub fetch returning `record` (or a 404
  * when `record` is null), plus a token provider that always yields a token.
+ * Pass `fetchImpl` to model an engine that fails instead of answering — the
+ * lookup then reports an error rather than "no contract".
  */
-export function makeContractRecordService(record: ContractRecord | null): {
+export function makeContractRecordService(
+  record: ContractRecord | null,
+  fetchImpl?: typeof fetch,
+): {
   service: ContractRecordService;
   fetchCalls: string[];
 } {
   const fetchCalls: string[] = [];
   const service = new ContractRecordService({
     tokenProvider: async () => 'engine-token',
-    fetchImpl: async (input: string | URL | Request) => {
+    fetchImpl: async (input: string | URL | Request, init?: RequestInit) => {
       fetchCalls.push(String(input));
+      if (fetchImpl) return fetchImpl(input, init);
       if (record === null) {
         return new Response(null, { status: 404 });
       }

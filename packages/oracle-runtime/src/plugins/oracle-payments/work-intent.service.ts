@@ -18,6 +18,16 @@ import { errorMessage, priceToCoin, retry } from './util.js';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
+/**
+ * Outcome of one on-chain reservation. The failure carries the chain's own
+ * words rather than collapsing to a null: "reserving the payment failed" with
+ * nothing after it is the one thing the agent cannot explain to the user, and
+ * every caller of this turns its failure into something the user reads.
+ */
+export type ReservationResult =
+  | { ok: true; intent: NonNullable<CommerceEngagement['intent']> }
+  | { ok: false; detail: string };
+
 export interface WorkIntentServiceDeps {
   engagement: EngagementService;
   /** Network name for the price→denom conversion (portal parity). */
@@ -35,8 +45,9 @@ export interface WorkIntentServiceDeps {
  * Work is always escrow-backed: the service price is reserved on-chain
  * (`MsgClaimIntent`) BEFORE the engagement is written, and the tx hash plus the
  * derived expiry are stamped on it. A failed reservation starts nothing: the
- * router surfaces `intent_failed` and the agent explains instead of working
- * unpaid. The delivery lane then settles the claim against that reservation
+ * router surfaces `intent_failed` together with the chain's own reason, so the
+ * agent explains what happened instead of working unpaid. The delivery lane
+ * then settles the claim against that reservation
  * with `useIntent: true` — the two halves are meaningless apart, so neither is
  * conditional.
  *
@@ -80,8 +91,15 @@ export class WorkIntentService {
       ...(start.userDid !== undefined && { userDid: start.userDid }),
     };
 
-    const intent = await this.reserve(start);
-    if (!intent) return { ok: false, reason: 'intent_failed' };
+    const reservation = await this.reserve(start);
+    if (!reservation.ok) {
+      return {
+        ok: false,
+        reason: 'intent_failed',
+        detail: reservation.detail,
+      };
+    }
+    const intent = reservation.intent;
 
     // The engagement record IS the persisted "this user is in work mode"
     // state: the router reads it before anything else, so a reservation whose
@@ -111,24 +129,35 @@ export class WorkIntentService {
           `(${errorMessage(error)}). The user holds a live reservation with no job record: they ` +
           'cannot start new paid work until it lapses, and cancel_work has nothing to release.',
       );
-      return { ok: false, reason: 'intent_failed' };
+      return {
+        ok: false,
+        reason: 'intent_failed',
+        // Deliberately distinct from a reservation failure: the payment IS
+        // reserved here, so the user is holding one and cannot start anything
+        // else until it lapses. Telling them "try again shortly" would be a
+        // lie, and only this text distinguishes the two.
+        detail:
+          `the payment was reserved on-chain (tx ${intent.txHash}) but the job record could not be ` +
+          `saved (${errorMessage(error)}), so the job did not open and the reservation is stranded ` +
+          'until it expires on its own',
+      };
     }
 
     return { ok: true, engagement };
   }
 
   /**
-   * Lock the service price on-chain. Returns `null` on any failure — a thrown
-   * transport error and a non-zero tx code both mean nothing is reserved.
+   * Lock the service price on-chain. A thrown transport error and a non-zero tx
+   * code both mean nothing is reserved, and both come back as a failure
+   * carrying the chain's own wording — logging it and returning a bare "no" is
+   * what leaves the agent with nothing to tell the user.
    *
    * Public because the delivery lane reserves again on its own account: a job
    * that outran its window needs a fresh intent before its claim can settle,
    * and that must be the same chain write with the same failure handling, not
    * a second copy of it.
    */
-  async reserve(
-    start: CommerceEngagementStart,
-  ): Promise<CommerceEngagement['intent'] | null> {
+  async reserve(start: CommerceEngagementStart): Promise<ReservationResult> {
     const price = priceToCoin(start.priceUsd, this.network);
     const amount: ClaimCoin[] = [
       { denom: price.denom, amount: String(price.amount) },
@@ -141,27 +170,36 @@ export class WorkIntentService {
         amount,
       });
     } catch (error) {
+      const detail = errorMessage(error);
       this.logger.warn(
-        `[oracle-payments] claim intent failed for collection ${start.collectionId}: ${errorMessage(error)}`,
+        `[oracle-payments] claim intent failed for collection ${start.collectionId}: ${detail}`,
       );
-      return null;
+      return {
+        ok: false,
+        detail: `the chain rejected the payment reservation: ${detail}`,
+      };
     }
 
     if (result.code !== 0) {
+      const rawLog = result.rawLog || 'unknown chain error';
       this.logger.warn(
-        `[oracle-payments] claim intent rejected for collection ${start.collectionId} (code ${result.code}): ${
-          result.rawLog || 'unknown chain error'
-        }`,
+        `[oracle-payments] claim intent rejected for collection ${start.collectionId} (code ${result.code}): ${rawLog}`,
       );
-      return null;
+      return {
+        ok: false,
+        detail: `the chain rejected the payment reservation (code ${result.code}): ${rawLog}`,
+      };
     }
 
     const submittedAt = this.clock();
     const expiresAt = expiryFrom(submittedAt, start.intentDurationNs);
     return {
-      txHash: result.transactionHash,
-      submittedAt: submittedAt.toISOString(),
-      ...(expiresAt !== undefined && { expiresAt }),
+      ok: true,
+      intent: {
+        txHash: result.transactionHash,
+        submittedAt: submittedAt.toISOString(),
+        ...(expiresAt !== undefined && { expiresAt }),
+      },
     };
   }
 }

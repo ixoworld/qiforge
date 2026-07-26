@@ -41,10 +41,25 @@ export interface WorkStatusTurn {
   forEventId: string;
 }
 
+/** One card update: what to post, resolved at post time. */
+interface StatusFrame {
+  phase: WorkStatusPhase;
+  label?: string;
+}
+
 interface TurnEntry extends WorkStatusTurn {
   anchorEventId?: string;
-  /** Serializes posts so the anchor always lands before its replacements. */
-  queue: Promise<void>;
+  /** Steps taken this turn — drives the `Step {n} · …` prefix. */
+  steps: number;
+  /**
+   * The newest frame waiting behind the in-flight post. A frame arriving while
+   * a post is in flight replaces this one instead of queuing behind it, so the
+   * card jumps straight to the latest state and an 8-tool turn costs a handful
+   * of Matrix events rather than one per emission.
+   */
+  pending?: StatusFrame;
+  /** True while `drain` owns the entry — keeps posts strictly serialized. */
+  draining: boolean;
 }
 
 export interface WorkStatusProducerDeps {
@@ -60,15 +75,14 @@ export interface WorkStatusProducerDeps {
 
 /**
  * Posts the per-turn `ixo.oracle.component` / `work_status` liveness card for
- * Matrix commerce turns. One anchor event per user message (`forEventId`);
- * every later phase posts an `m.replace` update carrying the full new content,
- * so clients collapse to the latest state.
+ * Matrix turns. One anchor event per user message (`forEventId`); every later
+ * phase posts an `m.replace` update carrying the full new content, so clients
+ * collapse to the latest state.
  *
- * Turns are registered by the Matrix listener bridge (only when the commerce
- * router is active), keyed by the turn's requestId. Emissions for an
- * unregistered requestId are no-ops — which is what silently disables the
- * card on HTTP turns and on oracles without the oracle-payments plugin.
- * Posting failures are logged and never thrown.
+ * Turns are registered by the Matrix listener bridge, keyed by the turn's
+ * requestId. Emissions for an unregistered requestId are no-ops — which is
+ * what silently disables the card on HTTP and WS turns. Posting failures are
+ * logged and never thrown.
  */
 export class WorkStatusProducer {
   private readonly turns = new Map<string, TurnEntry>();
@@ -91,7 +105,7 @@ export class WorkStatusProducer {
 
   /** Register a turn so later `emit`/`finish` calls have a card to drive. */
   beginTurn(turn: WorkStatusTurn): void {
-    this.turns.set(turn.requestId, { ...turn, queue: Promise.resolve() });
+    this.turns.set(turn.requestId, { ...turn, steps: 0, draining: false });
   }
 
   /**
@@ -104,6 +118,22 @@ export class WorkStatusProducer {
     const entry = this.turns.get(requestId);
     if (!entry) return;
     this.enqueue(entry, phase, label);
+  }
+
+  /**
+   * Post the next agent step of a registered turn: bumps the turn's counter
+   * and emits `working` with a `Step {n} · {action}` label. `action` is
+   * already a finished phrase (`Thinking…`, `Search skills…`).
+   *
+   * The counter can outrun the numbers the room actually sees — coalesced
+   * frames are skipped, not renumbered — so the line always moves forward.
+   * Unregistered requestIds are no-ops, same as `emit`.
+   */
+  step(requestId: string, action: string): void {
+    const entry = this.turns.get(requestId);
+    if (!entry) return;
+    entry.steps += 1;
+    this.enqueue(entry, 'working', `Step ${entry.steps} · ${action}`);
   }
 
   /**
@@ -123,44 +153,73 @@ export class WorkStatusProducer {
     this.turns.delete(requestId);
   }
 
+  /**
+   * Stage a frame and make sure someone is posting. Anything already waiting
+   * behind the in-flight post is stale by the time the homeserver would accept
+   * it, so the newest frame replaces it — which is also why `finish`'s
+   * terminal phase can never be dropped: it is always the newest frame.
+   */
   private enqueue(
     entry: TurnEntry,
     phase: WorkStatusPhase,
     label?: string,
   ): void {
-    entry.queue = entry.queue
-      .then(async () => {
-        if (!entry.anchorEventId && !ANCHOR_PHASES.has(phase)) return;
-        const resolvedLabel = label ?? DEFAULT_LABELS[phase];
-        const content = buildOracleComponentContent({
-          component: 'work_status',
-          props: {
-            forEventId: entry.forEventId,
-            phase,
-            label: resolvedLabel,
-            updatedAt: this.clock().toISOString(),
-          },
-          body: `Status: ${resolvedLabel}`,
-          sessionId: entry.sessionId,
-          requestId: entry.requestId,
-          ...(entry.anchorEventId
-            ? { replacesEventId: entry.anchorEventId }
-            : { threadId: entry.threadId }),
-        });
-        const eventId = await this.postEvent(
-          entry.roomId,
-          ORACLE_COMPONENT_EVENT_TYPE,
-          content,
-        );
-        if (!entry.anchorEventId) entry.anchorEventId = eventId;
-      })
-      .catch((error) => {
-        this.logger.warn(
-          `work_status post failed (room=${entry.roomId}, phase=${phase}): ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+    entry.pending = { phase, label };
+    if (entry.draining) return;
+    entry.draining = true;
+    void this.drain(entry);
+  }
+
+  /** Post staged frames one at a time until none is left. Never throws. */
+  private async drain(entry: TurnEntry): Promise<void> {
+    try {
+      while (entry.pending) {
+        const frame = entry.pending;
+        entry.pending = undefined;
+        await this.post(entry, frame);
+      }
+    } finally {
+      // Cleared in the same tick as the loop's final `pending` check, so a
+      // frame staged by a racing `emit` can never be stranded unposted.
+      entry.draining = false;
+    }
+  }
+
+  private async post(entry: TurnEntry, frame: StatusFrame): Promise<void> {
+    const { phase, label } = frame;
+    // Checked at post time, not enqueue time: a closing phase must not create
+    // a card even if it was staged while an anchor post was still in flight.
+    if (!entry.anchorEventId && !ANCHOR_PHASES.has(phase)) return;
+    const resolvedLabel = label ?? DEFAULT_LABELS[phase];
+    try {
+      const content = buildOracleComponentContent({
+        component: 'work_status',
+        props: {
+          forEventId: entry.forEventId,
+          phase,
+          label: resolvedLabel,
+          updatedAt: this.clock().toISOString(),
+        },
+        body: `Status: ${resolvedLabel}`,
+        sessionId: entry.sessionId,
+        requestId: entry.requestId,
+        ...(entry.anchorEventId
+          ? { replacesEventId: entry.anchorEventId }
+          : { threadId: entry.threadId }),
       });
+      const eventId = await this.postEvent(
+        entry.roomId,
+        ORACLE_COMPONENT_EVENT_TYPE,
+        content,
+      );
+      if (!entry.anchorEventId) entry.anchorEventId = eventId;
+    } catch (error) {
+      this.logger.warn(
+        `work_status post failed (room=${entry.roomId}, phase=${phase}): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }
 
@@ -175,7 +234,8 @@ export function humanizeToolLabel(toolName: string): string {
 }
 
 /**
- * Process-wide producer shared by the bridge (routing/done/superseded), the
- * router (routing) and the tool wrapper (working) — one anchor map per turn.
+ * Process-wide producer shared by the bridge (routing/delivering/done/
+ * superseded) and the work-status middleware (per-step `working` beats) —
+ * one anchor map per turn.
  */
 export const workStatusProducer = new WorkStatusProducer();

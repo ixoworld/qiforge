@@ -1,10 +1,5 @@
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
-import {
-  humanizeToolLabel,
-  workStatusProducer,
-  type WorkStatusProducer,
-} from '../matrix/work-status-producer.js';
 import type { PluginTool } from '../plugin-api/types.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import {
@@ -23,11 +18,6 @@ export interface WrapPluginToolOptions {
   state: RuntimeStateInput;
   /** Plugin manifest title used to auto-prefix the description. */
   pluginTitle?: string;
-  /**
-   * Status-card sink — only `emit` is used (the `working` phase). Defaults to
-   * the process-wide producer the Matrix bridge drives; tests inject a stub.
-   */
-  producer?: Pick<WorkStatusProducer, 'emit'>;
 }
 
 /**
@@ -46,7 +36,6 @@ export function wrapPluginTool(
   options: WrapPluginToolOptions,
 ): StructuredTool {
   const { ambient, state, pluginTitle } = options;
-  const producer = options.producer ?? workStatusProducer;
   const description = pluginTitle
     ? `[${pluginTitle}] ${pluginTool.description}`
     : pluginTool.description;
@@ -60,14 +49,6 @@ export function wrapPluginTool(
         runConfig as unknown as RunConfig,
         ambient,
         state,
-      );
-      // Liveness card: flips the turn's `work_status` card to `working` with
-      // a humanized tool label. No-op unless the Matrix bridge registered
-      // this requestId (commerce-routed turns only); never throws.
-      producer.emit(
-        ctx.session.requestId,
-        'working',
-        humanizeToolLabel(pluginTool.name),
       );
       return pluginTool.handler(args, ctx);
     },

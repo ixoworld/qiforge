@@ -160,9 +160,11 @@ export type CommercePaymentOutcome =
 /**
  * Why a work-classified turn did not start an engagement. The first four are
  * contract-gate failures (the user needs to contract or fix their contract);
- * the last two are different in kind — the contract is fine, but the user
- * already has a job running (`engagement_in_progress`) or the on-chain payment
- * reservation itself failed (`intent_failed`).
+ * the last three are different in kind — the contract is fine, but the user
+ * already has a job running (`engagement_in_progress`), the on-chain payment
+ * reservation itself failed (`intent_failed`), or the contract could not be
+ * checked at all (`contract_check_failed`, which is NOT evidence of an absent
+ * contract and must never be reported as one).
  */
 export type CommerceGateFailureReason =
   | 'not_contracted'
@@ -170,6 +172,7 @@ export type CommerceGateFailureReason =
   | 'max_amount_too_low'
   | 'service_not_contracted'
   | 'engagement_in_progress'
+  | 'contract_check_failed'
   | 'intent_failed';
 
 /**
@@ -200,6 +203,13 @@ export interface CommerceGateFailure {
   serviceId: string;
   /** Display name of the requested service, when the agent card provides one. */
   serviceName?: string;
+  /**
+   * What actually went wrong, in plain words — the chain's rejection text, the
+   * engine's status, the numbers that did not add up. The reason alone is a
+   * code; this is what lets the agent tell the user something true instead of
+   * "it failed". Absent only when the reason already is the whole story.
+   */
+  detail?: string;
   /** The blocking job — present only for `engagement_in_progress`. */
   inProgress?: CommerceInProgressEngagement;
 }

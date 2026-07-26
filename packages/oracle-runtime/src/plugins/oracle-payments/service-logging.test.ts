@@ -31,7 +31,7 @@ describe('oracle-payments services are never silent by default', () => {
   it('ContractRecordService reports a disabled lookup lane', async () => {
     const warn = spyOnNestWarn();
 
-    const record = await new ContractRecordService().lookup({
+    const { record } = await new ContractRecordService().lookup({
       subscriberDid: 'did:ixo:user-1',
     });
 
@@ -42,7 +42,7 @@ describe('oracle-payments services are never silent by default', () => {
   it('AgentCardService reports a card that cannot be resolved', async () => {
     const warn = spyOnNestWarn();
 
-    const card = await new AgentCardService({
+    const { card } = await new AgentCardService({
       getEntity: async () => {
         throw new Error('blocksync unreachable');
       },
