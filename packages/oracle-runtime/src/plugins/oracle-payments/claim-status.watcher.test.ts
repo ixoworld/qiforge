@@ -160,7 +160,10 @@ describe('ClaimStatusWatcher — delivery lane', () => {
     });
     expect(content.body).toMatch(/did not meet the contract/);
     expect(content.body).toMatch(/went back to you/);
-    expect(content.props).not.toHaveProperty('claimUrl');
+    // Neither PORTAL_URL nor NETWORK configured — the link falls back to devnet.
+    expect(content.props.claimUrl).toBe(
+      `https://dev.portal.qi.space/workspace/claims?claimId=${CLAIM_ID}`,
+    );
   });
 
   it('reports a disputed claim as disputed', async () => {

@@ -15,7 +15,12 @@ import {
   EngagementService,
   type PendingClaimRef,
 } from './engagement.service.js';
-import { claimDeepLink, errorMessage, retry } from './util.js';
+import {
+  claimDeepLink,
+  errorMessage,
+  resolvePortalUrl,
+  retry,
+} from './util.js';
 
 /** Injection token for the watcher's test seams (chain, Matrix, clock). */
 export const CLAIM_STATUS_WATCHER_DEPS = Symbol.for('ClaimStatusWatcherDeps');
@@ -217,7 +222,10 @@ export class ClaimStatusWatcher {
     const lane: ClaimLane =
       engagement.cancelledAt !== undefined ? 'cancellation' : 'delivery';
     const claimUrl = claimDeepLink(
-      this.config.get<string>('PORTAL_URL'),
+      resolvePortalUrl(
+        this.config.get<string>('PORTAL_URL'),
+        this.config.get<string>('NETWORK'),
+      ),
       claimId,
     );
 
@@ -232,7 +240,7 @@ export class ClaimStatusWatcher {
           name: engagement.serviceName,
           price: { amount: engagement.priceUsd, currency: 'USDC' },
         },
-        ...(claimUrl !== undefined && { claimUrl }),
+        claimUrl,
       },
       body: paymentUpdateBody(engagement, claimId, outcome, lane),
       sessionId: threadId,

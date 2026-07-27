@@ -874,11 +874,13 @@ describe('WorkClaimService — receipt card', () => {
     expect(content.body).toContain('Tax report');
   });
 
-  it('omits the claim deep link when PORTAL_URL is unset', async () => {
+  it('deep-links to the network portal when PORTAL_URL is unset', async () => {
     const h = await makeHarness({ config: { PORTAL_URL: undefined } });
     await h.service.deliver(TEXT_ARGS, h.ctx);
     const content = componentContent(h.posted[0]!);
-    expect(content.props.claimUrl).toBeUndefined();
+    expect(content.props.claimUrl).toBe(
+      'https://dev.portal.qi.space/workspace/claims?claimId=claim-cid-1',
+    );
   });
 });
 

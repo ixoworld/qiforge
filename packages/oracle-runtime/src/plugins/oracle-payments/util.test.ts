@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { MAINNET_USDC_IBC_DENOM } from './types.js';
-import { isEngagementExpired, isMatrixNotFound, priceToCoin } from './util.js';
+import {
+  claimDeepLink,
+  isEngagementExpired,
+  isMatrixNotFound,
+  priceToCoin,
+  resolveEvalEngineUrl,
+  resolvePortalUrl,
+} from './util.js';
 
 describe('isEngagementExpired', () => {
   const NOW = new Date('2026-07-22T12:00:00.000Z');
@@ -49,6 +56,83 @@ describe('priceToCoin', () => {
       denom: MAINNET_USDC_IBC_DENOM,
       amount: 20_000_000,
     });
+  });
+});
+
+describe('resolvePortalUrl', () => {
+  it('picks the portal deployed for the network', () => {
+    expect(resolvePortalUrl(undefined, 'devnet')).toBe(
+      'https://dev.portal.qi.space',
+    );
+    expect(resolvePortalUrl(undefined, 'testnet')).toBe(
+      'https://test.portal.qi.space',
+    );
+    expect(resolvePortalUrl(undefined, 'mainnet')).toBe(
+      'https://portal.qi.space',
+    );
+  });
+
+  it('falls back to devnet when NETWORK is absent or unrecognised', () => {
+    expect(resolvePortalUrl(undefined, undefined)).toBe(
+      'https://dev.portal.qi.space',
+    );
+    expect(resolvePortalUrl(undefined, 'localnet')).toBe(
+      'https://dev.portal.qi.space',
+    );
+  });
+
+  it('prefers an explicit PORTAL_URL over the network default', () => {
+    expect(resolvePortalUrl('https://portal.example', 'mainnet')).toBe(
+      'https://portal.example',
+    );
+  });
+});
+
+describe('resolveEvalEngineUrl', () => {
+  it('picks the engine deployed for the network', () => {
+    expect(resolveEvalEngineUrl(undefined, 'devnet')).toBe(
+      'https://dev.eval.ixo.earth',
+    );
+    expect(resolveEvalEngineUrl(undefined, 'testnet')).toBe(
+      'https://test.eval.ixo.earth',
+    );
+    expect(resolveEvalEngineUrl(undefined, 'mainnet')).toBe(
+      'https://eval.ixo.earth',
+    );
+  });
+
+  it('falls back to devnet when NETWORK is absent or unrecognised', () => {
+    // A devnet engine is the safe miss: an oracle must never read mainnet
+    // contract records because its NETWORK was mistyped.
+    expect(resolveEvalEngineUrl(undefined, undefined)).toBe(
+      'https://dev.eval.ixo.earth',
+    );
+    expect(resolveEvalEngineUrl(undefined, 'MAINNET')).toBe(
+      'https://dev.eval.ixo.earth',
+    );
+  });
+
+  it('prefers an explicit EVAL_ENGINE_URL over the network default', () => {
+    expect(resolveEvalEngineUrl('https://engine.example', 'mainnet')).toBe(
+      'https://engine.example',
+    );
+  });
+});
+
+describe('claimDeepLink', () => {
+  it('points at the claim page, trailing slash or not', () => {
+    expect(claimDeepLink('https://portal.qi.space', 'claim-1')).toBe(
+      'https://portal.qi.space/workspace/claims?claimId=claim-1',
+    );
+    expect(claimDeepLink('https://portal.qi.space/', 'claim-1')).toBe(
+      'https://portal.qi.space/workspace/claims?claimId=claim-1',
+    );
+  });
+
+  it('encodes a claim id that needs it', () => {
+    expect(claimDeepLink('https://portal.qi.space', 'claim/1?x')).toBe(
+      'https://portal.qi.space/workspace/claims?claimId=claim%2F1%3Fx',
+    );
   });
 });
 

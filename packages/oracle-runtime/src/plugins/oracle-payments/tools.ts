@@ -25,6 +25,7 @@ import {
 import {
   oracleAddressFromDid,
   readConfigString,
+  resolveEvalEngineUrl,
   summarizeServices,
   toContractServiceProp,
   toListServiceProp,
@@ -208,7 +209,10 @@ function createShowContractTool(deps: OraclePaymentsToolDeps): PluginTool {
 function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
   return tool(
     async (_args, ctx: RuntimeContext) => {
-      const engineUrl = readConfigString(ctx.config, 'EVAL_ENGINE_URL');
+      const engineUrl = resolveEvalEngineUrl(
+        readConfigString(ctx.config, 'EVAL_ENGINE_URL'),
+        readConfigString(ctx.config, 'NETWORK'),
+      );
       const { record, error } = await deps.contractRecord.lookup({
         engineUrl,
         subscriberDid: ctx.user.did,
@@ -218,7 +222,7 @@ function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
       // wrong answer this tool can give.
       if (error !== undefined) {
         ctx.logger.warn(
-          `[oracle-payments] contract status unknown for ${ctx.user.did} (engine ${engineUrl ?? 'unset'}): ${error}`,
+          `[oracle-payments] contract status unknown for ${ctx.user.did} (engine ${engineUrl}): ${error}`,
         );
         return {
           error,
@@ -230,7 +234,7 @@ function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
       }
       if (!record) {
         ctx.logger.debug?.(
-          `[oracle-payments] no contract record for ${ctx.user.did} (engine ${engineUrl ?? 'unset'}) — reporting uncontracted`,
+          `[oracle-payments] no contract record for ${ctx.user.did} (engine ${engineUrl}) — reporting uncontracted`,
         );
         return { contracted: false };
       }

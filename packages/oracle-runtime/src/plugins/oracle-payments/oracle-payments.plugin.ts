@@ -24,7 +24,11 @@ import {
   createOraclePaymentsTools,
   createOraclePaymentsWorkTools,
 } from './tools.js';
-import { readConfigString } from './util.js';
+import {
+  claimNetwork,
+  readConfigString,
+  resolveEvalEngineUrl,
+} from './util.js';
 import {
   DEFAULT_MAX_DELIVERABLE_MB,
   WorkClaimService,
@@ -38,6 +42,10 @@ const configSchema = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => v === 'true'),
+  /**
+   * Evaluation-engine base URL. Optional because it defaults per `NETWORK`
+   * (see `resolveEvalEngineUrl`) — set it only to point at another engine.
+   */
   EVAL_ENGINE_URL: z.url().optional(),
   AGENT_CARD_PATH: z.string().optional(),
   /** Classifier model override for the commerce message router. */
@@ -47,7 +55,10 @@ const configSchema = z.object({
     .number()
     .positive()
     .default(DEFAULT_MAX_DELIVERABLE_MB),
-  /** Portal base URL — makes the receipt card's claim deep link. */
+  /**
+   * Portal base URL — makes the receipt card's claim deep link. Optional
+   * because it defaults per `NETWORK` (see `resolvePortalUrl`).
+   */
   PORTAL_URL: z.url().optional(),
 });
 
@@ -185,11 +196,13 @@ export class OraclePaymentsPlugin extends OraclePlugin {
     this.contractGate ??= new ContractGateService({
       contractRecord: this.contractRecord,
       engagement: this.engagement,
-      engineUrl: config
-        ? readConfigString(config, 'EVAL_ENGINE_URL')
-        : undefined,
-      network:
-        (config ? readConfigString(config, 'NETWORK') : undefined) ?? 'devnet',
+      engineUrl: resolveEvalEngineUrl(
+        config ? readConfigString(config, 'EVAL_ENGINE_URL') : undefined,
+        config ? readConfigString(config, 'NETWORK') : undefined,
+      ),
+      network: claimNetwork(
+        config ? readConfigString(config, 'NETWORK') : undefined,
+      ),
     });
     return this.contractGate;
   }
@@ -197,8 +210,9 @@ export class OraclePaymentsPlugin extends OraclePlugin {
   private resolveWorkIntent(config?: MergedConfig): WorkIntentService {
     this.workIntent ??= new WorkIntentService({
       engagement: this.engagement,
-      network:
-        (config ? readConfigString(config, 'NETWORK') : undefined) ?? 'devnet',
+      network: claimNetwork(
+        config ? readConfigString(config, 'NETWORK') : undefined,
+      ),
     });
     return this.workIntent;
   }

@@ -282,6 +282,45 @@ which still matters on the late-decrypt path (`RoomTimeline.tsx:1403`,
 and never reaches the dispatcher branch. Moving the padding into the card
 instead would double-inset it there.
 
+### 4.4 Live edits must re-render the card
+
+Found after §4.1–§4.3 shipped: the card rendered the correct first phase and
+then froze, catching up only when the thread was closed and reopened.
+
+A Matrix edit is not a renderable timeline event. `RelationsContainer` calls
+`targetEvent.makeReplaced(edit)`, which mutates the anchor **in place** and
+emits `MatrixEventEvent.Replaced` on the event object
+(`matrix-js-sdk/lib/models/event.js:1273`–`1289`). Nothing is appended to the
+timeline, the anchor does not move, and the edit itself is filtered out of
+rendering — so none of the timeline's re-render triggers fire.
+
+Two defects compounded, each sufficient on its own:
+
+1. **Nothing subscribed to `Replaced`.** React had no reason to re-render, so
+   the card kept painting its mount-time content until something forced a
+   remount.
+2. **The memos would have returned stale content anyway.** `props` was
+   `useMemo(..., [mEvent])` and `isNewest` was `useMemo(..., [room, mEvent,
+forEventId])`. Because `makeReplaced` mutates in place, `mEvent` keeps one
+   object identity for the whole turn, so neither dependency array ever
+   changed.
+
+The fix subscribes to `MatrixEventEvent.Replaced` on `mEvent` and bumps a
+counter, mirroring the `MatrixEventEvent.Decrypted` precedent in
+`Message/EncryptedContent.tsx`, and drops both memos so each render re-derives
+from the event. Dropping them is safe precisely because §4.3 makes the
+dispatcher skip finished cards before they mount, so at most one card per room
+does this work.
+
+`WorkStatusCard`'s `room` prop narrows from the `Room` class to a structural
+`StatusTimelineRoom` (`getLiveTimeline` / `getThread`) — the same move
+`content.ts` made with `ResolvableEvent`, and what lets the component test
+supply a timeline stub without a cast. A real `Room` satisfies it.
+
+Covered by `__tests__/components/workStatusCard.test.tsx`, which drives real
+`MatrixEvent` objects through `makeReplaced` so the assertions exercise the
+SDK's actual edit mechanics rather than a mock of them.
+
 ---
 
 ## 5. Testing

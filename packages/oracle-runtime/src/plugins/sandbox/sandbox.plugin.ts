@@ -41,22 +41,23 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Sandbox',
   summary:
-    'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those.',
+    'Per-user Linux box for code execution. `sandbox_run` runs shell/python (writes anywhere via shell — incl. `/tmp` for scratch). `sandbox_write_file` writes raw bytes BUT only under `/workspace/data/` — paths like `/tmp/...` or `/workspace/tmp/...` are rejected; use `sandbox_run` for those. STORAGE: the box is a scratch disk, not your file store. Files under `/workspace/data/` are pushed UP to durable storage after each call, but NOTHING comes back DOWN automatically and the box is wiped after a few idle minutes. Any file not created in the current call must be fetched with `load_artifact` before you can read it.',
   whenToUse: [
     "Execute a skill — call `sandbox_run` with `cid` so user + oracle secrets are injected; the skill folder mounts read-only at `/workspace/skills/<skill-name>/` (use the absolute paths from `load_skill`'s `skillFiles`).",
     'Read a skill file (SKILL.md, scripts, configs) — call `sandbox_run` with `cid` and shell: `cat /workspace/skills/<skill-name>/SKILL.md`, `ls /workspace/skills/<skill-name>/`, `grep -r "<pattern>" /workspace/skills/<skill-name>/`, or `sed -n "1,80p" <file>` for a line range. There is no dedicated `read_skill` tool.',
     'Hit a JSON/REST API — write curl or python in `sandbox_run`. Never use a web scraper for `/api/`, `/v1/`, `/v2/`, `/v3/` endpoints.',
-    'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`).',
-    'Re-read an attachment the user sent earlier — it was auto-archived to `/workspace/output/<filename>`; load from there.',
+    'Generate or transform a file the user (or a later turn) will re-read — write it to `/workspace/data/output/<name>` (alias `/workspace/output/`). It is pushed to durable storage after the call; a later turn must `load_artifact` it back before reading.',
+    'Re-read ANY file you did not create in this same call — an attachment the user sent earlier, output from a previous turn, anything `artifact_list` shows — call `load_artifact` with its path FIRST, then read it with `sandbox_run`. Do not assume it is still on disk: the box is recycled after a few idle minutes and comes back empty.',
+    'An `ls`/`find` under `/workspace/data/` came back empty — that means the container is FRESH, not that your files were lost. They are safe in durable storage. Call `artifact_list` to see them and `load_artifact` to pull one back. Never report a file as missing or re-generate it based on an empty directory listing alone.',
     'Save a large or escape-sensitive blob (multi-line markdown, structured data) byte-perfect to `/workspace/data/...` — use `sandbox_write_file` so quoting bugs do not corrupt it.',
     "Write a scratch / throwaway file (build artefacts, temp scripts you will execute then delete) — use `sandbox_run` with a here-doc: `cat > /tmp/<name> <<'EOF'\\n<content>\\nEOF`. Never use `sandbox_write_file` for `/tmp` or anywhere outside `/workspace/data/` — it will be rejected.",
     'Always check the result envelope: `success === true` AND `exitCode === 0` before trusting `output`. On failure, READ the `error` text and change your approach — do not retry the same call with the same args.',
   ],
   whenNotToUse: [
     'The value is already inline in chat — just use it; opening the sandbox to echo it back wastes a turn.',
-    'Fetching a URL the user just mentioned — prefer `process_file` so it auto-archives to `/workspace/output/`.',
+    'Fetching a URL the user just mentioned — prefer `process_file`, which archives it as an artifact (pull it into the box with `load_artifact` when you need to read it).',
     'A long human-readable page (blog, article, news) — use the Firecrawl agent.',
-    'Installing native deps in cwd (`pip install -e .`, `bun install`) — `.venv`/`node_modules` get persisted to R2 and slow every future session. Install under `/tmp` (via `sandbox_run`) or inside the skill folder.',
+    'Installing native deps in cwd (`pip install -e .`, `bun install`) — `.venv`/`node_modules` get uploaded to R2 by the post-run sync, bloating storage and slowing every subsequent call (they are NOT restored for you, so it buys nothing). Install under `/tmp` (via `sandbox_run`) or inside the skill folder.',
     '`sandbox_write_file` with a path outside `/workspace/data/` (e.g. `/tmp/foo`, `/workspace/tmp/foo`, `/workspace/output-only-if-data-prefix-missing`) — the validator hard-rejects this. For temp/scratch writes, switch to `sandbox_run`.',
   ],
   examples: [
@@ -73,26 +74,42 @@ const manifest: PluginManifest = {
     {
       user: 'Run the price-forecast skill on the Q3 sales data.',
       thought:
-        'Skill execution → pass the skill CID so user + oracle secrets are injected. Write the forecast to /workspace/data/output/ so the user can re-read it next turn.',
+        'The CSV came from an earlier turn, so it is in durable storage but almost certainly NOT on the box — pull it down first. Then run the skill with its CID so user + oracle secrets are injected, and write the forecast to /workspace/data/output/ so it is archived for later.',
+      tool: 'load_artifact',
+      args: {
+        path: '/output/q3-sales.csv',
+      },
+    },
+    {
+      user: '(same turn, after load_artifact returned the absolute path)',
+      thought:
+        'Now the file really is on disk at /workspace/data/output/q3-sales.csv — safe to read it.',
       tool: 'sandbox_run',
       args: {
-        code: 'cd /workspace/skills/price-forecast && bash run.sh "/workspace/output/q3-sales.csv" > /workspace/data/output/forecast.json',
+        code: 'cd /workspace/skills/price-forecast && bash run.sh "/workspace/data/output/q3-sales.csv" > /workspace/data/output/forecast.json',
         cid: 'cid from list/search skills',
       },
     },
     {
       user: 'Compute monthly totals from the CSV I attached.',
       thought:
-        'The attachment is at /workspace/output/<filename>. Use uv (preferred over pip in this sandbox) to materialize pandas. Write the result so the user can reuse it next turn.',
+        'The attachment was archived as an artifact, not left on the box. load_artifact it first (artifact_list if I do not know the exact path), THEN compute. Use uv (preferred over pip in this sandbox) to materialize pandas. Write the result so the user can reuse it next turn.',
       tool: 'sandbox_run',
       args: {
-        code: "uv run --with pandas python -c \"import pandas as pd, json; df=pd.read_csv('/workspace/output/sales.csv'); out=df.groupby('month').sum().reset_index(); out.to_csv('/workspace/data/output/monthly_totals.csv', index=False); print(json.dumps({'rows': len(out)}))\"",
+        code: "uv run --with pandas python -c \"import pandas as pd, json; df=pd.read_csv('/workspace/data/output/sales.csv'); out=df.groupby('month').sum().reset_index(); out.to_csv('/workspace/data/output/monthly_totals.csv', index=False); print(json.dumps({'rows': len(out)}))\"",
       },
+    },
+    {
+      user: 'Where did the chart you made yesterday go? The folder looks empty.',
+      thought:
+        'An empty /workspace/data/output means the container was recycled, NOT that the file is gone. Do not re-generate it and do not tell the user it was lost. List what is actually in durable storage, then pull the one I need back down.',
+      tool: 'artifact_list',
+      args: {},
     },
     {
       user: 'Save this draft report so I can come back to it tomorrow.',
       thought:
-        'Multi-line markdown with quotes and code fences → write byte-perfect via sandbox_write_file (no shell-escaping). Persisted under /workspace/data so it survives across sessions.',
+        'Multi-line markdown with quotes and code fences → write byte-perfect via sandbox_write_file (no shell-escaping). Writing under /workspace/data archives it durably — tomorrow it will need a load_artifact to come back onto the box.',
       tool: 'sandbox_write_file',
       args: {
         path: '/workspace/data/output/draft-report.md',
@@ -105,7 +122,7 @@ const manifest: PluginManifest = {
         'Scratch script — runs once, then discarded. /tmp is the right home, but sandbox_write_file refuses anything outside /workspace/data/. Use sandbox_run with a here-doc to write + execute in one shot.',
       tool: 'sandbox_run',
       args: {
-        code: "cat > /tmp/transform.js <<'EOF'\nconst fs = require('fs');\nconst rows = JSON.parse(fs.readFileSync('/workspace/output/data.json'));\nconsole.log(JSON.stringify(rows.map(r => ({...r, normalized: r.value / 100}))));\nEOF\nnode /tmp/transform.js > /workspace/data/output/transformed.json",
+        code: "cat > /tmp/transform.js <<'EOF'\nconst fs = require('fs');\nconst rows = JSON.parse(fs.readFileSync('/workspace/data/output/data.json'));\nconsole.log(JSON.stringify(rows.map(r => ({...r, normalized: r.value / 100}))));\nEOF\nnode /tmp/transform.js > /workspace/data/output/transformed.json",
       },
     },
   ],

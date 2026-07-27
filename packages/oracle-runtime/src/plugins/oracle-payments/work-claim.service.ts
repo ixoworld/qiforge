@@ -37,11 +37,13 @@ import type { WorkIntentService } from './work-intent.service.js';
 import type { WorkSummaryExtractor } from './work-summary-extractor.js';
 import {
   claimDeepLink,
+  claimNetwork,
   errorMessage,
   isEngagementExpired,
   priceToCoin,
   readConfigNumber,
   readConfigString,
+  resolvePortalUrl,
   retry,
   slugify,
   type RetryOptions,
@@ -1088,7 +1090,10 @@ export class WorkClaimService {
   ): Promise<void> {
     const { engagement, args } = input;
     const claimUrl = claimDeepLink(
-      readConfigString(ctx.config, 'PORTAL_URL'),
+      resolvePortalUrl(
+        readConfigString(ctx.config, 'PORTAL_URL'),
+        this.network(ctx),
+      ),
       input.claimId,
     );
 
@@ -1110,7 +1115,7 @@ export class WorkClaimService {
         ...(input.workSummary !== undefined && {
           workSummary: input.workSummary,
         }),
-        ...(claimUrl !== undefined && { claimUrl }),
+        claimUrl,
       },
       body: `Delivered: ${engagement.serviceName} (${engagement.priceUsd} USDC) — claim ${input.claimId}.`,
       sessionId: ctx.session.id,
@@ -1121,8 +1126,7 @@ export class WorkClaimService {
   }
 
   private network(ctx: RuntimeContext): ClaimNetwork {
-    const network = readConfigString(ctx.config, 'NETWORK');
-    return network === 'mainnet' || network === 'testnet' ? network : 'devnet';
+    return claimNetwork(readConfigString(ctx.config, 'NETWORK'));
   }
 
   private requireConfig(ctx: RuntimeContext, key: string): string {

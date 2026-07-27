@@ -4,6 +4,7 @@ import type {
   CommerceEngagement,
   MergedConfig,
 } from '../../plugin-api/types.js';
+import type { ClaimNetwork } from './claim-lane.js';
 import {
   MAINNET_USDC_IBC_DENOM,
   MICRO_UNITS_PER_UNIT,
@@ -70,6 +71,55 @@ export function readConfigString(
 ): string | undefined {
   const value = config[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * `NETWORK` narrowed to the three networks the chain lane knows, defaulting to
+ * devnet. The one normalization for the whole plugin — the escrow, the claim,
+ * and the per-network service URLs below must all read the same network from
+ * the same string.
+ */
+export function claimNetwork(network: string | undefined): ClaimNetwork {
+  return network === 'mainnet' || network === 'testnet' ? network : 'devnet';
+}
+
+/** Portal deployments, indexed by the network whose claims they render. */
+const PORTAL_URLS: Record<ClaimNetwork, string> = {
+  devnet: 'https://dev.portal.qi.space',
+  testnet: 'https://test.portal.qi.space',
+  mainnet: 'https://portal.qi.space',
+};
+
+/** Evaluation-engine deployments, indexed by the network they settle on. */
+const EVAL_ENGINE_URLS: Record<ClaimNetwork, string> = {
+  devnet: 'https://dev.eval.ixo.earth',
+  testnet: 'https://test.eval.ixo.earth',
+  mainnet: 'https://eval.ixo.earth',
+};
+
+/**
+ * The portal base URL: the operator's `PORTAL_URL` when set, otherwise the
+ * portal deployed for `NETWORK`. Always resolves, so every receipt and payment
+ * card carries a claim deep link without the operator configuring anything.
+ */
+export function resolvePortalUrl(
+  portalUrl: string | undefined,
+  network: string | undefined,
+): string {
+  return portalUrl ?? PORTAL_URLS[claimNetwork(network)];
+}
+
+/**
+ * The evaluation-engine base URL: the operator's `EVAL_ENGINE_URL` when set,
+ * otherwise the engine deployed for `NETWORK`. Always resolves — a contract
+ * lookup has an engine to reach on every network, and an oracle on devnet never
+ * reads mainnet contract records.
+ */
+export function resolveEvalEngineUrl(
+  engineUrl: string | undefined,
+  network: string | undefined,
+): string {
+  return engineUrl ?? EVAL_ENGINE_URLS[claimNetwork(network)];
 }
 
 /**
@@ -202,17 +252,12 @@ export function slugify(text: string, maxLength = 60): string {
 }
 
 /**
- * The portal deep link for one claim, or `undefined` when no `PORTAL_URL` is
- * configured. Shared by the delivery receipt and the payment-update card so a
- * user always lands on the same claim page.
+ * The portal deep link for one claim. Shared by the delivery receipt and the
+ * payment-update card so a user always lands on the same claim page. Takes the
+ * already-resolved base URL — see {@link resolvePortalUrl}.
  */
-export function claimDeepLink(
-  portalUrl: string | undefined,
-  claimId: string,
-): string | undefined {
-  return portalUrl
-    ? `${portalUrl.replace(/\/+$/, '')}/workspace/claims?claimId=${encodeURIComponent(claimId)}`
-    : undefined;
+export function claimDeepLink(portalUrl: string, claimId: string): string {
+  return `${portalUrl.replace(/\/+$/, '')}/workspace/claims?claimId=${encodeURIComponent(claimId)}`;
 }
 
 /** Normalize any thrown value to a message string for logging. */
