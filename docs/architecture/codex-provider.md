@@ -29,7 +29,14 @@ The App Server is the bidirectional JSON-RPC surface Codex's own clients drive �
 - Approvals, streaming and thread resumption come from the protocol rather than being reconstructed.
 - A remote-runtime / local-client split works: the runtime lives wherever the oracle runs, and any client can drive it over the HTTP control plane.
 
-Frames are newline-delimited JSON and omit the `jsonrpc` version field. Method names are centralized in `app-server/protocol.ts` because Codex has renamed them across releases — an upgrade edits that table, not the adapter.
+Frames are newline-delimited JSON and omit the `jsonrpc` version field. Method names and enum spellings are centralized in `app-server/protocol.ts` and `domain/config.ts` because Codex has renamed them across releases — an upgrade edits those tables, not the adapter.
+
+Two things the published docs get wrong, both verified by driving `codex-cli 0.145.0` directly:
+
+- Sandbox values are `read-only` / `workspace-write` / `danger-full-access`, not camelCase. `readOnly` is rejected with `unknown variant`.
+- Approval values are `untrusted` / `on-request` / `never`. The server also has a `granular` policy, but it is a struct variant — the bare string `"granular"` is rejected — so it is not offered.
+
+The server also emits explicit `null` for absent fields (`error: null` on a successful turn, `details: null`, `extra: null`), so result and notification schemas use `.nullish()` rather than `.optional()` — a plain `.optional()` rejects `null` and would silently drop the notification.
 
 ## The two auth modes
 
@@ -49,7 +56,7 @@ The mode is **never inferred**. `CODEX_AUTH_MODE` is required with no default, a
 The App Server protocol has **no login method** — authentication is established upstream, and `account/read` reports the result. So:
 
 - **Subscription**: `codex login` writes `auth.json` into the tenant's `CODEX_HOME`. The harness never touches the OAuth tokens; it checks for the artefact, then lets the App Server read it. Missing → `requires_sign_in`.
-- **API key**: read from the room's JWE-encrypted secret store (`ctx.secrets`), injected into the child process env as `OPENAI_API_KEY`. Missing → `requires_sign_in`.
+- **API key**: read from the room's JWE-encrypted secret store (`ctx.secrets`) and registered with the App Server via `account/login/start` (`{type: 'apiKey', apiKey}`). Putting `OPENAI_API_KEY` in the child's environment is _not_ sufficient — verified against `codex-cli 0.145.0`, `account/read` returns `{account: null, requiresOpenaiAuth: true}` until the login call is made. Missing → `requires_sign_in`.
 
 Either way the App Server is the authority: `assertAuthenticated` calls `account/read` after the handshake and transitions to `invalid_credentials` if there is no account. A credential file that exists but does not work is caught here, not at the first turn.
 
@@ -70,6 +77,10 @@ stateDiagram-v2
     connected --> disconnected
 ```
 
+Turns are serialized per session: the App Server runs one turn per thread, and overlapping `codex_run_task` calls would otherwise clobber the shared pending-turn state and cross their event streams.
+
+A mode switch rebuilds the session's plan rather than relabelling it, so credential resolution, diagnostics and capabilities all follow the change.
+
 Reconnect is bounded by `CODEX_MAX_RECONNECT_ATTEMPTS`. The budget resets only when a turn **runs to completion** — not merely when the handshake succeeds — so a binary that starts fine and dies every turn still exhausts it instead of looping forever.
 
 ## Approvals
@@ -87,7 +98,7 @@ Decisions can arrive two ways, both landing on the same gate: `POST /codex/appro
 
 ## Tenancy
 
-`CodexTenantScope` is `{ userDid, oracleEntityDid }`, flattened to a filesystem-safe key. It scopes:
+`CodexTenantScope` is `{ userDid, oracleEntityDid }`, reduced to a filesystem-safe key: a readable sanitized prefix plus a digest of the exact pair. The digest matters — sanitizing alone is not injective (`did:x:a:b` and `did:x:a_b` both flatten to `did_x_a_b`), and this key indexes sessions, approvals and credential directories, so a collision would let one authenticated user reach another's runtime. It scopes:
 
 - the `CodexSession` (one App Server process per tenant),
 - the `CODEX_HOME` directory, created `0700`,
@@ -117,7 +128,9 @@ The plugin builds its registry from a plan on first use, so a misconfigured depl
 
 `session/codex-session.test.ts` drives a **real child process** — `__test-fixtures__/fake-app-server.mjs` speaks the same newline-delimited JSON-RPC framing as `codex app-server`. The stdio transport, id correlation, streaming notifications, the approval round-trip, thread resumption and crash/reconnect all run for real; only the Codex binary is substituted.
 
-**Manual verification remains:** running against a genuine `codex app-server` build to confirm the method names and payload shapes in `protocol.ts` match the installed Codex version. That table is the single place an upstream rename needs to be applied.
+The wire contract was verified by driving a real `codex-cli 0.145.0` App Server: the sandbox and approval enums, the `account/login/start` requirement for API keys, and the `{thread: {id}}` / `{turn: {id}}` result shapes all come from that session rather than from documentation.
+
+**Manual verification remains:** a full authenticated turn (streaming items, a live approval round trip) against a signed-in Codex account. Those paths are covered by the fixture but have not been exercised against the real service, which needs a funded key or a ChatGPT sign-in.
 
 ## Read next
 

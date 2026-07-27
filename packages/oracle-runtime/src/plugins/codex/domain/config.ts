@@ -2,21 +2,29 @@ import { z } from 'zod';
 import { CODEX_AUTH_MODES, type CodexAuthMode } from './provider.js';
 
 /**
- * Sandbox policy handed to `thread/start`. Values mirror the App Server's
- * `sandbox` enum verbatim so they pass through without translation.
+ * Sandbox policy handed to `thread/start`. These are the App Server's wire
+ * spellings, verified against `codex-cli` — sending anything else is rejected
+ * with `unknown variant`. Kept verbatim so they pass through untranslated.
  */
 export const CODEX_SANDBOX_MODES = [
-  'readOnly',
-  'workspaceWrite',
-  'dangerFullAccess',
+  'read-only',
+  'workspace-write',
+  'danger-full-access',
 ] as const;
 export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
 
-/** Approval policy handed to `thread/start`. Mirrors the App Server enum. */
+/**
+ * Approval policy handed to `thread/start`. App Server wire spellings.
+ *
+ * The server also has a `granular` policy, but it is a struct variant rather
+ * than a plain string — sending `"granular"` fails with `invalid type: unit
+ * variant, expected struct variant`. It is omitted until it is worth
+ * modelling the object form.
+ */
 export const CODEX_APPROVAL_POLICIES = [
+  'untrusted',
+  'on-request',
   'never',
-  'onRequest',
-  'unlessTrusted',
 ] as const;
 export type CodexApprovalPolicy = (typeof CODEX_APPROVAL_POLICIES)[number];
 
@@ -42,8 +50,8 @@ export const codexConfigSchema = z.object({
   CODEX_WORKSPACE_ROOT: z.string().min(1).default(process.cwd()),
   CODEX_MODEL: z.string().min(1).optional(),
   CODEX_REASONING_EFFORT: z.enum(CODEX_REASONING_EFFORTS).default('medium'),
-  CODEX_SANDBOX_MODE: z.enum(CODEX_SANDBOX_MODES).default('readOnly'),
-  CODEX_APPROVAL_POLICY: z.enum(CODEX_APPROVAL_POLICIES).default('onRequest'),
+  CODEX_SANDBOX_MODE: z.enum(CODEX_SANDBOX_MODES).default('read-only'),
+  CODEX_APPROVAL_POLICY: z.enum(CODEX_APPROVAL_POLICIES).default('on-request'),
   /** Name of the per-room secret holding the OpenAI API key in `api_key` mode. */
   CODEX_API_KEY_SECRET_NAME: z.string().min(1).default('OPENAI_API_KEY'),
   CODEX_STARTUP_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
@@ -132,11 +140,11 @@ export function normalizeCodexConfig(raw: unknown): CodexNormalizedConfig {
  */
 export function assertToolPolicy(config: CodexNormalizedConfig): void {
   if (
-    config.sandboxMode === 'dangerFullAccess' &&
+    config.sandboxMode === 'danger-full-access' &&
     config.approvalPolicy === 'never'
   ) {
     throw new CodexConfigError(
-      'CODEX_SANDBOX_MODE=dangerFullAccess with CODEX_APPROVAL_POLICY=never removes every guardrail. Set an approval policy of `onRequest` or `unlessTrusted`, or narrow the sandbox.',
+      'CODEX_SANDBOX_MODE=danger-full-access with CODEX_APPROVAL_POLICY=never removes every guardrail. Set an approval policy of `on-request` or `untrusted`, or narrow the sandbox.',
     );
   }
 }

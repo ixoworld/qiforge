@@ -51,7 +51,7 @@ describe('CodexPlugin', () => {
   it('fails the build when the tool policy leaves no guardrail', async () => {
     await expect(
       runtimeWith({
-        CODEX_SANDBOX_MODE: 'dangerFullAccess',
+        CODEX_SANDBOX_MODE: 'danger-full-access',
         CODEX_APPROVAL_POLICY: 'never',
       }),
     ).rejects.toThrow(/removes every guardrail/u);

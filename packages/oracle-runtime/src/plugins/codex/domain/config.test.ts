@@ -4,6 +4,7 @@ import {
   resolveCodexCapabilities,
 } from './capabilities.js';
 import { CodexConfigError, normalizeCodexConfig } from './config.js';
+import { tenantScopeKey } from './provider.js';
 import { preflight } from './preflight.js';
 
 const base = { CODEX_AUTH_MODE: 'api_key' };
@@ -15,8 +16,8 @@ describe('normalizeCodexConfig', () => {
     expect(cfg.authMode).toBe('api_key');
     expect(cfg.command).toBe('codex');
     expect(cfg.args).toEqual(['app-server']);
-    expect(cfg.sandboxMode).toBe('readOnly');
-    expect(cfg.approvalPolicy).toBe('onRequest');
+    expect(cfg.sandboxMode).toBe('read-only');
+    expect(cfg.approvalPolicy).toBe('on-request');
     expect(cfg.apiKeySecretName).toBe('OPENAI_API_KEY');
   });
 
@@ -56,7 +57,7 @@ describe('normalizeCodexConfig', () => {
     expect(() =>
       normalizeCodexConfig({
         ...base,
-        CODEX_SANDBOX_MODE: 'dangerFullAccess',
+        CODEX_SANDBOX_MODE: 'danger-full-access',
         CODEX_APPROVAL_POLICY: 'never',
       }),
     ).toThrow(/removes every guardrail/u);
@@ -65,10 +66,10 @@ describe('normalizeCodexConfig', () => {
   it('allows full host access when an approval gate remains', () => {
     const cfg = normalizeCodexConfig({
       ...base,
-      CODEX_SANDBOX_MODE: 'dangerFullAccess',
-      CODEX_APPROVAL_POLICY: 'onRequest',
+      CODEX_SANDBOX_MODE: 'danger-full-access',
+      CODEX_APPROVAL_POLICY: 'on-request',
     });
-    expect(cfg.sandboxMode).toBe('dangerFullAccess');
+    expect(cfg.sandboxMode).toBe('danger-full-access');
   });
 });
 
@@ -117,5 +118,35 @@ describe('preflight', () => {
     expect(preflight(base, { requestedAuthMode: 'api_key' }).authMode).toBe(
       'api_key',
     );
+  });
+});
+
+describe('tenantScopeKey', () => {
+  const oracleEntityDid = 'did:ixo:oracle1';
+
+  it('keeps a readable prefix so credential directories stay diagnosable', () => {
+    expect(
+      tenantScopeKey({ oracleEntityDid, userDid: 'did:ixo:user1' }),
+    ).toMatch(/^did_ixo_oracle1__did_ixo_user1-[0-9a-f]{16}$/u);
+  });
+
+  it('does not collide when sanitizing makes two DIDs look identical', () => {
+    // Both sanitize to `did_x_a_b`; only the digest keeps them apart, and this
+    // key indexes sessions, approvals and credential directories.
+    const first = tenantScopeKey({ oracleEntityDid, userDid: 'did:x:a:b' });
+    const second = tenantScopeKey({ oracleEntityDid, userDid: 'did:x:a_b' });
+
+    expect(first).not.toBe(second);
+  });
+
+  it('separates the oracle and user fields unambiguously', () => {
+    expect(tenantScopeKey({ oracleEntityDid: 'a:b', userDid: 'c' })).not.toBe(
+      tenantScopeKey({ oracleEntityDid: 'a', userDid: 'b:c' }),
+    );
+  });
+
+  it('is stable for the same scope', () => {
+    const scope = { oracleEntityDid, userDid: 'did:ixo:user1' };
+    expect(tenantScopeKey(scope)).toBe(tenantScopeKey(scope));
   });
 });

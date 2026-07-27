@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /** Stable provider identifier used in config, events and audit records. */
 export const CODEX_PROVIDER_ID = 'codex';
 
@@ -58,10 +60,21 @@ export interface CodexTenantScope {
   readonly oracleEntityDid: string;
 }
 
-/** Opaque, filesystem-safe key derived from a tenant scope. */
+/**
+ * Filesystem-safe key for a tenant scope.
+ *
+ * Sanitizing alone is not injective — `did:x:a:b` and `did:x:a_b` would
+ * collapse to the same key, and this value indexes sessions, approvals and
+ * credential directories. The readable prefix is therefore paired with a
+ * digest of the exact scope, so distinct DIDs can never collide.
+ */
 export function tenantScopeKey(scope: CodexTenantScope): string {
-  const raw = `${scope.oracleEntityDid}::${scope.userDid}`;
-  return raw.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const raw = `${scope.oracleEntityDid}\u0000${scope.userDid}`;
+  const readable = `${scope.oracleEntityDid}::${scope.userDid}`
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .slice(0, 80);
+  const digest = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  return `${readable}-${digest}`;
 }
 
 /** True when the status is resolvable by the user re-authenticating. */

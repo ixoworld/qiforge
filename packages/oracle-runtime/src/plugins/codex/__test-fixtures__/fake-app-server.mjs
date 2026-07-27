@@ -4,12 +4,34 @@
  * JSON-RPC framing over stdio so the transport, client, approval round-trip
  * and event mapping are exercised against a real process rather than a stub.
  *
- * Behaviour is driven by env vars so one fixture covers every scenario:
- *   FAKE_CODEX_ACCOUNT=none      → `account/read` reports no signed-in account
- *   FAKE_CODEX_REQUIRE_APPROVAL=1 → asks for command approval mid-turn
- *   FAKE_CODEX_EXIT_ON_TURN=1     → exits mid-turn to exercise reconnect
+ * Scenarios are selected with CLI flags rather than environment variables so
+ * a test never has to mutate global state to steer the server:
+ *
+ *   --account=none            `account/read` reports no signed-in account
+ *   --require-login           mirror the real server: no account until
+ *                             `account/login/start` registers a key
+ *   --require-approval        ask for command approval mid-turn
+ *   --exit-on-turn            exit mid-turn, every turn
+ *   --exit-on-turn-once=FILE  exit mid-turn unless FILE exists, creating it on
+ *                             the way out — so the next spawn behaves normally
+ *                             and a reconnect can be observed
  */
+import { existsSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
+
+const argv = process.argv.slice(2);
+const hasFlag = (name) => argv.includes(name);
+const flagValue = (name) => {
+  const match = argv.find((arg) => arg.startsWith(`${name}=`));
+  return match ? match.slice(name.length + 1) : undefined;
+};
+
+const noAccount = flagValue('--account') === 'none';
+const requireLogin = hasFlag('--require-login');
+let loggedIn = false;
+const requireApproval = hasFlag('--require-approval');
+const exitOnEveryTurn = hasFlag('--exit-on-turn');
+const exitOnceMarker = flagValue('--exit-on-turn-once');
 
 const send = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
 
@@ -53,14 +75,30 @@ function handle({ id, method, params }) {
     case 'initialized':
       return;
 
-    case 'account/read':
+    case 'account/read': {
+      // The real App Server does not read OPENAI_API_KEY from its environment
+      // for account purposes — a key has to be registered through
+      // `account/login/start` first.
+      const signedIn = !noAccount && (!requireLogin || loggedIn);
       send({
         id,
-        result:
-          process.env.FAKE_CODEX_ACCOUNT === 'none'
-            ? { account: null }
-            : { account: { authMode: 'chatgpt', planType: 'pro' } },
+        result: signedIn
+          ? {
+              account: { type: 'apiKey', planType: 'pro' },
+              requiresOpenaiAuth: false,
+            }
+          : { account: null, requiresOpenaiAuth: true },
       });
+      return;
+    }
+
+    case 'account/login/start':
+      if (params?.type !== 'apiKey' || !params?.apiKey) {
+        send({ id, error: { code: -32600, message: 'Invalid request' } });
+        return;
+      }
+      loggedIn = true;
+      send({ id, result: { type: 'apiKey' } });
       return;
 
     case 'thread/start':
@@ -89,6 +127,15 @@ function handle({ id, method, params }) {
   }
 }
 
+/** True when this process should die mid-turn to exercise reconnect. */
+function shouldExitMidTurn() {
+  if (exitOnEveryTurn) return true;
+  if (!exitOnceMarker) return false;
+  if (existsSync(exitOnceMarker)) return false;
+  writeFileSync(exitOnceMarker, 'crashed');
+  return true;
+}
+
 async function runTurn(id, params) {
   turnCounter += 1;
   const turnId = `turn_${turnCounter}`;
@@ -97,7 +144,7 @@ async function runTurn(id, params) {
   send({ id, result: { turn: { id: turnId, status: 'inProgress' } } });
   send({ method: 'turn/started', params: { turn: { id: turnId } } });
 
-  if (process.env.FAKE_CODEX_EXIT_ON_TURN === '1') {
+  if (shouldExitMidTurn()) {
     process.exit(3);
   }
 
@@ -106,7 +153,7 @@ async function runTurn(id, params) {
     params: { itemId: 'r1', delta: 'planning' },
   });
 
-  if (process.env.FAKE_CODEX_REQUIRE_APPROVAL === '1') {
+  if (requireApproval) {
     const decision = await requestApproval(threadId, turnId);
     if (decision !== 'accept' && decision !== 'acceptForSession') {
       send({
@@ -149,7 +196,8 @@ async function runTurn(id, params) {
   });
   send({
     method: 'turn/completed',
-    params: { turn: { id: turnId, status: 'completed' } },
+    // The real server includes an explicit `error: null` on success.
+    params: { turn: { id: turnId, status: 'completed', error: null } },
   });
 }
 

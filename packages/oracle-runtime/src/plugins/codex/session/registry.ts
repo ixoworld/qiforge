@@ -39,10 +39,6 @@ export class CodexRuntimeRegistry {
     });
   }
 
-  plan(): CodexRuntimePlan {
-    return this.options.plan;
-  }
-
   for(scope: CodexTenantScope): CodexSession {
     const key = tenantScopeKey(scope);
     const existing = this.sessions.get(key);

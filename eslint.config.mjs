@@ -59,16 +59,23 @@ export default [
     },
   },
 
+  // Test fixtures spawned as standalone Node processes. `no-undef` is off for
+  // TS (the compiler covers it) but active for plain JS, so Node's globals
+  // have to be declared here.
+  {
+    files: ['**/__test-fixtures__/**/*.mjs'],
+    languageOptions: {
+      globals: { process: 'readonly' },
+    },
+  },
+
   // Test files — disable type-aware linting. Tests live outside each
   // package's tsconfig `include`, so projectService would spin up a fresh
   // TypeScript program per file and exhaust the heap on `eslint .`.
   // Type-checking still happens via vitest + tsc; ESLint only needs
   // syntactic + vitest-plugin rules here.
   {
-    files: [
-      '**/__tests__/**/*.[jt]s?(x)',
-      '**/?(*.)+(spec|test).[jt]s?(x)',
-    ],
+    files: ['**/__tests__/**/*.[jt]s?(x)', '**/?(*.)+(spec|test).[jt]s?(x)'],
     ...tseslint.configs.disableTypeChecked,
     plugins: { vitest },
     languageOptions: {

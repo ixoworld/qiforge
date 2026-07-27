@@ -86,7 +86,9 @@ export class CodexController {
     const scope = this.scope(req);
     const session = this.registry.for(scope);
     const snapshot = session.snapshot();
-    const { capabilities } = this.registry.plan();
+    // Read from the session, not the registry: a mode switch rebuilds the
+    // session's plan, so the registry's boot-time capabilities would be stale.
+    const { capabilities } = session.currentPlan();
 
     return {
       provider: CODEX_PROVIDER_ID,

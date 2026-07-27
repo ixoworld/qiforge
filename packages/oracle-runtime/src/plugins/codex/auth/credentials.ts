@@ -9,12 +9,19 @@ const CODEX_AUTH_FILE = 'auth.json';
 
 /**
  * Credential material for one tenant's App Server process. `env` is spread
- * into the child process environment and must never be logged, emitted,
- * serialized into events, or returned over HTTP.
+ * into the child process environment and `apiKey` is sent to
+ * `account/login/start`; neither must ever be logged, emitted, serialized into
+ * events, or returned over HTTP.
  */
 export interface CodexCredentials {
   readonly codexHome: string;
   readonly env: Readonly<Record<string, string>>;
+  /**
+   * Present only in `api_key` mode. The App Server does not pick the key up
+   * from the environment — it has to be registered through
+   * `account/login/start`, so the value is carried here explicitly.
+   */
+  readonly apiKey?: string;
 }
 
 export type CodexCredentialOutcome =
@@ -103,6 +110,7 @@ export async function resolveCodexCredentials(params: {
     credentials: {
       codexHome,
       env: { CODEX_HOME: codexHome, OPENAI_API_KEY: apiKey },
+      apiKey,
     },
   };
 }

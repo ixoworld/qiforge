@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { CodexTenantScope } from '../domain/provider.js';
+import { tenantScopeKey, type CodexTenantScope } from '../domain/provider.js';
 import {
   CodexConnectionState,
   CodexTransitionError,
@@ -42,7 +42,7 @@ describe('CodexConnectionState', () => {
 
   it('scopes every transition to the tenant key', () => {
     state.transition('connecting', 'connect_requested');
-    expect(state.history()[0]?.tenant).toBe('did_ixo_oracle1__did_ixo_user1');
+    expect(state.history()[0]?.tenant).toBe(tenantScopeKey(scope));
   });
 
   it('rejects an illegal edge instead of silently corrupting state', () => {

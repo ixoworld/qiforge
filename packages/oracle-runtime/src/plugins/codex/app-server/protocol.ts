@@ -13,6 +13,7 @@ export const CODEX_METHODS = {
   turnStart: 'turn/start',
   turnInterrupt: 'turn/interrupt',
   accountRead: 'account/read',
+  accountLoginStart: 'account/login/start',
 } as const;
 
 /** Notifications the server pushes during a turn. */
@@ -133,7 +134,7 @@ export const threadStartResultSchema = z.object({
 });
 
 export const turnStartResultSchema = z.object({
-  turn: z.object({ id: z.string().min(1), status: z.string().optional() }),
+  turn: z.object({ id: z.string().min(1), status: z.string().nullish() }),
 });
 
 /**
@@ -144,12 +145,12 @@ export const turnStartResultSchema = z.object({
 export const accountReadResultSchema = z.object({
   account: z
     .object({
-      authMode: z.string().optional(),
-      planType: z.string().optional(),
-      email: z.string().optional(),
+      type: z.string().nullish(),
+      planType: z.string().nullish(),
+      email: z.string().nullish(),
     })
-    .nullable()
-    .optional(),
+    .nullish(),
+  requiresOpenaiAuth: z.boolean().nullish(),
 });
 
 // ---------------------------------------------------------------------------
@@ -163,33 +164,33 @@ export const turnStartedParamsSchema = z.object({
 export const turnCompletedParamsSchema = z.object({
   turn: z.object({
     id: z.string(),
-    status: z.enum(['completed', 'interrupted', 'failed']).optional(),
-    error: z.object({ message: z.string() }).optional(),
+    status: z.enum(['completed', 'interrupted', 'failed']).nullish(),
+    error: z.object({ message: z.string() }).nullish(),
   }),
 });
 
 export const itemParamsSchema = z.object({
   item: z.object({
     id: z.string(),
-    type: z.string().optional(),
-    status: z.string().optional(),
-    text: z.string().optional(),
-    command: z.string().optional(),
+    type: z.string().nullish(),
+    status: z.string().nullish(),
+    text: z.string().nullish(),
+    command: z.string().nullish(),
   }),
 });
 
 export const deltaParamsSchema = z.object({
-  itemId: z.string().optional(),
+  itemId: z.string().nullish(),
   delta: z.string(),
 });
 
 export const approvalParamsSchema = z.object({
-  itemId: z.string().optional(),
-  threadId: z.string().optional(),
-  turnId: z.string().optional(),
-  command: z.string().optional(),
-  cwd: z.string().optional(),
-  reason: z.string().optional(),
+  itemId: z.string().nullish(),
+  threadId: z.string().nullish(),
+  turnId: z.string().nullish(),
+  command: z.string().nullish(),
+  cwd: z.string().nullish(),
+  reason: z.string().nullish(),
 });
 
 export type CodexApprovalParams = z.infer<typeof approvalParamsSchema>;

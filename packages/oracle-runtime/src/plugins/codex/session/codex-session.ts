@@ -32,6 +32,7 @@ import {
   resolveCodexCredentials,
   type CodexSecretReader,
 } from '../auth/credentials.js';
+import { resolveCodexCapabilities } from '../domain/capabilities.js';
 import type { CodexRuntimePlan } from '../domain/preflight.js';
 import { tenantScopeKey, type CodexTenantScope } from '../domain/provider.js';
 import type { CodexApprovalGate } from './approval-gate.js';
@@ -125,8 +126,19 @@ export class CodexSession {
 
   private readonly transportFactory: CodexTransportFactory;
 
+  /**
+   * The effective plan. Held on the instance rather than read from
+   * `options` because `setAuthMode` rebuilds it — connection setup,
+   * diagnostics and capabilities must all follow the switch.
+   */
+  private plan: CodexRuntimePlan;
+
+  /** Serializes turns: the App Server runs one turn per thread at a time. */
+  private turnQueue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly options: CodexSessionOptions) {
     this.tenant = tenantScopeKey(options.scope);
+    this.plan = options.plan;
     this.state = new CodexConnectionState(options.scope, options.plan.authMode);
     this.transportFactory = options.transportFactory ?? defaultTransportFactory;
   }
@@ -171,7 +183,7 @@ export class CodexSession {
   }
 
   private async doConnect(deps: CodexConnectDeps): Promise<void> {
-    const { config } = this.options.plan;
+    const { config } = this.plan;
     this.state.transition('connecting', 'connect_requested');
 
     const outcome = await resolveCodexCredentials({
@@ -243,14 +255,37 @@ export class CodexSession {
       );
     }
 
+    await this.registerApiKey(credentials.apiKey);
     await this.assertAuthenticated();
 
     this.state.transition('connected', 'handshake_ok');
   }
 
   /**
+   * Register an API key with the App Server. It does not read `OPENAI_API_KEY`
+   * from its environment for account purposes — without this call
+   * `account/read` reports no account and every turn would be rejected.
+   */
+  private async registerApiKey(apiKey?: string): Promise<void> {
+    const client = this.client;
+    if (!client || !apiKey) return;
+    try {
+      await client.request(
+        CODEX_METHODS.accountLoginStart,
+        { type: 'apiKey', apiKey },
+        { timeoutMs: this.plan.config.startupTimeoutMs },
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.teardown();
+      this.state.transition('invalid_credentials', 'auth_rejected', { detail });
+      throw new CodexSessionError(detail, 'invalid_credentials');
+    }
+  }
+
+  /**
    * The App Server is the authority on whether its credentials work — a present
-   * `auth.json` or API key is necessary, not sufficient.
+   * `auth.json` or registered key is necessary, not sufficient.
    */
   private async assertAuthenticated(): Promise<void> {
     const client = this.client;
@@ -270,7 +305,7 @@ export class CodexSession {
     if (!parsed.success || !parsed.data.account) {
       await this.teardown();
       const detail =
-        this.options.plan.authMode === 'chatgpt_subscription'
+        this.plan.authMode === 'chatgpt_subscription'
           ? 'The Codex App Server reports no signed-in ChatGPT account.'
           : 'The Codex App Server rejected the configured API key.';
       this.state.transition('invalid_credentials', 'auth_rejected', { detail });
@@ -279,7 +314,18 @@ export class CodexSession {
   }
 
   async runTurn(request: CodexTurnRequest): Promise<CodexTurnResult> {
-    const { config, capabilities } = this.options.plan;
+    // Overlapping turns would clobber `pendingTurn`/`activeCtx` and cross
+    // their streams, so each waits for the previous one to settle.
+    const run = this.turnQueue.then(
+      () => this.doRunTurn(request),
+      () => this.doRunTurn(request),
+    );
+    this.turnQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doRunTurn(request: CodexTurnRequest): Promise<CodexTurnResult> {
+    const { config, capabilities } = this.plan;
     await this.connect({ secrets: request.ctx.secrets });
 
     const client = this.client;
@@ -365,7 +411,7 @@ export class CodexSession {
   private async ensureThread(requested?: string): Promise<string> {
     const client = this.client;
     if (!client) throw new CodexSessionError('not connected', 'error');
-    const { config, capabilities } = this.options.plan;
+    const { config, capabilities } = this.plan;
 
     const target = requested ?? this.threadId;
     if (target) {
@@ -436,7 +482,20 @@ export class CodexSession {
     await this.teardown();
     this.options.gate.declineAll(this.tenant);
     this.threadId = null;
+    // Rebuild the plan so credential resolution, diagnostics and capabilities
+    // all follow the new mode — a label change alone would keep launching with
+    // the old mode's credentials while reporting the new one.
+    this.plan = {
+      config: { ...this.plan.config, authMode: mode },
+      authMode: mode,
+      capabilities: resolveCodexCapabilities(mode),
+    };
     this.state.setAuthMode(mode);
+  }
+
+  /** The effective plan, after any mode switch. */
+  currentPlan(): CodexRuntimePlan {
+    return this.plan;
   }
 
   private async teardown(): Promise<void> {
@@ -503,9 +562,7 @@ export class CodexSession {
 
   /** Whether a fresh connect is worth attempting after a transport failure. */
   canReconnect(): boolean {
-    return (
-      this.reconnectAttempts < this.options.plan.config.maxReconnectAttempts
-    );
+    return this.reconnectAttempts < this.plan.config.maxReconnectAttempts;
   }
 
   private noteReconnectAttempt(): void {

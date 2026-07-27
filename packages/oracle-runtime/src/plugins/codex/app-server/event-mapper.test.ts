@@ -60,6 +60,18 @@ describe('mapNotification', () => {
     );
   });
 
+  it('accepts the explicit null error the server sends on success', () => {
+    expect(
+      mapNotification('turn/completed', {
+        turn: { id: 'turn_1', status: 'completed', error: null },
+      }),
+    ).toEqual({
+      type: 'turn.completed',
+      turnId: 'turn_1',
+      status: 'completed',
+    });
+  });
+
   it('preserves the failure reason on a failed turn', () => {
     expect(
       mapNotification('turn/completed', {

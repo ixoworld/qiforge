@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Logger, RuntimeContext } from '../../../plugin-api/types.js';
 import { preflight, type CodexRuntimePlan } from '../domain/preflight.js';
-import type { CodexTenantScope } from '../domain/provider.js';
+import { tenantScopeKey, type CodexTenantScope } from '../domain/provider.js';
 import { CodexApprovalGate } from './approval-gate.js';
 import { CodexSession, CodexSessionError } from './codex-session.js';
 
@@ -72,12 +72,20 @@ describe('CodexSession against a live App Server process', () => {
     await Promise.all(sessions.map((session) => session.disconnect()));
   });
 
-  const planFor = (overrides: Record<string, string> = {}): CodexRuntimePlan =>
+  /**
+   * `fixtureFlags` steers the fake App Server. Passing them as argv rather
+   * than env keeps each scenario local to its session — no global state to
+   * set up or tear down, and no leakage between tests.
+   */
+  const planFor = (
+    overrides: Record<string, string> = {},
+    fixtureFlags: string[] = [],
+  ): CodexRuntimePlan =>
     preflight({
       CODEX_AUTH_MODE: 'api_key',
       CODEX_HOME_ROOT: homeRoot,
       CODEX_APP_SERVER_COMMAND: process.execPath,
-      CODEX_APP_SERVER_ARGS: FIXTURE,
+      CODEX_APP_SERVER_ARGS: [FIXTURE, ...fixtureFlags].join(' '),
       CODEX_STARTUP_TIMEOUT_MS: '15000',
       CODEX_TURN_TIMEOUT_MS: '15000',
       ...overrides,
@@ -145,7 +153,7 @@ describe('CodexSession against a live App Server process', () => {
       session.runTurn({ prompt: 'x', ctx: turnCtx(emit(), noSecrets) }),
     ).rejects.toThrow(/ChatGPT sign-in/u);
 
-    const home = join(homeRoot, 'did_ixo_oracle1__did_ixo_user1');
+    const home = join(homeRoot, tenantScopeKey(scope));
     await writeFile(join(home, 'auth.json'), '{"tokens":{}}');
 
     const result = await session.runTurn({
@@ -166,17 +174,27 @@ describe('CodexSession against a live App Server process', () => {
     expect(session.snapshot().status).toBe('requires_sign_in');
   });
 
+  it('registers the API key through account/login/start', async () => {
+    // The App Server ignores OPENAI_API_KEY in its environment for account
+    // purposes; without the login call this turn would be rejected.
+    const session = makeSession(planFor({}, ['--require-login']));
+
+    const result = await session.runTurn({
+      prompt: 'needs a registered key',
+      ctx: turnCtx(),
+    });
+
+    expect(result.status).toBe('completed');
+    expect(session.snapshot().status).toBe('connected');
+  });
+
   it('reports invalid_credentials when the App Server has no account', async () => {
-    process.env.FAKE_CODEX_ACCOUNT = 'none';
-    try {
-      const session = makeSession(planFor());
-      await expect(
-        session.runTurn({ prompt: 'x', ctx: turnCtx() }),
-      ).rejects.toThrow(/no signed-in|rejected the configured API key/u);
-      expect(session.snapshot().status).toBe('invalid_credentials');
-    } finally {
-      delete process.env.FAKE_CODEX_ACCOUNT;
-    }
+    const session = makeSession(planFor({}, ['--account=none']));
+
+    await expect(
+      session.runTurn({ prompt: 'x', ctx: turnCtx() }),
+    ).rejects.toThrow(/no signed-in|rejected the configured API key/u);
+    expect(session.snapshot().status).toBe('invalid_credentials');
   });
 
   it('reuses one thread across turns and resumes it', async () => {
@@ -187,6 +205,22 @@ describe('CodexSession against a live App Server process', () => {
 
     expect(second.threadId).toBe(first.threadId);
     expect(second.turnId).not.toBe(first.turnId);
+  });
+
+  it('serializes overlapping turns instead of crossing their streams', async () => {
+    const session = makeSession(planFor());
+
+    const [first, second] = await Promise.all([
+      session.runTurn({ prompt: 'one', ctx: turnCtx() }),
+      session.runTurn({ prompt: 'two', ctx: turnCtx() }),
+    ]);
+
+    // Each turn gets its own id and its own output — neither settles on the
+    // other's completion notification.
+    expect(first.turnId).not.toBe(second.turnId);
+    expect(new Set([first.text, second.text])).toEqual(
+      new Set(['handled: one', 'handled: two']),
+    );
   });
 
   it('starts a fresh thread when the requested one is gone', async () => {
@@ -203,16 +237,11 @@ describe('CodexSession against a live App Server process', () => {
   });
 
   describe('approvals', () => {
-    beforeEach(() => {
-      process.env.FAKE_CODEX_REQUIRE_APPROVAL = '1';
-    });
-    afterEach(() => {
-      delete process.env.FAKE_CODEX_REQUIRE_APPROVAL;
-    });
+    const approvalPlan = () => planFor({}, ['--require-approval']);
 
     it('surfaces the request to a client and applies the human decision', async () => {
       const gate = new CodexApprovalGate({ timeoutMs: 5_000 });
-      const session = makeSession(planFor(), gate);
+      const session = makeSession(approvalPlan(), gate);
       const emitter = emit();
       const tenant = session.tenantKey();
 
@@ -240,7 +269,7 @@ describe('CodexSession against a live App Server process', () => {
 
     it('passes a decline through instead of silently allowing the command', async () => {
       const gate = new CodexApprovalGate({ timeoutMs: 5_000 });
-      const session = makeSession(planFor(), gate);
+      const session = makeSession(approvalPlan(), gate);
       const tenant = session.tenantKey();
 
       const turn = session.runTurn({ prompt: 'nope', ctx: turnCtx() });
@@ -252,7 +281,7 @@ describe('CodexSession against a live App Server process', () => {
 
     it('declines when nobody answers in time', async () => {
       const gate = new CodexApprovalGate({ timeoutMs: 50 });
-      const session = makeSession(planFor(), gate);
+      const session = makeSession(approvalPlan(), gate);
 
       expect(
         (await session.runTurn({ prompt: 'x', ctx: turnCtx() })).text,
@@ -261,7 +290,7 @@ describe('CodexSession against a live App Server process', () => {
 
     it('refuses a resolution from a different tenant', async () => {
       const gate = new CodexApprovalGate({ timeoutMs: 5_000 });
-      const session = makeSession(planFor(), gate);
+      const session = makeSession(approvalPlan(), gate);
       const tenant = session.tenantKey();
 
       const turn = session.runTurn({ prompt: 'x', ctx: turnCtx() });
@@ -277,15 +306,18 @@ describe('CodexSession against a live App Server process', () => {
 
   describe('transport failure', () => {
     it('fails the in-flight turn and reconnects on the next one', async () => {
-      process.env.FAKE_CODEX_EXIT_ON_TURN = '1';
-      const session = makeSession(planFor());
+      // The fixture crashes only until the marker exists, so the reconnect
+      // spawns a healthy server and recovery is observable.
+      const marker = join(homeRoot, 'crashed-once');
+      const session = makeSession(
+        planFor({}, [`--exit-on-turn-once=${marker}`]),
+      );
 
       await expect(
         session.runTurn({ prompt: 'crash', ctx: turnCtx() }),
       ).rejects.toThrow();
       expect(session.snapshot().status).toBe('error');
 
-      delete process.env.FAKE_CODEX_EXIT_ON_TURN;
       const result = await session.runTurn({
         prompt: 'recovered',
         ctx: turnCtx(),
@@ -298,24 +330,19 @@ describe('CodexSession against a live App Server process', () => {
     });
 
     it('stops reconnecting once the attempt budget is spent', async () => {
-      process.env.FAKE_CODEX_EXIT_ON_TURN = '1';
-      try {
-        const session = makeSession(
-          planFor({ CODEX_MAX_RECONNECT_ATTEMPTS: '1' }),
-        );
+      const session = makeSession(
+        planFor({ CODEX_MAX_RECONNECT_ATTEMPTS: '1' }, ['--exit-on-turn']),
+      );
 
-        await expect(
-          session.runTurn({ prompt: 'a', ctx: turnCtx() }),
-        ).rejects.toThrow();
-        await expect(
-          session.runTurn({ prompt: 'b', ctx: turnCtx() }),
-        ).rejects.toThrow();
-        await expect(
-          session.runTurn({ prompt: 'c', ctx: turnCtx() }),
-        ).rejects.toThrow(/reconnect attempts/u);
-      } finally {
-        delete process.env.FAKE_CODEX_EXIT_ON_TURN;
-      }
+      await expect(
+        session.runTurn({ prompt: 'a', ctx: turnCtx() }),
+      ).rejects.toThrow();
+      await expect(
+        session.runTurn({ prompt: 'b', ctx: turnCtx() }),
+      ).rejects.toThrow();
+      await expect(
+        session.runTurn({ prompt: 'c', ctx: turnCtx() }),
+      ).rejects.toThrow(/reconnect attempts/u);
     });
   });
 
