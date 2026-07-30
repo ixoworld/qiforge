@@ -126,6 +126,8 @@ describe('baseEnvSchema', () => {
       'LANGSMITH_ENDPOINT',
       'LANGSMITH_TRACED_DIDS',
       'MAIN_REASONING_EFFORT',
+      'BYO_LLM_ENABLED',
+      'BYO_CHATGPT_CLIENT_ID',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);
   });

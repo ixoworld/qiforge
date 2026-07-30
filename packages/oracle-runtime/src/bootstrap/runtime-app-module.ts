@@ -15,6 +15,7 @@ import type { AuthExcludedRoute } from '../plugin-api/types.js';
 import { AuthHeaderMiddleware } from '../modules/auth/auth-header.middleware.js';
 import { AuthModule } from '../modules/auth/auth.module.js';
 import { BlobStoreModule } from '../modules/blob-store/blob-store.module.js';
+import { ByoLlmModule } from '../modules/byo-llm/byo-llm.module.js';
 import { HealthModule } from '../modules/health/health.module.js';
 import { MessagesModule } from '../modules/messages/messages.module.js';
 import { ModelsModule } from '../modules/models/models.module.js';
@@ -112,6 +113,7 @@ export class RuntimeAppModule implements NestModule {
       ThrottlerModule,
       UcanModule,
       BlobStoreModule,
+      ByoLlmModule,
       AuthModule,
       SubscriptionModule,
       SessionsModule,

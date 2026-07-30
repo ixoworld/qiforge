@@ -632,6 +632,41 @@ describe('SseStreamRunner', () => {
       ]);
     });
 
+    it('Responses-mode chunks (array content) emit reasoning + text events', async () => {
+      const res = new FakeResponse();
+      const responsesChunk = (
+        content: Array<Record<string, unknown>>,
+      ): StreamEvent =>
+        ({
+          event: 'on_chat_model_stream',
+          run_id: 'chat-run',
+          name: 'model',
+          data: { chunk: new AIMessageChunk({ content }) },
+        }) as unknown as StreamEvent;
+      const { input, runner } = makeInput(
+        makeFakeAgent([
+          responsesChunk([
+            { type: 'reasoning', reasoning: 'thinking hard', index: 0 },
+          ]),
+          responsesChunk([{ type: 'text', text: 'the answer', index: 0 }]),
+        ]),
+        res,
+      );
+
+      await runner.run(input);
+
+      const events = eventsFromWrites(res.writes);
+      const reasonings = events.filter((e) => e.event === 'reasoning');
+      expect((reasonings[0]!.data as { reasoning: string }).reasoning).toBe(
+        'thinking hard',
+      );
+      const messages = events.filter((e) => e.event === 'message');
+      expect(messages).toHaveLength(1);
+      expect((messages[0]!.data as { content: string }).content).toBe(
+        'the answer',
+      );
+    });
+
     it('terminal ReasoningEvent(complete=true) + done emitted on clean finish', async () => {
       const res = new FakeResponse();
       const { input, runner } = makeInput(
