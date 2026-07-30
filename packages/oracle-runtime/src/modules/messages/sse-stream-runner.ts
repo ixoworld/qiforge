@@ -6,11 +6,15 @@ import {
 import { Injectable, Logger } from '@nestjs/common';
 import type { Response } from 'express';
 import { AIMessageChunk, type BaseMessage, ToolMessage } from 'langchain';
+import { type ByoProvider } from '../../llm/byo-catalog.js';
+import { classifyLlmError } from '../../llm/provider-error.js';
 import { emojify } from '../../utils/emoji.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
+import { resolveErrorSimulation } from './error-simulation.js';
 import { type PreparedRequest } from './request-preparer.js';
 import {
+  emitSSERawEvent,
   formatSSE,
   runWithSSEContext,
   sendSSEDone,
@@ -192,15 +196,36 @@ export class SseStreamRunner {
     const onClose = () => abortController.abort();
     res.on('close', onClose);
 
+    // Hoisted out of the stream closure so the catch below can flush
+    // orphaned tool spinners when the run dies mid-turn.
+    const toolCallMap = new Map<string, ToolCallEvent>();
+    const actionCallMap = new Map<string, ActionCallEvent>();
+    // The BYO provider active on this turn (null on platform turns) — set
+    // once the agent build resolves, read by the error classifier so a
+    // model failure is attributed to the user's own account.
+    let activeByoProvider: ByoProvider | null = null;
+
     try {
       await runWithSSEContext(
         res,
         async () => {
-          const { agent, stateInput, langGraphConfig } =
+          // Local-testing hook — no-op unless ALLOW_ERROR_SIMULATION=true
+          // and the message is a `/simulate-error <preset>` trigger.
+          const simulation = resolveErrorSimulation(payload.message);
+          if (simulation?.action === 'throw') {
+            activeByoProvider = simulation.byoProvider ?? null;
+            throw simulation.error;
+          }
+          if (simulation?.action === 'notice') {
+            emitSSERawEvent('error', simulation.payload);
+          }
+
+          const { agent, stateInput, langGraphConfig, byoProvider } =
             await this.agentBuilder.build(
               { payload, prepared, inputMessages },
               abortController,
             );
+          activeByoProvider = byoProvider;
 
           // ReactAgent.streamEvents returns the same `{event, data, tags}`
           // shape as LangChain's `streamEvents v2` — the v2 envelope is the
@@ -217,8 +242,6 @@ export class SseStreamRunner {
             inputTokens: 0,
             outputTokens: 0,
           };
-          const toolCallMap = new Map<string, ToolCallEvent>();
-          const actionCallMap = new Map<string, ActionCallEvent>();
           const agActionNames = new Set(
             (payload.agActions ?? []).map((a) => a.name),
           );
@@ -308,6 +331,7 @@ export class SseStreamRunner {
           }
         },
         abortController,
+        { sessionId, requestId },
       );
     } catch (error) {
       const aborted =
@@ -319,11 +343,43 @@ export class SseStreamRunner {
         if (!res.writableEnded) sendSSEDone(res);
         return;
       }
-      this.logger.error('Stream failed', error);
+      // Attribute the failure (rate limit / billing / auth / ...) to the
+      // account it belongs to, so the client can render actionable feedback
+      // instead of the raw SDK message.
+      const classified = classifyLlmError(error, {
+        byoProvider: activeByoProvider,
+      });
+      this.logger.error(
+        `Stream failed — kind=${classified.kind}, source=${classified.source}` +
+          (classified.provider ? `, provider=${classified.provider}` : '') +
+          (classified.status !== undefined
+            ? `, status=${classified.status}`
+            : ''),
+        error instanceof Error ? error.stack : String(error),
+      );
       if (!res.writableEnded && !abortController.signal.aborted) {
+        // Same cleanup the success path performs: clear stuck tool spinners
+        // and close the thinking indicator, or the FE keeps both alive
+        // forever alongside the error.
+        this.flushOrphanedToolCalls(
+          toolCallMap,
+          actionCallMap,
+          res,
+          abortController,
+        );
+        const completeEvent = ReasoningEvent.createChunk(
+          sessionId,
+          requestId,
+          '',
+          undefined,
+          true,
+        );
+        res.write(formatSSE(completeEvent.eventName, completeEvent.payload));
         sendSSEError(
           res,
           error instanceof Error ? error : 'Something went wrong',
+          classified,
+          { sessionId, requestId },
         );
         sendSSEDone(res);
       }

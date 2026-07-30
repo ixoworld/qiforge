@@ -26,6 +26,7 @@ import {
   getModelCapabilities,
   isAllowedModel,
 } from '../../llm/index.js';
+import { classifyLlmError } from '../../llm/provider-error.js';
 import { classifyAttachment } from './attachments/classify.js';
 import {
   buildUserMessageContent,
@@ -291,9 +292,14 @@ export class MessagesService implements OnModuleInit {
           `Pre-flight failed after SSE flush — session=${params.sessionId}`,
           error instanceof Error ? error.stack : String(error),
         );
+        // Pre-flight failures are infra (session lookup, attachments, agent
+        // build), never a user credential — classify without BYO context so
+        // the payload shape matches the stream path.
         sendSSEError(
           params.res,
           error instanceof Error ? error : 'Something went wrong',
+          classifyLlmError(error),
+          { sessionId: params.sessionId },
         );
         sendSSEDone(params.res);
         if (!params.res.writableEnded) params.res.end();

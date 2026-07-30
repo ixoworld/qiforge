@@ -12,8 +12,9 @@ import type {
 import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
 import { createByoLlmAdapter } from '../../llm/byo-adapter.js';
-import { isByoModelId } from '../../llm/byo-catalog.js';
+import { isByoModelId, type ByoProvider } from '../../llm/byo-catalog.js';
 import { isAllowedModel } from '../../llm/model-catalog.js';
+import { buildByoFallbackNotice } from '../../llm/provider-error.js';
 import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
 import {
@@ -27,7 +28,7 @@ import { resolveLangsmithTracing } from './langsmith-tracing.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
-import { emitSSEEvent } from './sse.utils.js';
+import { emitSSEEvent, emitSSERawEvent } from './sse.utils.js';
 import { UserContextFetcher } from './user-context-fetcher.js';
 
 export interface BuildAgentArgs {
@@ -68,6 +69,12 @@ export interface BuiltAgent {
    * langgraph-specific options we pass.
    */
   langGraphConfig: Record<string, unknown>;
+  /**
+   * The BYO provider the turn runs on, or `null` for platform turns. Lets
+   * the SSE runner attribute a model-call failure to the user's own account
+   * when classifying the error it sends to the client.
+   */
+  byoProvider: ByoProvider | null;
 }
 
 /**
@@ -268,6 +275,11 @@ export class AgentBuilder {
               this.logger.warn(
                 `[AgentBuilder] BYO credential resolution failed: ${err instanceof Error ? err.message : String(err)}`,
               );
+              // The user expected their own credential (they have one
+              // connected, or explicitly picked a `byo:` model) — tell them
+              // the turn degraded to the platform model instead of failing
+              // silently. No-op outside an SSE request context.
+              emitSSERawEvent('error', buildByoFallbackNotice('error'));
               return null;
             }),
     ]);
@@ -499,7 +511,12 @@ export class AgentBuilder {
       ...(abortController && { signal: abortController.signal }),
     };
 
-    return { agent, stateInput, langGraphConfig };
+    return {
+      agent,
+      stateInput,
+      langGraphConfig,
+      byoProvider: byoTurn?.provider ?? null,
+    };
   }
 
   /**

@@ -114,9 +114,48 @@ graph LR
   → `ReasoningEvent`, `{ type: 'text', text }` → message chunks). The batch
   (Matrix) path flattens array content via `message.text`.
 
+## Error handling
+
+Provider failures (rate limits, exhausted balances, revoked keys) are
+classified server-side and surfaced as structured SSE `error` events instead
+of raw SDK messages:
+
+- **Classifier** (`llm/provider-error.ts`): `classifyLlmError` maps a thrown
+  error to `{ kind, source, provider, status, retryable, message, detail }`.
+  Kinds: `rate_limit`, `billing`, `auth`, `timeout`, `server`, `network`,
+  `unknown`. The raw upstream text always survives in `detail`. Notable
+  mappings: OpenAI billing exhaustion is a 429 with
+  `code: insufficient_quota`; Anthropic credit exhaustion is a **400** whose
+  wording ("credit balance is too low") wins over the status; DeepSeek is a
+  bare `402 Insufficient Balance`; Gemini's free-tier rate limit reuses
+  OpenAI's billing sentence and must NOT classify as billing.
+- **Wire shape**: `sendSSEError` emits
+  `{ error, kind, source, provider?, providerLabel?, status?, retryable,
+detail, sessionId, requestId, timestamp }`. `error` is a friendly English
+  fallback (Matrix/Slack clients show it as-is); the portal re-maps `kind` to
+  localized copy with provider-aware actions.
+- **Error-path cleanup**: `SseStreamRunner`'s catch flushes orphaned tool
+  spinners and closes the thinking indicator before the error event — the
+  same cleanup the success path performs.
+- **Retry cap**: BYO models set `maxRetries: 2` (LangChain's AsyncCaller
+  default is 6 with exponential backoff — a rate-limited account would sit
+  in "Thinking..." for a minute before failing).
+- **Fallback notice**: when a turn silently degrades from a BYO credential
+  to the platform model (credential missing, ChatGPT refresh failed,
+  resolution error), a `kind: 'byo_fallback'` notice (with
+  `reason: 'not_connected' | 'reconnect_required' | 'error'`) is emitted on
+  the same `error` event channel and the turn continues — the picker would
+  otherwise keep showing the BYO model with no signal that it isn't in use.
+- **Local simulation**: with `ALLOW_ERROR_SIMULATION=true` (never in a
+  deployed env), a chat message `/simulate-error <preset>` triggers a
+  faithful replica of a real provider failure
+  (`modules/messages/error-simulation.ts`) — e.g. `deepseek:billing`,
+  `anthropic:rate_limit`, `chatgpt:usage_limit`, `fallback`.
+
 ## Env
 
-| Var                     | Meaning                                       |
-| ----------------------- | --------------------------------------------- |
-| `BYO_LLM_ENABLED`       | `'true'` enables the module (companion only). |
-| `BYO_CHATGPT_CLIENT_ID` | Override the OAuth client id (testing only).  |
+| Var                      | Meaning                                                  |
+| ------------------------ | -------------------------------------------------------- |
+| `BYO_LLM_ENABLED`        | `'true'` enables the module (companion only).            |
+| `BYO_CHATGPT_CLIENT_ID`  | Override the OAuth client id (testing only).             |
+| `ALLOW_ERROR_SIMULATION` | `'true'` enables `/simulate-error` (local testing only). |
