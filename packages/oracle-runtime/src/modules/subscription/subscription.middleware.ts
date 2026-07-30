@@ -16,6 +16,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { minutes } from '@nestjs/throttler';
 import { type NextFunction, type Request, type Response } from 'express';
+import { ByoLlmService } from '../byo-llm/byo-llm.service.js';
 import { UcanService } from '../ucan/ucan.service.js';
 
 /**
@@ -79,11 +80,16 @@ export class SubscriptionMiddleware implements NestMiddleware {
     @Optional()
     @Inject(SUBSCRIPTION_CREDIT_SINK)
     private readonly creditSink?: SubscriptionCreditSink,
+    // Optional so unit tests (and forks without the global module) construct
+    // fine; the runtime app always provides it via the global ByoLlmModule.
+    @Optional()
+    private readonly byoLlm?: ByoLlmService,
   ) {}
 
-  private checkCanContinue(
+  private async checkCanContinue(
     subscription: GetMySubscriptionsResponseDto,
-  ): boolean {
+    did: string,
+  ): Promise<boolean> {
     const disableCredits = this.configService.get<boolean>(
       'DISABLE_CREDITS',
       false,
@@ -100,6 +106,17 @@ export class SubscriptionMiddleware implements NestMiddleware {
     }
 
     if (subscription.totalCredits <= 10) {
+      // A user on their own credential pays their provider directly — the
+      // low-credit floor would lock them out before their key is ever used.
+      // The subscription-active check above still applies to them. Rides the
+      // 60s credential cache and only runs when the floor would fail, so the
+      // common path pays nothing; no-ops to false when BYO_LLM_ENABLED is off.
+      if (this.byoLlm && (await this.byoLlm.hasCredentials(did))) {
+        this.logger.debug(
+          `Credit floor bypassed for ${did} (BYO credential connected)`,
+        );
+        return true;
+      }
       throw new HttpException(
         'User has less than 10 credits, please top up to continue',
         HttpStatus.PAYMENT_REQUIRED,
@@ -113,6 +130,18 @@ export class SubscriptionMiddleware implements NestMiddleware {
     this.logger.debug(
       `SubscriptionMiddleware processing request for: ${req.originalUrl}`,
     );
+
+    // The BYO connect surface must stay reachable for users with no credit
+    // balance — connecting their own credential is exactly how such a user
+    // becomes able to chat again. `AuthHeaderMiddleware` still runs on these
+    // routes, and they never trigger platform-paid inference. `req.path` is
+    // preferred (no query string); `originalUrl` covers callers that only
+    // populate the raw URL.
+    const requestPath = (req.path ?? req.originalUrl ?? '').split('?')[0] ?? '';
+    if (requestPath.startsWith('/byo-llm')) {
+      next();
+      return;
+    }
 
     if (!this.creditSink) {
       this.logger.warn(
@@ -146,7 +175,7 @@ export class SubscriptionMiddleware implements NestMiddleware {
       if (cachedSubscription) {
         this.logger.debug(`Subscription found in cache for user: ${did}`);
         req.subscriptionData = cachedSubscription;
-        this.checkCanContinue(cachedSubscription);
+        await this.checkCanContinue(cachedSubscription, did);
         // Credit sink was already synced on the original cache miss; the
         // subscription cache TTL is the source of truth for "this user's
         // Redis state is fresh enough." Re-syncing on every cached request
@@ -215,7 +244,7 @@ export class SubscriptionMiddleware implements NestMiddleware {
         `Subscription validated for user: ${did}, status: ${subscription.status}`,
       );
 
-      this.checkCanContinue(subscription);
+      await this.checkCanContinue(subscription, did);
       await this.syncCreditSink(did, subscription);
       await this.cacheManager.set(
         `subscription_${did}`,

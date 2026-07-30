@@ -47,6 +47,31 @@ interface StreamStats {
 }
 
 /**
+ * Join the string values of one block type out of an array-shaped message
+ * content. Responses-API streams (the BYO ChatGPT path) deliver chunks as
+ * content-block arrays — `{ type: 'text', text }` for answer tokens and
+ * `{ type: 'reasoning', reasoning }` for thinking-summary tokens — instead
+ * of the plain string / raw completions delta the platform path produces.
+ * Returns `''` when the content is not an array or holds no such blocks.
+ */
+function collectBlockStrings(
+  content: unknown,
+  blockType: string,
+  field: string,
+): string {
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) continue;
+    const record = block as Record<string, unknown>;
+    if (record.type !== blockType) continue;
+    const value = record[field];
+    if (typeof value === 'string') parts.push(value);
+  }
+  return parts.join('');
+}
+
+/**
  * Parse a `ToolMessage.content` payload into a JSON object when possible.
  * Returns `null` if the content is a non-JSON string, an array of content
  * blocks (LangChain multi-modal output), or anything else we can't reason
@@ -490,7 +515,11 @@ export class SseStreamRunner {
         `First model delta: ${JSON.stringify(delta).slice(0, 300)}`,
       );
     }
-    const reasoning = delta?.reasoning ?? delta?.reasoning_content;
+    const deltaReasoning = delta?.reasoning ?? delta?.reasoning_content;
+    const reasoning =
+      deltaReasoning && deltaReasoning.trim()
+        ? deltaReasoning
+        : collectBlockStrings(chunk.content, 'reasoning', 'reasoning');
     if (
       !(reasoning && reasoning.trim()) &&
       Array.isArray(delta?.reasoning_details) &&
@@ -527,10 +556,13 @@ export class SseStreamRunner {
       );
     }
 
-    const content = chunk.content;
-    if (!content) return undefined;
+    const text =
+      typeof chunk.content === 'string'
+        ? chunk.content
+        : collectBlockStrings(chunk.content, 'text', 'text');
+    if (!text) return undefined;
     stats.content++;
-    const parsed = emojify(String(content));
+    const parsed = emojify(text);
     this.writeSse(res, abortController, 'message', {
       content: parsed,
       timestamp: new Date().toISOString(),

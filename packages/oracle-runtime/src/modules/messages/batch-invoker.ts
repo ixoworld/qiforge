@@ -65,7 +65,9 @@ export class BatchInvoker {
     return {
       message: {
         type: lastMessage.type,
-        content: String(lastMessage.content),
+        // `.text` flattens array-shaped content (Responses-API streams) to
+        // the text blocks; `String()` would render those as [object Object].
+        content: lastMessage.text,
         id: lastMessage.id ?? '',
       },
       sessionId: prepared.sessionId,

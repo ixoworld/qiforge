@@ -35,6 +35,7 @@ import {
 } from '../runtime-context/build-runtime.js';
 import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
 import {
+  createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
@@ -283,6 +284,7 @@ export async function createMainAgent(
     .map(({ middleware }) => middleware);
 
   const middleware = [
+    createByoHistorySanitizerMiddleware({ logger: ambient.logger }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,

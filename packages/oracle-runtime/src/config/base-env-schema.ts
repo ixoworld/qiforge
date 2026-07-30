@@ -123,6 +123,24 @@ export const baseEnvSchema = z.object({
    * preserves current behaviour; set `low` to trade reasoning depth for latency.
    */
   MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+
+  /**
+   * Bring-your-own-credential LLMs: users connect their own ChatGPT
+   * subscription or provider API keys and their turns run (and are billed)
+   * on their own account. Off by default — enabled only on the personal
+   * companion deployment. Env vars are strings, so only the literal 'true'
+   * enables it (`Boolean('false')` is true).
+   */
+  BYO_LLM_ENABLED: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
+
+  /**
+   * OAuth client id used for the ChatGPT subscription connect flow. Defaults
+   * to the Codex public client; override only for testing against a stub.
+   */
+  BYO_CHATGPT_CLIENT_ID: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;

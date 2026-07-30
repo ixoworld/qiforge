@@ -6,6 +6,10 @@ import { HumanMessage, fakeModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UcanService } from '../ucan/ucan.service.js';
 import type {
+  ByoLlmService,
+  ByoTurnState,
+} from '../byo-llm/byo-llm.service.js';
+import type {
   CompiledMainAgent,
   MainAgentArgs,
 } from '../../graph/main-agent-types.js';
@@ -177,6 +181,7 @@ interface Harness {
   getDelegationMock: ReturnType<typeof vi.fn>;
   cacheGetMock: ReturnType<typeof vi.fn>;
   cacheSetMock: ReturnType<typeof vi.fn>;
+  byoResolveForTurnMock: ReturnType<typeof vi.fn>;
   bundle: OracleRuntimeBundle;
 }
 
@@ -190,6 +195,11 @@ function buildHarness(
       sessionId: string;
     }) => Promise<Record<string, unknown> | undefined>;
     getDelegationImpl?: (userDid: string) => Promise<string | null>;
+    byoResolveImpl?: (params: {
+      userDid: string;
+      homeServerName: string;
+      requestedModel?: string;
+    }) => Promise<ByoTurnState | null>;
     configValues?: Record<string, unknown>;
   } = {},
 ): Harness {
@@ -232,11 +242,19 @@ function buildHarness(
     set: cacheSetMock,
   } as unknown as Cache;
 
+  const byoResolveForTurnMock = vi.fn(
+    overrides.byoResolveImpl ?? (async () => null),
+  );
+  const byoLlm = {
+    resolveForTurn: byoResolveForTurnMock,
+  } as unknown as ByoLlmService;
+
   const builder = new AgentBuilder(
     bundleHolder as unknown as OracleRuntimeBundleHolder,
     userContextFetcher,
     ucan,
     config,
+    byoLlm,
     cacheManager,
   );
 
@@ -247,6 +265,7 @@ function buildHarness(
     getDelegationMock,
     cacheGetMock,
     cacheSetMock,
+    byoResolveForTurnMock,
     bundle,
   };
 }
@@ -688,6 +707,95 @@ describe('AgentBuilder', () => {
         unknown
       >;
       expect(metadata.prepare_duration_ms).toBe(77);
+    });
+  });
+
+  describe('BYO turns', () => {
+    const byoTurn: ByoTurnState = {
+      provider: 'openai',
+      credential: { provider: 'openai', apiKey: 'sk-user' },
+      mainModelId: 'gpt-5.6-terra',
+      byoModelId: 'byo:openai/gpt-5.6-terra',
+    };
+
+    it('skips BYO resolution entirely when an allowed platform model is requested', async () => {
+      const { builder, byoResolveForTurnMock } = buildHarness();
+
+      await builder.build(
+        makeArgs({ payload: { model: 'openai/gpt-5.4-nano' } }),
+      );
+
+      expect(byoResolveForTurnMock).not.toHaveBeenCalled();
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('openai/gpt-5.4-nano');
+      expect(args.requestCtx.byo).toBeUndefined();
+    });
+
+    it('routes a byo: model request through the resolver and marks the turn BYO', async () => {
+      const { builder, byoResolveForTurnMock, bundle } = buildHarness({
+        byoResolveImpl: async () => byoTurn,
+      });
+
+      await builder.build(
+        makeArgs({ payload: { model: 'byo:openai/gpt-5.6-terra' } }),
+      );
+
+      expect(byoResolveForTurnMock).toHaveBeenCalledWith({
+        userDid: USER_DID,
+        homeServerName: HOME_SERVER,
+        requestedModel: 'byo:openai/gpt-5.6-terra',
+      });
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('byo:openai/gpt-5.6-terra');
+      expect(args.requestCtx.byo).toEqual({ provider: 'openai', active: true });
+      expect(args.ambient).not.toBe(bundle.ambient);
+      expect(args.ambient.llm).not.toBe(bundle.ambient.llm);
+    });
+
+    it('falls back to a platform turn when the resolver returns null', async () => {
+      const { builder, bundle } = buildHarness({
+        byoResolveImpl: async () => null,
+      });
+
+      await builder.build(
+        makeArgs({ payload: { model: 'byo:openai/gpt-5.6-terra' } }),
+      );
+
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBeUndefined();
+      expect(args.requestCtx.byo).toBeUndefined();
+      expect(args.ambient).toBe(bundle.ambient);
+    });
+
+    it('resolves BYO with no requested model (Matrix ingress auto-preference)', async () => {
+      const { builder, byoResolveForTurnMock } = buildHarness({
+        byoResolveImpl: async () => byoTurn,
+      });
+
+      await builder.build(makeArgs());
+
+      expect(byoResolveForTurnMock).toHaveBeenCalledWith({
+        userDid: USER_DID,
+        homeServerName: HOME_SERVER,
+        requestedModel: undefined,
+      });
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('byo:openai/gpt-5.6-terra');
+      expect(args.requestCtx.byo).toEqual({ provider: 'openai', active: true });
+    });
+
+    it('degrades to a platform turn when the resolver rejects', async () => {
+      const { builder, bundle } = buildHarness({
+        byoResolveImpl: async () => {
+          throw new Error('matrix down');
+        },
+      });
+
+      await builder.build(makeArgs());
+
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.byo).toBeUndefined();
+      expect(args.ambient).toBe(bundle.ambient);
     });
   });
 });
