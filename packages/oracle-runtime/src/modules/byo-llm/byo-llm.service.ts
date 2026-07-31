@@ -22,7 +22,9 @@ import {
   GEMINI_OPENAI_COMPAT_BASE_URL,
 } from '../../llm/byo-client.js';
 import type { ModelListItem } from '../../llm/model-catalog.js';
+import { buildByoFallbackNotice } from '../../llm/provider-error.js';
 import { HomeServerCache } from '../messages/homeserver-cache.js';
+import { emitSSERawEvent } from '../messages/sse.utils.js';
 import { SecretsService } from '../secrets/secrets.service.js';
 import {
   ChatGptOAuthError,
@@ -334,6 +336,12 @@ export class ByoLlmService {
         this.logger.warn(
           `BYO model "${requestedModel}" requested but no ${requested.provider} credential is connected — falling back to the platform default.`,
         );
+        // The picker still shows their BYO model — without a signal the user
+        // has no way to know this reply ran on the platform model instead.
+        emitSSERawEvent(
+          'error',
+          buildByoFallbackNotice('not_connected', requested.provider),
+        );
         return null;
       }
       return this.finalizeTurn(
@@ -374,6 +382,10 @@ export class ByoLlmService {
       if (!fresh) {
         this.logger.warn(
           `ChatGPT token refresh failed for ${userDid} — turn falls back to the platform default (user must reconnect).`,
+        );
+        emitSSERawEvent(
+          'error',
+          buildByoFallbackNotice('reconnect_required', 'chatgpt'),
         );
         return null;
       }

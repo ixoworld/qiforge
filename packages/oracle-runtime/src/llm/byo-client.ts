@@ -85,11 +85,17 @@ export function createByoChatModel(
   // params with a 400, so those branches force `temperature: undefined`
   // AFTER the spreads — the common factories inject a 0.2 default otherwise.
   const temperature = role === 'guard' ? 0 : 0.8;
+  // LangChain's AsyncCaller default is SIX retries with exponential backoff
+  // — a rate-limited BYO account would leave the user staring at
+  // "Thinking..." for a minute before any error surfaces. Two attempts keep
+  // transient-blip resilience while failing fast enough to report.
+  const maxRetries = 2;
 
   switch (credential.provider) {
     case 'openai':
       return getChatOpenAiModel({
         __includeRawResponse: true,
+        maxRetries,
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
@@ -101,6 +107,7 @@ export function createByoChatModel(
       return getChatOpenAiModel({
         temperature,
         __includeRawResponse: true,
+        maxRetries,
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
@@ -114,6 +121,7 @@ export function createByoChatModel(
       return getChatOpenAiModel({
         temperature,
         __includeRawResponse: true,
+        maxRetries,
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
@@ -128,6 +136,7 @@ export function createByoChatModel(
         model: modelId,
         apiKey: credential.apiKey,
         temperature: undefined,
+        maxRetries,
       };
       return getChatAnthropicModel(anthropicParams);
     }
@@ -147,6 +156,7 @@ export function createByoChatModel(
       const sessionId = crypto.randomUUID();
       return getChatOpenAiModel({
         __includeRawResponse: true,
+        maxRetries,
         useResponsesApi: true,
         streaming: true,
         // Zero-data-retention mode matches the backend's mandatory
