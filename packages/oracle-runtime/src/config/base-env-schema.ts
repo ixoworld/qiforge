@@ -77,7 +77,7 @@ export const baseEnvSchema = z.object({
 
   /**
    * Default model for new chats — an OpenRouter slug (e.g.
-   * `openai/gpt-5.4-nano`), ideally one returned by `GET /models`. When unset
+   * `openai/gpt-5.6-luna`), ideally one returned by `GET /models`. When unset
    * the runtime uses its built-in default (GPT-5.4 Nano). Lets an operator
    * change the default per deployment without a code change. Only applies to
    * the OpenRouter provider.

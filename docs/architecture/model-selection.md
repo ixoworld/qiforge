@@ -78,7 +78,7 @@ operator can override per deployment:
 
 | Env var              | Default               | Effect                                                        |
 | -------------------- | --------------------- | ------------------------------------------------------------- |
-| `DEFAULT_MODEL`      | `openai/gpt-5.4-nano` | Default model for new chats (OpenRouter provider only).       |
+| `DEFAULT_MODEL`      | `openai/gpt-5.6-luna` | Default model for new chats (OpenRouter provider only).       |
 | `MODEL_PRICE_MARKUP` | `1.6`                 | Markup applied to raw prices in `GET /models` (display only). |
 
 Model selection applies to the OpenRouter provider; the Nebius provider keeps

@@ -179,7 +179,7 @@ export class SendMessageDto {
     description:
       'Optional model id to answer this message with. Must be one of the ids returned by GET /models; an unknown or omitted value falls back to the oracle default model.',
     required: false,
-    example: 'openai/gpt-5.4-nano',
+    example: 'openai/gpt-5.6-luna',
     type: String,
   })
   @IsOptional()

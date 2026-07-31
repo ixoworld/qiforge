@@ -70,7 +70,7 @@ export interface ModelCatalogEntry {
  * operator can override this per deployment via the `DEFAULT_MODEL` env var
  * (see `getDefaultModelId`).
  */
-export const DEFAULT_MODEL_ID = 'openai/gpt-5.4-nano';
+export const DEFAULT_MODEL_ID = 'openai/gpt-5.6-luna';
 
 /**
  * Per-tier presentation. Kept separate from the entries so the wording is

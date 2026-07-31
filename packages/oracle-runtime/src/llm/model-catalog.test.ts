@@ -33,10 +33,10 @@ describe('model-catalog', () => {
   });
 
   describe('getDefaultModelId', () => {
-    it('defaults to GPT-5.4 Nano', () => {
+    it('defaults to openai/gpt-5.6-luna', () => {
       delete process.env.DEFAULT_MODEL;
       expect(getDefaultModelId()).toBe(DEFAULT_MODEL_ID);
-      expect(DEFAULT_MODEL_ID).toBe('openai/gpt-5.4-nano');
+      expect(DEFAULT_MODEL_ID).toBe('openai/openai/gpt-5.6-luna');
     });
 
     it('honours the DEFAULT_MODEL env override', () => {
