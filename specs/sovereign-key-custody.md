@@ -1,7 +1,7 @@
 # Sovereign Key Custody — Research Spike
 
 **Status:** Research spike — findings and a recommended direction, not an approved plan
-**Revision:** v1 — 2026-08-02
+**Revision:** v1.1 — 2026-08-02 (v1: findings and recommendation; v1.1 adds §8, the TEE upgrade specified for the roadmap)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Relates to:** `specs/sovereign-agency-harness.md` (§12 Identity Core, §15 Capability Kernel, Phase 3)
 
@@ -211,21 +211,133 @@ graph TD
 
 **Roadmap, chain work:** a `CosmwasmAuthenticatorV1` encoding threshold or attestation policy — the bridge that lets the chain accept the entity's transactions only under a quorum or a verified TEE quote. Further out, a keychain-registry module in the Warden/Zenrock shape (on-chain constitution evaluation authorizing a bonded signer set) would make "authorized by on-chain entity governance" verifiable to outside parties for _every_ IXO entity.
 
-**Deferred, hosting-dependent:** TEE anchoring. Design the registry schema now — approved capsule digests plus constitution CID, with constitution changes on the strictest approval path and a timelock so dependents can exit before a new capsule activates — so re-anchoring later is a governance event rather than an identity change.
+**Deferred, hosting-dependent:** TEE anchoring — specified for the roadmap in [§8](#8-the-tee-upgrade--roadmap-specification). Design the registry schema now — approved capsule digests plus constitution CID, with constitution changes on the strictest approval path and a timelock so dependents can exit before a new capsule activates — so re-anchoring later is a governance event rather than an identity change.
 
 ---
 
 ## 7. What I would verify next
 
-1. CosmWasm mainnet `code_upload_access` (genesis params) — gates every custom-authenticator plan.
+1. CosmWasm mainnet `code_upload_access` (genesis params) — gates every custom-authenticator plan, including the on-chain quote verifier in [§8.5 T4](#85-phased-delivery).
 2. Whether `x/entity` / `x/iid` handlers accept a contract or ICA address as owner/controller — load-bearing for "entity owned by a DAO."
 3. `@noble/curves` FROST module audit scope — decides pure-TS participant vs Rust sidecar.
 4. Whether threshold _decryption_ for the P-256 secrets key is practical, or whether blast-radius reduction (per-room derived keys rather than one global JWK) is the realistic near-term answer.
 5. Matrix E2E device keys under a threshold model — likely irreducible; needs an explicit statement of what sovereignty means for them.
+6. Whether the oracle-runtime container can be made byte-reproducible ([§8.5](#85-phased-delivery) T1) — the prerequisite for any measurement, and worth answering while still on commodity hosting.
+7. Gas and latency of on-chain DCAP quote verification on IXO, which decides whether T4 is per-transaction or amortised via a periodic attestation-freshness record.
 
 ---
 
-## 8. References
+## 8. The TEE upgrade — roadmap specification
+
+Deferred by the commodity-hosting constraint, specified here so it can be scheduled. It lands naturally with **Phase 4** of `specs/sovereign-agency-harness.md` (Oracle Capsule packaging), because the capsule digest is the measurement this design binds keys to.
+
+### 8.1 The decision that shapes everything: TEE hardens the organs, it does not replace them
+
+The tempting design is to drop the threshold and put one key in one enclave. Reject it. A lone enclave reintroduces all three weaknesses the threshold exists to prevent:
+
+| Weakness           | Lone enclave                                                                                                           | Threshold organs in enclaves                                                 |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Governance capture | Whoever approves a new measurement approves a build that re-derives and exfiltrates the key. Total loss, one approval. | An attacker must capture the approval process **and** obtain a second share. |
+| Physical attack    | A sub-$1,000 DDR5 interposer extracts keys and forges attestation. One machine, total loss.                            | Two machines on different platforms and providers must both be attacked.     |
+| Liveness           | The host pulls the plug; the entity stops.                                                                             | Any two organs suffice; venues are interchangeable.                          |
+
+So the upgrade is: **each online share moves into its own TEE, on deliberately different platforms.** The steward share stays on a human device and is unaffected. The result composes rather than substitutes — an attacker needs an enclave break _and_ a second share, and the operator is demoted to a landlord who can evict but cannot impersonate.
+
+```mermaid
+graph TD
+    subgraph V1["Venue A — e.g. Azure TDX"]
+        R["Runtime share<br/>derived in-enclave<br/>capsule digest measured"]
+    end
+    subgraph V2["Venue B — different provider"]
+        C["Co-signer share<br/>derived in-enclave<br/>constitution evaluated in-enclave"]
+    end
+    S["Steward share<br/>human device — unchanged"]
+    subgraph Law["Law layer — on IXO"]
+        REG["Capsule registry<br/>approved digests + constitution CID<br/>timelocked, constitutionally governed"]
+        IID["Entity IID document<br/>pubkeys + attestation evidence"]
+    end
+    KMS["Key derivation service<br/>releases only to approved measurements"]
+    REG --> KMS
+    KMS -->|"derive on attestation"| R
+    KMS -->|"derive on attestation"| C
+    R --- S
+    C --- S
+    R -->|"2-of-3 threshold signature"| OUT["Entity acts"]
+    C --> OUT
+    R -.->|"publish quote"| IID
+```
+
+### 8.2 What is bound to what
+
+The whole value of the upgrade is that the key becomes a function of **code plus law** rather than of an operator. Concretely, one attestation must bind all of:
+
+```
+TDX/SEV-SNP quote
+  ├─ hardware + firmware + OS measurement   (platform)
+  ├─ capsule digest                          (the code — Phase 4 capsule release)
+  ├─ constitution CID                        (the law — in measured config, not just runtime input)
+  └─ report_data = H(entity DID ‖ constitution CID ‖ derived pubkey)
+```
+
+The constitution CID must be part of the **measured configuration**, not merely something the process reads at startup. If it is only read at runtime, a host can swap the law without changing the measurement, and the binding is theatre.
+
+Keys are **derived, never sealed to one machine.** Derivation from a governed identity — not hardware sealing — is what lets keys survive upgrades, host loss and venue migration. Sealed-to-measurement keys die on every upgrade; that is the classic TEE trap.
+
+### 8.3 The registry contract is where sovereignty actually lives
+
+In every derivation-based system the upgrade-approval process is the de facto key owner. That makes the registry the most security-critical artifact in this design, and it is where the entity's constitution must bite:
+
+- **Holds:** the set of approved capsule digests, the constitution CID currently in force, and the approval rule.
+- **Approval requires** the constitutional quorum for a `govern`-class action — i.e. the same steward-tier requirement as §5, so no unattended process can approve a new measurement.
+- **Every approval references the constitution CID** it was made under, so the audit trail answers "which law authorized this code?"
+- **Constitution changes take the strictest path** — a change of law, not of code, and never bundled with a routine capsule bump.
+- **Timelock between approval and activation**, so dependents can observe a pending change and exit before it takes effect.
+- **Revocation** removes a digest; running instances keep cached keys until restart, so revocation must be paired with an eviction procedure rather than assumed instant.
+
+### 8.4 Platform choice
+
+Three routes, ascending sovereignty and effort. Start at (a) or (b) with the schema designed so (c) is a later governance event rather than an identity change.
+
+| Route                              | Shape                                                                                                                                                          | Cost                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **(a) Rent the layer**             | Phala Cloud + dstack, AppAuth contract owned by the entity's governance, capsule digest + constitution CID inside                                              | Near-zero build; external framework and anchor chain in the trust path |
+| **(b) Rent hardware, own the law** | Self-hosted dstack on hyperscaler CVMs or bare metal, or Oasis ROFL with admin = a governance contract; registry written to require constitution-CID reference | Moderate; removes the vendor's governance from the path                |
+| **(c) IXO-native**                 | DCAP quote verification on IXO (portable Rust `dcap-qvl` → CosmWasm authenticator; Automata's Solidity verifier proves feasibility) + self-run KMS quorum      | Serious build and ops; full sovereignty; justified at scale            |
+
+**Hosting gate:** this requires hyperscaler confidential VMs (Azure DCe/ECe TDX, GCP C3 TDX or Confidential Space, AWS Nitro Enclaves), bare metal (OVHcloud, OpenMetal, Hydra Host), or crypto-native TEE clouds (Phala, Oasis marketplace). Commodity PaaS — Fly.io, Render, Railway — has nothing TEE-shaped, so this is a deployment-model change, not a library swap. Note AWS Nitro is attractive operationally but has **no cross-cloud portability** (proprietary attestation, AWS-only KMS binding) and its account administrator can strip the attestation conditions — acceptable for one organ, never for both.
+
+### 8.5 Phased delivery
+
+**T1 — Reproducible capsule identity.** Make the capsule build byte-reproducible so the digest is a stable measurement.
+_Acceptance:_ two independent builders produce an identical digest; the digest is published as a linked resource on the entity's IID document.
+
+**T2 — One organ attested.** Move the **co-signer** into a CVM first (it is the smaller, more isolable service, and the higher-value target since it enforces the constitution). Its share is derived in-enclave and never leaves.
+_Acceptance:_ the quote verifies against vendor roots; the share cannot be retrieved through any API; the co-signer still refuses actions the constitution forbids; and a forced failover to a second venue re-derives the same share and resumes signing.
+
+**T3 — Registry and governance.** Stand up the registry per §8.3, with constitution-CID-referencing approvals and a timelock.
+_Acceptance:_ an unapproved digest receives no key; each approval records the constitution CID; a pending activation is externally observable for the full timelock; revocation plus eviction is exercised end to end.
+
+**T4 — Both online organs attested, IXO-native verification.** Runtime share into a CVM on a _different_ platform from the co-signer; DCAP verification moves on-chain as a CosmWasm authenticator so the chain accepts the entity's transactions only under a verified quote.
+_Acceptance:_ the two organs run on different vendors' silicon; a transaction with no valid quote is rejected on-chain; and re-anchoring from route (a)/(b) to (c) leaves the entity's DID and public keys unchanged.
+
+### 8.6 Residual trust after the upgrade
+
+Stated plainly, because the upgrade is often oversold:
+
+1. **Silicon vendors** (Intel/AMD) remain in the root of trust — attestation roots, TCB recovery cadence, microcode. Irreducible.
+2. **Physical access still wins.** Interposer attacks defeat confidentiality _and forge attestation_; vendors treat them as out of threat model. Mitigate with audited datacenters, machine allowlists (PPID pinning) and Proof-of-Cloud-style checks. Running the two organs on different providers means one physical compromise is not enough — this is the main reason the threshold survives the upgrade.
+3. **Governance capture is relocated, not removed.** It now requires the constitutional quorum plus a second share — much harder, still the primary attack path.
+4. **Liveness is unchanged.** TEEs give safety, never availability. The host can always evict. Continuity comes from key re-derivability on new hardware, encrypted state replication outside the enclave, and ≥2 eligible venues.
+5. **Anti-rollback needs external anchoring.** Enclaves have no trustworthy wall clock and hosts can replay old disk state; counters must be chain-anchored. Persistent volumes also survive upgrades, so a future approved build can read everything prior builds wrote — a reason to keep the timelock and to treat state encryption keys as capsule-scoped.
+6. **Framework longevity.** dstack (Linux Foundation-donated, audited, multi-cloud) is currently the safest bet; NEAR's Shade Agents showed agent-TEE tooling can be sunset within ~18 months. Content-addressed capsules plus derivation-by-identity make re-anchoring a governance event rather than an identity death.
+
+### 8.7 What would make this land sooner
+
+Two things could pull the upgrade forward independently of the hosting decision: the **T1 reproducible build** is valuable on its own (it is what makes any measurement meaningful, and it is a prerequisite for the capsule format regardless), and the **registry schema** in §8.3 costs little to design now and prevents an expensive migration later. Both are worth doing while still on commodity hosting.
+
+---
+
+## 9. References
 
 **Verified locally:** `packages/oracles-chain-client/src/matrix-bot/setup-claim-signing-mnemonics.ts` (at-rest routine), `setup-encryption-key.ts`, `packages/oracle-runtime/src/bootstrap/create-oracle-app.ts` (`wireSigningAndEncryptionKeys`), `packages/oracle-runtime/src/modules/ucan/ucan.service.ts`.
 
