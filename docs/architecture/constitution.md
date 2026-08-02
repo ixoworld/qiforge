@@ -1,0 +1,156 @@
+# The constitution engine
+
+How the runtime enforces the entity's own law on every tool call.
+
+Source: `packages/oracle-runtime/src/constitution/`.
+
+The design rationale, the survey it came from, and the phases beyond this one live in `specs/sovereign-agency-harness.md`. This page documents what the code does.
+
+## The idea in one line
+
+A model's output is a **claim**, not a decision. The constitution engine is the structural gate between the two: it classifies a proposed tool call into an action class, evaluates it against the entity's `domain.md`, and only then lets the handler run.
+
+## Where the law comes from
+
+The entity's law is a [`domain.md`](https://github.com/ixoworld/domain.md) — YAML frontmatter plus prose, declaring where authority lives, what the agent may propose, and what it must never do without an explicit grant. The runtime enforces a subset of that format:
+
+| Block                 | What the engine reads it for                                 |
+| --------------------- | ------------------------------------------------------------ |
+| `conformance`         | Spec version and assurance profile                           |
+| `domain`              | Identity of the subject the constitution governs             |
+| `documents.anchoring` | How the index binds to canonical IID state                   |
+| `constitution`        | Status, type, failure policy, review triggers                |
+| `agent_default_mode`  | The capability ceiling, disabling overrides, review triggers |
+| `rights`              | The baseline and the explicit grants                         |
+| `accounts`            | Spending policy for value-bearing actions                    |
+| `agents`              | Output bounds and the escalation route                       |
+| `critical_do_not`     | Prohibitions surfaced verbatim to the model                  |
+
+Blocks the engine does not evaluate are still parsed and retained, so widening the subset later is additive.
+
+> The upstream `@ixo/domain.md` package is not published yet, so `constitution/parse.ts` implements the subset in-repo using `gray-matter` and Zod. That module is the **only** place that knows how the format is encoded — when the package ships, `parseDomainMdSubset` is replaced by upstream's `parseDomain`/`lint` and nothing else changes.
+
+## The two verdicts
+
+The format distinguishes two things the runtime keeps separate:
+
+- **Static conformance** — provable from the bytes: encoding, schema shape, local references, profile invariants. This is `lintDomainMdSubset`.
+- **Runtime conformance** — canonical IID state, capability proofs, revocation, trusted time. This is `authorize` plus its dependencies.
+
+A static pass never implies runtime authorization. A document can be perfectly well-formed and still authorize nothing.
+
+## Authorization resolution
+
+`authorize(request, policy, deps)` is pure: no I/O, no ambient state, no clock of its own. Every external fact arrives through `AuthorizeDeps`, so the same request replays to the same decision — which is what makes a decision record auditable after the fact.
+
+```mermaid
+graph TD
+    A["Proposed tool call"] --> B{"Action class<br/>recognized?"}
+    B -->|no| X["refuse"]
+    B -->|yes| C{"Constitution<br/>in force?"}
+    C -->|no| X
+    C -->|yes| D{"Clock<br/>trusted?"}
+    D -->|no| X
+    D -->|yes| E{"Mode ceiling<br/>permits?"}
+    E -->|no| X
+    E -->|yes| F{"Override<br/>disables?"}
+    F -->|yes| X
+    F -->|no| G{"Matching<br/>deny grant?"}
+    G -->|yes| Y["deny"]
+    G -->|no| H{"Baseline requires<br/>a grant?"}
+    H -->|no| K
+    H -->|yes| I{"Allow grant matches,<br/>proof verifies,<br/>conditions hold?"}
+    I -->|no| X
+    I -->|yes| K{"Human review<br/>required?"}
+    K -->|yes, unproven| Z["manual_review_required"]
+    K -->|no, or proven| P["permit"]
+```
+
+Every step is default-deny. A check that cannot be _completed_ — an unverifiable proof, an unreachable revocation source, an untrusted clock — refuses or escalates according to `constitution.execution.failure_policy`; it never falls through to permitted.
+
+### The two vocabularies
+
+A right declares a `type` (`evaluate_claim`, `issue_credential`, …). The baseline is written in coarser **action classes** (`read`, `write`, `evaluate`, `execute`, `pay`, `issue`, `mint`, `transfer`, `govern`, `delete`, `revoke`). `RIGHT_TYPE_TO_ACTION` maps one to the other; a right type absent from that table is not recognized, and a request needing it is denied rather than guessed at.
+
+### The ceiling
+
+`agent_default_mode.mode` is a ceiling, not a grant:
+
+| Action class                                                   | Minimum mode       |
+| -------------------------------------------------------------- | ------------------ |
+| `read`                                                         | `read_only`        |
+| `propose`                                                      | `propose_only`     |
+| `evaluate`                                                     | `bounded_evaluate` |
+| `execute`, `write`, and everything value- or authority-bearing | `bounded_execute`  |
+
+Value movement, issuance, governance and destruction additionally **always** require an explicit grant — the mode never implies them. Requiring both the top mode and a grant is the fail-closed reading of the format's capability table: a `read_only` agent cannot move value on the strength of a stale grant.
+
+`overrides` only ever switch capabilities **off** (the format pins the known keys to `false`). An override that tries to enable something is a ceiling raise and fails linting with `open-ended-agent-authority`.
+
+### Grant matching
+
+A grant is about a request only when the principal, action class, operation and object all line up. Comparison is over canonical identifiers, never display strings. Object coverage requires an **explicit** wildcard: `ixo:oracle/workspace/*` covers `ixo:oracle/workspace/notes.md`, but a bare `ixo:oracle/workspace` covers only itself.
+
+Deny grants are evaluated before allow grants and win outright, including for actions below the baseline.
+
+### Conditions
+
+A matching grant still has to survive its conditions: activation and expiry against the declared clock, flow state, claim type, role, credential, and value ceiling. Value comparison uses `BigInt` and **refuses across denominations** — converting between them needs a governed price policy the runtime deliberately does not have. A ceiling that cannot be checked (no declared value on the call) is carried forward as an obligation rather than waved through.
+
+### Human review
+
+Two independent triggers: an action class whose trigger the constitution declares in `human_review_required_for`, or a matched grant with `conditions.human_review: true`. Either produces `manual_review_required` unless a review proof verifies against the request digest. A trigger the constitution never declared is never invented.
+
+## Declaring what a tool does
+
+The gate can only classify a call if the tool says what it does. `PluginTool.effect` carries that:
+
+```ts
+tool(handler, {
+  name: 'release_payment',
+  description: '…',
+  schema: paymentSchema,
+  effect: {
+    type: 'pay',
+    action: 'release_payment',
+    object: (args, ctx) => `ixo:oracle/treasury/${(args as Args).account}`,
+    value: (args) => (args as Args).amount,
+  },
+});
+```
+
+Two things to know:
+
+- The `tool()` helper builds its result field by field, so a new field must be copied through explicitly or it is silently dropped.
+- `wrapPluginTool` keeps only name, description and schema when it bridges to LangChain. The gate therefore reads effects from a `toolName → effect` map built in `createMainAgent` while the plugin tool is still in hand — never from the bound tool.
+
+A tool that declares no effect is reported once at boot (`constitution.tool_effect_undeclared`). Under permissive enforcement it is treated as a read; under strict enforcement it is refused, because an undeclared effect is an unbounded one.
+
+## Trusted time
+
+Expiry and revocation are only as good as the clock behind them, so the source is named in every decision rather than left implicit. This runtime declares `system_clock` and marks it trusted because a deployment has no better option today — not because the clock is verified. `TimeSource` is the seam where an attested source replaces it; a reading that reports `trusted: false` fails effectful actions closed.
+
+## Enforcement policy
+
+`DOMAIN_ENFORCEMENT` (`strict` | `permissive`, default `strict`) decides how much assurance the document itself must carry:
+
+|                        | `strict`                                   | `permissive`                      |
+| ---------------------- | ------------------------------------------ | --------------------------------- |
+| Required profile       | `anchored` or `runtime`, CID cross-checked | any, `authoring_draft` warns      |
+| Undeclared tool effect | denied                                     | treated as `read`, warned at boot |
+| Gate active            | yes                                        | **yes**                           |
+
+The gate runs in both modes. Enforcement level changes how much the _document_ must prove, never whether decisions are made.
+
+This is a deliberate new convention: nothing else in `bootstrap/` branches on the environment, and `NODE_ENV` is overloaded by test runners, so the choice is its own explicit variable.
+
+## What this phase does not do
+
+Per-permit UCAN minting and executor receipts, the Merkle-log episode ledger and its on-chain anchoring, cognition contracts, and the entity's own claims and settlement all come later. This phase establishes one thing: **no tool executes without a recorded authorization decision.**
+
+## Read next
+
+- [Boot sequence](boot-sequence.md) — where the document is loaded and validated.
+- [Runtime context](runtime-context.md) — `rtCtx.domain`.
+- [Graph and state](graph-and-state.md) — where the gate sits in the middleware stack.
+- `specs/sovereign-agency-harness.md` — the design and the phases beyond this one.

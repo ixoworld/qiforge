@@ -17,6 +17,13 @@ export interface ToolHelperOptions {
    * `manifest.visibility` setting.
    */
   visibility?: PluginTool['visibility'];
+  /**
+   * What the tool does to the world, in the vocabulary the entity's
+   * constitution is written in. Declaring it lets the constitution gate
+   * authorize the call precisely; leaving it off means the gate has to assume
+   * the worst.
+   */
+  effect?: PluginTool['effect'];
 }
 
 /**
@@ -43,7 +50,7 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility } = options;
+  const { name, description, schema, visibility, effect } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -68,6 +75,9 @@ export function tool(
   };
   if (visibility !== undefined) {
     pluginTool.visibility = visibility;
+  }
+  if (effect !== undefined) {
+    pluginTool.effect = effect;
   }
   return pluginTool;
 }

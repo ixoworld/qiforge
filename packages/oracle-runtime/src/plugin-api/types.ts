@@ -2,6 +2,7 @@ import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { RightsActionType } from '../constitution/schema.js';
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Mirrors the
@@ -427,6 +428,30 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   toolCallId?: string;
 }
 
+/**
+ * What a tool actually does to the world, in the vocabulary the entity's
+ * constitution is written in.
+ *
+ * The constitution gate classifies every tool call into one action class and
+ * evaluates it against the mode ceiling, the baseline, and the grants. A tool
+ * that declares no effect cannot be classified: under permissive enforcement
+ * it is treated as a read and reported at boot, and under strict enforcement
+ * it is refused, because an undeclared effect is an unbounded one.
+ */
+export interface ToolEffect {
+  /** The action class this tool exercises. */
+  type: RightsActionType;
+  /** The specific operation, matched against a grant's `action`. */
+  action: string;
+  /**
+   * Resolves the canonical identifier of what is being acted on, from the
+   * call's arguments. Defaults to the oracle's own resource when omitted.
+   */
+  object?: (args: unknown, ctx: RuntimeContext) => string;
+  /** Resolves the value the call would move, for tools that move any. */
+  value?: (args: unknown) => { amount: string; denom: string } | null;
+}
+
 export interface PluginTool {
   name: string;
   description: string;
@@ -434,6 +459,11 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * What this tool does to the world. Read by the constitution gate before
+   * the handler runs; see {@link ToolEffect}.
+   */
+  effect?: ToolEffect;
 }
 
 export interface PluginSubAgent {
