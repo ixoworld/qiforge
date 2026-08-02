@@ -246,7 +246,7 @@ rights:
       type: 'write'
       effect: 'allow'
       subject: 'did:ixo:entity:qiforge-example'
-      object: 'ixo:oracle/workspace'
+      object: 'ixo:oracle/workspace/*'
       action: '*'
       capability: { format: 'policy', reference: 'domain_md' }
       conditions:

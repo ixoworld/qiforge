@@ -249,6 +249,24 @@ export const documentsSchema = z
   })
   .loose();
 
+/**
+ * How the domain wants an enforcement failure handled: refuse outright, or
+ * hold the action and route it to a human. Anything else is not a choice the
+ * document may express — a failure never falls through to permitted.
+ */
+export const failurePolicySchema = z.enum(['deny', 'pause_and_escalate']);
+
+export type FailurePolicy = z.infer<typeof failurePolicySchema>;
+
+export const constitutionExecutionSchema = z
+  .object({
+    mode: z.string().optional(),
+    enforcement_points: z.array(z.string()).optional(),
+    failure_policy: failurePolicySchema.optional(),
+    human_review_required_for: z.array(z.string()).optional(),
+  })
+  .loose();
+
 export const constitutionSchema = z
   .object({
     status: z.enum([
@@ -262,6 +280,7 @@ export const constitutionSchema = z
     reason: z.string().nullable().optional(),
     subject: draftIdSchema,
     type: nonEmptyString,
+    execution: constitutionExecutionSchema.optional(),
   })
   .loose();
 
