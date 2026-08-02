@@ -1,7 +1,7 @@
 # The Sovereign Agency Harness — Research and Architecture
 
 **Status:** Research spec — patterns established, architecture proposed, implementation phased
-**Revision:** v1 — 2026-08-01
+**Revision:** v1.1 — 2026-08-02 (v1: research + architecture; v1.1 adds Part V — `domain.md` alignment assessment and the concrete Phase-1 wiring plan)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Builds on:** `specs/ORA-219-plugin-based-runtime.md` (the plugin runtime this design extends)
 **Stack context:** `@ixo/oracle-runtime` · IXO Impact Hub (IID / Entity / Claims modules) · Matrix · UCAN · LangGraph
@@ -44,7 +44,13 @@ Part I reports what the established harnesses teach. Part II derives the princip
   - [22. Gap analysis](#22-gap-analysis)
   - [23. Phased roadmap](#23-phased-roadmap)
   - [24. Open questions](#24-open-questions)
-- [25. References](#25-references)
+- **Part V — domain.md: the constitution artifact, assessed and wired**
+  - [25. What domain.md provides](#25-what-domainmd-provides)
+  - [26. Alignment assessment](#26-alignment-assessment)
+  - [27. Gaps, in both directions](#27-gaps-in-both-directions)
+  - [28. Phase-1 wiring plan](#28-phase-1-wiring-plan)
+  - [29. Sequencing with later phases and upstream proposals](#29-sequencing-with-later-phases-and-upstream-proposals)
+- [30. References](#30-references)
 
 ---
 
@@ -525,6 +531,7 @@ graph LR
 
 **Phase 1 — Constitution Engine (structural gate).**
 An always-on middleware wrapping every tool execution (and a policy service behind it): normalize `(principal, action, resource, context)` → evaluate against a policy bundle → permit/deny/obligations. Constitution as a content-addressed document linked from the entity's IID doc; version hash on every decision; refusal events emitted. Start with Cedar-style semantics (default deny, forbid-overrides-permit, fail-closed) over the runtime's existing tool metadata. _Acceptance:_ no tool executes without a recorded decision; a forbid rule blocks a permitted-looking action regardless of model output; constitution updates require a controller-signed resource update.
+_Update (v1.1):_ the constitution **artifact and its authorization semantics now exist** — the `domain.md` specification (ixoworld/domain.md). Part V assesses its alignment and replaces this phase's sketch with a concrete wiring plan (§28) and revised acceptance criteria.
 
 **Phase 2 — Sovereign episodic ledger.**
 Episode records (schema of §13) written per decision loop into an entity-scoped Matrix room; hash chain + Merkle log; periodic anchor of the signed tree head as an IID linked-resource update (option: additionally as a claim into an audit collection). Inclusion/consistency proof endpoints for auditors. _Acceptance:_ any episode is provable-included against an on-chain anchor; tampering with a stored episode is detectable; refusals appear as episodes.
@@ -551,12 +558,123 @@ The entity's outcome-bearing actions become claim objects in collections it part
 
 ---
 
-## 25. References
+# Part V — domain.md: the constitution artifact, assessed and wired
+
+Phase 1 called for a machine-readable, versioned, governance-amended constitution enforced structurally between claim and effect. That artifact now exists: the **`domain.md` specification** (ixoworld/domain.md, spec `1.0.0-rc.3`, studied from the full repository — generated spec, JSON Schemas, rule registry, examples, and the experimental `x-oracle-capsule` architecture, manifest contract, and threat model). This part assesses its alignment with the sovereign harness, names the gaps in both directions, and replaces the Phase-1 sketch with a concrete wiring plan for `@ixo/oracle-runtime`.
+
+## 25. What domain.md provides
+
+`domain.md` is "the IXO-domain analogue of `claude.md` / `skill.md` / `design.md`": one file per entity domain, normative YAML frontmatter plus ordered Markdown prose, that tells an agent **what domain it is in, where authority lives, what state is canonical, what it may inspect, what it may propose, and what it must never do without explicit authority**. Its machine layer indexes the full IID surface with operating context — constitution (subject profile, instruments, governance procedures, execution mode, constitutional-AI policy), controllers, services, resources, rights, claims contracts, linked entities, accounts, PODs/Flows, agents, privacy, and source-of-truth boundaries.
+
+Three properties make it constitution-grade rather than documentation:
+
+1. **Assurance is layered and honest.** Four conformance profiles (`authoring_draft` → `persisted_draft` → `anchored` → `runtime`) separate artifact assurance from entity lifecycle, and the spec is explicit that **static conformance never proves runtime authorization** — anchoring, CID verification, capability/revocation checks, trusted time, and canonical-state resolution remain runtime obligations that fail closed.
+2. **Authorization semantics are normative.** domain.md's §8 defines the per-action resolution algorithm: default deny; a mode **ceiling** (`read_only` → `propose_only` → `bounded_evaluate` → `bounded_execute`) that overrides may only lower; a baseline set of actions (`write`, `evaluate`, `execute`, `pay`, `issue`, `mint`, `transfer`, `govern`, `delete`, `revoke`) that **always** require an explicit scoped grant; deny grants overriding allow grants; grants carrying capability proofs (`ucan` / `cosmos_authz` / …), conditions (value ceilings with exact-denomination comparison, expiry, flow state, role, credential, human review), revocation methods, and audit targets; trusted-time checks that fail closed. "Missing authority is denial, not ambiguity."
+3. **Enforcement placement is specified.** The agent runtime contract (domain.md §12) is an eight-step hot path — load → resolve constitution → resolve live authority → constitutional evaluate → authorize → act → record → escalate/amend — with a stop-and-escalate list, and the source-of-truth block pins a fact-scoped `conflict_resolution_order` in which `domain.md` itself ranks **below** canonical protocol/IID state and **above** the user prompt and agent memory. A constitutional document or model evaluation never self-authorizes an action.
+
+For oracles specifically, the experimental **Oracle Capsule** contract packages one Agentic Oracle as an immutable release: the oracle's identity `domain.md` binds (via `x-oracle-capsule`) a content-addressed companion manifest that pins one Master skill, requested tool contracts, effect ceilings, and build provenance — all dual-addressed (CID + SHA-256, RFC 8785 canonicalization), with a minimal host kernel whose twelve invariants keep resolution, authority, state, signing, secrets, and receipts **outside the model context**, and a threat model with named trust boundaries and required negative tests. The contract is host-neutral by design: "Codex, Claude, Pi, CLI and MCP hosts may supply reasoning and presentation, but cannot reinterpret this contract or become its authority, durable state, secret store, signer or audit ledger."
+
+## 26. Alignment assessment
+
+**Verdict: domain.md is the Phase-1 constitution artifact, and more.** It does not merely align with §14 — it independently arrives at the same first principles this spec derived from the harness survey, and it covers organs beyond the Constitution Engine. Organ by organ:
+
+| Sovereign organ (Part III)               | domain.md / capsule coverage                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Verdict                                                                                                                                      |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Constitution Engine (§14)**            | `constitution` block (instruments with constitutive/governing/amending/interpretive/executable functions; governance procedures incl. amendment/dispute/suspension; execution with enforcement points and `failure_policy: deny\|pause_and_escalate`); domain.md §8 default-deny authorization with deny-overrides-allow; domain.md §14 change control (security-sensitive changes require controller/governance review; agents MUST NOT auto-migrate authority-bearing documents); content-addressed, anchored, revisioned | **Aligned** — the artifact, semantics, and amendment governance all exist; only the runtime engine is unbuilt (§27a)                         |
+| **Identity Core (§12)**                  | `domain.id`/`domain.iid`, controllers with verification methods and approval policies, `documents.anchoring` binding the index CID to canonical IID state                                                                                                                                                                                                                                                                                                                                                                   | **Aligned** (consumes the same `x/iid`/`x/entity` substrate)                                                                                 |
+| **Sovereign Memory (§13)**               | `subject_profile.memory` facet references memory policies; capsule defines four memory classes — `ephemeral_working`, `session_operational`, `subject_record`, `audit_record` (append-only, hash-chained, secret-redacted) — with encryption, scoping, and retention rules; "memory poisoning" is a named threat with canonical-state precedence                                                                                                                                                                            | **Partially aligned** — per-run audit chaining exists; entity-level Merkle log + ledger anchoring of episodes (Phase 2) is not yet specified |
+| **Capability Kernel (§15)**              | Rights entries carry capability format (`ucan`/`cosmos_authz`), proof references, attenuating conditions, revocation authority; domain.md §8 requires proof + delegation-chain verification, revocation, nonce/replay and trusted-time checks per action; capsule re-checks "audience, action, object, nonce, time, revocation, value limits" immediately before every invocation                                                                                                                                           | **Aligned** on verification; per-permit **minting** remains Phase 3 runtime work                                                             |
+| **Cognition Sockets (§16)**              | Capsule host-neutrality; "prompt and transient model output" owns nothing ("no authority; input/output filter only"); kernel keeps secrets/signing/state outside model context; `constitutional_ai` block allows critique/policy-evaluate modes while forbidding any grant of authority                                                                                                                                                                                                                                     | **Aligned** on the trust boundary; procurement/contract economics absent (§27b)                                                              |
+| **Evidence & Evaluation Pipeline (§17)** | Claims contracts: schemas, evidence requirements (freshness, sensitivity), pinned rubrics with disqualifiers and reason codes, **`evaluator_right` vs `determiner_right` separation**, UDIDs binding decision+evidence+authority+rubric+proof, human-review policy, outcome-mapped next actions with settlement policies; "evaluate facts, not files"                                                                                                                                                                       | **Aligned** — richer than §17 in places (adopted below)                                                                                      |
+| **Economic Membrane (§18)**              | Accounts with spending policies (per-transaction and daily ceilings, allowed recipients, `requires_claim`/`requires_udid`/`requires_human_approval`) and settlement triggers keyed to claim outcomes and flow states                                                                                                                                                                                                                                                                                                        | **Aligned** on outbound-value policy; entity cognition-opex metering absent (§27b)                                                           |
+
+Deeper convergences worth naming, because they are independent derivations of Part II:
+
+- **The IXO cycle is the sovereign loop.** `Identity → Constitution → Claims → Evidence → Evaluation → Decision → Capability → Action → Settlement → Memory`, with "no stage self-authorizes the next" — the same pipeline as §19, arrived at from the protocol side.
+- **Cedar semantics, independently chosen** (§9): "deny overrides allow; absence of allow is denial", default-deny resolution, fail-closed errors and clocks.
+- **The behavioral/structural split is explicit** (§9): the `constitutional_ai` block may supply principles as context, critique-and-revise, or policy evaluation, but "MUST NOT grant identity, rights, capabilities, approvals, or execution authority. On conflict, canonical authority prevails."
+- **One owner, one enforcement point** (§10's relocation discipline): the capsule architecture assigns every security-relevant fact exactly one owning artifact and one primary enforcement point; "if two artifacts appear to own the same fact, resolution stops."
+- **The capsule kernel's twelve invariants map onto §20's twelve design invariants** — verified distribution, no-downgrade profile validation, ceiling-intersection authority, per-call re-checks, egress projection, model-context exclusion of authority, memory-class separation, hash-chained receipts, mandatory human review, and rejection of runtime self-modification.
+- **Recursive twins respect the parent boundary**: an agentic twin is itself a constitutional subject with its own constitution, wallet, and memory — and "a twin's internal constitutional evaluation does not grant the live capability to act for the parent." Sub-agent envelope tightening (§16) generalizes the same rule.
+
+## 27. Gaps, in both directions
+
+### 27a. The engine gap — what Phase 1 must build
+
+domain.md deliberately ships the **law, the algorithm, and the validator — not the enforcement engine**. The `@ixo/domain.md` library exports `parseDomain`, `lint`, `diffDomains`, `exportDomain`, spec/schema getters, template rendering, and capsule validation; there is **no `authorize()` implementation of domain.md's §8 resolution algorithm**, and enforcement points are declared in the document precisely because enforcement belongs to the runtime. The runtime must therefore supply: the per-action evaluator; the tool→action mapping (nothing in oracle-runtime today declares which right `type` a tool exercises); the trusted-time and revocation-provider decisions domain.md §8 requires; decision-record emission; and the human-review obligation transport. This is exactly the Phase-1 build (§28). qiforge currently contains zero references to domain.md — the wiring is greenfield.
+
+### 27b. What domain.md does not yet cover (upstream proposals)
+
+- **Cognition contracts.** No schema slot records the terms under which a transient model is hired — role, price ceiling, data-handling terms, attestation requirement, settlement rail (§16). Candidate: an `x-cognition-contracts` extension (or an `agents.entries` extension field), promoted to core once Phase 4 proves the shape.
+- **Entity-level episodic anchoring.** The capsule's `audit_record` class is hash-chained per run, and `documents.anchoring` anchors the _index document_ — but nothing specifies the entity's cross-run episodic Merkle log and its ledger-anchoring cadence (§13, Phase 2). Candidate: a `memory`/`audit anchoring` policy resource type referenced from `subject_profile.memory`.
+- **Cognition-spend metering.** `accounts` governs outbound value; the entity's own model-inference operating expense (metering per hire against treasury, §18) has no home yet.
+
+### 27c. Adopted into this spec (v1.1 adjustments)
+
+domain.md improves on Part III in four places; this spec adopts them:
+
+1. **Fact-scoped conflict resolution.** The single precedence list of §13 becomes domain.md's `conflict_resolution_order` **plus `authority_scopes`** — precedence applies only among sources competent for the same fact, and an unscoped conflict stops rather than resolving mechanically.
+2. **UDIDs as the determination object.** §17's episode records reference (and where the entity is the determiner, emit) UDIDs — the object that binds decision, evidence, authority, rubric, and proof trail, and that settlement references "not a chat outcome."
+3. **Evaluate facts, not files.** §17 step 2 gains an explicit normalization stage: evidence → typed facts (per a fact schema) → rubric scoring. Evaluators never decide over raw files or free-form model text.
+4. **Memory-class vocabulary.** §13's tiers adopt the capsule's class names where they meet: working state ⊂ `session_operational`, context capsules ⊂ `ephemeral_working`, the episodic ledger _is_ an anchored, entity-scoped `audit_record`, and semantic memory falls under `subject_record` discipline (provenance-bound writes, canonical facts stay in their owning systems).
+
+## 28. Phase-1 wiring plan
+
+Nine work items, each shaped for the existing plugin/module architecture (ORA-219). The gate sits in the always-on middleware chain; the domain context loads as an always-on module; everything else is registry metadata and pure functions.
+
+```mermaid
+graph LR
+    DC["DomainContextModule<br/>domain.md — parsed, linted,<br/>CID-verified (anchored/runtime)"] --> GATE
+    UCAN["UcanService<br/>capability-proof verification"] --> GATE
+    Model["Hired model<br/>(proposes tool call)"] --> TV["tool-validation<br/>middleware"]
+    TV --> GATE["ConstitutionGate middleware<br/>authorize() — domain.md §8"]
+    GATE -->|"permit (+ obligations)"| EXEC["Tool handler<br/>(rtCtx, effects)"]
+    GATE -->|"deny / manual_review_required"| REFUSE["Structured refusal<br/>reason codes + rule refs"]
+    GATE --> REC["Decision record<br/>hash-chained → entity room"]
+    EXEC --> REC
+```
+
+**W1 — Author the oracle's own `domain.md`.** `domain.type: oracle`; constitution typed `con:OracleConstitution` (an `con:AgenticConstitution` where the oracle is an agentic twin), complete `subject_profile`; `agent_default_mode` ceiling (reference oracle starts at `bounded_evaluate` with the full default `human_review_required_for` list); `rights.agent_baseline` verbatim; an `agents` entry for the runtime itself with `permitted_outputs` / `forbidden_outputs` (`unreviewed_final_approval`, `unbounded_payment`, `silent_rubric_change`, `private_reasoning_as_state`) and escalation; `critical_do_not`. Ship as `apps/qiforge-example/domain.md` (`authoring_draft` in-repo); production deployments anchor it as a linked resource on `ORACLE_ENTITY_DID` with `documents.anchoring` — the same custody pattern as the signing keys (§21).
+
+**W2 — `DomainContextModule`** (always-on, `packages/oracle-runtime/src/modules/domain-context/`). Boot: load bytes → `parseDomain` + `lint` from `@ixo/domain.md` → enforce profile policy — production boots require `anchored`/`runtime` with the index CID verified against the resolved IID linked resource; dev tolerates `authoring_draft` with a prominent warning **and the gate active regardless**. Exposes a typed, frozen `DomainContext` (constitution, mode ceiling, rights, accounts, agents, privacy, `critical_do_not`) through ambient services and `rtCtx.domain`. Honors domain.md §14 change control: a changed `document_revision` in a security-sensitive block is never hot-applied — new revisions load only through restart with verified anchoring (runtime agents MUST NOT auto-migrate an authority-bearing document).
+
+**W3 — The `authorize()` evaluator** — a pure function implementing domain.md §8 exactly: canonical-action recognition; ceiling and overrides (lower-only); deny-grant scan; the `require_explicit_grant_for` baseline; grant matching by canonical DID/URI (never display strings); capability-proof and delegation-chain verification (delegated to the existing `UcanService`; caveat comparison via the `derives` machinery already in `packages/ucan`); revocation and `not_before`/`expiry` against a **declared** time source; exact-denomination value comparison; condition checks (flow state, role, credential, human-review proof). Interim home `packages/oracle-runtime/src/constitution/authorize.ts` with domain.md §16's fixture classes mirrored as tests (deny/allow conflict, expired/revoked capability, denomination mismatch, ceiling-raise attempt, missing review proof). **Recommended endgame: contribute `authorize()` upstream to `@ixo/domain.md`** so the evaluator lives beside the spec and its golden fixtures, and every conforming runtime shares one implementation — the runtime keeps only a thin adapter.
+
+**W4 — `ConstitutionGateMiddleware`** (always-on, `packages/oracle-runtime/src/graph/middlewares/`), wrapping every tool execution after tool-validation. Builds the authorization request — principal (the oracle DID acting via the current model/session), action (the tool's declared effect), object (resolved target), context (arguments, value, time) — calls `authorize()`, and: **permit** → proceed with obligations attached; **deny** → structured refusal returned to the model as the tool result (reason codes + rule references — never a silent drop, matching the "no tool is activated and the trace records the refusal reason" negative test); **pause_and_escalate / human-review obligation** → the W7 path. Fail-closed: an unloadable domain context, unverifiable proof, or ambiguous clock denies.
+
+**W5 — Tool effect declarations.** `PluginTool` gains an optional `effect` field: `{ type: <rights-type enum>, action: string, object?: (args, rtCtx) => string, value?: (args) => { amount, denom } | null }`. The bundled plugins are annotated in the same change (most are `read`; sandbox `execute`; editor/flows `write`; credits-adjacent surfaces `pay`-class). Boot lint: a tool without `effect` warns and is treated as `read` — and under `validation.lint_profile: strict`, undeclared tools are denied for anything beyond read. This is the registry-shaped, non-breaking seam ORA-219 anticipates.
+
+**W6 — Decision records v0.** Every gate verdict — permits and refusals — appends a JCS-canonicalized, hash-chained record to an entity-scoped Matrix room: `{ seq, prev_hash, domain_md_cid, document_revision, request { principal, action, object, value, session, model }, verdict { outcome, rule_refs, reason_codes, obligations }, capability { proof_digest, revocation_verdict } | null, time { source, instant }, nonce }` — the field set the capsule contract requires of authority records ("an opaque proof reference alone is insufficient"). This is §13's episode `decision` component shipped early; Phase 2 wraps these records in the Merkle log and anchors tree heads.
+
+**W7 — Human-review obligations.** v1 transport: the gated action returns `manual_review_required`, emits a typed escalation event, and posts to the room named by the oracle's `agents.entries[].escalation`; execution resumes only when a signed approval proof reference is presented with the retried action (recorded in the decision record). LangGraph-interrupt integration is a later refinement, not a Phase-1 dependency.
+
+**W8 — Prompt surface (the behavioral layer, kept consistent with the structural one).** The prompt composer gains a Pass-1 block from the domain context: constitution status and type, the mode ceiling and `require_explicit_grant_for` set, `critical_do_not` verbatim, and escalation norms — labeled as advisory context. Per §9 this improves what the model proposes; the gate remains the layer that decides.
+
+**W9 — CI and fixtures.** `domainmd lint` runs against the example oracle's `domain.md` in CI (spec pinned at `1.0.0-rc.3`; the package's spec/package versions are independent, so pin both); the W3 fixture corpus runs in unit CI; an integration test proves the end-to-end negative case — a prompt-injected instruction to skip review produces a refusal decision record and no tool execution.
+
+**Revised Phase-1 acceptance.** (1) No tool executes without a decision record; refusals are recorded with reason codes and rule references. (2) A deny grant blocks an otherwise-allowed action; baseline actions without a matching grant are denied. (3) `overrides` cannot raise the ceiling (boot lint + runtime). (4) Expired, revoked, replayed, or mis-scoped capability proofs fail closed. (5) Production boot refuses an unanchored or CID-mismatched `domain.md`; dev boot warns loudly and still gates. (6) Every decision cites the constitution's CID and `document_revision`.
+
+## 29. Sequencing with later phases and upstream proposals
+
+- **Phase 2** consumes W6 directly: decision records become the `decision` field of full episode records; the Merkle log and IID-anchored tree heads land around them; memory adopts the capsule's four-class vocabulary (§27c).
+- **Phase 3** turns the permit path into a mint: a permit's output becomes a one-shot, caveated UCAN invocation (the capsule's "effective ceiling is the intersection of identity document, capsule constraints, run authorization, live capabilities, subject policy, and runtime policy" realized in tokens), verified again at the tool boundary.
+- **Phase 4** adopts the **Oracle Capsule** as the release packaging for QiForge oracles: the runtime becomes a "conforming runtime" per the capsule architecture (signed distribution attestation, kernel-invariant conformance, classed memory, receipt verification), and cognition contracts land as the §27b extension.
+- **Phase 5** consumes the claims contracts already in domain.md (`evaluator_right` vs `determiner_right`, UDIDs, settlement triggers) for the entity's self-claims.
+
+**Upstream proposals to ixoworld/domain.md**, in priority order: (1) ship `authorize()` in `@ixo/domain.md` beside the spec with golden fixtures (the W3 endgame); (2) add the cognition-contract slot (§27b); (3) specify the entity-level episodic-anchoring policy resource (§27b); (4) align the domain.md §16 conformance-report schema with runtime decision records so static reports and runtime verdicts compose into one audit surface.
+
+---
+
+## 30. References
 
 **Named starting points**
 
 - LangChain Deep Agents — product page, "Deep Agents" blog post, deepagents 0.2 release notes, docs (overview/subagents/backends/middleware/long-term memory/human-in-the-loop), and repo source (`graph.py`, middleware, `libs/ARCHITECTURE.md`). https://www.langchain.com/deep-agents · https://github.com/langchain-ai/deepagents
 - qm — "a multiplayer agent harness for work"; full source studied: `src/harness/` (adapter contract, tape-fold, replay), `src/core/orchestrator.ts`, `src/credentials/keychain.ts`, `src/policy/`, `src/security/`, `src/cron/`, `src/memory/`, `AGENTS.md`, `SECURITY.md`. https://github.com/yc-software/qm
+
+**The constitution artifact (Part V)**
+
+- `domain.md` — spec `1.0.0-rc.3`: generated specification (`docs/spec.md`), `domain-md.schema.json`, rule registry, `PHILOSOPHY.md`, examples (protocol/service/project/passive-dataset domains), and the experimental `x-oracle-capsule` contract (`docs/experimental/x-oracle-capsule/` — architecture decision, manifest contract, threat model; capsule + source-lock schemas, RFC 8785 vectors). Library surface audited: `packages/cli/src/index.ts` (`parseDomain`, `lint`, `diffDomains`, capsule validation — no `authorize()` yet). https://github.com/ixoworld/domain.md
 
 **Harness ecosystem**
 
