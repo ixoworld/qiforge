@@ -50,6 +50,7 @@ function policy(
     grants?: Array<Record<string, unknown>>;
     status?: string;
     failurePolicy?: string;
+    accounts?: Array<Record<string, unknown>>;
   } = {},
 ): ConstitutionPolicy {
   const frontmatter = {
@@ -92,6 +93,7 @@ function policy(
       },
       entries: options.grants ?? [grant()],
     },
+    ...(options.accounts ? { accounts: { entries: options.accounts } } : {}),
   };
   return toConstitutionPolicy(
     parseDomainMdSubset(
@@ -785,5 +787,308 @@ describe('toConstitutionPolicy', () => {
       'payment_release',
       'rights_change',
     ]);
+  });
+});
+
+// A grant says the entity may pay. The account says how much, to whom, and on
+// what evidence. Enforcing only the first would let one valid `pay` grant
+// empty the treasury.
+describe('account spending policy', () => {
+  const RESERVE = 'Maintenance reserve';
+
+  function account(spending: Record<string, unknown> = {}) {
+    return {
+      name: RESERVE,
+      address: 'ixo1reserve',
+      chain_id: 'ixo-5',
+      owner: SUBJECT,
+      spending_policy: {
+        max_single_transaction: null,
+        daily_limit: null,
+        allowed_recipients: [],
+        requires_claim: false,
+        requires_udid: false,
+        requires_human_approval: false,
+        ...spending,
+      },
+    };
+  }
+
+  /** A policy where paying is otherwise fully permitted, so only the account bites. */
+  function payPolicy(spending: Record<string, unknown> = {}) {
+    return policy({
+      baseline: [],
+      grants: [],
+      accounts: [account(spending)],
+    });
+  }
+
+  function payment(overrides: Partial<AuthorizationRequest> = {}) {
+    return request({
+      action: 'pay',
+      operation: 'settle_invoice',
+      object: 'ixo:vendor:approved/garage',
+      value: { amount: '100', denom: 'uusdc' },
+      account: RESERVE,
+      ...overrides,
+    });
+  }
+
+  const spendDeps = (spent = '0'): AuthorizeDeps => ({
+    time: fixedClock(NOW),
+    spentInWindow: async (_account, _since, denom) => ({
+      amount: spent,
+      denom,
+    }),
+  });
+
+  it('permits a payment inside every limit', async () => {
+    const decision = await authorize(payment(), payPolicy(), spendDeps());
+    expect(decision.outcome).toBe('permit');
+  });
+
+  // The constitution restricts spending per account, so an action that moves
+  // value without saying which one it draws on cannot be checked at all.
+  it('refuses a payment that names no account', async () => {
+    const decision = await authorize(
+      payment({ account: undefined }),
+      payPolicy(),
+      spendDeps(),
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.accountUnnamed);
+  });
+
+  it('refuses a payment drawn on an account the constitution never declared', async () => {
+    const decision = await authorize(
+      payment({ account: 'Someone else’s wallet' }),
+      payPolicy(),
+      spendDeps(),
+    );
+    expect(decision.reasonCodes).toContain(REASON.accountUnknown);
+  });
+
+  it('leaves accounts alone when the constitution declares none', async () => {
+    const decision = await authorize(
+      payment({ account: undefined }),
+      policy({ baseline: [], grants: [] }),
+      deps,
+    );
+    expect(decision.outcome).toBe('permit');
+  });
+
+  describe('allowed recipients', () => {
+    it('permits a recipient the allowlist covers by wildcard', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ allowed_recipients: ['ixo:vendor:approved/*'] }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+
+    it('refuses a recipient outside the allowlist', async () => {
+      const decision = await authorize(
+        payment({ object: 'ixo:vendor:unvetted/someone' }),
+        payPolicy({ allowed_recipients: ['ixo:vendor:approved/*'] }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('deny');
+      expect(decision.reasonCodes).toContain(REASON.recipientNotAllowed);
+    });
+
+    // An empty list is an unconfigured field, not a policy admitting nobody:
+    // a constitution meaning to permit no payments writes no `pay` grant.
+    it('treats an empty allowlist as unconfigured', async () => {
+      const decision = await authorize(
+        payment({ object: 'ixo:vendor:anyone' }),
+        payPolicy({ allowed_recipients: [] }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+  });
+
+  describe('transaction ceiling', () => {
+    it('refuses a payment above the single-transaction maximum', async () => {
+      const decision = await authorize(
+        payment({ value: { amount: '9001', denom: 'uusdc' } }),
+        payPolicy({
+          max_single_transaction: { amount: '250', denom: 'uusdc' },
+        }),
+        spendDeps(),
+      );
+      expect(decision.reasonCodes).toContain(REASON.exceedsSingleTransaction);
+    });
+
+    it('refuses a payment that declares no value against a ceiling', async () => {
+      const decision = await authorize(
+        payment({ value: null }),
+        payPolicy({
+          max_single_transaction: { amount: '250', denom: 'uusdc' },
+        }),
+        spendDeps(),
+      );
+      expect(decision.reasonCodes).toContain(REASON.valueUndeclared);
+    });
+
+    it('refuses across denominations rather than converting', async () => {
+      const decision = await authorize(
+        payment({ value: { amount: '1', denom: 'uixo' } }),
+        payPolicy({
+          max_single_transaction: { amount: '250', denom: 'uusdc' },
+        }),
+        spendDeps(),
+      );
+      expect(decision.reasonCodes).toContain(REASON.valueDenomMismatch);
+    });
+  });
+
+  describe('daily limit', () => {
+    it('permits when the day’s total stays inside it', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        spendDeps('300'),
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+
+    // The limit is on the total, not on this payment alone.
+    it('refuses when this payment would push the day over', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        spendDeps('450'),
+      );
+      expect(decision.outcome).toBe('deny');
+      expect(decision.reasonCodes).toContain(REASON.exceedsDailyLimit);
+    });
+
+    // A limit is a claim about history, and the evaluator is pure. An
+    // unanswerable limit is not a satisfied one.
+    it('refuses when nothing can answer what has been spent', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        deps,
+      );
+      expect(decision.reasonCodes).toContain(REASON.dailyLimitUncheckable);
+    });
+
+    it('refuses when the spend source declines to answer', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        { time: fixedClock(NOW), spentInWindow: async () => null },
+      );
+      expect(decision.reasonCodes).toContain(REASON.dailyLimitUncheckable);
+    });
+
+    it('refuses when the spend source throws', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        {
+          time: fixedClock(NOW),
+          spentInWindow: () => Promise.reject(new Error('ledger down')),
+        },
+      );
+      expect(decision.reasonCodes).toContain(REASON.dailyLimitUncheckable);
+    });
+
+    it('records what the permitted payment used of the day', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ daily_limit: { amount: '500', denom: 'uusdc' } }),
+        spendDeps('300'),
+      );
+      expect(decision.obligations).toContainEqual({
+        kind: 'value_ceiling',
+        detail: expect.stringContaining('400 of 500 uusdc'),
+      });
+    });
+  });
+
+  // The account's way of saying money moves at the end of the
+  // claim → determination → settlement sequence, never on the entity's say-so.
+  describe('evidence preconditions', () => {
+    it('refuses a payment with no claim behind it', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ requires_claim: true }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('deny');
+      expect(decision.reasonCodes).toContain(REASON.claimRequired);
+    });
+
+    it('permits once the claim is named', async () => {
+      const decision = await authorize(
+        payment({ claimRef: 'claim:dv114:0001' }),
+        payPolicy({ requires_claim: true }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+
+    it('refuses a payment with no independent determination behind it', async () => {
+      const decision = await authorize(
+        payment({ claimRef: 'claim:dv114:0001' }),
+        payPolicy({ requires_claim: true, requires_udid: true }),
+        spendDeps(),
+      );
+      expect(decision.reasonCodes).toContain(REASON.udidRequired);
+    });
+
+    it('permits once both the claim and the determination are named', async () => {
+      const decision = await authorize(
+        payment({
+          claimRef: 'claim:dv114:0001',
+          udidRef: 'udid:fde:0001',
+        }),
+        payPolicy({ requires_claim: true, requires_udid: true }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+  });
+
+  describe('human approval', () => {
+    it('escalates a payment the account says a person must release', async () => {
+      const decision = await authorize(
+        payment(),
+        payPolicy({ requires_human_approval: true }),
+        spendDeps(),
+      );
+      expect(decision.outcome).toBe('manual_review_required');
+    });
+
+    it('permits once an approval verifies against the request', async () => {
+      const decision = await authorize(
+        payment({
+          reviewProofRef: '@steward:ixo.world',
+          requestDigest: 'digest-1',
+        }),
+        payPolicy({ requires_human_approval: true }),
+        {
+          time: fixedClock(NOW),
+          spentInWindow: async (_a, _s, denom) => ({ amount: '0', denom }),
+          verifyReviewProof: async (ref, digest) =>
+            ref === '@steward:ixo.world' && digest === 'digest-1',
+        },
+      );
+      expect(decision.outcome).toBe('permit');
+    });
+  });
+
+  // Minting and issuing create rather than move, and draw on no account.
+  it('does not demand an account for a mint', async () => {
+    const decision = await authorize(
+      request({ action: 'mint', operation: 'mint_thing', object: 'ixo:thing' }),
+      policy({ baseline: [], grants: [], accounts: [account()] }),
+      deps,
+    );
+    expect(decision.outcome).toBe('permit');
   });
 });

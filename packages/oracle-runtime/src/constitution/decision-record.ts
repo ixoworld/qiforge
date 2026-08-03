@@ -148,6 +148,8 @@ export interface DecisionRecord {
     readonly operation: string;
     readonly object: string;
     readonly value: { readonly amount: string; readonly denom: string } | null;
+    /** Which declared account the value moved from, for value-bearing calls. */
+    readonly account: string | null;
     /**
      * Whether the action class came from the tool or was assumed for it.
      * A permit granted on an assumed class is a weaker statement than one
@@ -240,6 +242,16 @@ export interface DecisionChainOptions {
  * to whoever later tried to verify it.
  */
 export class DecisionChain {
+  /**
+   * Every record, in order.
+   *
+   * Retained rather than only the head because the chain is the entity's own
+   * account of what it did, and questions like "how much has this account
+   * moved today" have no other honest source. Bounded by process lifetime; the
+   * published room is the durable copy.
+   */
+  private readonly entries: DecisionRecord[] = [];
+
   private head: DecisionRecord | null = null;
 
   private count = 0;
@@ -258,6 +270,16 @@ export class DecisionChain {
   /** How many decisions this chain has recorded. */
   get length(): number {
     return this.count;
+  }
+
+  /** The record at a position, or undefined past the end. */
+  at(index: number): DecisionRecord | undefined {
+    return this.entries[index];
+  }
+
+  /** Every record, oldest first. Frozen, like the records themselves. */
+  records(): readonly DecisionRecord[] {
+    return this.entries;
   }
 
   append(input: DecisionRecordInput): DecisionRecord {
@@ -286,6 +308,7 @@ export class DecisionChain {
         value: request.value
           ? { amount: request.value.amount, denom: request.value.denom }
           : null,
+        account: request.account ?? null,
         effect: input.effectAssumed ? 'assumed' : 'declared',
       },
       verdict: {
@@ -309,6 +332,7 @@ export class DecisionChain {
       ...unhashed,
       hash: hashRecord(unhashed),
     });
+    this.entries.push(record);
     this.head = record;
     this.count += 1;
     return record;

@@ -463,6 +463,62 @@ export interface ToolEffect {
   object?: (args: unknown, ctx: RuntimeContext) => string;
   /** Resolves the value the call would move, for tools that move any. */
   value?: (args: unknown) => { amount: string; denom: string } | null;
+  /**
+   * Facts about the entity's situation that grant conditions are checked
+   * against — the flow it is in, the kind of claim it is making, the roles and
+   * credentials it holds.
+   *
+   * **Note what this resolver is not given: the call's arguments.** That is the
+   * enforcement, not a convention. A grant conditioned on
+   * `flow_state: determination_upheld` exists precisely so the entity cannot
+   * pay for a repair before an independent evaluator upheld the fault — and if
+   * the model could put `determination_upheld` in an argument, it would be
+   * authorising its own payment. The signature makes that unexpressible.
+   *
+   * The asymmetry with {@link ToolEffect.object} is deliberate. An object names
+   * *what is being acted on*, which the person asking legitimately chooses:
+   * which file, which vendor. A fact describes *the state the entity is in*,
+   * which the entity determines and nobody else asserts.
+   *
+   * Facts come from the runtime context and from the plugin's own state, so a
+   * plugin can lie here in the same way it could declare `type: 'read'` on a
+   * payment tool. That is the intended trust boundary: plugin code is the
+   * fork's own, model output is not.
+   */
+  facts?: (ctx: RuntimeContext) => ConditionFacts;
+  /**
+   * Which of the constitution's declared accounts this call spends from.
+   *
+   * Read only for value-bearing actions, where it selects the spending policy
+   * to enforce. A constitution that declares accounts and an action that moves
+   * value without naming one is a policy that cannot be checked, and so is
+   * refused.
+   */
+  account?: (args: unknown, ctx: RuntimeContext) => string | null;
+}
+
+/**
+ * What a grant's conditions are evaluated against.
+ *
+ * Every field is optional and an absent one never satisfies a condition: a
+ * grant requiring a credential the entity cannot show is not a grant.
+ */
+export interface ConditionFacts {
+  /** Where the entity is in a declared flow. */
+  flowState?: string;
+  /** The kind of claim this action makes or determines. */
+  claimType?: string;
+  /** Roles the acting principal holds. */
+  roles?: readonly string[];
+  /** Credentials the entity currently holds and could show. */
+  credentials?: readonly string[];
+  /**
+   * The claim this action rests on, when the account it spends from requires
+   * one exist. A reference the entity can point at, not a boolean it asserts.
+   */
+  claimRef?: string;
+  /** The independent determination this action rests on, likewise. */
+  udidRef?: string;
 }
 
 export interface PluginTool {

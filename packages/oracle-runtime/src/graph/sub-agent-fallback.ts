@@ -205,6 +205,13 @@ export async function collectSubAgentsWithFallback(
                   logger: ambient.logger,
                   ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
                   ...(ambient.review ? { review: ambient.review } : {}),
+                  ...(ambient.capabilityVerifier
+                    ? {
+                        deps: {
+                          verifyCapabilityProof: ambient.capabilityVerifier,
+                        },
+                      }
+                    : {}),
                 }),
                 ...(withPassthrough.middleware ?? []),
               ],

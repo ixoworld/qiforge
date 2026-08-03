@@ -1,5 +1,6 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { DomainContext } from '../constitution/domain-context.js';
+import type { AuthorizeDeps } from '../constitution/authorize.js';
 import type {
   DecisionRecorder,
   ReviewCoordinator,
@@ -166,6 +167,13 @@ export interface AmbientServices {
    * with nowhere to go, which is correct but a dead end.
    */
   review?: ReviewCoordinator;
+  /**
+   * Verifies a capability token a grant names as its proof.
+   *
+   * Absent means non-`policy` grants cannot be satisfied and are refused —
+   * correct, and the state this runtime was in before the adapter existed.
+   */
+  capabilityVerifier?: AuthorizeDeps['verifyCapabilityProof'];
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
   blobStore: BlobStoreAdapter;

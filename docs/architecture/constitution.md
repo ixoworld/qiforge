@@ -111,6 +111,46 @@ This is worth stating plainly because the failure is silent. A grant with the wr
 
 A matching grant still has to survive its conditions: activation and expiry against the declared clock, flow state, claim type, role, credential, and value ceiling. Value comparison uses `BigInt` and **refuses across denominations** — converting between them needs a governed price policy the runtime deliberately does not have. A ceiling that cannot be checked — the grant caps value, the call declares none — **denies** (`value_undeclared`). This is not a technicality: an action that never says what it moves has not come in under the cap, it has declined to be measured by it, and a ceiling that permits whatever it cannot see is not a ceiling. In practice the reason code means a tool classified under a value-bearing grant is missing its `effect.value` extractor.
 
+### Where condition facts come from
+
+`flow_state`, `claim_type`, `role_required` and `credential_required` are checked against facts the tool supplies through `ToolEffect.facts`.
+
+**That resolver is not given the call's arguments.** The signature is the enforcement, not a convention. A grant conditioned on `flow_state: determination_upheld` exists precisely so the entity cannot pay for a repair before an independent evaluator upheld the fault — and if the model could put `determination_upheld` in an argument, it would be authorising its own payment.
+
+The asymmetry with `effect.object` is deliberate. An object names _what is being acted on_, which the person asking legitimately chooses: which file, which vendor. A fact describes _the state the entity is in_, which the entity determines and nobody else asserts.
+
+Facts come from the runtime context and from the plugin's own state, so a plugin can lie here in the same way it could declare `type: 'read'` on a payment tool. That is the intended trust boundary: plugin code is the fork's own, model output is not.
+
+A grant conditioned on a fact nobody supplied is not satisfied. Absent never means "unrestricted".
+
+### Account spending policy
+
+A grant says the entity may pay. The account says how much, to whom, and on what evidence. Enforcing only the first would let one valid `pay` grant empty the treasury, so `accounts.entries[].spending_policy` is part of the decision surface rather than documentation.
+
+Checked for `pay` and `transfer` only — `mint` and `issue` create rather than move and draw on no account.
+
+| Field                              | Enforcement                                                                                             |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `max_single_transaction`           | Denies above it. No declared value denies with `value_undeclared`.                                      |
+| `daily_limit`                      | Denies when _this payment would push the day's total over_, not just when the payment alone exceeds it. |
+| `allowed_recipients`               | Matched against the object with the same wildcard rules grants use.                                     |
+| `requires_claim` / `requires_udid` | Deny unless `facts.claimRef` / `facts.udidRef` names one.                                               |
+| `requires_human_approval`          | Escalates to `manual_review_required`.                                                                  |
+
+An action that moves value without naming an account, in a constitution that declares accounts, denies with `account_unnamed`: a policy that cannot be checked has not been satisfied. An empty `allowed_recipients` is an unconfigured field rather than a policy admitting nobody — a constitution meaning to permit no payments writes no `pay` grant.
+
+**The daily limit is answered by the decision ledger.** The evaluator is pure and has no history, so the ledger sums its own permits for that account in that denomination. It is the only account of spending the entity can make without trusting a second system to agree with it. Refusals do not count — a rejected attempt moved nothing and must not eat the day's allowance. A window reaching back before the process started returns null, and an unanswerable limit denies (`daily_limit_uncheckable`) rather than being assumed satisfied.
+
+### Capability proofs
+
+A grant's `capability.format` says how the authority it carries is evidenced. `policy` means the constitution is itself the authority and there is no separate token. Any other format names a proof, and `constitution/ucan-adapter.ts` verifies it: signature chain from root issuer to invoker, effective expiration across that chain, audience, and — the part the UCAN package cannot do — that the capability actually covers this action. `can` is matched to the operation and `with` to the object, using the same wildcard rules grants use.
+
+**Revocation is the weakest link and is recorded as such.** There is no revocation source in this codebase, so `CapabilityVerdict.revoked` is tri-state: `true`, `false`, or `null` for _not checked_. Permitting on an unchecked revocation is a deliberate choice — the same posture as an unverified anchor, and for the same reason. An audit trail that says a proof was unrevoked when nothing ever asked claims more than the runtime knows, and overstating is worse than admitting the gap.
+
+The proof to hand is the inbound delegation — what the user delegated to this oracle. A grant's principal is the _entity_, so a grant evidenced by a capability the entity itself holds is a different object; that arrives with per-permit minting.
+
+### Value
+
 A declared value must be an unsigned base-10 integer, and that is checked where the request enters rather than where a ceiling reads it. The constitution's own amounts are validated when the document is parsed, but the request's amount is assembled at runtime by a plugin's `effect.value` extractor, where nothing but the type checker stands between a typo and a real amount. `-1`, `1.5`, `007` and `''` all read as plausible `BigInt` input and would otherwise slip under a ceiling; `'abc'` would throw out of the evaluator entirely. All of them deny with `value_malformed`, and none of them reach the capability verifier.
 
 ### Human review

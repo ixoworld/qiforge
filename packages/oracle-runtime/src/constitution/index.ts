@@ -49,3 +49,9 @@ export {
   type TimeReading,
   type TimeSource,
 } from './time.js';
+
+export {
+  createCapabilityVerifier,
+  type CapabilityVerifierOptions,
+  type DelegationValidator,
+} from './ucan-adapter.js';

@@ -116,6 +116,33 @@ export class TwinState {
   recordMaintenance(record: MaintenanceRecord): void {
     this.maintenance.push(record);
   }
+
+  /**
+   * The most recent upheld determination, if the twin has received one.
+   *
+   * The single fact the constitution's booking and payment grants turn on.
+   * It is answered from what the twin was *told* by an evaluator — never from
+   * anything the model said — which is the entire reason the grants are
+   * written against it. A vehicle that could assert `determination_upheld`
+   * for itself would be a vehicle that authorises its own repair bills.
+   */
+  upheldDetermination(): Determination | undefined {
+    for (const determination of this.determinations.values()) {
+      if (determination.outcome === 'upheld') return determination;
+    }
+    return undefined;
+  }
+
+  /**
+   * Where the twin is in the claim → determination → settlement sequence.
+   *
+   * The value the constitution's `flow_state` conditions are matched against.
+   */
+  flowState(): string {
+    if (this.upheldDetermination()) return 'determination_upheld';
+    if (this.claims.size > 0) return 'awaiting_determination';
+    return 'nominal';
+  }
 }
 
 /** A vehicle mid-life with a brake fault developing — enough to exercise the loop. */

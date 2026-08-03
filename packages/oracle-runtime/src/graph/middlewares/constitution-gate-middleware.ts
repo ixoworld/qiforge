@@ -33,6 +33,7 @@ import { digestRequest } from '../../constitution/decision-record.js';
 import type { DomainContext } from '../../constitution/domain-context.js';
 import { systemClock, type TimeSource } from '../../constitution/time.js';
 import type {
+  ConditionFacts,
   Logger,
   RuntimeContext,
   ToolEffect,
@@ -120,6 +121,18 @@ export interface ConstitutionGateMiddlewareOptions {
 /** The ledger, as the gate needs to see it. */
 export interface DecisionRecorder {
   record(decision: GateDecisionRecord): unknown | null;
+  /**
+   * What an account has moved since an instant, in a given denomination.
+   *
+   * On the recorder because the ledger is the only honest source: it holds
+   * every decision the gate permitted, and any other tally is a second system
+   * that can disagree with the entity's own account of itself.
+   */
+  spentSince?(
+    account: string,
+    sinceEpochMs: number,
+    denom: string,
+  ): { amount: string; denom: string } | null;
 }
 
 /** What a reviewer is shown, and what their approval is bound to. */
@@ -183,6 +196,8 @@ function buildRequest(
 ): AuthorizationRequest | null {
   let object: string;
   let value: AuthorizationRequest['value'];
+  let facts: ConditionFacts;
+  let account: string | null;
   try {
     // The object defaults to the tool itself in the entity's namespace. That
     // is deliberately unlikely to match a grant: a `read` still passes on the
@@ -190,6 +205,11 @@ function buildRequest(
     // acts on. Not naming your object is not a way around naming it.
     object = effect.object?.(args, rtCtx) ?? `${domain.subject}#${toolName}`;
     value = effect.value?.(args) ?? null;
+    // Resolved without the arguments in scope — see `ToolEffect.facts`. A tool
+    // that declares none supplies none, and a grant conditioned on a fact
+    // nobody supplied is not satisfied.
+    facts = effect.facts?.(rtCtx) ?? {};
+    account = effect.account?.(args, rtCtx) ?? null;
   } catch {
     return null;
   }
@@ -207,6 +227,15 @@ function buildRequest(
     operation: effect.action,
     object,
     value,
+    ...(facts.flowState !== undefined ? { flowState: facts.flowState } : {}),
+    ...(facts.claimType !== undefined ? { claimType: facts.claimType } : {}),
+    ...(facts.roles !== undefined ? { roles: facts.roles } : {}),
+    ...(facts.credentials !== undefined
+      ? { credentials: facts.credentials }
+      : {}),
+    ...(facts.claimRef !== undefined ? { claimRef: facts.claimRef } : {}),
+    ...(facts.udidRef !== undefined ? { udidRef: facts.udidRef } : {}),
+    ...(account !== null ? { account } : {}),
     ...(rtCtx.user.ucanDelegation?.raw
       ? { capabilityProof: rtCtx.user.ucanDelegation.raw }
       : {}),
@@ -351,6 +380,16 @@ export const createConstitutionGateMiddleware = (
       try {
         decision = await authorize(request, domain.policy, {
           time,
+          // A recorder that cannot answer leaves the dep absent, and the
+          // evaluator denies an unanswerable limit rather than assuming it.
+          ...(recorder?.spentSince
+            ? {
+                spentInWindow: (account, since, denom) =>
+                  Promise.resolve(
+                    recorder.spentSince?.(account, since, denom) ?? null,
+                  ),
+              }
+            : {}),
           ...(review
             ? {
                 verifyReviewProof: (ref, digest) =>

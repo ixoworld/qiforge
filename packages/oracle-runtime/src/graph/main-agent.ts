@@ -338,6 +338,11 @@ export async function createMainAgent(
       logger: ambient.logger,
       ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
       ...(ambient.review ? { review: ambient.review } : {}),
+      ...(ambient.capabilityVerifier
+        ? {
+            deps: { verifyCapabilityProof: ambient.capabilityVerifier },
+          }
+        : {}),
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
     toolRetryMiddleware({ onFailure: (error) => error.message }),

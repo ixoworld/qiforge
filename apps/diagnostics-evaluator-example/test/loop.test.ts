@@ -34,7 +34,15 @@ const CLAIMS = 'ixo:collection:dv-fleet-diagnostics/claims';
 const VENDOR = 'ixo:vendor:approved/northgate-fleet-services';
 const CREDENTIAL = 'vc:fleet-diagnostics-evaluator';
 
-const deps: AuthorizeDeps = { time: fixedClock('2026-08-03T09:00:00.000Z') };
+const deps: AuthorizeDeps = {
+  time: fixedClock('2026-08-03T09:00:00.000Z'),
+  // The reserve has moved nothing today. Without a source for this the
+  // account's daily limit is unenforceable, and an unenforceable limit denies.
+  spentInWindow: async (_account, _since, denom) => ({ amount: '0', denom }),
+};
+
+/** The claim the vehicle files in step 2, referenced again at settlement. */
+const CLAIM_ID = 'claim:dv114:0001';
 
 let vehicle: ConstitutionPolicy;
 let evaluator: ConstitutionPolicy;
@@ -284,12 +292,21 @@ describe('the loop, end to end', () => {
 
     // 7. Payment is assembled and correct — and still stops for a human,
     //    because `payment_release` is a declared review trigger.
+    //
+    //    "Correct" now means more than a valid grant. The maintenance
+    //    reserve's spending policy demands the payment name the account it
+    //    draws on and point at both the claim and the independent
+    //    determination behind it. That is the sequence made mechanical: the
+    //    evidence assembled in steps 1–6 is what the account asks to see.
     const payment = req(VEHICLE, {
       action: 'pay',
       operation: 'settle_service_invoice',
       object: VENDOR,
       value: { amount: '148500000', denom: 'uusdc' },
       flowState: 'determination_upheld',
+      account: 'Maintenance reserve',
+      claimRef: CLAIM_ID,
+      udidRef: `${EVALUATOR}#${CLAIM_ID}`,
     });
     expect((await authorize(payment, vehicle, deps)).outcome).toBe(
       'manual_review_required',

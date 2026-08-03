@@ -141,6 +141,10 @@ export function buildSubmitClaimTool(state: TwinState): PluginTool {
         type: 'write',
         action: 'submit_claim',
         object: () => 'ixo:collection:dv-fleet-diagnostics/claims',
+        // The kind of claim this tool makes is a property of the tool. It is
+        // stated here rather than read from an argument so the model cannot
+        // relabel a claim into whichever grant happens to permit it.
+        facts: () => ({ claimType: 'vehicle_fault_observation' }),
       },
     },
   );
@@ -223,6 +227,8 @@ export function buildBookServiceTool(state: TwinState): PluginTool {
         // grant. The allowlist is enforced by scope, not by a check the model
         // could be talked out of.
         object: (args) => bookingSchema.parse(args).vendor,
+        // Read from the twin, which knows only what an evaluator told it.
+        facts: () => ({ flowState: state.flowState() }),
       },
     },
   );
@@ -271,6 +277,23 @@ export function buildSettleInvoiceTool(state: TwinState): PluginTool {
           const { amountMinor, denom } = invoiceSchema.parse(args);
           return { amount: amountMinor, denom };
         },
+        // The account's `requires_claim` and `requires_udid` are answered by
+        // pointing at the claim and the determination the twin holds, not by
+        // asserting they exist. If no evaluator upheld anything, there is
+        // nothing to point at and the payment is refused.
+        facts: () => {
+          const upheld = state.upheldDetermination();
+          return {
+            flowState: state.flowState(),
+            ...(upheld
+              ? {
+                  claimRef: upheld.claimId,
+                  udidRef: `${upheld.evaluator}#${upheld.claimId}`,
+                }
+              : {}),
+          };
+        },
+        account: () => 'Maintenance reserve',
       },
     },
   );

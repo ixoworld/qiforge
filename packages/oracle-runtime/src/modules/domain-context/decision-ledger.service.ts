@@ -24,6 +24,7 @@
  * while its own audit trail is down is an entity acting unaccountably, and
  * the constitution's whole claim is that it does not do that.
  */
+import type { Amount } from '../../constitution/schema.js';
 import {
   DecisionChain,
   type DecisionRecord,
@@ -132,6 +133,50 @@ export class DecisionLedgerService {
   /** The most recent record, or null before anything has been decided. */
   get tip(): DecisionRecord | null {
     return this.chain.tip;
+  }
+
+  /**
+   * What the named account has already moved since a given instant.
+   *
+   * A daily limit is a claim about history, and the evaluator that enforces it
+   * is pure — so the history has to come from somewhere. The ledger is the
+   * honest source: it already holds every decision the gate permitted, and
+   * summing its own permits is the only account of spending the entity can
+   * make without trusting a second system to agree with it.
+   *
+   * Only permits count. A refused payment moved nothing, and counting it would
+   * let a rejected attempt eat the day's allowance.
+   *
+   * Denominated, because a limit is: only records in the asked-for currency
+   * are summed, and spending in another denomination answers to its own limit.
+   *
+   * Returns null when the answer would be a guess — specifically, a window
+   * starting before this process did, which covers spending this ledger never
+   * saw. The evaluator reads null as "cannot check" and denies, which is the
+   * right reading: a limit enforced against a fraction of the day is not the
+   * limit.
+   */
+  spentSince(
+    account: string,
+    sinceEpochMs: number,
+    denom: string,
+  ): Amount | null {
+    // The chain begins when the process does. A window reaching back further
+    // than the first record covers spending this ledger never saw, and a
+    // total that omits it understates the day.
+    const first = this.chain.at(0);
+    if (first && Date.parse(first.iat) > sinceEpochMs) return null;
+
+    let total = 0n;
+    for (const record of this.chain.records()) {
+      if (record.verdict.outcome !== 'permit') continue;
+      if (record.request.account !== account) continue;
+      const value = record.request.value;
+      if (!value || value.denom !== denom) continue;
+      if (Date.parse(record.iat) < sinceEpochMs) continue;
+      total += BigInt(value.amount);
+    }
+    return { amount: total.toString(), denom };
   }
 
   /**

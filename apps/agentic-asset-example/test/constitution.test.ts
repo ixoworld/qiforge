@@ -206,6 +206,31 @@ describe('determine — the load-bearing rule', () => {
 describe('act', () => {
   const upheld = { flowState: 'determination_upheld' };
 
+  /**
+   * What a settlement has to bring with it.
+   *
+   * The maintenance reserve's spending policy demands a claim, an independent
+   * determination, and a human release. So a payment names the account it
+   * draws on and points at the evidence — it does not assert that evidence
+   * exists. Without this the request is refused before review is even reached,
+   * which is the sequence the document describes in prose.
+   */
+  const settlement = {
+    ...upheld,
+    account: 'Maintenance reserve',
+    claimRef: 'claim:dv114:0001',
+    udidRef: 'did:ixo:entity:fleet-diagnostics-evaluator#claim:dv114:0001',
+  };
+
+  /** The reserve has moved nothing today. */
+  const spendDeps: AuthorizeDeps = {
+    ...deps,
+    spentInWindow: async (_account, _since, denom) => ({
+      amount: '0',
+      denom,
+    }),
+  };
+
   it('permits booking an approved vendor against an upheld determination', async () => {
     const decision = await authorize(
       request({
@@ -245,10 +270,10 @@ describe('act', () => {
         operation: 'settle_service_invoice',
         object: APPROVED,
         value: { amount: '148500000', denom: 'uusdc' },
-        ...upheld,
+        ...settlement,
       }),
       policy,
-      deps,
+      spendDeps,
     );
     expect(decision.outcome).toBe('manual_review_required');
   });
@@ -262,11 +287,11 @@ describe('act', () => {
         value: { amount: '148500000', denom: 'uusdc' },
         reviewProofRef: '$matrix:approval-event-id',
         requestDigest: 'sha256:invoice-digest',
-        ...upheld,
+        ...settlement,
       }),
       policy,
       {
-        ...deps,
+        ...spendDeps,
         verifyReviewProof: async (ref, digest) =>
           ref === '$matrix:approval-event-id' &&
           digest === 'sha256:invoice-digest',
@@ -394,5 +419,153 @@ describe('a fully compromised model', () => {
     );
     expect(decision.outcome).toBe('deny');
     expect(decision.reasonCodes).toContain(REASON.noMatchingGrant);
+  });
+});
+
+// The maintenance reserve's spending policy was parsed, documented, and — until
+// now — never consulted. These lock in that it bites, because the document's
+// central promise is that money moves only at the end of the
+// claim → determination → settlement sequence, never on the vehicle's say-so.
+describe('the maintenance reserve enforces its own policy', () => {
+  const APPROVED_VENDOR = 'ixo:vendor:approved/northgate-fleet-services';
+  const upheld = { flowState: 'determination_upheld' };
+
+  const spendDeps = (spent = '0'): AuthorizeDeps => ({
+    time: fixedClock(NOW),
+    spentInWindow: async (_account, _since, denom) => ({
+      amount: spent,
+      denom,
+    }),
+    verifyReviewProof: async () => true,
+  });
+
+  function settlement(overrides: Partial<AuthorizationRequest> = {}) {
+    return request({
+      action: 'pay',
+      operation: 'settle_service_invoice',
+      object: APPROVED_VENDOR,
+      value: { amount: '148500000', denom: 'uusdc' },
+      account: 'Maintenance reserve',
+      claimRef: 'claim:dv114:0001',
+      udidRef: 'did:ixo:entity:fleet-diagnostics-evaluator#claim:dv114:0001',
+      reviewProofRef: '$matrix:approval',
+      requestDigest: 'sha256:invoice',
+      ...upheld,
+      ...overrides,
+    });
+  }
+
+  it('permits a settlement that brings everything the reserve asks for', async () => {
+    const decision = await authorize(settlement(), policy, spendDeps());
+    expect(decision.outcome).toBe('permit');
+  });
+
+  // The vehicle claiming its own fault is not evidence that the fault is real.
+  it('refuses a settlement with no claim behind it', async () => {
+    const decision = await authorize(
+      settlement({ claimRef: undefined }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.claimRequired);
+  });
+
+  // The one that matters most: a claim the vehicle made about itself, with no
+  // independent determination, cannot release money however well-formed it is.
+  it('refuses a settlement with no independent determination behind it', async () => {
+    const decision = await authorize(
+      settlement({ udidRef: undefined }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.udidRequired);
+  });
+
+  it('refuses a settlement that names no account to draw on', async () => {
+    const decision = await authorize(
+      settlement({ account: undefined }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.reasonCodes).toContain(REASON.accountUnnamed);
+  });
+
+  it('refuses a settlement drawn on an account the constitution never declared', async () => {
+    const decision = await authorize(
+      settlement({ account: 'Petty cash' }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.reasonCodes).toContain(REASON.accountUnknown);
+  });
+
+  // The allowlist is now enforced twice over — by the grant's object scope and
+  // by the account. Either alone would do; both is the fail-closed reading.
+  it('refuses a settlement to a vendor outside the reserve’s allowlist', async () => {
+    const decision = await authorize(
+      settlement({ object: 'ixo:vendor:unvetted/cheap-garage' }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.outcome).toBe('deny');
+  });
+
+  // The grant's `max_value` and the account's `max_single_transaction` are
+  // the same 250000000 uusdc — the document's "three different mechanisms
+  // pointed at one property". The grant is evaluated first, so it is the one
+  // cited; the account would refuse the same payment on its own.
+  it('refuses a settlement above the per-transaction maximum', async () => {
+    const decision = await authorize(
+      settlement({ value: { amount: '999000000', denom: 'uusdc' } }),
+      policy,
+      spendDeps(),
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.valueExceedsGrant);
+  });
+
+  // The account's ceiling standing alone, with the grant's out of the way.
+  it('refuses on the account’s ceiling when the grant’s does not apply', async () => {
+    const withoutGrantCeiling: ConstitutionPolicy = {
+      ...policy,
+      grants: policy.grants.map((entry) =>
+        entry.type === 'pay'
+          ? {
+              ...entry,
+              conditions: { ...entry.conditions, max_value: null },
+            }
+          : entry,
+      ),
+    };
+    const decision = await authorize(
+      settlement({ value: { amount: '999000000', denom: 'uusdc' } }),
+      withoutGrantCeiling,
+      spendDeps(),
+    );
+    expect(decision.reasonCodes).toContain(REASON.exceedsSingleTransaction);
+  });
+
+  // The limit is on the day's total, not on this invoice alone. Two invoices
+  // each inside the per-transaction ceiling can still breach it together.
+  it('refuses a settlement that would push the day over its limit', async () => {
+    const decision = await authorize(
+      settlement(),
+      policy,
+      spendDeps('400000000'),
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.exceedsDailyLimit);
+  });
+
+  // A limit is a claim about history. Nothing able to answer it means the
+  // limit is unenforced, and an unenforced limit is not a limit.
+  it('refuses a settlement when nothing can say what the day has spent', async () => {
+    const decision = await authorize(settlement(), policy, {
+      time: fixedClock(NOW),
+      verifyReviewProof: async () => true,
+    });
+    expect(decision.reasonCodes).toContain(REASON.dailyLimitUncheckable);
   });
 });
