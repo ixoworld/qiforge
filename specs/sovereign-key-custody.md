@@ -1,7 +1,7 @@
 # Sovereign Key Custody — Research Spike
 
 **Status:** Research spike — findings and a recommended direction, not an approved plan
-**Revision:** v1.2 — 2026-08-03 (v1: findings and recommendation; v1.1 adds §8, the TEE upgrade for the roadmap; v1.2 adds §9, the x402 sense-check)
+**Revision:** v1.3 — 2026-08-03 (v1: findings and recommendation; v1.1 adds §8, the TEE upgrade for the roadmap; v1.2 adds §9, the x402 sense-check; v1.3 adds §10, the custody ladder and the Matrix exception)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Relates to:** `specs/sovereign-agency-harness.md` (§12 Identity Core, §15 Capability Kernel, Phase 3)
 
@@ -413,7 +413,65 @@ The trap: the obvious Cosmos primitives — `authz` grants and `feegrant` — ar
 
 ---
 
-## 10. References
+## 10. The custody ladder, and the Matrix exception
+
+_Added after the Phase 1 gap review (`specs/sovereign-agency-harness.md` Part VI) concluded that "the entity does not yet own the building." This section answers the question that conclusion raises — does the runtime **have** to be hosted by a party with custody of the keys? — and works through the one credential where the answer's usual tools fail._
+
+### 10.1 Powers, not buildings
+
+"Owns the building" bundles four distinct powers with different fates:
+
+| Power the host has today                                    | Removable? | By what                                                                                                             |
+| ----------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| **Alter the entity's law** (edit `DOMAIN_MD_PATH`, restart) | Yes        | Anchor verification: strict mode loads only bytes whose CID matches the IID record. The seam exists, unimplemented. |
+| **Act as the entity** (hold its signing keys)               | Yes        | §5's tiered quorum; delegated, rotatable verification methods on the IID.                                           |
+| **Forge or erase its memory**                               | Yes        | The hash chain makes tampering evident; Phase 2's anchored tree heads make it evident against the chain.            |
+| **Deny it service** (stop the machine)                      | **No**     | Physics. Someone always operates hardware.                                                                          |
+
+The irreducible row is the important one: **integrity can be made operator-independent; availability cannot.** A host can always stop the process. What custody design removes is the ability to run a _modified_ entity that still claims to be the entity. Once law, keys and memory are outside the host's reach, shutdown is eviction, not capture — and eviction is survivable when identity, law and memory are portable enough that any conforming host can resume from anchored state.
+
+The organizing principle is the harness's own founding move applied one level up. Phase 1 established _model transience vs entity persistence_ — the model as a hired, credential-less, replaceable reasoning tool. The same relation should hold between the entity and its runtime host: **host transience vs entity persistence.** The runtime should relate to the entity the way the model relates to the runtime — attenuated, revocable, delegated, never root. The operator is just another hire.
+
+### 10.2 The ladder
+
+Five rungs, each demoting the host further. Most map to mechanisms this document already specifies; this table is the route, not new machinery:
+
+1. **Custody separation inside an operated host.** Keys at rest in the entity's account room under the versioned KDF format (§1); the constitution loaded against its verified anchor, so an operator-edited document fails the CID check and refuses boot. The operator keeps liveness control and loses silent modification.
+2. **The root of authority moves on-chain.** Keyless entity accounts + `MsgGrantEntityAccountAuthz` (§3a): the treasury lives on-chain, the runtime holds scoped, revocable authz grants, and the runtime's own key becomes a delegated verification method on the IID — rotatable by the controller without touching the entity's identity. Revoking the runtime becomes an on-chain act, not a hosting negotiation.
+3. **Attested runtimes.** §8: key release gated on a measured runtime image, the measurement pinned by the constitution. The host operates hardware it cannot look inside. Trust shifts to the chip vendor rather than vanishing — a rung, not a summit.
+4. **Threshold everything discrete.** §5's tiered quorum, with the steward's approval as their signing round. The host's share alone is worthless.
+5. **The entity pays its own rent.** Phase 5b revenue + an entity treasury make hosting a _procured service_ — chosen, paid for, and switchable by the entity's governance, exactly as models already are. With rungs 1–4 underneath, migration needs no incumbent's cooperation, because nothing the incumbent holds is load-bearing.
+
+What remains at the top of the ladder: some human governance root (controller, steward quorum — sovereignty means authority flows from the constitution, not that no humans exist), and the named trust assumptions of each rung (non-collusion, vendor roots, chain liveness). Trust is never eliminated; it is named, narrowed, and made evident in exercise — the same posture the gate takes toward everything else.
+
+### 10.3 Why Matrix account keys resist threshold custody
+
+Threshold cryptography fits acts that are **discrete and rare**: one message, one MPC round, one signature. That is why it works for the Ed25519/secp256k1 surfaces in §5. Matrix operational material is the opposite on every axis:
+
+- **The access token is a bearer credential, not a key.** The homeserver checks possession, not a signature. There is nothing to split — whoever presents it _is_ the account, wholesale.
+- **E2EE is a stateful symmetric ratchet, not discrete signing.** Olm/Megolm session keys sit in memory continuously and evolve with every message. A custodian quorum can release a static secret once; it cannot co-hold a ratchet that advances per event without sitting in the message path. A hypothetical per-message threshold decryption defeats itself besides: the output is the plaintext, which the runtime must hold to function — MPC latency paid per message to hide material from a host that sees the result anyway.
+- **Matrix has no attenuated delegation primitive.** A DID carries scoped, revocable verification methods; a Matrix device is fully empowered for everything its account can do. The only scoping Matrix offers is per-_user_ power levels per room.
+
+So the §5 recommendation does not extend to the Matrix account, and no key-splitting scheme will. The move is different in kind:
+
+### 10.4 Demote, don't split
+
+Change what the Matrix credential _means_, so that its uncustodiable nature stops mattering. Compromise of the account must mean "someone can post and read as our transport endpoint" — never "someone is the entity." Four mechanisms:
+
+1. **Authenticity moves inside the events.** Anything whose authorship matters — approvals, determinations, eventually the decision head pointer — carries a JWS signed by a DID key, which _is_ thresholdable, carried over Matrix rather than attested by it. An attacker with the account token can then publish noise or withhold events, but can forge nothing that verifies. This is the posture the hash chain already takes for integrity, extended to authenticity. The concrete instance in today's runtime is tracked: the review loop authenticates approvals by Matrix sender and room power ([IXO-4198](https://linear.app/ixo-world/issue/IXO-4198)); signed determinations are [IXO-4194](https://linear.app/ixo-world/issue/IXO-4194). One verification seam serves both.
+2. **Attenuation by account topology.** Matrix's unit of authority is the account, so split hot from cold: the runtime operates a low-power _device account_ — posts to the rooms it is invited to, structurally cannot change power levels, redact others, or alter membership — while room admin power sits with a cold governance account used rarely, for discrete ceremonies, and _therefore_ threshold-escrowable. Revocation is kick-and-rotate: the hot account carries no identity weight, so burning it costs nothing. The current runtime does the opposite — `MATRIX_ORACLE_ADMIN_USER_ID` is an **admin** account as the operational credential (§2's anti-pattern, restated as a to-fix).
+3. **Threshold the discrete points that do exist in the Matrix stack.** The SSSS recovery key for encrypted key backup is static and rarely used — Shamir-split it among stewards. And the boot-time unwrap of the entity's secrets (the §1 KDF ceremony) is a discrete release event: the natural seat for a custodian quorum or an attestation-gated release (§8), rather than policing every subsequent message.
+4. **Survivability through the DID, not the account.** The entity's identity is the DID; the Matrix account is a service endpoint its IID document references. Total account loss is recoverable by governance: mint a new account, re-reference it (a DID-signed act), restore history from the steward-held backup. _Matrix account transience, entity persistence_ — the account becomes replaceable the way the model is.
+
+### 10.5 The honest residue
+
+**A live runtime holds hot session keys and plaintext.** E2EE protects content from the homeserver; no key-management design protects it from the host that runs the decryption. That residue is addressable only by attestation (§8) or by not sending the data — which is the context-hygiene work ([IXO-4196](https://linear.app/ixo-world/issue/IXO-4196)), and consistent with this spike's standing conclusion that "fully keyless" is not achievable (§3b).
+
+The corrected summary for the Matrix surface: **threshold what signs, attenuate what transports, sign inside what matters, and threshold-escrow only the recovery and ceremony points.**
+
+---
+
+## 11. References
 
 **Verified locally:** `packages/oracles-chain-client/src/matrix-bot/setup-claim-signing-mnemonics.ts` (at-rest routine), `setup-encryption-key.ts`, `packages/oracle-runtime/src/bootstrap/create-oracle-app.ts` (`wireSigningAndEncryptionKeys`), `packages/oracle-runtime/src/modules/ucan/ucan.service.ts`.
 

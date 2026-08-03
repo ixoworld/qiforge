@@ -751,7 +751,7 @@ A gap review should also record what turned out stronger than specified, because
 
 ### 30f. Reading
 
-**Phase 1 built the constitution and the courtroom; the entity does not yet own the building.** Custody of keys, law, memory, and inference remains with the operator. That is precisely the remit of Phases 2–5 — anchoring (2), per-permit capabilities and receipts (3), cognition contracts and the capsule (4), self-claims and settlement (5, 5b) — plus the three tracked gaps above, and the standing custody items [IXO-4173](https://linear.app/ixo-world/issue/IXO-4173) (legacy secret re-wrap) and [IXO-4174](https://linear.app/ixo-world/issue/IXO-4174) (the local-only dependency override). None of the remaining distance requires revisiting Phase 1's decisions; it requires moving the root of trust.
+**Phase 1 built the constitution and the courtroom; the entity does not yet own the building.** Custody of keys, law, memory, and inference remains with the operator. That is precisely the remit of Phases 2–5 — anchoring (2), per-permit capabilities and receipts (3), cognition contracts and the capsule (4), self-claims and settlement (5, 5b) — plus the three tracked gaps above, and the standing custody items [IXO-4173](https://linear.app/ixo-world/issue/IXO-4173) (legacy secret re-wrap) and [IXO-4174](https://linear.app/ixo-world/issue/IXO-4174) (the local-only dependency override). None of the remaining distance requires revisiting Phase 1's decisions; it requires moving the root of trust — the route for which is `specs/sovereign-key-custody.md` §10 (the custody ladder, and the Matrix exception: threshold what signs, attenuate what transports, sign inside what matters).
 
 ---
 
