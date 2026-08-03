@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DecisionLedgerService } from '../modules/domain-context/decision-ledger.service.js';
+import { ConstitutionReviewService } from '../modules/domain-context/review.service.js';
 import { DOMAIN_CONTEXT } from '../modules/domain-context/domain-context.service.js';
 import { mockDomain } from '../testing/mocks.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
@@ -38,12 +39,18 @@ function makeFakeBlobStoreService(): BlobStoreService {
 
 function makeNestAppStub(ucan: UcanService, blobStore: BlobStoreService) {
   const ledger = { record: vi.fn() };
+  const review = {
+    findApproval: vi.fn(),
+    verifyProof: vi.fn(),
+    escalate: vi.fn(),
+  };
   return {
     get(token: unknown): unknown {
       if (token === UcanService) return ucan;
       if (token === BlobStoreService) return blobStore;
       if (token === DOMAIN_CONTEXT) return mockDomain();
       if (token === DecisionLedgerService) return ledger;
+      if (token === ConstitutionReviewService) return review;
       throw new Error(`unexpected DI lookup for ${String(token)}`);
     },
   } as Parameters<typeof buildAmbientServices>[0]['nestApp'];
@@ -84,6 +91,7 @@ describe('buildAmbientServices', () => {
     // type so the unit-test harnesses need not fake one, and this is the
     // assertion that keeps that convenience from becoming a hole.
     expect(ambient.decisions).toBeDefined();
+    expect(ambient.review).toBeDefined();
     expect(typeof ambient.blobStore.get).toBe('function');
     expect(typeof ambient.blobStore.isValidBlobId).toBe('function');
     expect(typeof ambient.ucan.hasSigningKey).toBe('function');

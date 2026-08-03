@@ -204,6 +204,7 @@ export async function collectSubAgentsWithFallback(
                   rtCtx,
                   logger: ambient.logger,
                   ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
+                  ...(ambient.review ? { review: ambient.review } : {}),
                 }),
                 ...(withPassthrough.middleware ?? []),
               ],

@@ -242,6 +242,42 @@ Two decisions in that table are worth stating.
 
 Composio scopes per toolkit rather than one blanket object, so a grant can admit `ixo:composio/gmail/*` without admitting every connected app.
 
+## The decision ledger
+
+A gate that refuses well and remembers nothing is an assertion, not an account. Every verdict the gate reaches becomes a record, each bound to its predecessor by a hash, published to `MATRIX_DECISIONS_ROOM_ID` as `ixo.constitution.decision` timeline events with an `ixo.constitution.decision_head` state pointer.
+
+Permits are recorded as readily as refusals. A log of only refusals cannot show that anything was checked.
+
+**Recording happens before execution, and failing to record is a refusal.** The chain append is synchronous; publishing is separate and slower. Under strict enforcement an effectful call whose decision cannot be recorded is denied with `audit_unavailable` — an entity that acts while its own audit trail is down is acting unaccountably. Reads proceed: an unrecorded read costs a log entry, an unrecorded payment costs the account of why it happened.
+
+**The chain never gains a gap.** When the buffer fills (1000 records, sized for the window between the gate going live and Matrix finishing init), the record is not appended either. An auditor sees a shorter chain rather than a broken one — and a gap is indistinguishable from a deletion, which is exactly the confusion to avoid.
+
+Truncation is caught by the head pointer: every remaining record in a chain that ended at 60 and had twenty removed still verifies, so the count has to be stated separately. `verifyChain()` is exported rather than kept as a test helper — an auditor reading the room should run the same check the runtime would.
+
+### What is deliberately not recorded
+
+The raw capability token, only its digest: a decisions room readable by anyone auditing the entity must not double as a place to harvest bearer credentials. And the tool's arguments, which are model-supplied and can carry anything a user typed. The decision-relevant facts — action class, operation, object, value — are recorded in full. An audit trail holds reproducible rationale, not a transcript.
+
+### Why the field names are UDID's
+
+`iss`, `aud`, `iat`, `jti`, `rub`, `cap`. A gate decision is **not** a UDID and must not be mistaken for one: a UDID is a determination by an independent evaluator over something that has happened, this is an authorization by the harness over something that has not. Keeping generation and determination distinct is the invariant the design rests on.
+
+What the shared naming buys is that the two line up when a human-review resolution is later issued as a real UDID — the reviewer is the evaluator, the gated action is the claim, and `rub.id` (`<domain_md_cid>@<document_revision>`) already names the exact rules that applied.
+
+Canonicalization is RFC 8785, implemented in-repo: the `/constitution` subpath has to stay free of Nest and Matrix, and a hash chain's serializer is not somewhere to inherit surprises. It rejects what it cannot represent rather than dropping it, because a chain that verifies over less than it covers still reads as evidence.
+
+## Closing the review loop
+
+`manual_review_required` is only a refusal with a nicer name until a person can answer it. The escalation goes to the room the constitution names in `agents[].escalation.matrix_room` — where a steward is actually watching, and which survives the session ending, the normal case for something a person has to think about.
+
+It carries the **request digest**: the action, on the object, for the value. Not the tool, which would approve every future call to it; not the decision, since the retry produces a different one. What a person approves is the thing they were shown, so an approval for 100 uixo to one vendor does not cover 100000, or a different vendor.
+
+An approval is a Matrix **state event** keyed by that digest. State is the right shape twice over: idempotent, so a reviewer who clicks twice approves once; and power-gated, so Matrix's own access control is the first check on who may approve at all.
+
+**The entity cannot approve its own escalation.** An approval sent by the oracle's own Matrix user (`MATRIX_ORACLE_ADMIN_USER_ID`) is rejected however well-formed it is. Generation and determination stay separate principals — an entity that could sign off its own escalations would have a review step in name only, and it is the direction a compromised model would push hardest on.
+
+Escalations are raised once per digest for the life of the process. The model is explicitly told that raising it is the correct next step and will often retry; a reviewer facing forty identical requests reads none of them. A send that fails un-suppresses the repeat, since the reviewer never saw that one.
+
 ## What this phase does not do
 
 Per-permit UCAN minting and executor receipts, the Merkle-log episode ledger and its on-chain anchoring, cognition contracts, and the entity's own claims and settlement all come later. This phase establishes one thing: **no tool executes without a recorded authorization decision.**

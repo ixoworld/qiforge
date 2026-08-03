@@ -18,21 +18,37 @@
  * recorder wired" rather than "recording failed" — the two mean different
  * things, and only the second is a refusal.
  */
-import type { DecisionRecorder } from '../../graph/middlewares/constitution-gate-middleware.js';
+import type {
+  DecisionRecorder,
+  ReviewCoordinator,
+} from '../../graph/middlewares/constitution-gate-middleware.js';
 
-let current: DecisionRecorder | undefined;
+let currentLedger: DecisionRecorder | undefined;
+
+let currentReview: ReviewCoordinator | undefined;
 
 /** Binds the ledger for this process. Called once, from the module factory. */
 export function setCurrentDecisionLedger(ledger: DecisionRecorder): void {
-  current = ledger;
+  currentLedger = ledger;
 }
 
 /** The ledger this process records to, or undefined before boot binds one. */
 export function getCurrentDecisionLedger(): DecisionRecorder | undefined {
-  return current;
+  return currentLedger;
 }
 
-/** Clears the binding. Exists so a test suite does not leak one into the next. */
+/** Binds the review loop for this process. Called once, from the factory. */
+export function setCurrentReviewCoordinator(review: ReviewCoordinator): void {
+  currentReview = review;
+}
+
+/** The review loop, or undefined before boot binds one. */
+export function getCurrentReviewCoordinator(): ReviewCoordinator | undefined {
+  return currentReview;
+}
+
+/** Clears the bindings. Exists so a test suite does not leak into the next. */
 export function resetCurrentDecisionLedger(): void {
-  current = undefined;
+  currentLedger = undefined;
+  currentReview = undefined;
 }

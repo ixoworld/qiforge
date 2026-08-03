@@ -7,6 +7,7 @@ import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
 import { DecisionLedgerService } from '../modules/domain-context/decision-ledger.service.js';
 import { DOMAIN_CONTEXT } from '../modules/domain-context/domain-context.service.js';
+import { ConstitutionReviewService } from '../modules/domain-context/review.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
 import type {
@@ -213,12 +214,14 @@ export function buildAmbientServices(
   // could disagree about which document is in force.
   const domainContext = opts.nestApp.get<DomainContext>(DOMAIN_CONTEXT);
   const decisions = opts.nestApp.get(DecisionLedgerService);
+  const review = opts.nestApp.get(ConstitutionReviewService);
 
   return {
     config: opts.config,
     identity: opts.identity,
     domain: domainContext,
     decisions,
+    review,
     availablePlugins: opts.availablePlugins,
     secrets: secretsAdapter,
     blobStore: blobStoreAdapter,

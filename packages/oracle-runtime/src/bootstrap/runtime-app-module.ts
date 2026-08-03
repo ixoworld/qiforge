@@ -127,6 +127,13 @@ export class RuntimeAppModule implements NestModule {
           typeof validatedEnv.MATRIX_DECISIONS_ROOM_ID === 'string'
             ? validatedEnv.MATRIX_DECISIONS_ROOM_ID
             : null,
+        // The entity's own Matrix user, so the review loop can refuse an
+        // approval it issued to itself. Without this the self-approval check
+        // has nothing to compare against and silently passes everything.
+        oracleMatrixUserId:
+          typeof validatedEnv.MATRIX_ORACLE_ADMIN_USER_ID === 'string'
+            ? validatedEnv.MATRIX_ORACLE_ADMIN_USER_ID
+            : null,
       }),
       UcanModule,
       BlobStoreModule,

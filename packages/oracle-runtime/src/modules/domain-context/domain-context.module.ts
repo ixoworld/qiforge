@@ -10,7 +10,10 @@
 import { MatrixManager } from '@ixo/matrix';
 import { Global, Logger, Module, type DynamicModule } from '@nestjs/common';
 import type { DomainContext } from '../../constitution/domain-context.js';
-import { setCurrentDecisionLedger } from './current-ledger.js';
+import {
+  setCurrentDecisionLedger,
+  setCurrentReviewCoordinator,
+} from './current-ledger.js';
 import {
   DecisionLedgerService,
   type DecisionTransport,
@@ -19,6 +22,10 @@ import {
   DOMAIN_CONTEXT,
   DomainContextService,
 } from './domain-context.service.js';
+import {
+  ConstitutionReviewService,
+  type ReviewTransport,
+} from './review.service.js';
 
 /**
  * The ledger's transport, over the entity's own Matrix client.
@@ -42,6 +49,32 @@ function matrixTransport(): DecisionTransport {
   };
 }
 
+/** The escalation room's transport. Same late-binding reasoning as above. */
+function reviewTransport(): ReviewTransport {
+  const client = () => {
+    const mx = MatrixManager.getInstance().getClient();
+    if (!mx) throw new Error('Matrix client is not available.');
+    return mx.mxClient;
+  };
+  return {
+    sendEvent: (roomId, type, content) =>
+      client().sendEvent(roomId, type, content),
+    getRoomState: async (roomId) => {
+      const state: unknown = await client().getRoomState(roomId);
+      if (!Array.isArray(state)) return [];
+      return state.map((event: Record<string, unknown>) => ({
+        type: typeof event.type === 'string' ? event.type : '',
+        state_key: typeof event.state_key === 'string' ? event.state_key : '',
+        sender: typeof event.sender === 'string' ? event.sender : '',
+        content:
+          typeof event.content === 'object' && event.content !== null
+            ? (event.content as Record<string, unknown>)
+            : {},
+      }));
+    },
+  };
+}
+
 @Global()
 @Module({})
 export class DomainContextModule {
@@ -55,7 +88,10 @@ export class DomainContextModule {
    */
   static register(
     context: DomainContext,
-    options: { decisionsRoomId?: string | null } = {},
+    options: {
+      decisionsRoomId?: string | null;
+      oracleMatrixUserId?: string | null;
+    } = {},
   ): DynamicModule {
     return {
       module: DomainContextModule,
@@ -64,6 +100,20 @@ export class DomainContextModule {
         {
           provide: DomainContextService,
           useFactory: (ctx: DomainContext) => new DomainContextService(ctx),
+          inject: [DOMAIN_CONTEXT],
+        },
+        {
+          provide: ConstitutionReviewService,
+          useFactory: (ctx: DomainContext) => {
+            const review = new ConstitutionReviewService({
+              domain: ctx,
+              transport: reviewTransport(),
+              logger: new Logger(ConstitutionReviewService.name),
+              selfMatrixUserId: options.oracleMatrixUserId ?? null,
+            });
+            setCurrentReviewCoordinator(review);
+            return review;
+          },
           inject: [DOMAIN_CONTEXT],
         },
         {
@@ -83,7 +133,12 @@ export class DomainContextModule {
           inject: [DOMAIN_CONTEXT],
         },
       ],
-      exports: [DomainContextService, DecisionLedgerService, DOMAIN_CONTEXT],
+      exports: [
+        DomainContextService,
+        DecisionLedgerService,
+        ConstitutionReviewService,
+        DOMAIN_CONTEXT,
+      ],
     };
   }
 }

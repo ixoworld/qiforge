@@ -1,6 +1,9 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { DomainContext } from '../constitution/domain-context.js';
-import type { DecisionRecorder } from '../graph/middlewares/constitution-gate-middleware.js';
+import type {
+  DecisionRecorder,
+  ReviewCoordinator,
+} from '../graph/middlewares/constitution-gate-middleware.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -157,6 +160,12 @@ export interface AmbientServices {
    * guarantees and its test asserts.
    */
   decisions?: DecisionRecorder;
+  /**
+   * The human-review loop the gate escalates to. Optional on the same terms
+   * as `decisions`: absent means `manual_review_required` stays a refusal
+   * with nowhere to go, which is correct but a dead end.
+   */
+  review?: ReviewCoordinator;
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
   blobStore: BlobStoreAdapter;

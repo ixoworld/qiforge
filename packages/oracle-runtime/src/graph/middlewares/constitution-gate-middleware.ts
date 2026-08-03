@@ -29,6 +29,7 @@ import {
   type AuthorizationRequest,
   type AuthorizeDeps,
 } from '../../constitution/authorize.js';
+import { digestRequest } from '../../constitution/decision-record.js';
 import type { DomainContext } from '../../constitution/domain-context.js';
 import { systemClock, type TimeSource } from '../../constitution/time.js';
 import type {
@@ -108,12 +109,40 @@ export interface ConstitutionGateMiddlewareOptions {
    * the entity has acted and nothing says on what authority.
    */
   recorder?: DecisionRecorder;
+  /**
+   * The human-review loop. Absent means `manual_review_required` stays a
+   * refusal with nowhere to go — correct, but a dead end.
+   */
+  review?: ReviewCoordinator;
   logger?: Logger;
 }
 
 /** The ledger, as the gate needs to see it. */
 export interface DecisionRecorder {
   record(decision: GateDecisionRecord): unknown | null;
+}
+
+/** What a reviewer is shown, and what their approval is bound to. */
+export interface EscalationSubject {
+  toolName: string;
+  action: string;
+  operation: string;
+  object: string;
+  value: { amount: string; denom: string } | null;
+  reasonCodes: readonly string[];
+  ruleRefs: readonly string[];
+  sessionId: string;
+  requestDigest: string;
+}
+
+/** The human-review loop, as the gate needs to see it. */
+export interface ReviewCoordinator {
+  /** The approving reviewer for this request, if one has signed off. */
+  findApproval(requestDigest: string): Promise<string | null>;
+  /** Re-checks that a proof reference still covers this exact request. */
+  verifyProof(ref: string, requestDigest?: string): Promise<boolean>;
+  /** Puts the decision in front of a person. */
+  escalate(subject: EscalationSubject): Promise<void>;
 }
 
 /** Formats a refusal the model can act on: what was refused, and on what grounds. */
@@ -198,6 +227,7 @@ export const createConstitutionGateMiddleware = (
     rtCtx,
     model,
     recorder,
+    review,
     logger = NOOP_LOGGER,
   } = options;
   const time = options.time ?? systemClock;
@@ -305,10 +335,28 @@ export const createConstitutionGateMiddleware = (
         );
       }
 
+      // Bind the request to a digest and look for an approval covering it,
+      // before evaluating rather than after. The evaluator decides whether
+      // review is required; whether it has already happened is a fact it has
+      // to be given, the same as the clock.
+      if (review) {
+        request.requestDigest = digestRequest(request);
+        const approver = await review
+          .findApproval(request.requestDigest)
+          .catch(() => null);
+        if (approver !== null) request.reviewProofRef = approver;
+      }
+
       let decision: AuthorizationDecision;
       try {
         decision = await authorize(request, domain.policy, {
           time,
+          ...(review
+            ? {
+                verifyReviewProof: (ref, digest) =>
+                  review.verifyProof(ref, digest),
+              }
+            : {}),
           ...options.deps,
         });
       } catch (error) {
@@ -328,6 +376,29 @@ export const createConstitutionGateMiddleware = (
       }
 
       if (decision.outcome !== 'permit') {
+        // Put it in front of a person. Awaited rather than fired and
+        // forgotten: the model is about to be told that raising this is the
+        // correct next step, and that has to be true by the time it reads it.
+        if (decision.outcome === 'manual_review_required' && review) {
+          await review
+            .escalate({
+              toolName,
+              action: request.action,
+              operation: request.operation,
+              object: request.object,
+              value: request.value ?? null,
+              reasonCodes: decision.reasonCodes,
+              ruleRefs: decision.ruleRefs,
+              sessionId: request.principal.sessionId,
+              requestDigest: request.requestDigest ?? digestRequest(request),
+            })
+            .catch((error: unknown) => {
+              logger.error(
+                `[constitution] Escalation for ${toolName} could not be raised`,
+                error,
+              );
+            });
+        }
         return refuse(toolName, toolCallId, decision, request, !declared);
       }
 
