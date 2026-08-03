@@ -396,7 +396,7 @@ The crux question — does "signs without raw private keys" mean non-custodial? 
 - **x402 as the `pay`-class executor, behind the gate — never beside it.** One locus of authority; do not stack a second policy engine whose rules could conflict with the constitution.
 - **Gasless is a real operational win.** The facilitator broadcasts and pays gas, so the entity needs only the stablecoin — no native-token balance management, gas estimation or stuck-nonce handling. Worth having regardless of custody choices.
 - **The `upto` scheme** fits metered cognition billing better than `exact`, and matches the Economic Membrane's per-call model.
-- **We are already a 402 server.** `subscription.middleware.ts` gates every request on subscription/credits _after_ UCAN auth, so the payer's DID is already known at the point of refusal. Emitting a `PAYMENT-REQUIRED` challenge and verifying a `PAYMENT-SIGNATURE` would make the oracle sellable to other agents — additive rather than architectural, and the most direct route to entities earning their own operating costs.
+- **We are already a 402 server.** `subscription.middleware.ts` gates every request on subscription/credits _after_ UCAN auth, so the payer's DID is already known at the point of refusal. Emitting a `PAYMENT-REQUIRED` challenge and verifying a `PAYMENT-SIGNATURE` would make the oracle sellable to other agents — additive rather than architectural, and the most direct route to entities earning their own operating costs. Specified as **Phase 5b** in `specs/sovereign-agency-harness.md` §23.
 
 ### 9.6 The Cosmos gap — and why a naive fix would be wrong
 

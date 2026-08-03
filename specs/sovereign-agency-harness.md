@@ -432,6 +432,7 @@ This maps one-to-one onto the IXO claims module, which already implements the li
 - **Treasury = entity accounts.** On-chain accounts owned by the entity (`MsgCreateEntityAccount`), operated under revocable grants. Spending limits per epoch/counterparty/action class are constitutional articles enforced at the gate and encoded as caveats on minted capabilities.
 - **Cognition is an operating expense.** Every model call is metered against the hire's contract (the credits/TokenLimiter pattern in this repo, pointed at the entity's treasury instead of operator revenue). Providers are paid per call via x402 where possible — machine-native HTTP 402 payments with **no standing credentials to leak** — or by metered credits.
 - **Income is escrowed settlement.** Work the entity performs for counterparties settles through the claims-module escrow: payment configs per lifecycle stage, funds released on independent evaluation — _conditional settlement on verified performance_, protocol-native.
+- **The membrane is symmetric.** The same 402 rail runs in the sell direction: the entity prices its own capabilities, challenges unpaid callers, verifies their signed payment authorizations, and settles to its treasury. This is what closes the loop on "cognition is an operating expense" — an entity that only spends is funded by an operator, which is the dependency this architecture exists to remove. Pricing is a constitutional article, not deployment config, and a verified payment is a precondition to authorization, never a substitute for it.
 - **Human-authorized envelopes.** Where a human principal authorizes classes of spend, the AP2 mandate pattern applies: a signed **open** mandate carrying constraints for autonomous operation (the bounded envelope, human-not-present), and a **closed** mandate authorizing one specific transaction for defined classes (the constitutional obligation hook), against a non-repudiable audit trail. Note AP2 v0.2 replaced the original intent/cart split with open/closed checkout mandates and specifies **SD-JWTs** rather than W3C VCs; almost all secondary sources still describe v0.1, so verify against the spec directly.
 
 ## 19. The sovereign loop, end to end
@@ -527,6 +528,8 @@ graph LR
     P3 --> P4
     P2 --> P5["Phase 5<br/>Self-claims & settlement"]
     P3 --> P5
+    P5 --> P5B["Phase 5b<br/>x402 seller"]
+    P1 --> P5B
 ```
 
 **Phase 1 — Constitution Engine (structural gate).**
@@ -544,6 +547,22 @@ Formalize the `CognitionDriver` seam over the existing LLM adapter (the BYO-LLM 
 
 **Phase 5 — Self-claims and conditional settlement.**
 The entity's outcome-bearing actions become claim objects in collections it participates in; independent oracle entities evaluate; disputes flow through the module; escrowed payments release on approval; x402 rail for per-call cognition payments where providers support it. _Acceptance:_ an end-to-end run where the entity performs work, its claim is independently evaluated, and settlement releases from escrow — with the full episode chain anchoring the story.
+
+**Phase 5b — x402 seller: the entity earns its own operating costs.**
+The economic membrane so far describes the entity _spending_. This is the other half: the entity charging for what it does, so cognition is funded by its own revenue rather than an operator's budget.
+
+The runtime is already a paywall — `subscription.middleware.ts` gates every request on subscription/credits **after** `AuthHeaderMiddleware`, so the payer's DID is known at the moment of refusal. Becoming an x402 seller is therefore additive: emit a `PAYMENT-REQUIRED` challenge alongside the existing 402, accept a `PAYMENT-SIGNATURE` on retry, verify and settle through a facilitator, then serve. See `specs/sovereign-key-custody.md` §9 for the protocol details and the custody analysis behind "adopt the rail, keep our own custody."
+
+Four properties this must preserve:
+
+1. **Selling is a constitutional act.** Which resources are priced, at what ceiling, and in which assets are constitutional articles — not deployment config. A price change is a `govern`-class action, so it inherits the steward quorum rather than being an operator edit.
+2. **Earning is not spending.** Inbound payment settles to an entity account; it never widens what the entity may spend. The `pay` action class, its ceilings and its human-review triggers are untouched by revenue.
+3. **One locus of authority.** A facilitator verifies signatures and broadcasts; it does not decide who may be served. Authorization stays with the constitution gate, which sees a paid request exactly as it sees any other — payment is a _precondition_, never a permit.
+4. **Verified sales are episodes.** A settled payment produces an episode record (challenge issued, payment verified, resource served, settlement reference), so revenue is auditable on the same ledger as everything else.
+
+_Acceptance:_ an unpaid request receives a well-formed challenge; a valid signed payment is verified, settled and served; a replayed payment is refused by the nonce check; a payment that satisfies the challenge but whose request the constitution forbids is **still refused**, with the payment not captured; and every settled sale appears as an episode.
+
+_Sequencing:_ depends on Phase 1 (the gate must exist before payment can be a precondition to it) and on the entity treasury from Phase 5. Independent of Phase 3, since selling requires verifying _counterparties'_ signatures rather than producing our own.
 
 **Non-goals (this spec).** Swapping the checkpointer implementation (the Matrix custody model is the point, not a limitation); replacing the plugin API (organs arrive as modules/middlewares/plugins per ORA-219); hot-swapping constitutions at runtime (amendment is governance, deliberately slow); multi-entity federation protocols (a later spec — this one makes a single entity sovereign first).
 
