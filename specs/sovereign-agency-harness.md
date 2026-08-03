@@ -1,7 +1,7 @@
 # The Sovereign Agency Harness — Research and Architecture
 
 **Status:** Research spec — patterns established, architecture proposed, implementation phased
-**Revision:** v1.1 — 2026-08-02 (v1: research + architecture; v1.1 adds Part V — `domain.md` alignment assessment and the concrete Phase-1 wiring plan)
+**Revision:** v1.2 — 2026-08-03 (v1: research + architecture; v1.1 adds Part V — `domain.md` alignment assessment and the concrete Phase-1 wiring plan; v1.2 adds Part VI — the Phase 1 gap review, written at completion)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Builds on:** `specs/ORA-219-plugin-based-runtime.md` (the plugin runtime this design extends)
 **Stack context:** `@ixo/oracle-runtime` · IXO Impact Hub (IID / Entity / Claims modules) · Matrix · UCAN · LangGraph
@@ -12,7 +12,7 @@
 
 A systematic study of how the industry's agent harnesses actually work — LangChain Deep Agents, qm, Claude Code / the Claude Agent SDK, the OpenAI Agents SDK, LangGraph, Letta (MemGPT), OpenHands, smolagents, MCP — followed by a first-principles derivation of the **Sovereign Agency Harness**: an architectural inversion in which the harness stops being extrinsic middleware owned by an app developer and becomes a **constitutive part of the entity itself**, with AI models reduced to pluggable, temporary reasoning tools the entity hires, uses, and discards.
 
-Part I reports what the established harnesses teach. Part II derives the principles. Part III specifies the sovereign architecture. Part IV maps it onto QiForge and phases the work.
+Part I reports what the established harnesses teach. Part II derives the principles. Part III specifies the sovereign architecture. Part IV maps it onto QiForge and phases the work. Part VI, added at Phase 1 completion, audits what was built against the promise — property by property, honestly.
 
 ### Table of contents
 
@@ -50,7 +50,9 @@ Part I reports what the established harnesses teach. Part II derives the princip
   - [27. Gaps, in both directions](#27-gaps-in-both-directions)
   - [28. Phase-1 wiring plan](#28-phase-1-wiring-plan)
   - [29. Sequencing with later phases and upstream proposals](#29-sequencing-with-later-phases-and-upstream-proposals)
-- [30. References](#30-references)
+- **Part VI — Phase 1 gap review: the promise, audited**
+  - [30. The gap review](#30-the-gap-review) — custody inventory (30a), the four properties scored (30b), the pipeline audited (30c), untracked gaps now tracked (30d), where Phase 1 exceeded the letter (30e), reading (30f)
+- [31. References](#31-references)
 
 ---
 
@@ -690,7 +692,70 @@ The reference implementation happens to be an oracle — `apps/qiforge-example/d
 
 ---
 
-## 30. References
+# Part VI — Phase 1 gap review: the promise, audited
+
+## 30. The gap review
+
+_Assessed 2026-08-03, at Phase 1 completion — all seven milestones (M1–M7) and the six review findings on PR #245. This section measures what was built against the paradigm statement this document opens with, and it is written to be checked rather than believed: every claim names the mechanism that makes it true or the gap that makes it false._
+
+**Verdict: the inversion has happened in the authority model and not yet in the custody model.** It is now structurally true that no model output becomes an effect except through the entity's own law — evaluated, recorded, fail-closed. But the entity does not yet hold its own root of trust: the operator controls the deployment, provisions the keys, holds the constitution file on disk, and pays for the model. Phase 1 built the constitutional core of an intrinsic harness inside what is still, operationally, an extrinsic service.
+
+### 30a. The custody inventory
+
+The paradigm statement names four things the extrinsic model puts in third-party hands: the memory, the system prompts, the API keys, and the execution loops. Where each lives at Phase 1 completion:
+
+| Asset                                            | Where it lives                                                         | Sovereign?                |
+| ------------------------------------------------ | ---------------------------------------------------------------------- | ------------------------- |
+| Conversation state, checkpoints, decision ledger | The entity's own Matrix rooms, under its own account                   | Largely yes               |
+| Episodic / semantic memory                       | External memory-engine service (MCP), access gated by the constitution | **No** — gated, not owned |
+| System prompt                                    | Composed by the runtime; prohibitions quoted verbatim from `domain.md` | Mixed                     |
+| API keys / inference                             | Operator env or BYO-LLM; the **operator** hires the model              | **No**                    |
+| Execution loop                                   | Operator-deployed process                                              | **No**                    |
+
+### 30b. The four ontological properties, scored
+
+**Constitutional Governance — achieved.** Every tool call — main agent, every sub-agent, the standalone editor — is classified from a declaration the model cannot write, evaluated against `domain.md`, and refused or run. It fails closed: an unclassifiable tool, a throwing effect expression, a crashing evaluator each deny. The `AUTHORIZATION OVERRIDE` retry — this codebase's own instance of "the model argues its way past the boundary" — is deleted. The vision's sentence _"the harness intercepts and blocks the instruction at the structural layer, regardless of the model's confidence level"_ is now literally the code, and `apps/diagnostics-evaluator-example/test/loop.test.ts` proves the deeper invariant across two constitutions at once: no principal both generates a claim and determines it.
+
+**Persistent Cryptographic Identity — half.** Nothing about identity is bound to any model, and `principal.model` on every decision record makes model transience _auditable_: the ledger shows which hired mind proposed what, across swaps, against one enduring subject. That is $\text{Asset Identity} \neq \text{Model Version}$ working. But the binding of the _running constitution_ to that identity is asserted, not proven — anchor verification is a seam nothing implements, `anchorVerified: false` is recorded and tolerated, and whoever can edit `DOMAIN_MD_PATH` and restart the process changes the entity's law. Amendment control (`change_rights` disabled) is enforced against the model, not against the operator.
+
+**Sovereign Episodic Memory — the weakest.** The decision ledger is the one genuinely sovereign record Phase 1 built: hash-chained, tamper-evident, in the entity's own room, auditable with the exported `verifyChain`. Conversation state also lives under the entity's Matrix account. But episodic memory proper is an external service the runtime proxies to. Access is governed — erasure is a `delete`-class act needing a grant — but governing access to memory you do not hold is tenancy, not custody. And the "inject context, wipe it clean" discipline holds only incidentally: models are stateless API calls, yet the full thread history replays to whichever provider is plugged in next. BYO-LLM makes the provider a choice; it does not bound what the hire is shown.
+
+**Capability-Based Authorization — half, and inverted in an interesting way.** The _bounding_ half is stronger than the slogan: "$500, on energy contracts, until 17:00" is exactly what a grant now expresses and enforces — `max_value`, object scope, `expiry`, plus account-level `daily_limit`, recipient allowlists, and evidence preconditions, with the daily limit answered by the decision ledger summing its own permits. The _token_ half does not exist: no per-permit UCAN minting. But note the interim posture is arguably safer for in-process tools — **the model holds no credential at all**. It cannot exfiltrate, replay, or overspend a token it never possesses; the gate authorizes each act directly. Minted tokens become necessary exactly when the entity delegates to external executors, which is Phase 3's subject.
+
+### 30c. The operational pipeline, stage by stage
+
+$$\text{Claim} \rightarrow \text{Evidence} \rightarrow \text{Constitution} \rightarrow \text{Decision} \rightarrow \text{Settlement}$$
+
+1. **Claim generation — built.** Everything the model emits is treated as a claim; the gate is the translation boundary between statistical output and bounded action.
+2. **Evidence verification — structurally present, cryptographically hollow.** `ToolEffect.facts` cannot read the model's arguments, so the entity's state comes from sources the model cannot write; `requires_claim` / `requires_udid` refuse a settlement that names no evidence. But nothing verifies the evidence that _is_ named: `receiveDetermination` accepts a determination without a signature check, and `udidRef` is a reference a plugin vouches for, not an attestation the harness verified. The vision demands rejecting _unverified_ evidence; Phase 1 rejects _absent_ evidence and trusts _asserted_ evidence. → [IXO-4194](https://linear.app/ixo-world/issue/IXO-4194)
+3. **Constitutional evaluation — built.** Fully; see 30b.
+4. **Decision & action — half.** Decisions commit before execution, and failing to record is itself a refusal (`audit_unavailable`) — a stronger clause than the vision asked for. But the ledger is tamper-_evident_, not tamper-_proof_: Matrix room history under an operator-run homeserver, with on-chain anchoring deferred to Phase 2. Execution is not capability-sandboxed; handlers run in-process.
+5. **Conditional settlement — not built.** No escrow, no proof-of-performance release. The account policy enforces settlement's _preconditions_ (claim + independent determination + human release), the correct shape awaiting Phase 5 / 5b machinery.
+
+### 30d. Three gaps outside the phase plan
+
+The phased roadmap (§23) already owns anchoring, per-permit capabilities, cognition contracts, and settlement. Three gaps surfaced by this review belong to no phase, and are now tracked:
+
+1. **The enforcement surface is the tool-call boundary — and effects exist elsewhere.** A plugin's Nest controller, a webhook handler, a scheduled job can act without crossing the gate. Phase 1 built model-containment completely and process-containment not at all; an auditor reading the decisions room would reasonably over-read its coverage. → [IXO-4195](https://linear.app/ixo-world/issue/IXO-4195)
+2. **Evidence-signature verification**, per stage 2 above. → [IXO-4194](https://linear.app/ixo-world/issue/IXO-4194)
+3. **Context hygiene as constitutional policy.** Which memory a hired model may see is an accident of checkpointer replay, not something `domain.md`'s privacy block governs — an entity declaring `private_by_default` shows every hired model its entire conversational past. → [IXO-4196](https://linear.app/ixo-world/issue/IXO-4196)
+
+### 30e. Where Phase 1 exceeded the letter of the vision
+
+A gap review should also record what turned out stronger than specified, because those choices should survive later phases:
+
+- **"Models generate claims, not authority" is load-bearing in five places**, not aspirational in one: effect declarations the model cannot touch, `facts` resolvers denied the call's arguments, the deeply frozen constitution, the credential-less model, and the rule that the entity cannot approve its own escalation.
+- **Failing to record is a refusal.** The vision asks for decisions to be committed to the ledger; Phase 1 additionally refuses effectful action while the ledger is unavailable, on the ground that an entity acting without an account of why is acting unaccountably.
+- **The entity-neutral correction.** Mid-phase, the runtime's oracle-shaped narrowing was removed — the harness governs any agentic entity, the entity is the agent of its own functions, and the DV-114 asset example is the paradigm sentence made executable: an asset that claims its own faults, cannot determine them, and cannot pay for repairs on its own say-so.
+- **Approvals bind to requests, not to tools or sessions.** A human release covers the action, on the object, for the value — an approval for 100 uusdc to one vendor covers neither 100000 nor another vendor, and re-approval is not demanded per session (which would train reviewers to approve without reading).
+
+### 30f. Reading
+
+**Phase 1 built the constitution and the courtroom; the entity does not yet own the building.** Custody of keys, law, memory, and inference remains with the operator. That is precisely the remit of Phases 2–5 — anchoring (2), per-permit capabilities and receipts (3), cognition contracts and the capsule (4), self-claims and settlement (5, 5b) — plus the three tracked gaps above, and the standing custody items [IXO-4173](https://linear.app/ixo-world/issue/IXO-4173) (legacy secret re-wrap) and [IXO-4174](https://linear.app/ixo-world/issue/IXO-4174) (the local-only dependency override). None of the remaining distance requires revisiting Phase 1's decisions; it requires moving the root of trust.
+
+---
+
+## 31. References
 
 **Named starting points**
 
