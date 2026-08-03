@@ -56,7 +56,18 @@ export const GATE_REASON = {
   effectUnresolvable: 'tool_effect_unresolvable',
   /** The evaluator threw rather than returning a verdict. */
   evaluatorFailed: 'evaluator_failed',
+  /** The decision could not be recorded, so the action must not happen. */
+  auditUnavailable: 'audit_unavailable',
 } as const;
+
+/**
+ * Action classes that change nothing.
+ *
+ * The distinction matters only when the audit trail is down: a read that goes
+ * unrecorded costs an entry in a log, while an unrecorded payment is an
+ * entity acting with no account of why. Reads proceed; everything else stops.
+ */
+const NON_EFFECTFUL: ReadonlySet<string> = new Set(['read', 'propose']);
 
 /** What the gate hands to a recorder. The decision plus what it was about. */
 export interface GateDecisionRecord {
@@ -87,12 +98,22 @@ export interface ConstitutionGateMiddlewareOptions {
   /** Model identifier, recorded on the decision — which model proposed this. */
   model?: string;
   /**
-   * Called with every verdict, permits included. The seam the decision-record
-   * ledger hangs off; a log of only refusals cannot show that anything was
-   * checked.
+   * Records every verdict, permits included: a log of only refusals cannot
+   * show that anything was checked.
+   *
+   * Returns null when the decision could not be recorded — which the gate
+   * treats as a refusal for effectful actions under strict enforcement. The
+   * recorder can therefore stop an action, which is why it is synchronous:
+   * a record that lands after the handler runs would leave a window in which
+   * the entity has acted and nothing says on what authority.
    */
-  onDecision?: (record: GateDecisionRecord) => void;
+  recorder?: DecisionRecorder;
   logger?: Logger;
+}
+
+/** The ledger, as the gate needs to see it. */
+export interface DecisionRecorder {
+  record(decision: GateDecisionRecord): unknown | null;
 }
 
 /** Formats a refusal the model can act on: what was refused, and on what grounds. */
@@ -176,7 +197,7 @@ export const createConstitutionGateMiddleware = (
     effectByToolName,
     rtCtx,
     model,
-    onDecision,
+    recorder,
     logger = NOOP_LOGGER,
   } = options;
   const time = options.time ?? systemClock;
@@ -189,7 +210,10 @@ export const createConstitutionGateMiddleware = (
     request: AuthorizationRequest | null,
     effectAssumed = false,
   ): ToolMessage => {
-    if (request) onDecision?.({ toolName, request, decision, effectAssumed });
+    // Best effort: the action is refused either way, so a ledger that cannot
+    // take this record does not change the outcome, only the account of it.
+    if (request)
+      recorder?.record({ toolName, request, decision, effectAssumed });
     const prefix =
       decision.outcome === 'manual_review_required'
         ? CONSTITUTION_REVIEW_PREFIX
@@ -307,12 +331,41 @@ export const createConstitutionGateMiddleware = (
         return refuse(toolName, toolCallId, decision, request, !declared);
       }
 
-      onDecision?.({
-        toolName,
-        request,
-        decision,
-        effectAssumed: !declared,
-      });
+      // The record is made before the handler runs, and its absence is a
+      // refusal. An entity that acts while its own audit trail is down is
+      // acting unaccountably, which is the one thing the constitution claims
+      // it does not do. Reads are exempt: an unrecorded read costs a log
+      // entry, an unrecorded payment costs the account of why it happened.
+      const recorded =
+        recorder === undefined
+          ? true
+          : recorder.record({
+              toolName,
+              request,
+              decision,
+              effectAssumed: !declared,
+            }) !== null;
+
+      if (!recorded && strict && !NON_EFFECTFUL.has(effect.type)) {
+        return refuse(
+          toolName,
+          toolCallId,
+          {
+            outcome: 'deny',
+            reasonCodes: [GATE_REASON.auditUnavailable],
+            ruleRefs: ['constitution.execution'],
+            obligations: [],
+            time: time.now(),
+          },
+          null,
+        );
+      }
+      if (!recorded) {
+        logger.warn(
+          `[constitution] ${toolName} ran without a recorded decision; the ledger is unavailable.`,
+        );
+      }
+
       if (decision.obligations.length > 0) {
         logger.log(
           `Constitution permitted ${toolName} with obligations`,

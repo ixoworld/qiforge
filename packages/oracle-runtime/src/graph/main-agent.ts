@@ -336,6 +336,7 @@ export async function createMainAgent(
       effectByToolName,
       rtCtx,
       logger: ambient.logger,
+      ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
     toolRetryMiddleware({ onFailure: (error) => error.message }),

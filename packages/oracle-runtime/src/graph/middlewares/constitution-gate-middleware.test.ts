@@ -46,14 +46,15 @@ function gate(options: {
   domain?: DomainContext;
   effects?: Record<string, ToolEffect>;
   rtCtx?: RuntimeContext;
-  onDecision?: (record: GateDecisionRecord) => void;
+  onDecision?: (record: GateDecisionRecord) => unknown | null;
 }) {
+  const onDecision = options.onDecision;
   return createConstitutionGateMiddleware({
     domain: options.domain ?? mockDomain({ subject: SUBJECT }),
     effectByToolName: new Map(Object.entries(options.effects ?? {})),
     rtCtx: options.rtCtx ?? makeRuntimeContext(),
     time: fixedClock(NOW),
-    ...(options.onDecision ? { onDecision: options.onDecision } : {}),
+    ...(onDecision ? { recorder: { record: onDecision } } : {}),
   });
 }
 
@@ -366,29 +367,64 @@ describe('every verdict is offered to the recorder', () => {
   });
 });
 
-describe('the principal is the entity', () => {
-  // Grants say what the *entity* may do. The user is who it acts for, which
-  // the UCAN delegation answers on the way in — a different question.
-  it('evaluates as the constitution’s subject, not the requesting user', async () => {
-    const onDecision = vi.fn();
-    const rtCtx = makeRuntimeContext({
-      user: {
-        did: 'did:ixo:user:someone-else',
-        matrixUserId: '@someone:ixo.world',
-        ucanDelegation: { raw: 'ucan-token' },
-      },
-    });
-    await run(
+// An entity that acts while its own audit trail is down is acting
+// unaccountably, which is the one thing the constitution claims it does not
+// do. A recorder returning null says it cannot promise the record will be
+// published, and for an effectful action that is itself a refusal.
+describe('a decision that cannot be recorded', () => {
+  const unrecordable = () => null;
+
+  it('refuses an effectful call under strict enforcement', async () => {
+    const { result, handler } = await run(
       gate({
-        domain: mockDomain({ subject: SUBJECT }),
+        domain: mockDomain({ subject: SUBJECT, enforcement: 'strict' }),
+        effects: { write_thing: { type: 'write', action: 'write_thing' } },
+        onDecision: unrecordable,
+      }),
+      call('write_thing'),
+    );
+    const message = result as ToolMessage;
+    expect(handler).not.toHaveBeenCalled();
+    expect(message.content).toContain(CONSTITUTION_DENIED_PREFIX);
+    expect(message.content).toContain(GATE_REASON.auditUnavailable);
+    expect(message.status).toBe('error');
+  });
+
+  // An unrecorded read costs a log entry; an unrecorded payment costs the
+  // account of why it happened. Blocking reads would take the runtime down
+  // for the duration of a Matrix outage without protecting anything.
+  it('lets a read through, since it changes nothing', async () => {
+    const { handler } = await run(
+      gate({
+        domain: mockDomain({ subject: SUBJECT, enforcement: 'strict' }),
         effects: { read_thing: { type: 'read', action: 'read_thing' } },
-        rtCtx,
-        onDecision,
+        onDecision: unrecordable,
       }),
       call('read_thing'),
     );
-    const record = onDecision.mock.calls[0]?.[0] as GateDecisionRecord;
-    expect(record.request.principal.did).toBe(SUBJECT);
-    expect(record.request.principal.did).not.toBe('did:ixo:user:someone-else');
+    expect(handler).toHaveBeenCalled();
+  });
+
+  it('warns but proceeds under permissive enforcement', async () => {
+    const { handler } = await run(
+      gate({
+        domain: mockDomain({ subject: SUBJECT, enforcement: 'permissive' }),
+        effects: { write_thing: { type: 'write', action: 'write_thing' } },
+        onDecision: unrecordable,
+      }),
+      call('write_thing'),
+    );
+    expect(handler).toHaveBeenCalled();
+  });
+
+  it('runs the tool when no recorder is wired at all', async () => {
+    const { handler } = await run(
+      gate({
+        domain: mockDomain({ subject: SUBJECT, enforcement: 'strict' }),
+        effects: { write_thing: { type: 'write', action: 'write_thing' } },
+      }),
+      call('write_thing'),
+    );
+    expect(handler).toHaveBeenCalled();
   });
 });

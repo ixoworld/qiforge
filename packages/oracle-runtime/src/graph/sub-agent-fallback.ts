@@ -203,6 +203,7 @@ export async function collectSubAgentsWithFallback(
                   effectByToolName: effectMapFor(subAgent, buildCtx),
                   rtCtx,
                   logger: ambient.logger,
+                  ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
                 }),
                 ...(withPassthrough.middleware ?? []),
               ],

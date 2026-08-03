@@ -119,7 +119,15 @@ export class RuntimeAppModule implements NestModule {
       CacheModule.register({ isGlobal: true }),
       ScheduleModule.forRoot(),
       ThrottlerModule,
-      DomainContextModule.register(opts.domainContext),
+      DomainContextModule.register(opts.domainContext, {
+        // Validated at boot: strict enforcement requires this room, because
+        // gating every call while the record of why goes nowhere would make
+        // the enforcement real and the accountability imaginary.
+        decisionsRoomId:
+          typeof validatedEnv.MATRIX_DECISIONS_ROOM_ID === 'string'
+            ? validatedEnv.MATRIX_DECISIONS_ROOM_ID
+            : null,
+      }),
       UcanModule,
       BlobStoreModule,
       ByoLlmModule,

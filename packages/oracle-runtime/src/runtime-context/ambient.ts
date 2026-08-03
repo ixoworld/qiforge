@@ -1,5 +1,6 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { DomainContext } from '../constitution/domain-context.js';
+import type { DecisionRecorder } from '../graph/middlewares/constitution-gate-middleware.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -146,6 +147,16 @@ export interface AmbientServices {
   identity: OracleIdentity;
   /** The entity's constitution, loaded once at boot and frozen. */
   domain: DomainContext;
+  /**
+   * The decision ledger the gate records every verdict to.
+   *
+   * Optional because a runtime assembled without one is a coherent thing —
+   * every unit-test harness in this repo is one — and the gate already treats
+   * an absent recorder differently from one that refuses a record. What it
+   * must never be is absent in a real boot, which `createAmbientServices`
+   * guarantees and its test asserts.
+   */
+  decisions?: DecisionRecorder;
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
   blobStore: BlobStoreAdapter;

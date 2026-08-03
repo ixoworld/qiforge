@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { emojify } from '../../utils/emoji.js';
 
 import { createConstitutionGateMiddleware } from '../../graph/middlewares/index.js';
+import { getCurrentDecisionLedger } from '../../modules/domain-context/current-ledger.js';
 import { filterForwardedMessages } from '../../graph/subagent-as-tool.js';
 import { isUserInRoom } from '../../matrix/room-membership.js';
 import { EDITOR_AGENT_TOOL_NAME } from './editor-agent.js';
@@ -249,6 +250,7 @@ export function createStandaloneEditorTool(
           ]),
         );
 
+        const recorder = getCurrentDecisionLedger();
         const agent = createAgent({
           model: ctx.llm.get('subagent'),
           tools: boundTools,
@@ -263,6 +265,10 @@ export function createStandaloneEditorTool(
               effectByToolName: editorEffects,
               rtCtx: ctx,
               logger: ctx.logger,
+              // Not from `ctx`: `RuntimeContext` is the plugin-facing type,
+              // and a ledger reachable from it is a ledger any plugin can
+              // write to.
+              ...(recorder ? { recorder } : {}),
             }),
           ],
         });

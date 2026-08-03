@@ -22,6 +22,7 @@ import {
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
 import type { DomainEnforcement } from '../constitution/domain-context.js';
+import { DecisionLedgerService } from '../modules/domain-context/decision-ledger.service.js';
 import { loadDomainMd, type AnchorVerifier } from '../constitution/load.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
@@ -691,6 +692,18 @@ export async function createOracleApp(
           } catch (err) {
             logger.error?.(
               `[boot] key setup failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          // The ledger has been buffering every decision made since the gate
+          // went live. Publishing starts here rather than being polled for,
+          // because a ledger that discovered its own transport by retrying
+          // would report itself unavailable for as long as its backoff ran —
+          // and an unavailable ledger refuses effectful actions.
+          try {
+            nestApp.get(DecisionLedgerService).markTransportReady();
+          } catch (err) {
+            logger.error?.(
+              `[boot] decision ledger could not start publishing: ${err instanceof Error ? err.message : String(err)}`,
             );
           }
           dispatchStatus({ plugin: 'matrix', from: 'pending', to: 'loaded' });
