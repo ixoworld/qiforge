@@ -77,6 +77,22 @@ Acceptance:
 - The migration runs at most once per secret and is safe to interrupt.
 - `decryptLegacy` can then be deleted, with a release note naming the minimum runtime version.
 
+### Drop the git-hosted `jsonld` dependency
+
+**Blocks:** installing in any environment without egress to `codeload.github.com`.
+
+Two transitive packages — `@digitalcredentials/jsonld-signatures@10.1.0` and `@digitalcredentials/vc@7.0.0`, both pinned by `@veramo/credential-ld@7.0.0` — declare a bare `jsonld` dependency pointing at a git tarball on `codeload.github.com`. A network that does not allow that host cannot install this repo at all, and the failure is opaque: a 403 on a tarball fetch, from a package name that appears nowhere in our `package.json` files.
+
+It is avoidable. Both packages dropped the git dependency in later versions in favour of the registry-published `@digitalcredentials/jsonld` — `jsonld-signatures` at 9.3.2+ (latest 12.0.1) and `vc` at 9.0.0+ (latest 10.0.2). `@veramo/credential-ld@7.0.0` already depends on registry `@digitalcredentials/jsonld@^6.0.0` for its own use, so the fork is a dependency we accept anyway; only these two stale pins reach for it over git.
+
+The bump crosses `credential-ld`'s declared ranges (`^10.0.0` and `^7.0.0`), so it needs overrides and real verification of the credential-signing path — which currently has no test coverage in this repo. That is the work.
+
+A narrower stopgap, if the goal is only to get an install through: override `jsonld` to `npm:@digitalcredentials/jsonld@9.0.0`. It resolves and the workspace builds and tests clean, but it swaps the JSON-LD processor under credential signing from 8.3.3-0 to 9.0.0 with nothing exercising that path, so it is a local unblock and not a fix.
+
+Note this removes one of two git dependencies. `@veramo-community/lds-ecdsa-secp256k1-recovery2020` is unpublished — `@veramo/credential-ld` declares it as `github:uport-project/…` — so it can only be resolved over git, never from the registry. That one is upstream's to fix.
+
+Acceptance: `grep codeload pnpm-lock.yaml` returns nothing; an install succeeds with only `registry.npmjs.org` and `github.com` reachable; credential issuance and verification are covered by a test that runs in CI.
+
 ### Warn at boot when the value PIN is too weak to rely on
 
 **Spec:** `specs/sovereign-key-custody.md` §1.
