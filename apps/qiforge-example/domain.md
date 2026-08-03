@@ -242,6 +242,12 @@ rights:
           authority: ['did:ixo:entity:qiforge-example'],
         }
       audit: { record_as: 'matrix_event', signature_required: false }
+    # Shipped inert, deliberately. `write` needs `bounded_execute`, and this
+    # template's ceiling is `bounded_evaluate` — so this grant authorizes
+    # nothing until a fork raises `agent_default_mode.mode`. It is here as the
+    # grant you will want when you do, written to the scope you should keep:
+    # the workspace, not the whole oracle. Raising the ceiling without
+    # narrowing an object is how a drafting oracle becomes an editing one.
     - id: 'right:oracle:author-working-documents'
       type: 'write'
       effect: 'allow'

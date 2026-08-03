@@ -59,14 +59,26 @@ Always set `name` — it appears in error messages and traces.
 
 ## Ordering
 
-The order matters. The always-on middlewares fire `beforeModel` in the order they're declared in `createMainAgent`:
+The order matters, and it is the declaration order in `createMainAgent`:
 
-1. Tool validation (rejects invalid tool args before LLM sees them).
-2. Tool retry (gives the agent one chance to fix args).
-3. Page context (injects context the agent needs for editor flows).
-4. Safety guardrail (filters unsafe output — last, so it sees what others have done).
+1. **BYO history sanitizer** — strips provider-incompatible history for BYO-LLM turns.
+2. **Capability gate** (`wrapModelCall`) — hides on-demand tools the agent has not loaded this thread.
+3. **Tool validation** (`wrapToolCall`) — validates args against their Zod schemas.
+4. **Constitution gate** (`wrapToolCall`) — evaluates every call against the entity's constitution.
+5. **Tool repetition guard** (`wrapToolCall`) — short-circuits a repeated failing call with identical arguments.
+6. **Tool retry** — gives the agent one chance to fix args.
+7. **Page context**, when a room-title hook is supplied.
+8. **Safety guardrail**, when a safety model is configured — last, so it sees what the others have done.
 
-Plugin middlewares fire after these four, in topological dependency order across plugins. Your new always-on middleware needs a deliberate slot — append, prepend, or insert mid-list. The decision should be in the PR description.
+Plugin middlewares fire after these, in topological dependency order across plugins.
+
+Two of these positions are load-bearing rather than conventional, and a change that moves them needs to say why:
+
+**The constitution gate sits ahead of the repetition guard.** The guard answers a duplicate failed call by short-circuiting it — without invoking the handler, and so without invoking anything wrapped behind it. A gate placed after the guard would never see those calls, which is a bypass rather than an optimisation.
+
+**Tool validation sits ahead of the constitution gate.** The gate classifies a call from its arguments, so those arguments should already have satisfied the tool's schema. This is convenience rather than safety — the gate treats arguments as data to classify, never as instructions — but it means an effect expression is reading a shape the tool declared rather than whatever arrived.
+
+Your new always-on middleware needs a deliberate slot: append, prepend, or insert mid-list. The decision belongs in the PR description, and if it goes anywhere near the two positions above, say what you checked.
 
 ## House rules
 

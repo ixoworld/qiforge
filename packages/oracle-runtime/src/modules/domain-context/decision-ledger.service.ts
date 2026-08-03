@@ -136,6 +136,18 @@ export class DecisionLedgerService {
   }
 
   /**
+   * Every decision this process has recorded, oldest first.
+   *
+   * The in-memory copy of what was published. Exposed because verification is
+   * the reason the chain exists and a caller should be able to run the same
+   * check an auditor reading the room would — `verifyChain(ledger.records())`
+   * answers the same question either way.
+   */
+  records(): readonly DecisionRecord[] {
+    return this.chain.records();
+  }
+
+  /**
    * What the named account has already moved since a given instant.
    *
    * A daily limit is a claim about history, and the evaluator that enforces it
