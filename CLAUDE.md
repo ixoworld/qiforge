@@ -10,6 +10,7 @@ Active codebase:
 
 - `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 14 bundled plugins).
 - `apps/qiforge-example/` — reference oracle wiring the bundled plugin set + a custom Weather plugin. Use as the canonical "how a fork is built".
+- `apps/diagnostics-evaluator-example/` — reference **evaluator oracle**: determines the vehicle's fault claims and cannot act on its own verdicts. Its `test/loop.test.ts` is the only test that loads two constitutions at once, asserting the property neither holds alone — no principal both generates a claim and determines it.
 - `apps/agentic-asset-example/` — reference agentic **asset**: the twin of a delivery vehicle that claims its own faults, accepts an independent determination, and procures its own service. The runtime governs any agentic entity — asset, deed, project, organisation, oracle — and nothing in it branches on which.
 
 `apps/app/` is legacy and being removed (TASK-32). Do not touch prompts, tools, or middlewares there. Scope edits to the runtime package and the example app.
@@ -101,6 +102,7 @@ Single new state field: `loadedPlugins` — populated by the `load_capability` m
 | Test harness           | `packages/oracle-runtime/src/testing/create-test-runtime.ts`                                                          |
 | Reference oracle       | `apps/qiforge-example/src/main.ts`                                                                                    |
 | Reference asset twin   | `apps/agentic-asset-example/` (`domain.md`, `ASSET-TWIN.md`)                                                          |
+| Reference evaluator    | `apps/diagnostics-evaluator-example/` (`domain.md`, `EVALUATOR.md`, `test/loop.test.ts`)                              |
 | Reference plugin       | `apps/qiforge-example/src/plugins/weather/weather.plugin.ts`                                                          |
 | Weather walkthrough    | `apps/qiforge-example/WEATHER-PLUGIN.md`                                                                              |
 

@@ -1,0 +1,30 @@
+{
+  "name": "diagnostics-evaluator-example",
+  "version": "0.0.1",
+  "description": "Reference evaluator oracle: determines fleet diagnostic claims it did not generate, and cannot act on its own verdicts.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ixo/oracle-runtime": "workspace:*",
+    "@nestjs/common": "^11.1.19",
+    "dotenv": "^16.4.7",
+    "reflect-metadata": "^0.2.2"
+  },
+  "devDependencies": {
+    "@ixo/vitest-config": "workspace:*",
+    "@types/node": "^22.10.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.4"
+  }
+}
