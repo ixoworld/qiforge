@@ -31,6 +31,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./constitution": {
+      "types": "./dist/constitution/index.d.ts",
+      "import": "./dist/constitution/index.js",
+      "default": "./dist/constitution/index.js"
+    },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js",

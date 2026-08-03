@@ -10,6 +10,7 @@ Active codebase:
 
 - `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 14 bundled plugins).
 - `apps/qiforge-example/` — reference oracle wiring the bundled plugin set + a custom Weather plugin. Use as the canonical "how a fork is built".
+- `apps/agentic-asset-example/` — reference agentic **asset**: the twin of a delivery vehicle that claims its own faults, accepts an independent determination, and procures its own service. The runtime governs any agentic entity — asset, deed, project, organisation, oracle — and nothing in it branches on which.
 
 `apps/app/` is legacy and being removed (TASK-32). Do not touch prompts, tools, or middlewares there. Scope edits to the runtime package and the example app.
 
@@ -99,6 +100,7 @@ Single new state field: `loadedPlugins` — populated by the `load_capability` m
 | Matrix checkpointer    | `packages/oracle-runtime/src/matrix/checkpointer/`                                                                    |
 | Test harness           | `packages/oracle-runtime/src/testing/create-test-runtime.ts`                                                          |
 | Reference oracle       | `apps/qiforge-example/src/main.ts`                                                                                    |
+| Reference asset twin   | `apps/agentic-asset-example/` (`domain.md`, `ASSET-TWIN.md`)                                                          |
 | Reference plugin       | `apps/qiforge-example/src/plugins/weather/weather.plugin.ts`                                                          |
 | Weather walkthrough    | `apps/qiforge-example/WEATHER-PLUGIN.md`                                                                              |
 
