@@ -7,6 +7,8 @@
  * writes. These tests make that a test failure rather than something found in
  * production.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { RIGHTS_ACTION_TYPES } from '../constitution/schema.js';
 import { buildMetaTools } from '../meta-tools/index.js';
@@ -162,24 +164,72 @@ describe('the classifications that decide real authority', () => {
   });
 });
 
-// The limit of this approach, stated as a test so it cannot be forgotten.
-describe('tools discovered at request time are not covered', () => {
-  // MCP-backed plugins (memory, composio, sandbox) list their tools from an
-  // upstream server per request. The names are not knowable here, so the
-  // table cannot classify them and the gate has nothing to go on: permissive
-  // treats them as `read`, strict refuses them.
-  //
-  // Fixing that means each MCP-backed plugin declaring an effect for the
-  // tools it proxies — a per-plugin decision about what that server is
-  // allowed to do on the entity's behalf, which is exactly the decision that
-  // should not be inferred from a tool name an upstream service chose.
-  it('is a known gap, not an oversight', () => {
-    const mcpBacked = BUNDLED_PLUGINS.filter((p) => p.getRequestTools);
-    expect(mcpBacked.length).toBeGreaterThan(0);
-    for (const plugin of mcpBacked) {
-      // No entry in the table is keyed to a plugin rather than a tool, so
-      // there is nothing here that could be mistaken for covering them.
-      expect(BUNDLED_TOOL_EFFECTS.has(plugin.name)).toBe(false);
+// Tools discovered at request time cannot be listed in a static table — the
+// names come from an upstream MCP server, a connected SaaS app, or the user's
+// browser. Each proxying plugin declares the effect on the tools it adapts
+// instead, which is the honest place for the decision: it is a statement about
+// what that server may do on the entity's behalf.
+describe('proxied tools are classified where they are adapted', () => {
+  const adapters = [
+    {
+      plugin: 'memory',
+      file: 'memory/memory-tools.ts',
+      // A filtered allowlist, so these are classified individually.
+      expect: /MEMORY_TOOL_EFFECTS/,
+    },
+    {
+      plugin: 'composio',
+      file: 'composio/composio-tools.ts',
+      expect: /type: 'execute'/,
+    },
+    {
+      plugin: 'sandbox',
+      file: 'sandbox/sandbox.plugin.ts',
+      expect: /type: 'execute' as const/,
+    },
+    {
+      plugin: 'portal',
+      file: 'portal/portal.plugin.ts',
+      expect: /type: 'execute'/,
+    },
+  ];
+
+  it.each(adapters)(
+    'the $plugin adapter declares an effect on what it proxies',
+    ({ file, expect: pattern }) => {
+      const source = readFileSync(
+        fileURLToPath(new URL(file, import.meta.url)),
+        'utf8',
+      );
+      expect(source).toMatch(pattern);
+      expect(source).toMatch(/effect: \{/);
+    },
+  );
+
+  // Erasing an entity's own episodic record is not a write. The record is the
+  // thing the harness exists to keep.
+  it('treats erasing memory as a delete', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('memory/memory-tools.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(source).toMatch(/MEMORY_CLEAR_MCP_NAME\]: 'delete'/);
+    expect(source).toMatch(/MEMORY_DELETE_EPISODE_MCP_NAME\]: 'delete'/);
+  });
+
+  // A remote server naming a tool `read_everything` would not make it a read.
+  it('does not let an upstream name decide the class for a general proxy', () => {
+    for (const file of [
+      'composio/composio-tools.ts',
+      'sandbox/sandbox.plugin.ts',
+      'portal/portal.plugin.ts',
+    ]) {
+      const source = readFileSync(
+        fileURLToPath(new URL(file, import.meta.url)),
+        'utf8',
+      );
+      // The class is a literal, never derived from the tool's name.
+      expect(source).not.toMatch(/type: .*\.name\.(startsWith|includes)/);
     }
   });
 });

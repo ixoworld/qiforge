@@ -221,6 +221,20 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
     name: sessionTool.name,
     description: sessionTool.description,
     schema: toolSchema(sessionTool.schema),
+    // Composio proxies arbitrary third-party actions — sending mail, posting
+    // to a channel, opening an issue. The names are chosen by Composio and
+    // the connected app, so classifying them individually would mean trusting
+    // a remote naming convention to describe authority. They are all
+    // `execute`: this reaches outside the entity and causes effects there.
+    //
+    // Scoping to the toolkit rather than one blanket object lets a grant
+    // admit `ixo:composio/gmail/*` without admitting every connected app.
+    effect: {
+      type: 'execute',
+      action: sessionTool.name,
+      object: () =>
+        `ixo:composio/${sessionTool.name.split('_')[0]?.toLowerCase() ?? 'unknown'}`,
+    },
     handler: async (args, ctx: RuntimeContext) => {
       try {
         return await sessionTool.invoke(normalizeArgs(sessionTool.name, args));

@@ -1,4 +1,5 @@
 import { MultiServerMCPClient } from '@langchain/mcp-adapters';
+import type { RightsActionType } from '../../constitution/schema.js';
 import type { z } from 'zod';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import { buildMemoryHeaders } from './memory-ucan.js';
@@ -227,12 +228,39 @@ export function createDefaultMemoryMcpFactory(
  * the Memory Engine server publishes, and our handler is a thin passthrough
  * to `mcpTool.invoke`.
  */
+/**
+ * What each Memory Engine tool does, for the constitution gate.
+ *
+ * The upstream surface is filtered to a known allowlist
+ * (`DEFAULT_MEMORY_TOOLS`), so unlike a general MCP proxy these can be
+ * classified individually rather than sharing one conservative default.
+ * Anything outside the allowlist would not reach here.
+ */
+const MEMORY_TOOL_EFFECTS: Readonly<Record<string, RightsActionType>> =
+  Object.freeze({
+    [MEMORY_SEARCH_MCP_NAME]: 'read',
+    [MEMORY_ADD_MCP_NAME]: 'write',
+    // Both remove recorded memory. An entity's own episodic record is the
+    // thing the harness exists to keep, so erasing it is `delete` and not a
+    // write — the class carries its own grant and its own ceiling.
+    [MEMORY_DELETE_EPISODE_MCP_NAME]: 'delete',
+    [MEMORY_CLEAR_MCP_NAME]: 'delete',
+  });
+
 function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
   return {
     name: mcpTool.name,
     description: mcpTool.description,
     schema: mcpTool.schema,
     handler: async (args) => mcpTool.invoke(args),
+    effect: {
+      // A tool the allowlist admits but nobody classified is `delete` rather
+      // than `read`: the conservative reading of an unknown memory operation
+      // is that it destroys something.
+      type: MEMORY_TOOL_EFFECTS[mcpTool.name] ?? 'delete',
+      action: mcpTool.name,
+      object: () => 'ixo:memory/episodes',
+    },
   };
 }
 

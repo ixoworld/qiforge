@@ -219,11 +219,24 @@ Classification runs toward the more restricted class on close calls: a read wron
 - **`vfs_share` is `govern`.** It publishes a file so anyone with the link can read it. As a `write`, a plain filesystem grant would authorise publishing to the world.
 - **`resolve_task_approval` is `evaluate`.** It records a decision about a draft, and a decision is an evaluation whatever it is stored as.
 
-### The gap: tools discovered at request time
+### Tools the runtime proxies
 
-MCP-backed plugins — memory, composio, sandbox — list their tools from an upstream server per request. Those names are chosen by the server, not by this repository, so no static table can enumerate them: permissive treats them as `read`, strict refuses them.
+Four plugins surface tools whose names come from somewhere else — an upstream MCP server, a connected SaaS app, or the user's browser. No static table can enumerate those, so each adapter declares the effect on the tools it wraps. That is the honest home for the decision: it is a statement about what that server may do on the entity's behalf.
 
-Closing it means each MCP-backed plugin declaring an effect for the tools it proxies — a decision about what that server may do on the entity's behalf. That decision should not be inferred from a tool name the upstream service picked, which is why it is not guessed here. `tool-effects.test.ts` pins the gap as a test so it stays visible.
+| Plugin     | Class     | Object                   | Why                                                                                       |
+| ---------- | --------- | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `memory`   | per tool  | `ixo:memory/episodes`    | A filtered allowlist, so these are classified individually rather than sharing a default. |
+| `composio` | `execute` | `ixo:composio/<toolkit>` | Proxies arbitrary third-party actions — sending mail, posting, opening issues.            |
+| `sandbox`  | `execute` | `ixo:sandbox`            | Runs code, and a tool that runs code can do whatever that code does.                      |
+| `portal`   | `execute` | `ixo:portal/browser`     | Drives the user's own browser; effects land wherever it is pointed.                       |
+
+Two decisions in that table are worth stating.
+
+**The class is never derived from the tool's name.** A remote server naming something `read_everything` would not make it a read, and letting an upstream naming convention bound the entity's authority is the failure this whole layer exists to prevent. For the general proxies the class is a literal; a test asserts none of them branches on the name.
+
+**Erasing memory is `delete`, not `write`.** An entity's own episodic record is the thing the harness exists to keep, so `memory-engine__clear` and `memory-engine__delete_episode` carry their own class, their own grant and their own ceiling. A memory tool the allowlist admits but nobody classified also defaults to `delete` — the conservative reading of an unknown memory operation is that it destroys something.
+
+Composio scopes per toolkit rather than one blanket object, so a grant can admit `ixo:composio/gmail/*` without admitting every connected app.
 
 ## What this phase does not do
 
