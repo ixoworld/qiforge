@@ -207,6 +207,24 @@ A refusal comes back as a `ToolMessage` with `status: 'error'` and a stable `[co
 
 `subagent-as-tool.ts` used to detect refusal phrasing heuristically and re-invoke the sub-agent with text asserting it was "fully authorized". That is precisely the move the constitution exists to make impossible, and a heuristic over model prose cannot tell a constitutional refusal from a stylistic one. It is gone. Soft LLM refusals are no longer auto-retried — accepted, and safer.
 
+### What the bundled tools declare
+
+`plugins/tool-effects.ts` holds the effect for every statically-declared bundled tool, in one table. A tool's own `PluginTool.effect` always wins — the table is a convenience for the bundled set, not a substitute for the field.
+
+One file rather than eighty declarations because the complete answer to "what can this runtime do, and to what" should be auditable in a single read. The cost is drift, and two things catch it: a consolidated boot warning naming every undeclared tool, and `tool-effects.test.ts`, which collects from the registry and fails if anything is unclassified. Collecting rather than grepping matters — it is how the three `setStatusTool`-built task tools were found, whose names are factory arguments and appear in no `name:` field.
+
+Classification runs toward the more restricted class on close calls: a read wrongly filed as a write costs an unnecessary grant, while the reverse lets an edit through on a read grant. Three are worth knowing:
+
+- **`mint_invocation` is `govern`.** It mints a UCAN invocation against a service — delegating authority, which the format maps through `delegate`.
+- **`vfs_share` is `govern`.** It publishes a file so anyone with the link can read it. As a `write`, a plain filesystem grant would authorise publishing to the world.
+- **`resolve_task_approval` is `evaluate`.** It records a decision about a draft, and a decision is an evaluation whatever it is stored as.
+
+### The gap: tools discovered at request time
+
+MCP-backed plugins — memory, composio, sandbox — list their tools from an upstream server per request. Those names are chosen by the server, not by this repository, so no static table can enumerate them: permissive treats them as `read`, strict refuses them.
+
+Closing it means each MCP-backed plugin declaring an effect for the tools it proxies — a decision about what that server may do on the entity's behalf. That decision should not be inferred from a tool name the upstream service picked, which is why it is not guessed here. `tool-effects.test.ts` pins the gap as a test so it stays visible.
+
 ## What this phase does not do
 
 Per-permit UCAN minting and executor receipts, the Merkle-log episode ledger and its on-chain anchoring, cognition contracts, and the entity's own claims and settlement all come later. This phase establishes one thing: **no tool executes without a recorded authorization decision.**

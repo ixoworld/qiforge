@@ -14,6 +14,7 @@ import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool.js';
 import { createConstitutionGateMiddleware } from './middlewares/index.js';
+import { resolveToolEffect } from '../plugins/tool-effects.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 /** Inputs for collecting and wrapping sub-agents. */
@@ -93,7 +94,8 @@ function effectMapFor(
     ? subAgent.tools
     : subAgent.tools(buildCtx);
   for (const tool of tools) {
-    if (tool.effect) out.set(tool.name, tool.effect);
+    const effect = resolveToolEffect(tool);
+    if (effect) out.set(tool.name, effect);
   }
   return out;
 }

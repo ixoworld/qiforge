@@ -54,6 +54,7 @@ import {
 import { MainAgentGraphState } from './state.js';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback.js';
 import { computeSubAgentToolName } from './subagent-as-tool.js';
+import { resolveToolEffect } from '../plugins/tool-effects.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
@@ -275,7 +276,8 @@ export async function createMainAgent(
     const effective =
       tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
     visibilityByToolName.set(tool.name, effective);
-    if (tool.effect) effectByToolName.set(tool.name, tool.effect);
+    const effect = resolveToolEffect(tool);
+    if (effect) effectByToolName.set(tool.name, effect);
   }
   for (const { pluginName, subAgent } of allSubAgents) {
     const toolName = computeSubAgentToolName(subAgent.name);
