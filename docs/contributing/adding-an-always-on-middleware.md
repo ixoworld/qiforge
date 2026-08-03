@@ -1,13 +1,17 @@
 # Adding an always-on middleware
 
-The runtime installs four always-on middlewares before any plugin middleware runs:
+The runtime installs a fixed always-on stack before any plugin middleware runs:
 
-1. `createToolValidationMiddleware` — validates tool args against their Zod schemas.
-2. `toolRetryMiddleware` — LangChain built-in. One retry on tool validation failure.
-3. `createPageContextMiddleware` — injects active page context for editor flows.
-4. `createSafetyGuardrailMiddleware` — blocks output that violates the safety guardrails.
+1. `createByoHistorySanitizerMiddleware` — strips provider-incompatible history for BYO-LLM turns.
+2. `createCapabilityGateMiddleware` — hides on-demand plugin tools the agent has not loaded this thread.
+3. `createToolValidationMiddleware` — validates tool args against their Zod schemas.
+4. `createConstitutionGateMiddleware` — evaluates every tool call against the entity's constitution. Placed ahead of the repetition guard, which short-circuits duplicate failed calls without invoking the handler: a gate behind it would never see those calls.
+5. `createToolRepetitionGuardMiddleware` — short-circuits a repeated failing call with identical arguments.
+6. `toolRetryMiddleware` — LangChain built-in. One retry on tool failure.
+7. `createPageContextMiddleware` — injects active page context for editor flows (when a room-title hook is supplied).
+8. `createSafetyGuardrailMiddleware` — blocks output that violates the safety guardrails (when a safety model is supplied).
 
-These are hard-coded into `createMainAgent` in the order shown. Adding a fifth is a runtime-level decision.
+These are hard-coded into `createMainAgent` in the order shown, and the order is part of the contract — see the constitution gate's placement for why. Adding one is a runtime-level decision.
 
 Don't add an always-on middleware just because something needs to run on every turn. The threshold is high:
 
@@ -15,7 +19,7 @@ Don't add an always-on middleware just because something needs to run on every t
 - **It must run unconditionally** — no fork should be able to opt out (otherwise it's a plugin).
 - **It must be cheap.** It costs ms on every LLM call.
 
-If the answer is "this is needed when plugin X is loaded", build it into plugin X's `getMiddlewares` instead. The four always-on middlewares are framework contracts; the rest are plugin contributions.
+If the answer is "this is needed when plugin X is loaded", build it into plugin X's `getMiddlewares` instead. The always-on middlewares are framework contracts; the rest are plugin contributions.
 
 ## Checklist
 
@@ -55,7 +59,7 @@ Always set `name` — it appears in error messages and traces.
 
 ## Ordering
 
-The order matters. The four always-on middlewares fire `beforeModel` in the order they're declared in `createMainAgent`:
+The order matters. The always-on middlewares fire `beforeModel` in the order they're declared in `createMainAgent`:
 
 1. Tool validation (rejects invalid tool args before LLM sees them).
 2. Tool retry (gives the agent one chance to fix args).
@@ -73,5 +77,5 @@ Plugin middlewares fire after these four, in topological dependency order across
 
 ## Read next
 
-- [Graph and state](../architecture/graph-and-state.md) — the four always-on middlewares in order.
+- [Graph and state](../architecture/graph-and-state.md) — the always-on middlewares in order.
 - Public docs: `ixo-docs/build-an-oracle/guides/plugin-middlewares.mdx` — the developer-facing version for plugin authors.

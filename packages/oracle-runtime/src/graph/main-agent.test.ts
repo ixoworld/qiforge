@@ -210,6 +210,10 @@ describe('createMainAgent', () => {
       'ByoHistorySanitizerMiddleware',
       'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
+      // Ahead of the repetition guard, which short-circuits duplicate failed
+      // calls without invoking the handler — a gate behind it would never see
+      // the calls the guard answers.
+      'ConstitutionGateMiddleware',
       'ToolRepetitionGuardMiddleware',
       'ToolRetryMiddleware',
       'PageContextMiddleware',

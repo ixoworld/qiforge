@@ -98,13 +98,17 @@ Other sections (identity, operating mode, user context, time context, user prefe
 
 Order is fixed:
 
-1. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
-2. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
-3. `createPageContextMiddleware()` — injects active page context for editor flows.
-4. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails.
-5. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
+1. `createByoHistorySanitizerMiddleware` — strips provider-incompatible history for BYO-LLM turns.
+2. `createCapabilityGateMiddleware` — hides on-demand plugin tools the agent has not loaded this thread.
+3. `createToolValidationMiddleware` — validates tool args against their Zod schemas.
+4. `createConstitutionGateMiddleware` — evaluates every tool call against the entity's constitution. Placed ahead of the repetition guard, which short-circuits duplicate failed calls without invoking the handler: a gate behind it would never see those calls.
+5. `createToolRepetitionGuardMiddleware` — short-circuits a repeated failing call with identical arguments.
+6. `toolRetryMiddleware` — LangChain built-in. One retry on tool failure.
+7. `createPageContextMiddleware` — injects active page context for editor flows (when a room-title hook is supplied).
+8. `createSafetyGuardrailMiddleware` — blocks output that violates the safety guardrails (when a safety model is supplied).
+9. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
 
-All four always-on middlewares ship in `graph/middlewares/`. They're not removable or reorderable.
+They ship in `graph/middlewares/` and are neither removable nor reorderable. The constitution gate is also installed inside every sub-agent and the standalone editor agent — a gate covering only the main agent would leave delegation as a way around it, which is the first thing a model reaches for after a refusal.
 
 ## Read next
 

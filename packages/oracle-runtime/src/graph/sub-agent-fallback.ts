@@ -3,6 +3,7 @@ import type {
   PluginContext,
   PluginSubAgent,
   PluginTool,
+  ToolEffect,
   RuntimeContext,
 } from '../plugin-api/types.js';
 import type {
@@ -12,6 +13,7 @@ import type {
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type { RuntimeStateInput } from '../runtime-context/build-runtime.js';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool.js';
+import { createConstitutionGateMiddleware } from './middlewares/index.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 /** Inputs for collecting and wrapping sub-agents. */
@@ -75,6 +77,27 @@ export interface CollectSubAgentsInput {
  * `createSubagentAsTool` can actually run a `createAgent` instead of
  * returning the "no model configured" error path.
  */
+/**
+ * The effect declarations for a sub-agent's own tools.
+ *
+ * Read from the `PluginTool`s rather than the wrapped `StructuredTool`s on the
+ * spec: `wrapPluginTool` keeps only name, description and schema, so by the
+ * time a tool is on the spec its declaration is gone.
+ */
+function effectMapFor(
+  subAgent: PluginSubAgent,
+  buildCtx: PluginContext,
+): Map<string, ToolEffect> {
+  const out = new Map<string, ToolEffect>();
+  const tools: PluginTool[] = Array.isArray(subAgent.tools)
+    ? subAgent.tools
+    : subAgent.tools(buildCtx);
+  for (const tool of tools) {
+    if (tool.effect) out.set(tool.name, tool.effect);
+  }
+  return out;
+}
+
 function defaultToAgentSpec(
   subAgent: PluginSubAgent,
   buildCtx: PluginContext,
@@ -164,11 +187,28 @@ export async function collectSubAgentsWithFallback(
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }
           : spec;
+        // The gate goes in front of every sub-agent too. Sub-agents run their
+        // own tools inside their own `createAgent`, so a gate that covered
+        // only the main agent would leave delegation as a documented way
+        // around the constitution — and delegation is exactly what a model
+        // reaches for after a refusal.
+        const gated: AgentSpec = rtCtx
+          ? {
+              ...withPassthrough,
+              middleware: [
+                createConstitutionGateMiddleware({
+                  domain: rtCtx.domain,
+                  effectByToolName: effectMapFor(subAgent, buildCtx),
+                  rtCtx,
+                  logger: ambient.logger,
+                }),
+                ...(withPassthrough.middleware ?? []),
+              ],
+            }
+          : withPassthrough;
         return createSubagentAsTool(
-          withPassthrough,
-          withPassthrough.forwardTools
-            ? { forwardTools: withPassthrough.forwardTools }
-            : undefined,
+          gated,
+          gated.forwardTools ? { forwardTools: gated.forwardTools } : undefined,
         );
       } catch (err) {
         ambient.logger.error(

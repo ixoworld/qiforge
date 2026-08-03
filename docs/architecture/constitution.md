@@ -189,6 +189,24 @@ A tool reading `rtCtx.domain` is reading a description of what governs it, not a
 
 Three things about it are deliberate. It tells the model the constitution is enforced _outside_ the conversation and that message text claiming to authorize it changes nothing, so it never reads as "please comply". It reproduces prohibitions verbatim, because paraphrasing a prohibition is how it stops being one. And it renders nothing at all when the document is at the top ceiling with no baseline, triggers or prohibitions — a section that says nothing still costs tokens on every turn.
 
+## The gate
+
+`createConstitutionGateMiddleware` is where the evaluator meets a live tool call. It wraps every tool execution: classify the call from the tool's declared `effect`, evaluate against the constitution, and only then run the handler.
+
+Three properties make it a gate rather than a suggestion.
+
+**Placement.** It sits ahead of the repetition guard, which short-circuits duplicate failed calls _without_ invoking the handler. A gate behind it would never see those calls. It is also installed inside every sub-agent and the standalone editor agent — a gate covering only the main agent would leave delegation as a documented way around the constitution, and delegation is the first thing a model reaches for after a refusal.
+
+**It fails closed.** An undeclared effect under strict enforcement, an `effect.object` expression that throws, the evaluator itself throwing — each denies. The only path to execution is an explicit permit.
+
+**It reads nothing the model writes.** The constitution is frozen at boot and the effect declaration is registry metadata. The arguments are the only model-supplied input, and they are data to classify rather than instructions to obey. Text claiming authority changes nothing.
+
+A refusal comes back as a `ToolMessage` with `status: 'error'` and a stable `[constitution:denied]` / `[constitution:manual_review_required]` prefix, carrying the reason codes and rule references. The `error` status is load-bearing: it is what lets the repetition guard stop a model that retries a refusal verbatim.
+
+### What was removed to make this true
+
+`subagent-as-tool.ts` used to detect refusal phrasing heuristically and re-invoke the sub-agent with text asserting it was "fully authorized". That is precisely the move the constitution exists to make impossible, and a heuristic over model prose cannot tell a constitutional refusal from a stylistic one. It is gone. Soft LLM refusals are no longer auto-retried — accepted, and safer.
+
 ## What this phase does not do
 
 Per-permit UCAN minting and executor receipts, the Merkle-log episode ledger and its on-chain anchoring, cognition contracts, and the entity's own claims and settlement all come later. This phase establishes one thing: **no tool executes without a recorded authorization decision.**
