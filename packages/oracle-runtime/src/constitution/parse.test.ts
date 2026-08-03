@@ -130,9 +130,10 @@ describe('parseDomainMdSubset', () => {
   });
 
   it('rejects a byte-order mark', () => {
-    expect(() => parseDomainMdSubset(`﻿${render(baseFrontmatter())}`)).toThrow(
-      /byte-order/i,
-    );
+    // Escaped rather than literal: a bare U+FEFF is invisible in a diff.
+    expect(() =>
+      parseDomainMdSubset(`\u{FEFF}${render(baseFrontmatter())}`),
+    ).toThrow(/byte-order/i);
   });
 
   it('rejects frontmatter that fails schema validation', () => {
