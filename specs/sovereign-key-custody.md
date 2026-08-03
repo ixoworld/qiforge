@@ -1,7 +1,7 @@
 # Sovereign Key Custody — Research Spike
 
 **Status:** Research spike — findings and a recommended direction, not an approved plan
-**Revision:** v1.1 — 2026-08-02 (v1: findings and recommendation; v1.1 adds §8, the TEE upgrade specified for the roadmap)
+**Revision:** v1.2 — 2026-08-03 (v1: findings and recommendation; v1.1 adds §8, the TEE upgrade for the roadmap; v1.2 adds §9, the x402 sense-check)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Relates to:** `specs/sovereign-agency-harness.md` (§12 Identity Core, §15 Capability Kernel, Phase 3)
 
@@ -337,7 +337,83 @@ Two things could pull the upgrade forward independently of the hosting decision:
 
 ---
 
-## 9. References
+## 9. Sense-check against x402 (Base agent payments)
+
+Compared because x402 solves the adjacent half of our problem — bounded machine authority over value — from an entirely different lineage. Verified against the specification repo and Coinbase's own documentation; four premises in the brief that prompted this turned out to be stale or wrong, and they are corrected inline.
+
+### 9.1 Four corrections before the comparison
+
+1. **x402 is no longer Coinbase's.** It was contributed to the **Linux Foundation**; the x402 Foundation reached operational launch **14 July 2026** with ~40 members (Premier includes AWS, Google, Stripe, Visa, Mastercard, Circle, Cloudflare, Shopify, Coinbase). The canonical repo is `x402-foundation/x402`; `coinbase/x402` paths 404. This matters for our trust envelope: a neutrally-governed standard is a different proposition from a vendor protocol.
+2. **There are two live wire formats.** v1 uses `X-PAYMENT` / `X-PAYMENT-RESPONSE` with requirements in the response body. **v2** (dated 2025-12-09) moves everything into headers — `PAYMENT-REQUIRED`, `PAYMENT-SIGNATURE`, `PAYMENT-RESPONSE` — drops the `X-` prefixes per RFC 6648, switches to **CAIP-2** network ids (`eip155:8453` = Base mainnet), and renames `maxAmountRequired` → `amount`. Any implementation must pin a version.
+3. **`upto`, `auth-capture` and `batch-settlement` schemes exist** alongside `exact`. `upto` is metered/usage-based settlement — directly relevant to per-call cognition billing.
+4. **AP2 changed.** v0.2 replaced intent/cart/payment mandates with **open/closed checkout mandates** as **SD-JWT** verifiable digital credentials, not W3C VCs — and its core spec does not reference x402 at all. The two are joined by a separate artifact (the A2A x402 extension, v0.1), so "x402 is the settlement rail under AP2" overstates the coupling. Our own spec references were stale and have been corrected.
+
+### 9.2 The convergence: an EIP-3009 authorization _is_ a capability token
+
+The `exact` scheme on EVM signs an **EIP-3009 `transferWithAuthorization`** as EIP-712 typed data. The signed struct maps field-for-field onto what our capability kernel mints:
+
+| EIP-3009 field                     | Our equivalent                                       |
+| ---------------------------------- | ---------------------------------------------------- |
+| `from`                             | principal (entity DID → account)                     |
+| `to`                               | `object` — the payee                                 |
+| `value`                            | `value: {amount, denom}`, exact-denomination ceiling |
+| `validAfter` / `validBefore`       | `not_before` / `expiry` grant conditions             |
+| `nonce` (random 32-byte, one-shot) | invocation nonce, replay-protected                   |
+| EIP-712 domain `verifyingContract` | the resource the capability is scoped to             |
+
+The properties are confirmed, not inferred: it is **a specific transfer, not an allowance** — ERC-3009 avoids `approve` entirely; the on-chain `_authorizationStates[authorizer][nonce]` mapping makes each authorization **one-shot**; and the spec states plainly that _"the Facilitator cannot modify the amount or destination."_ The blast radius of a leaked signature is exactly one payment, of a known amount, to a known recipient, inside a known time window.
+
+That is categorically stronger than an allowance or a capped session key, and it is the same instrument our Phase-3 per-permit minting is designed to produce. **The generalization worth taking:** the capability kernel should treat permit _encoding_ as pluggable — UCAN invocations for our own services, EIP-3009 authorizations for x402 rails, Cosmos authz grants for chain transactions — while the authority model stays single.
+
+### 9.3 The gap x402 leaves, which is exactly our thesis
+
+x402 specifies **how to express a bounded payment instrument**. It says nothing about **who decided to issue one**. The buyer's runtime parses the challenge, picks a requirement, and signs. There is no policy evaluation between decision and signature.
+
+That gap is the whole reason the constitution gate exists. A prompt-injected agent holding valid credentials signs a valid payment; the protocol will faithfully honour it, because everything about the instrument is correct. Coinbase's **Policy Engine** is the closest mitigation — destination allowlists, amount limits, KYT, contract/method constraints, deterministic first-match evaluation — but it is gated by _possession of CDP credentials_, not by an entity's constitution, and the documentation does not say whether it evaluates inside the enclave or in front of it, which determines whether a CDP-side compromise bypasses it.
+
+|                                          | x402 / CDP                                | Sovereign harness                         |
+| ---------------------------------------- | ----------------------------------------- | ----------------------------------------- |
+| Instrument scoping                       | Excellent — one-shot, bound, expiring     | Same model, our encoding                  |
+| Who authorized the _decision_            | Buyer runtime; not addressed              | Constitution gate + independent co-signer |
+| Who authorized the agent to spend at all | Not addressed (AP2's job, separate layer) | Human-review tier / steward co-signature  |
+| Payer identity                           | An address                                | A DID that survives key rotation          |
+| Policy locus                             | Operator-hosted, credential-gated         | Entity-governed, constitutionally amended |
+
+### 9.4 The custody verdict
+
+The crux question — does "signs without raw private keys" mean non-custodial? — resolves as **genuinely mixed**, and both simplifications are wrong.
+
+**Non-custodial in key ownership.** CDP Server Wallets run in AWS Nitro Enclaves; Coinbase documents that plaintext keys never leave the enclave and are inaccessible _"to CDP, AWS, or other infrastructure components."_ Decisively, **the developer can export the raw private key** via `cdp.evm.exportAccount()` given the `Export` API scope, end-to-end encrypted from enclave to SDK. A provider that hands you the key on demand is not exercising custody in the usual sense. So "the agent doesn't hold a raw private key" is a **deployment default, not a cryptographic constraint** — there is no lock-in at the key layer.
+
+**Custodial in availability and operational trust.** Coinbase operates the enclave, its image and attestation, the authentication service, and the policy engine, and holds the encrypted key at rest in its database. If CDP is down, suspended, or terminates the account, signing stops. And the guarantee is **operator-asserted rather than user-verifiable**: no public third-party audit and no developer-facing remote-attestation procedure was found that would let us confirm which enclave image is running. That is a materially weaker assurance than the on-chain-governed measurement registries in §8, where approval of the running code is itself a public, governed act.
+
+**Against our test:** CDP fails _domain-governed only_ — not because it is insecure, but because enforcement and availability depend on a party whose behaviour we cannot verify. **The protocol passes.** x402 is LF-governed, facilitators are pluggable and self-hostable (`x402-rs`, Hono, Faremeter, Cloudflare and others operate independent ones), and the buyer signs with _any_ signer. Facilitator trust reduces to **liveness and delivery-fairness, not custody**: a facilitator can decline to settle, delay to the edge of the window, or settle while the seller withholds the resource — but cannot alter, reuse, or exceed the authorization, and never sees a key.
+
+**So: adopt the rail, keep our own custody.** Our threshold signer becomes the x402 buyer signer; no CDP wallet in the sovereign path.
+
+### 9.5 What we should take from it
+
+- **x402 as the `pay`-class executor, behind the gate — never beside it.** One locus of authority; do not stack a second policy engine whose rules could conflict with the constitution.
+- **Gasless is a real operational win.** The facilitator broadcasts and pays gas, so the entity needs only the stablecoin — no native-token balance management, gas estimation or stuck-nonce handling. Worth having regardless of custody choices.
+- **The `upto` scheme** fits metered cognition billing better than `exact`, and matches the Economic Membrane's per-call model.
+- **We are already a 402 server.** `subscription.middleware.ts` gates every request on subscription/credits _after_ UCAN auth, so the payer's DID is already known at the point of refusal. Emitting a `PAYMENT-REQUIRED` challenge and verifying a `PAYMENT-SIGNATURE` would make the oracle sellable to other agents — additive rather than architectural, and the most direct route to entities earning their own operating costs.
+
+### 9.6 The Cosmos gap — and why a naive fix would be wrong
+
+There is **no Cosmos scheme**. Fifteen chain families implement `exact` (EVM, Solana, Sui, NEAR, Aptos, Algorand, Cardano, Casper, Concordium, Hedera, Keeta, StarkNet, Stellar, TON, XRPL); Cosmos is absent. `cosmos:<chain-id>` is a valid CAIP-2 namespace, so nothing in the identifier model blocks it — nobody has written `scheme_exact_cosmos.md`.
+
+The trap: the obvious Cosmos primitives — `authz` grants and `feegrant` — are **allowance-shaped, not one-shot-transfer-shaped**. Mapping x402 onto them naively would silently discard the property that makes the scheme good (§9.2) and reintroduce standing authority. A correct Cosmos scheme needs a one-shot, nonce-protected, recipient-and-amount-bound signed transfer authorization. That is a design problem, not a protocol blocker — and, given IXO's entity-account and smart-account primitives, a plausible contribution to a standard now under neutral governance.
+
+### 9.7 What I could not verify
+
+1. Whether Coinbase can technically sign without a developer request. No public audit or developer-facing attestation-verification procedure found — the highest-value open question, and the reason CDP fails our test rather than passing it conditionally.
+2. Whether CDP policy evaluation runs inside the enclave or in front of it.
+3. Whether key export remains available after account suspension — determines whether the availability risk is genuinely mitigable by exporting in advance.
+4. Whether any Cosmos scheme is proposed; the repo's issues were unreachable from this container.
+
+---
+
+## 10. References
 
 **Verified locally:** `packages/oracles-chain-client/src/matrix-bot/setup-claim-signing-mnemonics.ts` (at-rest routine), `setup-encryption-key.ts`, `packages/oracle-runtime/src/bootstrap/create-oracle-app.ts` (`wireSigningAndEncryptionKeys`), `packages/oracle-runtime/src/modules/ucan/ucan.service.ts`.
 
