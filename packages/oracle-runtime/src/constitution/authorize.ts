@@ -187,6 +187,7 @@ export const REASON = {
   proofRevoked: 'capability_revoked',
   verifierUnavailable: 'capability_verifier_unavailable',
   valueMalformed: 'value_malformed',
+  valueUndeclared: 'value_undeclared',
   valueDenomMismatch: 'value_denomination_mismatch',
   valueExceedsGrant: 'value_exceeds_grant',
   flowStateMismatch: 'flow_state_mismatch',
@@ -484,21 +485,28 @@ async function evaluateGrant(
   if (conditions.max_value) {
     const value = request.value;
     if (!value) {
-      // A ceiling with no declared value cannot be checked; carry it as an
-      // obligation so the executor stays bound by it.
-      obligations.push({
-        kind: 'value_ceiling',
-        detail: `At most ${conditions.max_value.amount} ${conditions.max_value.denom}.`,
-      });
-    } else {
-      // Only identical denominations are comparable — conversion needs a
-      // governed price policy this runtime deliberately does not have.
-      if (value.denom !== conditions.max_value.denom)
-        return fail(REASON.valueDenomMismatch);
-      if (BigInt(value.amount) > BigInt(conditions.max_value.amount)) {
-        return fail(REASON.valueExceedsGrant);
-      }
+      // A bound that cannot be evaluated is not a bound that has been
+      // satisfied. This grant exists to cap what an action may move; an
+      // action that never says what it moves is asking to be trusted with
+      // the cap rather than held to it, which is the whole thing the ceiling
+      // is for. The obligation this once carried was addressed to an
+      // executor that does not read obligations — so it permitted, and the
+      // cap did nothing.
+      return fail(REASON.valueUndeclared);
     }
+    // Only identical denominations are comparable — conversion needs a
+    // governed price policy this runtime deliberately does not have.
+    if (value.denom !== conditions.max_value.denom)
+      return fail(REASON.valueDenomMismatch);
+    if (BigInt(value.amount) > BigInt(conditions.max_value.amount)) {
+      return fail(REASON.valueExceedsGrant);
+    }
+    // Recorded so the decision says which cap the permit was checked against,
+    // not to ask anyone downstream to check it again.
+    obligations.push({
+      kind: 'value_ceiling',
+      detail: `Checked against a ceiling of ${conditions.max_value.amount} ${conditions.max_value.denom}.`,
+    });
   }
 
   // A grant that names a capability format other than the document itself

@@ -103,9 +103,13 @@ A grant is about a request only when the principal, action class, operation and 
 
 Deny grants are evaluated before allow grants and win outright, including for actions below the baseline.
 
+**The principal a grant names is the entity itself.** The gate sets `principal.did` from `constitution.subject`, and a grant matches only on equality with it — so `rights.entries[].subject` has to be written in the same identifier space, `urn:uuid` draft identity included. Naming a third party is legal and sometimes correct, but such a grant authorises nothing _here_; the linter says so with `ungoverned-grant-subject` (a warning, since the document may legitimately describe rights it does not itself exercise).
+
+This is worth stating plainly because the failure is silent. A grant with the wrong subject parses, lints, and reads like authority, while every action it was written to permit refuses with `no_matching_grant`. It shipped that way in this repo's own reference oracle: a draft constitution held a `urn:uuid` identity and both grants named an invented `did:ixo:entity:qiforge-example`.
+
 ### Conditions
 
-A matching grant still has to survive its conditions: activation and expiry against the declared clock, flow state, claim type, role, credential, and value ceiling. Value comparison uses `BigInt` and **refuses across denominations** — converting between them needs a governed price policy the runtime deliberately does not have. A ceiling that cannot be checked (no declared value on the call) is carried forward as an obligation rather than waved through.
+A matching grant still has to survive its conditions: activation and expiry against the declared clock, flow state, claim type, role, credential, and value ceiling. Value comparison uses `BigInt` and **refuses across denominations** — converting between them needs a governed price policy the runtime deliberately does not have. A ceiling that cannot be checked — the grant caps value, the call declares none — **denies** (`value_undeclared`). This is not a technicality: an action that never says what it moves has not come in under the cap, it has declined to be measured by it, and a ceiling that permits whatever it cannot see is not a ceiling. In practice the reason code means a tool classified under a value-bearing grant is missing its `effect.value` extractor.
 
 A declared value must be an unsigned base-10 integer, and that is checked where the request enters rather than where a ceiling reads it. The constitution's own amounts are validated when the document is parsed, but the request's amount is assembled at runtime by a plugin's `effect.value` extractor, where nothing but the type checker stands between a typo and a real amount. `-1`, `1.5`, `007` and `''` all read as plausible `BigInt` input and would otherwise slip under a ceiling; `'abc'` would throw out of the evaluator entirely. All of them deny with `value_malformed`, and none of them reach the capability verifier.
 

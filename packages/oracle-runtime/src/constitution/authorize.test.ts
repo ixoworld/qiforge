@@ -437,9 +437,32 @@ describe('authorize — grant conditions', () => {
     expect(decision.reasonCodes).toContain(REASON.valueExceedsGrant);
   });
 
-  it('carries an unchecked ceiling forward as an obligation', async () => {
+  // The grant caps what the action may move. An action that declares no value
+  // has not come in under the cap — it has declined to be measured by it, and
+  // a ceiling that permits whatever it cannot see is not a ceiling.
+  it('denies when a ceiling exists and the action declares no value', async () => {
     const decision = await authorize(
-      request(),
+      { ...request(), value: null },
+      policy({
+        grants: [
+          grant({
+            conditions: {
+              ...(grant().conditions as object),
+              max_value: { amount: '500', denom: 'uixo' },
+            },
+          }),
+        ],
+      }),
+      deps,
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.valueUndeclared);
+  });
+
+  // Recorded on the permit so a decision record says which cap was applied.
+  it('records the ceiling it checked a permitted value against', async () => {
+    const decision = await authorize(
+      { ...request(), value: { amount: '100', denom: 'uixo' } },
       policy({
         grants: [
           grant({
@@ -455,7 +478,7 @@ describe('authorize — grant conditions', () => {
     expect(decision.outcome).toBe('permit');
     expect(decision.obligations).toContainEqual({
       kind: 'value_ceiling',
-      detail: 'At most 500 uixo.',
+      detail: 'Checked against a ceiling of 500 uixo.',
     });
   });
 

@@ -223,7 +223,7 @@ rights:
     - id: 'right:oracle:read-domain-context'
       type: 'read'
       effect: 'allow'
-      subject: 'did:ixo:entity:qiforge-example'
+      subject: 'urn:uuid:6f1d0d5a-4a1e-4f2b-9c7a-2f9a5b3c1d40'
       object: 'ixo:oracle'
       action: '*'
       capability: { format: 'policy', reference: 'domain_md' }
@@ -245,7 +245,7 @@ rights:
     - id: 'right:oracle:author-working-documents'
       type: 'write'
       effect: 'allow'
-      subject: 'did:ixo:entity:qiforge-example'
+      subject: 'urn:uuid:6f1d0d5a-4a1e-4f2b-9c7a-2f9a5b3c1d40'
       object: 'ixo:oracle/workspace/*'
       action: '*'
       capability: { format: 'policy', reference: 'domain_md' }

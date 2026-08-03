@@ -17,6 +17,7 @@ function frontmatter(
     criticalDoNot?: string[];
     agents?: Array<Record<string, unknown>>;
     mode?: string;
+    grants?: Array<Record<string, unknown>>;
   } = {},
 ): Record<string, unknown> {
   const base: Record<string, unknown> = {
@@ -51,7 +52,7 @@ function frontmatter(
     },
     rights: {
       agent_baseline: { require_explicit_grant_for: ['write', 'pay'] },
-      entries: [],
+      entries: options.grants ?? [],
     },
   };
   if (options.anchoring !== null) {
@@ -226,12 +227,37 @@ describe('loadDomainMd — strict', () => {
 });
 
 describe('buildDomainContext', () => {
+  // A deny grant with a nested ceiling: the shapes a shallow freeze leaves
+  // writable are exactly the ones worth rewriting.
+  const GRANT = {
+    id: 'right:test:no-payment',
+    type: 'payment',
+    effect: 'deny',
+    subject: SUBJECT,
+    object: 'ixo:treasury',
+    action: '*',
+    capability: { format: 'policy', reference: 'domain_md' },
+    conditions: {
+      flow_state: null,
+      claim_type: null,
+      max_value: { amount: '100', denom: 'uixo' },
+      not_before: null,
+      expiry: null,
+      role_required: null,
+      credential_required: null,
+      human_review: false,
+    },
+    revocation: { method: 'governance', reference: null },
+    audit: { required: true },
+  };
+
   const parsed = () =>
     parseDomainMdSubset(
       render(
         frontmatter({
           profile: 'anchored',
           criticalDoNot: ['Never sign on a user’s behalf.'],
+          grants: [GRANT],
           agents: [
             {
               id: SUBJECT,
@@ -271,17 +297,69 @@ describe('buildDomainContext', () => {
     expect(ctx.advisory.escalationRole).toBe('steward');
   });
 
+  // Asserting `isFrozen` on the containers is how the shallow-freeze bug
+  // survived review: every one of those assertions passed while each grant,
+  // and each grant's conditions, stayed writable. The property is about what
+  // is reachable, so the test walks what is reachable.
   it('freezes what governs, so holding a reference is not holding a lever', () => {
     const ctx = buildDomainContext({
       parsed: parsed(),
       enforcement: 'strict',
       source: SOURCE,
     });
-    expect(Object.isFrozen(ctx)).toBe(true);
-    expect(Object.isFrozen(ctx.policy)).toBe(true);
-    expect(Object.isFrozen(ctx.policy.grants)).toBe(true);
-    expect(Object.isFrozen(ctx.advisory)).toBe(true);
-    expect(Object.isFrozen(ctx.advisory.criticalDoNot)).toBe(true);
+
+    const unfrozen: string[] = [];
+    const walk = (value: unknown, path: string, seen: WeakSet<object>) => {
+      if (typeof value !== 'object' || value === null) return;
+      if (seen.has(value)) return;
+      seen.add(value);
+      if (!Object.isFrozen(value)) unfrozen.push(path);
+      for (const [key, child] of Object.entries(value)) {
+        walk(child, `${path}.${key}`, seen);
+      }
+    };
+    walk(ctx, 'domain', new WeakSet());
+
+    expect(unfrozen).toEqual([]);
+    expect(ctx.policy.grants.length).toBeGreaterThan(0);
+  });
+
+  // The mutation the freeze exists to stop, attempted rather than inferred.
+  it('cannot have a grant rewritten through the reference the gate holds', () => {
+    const ctx = buildDomainContext({
+      parsed: parsed(),
+      enforcement: 'strict',
+      source: SOURCE,
+    });
+    const [first] = ctx.policy.grants;
+    const originalEffect = first.effect;
+    const originalObject = first.object;
+
+    expect(() => {
+      // A deny turned into an allow is the whole attack.
+      first.effect = 'allow';
+    }).toThrow(TypeError);
+    expect(() => {
+      first.object = '*';
+    }).toThrow(TypeError);
+    expect(() => {
+      first.conditions.max_value = { amount: '999999999', denom: 'uixo' };
+    }).toThrow(TypeError);
+
+    expect(first.effect).toBe(originalEffect);
+    expect(first.object).toBe(originalObject);
+  });
+
+  // Freezing the projection must not freeze the document it was projected
+  // from — the caller passed it in to be read, not to be immobilised.
+  it('leaves the caller’s parsed document alone', () => {
+    const source = parsed();
+    buildDomainContext({
+      parsed: source,
+      enforcement: 'strict',
+      source: SOURCE,
+    });
+    expect(Object.isFrozen(source.frontmatter.rights.entries[0])).toBe(false);
   });
 
   it('defaults an unchecked anchor to unverified rather than assuming', () => {

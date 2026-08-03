@@ -180,10 +180,40 @@ export function resolveAgent(
 }
 
 /**
+ * Freezes a value and everything reachable from it.
+ *
+ * `Object.freeze` is one level deep, which for a policy is barely a freeze at
+ * all: freezing the grants array leaves every grant, and every grant's
+ * `conditions` and `capability`, writable by anything holding a reference. The
+ * constitution is the one input to a decision that no part of the running
+ * system may alter, and a decision record citing `cid@revision` is a claim
+ * that these exact rules applied — so the object has to actually be the bytes
+ * that were loaded, not a mutable copy of them.
+ *
+ * Cycles are handled for correctness rather than because a parsed document
+ * contains any: this runs once at boot, and a stack overflow there would be a
+ * strange way to discover that a constitution referred to itself.
+ */
+function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
+  if (typeof value !== 'object' || value === null) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    deepFreeze((value as Record<string | symbol, unknown>)[key], seen);
+  }
+  return Object.freeze(value);
+}
+
+/**
  * Projects a parsed document into the value the runtime holds.
  *
  * Pure: no IO, no clock, no environment. Everything that could fail has
  * already failed in `parseDomainMdSubset`.
+ *
+ * The result is deeply frozen, including every grant and its nested
+ * conditions. It is also a copy: freezing the projection would otherwise
+ * freeze the caller's parsed document with it, which is a surprising thing to
+ * do to something that was only passed in to be read.
  */
 export function buildDomainContext(args: {
   parsed: ParsedDomainMd;
@@ -202,7 +232,7 @@ export function buildDomainContext(args: {
   const policy = toConstitutionPolicy(parsed);
   const self = args.agent;
 
-  return Object.freeze({
+  return deepFreeze({
     enforcement,
     subject: fm.constitution.subject,
     entityType: fm.domain.type,
@@ -210,31 +240,33 @@ export function buildDomainContext(args: {
     profile: fm.conformance.profile,
     anchorVerified: args.anchorVerified ?? false,
     anchoring: fm.documents?.anchoring
-      ? Object.freeze({ ...fm.documents.anchoring })
+      ? structuredClone(fm.documents.anchoring)
       : null,
     domainMdCid: parsed.digest.cid,
     domainMdSha256: parsed.digest.sha256,
     documentRevision: fm.document_revision,
     source,
-    policy: Object.freeze({
+    policy: {
       ...policy,
-      disabledOverrides: Object.freeze([...policy.disabledOverrides]),
-      baseline: Object.freeze([...policy.baseline]),
-      humanReviewRequiredFor: Object.freeze([...policy.humanReviewRequiredFor]),
-      grants: Object.freeze([...policy.grants]),
-    }),
-    advisory: Object.freeze({
+      disabledOverrides: [...policy.disabledOverrides],
+      baseline: [...policy.baseline],
+      humanReviewRequiredFor: [...policy.humanReviewRequiredFor],
+      // Cloned, not aliased: these objects come straight out of the caller's
+      // parsed document, and freezing them in place would freeze the document.
+      grants: structuredClone(policy.grants),
+    },
+    advisory: {
       constitutionStatus: fm.constitution.status,
       constitutionType: fm.constitution.type,
       modeCeiling: fm.agent_default_mode.mode,
-      requireExplicitGrantFor: Object.freeze([
+      requireExplicitGrantFor: [
         ...fm.rights.agent_baseline.require_explicit_grant_for,
-      ]),
-      humanReviewRequiredFor: Object.freeze([...policy.humanReviewRequiredFor]),
-      criticalDoNot: Object.freeze([...(fm.critical_do_not ?? [])]),
-      forbiddenOutputs: Object.freeze([...(self?.forbidden_outputs ?? [])]),
+      ],
+      humanReviewRequiredFor: [...policy.humanReviewRequiredFor],
+      criticalDoNot: [...(fm.critical_do_not ?? [])],
+      forbiddenOutputs: [...(self?.forbidden_outputs ?? [])],
       escalationRoom: self?.escalation?.matrix_room ?? null,
       escalationRole: self?.escalation?.human_role ?? null,
-    }),
+    },
   });
 }

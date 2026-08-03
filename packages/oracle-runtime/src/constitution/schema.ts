@@ -316,7 +316,12 @@ export const rightSchema = z
     id: nonEmptyString,
     type: nonEmptyString,
     effect: z.enum(['allow', 'deny']),
-    subject: didSchema,
+    // The same identifier space as `constitution.subject`, and it has to be:
+    // a grant is matched by comparing the two for equality. Restricting this
+    // to `did:ixo` while the constitution may hold a `urn:uuid` draft identity
+    // makes a self-grant unwritable in any pre-anchoring document — and the
+    // grant an author writes instead is one that can never match.
+    subject: draftIdSchema,
     object: nonEmptyString,
     action: nonEmptyString,
     capability: z

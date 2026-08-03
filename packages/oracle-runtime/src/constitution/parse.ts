@@ -317,8 +317,31 @@ function lintRights(fm: DomainMdFrontmatter): LintFinding[] {
   const findings: LintFinding[] = [];
   const seen = new Set<string>();
 
+  // Subjects a grant can name and still be about someone this document
+  // governs. A grant is matched by comparing its subject to the acting
+  // principal, so anything outside this set is inert here whatever it says.
+  const governed = new Set<string>([
+    fm.constitution.subject,
+    fm.domain.id,
+    ...(fm.agents?.entries ?? []).map((entry) => entry.id),
+  ]);
+
   fm.rights.entries.forEach((grant, index) => {
     const path = `rights.entries[${index}]`;
+
+    // The failure this catches is silent: a grant naming a subject that never
+    // acts is not an error anywhere — it parses, it lints, it sits in the
+    // document looking like authority — and every action it was written to
+    // permit is refused for want of a grant. Naming a third party is legal,
+    // so this is a warning; the message says which identifier would work.
+    if (!governed.has(grant.subject)) {
+      findings.push({
+        code: 'ungoverned-grant-subject',
+        severity: 'warning',
+        path: `${path}.subject`,
+        message: `Grant '${grant.id}' names subject '${grant.subject}', which is neither the constitution's subject ('${fm.constitution.subject}') nor a declared agent. Nothing this document governs can match it.`,
+      });
+    }
     if (seen.has(grant.id)) {
       findings.push({
         code: 'duplicate-entry-id',

@@ -52,7 +52,7 @@ function baseFrontmatter(): Record<string, unknown> {
           id: 'right:test:read',
           type: 'read',
           effect: 'allow',
-          subject: 'did:ixo:entity:test',
+          subject: 'urn:uuid:6f1d0d5a-4a1e-4f2b-9c7a-2f9a5b3c1d40',
           object: 'ixo:oracle',
           action: '*',
           capability: { format: 'policy', reference: 'domain_md' },
@@ -244,6 +244,49 @@ describe('lintDomainMdSubset', () => {
     expect(codes(findings)).toContain(
       'constitutional-subject-profile-unresolved',
     );
+  });
+
+  // The failure mode this exists for is a document that looks like it grants
+  // authority and grants none: the subject is compared for equality against
+  // the acting principal, so a grant naming anyone else is inert. It shipped
+  // in the reference oracle, where a draft constitution held a `urn:uuid`
+  // identity and both its grants named an invented `did:ixo` — parsing,
+  // linting, and permitting nothing.
+  it('flags a grant naming a subject the document does not govern', () => {
+    const frontmatter = baseFrontmatter();
+    const rights = frontmatter.rights as {
+      entries: Record<string, unknown>[];
+    };
+    rights.entries[0].subject = 'did:ixo:entity:someone-else';
+    const findings = lintDomainMdSubset(
+      parseDomainMdSubset(render(frontmatter)),
+    );
+    expect(codes(findings)).toContain('ungoverned-grant-subject');
+    // A grant to a third party is legal in the format, so this must not stop
+    // the document being enforced — only say that this runtime cannot use it.
+    expect(hasBlockingFindings(findings)).toBe(false);
+  });
+
+  it('accepts a grant naming a declared agent rather than the entity', () => {
+    const frontmatter = baseFrontmatter();
+    const rights = frontmatter.rights as {
+      entries: Record<string, unknown>[];
+    };
+    rights.entries[0].subject = 'did:ixo:agent:delegate';
+    frontmatter.agents = {
+      entries: [
+        {
+          id: 'did:ixo:agent:delegate',
+          role: 'delegate',
+          permitted_outputs: [],
+          forbidden_outputs: [],
+        },
+      ],
+    };
+    const findings = lintDomainMdSubset(
+      parseDomainMdSubset(render(frontmatter)),
+    );
+    expect(codes(findings)).not.toContain('ungoverned-grant-subject');
   });
 
   it('rejects not_applicable for an agentic domain', () => {
