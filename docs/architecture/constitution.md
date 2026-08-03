@@ -10,6 +10,16 @@ The design rationale, the survey it came from, and the phases beyond this one li
 
 A model's output is a **claim**, not a decision. The constitution engine is the structural gate between the two: it classifies a proposed tool call into an action class, evaluates it against the entity's `domain.md`, and only then lets the handler run.
 
+## What it governs
+
+An **agentic entity** — an asset, a deed, a project, an organisation (DAO), an oracle, or any other type the format admits. The engine never branches on `domain.type`; it carries the value onto `DomainContext.entityType` so a decision record can say what was governed, and reads it nowhere else. The action vocabulary is the format's own and is entity-neutral: `vote` and `delegate` for an organisation, `transfer` and `pay` for an asset, `evaluate` and `issue` for a project all map through the same `RIGHT_TYPE_TO_ACTION` table.
+
+**The entity is the agent for its own agentic functions.** This harness _is_ the entity's agency, not a separate party acting on its behalf, so the `agents` entry whose id matches the entity's own is the one that describes this runtime — whatever kind of entity it is.
+
+A constitution may declare further agents: counterparties the entity works with, or a second agentic function the entity runs as its own deployment. Those are named by `DOMAIN_AGENT_ID` and never inferred. `resolveAgent` takes, in order: the configured id (an id naming no declared agent is an error, not a fallback — a runtime told it is an agent the constitution does not recognise must not quietly become a different one), then the entity's own entry, then a sole declared agent. Anything else is ambiguous, and strict enforcement refuses to boot rather than run with the wrong output bounds and an escalation route pointing at a room nobody is watching.
+
+The reference implementation is an oracle because that is what this runtime shipped first, not because the engine assumes one.
+
 ## Where the law comes from
 
 The entity's law is a [`domain.md`](https://github.com/ixoworld/domain.md) — YAML frontmatter plus prose, declaring where authority lives, what the agent may propose, and what it must never do without an explicit grant. The runtime enforces a subset of that format:

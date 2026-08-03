@@ -353,6 +353,10 @@ export async function createOracleApp(
     source: domainMdPath,
     bytes: domainBytes,
     enforcement,
+    agentId:
+      typeof validated.config.DOMAIN_AGENT_ID === 'string'
+        ? validated.config.DOMAIN_AGENT_ID
+        : undefined,
     verifyAnchor: opts.verifyConstitutionAnchor,
   });
   for (const warning of domainLoad.warnings) logger.warn?.(warning);
@@ -372,8 +376,10 @@ export async function createOracleApp(
   logger.log(
     `[boot] Constitution in force: ${domainContext.subject} ` +
       `rev ${domainContext.documentRevision} (${domainContext.domainMdCid}), ` +
-      `profile '${domainContext.profile}', enforcement '${domainContext.enforcement}', ` +
-      `ceiling '${domainContext.advisory.modeCeiling}' ` +
+      `type '${domainContext.entityType}', profile '${domainContext.profile}', ` +
+      `enforcement '${domainContext.enforcement}', ` +
+      `ceiling '${domainContext.advisory.modeCeiling}'` +
+      `${domainContext.agentId ? `, acting as '${domainContext.agentId}'` : ''} ` +
       `(event: boot.constitution.loaded)`,
   );
 

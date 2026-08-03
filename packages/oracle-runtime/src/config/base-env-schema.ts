@@ -145,8 +145,8 @@ export const baseEnvSchema = z.object({
   /**
    * Path to the entity's `domain.md` — its constitution. Required: the runtime
    * evaluates every tool call against it, and there is no default constitution
-   * to fall back on. An oracle without one has no basis for the authority it
-   * would be exercising.
+   * to fall back on. An entity without one has no basis for the authority it
+   * would be exercising, whatever kind of entity it is.
    */
   DOMAIN_MD_PATH: z.string(),
 
@@ -161,6 +161,23 @@ export const baseEnvSchema = z.object({
    * there is deliberately no `off`.
    */
   DOMAIN_ENFORCEMENT: z.enum(['strict', 'permissive']).default('strict'),
+
+  /**
+   * Which of the entity's declared agents this runtime is acting as — an id
+   * from `agents.entries[].id` in the constitution.
+   *
+   * An entity and its agents are different things. An agentic organisation,
+   * project, asset or deed typically declares several agents and is none of
+   * them; only an agentic oracle collapses the two by being its own single
+   * agent. Where the constitution declares more than one agent and none of
+   * them is the entity itself, the runtime cannot tell which output bounds
+   * and escalation route apply to it, and strict enforcement refuses to boot
+   * until this says so.
+   *
+   * Optional, because a constitution declaring one agent (or none) is
+   * unambiguous without it.
+   */
+  DOMAIN_AGENT_ID: z.string().optional(),
 
   /**
    * Matrix room the hash-chained authorization decision records are written

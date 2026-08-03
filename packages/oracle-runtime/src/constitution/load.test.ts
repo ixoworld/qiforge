@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { buildDomainContext, isAnchoredProfile } from './domain-context.js';
+import {
+  buildDomainContext,
+  isAnchoredProfile,
+  resolveAgent,
+} from './domain-context.js';
 import { loadDomainMd } from './load.js';
 import { parseDomainMdSubset } from './parse.js';
 import { SUPPORTED_SCHEMA_URI, SUPPORTED_SPEC_VERSION } from './schema.js';
@@ -243,10 +247,16 @@ describe('buildDomainContext', () => {
     );
 
   it('carries identity, policy and advisory content', () => {
+    const doc = parsed();
+    const resolved = resolveAgent(
+      doc.frontmatter.agents?.entries,
+      doc.frontmatter.domain.id,
+    );
     const ctx = buildDomainContext({
-      parsed: parsed(),
+      parsed: doc,
       enforcement: 'strict',
       source: SOURCE,
+      agent: resolved.kind === 'declared' ? resolved.entry : undefined,
     });
     expect(ctx.subject).toBe(SUBJECT);
     expect(ctx.documentRevision).toBe('1.2.0');
@@ -290,5 +300,185 @@ describe('isAnchoredProfile', () => {
     expect(isAnchoredProfile('runtime')).toBe(true);
     expect(isAnchoredProfile('authoring_draft')).toBe(false);
     expect(isAnchoredProfile('persisted_draft')).toBe(false);
+  });
+});
+
+// The entity is the agent for its own agentic functions — an agentic asset,
+// deed, project, organisation or oracle acts as itself. These pin that shape
+// across entity types, and pin what happens when a document names agents the
+// entity is not.
+describe('resolveAgent', () => {
+  it.each([
+    ['an agentic asset', 'did:ixo:entity:solar-array'],
+    ['an agentic deed', 'did:ixo:entity:a-commitment'],
+    ['an agentic project', 'did:ixo:entity:a-project'],
+    ['an agentic organisation', 'did:ixo:entity:a-dao'],
+    ['an agentic oracle', 'did:ixo:entity:an-oracle'],
+  ])('resolves %s to itself, alongside other declared agents', (_label, id) => {
+    const resolution = resolveAgent(
+      [
+        { id: 'did:ixo:agent:a-counterparty' },
+        { id },
+        { id: 'did:ixo:agent:another' },
+      ],
+      id,
+    );
+    expect(resolution).toMatchObject({
+      kind: 'declared',
+      via: 'entity-is-agent',
+    });
+    if (resolution.kind !== 'declared') throw new Error('unreachable');
+    expect(resolution.entry.id).toBe(id);
+  });
+
+  it('lets configuration name a second agentic function the entity runs', () => {
+    const entity = 'did:ixo:entity:a-dao';
+    const resolution = resolveAgent(
+      [{ id: entity }, { id: `${entity}#treasury` }],
+      entity,
+      `${entity}#treasury`,
+    );
+    expect(resolution).toMatchObject({ kind: 'declared', via: 'configured' });
+    if (resolution.kind !== 'declared') throw new Error('unreachable');
+    expect(resolution.entry.id).toBe(`${entity}#treasury`);
+  });
+
+  it('refuses an id the constitution does not declare, rather than falling back', () => {
+    const entity = 'did:ixo:entity:a-dao';
+    const resolution = resolveAgent(
+      [{ id: entity }],
+      entity,
+      'did:ixo:agent:absent',
+    );
+    expect(resolution.kind).toBe('not-found');
+  });
+
+  it('takes a sole declared agent even when it is named apart from the entity', () => {
+    const resolution = resolveAgent(
+      [{ id: 'did:ixo:agent:maintenance' }],
+      'did:ixo:entity:solar-array',
+    );
+    expect(resolution).toMatchObject({ kind: 'declared', via: 'sole-agent' });
+  });
+
+  it('reports ambiguity when several agents are declared and none is the entity', () => {
+    const resolution = resolveAgent(
+      [{ id: 'did:ixo:agent:one' }, { id: 'did:ixo:agent:two' }],
+      'did:ixo:entity:a-dao',
+    );
+    expect(resolution.kind).toBe('ambiguous');
+  });
+
+  it('reports no agents rather than inventing one', () => {
+    expect(resolveAgent(undefined, 'did:ixo:entity:x').kind).toBe('none');
+    expect(resolveAgent([], 'did:ixo:entity:x').kind).toBe('none');
+  });
+});
+
+describe('loadDomainMd — entity types and agentic functions', () => {
+  const ENTITY = 'did:ixo:entity:a-dao';
+
+  function doc(options: {
+    entityType?: string;
+    agents?: Array<Record<string, unknown>>;
+  }) {
+    const fm = frontmatter({ profile: 'anchored' });
+    const domain = fm.domain as Record<string, unknown>;
+    domain.id = ENTITY;
+    domain.iid = ENTITY;
+    domain.type = options.entityType ?? 'organisation';
+    const constitution = fm.constitution as Record<string, unknown>;
+    constitution.subject = ENTITY;
+    constitution.type = 'con:AgenticConstitution';
+    if (options.agents) fm.agents = { entries: options.agents };
+    return render(fm);
+  }
+
+  const SELF = {
+    id: ENTITY,
+    forbidden_outputs: ['unbounded_payment'],
+    escalation: { matrix_room: '!members:ixo.world' },
+  };
+  const OTHER = {
+    id: 'did:ixo:agent:an-auditor',
+    forbidden_outputs: ['unreviewed_final_approval'],
+    escalation: { matrix_room: '!audit:ixo.world' },
+  };
+
+  // The runtime must not branch on entity type — it carries it so decision
+  // records can say what was governed, and nothing else.
+  it.each(['asset', 'deed', 'project', 'organisation', 'oracle'])(
+    'governs an agentic %s the same way, carrying its type',
+    async (entityType) => {
+      const result = await loadDomainMd({
+        source: SOURCE,
+        bytes: doc({ entityType, agents: [SELF] }),
+        enforcement: 'strict',
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.context?.entityType).toBe(entityType);
+      expect(result.context?.agentId).toBe(ENTITY);
+      expect(result.context?.advisory.escalationRoom).toBe(
+        '!members:ixo.world',
+      );
+    },
+  );
+
+  it('takes the entity’s own bounds, not another declared agent’s', async () => {
+    const result = await loadDomainMd({
+      source: SOURCE,
+      bytes: doc({ agents: [OTHER, SELF] }),
+      enforcement: 'strict',
+    });
+    expect(result.context?.agentId).toBe(ENTITY);
+    expect(result.context?.advisory.forbiddenOutputs).toEqual([
+      'unbounded_payment',
+    ]);
+    expect(result.context?.advisory.escalationRoom).toBe('!members:ixo.world');
+  });
+
+  it('runs a named agentic function when configured to', async () => {
+    const result = await loadDomainMd({
+      source: SOURCE,
+      bytes: doc({ agents: [SELF, OTHER] }),
+      enforcement: 'strict',
+      agentId: OTHER.id,
+    });
+    expect(result.context?.agentId).toBe(OTHER.id);
+    expect(result.context?.advisory.escalationRoom).toBe('!audit:ixo.world');
+  });
+
+  it('refuses to start when it cannot tell which agentic function it runs', async () => {
+    const result = await loadDomainMd({
+      source: SOURCE,
+      bytes: doc({ agents: [OTHER, { id: 'did:ixo:agent:another' }] }),
+      enforcement: 'strict',
+    });
+    expect(result.context).toBeNull();
+    expect(result.errors[0]?.field).toBe('DOMAIN_AGENT_ID');
+    expect(result.errors[0]?.message).toMatch(
+      /cannot tell which agentic function/i,
+    );
+  });
+
+  it('warns rather than refusing under permissive enforcement', async () => {
+    const result = await loadDomainMd({
+      source: SOURCE,
+      bytes: doc({ agents: [OTHER, { id: 'did:ixo:agent:another' }] }),
+      enforcement: 'permissive',
+    });
+    expect(result.context).not.toBeNull();
+    expect(result.context?.agentId).toBeNull();
+    expect(result.warnings.join('\n')).toMatch(/set DOMAIN_AGENT_ID/i);
+  });
+
+  it('accepts an entity that declares no agents block at all', async () => {
+    const result = await loadDomainMd({
+      source: SOURCE,
+      bytes: doc({}),
+      enforcement: 'strict',
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.context?.agentId).toBeNull();
   });
 });

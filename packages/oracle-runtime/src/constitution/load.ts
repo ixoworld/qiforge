@@ -17,6 +17,7 @@
 import {
   buildDomainContext,
   isAnchoredProfile,
+  resolveAgent,
   type DomainContext,
   type DomainEnforcement,
 } from './domain-context.js';
@@ -67,6 +68,14 @@ export interface LoadDomainMdArgs {
   /** The document's exact bytes. */
   bytes: string;
   enforcement: DomainEnforcement;
+  /**
+   * Which of the entity's declared agents this runtime is acting as.
+   *
+   * Only needed when the entity declares several — which is the normal shape
+   * for an organisation, project, asset or deed, and the degenerate case for
+   * an oracle, where the entity is its own single agent.
+   */
+  agentId?: string;
   verifyAnchor?: AnchorVerifier;
 }
 
@@ -183,6 +192,51 @@ export async function loadDomainMd(
     );
   }
 
+  // Which agent this runtime is acting as. The entity is the agent for its own
+  // agentic functions, so the entity's own entry is the normal answer for
+  // every entity type. Where a document names several agents and none is the
+  // entity, the runtime cannot tell — and an unresolved agent refuses rather
+  // than running with no output bounds and no escalation route.
+  const agent = resolveAgent(
+    parsed.frontmatter.agents?.entries,
+    parsed.frontmatter.domain.id,
+    args.agentId,
+  );
+  if (agent.kind === 'not-found') {
+    errors.push({
+      field: 'DOMAIN_AGENT_ID',
+      message:
+        `This runtime is configured as agent '${agent.agentId}', which the constitution at ` +
+        `${source} does not declare. It declares: ${agent.declared.join(', ')}.`,
+      hint: 'Correct DOMAIN_AGENT_ID, or add the agent to the document under agents.entries.',
+    });
+  } else if (agent.kind === 'ambiguous') {
+    const detail =
+      `The constitution at ${source} declares ${agent.declared.length} agents ` +
+      `(${agent.declared.join(', ')}) and none of them is the entity itself, so the runtime ` +
+      `cannot tell which agentic function it is running — and therefore which output bounds ` +
+      `and escalation route apply to it.`;
+    if (enforcement === 'strict') {
+      errors.push({
+        field: 'DOMAIN_AGENT_ID',
+        message: detail,
+        hint: 'Set DOMAIN_AGENT_ID to the id of the agent this deployment runs.',
+      });
+    } else {
+      warnings.push(
+        `[constitution] ${detail} Running without them; set DOMAIN_AGENT_ID to fix.`,
+      );
+    }
+  } else if (agent.kind === 'declared' && agent.via === 'sole-agent') {
+    // The entity acting as itself needs no remark — that is the ordinary
+    // shape. A sole agent named separately from the entity is worth one line,
+    // because it is the case a second agentic function would silently change.
+    warnings.push(
+      `[constitution] Acting as agent '${agent.entry.id}', the only one declared, though it ` +
+        `is not the entity itself. Set DOMAIN_AGENT_ID to state it outright.`,
+    );
+  }
+
   if (errors.length > 0) {
     return { context: null, errors, warnings, findings };
   }
@@ -193,6 +247,7 @@ export async function loadDomainMd(
       enforcement,
       source,
       anchorVerified,
+      agent: agent.kind === 'declared' ? agent.entry : undefined,
     }),
     errors,
     warnings,

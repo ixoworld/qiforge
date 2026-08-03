@@ -62,6 +62,20 @@ export interface DomainContext {
   readonly enforcement: DomainEnforcement;
   /** The subject the constitution governs — the entity's own identifier. */
   readonly subject: string;
+  /**
+   * What kind of entity this is, verbatim from the document: `oracle`,
+   * `organisation`, `project`, `asset`, `deed`, or anything else the format
+   * admits. The runtime does not branch on it — it is carried so decision
+   * records and diagnostics can say what was being governed.
+   */
+  readonly entityType: string;
+  /**
+   * The declared agent this runtime is acting as, when the document declares
+   * agents at all. Null when it declares none — a legitimate shape for a
+   * simple entity, and distinct from "declares some but we could not tell
+   * which", which never reaches here because it refuses the boot.
+   */
+  readonly agentId: string | null;
   /** Assurance profile the document declares. */
   readonly profile: ConformanceProfile;
   /**
@@ -99,19 +113,70 @@ export interface DomainContext {
   };
 }
 
-/** The runtime's own agent entry, when the document declares one. */
-function selfAgentEntry(
+/**
+ * How the runtime came to believe a given agent entry describes it — or why
+ * it could not tell.
+ *
+ * **The entity is the agent for its own agentic functions.** An agentic
+ * asset, deed, project, organisation or oracle acts as itself; this harness
+ * is that entity's agency, not a separate party operating on its behalf. So
+ * the entry whose id is the entity's own is the normal answer, whatever kind
+ * of entity it is.
+ *
+ * A constitution may list further agents — other parties the entity works
+ * with, or a second agentic function it runs as its own deployment. Those are
+ * addressed by configuration, never inferred, because picking the wrong one
+ * applies the wrong output bounds and escalates to a room nobody is watching.
+ */
+export type AgentResolution =
+  | { kind: 'declared'; entry: DomainAgentEntry; via: 'configured' }
+  | { kind: 'declared'; entry: DomainAgentEntry; via: 'entity-is-agent' }
+  | { kind: 'declared'; entry: DomainAgentEntry; via: 'sole-agent' }
+  | { kind: 'none' }
+  | { kind: 'not-found'; agentId: string; declared: readonly string[] }
+  | { kind: 'ambiguous'; declared: readonly string[] };
+
+/**
+ * Works out which declared agent this runtime is acting as.
+ *
+ * Resolution order:
+ *
+ * 1. `agentId` — the deployment said so, which is how an entity running more
+ *    than one agentic function distinguishes them. Authoritative, and an id
+ *    naming no declared agent is an error rather than a fallback: a runtime
+ *    told it is an agent the constitution does not recognise must not quietly
+ *    become a different one.
+ * 2. The entry whose id is the entity's own — the entity acting for its own
+ *    agentic functions. The normal case for every entity type.
+ * 3. A single declared agent — unambiguous even when it is named separately
+ *    from the entity.
+ *
+ * Anything else is ambiguous, and ambiguity is reported rather than resolved.
+ */
+export function resolveAgent(
   entries: readonly DomainAgentEntry[] | undefined,
-  subject: string,
-): DomainAgentEntry | undefined {
-  if (!entries || entries.length === 0) return undefined;
-  // Prefer an entry that names the subject; otherwise a single declared agent
-  // is unambiguously this runtime. More than one and no match is ambiguous, so
-  // nothing is assumed — the advisory block simply carries less.
-  return (
-    entries.find((entry) => entry.id === subject) ??
-    (entries.length === 1 ? entries[0] : undefined)
-  );
+  entityId: string,
+  agentId?: string,
+): AgentResolution {
+  if (!entries || entries.length === 0) return { kind: 'none' };
+  const declared = entries.map((entry) => entry.id);
+
+  if (agentId) {
+    const entry = entries.find((candidate) => candidate.id === agentId);
+    return entry
+      ? { kind: 'declared', entry, via: 'configured' }
+      : { kind: 'not-found', agentId, declared };
+  }
+
+  const selfEntity = entries.find((entry) => entry.id === entityId);
+  if (selfEntity) {
+    return { kind: 'declared', entry: selfEntity, via: 'entity-is-agent' };
+  }
+
+  const sole = entries.length === 1 ? entries[0] : undefined;
+  if (sole) return { kind: 'declared', entry: sole, via: 'sole-agent' };
+
+  return { kind: 'ambiguous', declared };
 }
 
 /**
@@ -125,15 +190,23 @@ export function buildDomainContext(args: {
   enforcement: DomainEnforcement;
   source: string;
   anchorVerified?: boolean;
+  /**
+   * Which declared agent this runtime acts as. Resolved by the caller, which
+   * is also where an unresolvable one becomes a boot refusal — this function
+   * only projects, so it takes the answer rather than re-deriving it.
+   */
+  agent?: DomainAgentEntry;
 }): DomainContext {
   const { parsed, enforcement, source } = args;
   const fm = parsed.frontmatter;
   const policy = toConstitutionPolicy(parsed);
-  const self = selfAgentEntry(fm.agents?.entries, fm.domain.id);
+  const self = args.agent;
 
   return Object.freeze({
     enforcement,
     subject: fm.constitution.subject,
+    entityType: fm.domain.type,
+    agentId: self?.id ?? null,
     profile: fm.conformance.profile,
     anchorVerified: args.anchorVerified ?? false,
     anchoring: fm.documents?.anchoring

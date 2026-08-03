@@ -16,6 +16,7 @@ import type {
 } from '../plugin-api/types.js';
 import {
   buildDomainContext,
+  resolveAgent,
   type DomainContext,
   type DomainEnforcement,
 } from '../constitution/domain-context.js';
@@ -219,6 +220,14 @@ export type FetchHandler = (
  */
 export interface MockDomainOptions {
   subject?: string;
+  /** Entity kind — `organisation`, `project`, `asset`, `deed`, `oracle`, … */
+  entityType?: string;
+  /** Constitution type URI. Defaults to the general agentic constitution. */
+  constitutionType?: string;
+  /** Declared agents, verbatim as the document would carry them. */
+  agents?: Array<Record<string, unknown>>;
+  /** Which declared agent the runtime acts as. */
+  agentId?: string;
   /** Mode ceiling. Defaults to the most permissive, so unrelated suites are unaffected. */
   mode?: 'read_only' | 'propose_only' | 'bounded_evaluate' | 'bounded_execute';
   /** Action classes that always need an explicit grant. Defaults to none. */
@@ -244,7 +253,7 @@ export interface MockDomainOptions {
  * that cares about the gate states what it needs.
  */
 export function mockDomain(options: MockDomainOptions = {}): DomainContext {
-  const subject = options.subject ?? 'did:ixo:entity:test-oracle';
+  const subject = options.subject ?? 'did:ixo:entity:test';
   const frontmatter = {
     version: SUPPORTED_SPEC_VERSION,
     kind: 'domain.md',
@@ -257,7 +266,10 @@ export function mockDomain(options: MockDomainOptions = {}): DomainContext {
     domain: {
       id: subject,
       iid: null,
-      type: 'oracle',
+      // Not an oracle by default. The runtime governs any agentic entity, and
+      // a test double that always looked like one would let an
+      // oracle-shaped assumption pass every suite unnoticed.
+      type: options.entityType ?? 'organisation',
       status: 'active',
       purpose: 'Test double.',
       operating_boundary: 'Tests only.',
@@ -266,7 +278,7 @@ export function mockDomain(options: MockDomainOptions = {}): DomainContext {
       status: 'in_force',
       reason: null,
       subject,
-      type: 'con:OracleConstitution',
+      type: options.constitutionType ?? 'con:AgenticConstitution',
     },
     agent_default_mode: {
       mode: options.mode ?? 'bounded_execute',
@@ -278,13 +290,22 @@ export function mockDomain(options: MockDomainOptions = {}): DomainContext {
       entries: options.grants ?? [],
     },
     critical_do_not: options.criticalDoNot ?? [],
+    ...(options.agents ? { agents: { entries: options.agents } } : {}),
   };
 
+  const parsed = parseDomainMdSubset(
+    `---\n${JSON.stringify(frontmatter, null, 2)}\n---\n# domain.md (test)\n`,
+  );
+  const agent = resolveAgent(
+    parsed.frontmatter.agents?.entries,
+    parsed.frontmatter.domain.id,
+    options.agentId,
+  );
+
   return buildDomainContext({
-    parsed: parseDomainMdSubset(
-      `---\n${JSON.stringify(frontmatter, null, 2)}\n---\n# domain.md (test)\n`,
-    ),
+    parsed,
     enforcement: options.enforcement ?? 'permissive',
     source: '<mockDomain>',
+    agent: agent.kind === 'declared' ? agent.entry : undefined,
   });
 }
