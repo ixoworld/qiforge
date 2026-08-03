@@ -27,6 +27,7 @@ import {
   ACTION_MIN_MODE,
   OVERRIDE_DISABLES,
   RIGHT_TYPE_TO_ACTION,
+  amountSchema,
   type AgentMode,
   type Amount,
   type ConstitutionStatus,
@@ -185,6 +186,7 @@ export const REASON = {
   proofInvalid: 'capability_proof_invalid',
   proofRevoked: 'capability_revoked',
   verifierUnavailable: 'capability_verifier_unavailable',
+  valueMalformed: 'value_malformed',
   valueDenomMismatch: 'value_denomination_mismatch',
   valueExceedsGrant: 'value_exceeds_grant',
   flowStateMismatch: 'flow_state_mismatch',
@@ -255,6 +257,16 @@ export async function authorize(
   // 1. The action class must be one the format defines.
   if (!(request.action in ACTION_MIN_MODE)) {
     return refuse([REASON.unrecognizedAction], ['domain-md#8']);
+  }
+
+  // A declared value has to be a real amount before anything compares it or
+  // hands it to a capability verifier. The constitution's own amounts are
+  // schema-validated on parse, but the request's is assembled at runtime from
+  // a plugin's `effect.value` extractor, where nothing but the type checker
+  // stands between a typo and an unsigned integer. An amount that cannot be
+  // read is ambiguity, and ambiguity is denial.
+  if (request.value != null && !amountSchema.safeParse(request.value).success) {
+    return refuse([REASON.valueMalformed], ['domain-md#8']);
   }
 
   const effectful = request.action !== 'read' && request.action !== 'propose';

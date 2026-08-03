@@ -301,6 +301,69 @@ describe('authorize — grant conditions', () => {
     expect(decision.reasonCodes).toContain(REASON.grantExpired);
   });
 
+  // A request's amount is assembled at runtime by a plugin's `effect.value`
+  // extractor, so unlike the constitution's own amounts it has never been
+  // through a schema. These cases prove a bad one denies rather than throwing
+  // — and that it denies wherever it appears, not only where a ceiling reads
+  // it.
+  it.each([
+    ['not a number', 'abc'],
+    ['a decimal', '1.5'],
+    ['a negative', '-1'],
+    ['leading zeros', '007'],
+    ['an empty string', ''],
+    ['whitespace', ' 10 '],
+  ])('denies a value that is %s', async (_label, amount) => {
+    const decision = await authorize(
+      request({ value: { amount, denom: 'uixo' } }),
+      policy({
+        grants: [
+          grant({
+            conditions: {
+              ...(grant().conditions as object),
+              max_value: { amount: '1000', denom: 'uixo' },
+            },
+          }),
+        ],
+      }),
+      deps,
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.valueMalformed);
+  });
+
+  it('denies a malformed value on an action no ceiling would have checked', async () => {
+    const decision = await authorize(
+      request({
+        action: 'read',
+        operation: 'read_file',
+        object: 'ixo:oracle',
+        value: { amount: 'lots', denom: 'uixo' },
+      }),
+      policy({ mode: 'read_only' }),
+      deps,
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.valueMalformed);
+  });
+
+  it('never hands a malformed value to the capability verifier', async () => {
+    const verifyCapabilityProof = vi.fn();
+    const decision = await authorize(
+      request({
+        value: { amount: '1e6', denom: 'uixo' },
+        capabilityProof: 'proof',
+      }),
+      policy({
+        grants: [grant({ capability: { format: 'ucan', reference: null } })],
+      }),
+      { ...deps, verifyCapabilityProof },
+    );
+    expect(decision.outcome).toBe('deny');
+    expect(decision.reasonCodes).toContain(REASON.valueMalformed);
+    expect(verifyCapabilityProof).not.toHaveBeenCalled();
+  });
+
   it('rejects a value in a denomination the grant does not bound', async () => {
     const decision = await authorize(
       request({ value: { amount: '10', denom: 'uixo' } }),

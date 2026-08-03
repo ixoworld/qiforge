@@ -97,6 +97,8 @@ Deny grants are evaluated before allow grants and win outright, including for ac
 
 A matching grant still has to survive its conditions: activation and expiry against the declared clock, flow state, claim type, role, credential, and value ceiling. Value comparison uses `BigInt` and **refuses across denominations** — converting between them needs a governed price policy the runtime deliberately does not have. A ceiling that cannot be checked (no declared value on the call) is carried forward as an obligation rather than waved through.
 
+A declared value must be an unsigned base-10 integer, and that is checked where the request enters rather than where a ceiling reads it. The constitution's own amounts are validated when the document is parsed, but the request's amount is assembled at runtime by a plugin's `effect.value` extractor, where nothing but the type checker stands between a typo and a real amount. `-1`, `1.5`, `007` and `''` all read as plausible `BigInt` input and would otherwise slip under a ceiling; `'abc'` would throw out of the evaluator entirely. All of them deny with `value_malformed`, and none of them reach the capability verifier.
+
 ### Human review
 
 Two independent triggers: an action class whose trigger the constitution declares in `human_review_required_for`, or a matched grant with `conditions.human_review: true`. Either produces `manual_review_required` unless a review proof verifies against the request digest. A trigger the constitution never declared is never invented.
