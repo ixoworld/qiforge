@@ -2,6 +2,7 @@ import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DomainContext } from '../constitution/domain-context.js';
 import type { RightsActionType } from '../constitution/schema.js';
 
 /**
@@ -283,6 +284,18 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Same merged Zod-validated env. */
   config: TConfig;
+
+  /**
+   * The entity's constitution — loaded once at boot, frozen, identical for
+   * every request.
+   *
+   * Exposed so a tool can *read* what governs it (to explain a boundary, or
+   * to shape what it offers). It is not how a tool becomes authorized: the
+   * gate evaluates every call against this same value before the handler
+   * runs, so a tool consulting it here cannot widen what it is permitted to
+   * do — only discover it.
+   */
+  domain: DomainContext;
 
   /** Set of plugin names currently loaded (boot-fixed). */
   availablePlugins: ReadonlySet<string>;

@@ -3,6 +3,7 @@ import { createAgent, fakeModel, type ToolRuntime } from 'langchain';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
+  mockDomain,
   mockEmit,
   mockLogger,
   mockMatrix,
@@ -32,6 +33,7 @@ function makeAmbient(
   overrides: Partial<AmbientServices> = {},
 ): AmbientServices {
   return {
+    domain: mockDomain(),
     config: { FOO_KEY: 'foo-value' },
     identity: IDENTITY,
     availablePlugins: new Set(['climate']),

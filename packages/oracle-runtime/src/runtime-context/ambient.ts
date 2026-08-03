@@ -1,4 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DomainContext } from '../constitution/domain-context.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -143,6 +144,8 @@ export interface EmitAdapter {
 export interface AmbientServices {
   config: Record<string, unknown>;
   identity: OracleIdentity;
+  /** The entity's constitution, loaded once at boot and frozen. */
+  domain: DomainContext;
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
   blobStore: BlobStoreAdapter;

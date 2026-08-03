@@ -42,6 +42,7 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares/index.js';
+import { buildConstitutionBlock } from './constitution-block.js';
 import {
   composePrompt,
   formatTimeContext,
@@ -393,6 +394,9 @@ export async function createMainAgent(
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
+    // Read from the same frozen context the gate evaluates against, so what
+    // the model is told and what it will be held to cannot drift apart.
+    constitutionBlock: buildConstitutionBlock(rtCtx.domain),
     customInstructions,
     operationalMode:
       editorPrompts?.operationalMode ??

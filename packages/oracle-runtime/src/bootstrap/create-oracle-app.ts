@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { MatrixManager } from '@ixo/matrix';
 import {
   loadEncryptionKey,
@@ -16,9 +17,12 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import pkg from '../../package.json' with { type: 'json' };
 import {
   baseEnvSchema,
+  validateDomainEnforcement,
   validateLangsmithTracing,
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
+import type { DomainEnforcement } from '../constitution/domain-context.js';
+import { loadDomainMd, type AnchorVerifier } from '../constitution/load.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
 import {
@@ -127,6 +131,19 @@ export interface CreateOracleAppOptions {
    * swap it for an alternate implementation.
    */
   hooks?: MainAgentHooks;
+  /**
+   * Confirms the `documents.anchoring` block of the entity's `domain.md`
+   * against canonical state — typically by resolving the IID linked resource
+   * it names and comparing content addresses.
+   *
+   * Supplied by the host because it is a chain call, and the runtime's
+   * constitution layer stays free of network dependencies. Under strict
+   * enforcement a verifier that returns false (or throws) refuses the boot.
+   * When none is supplied, a declared anchor is accepted on the document's own
+   * say-so and the resulting context records `anchorVerified: false`, so a
+   * decision citing it does not overstate what was checked.
+   */
+  verifyConstitutionAnchor?: AnchorVerifier;
 }
 
 export interface PluginStatusReport {
@@ -291,7 +308,76 @@ export async function createOracleApp(
     );
   }
 
-  // 5a. Build the internal identity from config + validated env. Defer until
+  // Cross-field check binding the enforcement posture to the audit ledger —
+  // strict enforcement without a decisions room would enforce without leaving
+  // a record of why.
+  const enforcementErrors = validateDomainEnforcement(validated.config);
+  if (enforcementErrors.length > 0) {
+    for (const issue of enforcementErrors) {
+      reportBootError(
+        logger,
+        `Constitution env validation failed for '${issue.field}': ${issue.message}`,
+      );
+    }
+    throw new Error(
+      `Env validation failed (${enforcementErrors.length} issue${enforcementErrors.length === 1 ? '' : 's'}).`,
+    );
+  }
+
+  // 5b. The constitution. Loaded before Nest is constructed so a document that
+  // fails its checks stops the boot outright, rather than surfacing as an
+  // error on the first tool call of a runtime that is already serving.
+  const domainMdPath = String(validated.config.DOMAIN_MD_PATH ?? '');
+  // Narrowed rather than asserted, and defaulting the other way from the
+  // schema's own default would be the dangerous direction: anything that is
+  // not explicitly permissive is strict.
+  const enforcement: DomainEnforcement =
+    validated.config.DOMAIN_ENFORCEMENT === 'permissive'
+      ? 'permissive'
+      : 'strict';
+
+  let domainBytes: string;
+  try {
+    domainBytes = await readFile(domainMdPath, 'utf8');
+  } catch (err) {
+    reportBootError(
+      logger,
+      `Could not read the constitution at DOMAIN_MD_PATH='${domainMdPath}': ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      "The runtime evaluates every tool call against the entity's domain.md and has no default to fall back on.",
+    );
+    throw err;
+  }
+
+  const domainLoad = await loadDomainMd({
+    source: domainMdPath,
+    bytes: domainBytes,
+    enforcement,
+    verifyAnchor: opts.verifyConstitutionAnchor,
+  });
+  for (const warning of domainLoad.warnings) logger.warn?.(warning);
+  if (domainLoad.errors.length > 0 || !domainLoad.context) {
+    for (const issue of domainLoad.errors) {
+      reportBootError(
+        logger,
+        `Constitution rejected — ${issue.field}: ${issue.message}`,
+        issue.hint,
+      );
+    }
+    throw new Error(
+      `Constitution validation failed (${domainLoad.errors.length} issue${domainLoad.errors.length === 1 ? '' : 's'}).`,
+    );
+  }
+  const domainContext = domainLoad.context;
+  logger.log(
+    `[boot] Constitution in force: ${domainContext.subject} ` +
+      `rev ${domainContext.documentRevision} (${domainContext.domainMdCid}), ` +
+      `profile '${domainContext.profile}', enforcement '${domainContext.enforcement}', ` +
+      `ceiling '${domainContext.advisory.modeCeiling}' ` +
+      `(event: boot.constitution.loaded)`,
+  );
+
+  // 5c. Build the internal identity from config + validated env. Defer until
   // here so `ORACLE_ENTITY_DID` has been parsed by the base env schema —
   // a missing/empty value fails validation above with a clear message.
   const entityDid = String(validated.config.ORACLE_ENTITY_DID ?? '');
@@ -348,6 +434,7 @@ export async function createOracleApp(
   ];
   const appModule = RuntimeAppModule.register({
     validatedEnv: validated.config,
+    domainContext,
     userNestModules: opts.nestModules,
     pluginNestModules,
     pluginAuthExclusions,

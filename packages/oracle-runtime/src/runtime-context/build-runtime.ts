@@ -110,6 +110,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       state: readonlyState,
     },
     config: ambient.config as TConfig,
+    domain: ambient.domain,
     availablePlugins: ambient.availablePlugins,
     loadedPlugins,
     secrets: {

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { DOMAIN_CONTEXT } from '../modules/domain-context/domain-context.service.js';
+import { mockDomain } from '../testing/mocks.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import type { OracleIdentity } from '../plugin-api/types.js';
@@ -38,6 +40,7 @@ function makeNestAppStub(ucan: UcanService, blobStore: BlobStoreService) {
     get(token: unknown): unknown {
       if (token === UcanService) return ucan;
       if (token === BlobStoreService) return blobStore;
+      if (token === DOMAIN_CONTEXT) return mockDomain();
       throw new Error(`unexpected DI lookup for ${String(token)}`);
     },
   } as Parameters<typeof buildAmbientServices>[0]['nestApp'];

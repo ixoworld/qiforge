@@ -85,6 +85,25 @@ export type {
 } from './constitution/schema.js';
 export { systemClock, fixedClock } from './constitution/time.js';
 export type { TimeSource, TimeReading } from './constitution/time.js';
+export {
+  buildDomainContext,
+  isAnchoredProfile,
+} from './constitution/domain-context.js';
+export type {
+  DomainContext,
+  DomainEnforcement,
+} from './constitution/domain-context.js';
+export { loadDomainMd } from './constitution/load.js';
+export type {
+  AnchorVerifier,
+  DomainLoadError,
+  LoadDomainMdResult,
+} from './constitution/load.js';
+export { DomainContextModule } from './modules/domain-context/domain-context.module.js';
+export {
+  DomainContextService,
+  DOMAIN_CONTEXT,
+} from './modules/domain-context/domain-context.service.js';
 
 export {
   createSubagentAsTool,

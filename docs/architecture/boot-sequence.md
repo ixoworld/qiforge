@@ -47,6 +47,25 @@ Hard violations are collected; if non-empty, boot throws `Plugin manifest valida
 
 `validateLlmProviderKey(validated.config)` — Zod can't express "the API key for the selected provider is required". This step does it: when `LLM_PROVIDER='openrouter'`, `OPEN_ROUTER_API_KEY` must be present; when `'nebius'`, `NEBIUS_API_KEY` must be present.
 
+### 6a. Enforcement cross-check
+
+`validateDomainEnforcement(validated.config)` — another rule Zod can't express: strict enforcement requires `MATRIX_DECISIONS_ROOM_ID`. A runtime that gates every call but has nowhere to record the verdicts is enforcing without leaving an audit trail, so the boot fails rather than letting the deployment believe it is audited. Permissive runs may omit the room.
+
+### 6b. Load the constitution
+
+`readFile(DOMAIN_MD_PATH)` → `loadDomainMd({ source, bytes, enforcement, verifyAnchor })` → a frozen `DomainContext`.
+
+This runs before `NestFactory.create` deliberately: a document that fails its checks must stop the boot, not surface as an error on the first tool call of a runtime that is already serving traffic.
+
+`loadDomainMd` parses, lints, and then applies the posture:
+
+- **strict** requires the conformance profile to be `anchored` or `runtime`. Whether the anchoring block is structurally sound is already a blocking lint rule, so that is not re-checked here. When `createOracleApp` was given a `verifyConstitutionAnchor`, the declared anchor is resolved against canonical state and a failure (or a throw) refuses the boot. With no verifier, the anchor is accepted on the document's own declaration and the context records `anchorVerified: false` — an unproven anchor is a fact about the deployment, not something to paper over.
+- **permissive** tolerates an unanchored draft and says so loudly once.
+
+Neither posture disables the gate. There is deliberately no `off`.
+
+The document is never reloaded. Amendment is governance, and a runtime that re-read its own constitution mid-flight would let a file write do what governance is meant to do.
+
 ### 7. Build OracleIdentity
 
 `identity = { name, org, description, entityDid, prompt }` — built from `opts.config` plus the validated `ORACLE_ENTITY_DID` env. A missing/empty `ORACLE_ENTITY_DID` after validation throws explicitly.
@@ -104,7 +123,9 @@ Passed into the `RuntimeAppModule` configurer, which wires `MiddlewareConsumer.e
 
 ### 11. Build RuntimeAppModule
 
-`RuntimeAppModule.register({ validatedEnv, userNestModules, pluginNestModules, pluginAuthExclusions, enableSubscriptionMiddleware })`. The `enableSubscriptionMiddleware` boolean is `true` when the `credits` plugin is loaded — the credits plugin's presence flips Tier-0 `SubscriptionMiddleware` on.
+`RuntimeAppModule.register({ validatedEnv, domainContext, userNestModules, pluginNestModules, pluginAuthExclusions, enableSubscriptionMiddleware })`. The `enableSubscriptionMiddleware` boolean is `true` when the `credits` plugin is loaded — the credits plugin's presence flips Tier-0 `SubscriptionMiddleware` on.
+
+`domainContext` is the constitution from step 6b, bound into the container by the `@Global` `DomainContextModule`. Global for the same reason as `UcanModule`: the gate, the prompt composer and the decision recorder sit in unrelated parts of the tree, and threading an import through each would make the constitution look optional to whichever module forgot.
 
 ### 12. File processing provider
 
@@ -121,6 +142,8 @@ CORS enabled (configurable origin, fixed allowed headers/methods). Swagger UI mo
 ### 14. AmbientServices
 
 `buildAmbientServices({ nestApp, config, identity, availablePlugins, logger })` resolves every Tier-0 service via `nestApp.get(...)` and packs them into an `AmbientServices` bag that `MessagesController` reads on every request to build a `RuntimeContext`.
+
+The constitution is among them, read back out of the container via the `DOMAIN_CONTEXT` token rather than passed in as an option — one source beats two that could disagree about which document is in force. It surfaces on every request as `rtCtx.domain`.
 
 ### 15. Warm boot caches
 
@@ -174,6 +197,10 @@ The bootstrap logger reports `[boot-error]` for each issue. Aborts when:
 - Manifest validation collects errors.
 - Env validation collects errors.
 - LLM provider cross-check fails.
+- Strict enforcement is set without `MATRIX_DECISIONS_ROOM_ID`.
+- `DOMAIN_MD_PATH` cannot be read, or the document fails to parse.
+- The constitution has blocking lint findings.
+- Strict enforcement and the document is unanchored, or its anchor fails verification.
 - `ORACLE_ENTITY_DID` is empty after validation.
 
 What does NOT fail boot:

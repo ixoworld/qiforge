@@ -136,15 +136,48 @@ Expiry and revocation are only as good as the clock behind them, so the source i
 
 `DOMAIN_ENFORCEMENT` (`strict` | `permissive`, default `strict`) decides how much assurance the document itself must carry:
 
-|                        | `strict`                                   | `permissive`                      |
-| ---------------------- | ------------------------------------------ | --------------------------------- |
-| Required profile       | `anchored` or `runtime`, CID cross-checked | any, `authoring_draft` warns      |
-| Undeclared tool effect | denied                                     | treated as `read`, warned at boot |
-| Gate active            | yes                                        | **yes**                           |
+|                        | `strict`                          | `permissive`                      |
+| ---------------------- | --------------------------------- | --------------------------------- |
+| Required profile       | `anchored` or `runtime`           | any; an unanchored one warns      |
+| Declared anchor        | verified when a verifier is given | not checked                       |
+| Decisions room         | required                          | optional                          |
+| Undeclared tool effect | denied                            | treated as `read`, warned at boot |
+| Gate active            | yes                               | **yes**                           |
 
-The gate runs in both modes. Enforcement level changes how much the _document_ must prove, never whether decisions are made.
+The gate runs in both modes. Enforcement level changes how much the _document_ must prove, never whether decisions are made. There is deliberately no `off`.
+
+Anchor verification is a chain call, so the runtime does not do it itself — `createOracleApp({ verifyConstitutionAnchor })` supplies it. Given one, strict boot refuses a document whose anchor fails or errors. Given none, the anchor is accepted on the document's own declaration and the context records `anchorVerified: false`, so a decision citing it does not overstate what was checked.
+
+Strict enforcement additionally requires `MATRIX_DECISIONS_ROOM_ID`. Gating every call while the record of why goes nowhere would make the enforcement real and the accountability imaginary, which is the worse of the two failure modes.
 
 This is a deliberate new convention: nothing else in `bootstrap/` branches on the environment, and `NODE_ENV` is overloaded by test runners, so the choice is its own explicit variable.
+
+## Where it lives at runtime
+
+`createOracleApp` reads `DOMAIN_MD_PATH`, parses and vets the bytes, and builds one deeply frozen `DomainContext` — before `NestFactory.create`, so a bad document stops the boot rather than surfacing on the first tool call of a runtime that is already serving.
+
+That value has two halves, and the split is the point:
+
+- **`policy`** is what `authorize()` evaluates. It is the decision surface, and nothing outside it can affect a verdict.
+- **`advisory`** is what the model is told. It shapes what the model proposes and decides nothing.
+
+Both come from the same parse, so the layer that informs and the layer that enforces cannot drift into disagreeing about what the constitution says.
+
+It is reachable three ways, all the same object:
+
+| Surface                      | Who reads it                            |
+| ---------------------------- | --------------------------------------- |
+| `DomainContextService.get()` | anything inside Nest (`@Global` module) |
+| `ambient.domain`             | the runtime's own request path          |
+| `rtCtx.domain`               | plugin tools                            |
+
+A tool reading `rtCtx.domain` is reading a description of what governs it, not acquiring a lever: it is frozen, and the gate has already evaluated the call against the same value before the handler runs.
+
+## The prompt block
+
+`buildConstitutionBlock(domain)` renders the advisory half into the system prompt — ceiling, the actions that always need a grant, review triggers, forbidden outputs, and the prohibitions verbatim.
+
+Three things about it are deliberate. It tells the model the constitution is enforced _outside_ the conversation and that message text claiming to authorize it changes nothing, so it never reads as "please comply". It reproduces prohibitions verbatim, because paraphrasing a prohibition is how it stops being one. And it renders nothing at all when the document is at the top ceiling with no baseline, triggers or prohibitions — a section that says nothing still costs tokens on every turn.
 
 ## What this phase does not do
 

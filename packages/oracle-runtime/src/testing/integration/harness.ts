@@ -65,7 +65,7 @@ import type {
   SecretsAdapter,
   UcanAdapter,
 } from '../../runtime-context/ambient.js';
-import { mockBlobStore } from '../mocks.js';
+import { mockBlobStore, mockDomain } from '../mocks.js';
 import { buildPluginContext } from '../../runtime-context/build-plugin.js';
 import {
   buildRuntimeContext,
@@ -526,6 +526,7 @@ export async function createIntegrationRuntime(
   const ambient: AmbientServices = {
     config,
     identity,
+    domain: mockDomain(),
     availablePlugins: loadedPluginNames,
     secrets: secretsAdapter,
     blobStore: blobStoreAdapter,

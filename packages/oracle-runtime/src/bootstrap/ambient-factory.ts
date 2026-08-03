@@ -1,9 +1,11 @@
 import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import type { DomainContext } from '../constitution/domain-context.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
+import { DOMAIN_CONTEXT } from '../modules/domain-context/domain-context.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
 import type {
@@ -205,9 +207,15 @@ export function buildAmbientServices(
     },
   };
 
+  // Read out of the container rather than taken as an option: by this point
+  // the constitution is already bound there, and one source beats two that
+  // could disagree about which document is in force.
+  const domainContext = opts.nestApp.get<DomainContext>(DOMAIN_CONTEXT);
+
   return {
     config: opts.config,
     identity: opts.identity,
+    domain: domainContext,
     availablePlugins: opts.availablePlugins,
     secrets: secretsAdapter,
     blobStore: blobStoreAdapter,

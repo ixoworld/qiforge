@@ -1,4 +1,5 @@
 import { HumanMessage } from '@langchain/core/messages';
+import { mockDomain } from '../testing/mocks.js';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { describe, expect, it, vi } from 'vitest';
 import type {
@@ -25,6 +26,7 @@ function makeAmbient(overrides: AmbientMockOverrides = {}): AmbientServices {
   const emit: EmitAdapter = overrides.emit ?? { emit: vi.fn() };
   const fakeChatModel = { invoke: vi.fn() } as unknown as BaseChatModel;
   return {
+    domain: mockDomain(),
     config: { FOO: 'bar' },
     identity: {
       name: 'TestOracle',

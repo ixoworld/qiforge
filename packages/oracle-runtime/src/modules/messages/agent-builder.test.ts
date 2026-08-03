@@ -1,4 +1,5 @@
 import type { Cache } from '@nestjs/cache-manager';
+import { mockDomain } from '../../testing/mocks.js';
 import type { ConfigService } from '@nestjs/config';
 import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
@@ -78,6 +79,7 @@ function makeIdentity(): OracleIdentity {
 
 function makeAmbient(): AmbientServices {
   return {
+    domain: mockDomain(),
     config: {},
     identity: makeIdentity(),
     availablePlugins: new Set(),

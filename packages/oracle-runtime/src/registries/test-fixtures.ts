@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { mockDomain } from '../testing/mocks.js';
 import { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
   AgentMiddleware,
@@ -195,6 +196,7 @@ export function makeRuntimeContext(
       error: () => undefined,
       warn: () => undefined,
     },
+    domain: mockDomain(),
     abortSignal: new AbortController().signal,
     shared: {},
   } satisfies RuntimeContext;
