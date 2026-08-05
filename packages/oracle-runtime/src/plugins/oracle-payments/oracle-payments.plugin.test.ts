@@ -71,7 +71,6 @@ function makeStubbedWorkClaim(): WorkClaimService {
     contractGate: new ContractGateService({
       contractRecord: makeContractRecordService(makeContractRecord()).service,
       engagement,
-      network: 'devnet',
     }),
     extractor: new WorkSummaryExtractor(),
   });
@@ -280,7 +279,6 @@ describe('OraclePaymentsPlugin — start_work', () => {
       contractRecord: makeContractRecordService(record, fetchImpl).service,
       engagement,
       engineUrl: 'https://engine.example',
-      network: 'devnet',
     });
     const sendIntent = vi.fn(async () => ({
       code: intentCode,
@@ -289,7 +287,6 @@ describe('OraclePaymentsPlugin — start_work', () => {
     }));
     const workIntent = new WorkIntentService({
       engagement,
-      network: 'devnet',
       chain: { sendIntent },
       clock: () => new Date('2026-07-22T12:00:00.000Z'),
     });
@@ -642,7 +639,7 @@ describe('OraclePaymentsPlugin — tools', () => {
       status: 'active',
       serviceIds: ['tax-report'],
       quotaRemaining: 3,
-      maxAmount: { amount: '20000000', denom: 'uixo' },
+      maxAmount: { amount: '20000000', denom: 'upay' },
     });
   });
 

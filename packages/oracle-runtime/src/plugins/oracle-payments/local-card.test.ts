@@ -97,7 +97,7 @@ describe('deriveManifestFromCard', () => {
         id: 'alpha',
         name: 'Alpha',
         description: 'the first service',
-        price: { amount: 12, currency: 'USDC' },
+        price: { amount: 12, currency: 'PAY' },
         deliverables: 'A PDF',
       },
       {
@@ -112,7 +112,7 @@ describe('deriveManifestFromCard', () => {
   it('summary carries the card name, each service name + price, and the base summary', () => {
     const m = deriveManifestFromCard(base, card);
     expect(m.summary).toContain('Tax Oracle');
-    expect(m.summary).toContain('Alpha (12 USDC)');
+    expect(m.summary).toContain('Alpha (12 PAY)');
     expect(m.summary).toContain('Freebie (free)');
     expect(m.summary).toContain(base.summary);
   });
@@ -131,7 +131,7 @@ describe('deriveManifestFromCard', () => {
     const m = deriveManifestFromCard(base, card);
     const freeLine = m.whenToUse.find((l) => l.includes('Freebie'));
     expect(freeLine).toContain('free');
-    expect(freeLine).not.toContain('0 USDC');
+    expect(freeLine).not.toContain('0 PAY');
   });
 
   it('retargets the show_contract example to the first service id', () => {
@@ -175,8 +175,8 @@ describe('OraclePaymentsPlugin — get manifest', () => {
     process.env.AGENT_CARD_PATH = LOCAL_CARD_PATH;
     const m = new OraclePaymentsPlugin().manifest;
     expect(m.summary).toContain('Tax Oracle');
-    expect(m.summary).toContain('Tax report (20 USDC)');
-    expect(m.summary).toContain('Quick estimate (5 USDC)');
+    expect(m.summary).toContain('Tax report (20 PAY)');
+    expect(m.summary).toContain('Quick estimate (5 PAY)');
     expect(m.whenToUse).toHaveLength(baseLen + 2);
     const showContract = m.examples?.find((e) => e.tool === 'show_contract');
     expect(showContract?.args).toEqual({ serviceId: 'tax-report' });

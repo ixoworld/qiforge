@@ -8,7 +8,7 @@
         "id": "tax-report",
         "name": "Tax report",
         "description": "A full tax report for the year",
-        "price": { "amount": 20, "currency": "USDC" },
+        "price": { "amount": 20, "currency": "PAY" },
         "deliverables": "A PDF tax report",
         "doneMeans": ["All income sources are accounted for"],
         "tags": ["tax", "finance"],

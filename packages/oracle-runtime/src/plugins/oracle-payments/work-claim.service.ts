@@ -38,7 +38,9 @@ import type { WorkSummaryExtractor } from './work-summary-extractor.js';
 import {
   claimDeepLink,
   claimNetwork,
+  DEFAULT_CURRENCY,
   errorMessage,
+  grantedDenom,
   isEngagementExpired,
   priceToCoin,
   readConfigNumber,
@@ -394,7 +396,20 @@ export class WorkClaimService {
     this.statusProducer.emit(ctx.session.requestId, 'delivering');
 
     const network = this.network(ctx);
-    const price = priceToCoin(engagement.priceUsd, network);
+    // R1 (uPay spec §5): the claim is priced in the granted denom the gate
+    // just re-read off the contract record — the same source every reservation
+    // prices from, so the claim and the escrow it settles can never disagree.
+    // The gate always supplies it; its absence is a wiring fault, and pricing
+    // in a guessed denom would strand the escrow, so this fails closed.
+    const denom = grantedDenom(gate.start);
+    if (denom === undefined) {
+      throw new Error(
+        "This work can't be billed right now: the contract check reported no granted payment " +
+          'denom to price the claim in. This is a fault on our side, not a problem with their ' +
+          'contract — the work itself is not lost, so say why and call deliver_work again shortly.',
+      );
+    }
+    const price = priceToCoin(engagement.priceUsd, denom);
     const amount: ClaimCoin[] = [
       { denom: price.denom, amount: String(price.amount) },
     ];
@@ -797,6 +812,24 @@ export class WorkClaimService {
       );
     }
 
+    // R1 (uPay spec §5): the release claim hands back the exact coin the
+    // reservation locked — the granted denom stamped on the engagement at
+    // start. An engagement without one predates the stamp; pricing the release
+    // in a guessed denom would only be rejected on-chain, so fail closed and
+    // let the reservation lapse on its own, after which cancelling closes the
+    // job cleanly with no claim at all.
+    const denom = grantedDenom(engagement);
+    if (denom === undefined) {
+      throw new Error(
+        'The reserved payment cannot be released: this job carries no record of the denom it was ' +
+          'reserved in, so the release claim cannot be priced. The reservation is still held ' +
+          `on-chain${expiresAt !== undefined ? ` and expires on its own at ${expiresAt}` : ' until it expires on its own'} — ` +
+          'once it has, calling cancel_work again closes the job cleanly. Tell the user plainly ' +
+          'that the cancellation is recorded but the reserved payment releases only when the ' +
+          'reservation expires.',
+      );
+    }
+
     // Stamped before anything can fail: an engagement that still reads
     // `active` while carrying `cancelledAt` is a release the gate must report
     // as failed rather than as a job still being worked on.
@@ -808,7 +841,7 @@ export class WorkClaimService {
     const cancelledAt = marked?.cancelledAt ?? this.clock().toISOString();
 
     const network = this.network(ctx);
-    const price = priceToCoin(engagement.priceUsd, network);
+    const price = priceToCoin(engagement.priceUsd, denom);
     const amount: ClaimCoin[] = [
       { denom: price.denom, amount: String(price.amount) },
     ];
@@ -1103,7 +1136,7 @@ export class WorkClaimService {
         service: {
           id: engagement.serviceId,
           name: engagement.serviceName,
-          price: { amount: engagement.priceUsd, currency: 'USDC' },
+          price: { amount: engagement.priceUsd, currency: DEFAULT_CURRENCY },
         },
         description: args.description,
         resultStatus: args.resultStatus,
@@ -1117,7 +1150,7 @@ export class WorkClaimService {
         }),
         claimUrl,
       },
-      body: `Delivered: ${engagement.serviceName} (${engagement.priceUsd} USDC) — claim ${input.claimId}.`,
+      body: `Delivered: ${engagement.serviceName} (${engagement.priceUsd} ${DEFAULT_CURRENCY}) — claim ${input.claimId}.`,
       sessionId: ctx.session.id,
       requestId: ctx.session.requestId,
       ...(ctx.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),

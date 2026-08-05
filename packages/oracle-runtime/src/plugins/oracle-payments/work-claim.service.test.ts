@@ -20,7 +20,6 @@ import type {
   SubmitClaimInput,
   SubmitClaimResult,
 } from './claim-lane.js';
-import { MAINNET_USDC_IBC_DENOM } from './types.js';
 import {
   WorkClaimService,
   type DeliverWorkArgs,
@@ -112,7 +111,7 @@ const INTENT_GONE_LOG =
   'failed to execute message; message index: 0: for agent ixo1oracleaddr and collection 42: intent not found';
 
 interface HarnessOptions {
-  engagement?: CommerceEngagement | null;
+  engagement?: (CommerceEngagement & { denom?: string }) | null;
   /** `null` means "no contract record" — the gate then fails not_contracted. */
   contract?: ReturnType<typeof makeContractRecord> | null;
   config?: Record<string, unknown>;
@@ -148,7 +147,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     ).service,
     engagement,
     engineUrl: 'https://engine.example',
-    network: String(options.config?.NETWORK ?? BASE_CONFIG.NETWORK),
   });
 
   const extractor =
@@ -196,7 +194,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   );
   const workIntent = new WorkIntentService({
     engagement,
-    network: String(options.config?.NETWORK ?? BASE_CONFIG.NETWORK),
     chain: { sendIntent },
     clock: () => new Date(NOW),
   });
@@ -324,7 +321,7 @@ describe('WorkClaimService — a reservation that lapsed mid-job', () => {
     expect(h.sendIntent).toHaveBeenCalledTimes(1);
     expect(h.sendIntent.mock.calls[0]?.[0]).toMatchObject({
       collectionId: COLLECTION_ID,
-      amount: [{ denom: 'uixo', amount: '20000000' }],
+      amount: [{ denom: 'upay', amount: '20000000' }],
     });
     expect(result).toMatchObject({ delivered: true, txHash: 'TX-1' });
     expect(result.note).toMatch(/ran out while the work was still running/);
@@ -346,7 +343,7 @@ describe('WorkClaimService — a reservation that lapsed mid-job', () => {
         authz: {
           granted: true,
           agentQuotaRemaining: 0,
-          maxAmount: { amount: '20000000', denom: 'uixo' },
+          maxAmount: { amount: '20000000', denom: 'upay' },
           intentDurationNs: '604800000000000',
         },
       }),
@@ -613,10 +610,10 @@ describe('WorkClaimService — text deliverable', () => {
     expect(body.proofs).toBeUndefined();
   });
 
-  it('prices the claim in micro-units of the network denom', async () => {
+  it('prices the claim in micro-units of the granted denom', async () => {
     const h = await makeHarness();
     await h.service.deliver(TEXT_ARGS, h.ctx);
-    const expected = [{ denom: 'uixo', amount: '20000000' }];
+    const expected = [{ denom: 'upay', amount: '20000000' }];
     expect(h.signAndSave.mock.calls[0]![0].amount).toEqual(expected);
     expect(h.submit.mock.calls[0]![0]).toMatchObject({
       claimId: 'claim-cid-1',
@@ -625,20 +622,20 @@ describe('WorkClaimService — text deliverable', () => {
     });
   });
 
-  it('uses the USDC IBC denom on mainnet', async () => {
+  it('follows the denom off the contract record, never a network guess', async () => {
+    // R1 (uPay spec §5): a contract granted in another denom keeps settling
+    // in it — the grant is the one source, on every network.
     const h = await makeHarness({
-      config: { NETWORK: 'mainnet' },
-      // The grant on mainnet is denominated in the same USDC IBC denom.
       contract: makeContractRecord({
         authz: {
           ...makeContractRecord().authz,
-          maxAmount: { amount: '20000000', denom: MAINNET_USDC_IBC_DENOM },
+          maxAmount: { amount: '20000000', denom: 'uusdc' },
         },
       }),
     });
     await h.service.deliver(TEXT_ARGS, h.ctx);
     expect(h.submit.mock.calls[0]![0].amount).toEqual([
-      { denom: MAINNET_USDC_IBC_DENOM, amount: '20000000' },
+      { denom: 'uusdc', amount: '20000000' },
     ]);
   });
 
@@ -806,7 +803,6 @@ describe('WorkClaimService — failure and idempotency lanes', () => {
         contractRecord: makeContractRecordService(makeContractRecord()).service,
         engagement: h.engagement,
         engineUrl: 'https://engine.example',
-        network: 'devnet',
       }),
       extractor: new WorkSummaryExtractor({
         getModel: () => ({
@@ -857,7 +853,7 @@ describe('WorkClaimService — receipt card', () => {
       service: {
         id: 'tax-report',
         name: 'Tax report',
-        price: { amount: 20, currency: 'USDC' },
+        price: { amount: 20, currency: 'PAY' },
       },
       description: TEXT_ARGS.description,
       resultStatus: 'completed',
@@ -901,7 +897,7 @@ const ReleaseBodySchema = z.object({
 
 /** A harness whose engagement carries the escrow a release has to free. */
 function makeReleaseHarness(
-  overrides: Partial<CommerceEngagement> = {},
+  overrides: Partial<CommerceEngagement & { denom?: string }> = {},
   options: HarnessOptions = {},
 ): Promise<Harness> {
   return makeHarness({
@@ -956,10 +952,10 @@ describe('WorkClaimService — release lane (cancel_work)', () => {
       claimId: 'claim-cid-1',
       collectionId: COLLECTION_ID,
       useIntent: true,
-      amount: [{ denom: 'uixo', amount: '20000000' }],
+      amount: [{ denom: 'upay', amount: '20000000' }],
     });
     expect(h.signAndSave.mock.calls[0]?.[0].amount).toEqual([
-      { denom: 'uixo', amount: '20000000' },
+      { denom: 'upay', amount: '20000000' },
     ]);
     expect(result).toMatchObject({
       cancelled: true,
@@ -1081,6 +1077,21 @@ describe('WorkClaimService — release lane (cancel_work)', () => {
       /signing key is not loaded/,
     );
     expect(h.signAndSave).not.toHaveBeenCalled();
+    expect((await h.engagement.findActive(ROOM_ID))?.threadId).toBe(THREAD_ID);
+  });
+
+  it('fails closed on a job with no granted-denom record instead of guessing', async () => {
+    // An engagement written before the denom stamp existed (uPay spec §5 R1):
+    // its release claim cannot be priced, so nothing is signed and the job
+    // stays blocking until the reservation lapses on its own — a release in a
+    // guessed denom would only be rejected on-chain anyway.
+    const h = await makeReleaseHarness({ denom: undefined });
+
+    await expect(h.service.release({}, h.ctx)).rejects.toThrow(
+      /cannot be priced/,
+    );
+    expect(h.signAndSave).not.toHaveBeenCalled();
+    expect(h.submit).not.toHaveBeenCalled();
     expect((await h.engagement.findActive(ROOM_ID))?.threadId).toBe(THREAD_ID);
   });
 

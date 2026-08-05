@@ -9,7 +9,7 @@ import type {
   ContractRecordService,
 } from './contract-record.service.js';
 import type { EngagementService } from './engagement.service.js';
-import type { ContractRecord } from './types.js';
+import type { ContractRecord, GrantedEngagementStart } from './types.js';
 import { isEngagementExpired, priceToCoin } from './util.js';
 
 /** How long a gate consults the same contract record before re-asking. */
@@ -26,8 +26,6 @@ export interface ContractGateServiceDeps {
   engagement: ActiveEngagementLookup;
   /** Engine base URL (`EVAL_ENGINE_URL`) — unset disables lookups upstream. */
   engineUrl?: string;
-  /** Network name for price→denom conversion (portal parity). */
-  network: string;
   clock?: () => number;
   logger?: Logger;
 }
@@ -55,7 +53,6 @@ export class ContractGateService {
   private readonly contractRecord: ContractRecordService;
   private readonly engagement: ActiveEngagementLookup;
   private readonly engineUrl?: string;
-  private readonly network: string;
   private readonly clock: () => number;
   private readonly logger: Logger;
   private readonly cache = new Map<string, GateCacheEntry>();
@@ -64,7 +61,6 @@ export class ContractGateService {
     this.contractRecord = deps.contractRecord;
     this.engagement = deps.engagement;
     this.engineUrl = deps.engineUrl;
-    this.network = deps.network;
     this.clock = deps.clock ?? Date.now;
     this.logger = deps.logger ?? new NestLogger(ContractGateService.name);
   }
@@ -154,13 +150,23 @@ export class ContractGateService {
       };
     }
 
-    const price = priceToCoin(service.priceUsd, this.network);
+    // R1 (uPay spec §5): every coin this job builds is priced in the denom the
+    // portal granted — read off the very grant the cap check reads, never
+    // guessed from the network. A grant that names no denom can't price a job
+    // at all, so it fails closed here rather than reserving in a guess.
     const max = record.authz.maxAmount;
+    if (!max.denom) {
+      return {
+        ok: false,
+        reason: 'not_contracted',
+        detail:
+          "their contract's on-chain authorization names no payment denom, so no job can be " +
+          'priced against it — they need to contract again',
+      };
+    }
+    const price = priceToCoin(service.priceUsd, max.denom);
     const maxAmount = Number(max.amount);
-    const maxCovers =
-      max.denom === price.denom &&
-      Number.isFinite(maxAmount) &&
-      maxAmount >= price.amount;
+    const maxCovers = Number.isFinite(maxAmount) && maxAmount >= price.amount;
     if (!maxCovers) {
       return {
         ok: false,
@@ -181,18 +187,17 @@ export class ContractGateService {
       };
     }
 
-    return {
-      ok: true,
-      start: {
-        serviceId: service.id,
-        serviceName: service.name,
-        priceUsd: service.priceUsd,
-        collectionId: record.collectionId,
-        adminAddress: record.adminAddress,
-        userDid: senderDid,
-        intentDurationNs: record.authz.intentDurationNs,
-      },
+    const start: GrantedEngagementStart = {
+      serviceId: service.id,
+      serviceName: service.name,
+      priceUsd: service.priceUsd,
+      denom: price.denom,
+      collectionId: record.collectionId,
+      adminAddress: record.adminAddress,
+      userDid: senderDid,
+      intentDurationNs: record.authz.intentDurationNs,
     };
+    return { ok: true, start };
   }
 
   /**

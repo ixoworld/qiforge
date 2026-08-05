@@ -14,7 +14,7 @@ import type {
   EngagementService,
   EngagementStartData,
 } from './engagement.service.js';
-import { errorMessage, priceToCoin, retry } from './util.js';
+import { errorMessage, grantedDenom, priceToCoin, retry } from './util.js';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
@@ -30,8 +30,6 @@ export type ReservationResult =
 
 export interface WorkIntentServiceDeps {
   engagement: EngagementService;
-  /** Network name for the price→denom conversion (portal parity). */
-  network: string;
   chain?: IntentChainClient;
   clock?: () => Date;
   /** Sleep seam for the engagement-persist retry; tests pass a no-op. */
@@ -62,7 +60,6 @@ export interface WorkIntentServiceDeps {
  */
 export class WorkIntentService {
   private readonly engagement: EngagementService;
-  private readonly network: string;
   private readonly chain: IntentChainClient;
   private readonly clock: () => Date;
   private readonly sleep?: (ms: number) => Promise<void>;
@@ -70,7 +67,6 @@ export class WorkIntentService {
 
   constructor(deps: WorkIntentServiceDeps) {
     this.engagement = deps.engagement;
-    this.network = deps.network;
     this.chain = deps.chain ?? defaultIntentChainClient;
     this.clock = deps.clock ?? (() => new Date());
     this.sleep = deps.sleep;
@@ -82,6 +78,11 @@ export class WorkIntentService {
     threadId: string,
     start: CommerceEngagementStart,
   ): Promise<CommerceEngagementStartResult> {
+    // R1 (uPay spec §5): the granted denom the gate carried on the start is
+    // stamped onto the engagement, so the release lane can later price its
+    // claim in the exact coin this reservation locks — no record lookup, no
+    // guess. `reserve` below fails closed when the start carries none.
+    const denom = grantedDenom(start);
     const data: EngagementStartData = {
       serviceId: start.serviceId,
       serviceName: start.serviceName,
@@ -89,6 +90,7 @@ export class WorkIntentService {
       collectionId: start.collectionId,
       adminAddress: start.adminAddress,
       ...(start.userDid !== undefined && { userDid: start.userDid }),
+      ...(denom !== undefined && { denom }),
     };
 
     const reservation = await this.reserve(start);
@@ -158,7 +160,20 @@ export class WorkIntentService {
    * a second copy of it.
    */
   async reserve(start: CommerceEngagementStart): Promise<ReservationResult> {
-    const price = priceToCoin(start.priceUsd, this.network);
+    // Fail closed on a start with no granted denom: reserving in a guessed
+    // one would lock escrow the grant never covers and read back to the user
+    // as "max amount too low" (uPay spec §5 R1). The gate always supplies it,
+    // so this refusal only ever names a wiring fault, not a user's contract.
+    const denom = grantedDenom(start);
+    if (denom === undefined) {
+      return {
+        ok: false,
+        detail:
+          'the job carries no granted payment denom to price the reservation in — the contract ' +
+          'gate supplies it, so this is a fault on our side, and nothing was reserved',
+      };
+    }
+    const price = priceToCoin(start.priceUsd, denom);
     const amount: ClaimCoin[] = [
       { denom: price.denom, amount: String(price.amount) },
     ];

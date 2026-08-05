@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { MAINNET_USDC_IBC_DENOM } from './types.js';
 import {
   claimDeepLink,
+  grantedDenom,
   isEngagementExpired,
   isMatrixNotFound,
   priceToCoin,
@@ -44,18 +44,30 @@ describe('isEngagementExpired', () => {
 });
 
 describe('priceToCoin', () => {
-  it('uses uixo off mainnet, scaled by 1e6', () => {
-    expect(priceToCoin(20, 'devnet')).toEqual({
-      denom: 'uixo',
+  it('prices in the granted denom, scaled by 1e6', () => {
+    expect(priceToCoin(20, 'upay')).toEqual({
+      denom: 'upay',
       amount: 20_000_000,
     });
   });
 
-  it('uses the USDC IBC denom on mainnet', () => {
-    expect(priceToCoin(20, 'mainnet')).toEqual({
-      denom: MAINNET_USDC_IBC_DENOM,
+  it('follows whatever denom the grant names — nothing is network-guessed', () => {
+    expect(priceToCoin(20, 'uusdc')).toEqual({
+      denom: 'uusdc',
       amount: 20_000_000,
     });
+  });
+});
+
+describe('grantedDenom', () => {
+  it('reads the denom the gate stamped on a start or engagement', () => {
+    expect(grantedDenom({ priceUsd: 20, denom: 'upay' })).toBe('upay');
+  });
+
+  it('is undefined — the fail-closed signal — when absent or empty', () => {
+    // A job without a granted denom must be refused, never priced by guess.
+    expect(grantedDenom({ priceUsd: 20 })).toBeUndefined();
+    expect(grantedDenom({ priceUsd: 20, denom: '' })).toBeUndefined();
   });
 });
 

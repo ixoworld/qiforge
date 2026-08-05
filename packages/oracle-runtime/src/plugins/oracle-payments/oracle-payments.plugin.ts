@@ -24,11 +24,7 @@ import {
   createOraclePaymentsTools,
   createOraclePaymentsWorkTools,
 } from './tools.js';
-import {
-  claimNetwork,
-  readConfigString,
-  resolveEvalEngineUrl,
-} from './util.js';
+import { readConfigString, resolveEvalEngineUrl } from './util.js';
 import {
   DEFAULT_MAX_DELIVERABLE_MB,
   WorkClaimService,
@@ -200,19 +196,13 @@ export class OraclePaymentsPlugin extends OraclePlugin {
         config ? readConfigString(config, 'EVAL_ENGINE_URL') : undefined,
         config ? readConfigString(config, 'NETWORK') : undefined,
       ),
-      network: claimNetwork(
-        config ? readConfigString(config, 'NETWORK') : undefined,
-      ),
     });
     return this.contractGate;
   }
 
-  private resolveWorkIntent(config?: MergedConfig): WorkIntentService {
+  private resolveWorkIntent(): WorkIntentService {
     this.workIntent ??= new WorkIntentService({
       engagement: this.engagement,
-      network: claimNetwork(
-        config ? readConfigString(config, 'NETWORK') : undefined,
-      ),
     });
     return this.workIntent;
   }
@@ -225,7 +215,7 @@ export class OraclePaymentsPlugin extends OraclePlugin {
       // The same escrow lane the router starts jobs with: delivery reserves
       // again when a job outlives its window, and both must be the one chain
       // write.
-      intent: this.resolveWorkIntent(config),
+      intent: this.resolveWorkIntent(),
     });
     return this.workClaim;
   }
@@ -309,7 +299,7 @@ export class OraclePaymentsPlugin extends OraclePlugin {
       startWork: {
         agentCard: this.agentCard,
         contractGate: this.resolveContractGate(rtCtx.config),
-        workIntent: this.resolveWorkIntent(rtCtx.config),
+        workIntent: this.resolveWorkIntent(),
       },
     });
   }
@@ -367,7 +357,7 @@ export class OraclePaymentsPlugin extends OraclePlugin {
         contractRecord: this.contractRecord,
         engagement: this.engagement,
         contractGate: this.resolveContractGate(ctx?.config),
-        workIntent: this.resolveWorkIntent(ctx?.config),
+        workIntent: this.resolveWorkIntent(),
         workClaim: this.resolveWorkClaim(ctx?.config),
       }),
     ];

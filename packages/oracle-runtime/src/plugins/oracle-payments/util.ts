@@ -5,11 +5,7 @@ import type {
   MergedConfig,
 } from '../../plugin-api/types.js';
 import type { ClaimNetwork } from './claim-lane.js';
-import {
-  MAINNET_USDC_IBC_DENOM,
-  MICRO_UNITS_PER_UNIT,
-  type AgentCardServiceView,
-} from './types.js';
+import { MICRO_UNITS_PER_UNIT, type AgentCardServiceView } from './types.js';
 
 /** Just the reservation — everything the expiry helpers need to read. */
 type Reserved = Pick<CommerceEngagement, 'intent'>;
@@ -42,20 +38,39 @@ export function isEngagementExpired(engagement: Reserved, now: Date): boolean {
 }
 
 /**
- * Convert a USD price to the collection payment denom + micro-unit amount.
- * The single conversion for the whole plugin: the gate's `maxAmount` check, the
- * escrow intent locked at engagement start, and the claim amount submitted at
- * delivery all price the same service the same way, so the escrow and the claim
- * can never disagree.
+ * Convert a USD price to a micro-unit coin in the GRANTED denom — the
+ * `authz.maxAmount.denom` the portal named on the contract's spend
+ * authorization, never a network guess (uPay spec §5 R1: guessing is how a
+ * flipped grant denom fails every job as "max amount too low"). The single
+ * conversion for the whole plugin: the gate's `maxAmount` check, the escrow
+ * intent locked at engagement start, and the claim amount submitted at
+ * delivery or cancellation all price the same service the same way, so the
+ * escrow and the claim can never disagree.
  */
 export function priceToCoin(
   priceUsd: number,
-  network: string,
+  denom: string,
 ): { denom: string; amount: number } {
   return {
-    denom: network === 'mainnet' ? MAINNET_USDC_IBC_DENOM : 'uixo',
+    denom,
     amount: Math.round(priceUsd * MICRO_UNITS_PER_UNIT),
   };
+}
+
+/**
+ * The granted denom carried on a gate-issued engagement start or stamped on a
+ * persisted engagement, or `undefined` when there is none to read. The shared
+ * `CommerceEngagementStart`/`CommerceEngagement` types predate the field, so
+ * it travels structurally — this is the one reader, and its `undefined` is a
+ * fail-closed signal: a job without a granted denom is refused, never priced
+ * in a guessed one.
+ */
+export function grantedDenom(job: {
+  priceUsd: number;
+  denom?: unknown;
+}): string | undefined {
+  const denom = job.denom;
+  return typeof denom === 'string' && denom.length > 0 ? denom : undefined;
 }
 
 /**
@@ -160,8 +175,11 @@ export function oracleAddressFromDid(oracleDid: string): string {
     : oracleDid;
 }
 
-/** Default display currency when a card service omits one. */
-const DEFAULT_CURRENCY = 'USDC';
+/**
+ * Display currency when a card service omits one: PAY, the platform
+ * settlement currency (1 PAY = 1 USD — the only conversion ever shown).
+ */
+export const DEFAULT_CURRENCY = 'PAY';
 
 /** Shape a card service for the `list_services` component `props.services[]`. */
 export function toListServiceProp(

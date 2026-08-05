@@ -2,9 +2,10 @@ import { z } from 'zod';
 
 /**
  * One service the agent offers. `price.amount` is a display price in whole
- * units of `price.currency` (USDC by convention) — NOT a chain amount. Callers
- * that turn a service price into an on-chain `maxAmount` or claim amount own
- * that conversion, because it depends on the collection's payment denom.
+ * units of `price.currency` (PAY, the platform settlement currency — 1 PAY =
+ * 1 USD) — NOT a chain amount. Callers that turn a service price into an
+ * on-chain `maxAmount` or claim amount own that conversion, because the coin
+ * is built in the denom the contract was granted in.
  */
 export const AgentCardServiceSchema = z.object({
   id: z.string(),

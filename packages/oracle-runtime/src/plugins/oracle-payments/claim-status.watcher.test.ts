@@ -126,7 +126,7 @@ describe('ClaimStatusWatcher — delivery lane', () => {
       service: {
         id: 'tax-report',
         name: 'Tax report',
-        price: { amount: 20, currency: 'USDC' },
+        price: { amount: 20, currency: 'PAY' },
       },
       claimUrl: `https://portal.test/workspace/claims?claimId=${CLAIM_ID}`,
     });

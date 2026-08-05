@@ -93,7 +93,6 @@ describe('oracle-payments services are never silent by default', () => {
         },
       }),
       engagement: { findActiveForUser: async () => null },
-      network: 'devnet',
     });
     // Reach the record lane through a stub that throws where the service
     // contract says it never does — the belt-and-braces warn.

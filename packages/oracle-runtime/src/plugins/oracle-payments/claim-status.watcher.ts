@@ -17,6 +17,7 @@ import {
 } from './engagement.service.js';
 import {
   claimDeepLink,
+  DEFAULT_CURRENCY,
   errorMessage,
   resolvePortalUrl,
   retry,
@@ -238,7 +239,7 @@ export class ClaimStatusWatcher {
         service: {
           id: engagement.serviceId,
           name: engagement.serviceName,
-          price: { amount: engagement.priceUsd, currency: 'USDC' },
+          price: { amount: engagement.priceUsd, currency: DEFAULT_CURRENCY },
         },
         claimUrl,
       },
@@ -271,7 +272,7 @@ function paymentUpdateBody(
   outcome: CommercePaymentOutcome,
   lane: ClaimLane,
 ): string {
-  const price = `${engagement.priceUsd} USDC`;
+  const price = `${engagement.priceUsd} ${DEFAULT_CURRENCY}`;
   const name = engagement.serviceName;
   const suffix = ` (claim ${claimId}).`;
 

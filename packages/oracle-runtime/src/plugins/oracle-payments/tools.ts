@@ -23,6 +23,7 @@ import {
   type WorkClaimService,
 } from './work-claim.service.js';
 import {
+  DEFAULT_CURRENCY,
   oracleAddressFromDid,
   readConfigString,
   resolveEvalEngineUrl,
@@ -175,7 +176,7 @@ function createShowContractTool(deps: OraclePaymentsToolDeps): PluginTool {
 
       const oracleDid = readConfigString(ctx.config, 'ORACLE_DID');
       const oracleAddress = oracleDid ? oracleAddressFromDid(oracleDid) : '';
-      const currency = service.price.currency ?? 'USDC';
+      const currency = service.price.currency ?? DEFAULT_CURRENCY;
 
       // When the router's contract gate failed this turn, the card carries
       // the real failure reason; a plain user-initiated ask stays 'user_asked'.

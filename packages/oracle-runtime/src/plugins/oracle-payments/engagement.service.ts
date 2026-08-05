@@ -82,6 +82,10 @@ const EngagementSchema: z.ZodType<CommerceEngagement> = z.object({
   priceUsd: z.number(),
   collectionId: z.string(),
   adminAddress: z.string(),
+  // The granted denom every coin for this job is priced in (uPay spec §5 R1),
+  // stamped at start. Declared here so a read never strips it — the shared
+  // CommerceEngagement type predates it and `grantedDenom()` reads it back.
+  denom: z.string().optional(),
   userDid: z.string().optional(),
   startedAt: z.string(),
   cancelledAt: z.string().optional(),
@@ -116,6 +120,13 @@ export interface EngagementStartData {
   priceUsd: number;
   collectionId: string;
   adminAddress: string;
+  /**
+   * The granted denom the job's coins are priced in — `authz.maxAmount.denom`
+   * off the contract record, carried here by the gate (uPay spec §5 R1).
+   * Optional only because engagements written before it existed must stay
+   * readable; the claim lanes fail closed on its absence rather than guess.
+   */
+  denom?: string;
   /** The user the job belongs to — the key the active-engagement replica uses. */
   userDid?: string;
   /** The escrow reserved for this job, when the engagement is intent-backed. */

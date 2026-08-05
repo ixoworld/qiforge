@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { PluginManifest } from '../../plugin-api/types.js';
 import { DisplayCardSchema, type AgentCardServiceView } from './types.js';
+import { DEFAULT_CURRENCY } from './util.js';
 
 /** The local agent-card file, reduced to what manifest derivation consumes. */
 export interface LocalAgentCard {
@@ -55,7 +56,7 @@ export function loadLocalAgentCard(path: string): LocalAgentCard {
 }
 
 function serviceLine(service: AgentCardServiceView): string {
-  const currency = service.price.currency ?? 'USDC';
+  const currency = service.price.currency ?? DEFAULT_CURRENCY;
   const price =
     service.price.amount === 0 ? 'free' : `${service.price.amount} ${currency}`;
   const description = service.description ? `: ${service.description}` : '';
@@ -75,7 +76,7 @@ export function deriveManifestFromCard(
 ): PluginManifest {
   const services = card.services.map(
     (s) =>
-      `${s.name} (${s.price.amount === 0 ? 'free' : `${s.price.amount} ${s.price.currency ?? 'USDC'}`})`,
+      `${s.name} (${s.price.amount === 0 ? 'free' : `${s.price.amount} ${s.price.currency ?? DEFAULT_CURRENCY}`})`,
   );
   const description = card.description ? ` ${card.description}` : '';
   const summary = `${card.name} —${description} Paid services: ${services.join(', ')}. ${base.summary}`;

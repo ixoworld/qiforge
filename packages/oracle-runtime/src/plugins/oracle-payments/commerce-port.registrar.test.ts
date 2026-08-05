@@ -12,6 +12,7 @@ import {
 } from './__test-fixtures__/oracle-payments-fixtures.js';
 import { CommerceRouterPortRegistrar } from './commerce-port.registrar.js';
 import { ContractGateService } from './contract-gate.service.js';
+import type { GrantedEngagementStart } from './types.js';
 import { WorkIntentService } from './work-intent.service.js';
 
 function makeRegistrar(config: Record<string, unknown>) {
@@ -20,7 +21,6 @@ function makeRegistrar(config: Record<string, unknown>) {
     contractRecord: makeContractRecordService(makeContractRecord()).service,
     engagement,
     engineUrl: 'https://engine.example',
-    network: 'devnet',
   });
   const sendIntent = vi.fn(async () => ({
     code: 0,
@@ -33,7 +33,6 @@ function makeRegistrar(config: Record<string, unknown>) {
     gate,
     new WorkIntentService({
       engagement,
-      network: 'devnet',
       chain: { sendIntent },
       clock: () => new Date('2026-07-22T12:00:00.000Z'),
     }),
@@ -72,17 +71,19 @@ describe('CommerceRouterPortRegistrar', () => {
     // Engagement start reserves payment, then round-trips through the plugin's
     // store. (The port exposes no way to END an engagement — that is the
     // agent's cancel_work/deliver_work decision, not the router's.)
-    const started = await port!.startEngagement('!room:home', 'thread-1', {
+    const start: GrantedEngagementStart = {
       serviceId: 'tax-report',
       serviceName: 'Tax report',
       priceUsd: 20,
+      denom: 'upay',
       collectionId: '42',
       adminAddress: 'ixo1admin',
       userDid: USER_DID,
-    });
+    };
+    const started = await port!.startEngagement('!room:home', 'thread-1', start);
     expect(sendIntent).toHaveBeenCalledWith({
       collectionId: '42',
-      amount: [{ denom: 'uixo', amount: '20000000' }],
+      amount: [{ denom: 'upay', amount: '20000000' }],
     });
     expect(started.ok).toBe(true);
     expect(started.ok && started.engagement.status).toBe('active');

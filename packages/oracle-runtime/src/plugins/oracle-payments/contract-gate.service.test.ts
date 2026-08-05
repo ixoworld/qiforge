@@ -25,7 +25,6 @@ const TAX_SERVICE: CommerceRoutedService = {
 function makeGate(
   record: ContractRecord | null,
   opts: {
-    network?: string;
     now?: () => number;
     fetchImpl?: typeof fetch;
   } = {},
@@ -43,7 +42,6 @@ function makeGate(
     contractRecord: service,
     engagement,
     engineUrl: ENGINE_URL,
-    network: opts.network ?? 'devnet',
     clock: opts.now,
   });
   return { gate, fetchCalls, engagement };
@@ -122,27 +120,44 @@ describe('ContractGateService', () => {
 
   it('fails max_amount_too_low when the grant cap is under the price', async () => {
     const record = makeContractRecord();
-    // 20 USD on devnet = 20_000_000 uixo; cap it below.
-    record.authz.maxAmount = { amount: '19999999', denom: 'uixo' };
+    // 20 USD = 20_000_000 micro-units of the granted denom; cap it below.
+    record.authz.maxAmount = { amount: '19999999', denom: 'upay' };
     const { gate } = makeGate(record);
 
     // The numbers travel: "too low" alone is not something a user can act on.
     expect(await check(gate)).toEqual({
       ok: false,
       reason: 'max_amount_too_low',
-      detail: expect.stringContaining('19999999 uixo'),
+      detail: expect.stringContaining('19999999 upay'),
     });
   });
 
-  it('fails max_amount_too_low on a denom mismatch', async () => {
+  it('follows the granted denom — a uusdc grant prices the job in uusdc', async () => {
+    // The handshake fix (uPay spec §5 R1): what used to refuse as a denom
+    // mismatch now proves grant-following — the job is priced in whatever
+    // denom the portal granted, so old contracts keep settling in their old
+    // denom across the uPay flip.
     const record = makeContractRecord();
     record.authz.maxAmount = { amount: '999999999', denom: 'uusdc' };
     const { gate } = makeGate(record);
 
+    expect(await check(gate)).toMatchObject({
+      ok: true,
+      start: { denom: 'uusdc' },
+    });
+  });
+
+  it('fails closed when the grant names no denom at all', async () => {
+    // No denom means no job can be priced — refusing beats reserving escrow
+    // in a guessed denom the grant never covers.
+    const record = makeContractRecord();
+    record.authz.maxAmount = { amount: '999999999', denom: '' };
+    const { gate } = makeGate(record);
+
     expect(await check(gate)).toEqual({
       ok: false,
-      reason: 'max_amount_too_low',
-      detail: expect.stringContaining('uusdc'),
+      reason: 'not_contracted',
+      detail: expect.stringContaining('names no payment denom'),
     });
   });
 
@@ -171,6 +186,9 @@ describe('ContractGateService', () => {
         serviceId: 'tax-report',
         serviceName: 'Tax report',
         priceUsd: 20,
+        // The granted denom off the record — the denom every coin this job
+        // builds is priced in (uPay spec §5 R1).
+        denom: 'upay',
         collectionId: '42',
         adminAddress: 'ixo1admincollectionadmin',
         // Stamped on the engagement so the replica that keeps the user in

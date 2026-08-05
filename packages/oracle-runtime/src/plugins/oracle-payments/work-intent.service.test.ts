@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CommerceEngagementStart } from '../../modules/messages/commerce-router-port.js';
 import type { SubmitClaimResult } from './claim-lane.js';
 import {
   COLLECTION_ID,
@@ -8,16 +7,18 @@ import {
   ROOM_ID,
   THREAD_ID,
 } from './__test-fixtures__/oracle-payments-fixtures.js';
+import type { GrantedEngagementStart } from './types.js';
 import { expiryFrom, WorkIntentService } from './work-intent.service.js';
 
 /** Seven days, the duration the contract's AuthZ snapshot reports. */
 const SEVEN_DAYS_NS = '604800000000000';
 const NOW = '2026-07-22T12:00:00.000Z';
 
-const START: CommerceEngagementStart = {
+const START: GrantedEngagementStart = {
   serviceId: 'tax-report',
   serviceName: 'Tax report',
   priceUsd: 20,
+  denom: 'upay',
   collectionId: COLLECTION_ID,
   adminAddress: 'ixo1admin',
   intentDurationNs: SEVEN_DAYS_NS,
@@ -26,7 +27,6 @@ const START: CommerceEngagementStart = {
 function makeService(options: {
   result?: SubmitClaimResult;
   throws?: Error;
-  network?: string;
   /** Fails the durable engagement write, as a Matrix outage would. */
   setState?: (payload: {
     roomId: string;
@@ -49,7 +49,6 @@ function makeService(options: {
   });
   const service = new WorkIntentService({
     engagement,
-    network: options.network ?? 'devnet',
     chain: { sendIntent },
     clock: () => new Date(NOW),
     sleep: async () => {},
@@ -72,7 +71,7 @@ describe('WorkIntentService.startEngagement', () => {
     expect(sendIntent).toHaveBeenCalledWith({
       collectionId: COLLECTION_ID,
       // Same conversion the claim uses at delivery — escrow and claim agree.
-      amount: [{ denom: 'uixo', amount: '20000000' }],
+      amount: [{ denom: 'upay', amount: '20000000' }],
     });
     expect(result).toEqual({
       ok: true,
@@ -81,6 +80,9 @@ describe('WorkIntentService.startEngagement', () => {
         serviceId: 'tax-report',
         serviceName: 'Tax report',
         priceUsd: 20,
+        // The granted denom, stamped so the release lane can price its claim
+        // without a record lookup (uPay spec §5 R1).
+        denom: 'upay',
         collectionId: COLLECTION_ID,
         adminAddress: 'ixo1admin',
         startedAt: NOW,
@@ -97,12 +99,34 @@ describe('WorkIntentService.startEngagement', () => {
     });
   });
 
-  it('prices the reservation in the mainnet denom on mainnet', async () => {
-    const { service, sendIntent } = makeService({ network: 'mainnet' });
+  it('reserves in whatever denom the grant names — nothing is network-guessed', async () => {
+    // R1: a contract granted in another denom keeps settling in it, which is
+    // what lets old contracts straddle the uPay flip without a flag day.
+    const { service, sendIntent } = makeService({});
 
-    await service.startEngagement(ROOM_ID, THREAD_ID, START);
+    await service.startEngagement(ROOM_ID, THREAD_ID, {
+      ...START,
+      denom: 'uusdc',
+    });
 
-    expect(sendIntent.mock.calls[0]![0].amount[0]!.denom).toMatch(/^ibc\//);
+    expect(sendIntent.mock.calls[0]![0].amount[0]!.denom).toBe('uusdc');
+  });
+
+  it('refuses a start that carries no granted denom — nothing is reserved', async () => {
+    // Fail closed: reserving in a guessed denom would lock escrow the grant
+    // never covers. Only the gate mints starts, so this names a wiring fault.
+    const { service, engagement, sendIntent } = makeService({});
+    const { denom: _denom, ...ungranted } = START;
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, ungranted);
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'intent_failed',
+      detail: expect.stringContaining('no granted payment denom'),
+    });
+    expect(sendIntent).not.toHaveBeenCalled();
+    expect(await engagement.get(ROOM_ID, THREAD_ID)).toBeNull();
   });
 
   it("starts no engagement when the reservation tx is rejected, and carries the chain's reason", async () => {
@@ -140,10 +164,11 @@ describe('WorkIntentService.startEngagement', () => {
 
   it('leaves the deadline unset when the contract reports no usable duration', async () => {
     const { service } = makeService({});
-    const noDuration: CommerceEngagementStart = {
+    const noDuration: GrantedEngagementStart = {
       serviceId: START.serviceId,
       serviceName: START.serviceName,
       priceUsd: START.priceUsd,
+      denom: START.denom,
       collectionId: START.collectionId,
       adminAddress: START.adminAddress,
     };

@@ -24,7 +24,7 @@ describe('Authz', () => {
 
   it('Should fail to submit intent without permission', async () => {
     const Promise = claims.sendClaimIntent({
-      amount: [{ denom: 'uixo', amount: '1000' }],
+      amount: [{ denom: 'upay', amount: '1000' }],
       userClaimCollection: '138',
     });
     await expect(Promise).rejects.toThrow();
@@ -34,7 +34,7 @@ describe('Authz', () => {
   it('should list intents', async () => {
     await client.init();
     //  const Promise = claims.sendClaimIntent({
-    //    amount: [{ denom: 'uixo', amount: '1000' }],
+    //    amount: [{ denom: 'upay', amount: '1000' }],
     //    granteeAddress: oracleAddress,
     //    userAddress,
     //  });
@@ -109,7 +109,7 @@ describe('Authz', () => {
       });
     }
     await claims.sendClaimIntent({
-      amount: [{ denom: 'uixo', amount: '1000' }],
+      amount: [{ denom: 'upay', amount: '1000' }],
       userClaimCollection: '138',
     });
     intentList = await client.queryClient.ixo.claims.v1beta1.intentList({});
@@ -120,7 +120,7 @@ describe('Authz', () => {
       collectionId: '138',
     });
     await claims.sendClaimIntent({
-      amount: [{ denom: 'uixo', amount: '478' }],
+      amount: [{ denom: 'upay', amount: '478' }],
       userClaimCollection: '138',
     });
     // await expect(Promise).resolves.toBeDefined();
@@ -131,7 +131,7 @@ describe('Authz', () => {
     // console.log('🚀 ~ Authz ~ it.only ~ permissions:', permissions);
     await claims.submitClaim({
       claimId: '1',
-      amount: [{ denom: 'uixo', amount: '1000' }],
+      amount: [{ denom: 'upay', amount: '1000' }],
       useIntent: true,
       collectionId: '138',
     });
@@ -162,7 +162,7 @@ describe('Authz', () => {
                     maxCustomAmount: [
                       cosmos.base.v1beta1.Coin.fromPartial({
                         amount: '30000000',
-                        denom: 'uixo',
+                        denom: 'upay',
                       }),
                     ],
                   }),

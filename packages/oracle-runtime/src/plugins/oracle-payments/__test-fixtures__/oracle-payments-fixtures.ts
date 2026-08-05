@@ -51,7 +51,7 @@ export function makeCardDocument(entityDid: string = ORACLE_ENTITY_DID): {
           id: 'tax-report',
           name: 'Tax report',
           description: 'A full tax report for the year',
-          price: { amount: 20, currency: 'USDC' },
+          price: { amount: 20, currency: 'PAY' },
           deliverables: 'A PDF tax report',
           doneMeans: ['All income sources are accounted for'],
           tags: ['tax', 'finance'],
@@ -110,7 +110,7 @@ export function makeContractRecord(
     authz: {
       granted: true,
       agentQuotaRemaining: 3,
-      maxAmount: { amount: '20000000', denom: 'uixo' },
+      maxAmount: { amount: '20000000', denom: 'upay' },
       intentDurationNs: '604800000000000',
     },
     ...overrides,
@@ -226,15 +226,22 @@ export function makeCommerceCtx(
   });
 }
 
+/**
+ * The engagement as the plugin persists it: the shared shape plus the granted
+ * denom stamped at start (uPay spec §5 R1), which the shared type predates.
+ */
+export type StampedEngagement = CommerceEngagement & { denom?: string };
+
 /** An active work engagement for `tax-report`, as the router would start it. */
 export function makeEngagement(
-  overrides: Partial<CommerceEngagement> = {},
-): CommerceEngagement {
+  overrides: Partial<StampedEngagement> = {},
+): StampedEngagement {
   return {
     status: 'active',
     serviceId: 'tax-report',
     serviceName: 'Tax report',
     priceUsd: 20,
+    denom: 'upay',
     collectionId: COLLECTION_ID,
     adminAddress: ADMIN_ADDRESS,
     startedAt: '2026-07-22T00:00:00.000Z',

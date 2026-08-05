@@ -14,7 +14,7 @@ export {
   type EngineTokenProvider,
   EVAL_ENGINE_RESOURCE,
 } from './contract-record.service.js';
-export { claimDeepLink, priceToCoin } from './util.js';
+export { claimDeepLink, grantedDenom, priceToCoin } from './util.js';
 export {
   ContractedEventListener,
   applyContractedCacheBust,
@@ -104,8 +104,8 @@ export {
 export {
   ContractRecordSchema,
   DisplayCardSchema,
-  MAINNET_USDC_IBC_DENOM,
   type AgentCardServiceView,
   type ContractRecord,
+  type GrantedEngagementStart,
   type ResolvedAgentCard,
 } from './types.js';
