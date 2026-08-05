@@ -773,14 +773,14 @@ Ingredient by ingredient this is old: per-task VMs are CI runners, the setup scr
 
 Bound to a thread, the binding is a convenience. Bound to an entity — a DID with a constitution, rooms, a ledger, a treasury — it is the runtime shape of the custody spec's conclusion (§10.1): _host transience vs entity persistence_. The mapping, row by row:
 
-| Orbs                                            | Sovereign analog                                                          | Verdict                                                                                              |
-| ----------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Thread owns a metered, pausable machine         | Entity rents its runtime instance                                         | **Adopt** — custody rung 5 made mechanical                                                            |
-| `.agents/setup` / `.agents/resume` in the repo  | Resurrection contract in entity-owned state                               | **Adopt, re-rooted** — [IXO-4240](https://linear.app/ixo-world/issue/IXO-4240)                        |
-| OIDC workload identity, short-lived tokens      | Instance holds only expiring, attenuated capabilities; the root is the DID | **Adopt the shape, reject the root**                                                                  |
-| Portal auth = thread viewership                 | —                                                                         | **Reject** — ambient authority derived from a social object                                           |
-| Webhook URL as password                         | —                                                                         | **Reject** — bearer ingress around the gate ([IXO-4195](https://linear.app/ixo-world/issue/IXO-4195)) |
-| Isolation as the safety story                   | Constitution as the authority story                                       | **Orthogonal** — containment bounds blast radius; it does not create authority                        |
+| Orbs                                           | Sovereign analog                                                           | Verdict                                                                                               |
+| ---------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Thread owns a metered, pausable machine        | Entity rents its runtime instance                                          | **Adopt** — custody rung 5 made mechanical                                                            |
+| `.agents/setup` / `.agents/resume` in the repo | Resurrection contract in entity-owned state                                | **Adopt, re-rooted** — [IXO-4240](https://linear.app/ixo-world/issue/IXO-4240)                        |
+| OIDC workload identity, short-lived tokens     | Instance holds only expiring, attenuated capabilities; the root is the DID | **Adopt the shape, reject the root**                                                                  |
+| Portal auth = thread viewership                | —                                                                          | **Reject** — ambient authority derived from a social object                                           |
+| Webhook URL as password                        | —                                                                          | **Reject** — bearer ingress around the gate ([IXO-4195](https://linear.app/ixo-world/issue/IXO-4195)) |
+| Isolation as the safety story                  | Constitution as the authority story                                        | **Orthogonal** — containment bounds blast radius; it does not create authority                        |
 
 The first row indicts the current runtime shape. Today the harness is an always-on daemon, operator-provisioned, whose continuity is process uptime — the extrinsic pattern §30a scored, persisting one level below the constitution. The target shape is the orb shape with the tenant upgraded: **wake on message, hydrate from the entity's own state, act under the gate, pause.** Two consequences fall out immediately:
 
