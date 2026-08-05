@@ -1,7 +1,7 @@
 # The Sovereign Agency Harness — Research and Architecture
 
 **Status:** Research spec — patterns established, architecture proposed, implementation phased
-**Revision:** v1.2 — 2026-08-03 (v1: research + architecture; v1.1 adds Part V — `domain.md` alignment assessment and the concrete Phase-1 wiring plan; v1.2 adds Part VI — the Phase 1 gap review, written at completion)
+**Revision:** v1.3 — 2026-08-05 (v1: research + architecture; v1.1 adds Part V — `domain.md` alignment assessment and the concrete Phase-1 wiring plan; v1.2 adds Part VI — the Phase 1 gap review, written at completion; v1.3 adds Part VII — the hosting pattern, from the Orbs evaluation)
 **Branch:** `claude/sovereign-agency-harness-09u8j6`
 **Builds on:** `specs/ORA-219-plugin-based-runtime.md` (the plugin runtime this design extends)
 **Stack context:** `@ixo/oracle-runtime` · IXO Impact Hub (IID / Entity / Claims modules) · Matrix · UCAN · LangGraph
@@ -12,7 +12,7 @@
 
 A systematic study of how the industry's agent harnesses actually work — LangChain Deep Agents, qm, Claude Code / the Claude Agent SDK, the OpenAI Agents SDK, LangGraph, Letta (MemGPT), OpenHands, smolagents, MCP — followed by a first-principles derivation of the **Sovereign Agency Harness**: an architectural inversion in which the harness stops being extrinsic middleware owned by an app developer and becomes a **constitutive part of the entity itself**, with AI models reduced to pluggable, temporary reasoning tools the entity hires, uses, and discards.
 
-Part I reports what the established harnesses teach. Part II derives the principles. Part III specifies the sovereign architecture. Part IV maps it onto QiForge and phases the work. Part VI, added at Phase 1 completion, audits what was built against the promise — property by property, honestly.
+Part I reports what the established harnesses teach. Part II derives the principles. Part III specifies the sovereign architecture. Part IV maps it onto QiForge and phases the work. Part VI, added at Phase 1 completion, audits what was built against the promise — property by property, honestly. Part VII extracts, from Amp's Orbs, the compute-tenancy pattern that moves the entity out of the operator's building.
 
 ### Table of contents
 
@@ -52,7 +52,9 @@ Part I reports what the established harnesses teach. Part II derives the princip
   - [29. Sequencing with later phases and upstream proposals](#29-sequencing-with-later-phases-and-upstream-proposals)
 - **Part VI — Phase 1 gap review: the promise, audited**
   - [30. The gap review](#30-the-gap-review) — custody inventory (30a), the four properties scored (30b), the pipeline audited (30c), untracked gaps now tracked (30d), where Phase 1 exceeded the letter (30e), reading (30f)
-- [31. References](#31-references)
+- **Part VII — The hosting pattern: entity as tenant**
+  - [31. Disposable body, sovereign soul](#31-disposable-body-sovereign-soul) — the pattern extracted (31a), the inversion applied (31b), the resurrection contract (31c), instance identity (31d), what does not transfer (31e)
+- [32. References](#32-references)
 
 ---
 
@@ -755,7 +757,53 @@ A gap review should also record what turned out stronger than specified, because
 
 ---
 
-## 31. References
+# Part VII — The hosting pattern: entity as tenant
+
+## 31. Disposable body, sovereign soul
+
+_Assessed 2026-08-05, against Amp's Orbs (https://ampcode.com/manual/orbs), evaluated on request as a candidate design pattern for the sovereign runtime. The verdict up front: Orbs carry no governance worth importing — Amp's stated posture is that the agent "does not ask for approval before running tools," the inverse of this harness — but beneath that sits a compute-tenancy inversion that answers the question §30f left open and the custody ladder (`specs/sovereign-key-custody.md` §10) routes: how the entity stops living in the operator's building._
+
+### 31a. The pattern, extracted
+
+An orb is a per-thread remote machine: billed by the minute, auto-paused when idle, resumed on demand — a paused orb costs nothing. The repository carries its own runtime contract: `.agents/setup` (bootstrap), `.agents/resume` (idempotent reconnect, budgeted at ten seconds), a service manifest. Ingress arrives through viewer-scoped portal URLs and bearer-URL webhooks; outbound identity through OIDC workload tokens — short-lived, audience-bound, minted at need rather than stored.
+
+Ingredient by ingredient this is old: per-task VMs are CI runners, the setup script is a devcontainer, pause-per-minute is serverless economics. What is new is the **binding**: the machine's lifecycle is bound to a persistent conversational identity. The thread owns the machine, not the reverse — compute is a metered, disposable, evictable attachment to a durable identity whose continuity lives entirely in state the machine does not own.
+
+### 31b. The inversion, applied
+
+Bound to a thread, the binding is a convenience. Bound to an entity — a DID with a constitution, rooms, a ledger, a treasury — it is the runtime shape of the custody spec's conclusion (§10.1): _host transience vs entity persistence_. The mapping, row by row:
+
+| Orbs                                            | Sovereign analog                                                          | Verdict                                                                                              |
+| ----------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Thread owns a metered, pausable machine         | Entity rents its runtime instance                                         | **Adopt** — custody rung 5 made mechanical                                                            |
+| `.agents/setup` / `.agents/resume` in the repo  | Resurrection contract in entity-owned state                               | **Adopt, re-rooted** — [IXO-4240](https://linear.app/ixo-world/issue/IXO-4240)                        |
+| OIDC workload identity, short-lived tokens      | Instance holds only expiring, attenuated capabilities; the root is the DID | **Adopt the shape, reject the root**                                                                  |
+| Portal auth = thread viewership                 | —                                                                         | **Reject** — ambient authority derived from a social object                                           |
+| Webhook URL as password                         | —                                                                         | **Reject** — bearer ingress around the gate ([IXO-4195](https://linear.app/ixo-world/issue/IXO-4195)) |
+| Isolation as the safety story                   | Constitution as the authority story                                       | **Orthogonal** — containment bounds blast radius; it does not create authority                        |
+
+The first row indicts the current runtime shape. Today the harness is an always-on daemon, operator-provisioned, whose continuity is process uptime — the extrinsic pattern §30a scored, persisting one level below the constitution. The target shape is the orb shape with the tenant upgraded: **wake on message, hydrate from the entity's own state, act under the gate, pause.** Two consequences fall out immediately:
+
+- **Insolvency becomes suspension, not death.** A paused instance costs nothing, so an entity that exhausts its treasury pauses — identity, law, memory, and ledger survive, held elsewhere — and resumes when funded. That is a strictly better failure mode than any always-on tenancy, and it is model-transience-vs-entity-persistence applied to the host itself.
+- **Compute rent is the reference recurring payment.** Metered hosting paid from the entity's on-chain account is the ideal first autonomous recurring `pay` through the full machinery — small, bounded, denominated, recipient-allowlisted, exactly what the account policy and the ledger's own spend accounting (§30b) were built to govern. Rung 5 stops being aspiration the day the entity pays this bill itself.
+
+### 31c. The resurrection contract
+
+What makes eviction survivable is that rebirth is cheap. Orbs make rebirth declarative and versioned; the sovereign version must also make it **operator-free**: fresh machine + entity DID + delegated room access → serving entity, within a time budget, with no operator-held secret on the critical path — the constitution loaded against its verified anchor, keys via the account-room custody path, checkpoints from the entity's rooms, the ledger resuming from its published head with no gap and no fork. This degrades the one power §10.1 concedes as irreducible — deny-service — from "can kill the entity" to "can evict it from one building." The Orbs detail that keeps the requirement honest is the resume budget: ten seconds, against a Matrix init that is today a slow background boot phase; a pausable entity needs a lazy-hydration resume path, not just a correct cold one. Tracked: [IXO-4240](https://linear.app/ixo-world/issue/IXO-4240).
+
+### 31d. Instance identity
+
+Orbs prove the operational half of the custody spec's "demote, don't split" (§10.4) at the infrastructure layer: a machine that mints short-lived, audience-bound tokens at need holds nothing worth stealing at rest. The instance should hold exactly that — expiring, attenuated capabilities plus the hot device account — and never a root. But note what roots an orb's identity: the provider's OIDC issuer. Such a token attests _this is instance X in workspace Y_ — a **host attestation**, admissible as an input to attested-runtime gating (custody spec §8), never as the principal. The principal is the DID. A provider-rooted identity as principal would rebuild the landlord one abstraction up.
+
+### 31e. What does not transfer
+
+The ingress surface is the cautionary half. Portal access scoped to thread viewers is ambient authority from a social object — the shape the review loop already rejected when approvals became power-gated, sender-checked state events ([IXO-4198](https://linear.app/ixo-world/issue/IXO-4198)). Webhook URLs as passwords are bearer capabilities with at-least-once delivery and no sender verification — fine for CI pings, a gate bypass for anything effectful. Both restate [IXO-4195](https://linear.app/ixo-world/issue/IXO-4195)'s rule with a live example: **any non-tool ingress into an entity's runtime terminates in `authorize()` with a declared effect, and no effectful endpoint authenticates by URL possession.** And the framing "sandboxed, therefore safe to run unsupervised" mistakes containment for authority: a perfectly isolated model that pays from the treasury is still ungoverned unless the gate is in the path.
+
+Nothing in this part requires Amp. The pattern is provider-agnostic, and sovereignty requires that it stay so: an orb market, a rival's equivalent, or the entity's own attested hardware are interchangeable buildings — which is the point.
+
+---
+
+## 32. References
 
 **Named starting points**
 
