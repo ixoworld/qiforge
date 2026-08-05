@@ -1,9 +1,16 @@
 import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import type { DomainContext } from '../constitution/domain-context.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
+import { createIxoDIDResolver, createUCANValidator } from '@ixo/ucan';
+import type { AuthorizeDeps } from '../constitution/authorize.js';
+import { createCapabilityVerifier } from '../constitution/ucan-adapter.js';
+import { DecisionLedgerService } from '../modules/domain-context/decision-ledger.service.js';
+import { DOMAIN_CONTEXT } from '../modules/domain-context/domain-context.service.js';
+import { ConstitutionReviewService } from '../modules/domain-context/review.service.js';
 import { UcanService } from '../modules/ucan/ucan.service.js';
 import { wsEmitter } from '../modules/ws/emitter.js';
 import type {
@@ -52,6 +59,47 @@ export interface BuildAmbientOptions {
  * narrow so plugins don't reach for service internals. This factory is the
  * only place where the wide-shape services get bound to the narrow shape.
  */
+/**
+ * Builds the capability verifier, when the runtime has what it needs to.
+ *
+ * Lazy about the validator: constructing one resolves DIDs over the network,
+ * and doing that at boot for a runtime whose constitution names no
+ * capability-proof grant would be work nobody asked for. Built on first use
+ * and reused after — the DID resolver caches, so the cost lands once.
+ */
+function buildCapabilityVerifier(
+  config: Record<string, unknown>,
+  logger: PluginLogger,
+): AuthorizeDeps['verifyCapabilityProof'] | undefined {
+  const oracleDid = config.ORACLE_DID;
+  const blocksyncUri = config.BLOCKSYNC_GRAPHQL_URL;
+  if (typeof oracleDid !== 'string' || typeof blocksyncUri !== 'string') {
+    logger.warn(
+      '[constitution] No capability verifier: ORACLE_DID or BLOCKSYNC_GRAPHQL_URL is unset. ' +
+        'Grants evidenced by a capability proof will be refused. ' +
+        '(event: constitution.capability_verifier.unconfigured)',
+    );
+    return undefined;
+  }
+
+  let verifier: AuthorizeDeps['verifyCapabilityProof'] | null = null;
+  const build = async () => {
+    const validator = await createUCANValidator({
+      serverDid: oracleDid,
+      rootIssuers: [],
+      didResolver: createIxoDIDResolver({ indexerUrl: blocksyncUri }),
+    });
+    // No revocation source exists in this codebase, so the verdict records
+    // `revoked: null` — not checked — rather than claiming the proof is clean.
+    return createCapabilityVerifier({ validator });
+  };
+
+  return async (proof, expectation) => {
+    verifier ??= await build();
+    return verifier(proof, expectation);
+  };
+}
+
 export function buildAmbientServices(
   opts: BuildAmbientOptions,
 ): AmbientServices {
@@ -205,9 +253,21 @@ export function buildAmbientServices(
     },
   };
 
+  // Read out of the container rather than taken as an option: by this point
+  // the constitution is already bound there, and one source beats two that
+  // could disagree about which document is in force.
+  const domainContext = opts.nestApp.get<DomainContext>(DOMAIN_CONTEXT);
+  const decisions = opts.nestApp.get(DecisionLedgerService);
+  const capabilityVerifier = buildCapabilityVerifier(opts.config, opts.logger);
+  const review = opts.nestApp.get(ConstitutionReviewService);
+
   return {
     config: opts.config,
     identity: opts.identity,
+    domain: domainContext,
+    decisions,
+    review,
+    ...(capabilityVerifier ? { capabilityVerifier } : {}),
     availablePlugins: opts.availablePlugins,
     secrets: secretsAdapter,
     blobStore: blobStoreAdapter,

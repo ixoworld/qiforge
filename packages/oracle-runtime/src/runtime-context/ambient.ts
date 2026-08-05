@@ -1,4 +1,10 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DomainContext } from '../constitution/domain-context.js';
+import type { AuthorizeDeps } from '../constitution/authorize.js';
+import type {
+  DecisionRecorder,
+  ReviewCoordinator,
+} from '../graph/middlewares/constitution-gate-middleware.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -143,6 +149,31 @@ export interface EmitAdapter {
 export interface AmbientServices {
   config: Record<string, unknown>;
   identity: OracleIdentity;
+  /** The entity's constitution, loaded once at boot and frozen. */
+  domain: DomainContext;
+  /**
+   * The decision ledger the gate records every verdict to.
+   *
+   * Optional because a runtime assembled without one is a coherent thing —
+   * every unit-test harness in this repo is one — and the gate already treats
+   * an absent recorder differently from one that refuses a record. What it
+   * must never be is absent in a real boot, which `createAmbientServices`
+   * guarantees and its test asserts.
+   */
+  decisions?: DecisionRecorder;
+  /**
+   * The human-review loop the gate escalates to. Optional on the same terms
+   * as `decisions`: absent means `manual_review_required` stays a refusal
+   * with nowhere to go, which is correct but a dead end.
+   */
+  review?: ReviewCoordinator;
+  /**
+   * Verifies a capability token a grant names as its proof.
+   *
+   * Absent means non-`policy` grants cannot be satisfied and are refused —
+   * correct, and the state this runtime was in before the adapter existed.
+   */
+  capabilityVerifier?: AuthorizeDeps['verifyCapabilityProof'];
   availablePlugins: ReadonlySet<string>;
   secrets: SecretsAdapter;
   blobStore: BlobStoreAdapter;

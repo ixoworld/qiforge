@@ -31,6 +31,7 @@ import {
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import {
   mockBlobStore,
+  mockDomain,
   mockEmit,
   mockLlm,
   mockLogger,
@@ -199,6 +200,7 @@ export async function createTestRuntime(
   // `rt.mocks.matrix(...)` swaps are picked up by every fresh
   // `buildRuntimeContext` call without relying on a re-bind.
   const ambient: AmbientServices = {
+    domain: mockDomain(),
     config: opts.config ?? {},
     identity,
     availablePlugins: loadedPluginNames,

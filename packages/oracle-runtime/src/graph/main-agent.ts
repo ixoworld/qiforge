@@ -9,6 +9,7 @@ import type {
   PluginContext,
   PluginManifest,
   PluginTool,
+  ToolEffect,
 } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import {
@@ -37,11 +38,13 @@ import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
 import {
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
+  createConstitutionGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares/index.js';
+import { buildConstitutionBlock } from './constitution-block.js';
 import {
   composePrompt,
   formatTimeContext,
@@ -51,6 +54,7 @@ import {
 import { MainAgentGraphState } from './state.js';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback.js';
 import { computeSubAgentToolName } from './subagent-as-tool.js';
+import { resolveToolEffect } from '../plugins/tool-effects.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
@@ -263,11 +267,17 @@ export async function createMainAgent(
     string,
     NonNullable<PluginManifest['visibility']>
   >();
+  // What each tool does to the world, for the constitution gate. Read from a
+  // map rather than the tool because `wrapPluginTool` keeps only name,
+  // description and schema — the declaration does not survive the trip.
+  const effectByToolName = new Map<string, ToolEffect>();
   for (const { pluginName, tool } of allTools) {
     pluginByToolName.set(tool.name, pluginName);
     const effective =
       tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
     visibilityByToolName.set(tool.name, effective);
+    const effect = resolveToolEffect(tool);
+    if (effect) effectByToolName.set(tool.name, effect);
   }
   for (const { pluginName, subAgent } of allSubAgents) {
     const toolName = computeSubAgentToolName(subAgent.name);
@@ -276,9 +286,33 @@ export async function createMainAgent(
       toolName,
       manifestViz.get(pluginName) ?? 'on-demand',
     );
+    // Delegating is an `evaluate`: handing work to a sub-agent is a judgement
+    // about what should happen, not the happening. Whatever the sub-agent then
+    // does is gated again on its own tools, which is where the effects are.
+    effectByToolName.set(toolName, {
+      type: 'evaluate',
+      action: 'delegate_to_sub_agent',
+      object: () => `${rtCtx.domain.subject}#sub-agent/${subAgent.name}`,
+    });
   }
 
-  // ── 6. Middleware stack — 4 always-on + plugin contributions ────────────
+  // One consolidated line rather than one per tool: a boot that warns sixty
+  // times trains everyone to stop reading boot warnings.
+  const undeclared = [...allTools]
+    .map(({ tool }) => tool.name)
+    .filter((name) => !effectByToolName.has(name));
+  if (undeclared.length > 0) {
+    const consequence =
+      rtCtx.domain.enforcement === 'strict'
+        ? 'Under strict enforcement these are refused — an unknown effect is an unbounded one.'
+        : 'Treated as `read` under permissive enforcement; they would be refused under strict.';
+    ambient.logger.warn(
+      `[constitution] ${undeclared.length} tool(s) declare no effect: ${undeclared.join(', ')}. ` +
+        `${consequence} (event: boot.constitution.undeclared_effects)`,
+    );
+  }
+
+  // ── 6. Middleware stack — always-on + plugin contributions ──────────────
   const pluginMiddlewares = registries.middlewares
     .collect(buildCtx)
     .map(({ middleware }) => middleware);
@@ -293,6 +327,22 @@ export async function createMainAgent(
     createToolValidationMiddleware({
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,
+    }),
+    // Ahead of the repetition guard on purpose: the guard short-circuits a
+    // duplicate failed call without invoking the handler, so a gate placed
+    // after it would never see those calls.
+    createConstitutionGateMiddleware({
+      domain: rtCtx.domain,
+      effectByToolName,
+      rtCtx,
+      logger: ambient.logger,
+      ...(ambient.decisions ? { recorder: ambient.decisions } : {}),
+      ...(ambient.review ? { review: ambient.review } : {}),
+      ...(ambient.capabilityVerifier
+        ? {
+            deps: { verifyCapabilityProof: ambient.capabilityVerifier },
+          }
+        : {}),
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
     toolRetryMiddleware({ onFailure: (error) => error.message }),
@@ -393,6 +443,9 @@ export async function createMainAgent(
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
+    // Read from the same frozen context the gate evaluates against, so what
+    // the model is told and what it will be held to cannot drift apart.
+    constitutionBlock: buildConstitutionBlock(rtCtx.domain),
     customInstructions,
     operationalMode:
       editorPrompts?.operationalMode ??

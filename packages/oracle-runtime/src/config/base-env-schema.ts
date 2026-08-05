@@ -141,6 +141,54 @@ export const baseEnvSchema = z.object({
    * to the Codex public client; override only for testing against a stub.
    */
   BYO_CHATGPT_CLIENT_ID: z.string().optional(),
+
+  /**
+   * Path to the entity's `domain.md` — its constitution. Required: the runtime
+   * evaluates every tool call against it, and there is no default constitution
+   * to fall back on. An entity without one has no basis for the authority it
+   * would be exercising, whatever kind of entity it is.
+   */
+  DOMAIN_MD_PATH: z.string(),
+
+  /**
+   * How the runtime treats a constitution it cannot fully vouch for.
+   *
+   * `strict` (the default, and the only posture to deploy) requires the
+   * document to be anchored to canonical state and refuses actions it cannot
+   * classify. `permissive` tolerates an unanchored draft for development.
+   *
+   * Neither mode disables the gate — enforcement is not a feature flag, so
+   * there is deliberately no `off`.
+   */
+  DOMAIN_ENFORCEMENT: z.enum(['strict', 'permissive']).default('strict'),
+
+  /**
+   * Which of the entity's declared agents this runtime is acting as — an id
+   * from `agents.entries[].id` in the constitution.
+   *
+   * An entity and its agents are different things. An agentic organisation,
+   * project, asset or deed typically declares several agents and is none of
+   * them; only an agentic oracle collapses the two by being its own single
+   * agent. Where the constitution declares more than one agent and none of
+   * them is the entity itself, the runtime cannot tell which output bounds
+   * and escalation route apply to it, and strict enforcement refuses to boot
+   * until this says so.
+   *
+   * Optional, because a constitution declaring one agent (or none) is
+   * unambiguous without it.
+   */
+  DOMAIN_AGENT_ID: z.string().optional(),
+
+  /**
+   * Matrix room the hash-chained authorization decision records are written
+   * to. Kept separate from `MATRIX_ACCOUNT_ROOM_ID`, which custodies keys:
+   * an audit ledger and a key store want different access, and conflating
+   * them means widening one to widen the other.
+   *
+   * Required under strict enforcement — an unrecordable decision is an
+   * unauditable one — and checked by `validateDomainEnforcement`.
+   */
+  MATRIX_DECISIONS_ROOM_ID: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
@@ -184,6 +232,43 @@ export function validateLlmProviderKey(
     });
   }
   return errors;
+}
+
+/**
+ * Cross-field check binding the enforcement posture to the audit ledger.
+ *
+ * Same contract as `validateLlmProviderKey`: structured errors for the boot
+ * reporter, empty array when the configuration is coherent.
+ *
+ * Strict enforcement promises that no tool executes without a recorded
+ * decision. Without a room to record into, the runtime would keep refusing
+ * and permitting while the record of why went nowhere — the enforcement would
+ * be real and the accountability would not. Failing the boot is the honest
+ * outcome; the alternative is a deployment that believes it is audited.
+ *
+ * Permissive deployments may omit the room: they are development runs, and
+ * the decision path buffers rather than blocks.
+ */
+export function validateDomainEnforcement(
+  env: Record<string, unknown>,
+): Array<{ field: string; message: string }> {
+  const enforcement = env.DOMAIN_ENFORCEMENT ?? 'strict';
+  if (enforcement !== 'strict') return [];
+
+  const room = env.MATRIX_DECISIONS_ROOM_ID;
+  if (typeof room === 'string' && room.trim().length > 0) return [];
+
+  return [
+    {
+      field: 'MATRIX_DECISIONS_ROOM_ID',
+      message:
+        'DOMAIN_ENFORCEMENT is strict but MATRIX_DECISIONS_ROOM_ID is not set. Strict ' +
+        'enforcement records every authorization decision, including refusals, to a ' +
+        'dedicated Matrix room; without one the runtime would enforce without leaving an ' +
+        'audit trail. Set MATRIX_DECISIONS_ROOM_ID, or set DOMAIN_ENFORCEMENT=permissive ' +
+        'for development.',
+    },
+  ];
 }
 
 /**

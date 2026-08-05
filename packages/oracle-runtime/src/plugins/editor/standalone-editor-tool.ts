@@ -8,11 +8,20 @@ import { createAgent, type StructuredTool } from 'langchain';
 import { z } from 'zod';
 import { emojify } from '../../utils/emoji.js';
 
+import { createConstitutionGateMiddleware } from '../../graph/middlewares/index.js';
+import {
+  getCurrentDecisionLedger,
+  getCurrentReviewCoordinator,
+} from '../../modules/domain-context/current-ledger.js';
 import { filterForwardedMessages } from '../../graph/subagent-as-tool.js';
 import { isUserInRoom } from '../../matrix/room-membership.js';
 import { EDITOR_AGENT_TOOL_NAME } from './editor-agent.js';
 import { tool as pluginTool } from '../../plugin-api/tool-helper.js';
-import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
+import type {
+  PluginTool,
+  RuntimeContext,
+  ToolEffect,
+} from '../../plugin-api/types.js';
 import {
   createBlocknoteTools,
   type BlocknoteToolsConfig,
@@ -225,11 +234,48 @@ export function createStandaloneEditorTool(
           Boolean(t),
         );
 
+        // The editor's tools are assembled here as `StructuredTool`s rather
+        // than collected from a registry, so none of them carries an `effect`
+        // declaration to read. Until they do, classify by name with the
+        // conservative default: anything not obviously a read is treated as a
+        // `write`. Erring toward the more restricted class means a
+        // misclassification over-gates rather than letting an edit through
+        // unevaluated, and the object is scoped to the room being edited so a
+        // grant can bound the editor to one workspace.
+        const editorEffects = new Map<string, ToolEffect>(
+          boundTools.map((t) => [
+            t.name,
+            {
+              type: t.name.startsWith('read_') ? 'read' : 'write',
+              action: t.name,
+              object: () => `ixo:editor/${roomId}`,
+            },
+          ]),
+        );
+
+        const recorder = getCurrentDecisionLedger();
+        const review = getCurrentReviewCoordinator();
         const agent = createAgent({
           model: ctx.llm.get('subagent'),
           tools: boundTools,
           systemPrompt: editorAgentPrompt,
-          middleware: [],
+          // This used to be an empty array, which made the standalone editor
+          // the one agent in the runtime whose tool calls nothing evaluated.
+          // Its tools are built here rather than collected from a registry, so
+          // the effect map is built here too.
+          middleware: [
+            createConstitutionGateMiddleware({
+              domain: ctx.domain,
+              effectByToolName: editorEffects,
+              rtCtx: ctx,
+              logger: ctx.logger,
+              // Not from `ctx`: `RuntimeContext` is the plugin-facing type,
+              // and a ledger reachable from it is a ledger any plugin can
+              // write to.
+              ...(recorder ? { recorder } : {}),
+              ...(review ? { review } : {}),
+            }),
+          ],
         });
 
         const result = await agent.invoke({

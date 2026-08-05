@@ -25,6 +25,12 @@ type ContextSlot =
  */
 export interface ComposePromptInput {
   identity: OracleIdentity;
+  /**
+   * Constitution section — the mode ceiling, the actions that always need an
+   * explicit grant, the review triggers and the prohibitions. Empty string
+   * when the document has nothing to add beyond what the tools already say.
+   */
+  constitutionBlock: string;
   /** Pre-rendered Tier-1 capability block. Empty string when no eager plugins. */
   capabilityBlock: string;
   /**
@@ -338,6 +344,10 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 {{{CAPABILITY_BLOCK}}}
 
 {{/CAPABILITY_BLOCK}}
+{{#CONSTITUTION_BLOCK}}
+{{{CONSTITUTION_BLOCK}}}
+
+{{/CONSTITUTION_BLOCK}}
 ## Operating principles
 
 - The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
@@ -418,6 +428,7 @@ interface TemplateVariables {
   ORACLE_SECTION: string;
   CAPABILITIES_NOTE: string;
   CAPABILITY_BLOCK: string;
+  CONSTITUTION_BLOCK: string;
   CUSTOM_INSTRUCTIONS: string;
   COMMUNICATION_STYLE: string;
   CONTEXT_BLOCK: string;
@@ -437,6 +448,7 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'ORACLE_SECTION',
     'CAPABILITIES_NOTE',
     'CAPABILITY_BLOCK',
+    'CONSTITUTION_BLOCK',
     'CUSTOM_INSTRUCTIONS',
     'COMMUNICATION_STYLE',
     'CONTEXT_BLOCK',
@@ -480,6 +492,7 @@ export async function composePrompt(
     ORACLE_SECTION: oracleSection,
     CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
+    CONSTITUTION_BLOCK: input.constitutionBlock,
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),

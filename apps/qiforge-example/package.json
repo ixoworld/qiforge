@@ -12,7 +12,8 @@
     "start": "node dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
-    "test:integration": "vitest run --mode int"
+    "test:integration": "vitest run --mode int",
+    "test": "vitest run"
   },
   "dependencies": {
     "@ixo/oracle-runtime": "workspace:*",

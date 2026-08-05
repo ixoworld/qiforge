@@ -482,6 +482,15 @@ export class SandboxPlugin extends OraclePlugin {
       description: tool.description,
       schema: tool.schema,
       handler: async (args) => tool.invoke(args),
+      // Discovered from the sandbox server, so the names are not knowable
+      // here. All `execute`: the sandbox runs code, and a tool that runs code
+      // can do whatever that code does. Classifying by name would mean
+      // trusting the server's naming to bound the entity's authority.
+      effect: {
+        type: 'execute' as const,
+        action: tool.name,
+        object: () => 'ixo:sandbox',
+      },
     }));
 
     // sandbox_write_blob — companion to mint_invocation. Synthetic wrapper

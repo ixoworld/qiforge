@@ -32,3 +32,11 @@ export {
   createSummarizationMiddleware,
   type SummarizationMiddlewareOptions,
 } from './summarization-middleware.js';
+export {
+  createConstitutionGateMiddleware,
+  CONSTITUTION_DENIED_PREFIX,
+  CONSTITUTION_REVIEW_PREFIX,
+  GATE_REASON,
+  type ConstitutionGateMiddlewareOptions,
+  type GateDecisionRecord,
+} from './constitution-gate-middleware.js';

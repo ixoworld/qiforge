@@ -19,6 +19,7 @@ import type {
   RuntimeContext,
 } from '../plugin-api/types.js';
 import {
+  mockDomain,
   mockEmit,
   mockLogger,
   mockMatrix,
@@ -60,6 +61,7 @@ function makeAmbient(
   overrides: Partial<AmbientServices> = {},
 ): AmbientServices {
   return {
+    domain: mockDomain(),
     config: { FOO: 'bar' },
     identity: IDENTITY,
     availablePlugins: new Set(['memory']),

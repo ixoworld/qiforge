@@ -25,18 +25,19 @@ Each subdirectory holds the module, controller(s), service(s), DTOs, and tests.
 
 These are imported by `RuntimeAppModule` on every boot regardless of plugin set:
 
-| Module               | Purpose                                                                                            | Public-facing routes |
-| -------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
-| `SessionsModule`     | Chat session lifecycle (per-user, per-thread).                                                     | `/sessions`          |
-| `MessagesModule`     | Send + stream messages; per-request agent build.                                                   | `/messages`          |
-| `ModelsModule`       | Model catalog with cost tiers ([model selection](./model-selection.md)). Auth-excluded (public).   | `/models`            |
-| `WsModule`           | WebSocket gateway for typed events.                                                                | WebSocket            |
-| `SecretsModule`      | Per-room JWE-encrypted secrets with 24h cache.                                                     | (no public routes)   |
-| `UcanModule`         | UCAN delegation + invocation signing.                                                              | (no public routes)   |
-| `AuthModule`         | `AuthHeaderMiddleware` validates UCAN + DID on every protected route.                              | (middleware)         |
-| `SubscriptionModule` | Subscription enforcement middleware. Wired conditionally — active when `credits` plugin is loaded. | (middleware)         |
-| `ThrottlerModule`    | Per-user rate limiting.                                                                            | (middleware)         |
-| `HealthModule`       | `/health` liveness probe.                                                                          | `/health`            |
+| Module                | Purpose                                                                                            | Public-facing routes |
+| --------------------- | -------------------------------------------------------------------------------------------------- | -------------------- |
+| `SessionsModule`      | Chat session lifecycle (per-user, per-thread).                                                     | `/sessions`          |
+| `MessagesModule`      | Send + stream messages; per-request agent build.                                                   | `/messages`          |
+| `ModelsModule`        | Model catalog with cost tiers ([model selection](./model-selection.md)). Auth-excluded (public).   | `/models`            |
+| `WsModule`            | WebSocket gateway for typed events.                                                                | WebSocket            |
+| `SecretsModule`       | Per-room JWE-encrypted secrets with 24h cache.                                                     | (no public routes)   |
+| `DomainContextModule` | Serves the entity's constitution, loaded and vetted at boot. `@Global`.                            | (no public routes)   |
+| `UcanModule`          | UCAN delegation + invocation signing.                                                              | (no public routes)   |
+| `AuthModule`          | `AuthHeaderMiddleware` validates UCAN + DID on every protected route.                              | (middleware)         |
+| `SubscriptionModule`  | Subscription enforcement middleware. Wired conditionally — active when `credits` plugin is loaded. | (middleware)         |
+| `ThrottlerModule`     | Per-user rate limiting.                                                                            | (middleware)         |
+| `HealthModule`        | `/health` liveness probe.                                                                          | `/health`            |
 
 ## Plugin modules
 

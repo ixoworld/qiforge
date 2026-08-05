@@ -117,6 +117,15 @@ function buildBrowserTool(descriptor: BrowserToolCall): PluginTool | null {
       name: descriptor.name,
       description: descriptor.description,
       schema,
+      // Declared by the connected client, so the names come from the browser
+      // session rather than from here. All `execute`: these drive the user's
+      // own browser — navigating, clicking, filling forms — and the effects
+      // land wherever that browser is pointed.
+      effect: {
+        type: 'execute',
+        action: descriptor.name,
+        object: () => 'ixo:portal/browser',
+      },
     },
   );
 }

@@ -1,4 +1,5 @@
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
+import { mockDomain } from '../testing/mocks.js';
 import type * as Langchain from 'langchain';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -50,6 +51,7 @@ import { createMainAgent, type MainAgentArgs } from './main-agent.js';
 
 function makeAmbient(): AmbientServices {
   return {
+    domain: mockDomain(),
     config: {},
     identity: {
       name: 'TestOracle',

@@ -72,7 +72,7 @@ export abstract class OraclePlugin {
   ): PluginSubAgent[] | Promise<PluginSubAgent[]>;
 
   /**
-   * LangChain middlewares inserted after the four always-on middlewares
+   * LangChain middlewares inserted after the always-on middlewares
    * (tool-validation, retry, page-context, safety-guardrail).
    */
   getMiddlewares?(ctx: PluginContext): AgentMiddleware[];

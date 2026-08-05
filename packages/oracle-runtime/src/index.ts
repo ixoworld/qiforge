@@ -18,6 +18,7 @@ export type {
   PluginContext,
   RuntimeContext,
   PluginTool,
+  ToolEffect,
   PluginSubAgent,
   AuthExcludedRoute,
   OracleConfig,
@@ -45,6 +46,64 @@ export type {
 
 export type { AgentMiddleware } from 'langchain';
 export { z } from 'zod';
+
+// ── Constitution — the entity's machine-readable law and its evaluator ──
+export {
+  authorize,
+  toConstitutionPolicy,
+  REASON as CONSTITUTION_REASON,
+} from './constitution/authorize.js';
+export type {
+  AuthorizationRequest,
+  AuthorizationDecision,
+  AuthorizationOutcome,
+  AuthorizeDeps,
+  CapabilityVerdict,
+  ConstitutionPolicy,
+  Obligation,
+} from './constitution/authorize.js';
+export {
+  computeDomainMdDigest,
+  hasBlockingFindings,
+  lintDomainMdSubset,
+  parseDomainMdSubset,
+  DomainMdParseError,
+} from './constitution/parse.js';
+export type { LintFinding } from './constitution/parse.js';
+export {
+  RIGHTS_ACTION_TYPES,
+  AGENT_MODES,
+  SUPPORTED_SPEC_VERSION as DOMAIN_MD_SPEC_VERSION,
+} from './constitution/schema.js';
+export type {
+  AgentMode,
+  Amount,
+  DomainMdFrontmatter,
+  ParsedDomainMd,
+  RightsActionType,
+  RightsGrant,
+} from './constitution/schema.js';
+export { systemClock, fixedClock } from './constitution/time.js';
+export type { TimeSource, TimeReading } from './constitution/time.js';
+export {
+  buildDomainContext,
+  isAnchoredProfile,
+} from './constitution/domain-context.js';
+export type {
+  DomainContext,
+  DomainEnforcement,
+} from './constitution/domain-context.js';
+export { loadDomainMd } from './constitution/load.js';
+export type {
+  AnchorVerifier,
+  DomainLoadError,
+  LoadDomainMdResult,
+} from './constitution/load.js';
+export { DomainContextModule } from './modules/domain-context/domain-context.module.js';
+export {
+  DomainContextService,
+  DOMAIN_CONTEXT,
+} from './modules/domain-context/domain-context.service.js';
 
 export {
   createSubagentAsTool,

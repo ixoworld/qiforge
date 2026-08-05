@@ -69,7 +69,7 @@ Middlewares run on every LLM step. Hooks come from LangChain's `AgentMiddleware`
 | `afterModel(state)`     | After the LLM returns     | LangGraph state |
 | `onError(error, state)` | LLM call throws           | error + state   |
 
-Plugin middlewares run **after** the four always-on middlewares (tool validation, retry, page context, safety guardrail) in topological dependency order across plugins.
+Plugin middlewares run **after** the always-on middlewares (BYO-history sanitizer, capability gate, tool validation, constitution gate, repetition guard, retry, page context, safety guardrail) in topological dependency order across plugins.
 
 ## Order across the boot
 

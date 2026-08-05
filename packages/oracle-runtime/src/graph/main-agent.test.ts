@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { mockDomain } from '../testing/mocks.js';
 import { z } from 'zod';
 import {
   ConfigSchemaRegistry,
@@ -45,6 +46,7 @@ import { createMainAgent, type MainAgentArgs } from './main-agent.js';
 
 function makeAmbient(): AmbientServices {
   return {
+    domain: mockDomain(),
     config: { FOO: 'bar' },
     identity: {
       name: 'TestOracle',
@@ -208,6 +210,10 @@ describe('createMainAgent', () => {
       'ByoHistorySanitizerMiddleware',
       'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
+      // Ahead of the repetition guard, which short-circuits duplicate failed
+      // calls without invoking the handler — a gate behind it would never see
+      // the calls the guard answers.
+      'ConstitutionGateMiddleware',
       'ToolRepetitionGuardMiddleware',
       'ToolRetryMiddleware',
       'PageContextMiddleware',

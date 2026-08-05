@@ -9,7 +9,7 @@ packages/oracle-runtime/src/
 ├── bootstrap/            # createOracleApp, loader, composer, inspect, graceful shutdown
 ├── config/               # base env schema, LLM provider config, model-for-role
 ├── events/               # scoped emitter
-├── graph/                # createMainAgent, agent builder, prompt composer, 4 always-on middlewares
+├── graph/                # createMainAgent, agent builder, prompt composer, always-on middlewares
 ├── llm/                  # provider abstractions
 ├── manifest/             # PluginManifest schema, validator, tier-1 renderer
 ├── matrix/               # Matrix adapter + checkpointer (UserMatrixSqliteSyncService)

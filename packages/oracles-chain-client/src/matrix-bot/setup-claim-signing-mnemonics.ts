@@ -2,7 +2,6 @@ import { customMessages, ixo, utils } from '@ixo/impactxclient-sdk';
 import { type KeyTypes } from '@ixo/impactxclient-sdk/messages/iid';
 import { Logger } from '@ixo/logger';
 import base58 from 'bs58';
-import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import { Client } from 'src/client/client.js';
 import {
   createVeramoAgent,
@@ -10,31 +9,20 @@ import {
 } from 'src/client/create-credentials.js';
 import { gqlClient } from 'src/gql/index.js';
 import { getMatrixHomeServerForDid } from './did-matrix-batcher.js';
-export function encrypt(text: string, password: string) {
-  const iv = randomBytes(16);
-  const cipher = createCipheriv(
-    'aes-256-cbc',
-    Buffer.from(password.padEnd(32)),
-    iv,
-  );
-  let encrypted = cipher.update(text);
-  encrypted = Buffer.concat([encrypted, cipher.final()]);
-  return iv.toString('hex') + ':' + encrypted.toString('hex');
-}
+// Encryption of secret material at rest lives in `secret-box.ts`, which has no
+// dependencies beyond node:crypto so it can be reasoned about and tested on its
+// own. Imported for use below, and re-exported because both names are part of
+// this package's public surface and the CLI imports them from this path.
+import { decrypt, encrypt } from './secret-box.js';
 
-export function decrypt(text: string, password: string) {
-  const [ivHex, encryptedHex] = text.split(':');
-  const iv = Buffer.from(ivHex || '', 'hex');
-  const encrypted = Buffer.from(encryptedHex || '', 'hex');
-  const decipher = createDecipheriv(
-    'aes-256-cbc',
-    Buffer.from(password.padEnd(32)),
-    iv,
-  );
-  let decrypted = decipher.update(encrypted);
-  decrypted = Buffer.concat([decrypted, decipher.final()]);
-  return decrypted.toString();
-}
+export {
+  encrypt,
+  decrypt,
+  isLegacyCiphertext,
+  isWeakPassword,
+  rewrap,
+  MIN_RECOMMENDED_PASSWORD_LENGTH,
+} from './secret-box.js';
 
 async function getEncryptedSigningMnemonic(
   userRoomId: string,

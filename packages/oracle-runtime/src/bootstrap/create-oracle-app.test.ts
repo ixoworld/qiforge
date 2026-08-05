@@ -1,4 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+
+const EXAMPLE_DOMAIN_MD = fileURLToPath(
+  new URL('../../../../apps/qiforge-example/domain.md', import.meta.url),
+);
 import { z } from 'zod';
 
 const mockNestApp = {
@@ -92,6 +97,11 @@ const validBaseEnv: NodeJS.ProcessEnv = {
   RPC_URL: 'http://localhost:26657',
   // LLM_PROVIDER defaults to 'openrouter' — match by setting the OpenRouter key.
   OPEN_ROUTER_API_KEY: 'sk-or-test',
+  // The reference oracle's own constitution, rather than a synthetic fixture:
+  // these tests then fail if the shipped example stops loading. It is an
+  // authoring draft, so the posture has to be the development one.
+  DOMAIN_MD_PATH: EXAMPLE_DOMAIN_MD,
+  DOMAIN_ENFORCEMENT: 'permissive',
 };
 
 // Shared defaults used by happy-path tests — `bundledPlugins: []` keeps the

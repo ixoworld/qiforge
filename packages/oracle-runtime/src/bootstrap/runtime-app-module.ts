@@ -11,6 +11,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard } from '@nestjs/throttler';
+import type { DomainContext } from '../constitution/domain-context.js';
 import type { AuthExcludedRoute } from '../plugin-api/types.js';
 import { AuthHeaderMiddleware } from '../modules/auth/auth-header.middleware.js';
 import { AuthModule } from '../modules/auth/auth.module.js';
@@ -22,6 +23,7 @@ import { ModelsModule } from '../modules/models/models.module.js';
 import { SessionsModule } from '../modules/sessions/sessions.module.js';
 import { SubscriptionMiddleware } from '../modules/subscription/subscription.middleware.js';
 import { SubscriptionModule } from '../modules/subscription/subscription.module.js';
+import { DomainContextModule } from '../modules/domain-context/domain-context.module.js';
 import { ThrottlerModule } from '../modules/throttler/throttler.module.js';
 import { UcanModule } from '../modules/ucan/ucan.module.js';
 import { WsModule } from '../modules/ws/ws.module.js';
@@ -29,6 +31,12 @@ import { WsModule } from '../modules/ws/ws.module.js';
 export interface RuntimeAppModuleOptions {
   /** Pre-validated env values, fed straight into `ConfigModule`. */
   validatedEnv: Record<string, unknown>;
+  /**
+   * The entity's constitution, already loaded and vetted by `createOracleApp`.
+   * Bound into the container so the gate, the prompt composer and the decision
+   * recorder read one value rather than each re-reading the document.
+   */
+  domainContext: DomainContext;
   /** Additional modules supplied by the fork at `createOracleApp`. */
   userNestModules?: Array<Type | DynamicModule>;
   /** Plugin-shipped NestJS modules collected from bundled plugins. */
@@ -111,6 +119,22 @@ export class RuntimeAppModule implements NestModule {
       CacheModule.register({ isGlobal: true }),
       ScheduleModule.forRoot(),
       ThrottlerModule,
+      DomainContextModule.register(opts.domainContext, {
+        // Validated at boot: strict enforcement requires this room, because
+        // gating every call while the record of why goes nowhere would make
+        // the enforcement real and the accountability imaginary.
+        decisionsRoomId:
+          typeof validatedEnv.MATRIX_DECISIONS_ROOM_ID === 'string'
+            ? validatedEnv.MATRIX_DECISIONS_ROOM_ID
+            : null,
+        // The entity's own Matrix user, so the review loop can refuse an
+        // approval it issued to itself. Without this the self-approval check
+        // has nothing to compare against and silently passes everything.
+        oracleMatrixUserId:
+          typeof validatedEnv.MATRIX_ORACLE_ADMIN_USER_ID === 'string'
+            ? validatedEnv.MATRIX_ORACLE_ADMIN_USER_ID
+            : null,
+      }),
       UcanModule,
       BlobStoreModule,
       ByoLlmModule,

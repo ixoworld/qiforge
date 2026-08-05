@@ -30,5 +30,16 @@ export default defineConfig(({ mode }) => {
     return merged;
   }
 
-  return mergeConfig(nestConfig, {});
+  const merged = mergeConfig(nestConfig, {});
+  merged.test = {
+    ...merged.test,
+    // The constitution test lives in `test/` rather than beside a module: it
+    // exercises the shipped `domain.md`, which belongs to the app rather than
+    // to any one file in it.
+    include: ['test/**/*.test.ts'],
+    // `*.int.test.ts` also ends in `.test.ts`, so the integration suite has to
+    // be excluded explicitly or `pnpm test` would try to boot a real oracle.
+    exclude: ['node_modules', 'dist', 'test/**/*.int.test.ts'],
+  };
+  return merged;
 });

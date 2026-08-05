@@ -4,15 +4,17 @@ Pointers to the source-of-truth design artefacts. These docs don't restate the s
 
 ## Source of truth
 
-| Artefact                    | Path                                          | Use it for                                                                         |
-| --------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------- |
-| ORA-219 spec                | `specs/ORA-219-plugin-based-runtime.md`       | Every design decision behind the plugin runtime. ~2000 lines, structured by parts. |
-| Task index                  | `specs/tasks/README.md`                       | Status of every implementation task, dependency graph, phase notes.                |
-| Individual tasks            | `specs/tasks/TASK-*.md`                       | Deliverables and acceptance criteria for each task.                                |
-| Follow-up ticket: logger    | `specs/tasks/TASK-FOLLOWUP-logger.md`         | Outstanding non-spec work that blocks 1.0.0.                                       |
-| Storage scaling             | `specs/matrix-storage-architecture-review.md` | Tracked separately. Out of scope for ORA-219.                                      |
-| Integration testing handoff | `specs/integration-testing-wave4-handoff.md`  | Context dump from the Wave-4 integration-test push.                                |
-| Messages/Sessions testing   | `specs/messages-sessions-testing-spec.md`     | Test coverage spec for those modules.                                              |
+| Artefact                    | Path                                          | Use it for                                                                                                                                                                                                                                                      |
+| --------------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ORA-219 spec                | `specs/ORA-219-plugin-based-runtime.md`       | Every design decision behind the plugin runtime. ~2000 lines, structured by parts.                                                                                                                                                                              |
+| Sovereign Agency Harness    | `specs/sovereign-agency-harness.md`           | Research + architecture for the intrinsic (entity-owned) harness: survey of established harnesses, first principles, the seven-organ design, phased QiForge roadmap; Part V assesses `domain.md` as the constitution artifact and specifies the Phase-1 wiring. |
+| Sovereign key custody       | `specs/sovereign-key-custody.md`              | Research spike on how a sovereign entity holds and uses signing keys without an external operator: the three key surfaces, tiered quorum by action class, the TEE upgrade roadmap, and a sense-check against x402.                                              |
+| Task index                  | `specs/tasks/README.md`                       | Status of every implementation task, dependency graph, phase notes.                                                                                                                                                                                             |
+| Individual tasks            | `specs/tasks/TASK-*.md`                       | Deliverables and acceptance criteria for each task.                                                                                                                                                                                                             |
+| Follow-up ticket: logger    | `specs/tasks/TASK-FOLLOWUP-logger.md`         | Outstanding non-spec work that blocks 1.0.0.                                                                                                                                                                                                                    |
+| Storage scaling             | `specs/matrix-storage-architecture-review.md` | Tracked separately. Out of scope for ORA-219.                                                                                                                                                                                                                   |
+| Integration testing handoff | `specs/integration-testing-wave4-handoff.md`  | Context dump from the Wave-4 integration-test push.                                                                                                                                                                                                             |
+| Messages/Sessions testing   | `specs/messages-sessions-testing-spec.md`     | Test coverage spec for those modules.                                                                                                                                                                                                                           |
 
 ## When the spec disagrees with code
 

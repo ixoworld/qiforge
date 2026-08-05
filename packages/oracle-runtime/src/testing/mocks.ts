@@ -14,6 +14,17 @@ import type {
   MatrixEvent,
   RoomStateSnapshot,
 } from '../plugin-api/types.js';
+import {
+  buildDomainContext,
+  resolveAgent,
+  type DomainContext,
+  type DomainEnforcement,
+} from '../constitution/domain-context.js';
+import { parseDomainMdSubset } from '../constitution/parse.js';
+import {
+  SUPPORTED_SCHEMA_URI,
+  SUPPORTED_SPEC_VERSION,
+} from '../constitution/schema.js';
 
 /** Minimal `Response`-like envelope returned from `mockResponse`. */
 export interface MockResponseLike {
@@ -201,3 +212,100 @@ export type FetchHandler = (
   url: string,
   init?: RequestInit,
 ) => unknown | Promise<unknown>;
+
+/**
+ * Overrides for `mockDomain`. Each maps onto the corresponding part of the
+ * document rather than onto the built context, so a test cannot construct a
+ * constitution the parser would have rejected.
+ */
+export interface MockDomainOptions {
+  subject?: string;
+  /** Entity kind — `organisation`, `project`, `asset`, `deed`, `oracle`, … */
+  entityType?: string;
+  /** Constitution type URI. Defaults to the general agentic constitution. */
+  constitutionType?: string;
+  /** Declared agents, verbatim as the document would carry them. */
+  agents?: Array<Record<string, unknown>>;
+  /** Which declared agent the runtime acts as. */
+  agentId?: string;
+  /** Mode ceiling. Defaults to the most permissive, so unrelated suites are unaffected. */
+  mode?: 'read_only' | 'propose_only' | 'bounded_evaluate' | 'bounded_execute';
+  /** Action classes that always need an explicit grant. Defaults to none. */
+  baseline?: string[];
+  /** Rights entries, verbatim as the document would carry them. */
+  grants?: Array<Record<string, unknown>>;
+  humanReviewRequiredFor?: string[];
+  criticalDoNot?: string[];
+  enforcement?: DomainEnforcement;
+}
+
+/**
+ * A constitution for tests.
+ *
+ * Built by running a real document through the real parser rather than by
+ * hand-assembling a `DomainContext`: a mock that skipped validation could
+ * hold a shape no actual `domain.md` can produce, and every test resting on
+ * it would be testing a fiction.
+ *
+ * The defaults are deliberately permissive — top mode ceiling, empty
+ * baseline, no grants needed — so suites that have nothing to do with
+ * authorization are not quietly rewritten into authorization tests. A test
+ * that cares about the gate states what it needs.
+ */
+export function mockDomain(options: MockDomainOptions = {}): DomainContext {
+  const subject = options.subject ?? 'did:ixo:entity:test';
+  const frontmatter = {
+    version: SUPPORTED_SPEC_VERSION,
+    kind: 'domain.md',
+    conformance: {
+      spec_version: SUPPORTED_SPEC_VERSION,
+      schema: SUPPORTED_SCHEMA_URI,
+      profile: 'authoring_draft',
+    },
+    document_revision: '0.0.0-test',
+    domain: {
+      id: subject,
+      iid: null,
+      // Not an oracle by default. The runtime governs any agentic entity, and
+      // a test double that always looked like one would let an
+      // oracle-shaped assumption pass every suite unnoticed.
+      type: options.entityType ?? 'organisation',
+      status: 'active',
+      purpose: 'Test double.',
+      operating_boundary: 'Tests only.',
+    },
+    constitution: {
+      status: 'in_force',
+      reason: null,
+      subject,
+      type: options.constitutionType ?? 'con:AgenticConstitution',
+    },
+    agent_default_mode: {
+      mode: options.mode ?? 'bounded_execute',
+      overrides: {},
+      human_review_required_for: options.humanReviewRequiredFor ?? [],
+    },
+    rights: {
+      agent_baseline: { require_explicit_grant_for: options.baseline ?? [] },
+      entries: options.grants ?? [],
+    },
+    critical_do_not: options.criticalDoNot ?? [],
+    ...(options.agents ? { agents: { entries: options.agents } } : {}),
+  };
+
+  const parsed = parseDomainMdSubset(
+    `---\n${JSON.stringify(frontmatter, null, 2)}\n---\n# domain.md (test)\n`,
+  );
+  const agent = resolveAgent(
+    parsed.frontmatter.agents?.entries,
+    parsed.frontmatter.domain.id,
+    options.agentId,
+  );
+
+  return buildDomainContext({
+    parsed,
+    enforcement: options.enforcement ?? 'permissive',
+    source: '<mockDomain>',
+    agent: agent.kind === 'declared' ? agent.entry : undefined,
+  });
+}

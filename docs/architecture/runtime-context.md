@@ -19,6 +19,7 @@ runtime-context/
 
 ```ts
 interface AmbientServices {
+  domain: DomainContext; // the entity's constitution, frozen at boot
   ucan: UcanAdapter;
   matrix: MatrixAdapter;
   secrets: SecretsAdapter;
@@ -74,6 +75,7 @@ export function buildRuntimeContext(
     session: extractSession(runConfig),
     history: buildHistory(stateInput, runConfig),
     config: ambient.config,
+    domain: ambient.domain,
     availablePlugins: ambient.availablePlugins,
     loadedPlugins: new Set(stateInput.loadedPlugins ?? []),
     secrets: bindSecrets(ambient.secrets, runConfig.session.roomId),
@@ -130,6 +132,7 @@ interface RunConfig {
 | Field                                   | When computed                                                                            |
 | --------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `user`, `session`                       | Eager — extracted from runConfig on context build.                                       |
+| `domain`                                | Eager — the same frozen constitution on every request; loaded once at boot.              |
 | `history.messages`, `history.state`     | Eager — reference into `stateInput`.                                                     |
 | `history.userContext`                   | Eager — reference into `stateInput.userContext` (mutated by Memory plugin's middleware). |
 | `secrets.getIndex`, `secrets.getValues` | Lazy — round-trip to Matrix on call.                                                     |
@@ -147,6 +150,8 @@ The eager fields are cheap (object property access). The lazy ones do real work 
 A `RuntimeContext` lives for the duration of one LangGraph turn. It's created at agent-build time and torn down when the turn completes (or aborts). Don't capture references across turns — the inner services may have rebound (e.g. Matrix sync replayed events, the secrets cache invalidated).
 
 For per-thread state that survives turns, use the graph state field (with a reducer) or the shared-state pattern (with a producer plugin keeping a Map keyed by session ID).
+
+`ctx.domain` is the exception that proves the rule: it is process-lifetime and identical across turns, because the entity's constitution does not change while the runtime is running. It is deeply frozen, so a tool holding a reference to it holds a description of what governs it and not a lever over it. Reading it is legitimate — to explain a boundary, or to shape what a tool offers — but it is not how a tool becomes authorized. The gate evaluates every call against the same value before the handler runs.
 
 ## Tool wrapping leverages this
 
