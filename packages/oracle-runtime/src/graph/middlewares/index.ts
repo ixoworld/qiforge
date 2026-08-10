@@ -1,4 +1,9 @@
 export {
+  createByoHistorySanitizerMiddleware,
+  type ByoHistorySanitizerMiddlewareOptions,
+} from './byo-history-sanitizer-middleware.js';
+
+export {
   createCapabilityGateMiddleware,
   type CapabilityGateMiddlewareOptions,
 } from './capability-gate-middleware.js';

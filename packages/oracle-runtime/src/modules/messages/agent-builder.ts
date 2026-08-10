@@ -11,16 +11,24 @@ import type {
 } from '../../graph/main-agent-types.js';
 import { createMainAgent } from '../../graph/main-agent.js';
 import type { TMainAgentGraphState } from '../../graph/state.js';
+import { createByoLlmAdapter } from '../../llm/byo-adapter.js';
+import { isByoModelId, type ByoProvider } from '../../llm/byo-catalog.js';
 import { isAllowedModel } from '../../llm/model-catalog.js';
+import { buildByoFallbackNotice } from '../../llm/provider-error.js';
 import { didToMatrixUserId } from '../../matrix/user-id.js';
 import type { UcanDelegation } from '../../plugin-api/types.js';
+import {
+  ByoLlmService,
+  type ByoTurnState,
+} from '../byo-llm/byo-llm.service.js';
 import { UcanService } from '../ucan/ucan.service.js';
 import { EditorPlugin } from '../../plugins/editor/editor.plugin.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
+import { resolveLangsmithTracing } from './langsmith-tracing.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
 import { type PreparedRequest } from './request-preparer.js';
-import { emitSSEEvent } from './sse.utils.js';
+import { emitSSEEvent, emitSSERawEvent } from './sse.utils.js';
 import { UserContextFetcher } from './user-context-fetcher.js';
 
 export interface BuildAgentArgs {
@@ -61,6 +69,12 @@ export interface BuiltAgent {
    * langgraph-specific options we pass.
    */
   langGraphConfig: Record<string, unknown>;
+  /**
+   * The BYO provider the turn runs on, or `null` for platform turns. Lets
+   * the SSE runner attribute a model-call failure to the user's own account
+   * when classifying the error it sends to the client.
+   */
+  byoProvider: ByoProvider | null;
 }
 
 /**
@@ -109,6 +123,7 @@ export class AgentBuilder {
     private readonly userContextFetcher: UserContextFetcher,
     private readonly ucan: UcanService,
     private readonly config: ConfigService,
+    private readonly byoLlm: ByoLlmService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
@@ -116,6 +131,7 @@ export class AgentBuilder {
     args: BuildAgentArgs,
     abortController?: AbortController,
   ): Promise<BuiltAgent> {
+    const buildStartedAt = performance.now();
     const { payload, prepared, inputMessages } = args;
     const bundle = this.bundleHolder.get();
     const hooks = bundle.hooks ?? {};
@@ -201,11 +217,31 @@ export class AgentBuilder {
         return undefined;
       });
 
+    // Per-request model override, resolved BEFORE the parallel batch because
+    // the BYO leg needs it. Platform ids are gated by the catalog allow-list;
+    // `byo:` ids are validated (and bound to a connected credential) inside
+    // `ByoLlmService.resolveForTurn`. An unknown id is dropped and the turn
+    // falls back to the default model.
+    let requestedModel: string | undefined;
+    let requestedByoModel: string | undefined;
+    if (payload.model) {
+      if (isByoModelId(payload.model)) {
+        requestedByoModel = payload.model;
+      } else if (isAllowedModel(payload.model)) {
+        requestedModel = payload.model;
+      } else {
+        this.logger.warn(
+          `Ignoring unknown model "${payload.model}" — falling back to the default model.`,
+        );
+      }
+    }
+
     const userPrefsService = UserPreferencesService.getInstance();
     const [
       { checkpointer, priorState },
       freshUserPreferences,
       matrixDelegationRaw,
+      byoTurn,
     ] = await Promise.all([
       readPriorState(),
       userPrefsService.get(prepared.roomId).catch((err) => {
@@ -222,6 +258,30 @@ export class AgentBuilder {
             return null;
           })
         : Promise.resolve(null),
+      // BYO credential resolution. An explicit *platform* model choice keeps
+      // the turn platform-paid, so the lookup is skipped entirely; a `byo:`
+      // choice (or no choice at all — the Matrix/Slack ingress) resolves the
+      // user's connected credential. No-ops to null when BYO_LLM_ENABLED is
+      // off. Best-effort: a resolution failure degrades to a platform turn.
+      requestedModel !== undefined
+        ? Promise.resolve<ByoTurnState | null>(null)
+        : this.byoLlm
+            .resolveForTurn({
+              userDid: payload.did,
+              homeServerName: prepared.homeServerName,
+              requestedModel: requestedByoModel,
+            })
+            .catch((err: unknown): ByoTurnState | null => {
+              this.logger.warn(
+                `[AgentBuilder] BYO credential resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              // The user expected their own credential (they have one
+              // connected, or explicitly picked a `byo:` model) — tell them
+              // the turn degraded to the platform model instead of failing
+              // silently. No-op outside an SSE request context.
+              emitSSERawEvent('error', buildByoFallbackNotice('error'));
+              return null;
+            }),
     ]);
 
     // Stale-while-revalidate: when the checkpoint already carries a
@@ -303,18 +363,10 @@ export class AgentBuilder {
           raw: matrixDelegationRaw ?? '',
         };
 
-    // Per-request model override, gated by the catalog allow-list so a client
-    // can't point a turn at an arbitrary (or unlisted, costly) model. An
-    // unknown id is dropped and the turn falls back to the default model.
-    let requestedModel: string | undefined;
-    if (payload.model) {
-      if (isAllowedModel(payload.model)) {
-        requestedModel = payload.model;
-      } else {
-        this.logger.warn(
-          `Ignoring unknown model "${payload.model}" — falling back to the default model.`,
-        );
-      }
+    if (byoTurn) {
+      this.logger.log(
+        `[AgentBuilder] BYO turn — provider=${byoTurn.provider}, model=${byoTurn.mainModelId}, did=${payload.did}`,
+      );
     }
 
     const requestCtx: MainAgentRequestContext = {
@@ -332,8 +384,11 @@ export class AgentBuilder {
         roomId: prepared.roomId,
       },
       history: { userContext },
-      model: requestedModel,
       ...(payload.commerce && { commerce: payload.commerce }),
+      model: byoTurn ? byoTurn.byoModelId : requestedModel,
+      ...(byoTurn && {
+        byo: { provider: byoTurn.provider, active: true },
+      }),
     };
 
     // The editor plugin is `on-demand` (so ordinary chats carry none of its
@@ -374,13 +429,25 @@ export class AgentBuilder {
       ? { ...hooks, checkpointerForUser: () => Promise.resolve(checkpointer) }
       : hooks;
 
+    // On a BYO turn, swap in a request-scoped LLM adapter so the main model,
+    // sub-agents and plugin `rtCtx.llm` consumers all run on the user's
+    // credential (roles the provider can't serve fall through to the platform
+    // adapter inside the wrapper). A shallow spread per BYO turn; platform
+    // turns reuse the boot-time ambient untouched.
+    const ambient = byoTurn
+      ? {
+          ...bundle.ambient,
+          llm: createByoLlmAdapter(bundle.ambient.llm, byoTurn),
+        }
+      : bundle.ambient;
+
     const agent = await createMainAgent({
       registries: bundle.registries,
       identity: bundle.identity,
       config: bundle.config,
       availablePlugins: bundle.availablePlugins,
       hooks: buildHooks,
-      ambient: bundle.ambient,
+      ambient,
       requestCtx,
       state: buildTimeState,
     });
@@ -405,6 +472,28 @@ export class AgentBuilder {
       ...(editorSessionActive && { loadedPlugins: [EditorPlugin.NAME] }),
     };
 
+    // LangSmith: metadata (user DID, ingress client, pre-graph timings) is
+    // attached unconditionally so any active tracer — the global env-driven
+    // one or the selective per-DID one — can filter and aggregate per user;
+    // it is inert when no tracer runs. `callbacks` appears only when this
+    // user's DID is in the `LANGSMITH_TRACED_DIDS` allowlist, and the
+    // explicit tracer propagates through the whole turn (model calls, tools,
+    // sub-agents) via LangGraph's config inheritance.
+    const tracing = resolveLangsmithTracing({
+      userDid: payload.did,
+      client: clientType,
+      env: {
+        tracing: this.config.get<string>('LANGSMITH_TRACING'),
+        apiKey: this.config.get<string>('LANGSMITH_API_KEY'),
+        project: this.config.get<string>('LANGSMITH_PROJECT'),
+        tracedDids: this.config.get<string>('LANGSMITH_TRACED_DIDS'),
+      },
+      timings: {
+        prepareDurationMs: prepared.prepareDurationMs,
+        agentBuildDurationMs: Math.round(performance.now() - buildStartedAt),
+      },
+    });
+
     // `version: 'v2'` is REQUIRED for `agent.streamEvents` to emit the
     // `{event, data, tags}` envelope the SSE loop expects. Without it,
     // langchain defaults to v1 (or emits nothing) and the FE sees a
@@ -418,10 +507,17 @@ export class AgentBuilder {
       recursionLimit: 200,
       configurable: prepared.runnableConfig.configurable,
       context: requestCtx,
+      metadata: tracing.metadata,
+      ...(tracing.callbacks && { callbacks: tracing.callbacks }),
       ...(abortController && { signal: abortController.signal }),
     };
 
-    return { agent, stateInput, langGraphConfig };
+    return {
+      agent,
+      stateInput,
+      langGraphConfig,
+      byoProvider: byoTurn?.provider ?? null,
+    };
   }
 
   /**

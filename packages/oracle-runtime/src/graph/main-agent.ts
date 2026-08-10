@@ -38,6 +38,7 @@ import {
 } from '../runtime-context/build-runtime.js';
 import type { CompiledMainAgent, MainAgentArgs } from './main-agent-types.js';
 import {
+  createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
@@ -386,6 +387,7 @@ export async function createMainAgent(
     // Outermost: one liveness beat per model/tool call the agent issues,
     // before any inner guard can short-circuit or retry it.
     createWorkStatusMiddleware(),
+    createByoHistorySanitizerMiddleware({ logger: ambient.logger }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,

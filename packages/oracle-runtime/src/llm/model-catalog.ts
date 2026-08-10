@@ -25,7 +25,8 @@ export type ModelFamily =
   | 'google'
   | 'anthropic'
   | 'moonshotai'
-  | 'z-ai';
+  | 'z-ai'
+  | 'deepseek';
 
 /** Raw list price, USD per million tokens. */
 export interface ModelPrice {

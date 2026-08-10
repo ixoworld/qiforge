@@ -6,11 +6,15 @@ import {
 import { Injectable, Logger } from '@nestjs/common';
 import type { Response } from 'express';
 import { AIMessageChunk, type BaseMessage, ToolMessage } from 'langchain';
+import { type ByoProvider } from '../../llm/byo-catalog.js';
+import { classifyLlmError } from '../../llm/provider-error.js';
 import { emojify } from '../../utils/emoji.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
+import { resolveErrorSimulation } from './error-simulation.js';
 import { type PreparedRequest } from './request-preparer.js';
 import {
+  emitSSERawEvent,
   formatSSE,
   runWithSSEContext,
   sendSSEDone,
@@ -44,6 +48,31 @@ interface StreamStats {
    */
   inputTokens: number;
   outputTokens: number;
+}
+
+/**
+ * Join the string values of one block type out of an array-shaped message
+ * content. Responses-API streams (the BYO ChatGPT path) deliver chunks as
+ * content-block arrays — `{ type: 'text', text }` for answer tokens and
+ * `{ type: 'reasoning', reasoning }` for thinking-summary tokens — instead
+ * of the plain string / raw completions delta the platform path produces.
+ * Returns `''` when the content is not an array or holds no such blocks.
+ */
+function collectBlockStrings(
+  content: unknown,
+  blockType: string,
+  field: string,
+): string {
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) continue;
+    const record = block as Record<string, unknown>;
+    if (record.type !== blockType) continue;
+    const value = record[field];
+    if (typeof value === 'string') parts.push(value);
+  }
+  return parts.join('');
 }
 
 /**
@@ -167,15 +196,36 @@ export class SseStreamRunner {
     const onClose = () => abortController.abort();
     res.on('close', onClose);
 
+    // Hoisted out of the stream closure so the catch below can flush
+    // orphaned tool spinners when the run dies mid-turn.
+    const toolCallMap = new Map<string, ToolCallEvent>();
+    const actionCallMap = new Map<string, ActionCallEvent>();
+    // The BYO provider active on this turn (null on platform turns) — set
+    // once the agent build resolves, read by the error classifier so a
+    // model failure is attributed to the user's own account.
+    let activeByoProvider: ByoProvider | null = null;
+
     try {
       await runWithSSEContext(
         res,
         async () => {
-          const { agent, stateInput, langGraphConfig } =
+          // Local-testing hook — no-op unless ALLOW_ERROR_SIMULATION=true
+          // and the message is a `/simulate-error <preset>` trigger.
+          const simulation = resolveErrorSimulation(payload.message);
+          if (simulation?.action === 'throw') {
+            activeByoProvider = simulation.byoProvider ?? null;
+            throw simulation.error;
+          }
+          if (simulation?.action === 'notice') {
+            emitSSERawEvent('error', simulation.payload);
+          }
+
+          const { agent, stateInput, langGraphConfig, byoProvider } =
             await this.agentBuilder.build(
               { payload, prepared, inputMessages },
               abortController,
             );
+          activeByoProvider = byoProvider;
 
           // ReactAgent.streamEvents returns the same `{event, data, tags}`
           // shape as LangChain's `streamEvents v2` — the v2 envelope is the
@@ -192,8 +242,6 @@ export class SseStreamRunner {
             inputTokens: 0,
             outputTokens: 0,
           };
-          const toolCallMap = new Map<string, ToolCallEvent>();
-          const actionCallMap = new Map<string, ActionCallEvent>();
           const agActionNames = new Set(
             (payload.agActions ?? []).map((a) => a.name),
           );
@@ -283,6 +331,7 @@ export class SseStreamRunner {
           }
         },
         abortController,
+        { sessionId, requestId },
       );
     } catch (error) {
       const aborted =
@@ -294,11 +343,43 @@ export class SseStreamRunner {
         if (!res.writableEnded) sendSSEDone(res);
         return;
       }
-      this.logger.error('Stream failed', error);
+      // Attribute the failure (rate limit / billing / auth / ...) to the
+      // account it belongs to, so the client can render actionable feedback
+      // instead of the raw SDK message.
+      const classified = classifyLlmError(error, {
+        byoProvider: activeByoProvider,
+      });
+      this.logger.error(
+        `Stream failed — kind=${classified.kind}, source=${classified.source}` +
+          (classified.provider ? `, provider=${classified.provider}` : '') +
+          (classified.status !== undefined
+            ? `, status=${classified.status}`
+            : ''),
+        error instanceof Error ? error.stack : String(error),
+      );
       if (!res.writableEnded && !abortController.signal.aborted) {
+        // Same cleanup the success path performs: clear stuck tool spinners
+        // and close the thinking indicator, or the FE keeps both alive
+        // forever alongside the error.
+        this.flushOrphanedToolCalls(
+          toolCallMap,
+          actionCallMap,
+          res,
+          abortController,
+        );
+        const completeEvent = ReasoningEvent.createChunk(
+          sessionId,
+          requestId,
+          '',
+          undefined,
+          true,
+        );
+        res.write(formatSSE(completeEvent.eventName, completeEvent.payload));
         sendSSEError(
           res,
           error instanceof Error ? error : 'Something went wrong',
+          classified,
+          { sessionId, requestId },
         );
         sendSSEDone(res);
       }
@@ -490,7 +571,11 @@ export class SseStreamRunner {
         `First model delta: ${JSON.stringify(delta).slice(0, 300)}`,
       );
     }
-    const reasoning = delta?.reasoning ?? delta?.reasoning_content;
+    const deltaReasoning = delta?.reasoning ?? delta?.reasoning_content;
+    const reasoning =
+      deltaReasoning && deltaReasoning.trim()
+        ? deltaReasoning
+        : collectBlockStrings(chunk.content, 'reasoning', 'reasoning');
     if (
       !(reasoning && reasoning.trim()) &&
       Array.isArray(delta?.reasoning_details) &&
@@ -527,10 +612,13 @@ export class SseStreamRunner {
       );
     }
 
-    const content = chunk.content;
-    if (!content) return undefined;
+    const text =
+      typeof chunk.content === 'string'
+        ? chunk.content
+        : collectBlockStrings(chunk.content, 'text', 'text');
+    if (!text) return undefined;
     stats.content++;
-    const parsed = emojify(String(content));
+    const parsed = emojify(text);
     this.writeSse(res, abortController, 'message', {
       content: parsed,
       timestamp: new Date().toISOString(),

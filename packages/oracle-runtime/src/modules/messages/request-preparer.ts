@@ -29,6 +29,14 @@ export interface PreparedRequest {
   targetSession: ChatSession;
   timezone?: string;
   currentTime?: string;
+  /**
+   * Wall-clock cost of `prepare()` for this request. Carried onto the
+   * LangSmith trace metadata (`prepare_duration_ms`) because the trace only
+   * starts when the graph run starts — without this, a slow first turn
+   * caused by pre-graph work (cold home-server chain lookup, Matrix→SQLite
+   * sync, session read) looks like a healthy fast trace.
+   */
+  prepareDurationMs?: number;
 }
 
 export type PrepareInput = SendMessagePayload & {
@@ -59,6 +67,7 @@ export class RequestPreparer {
   ) {}
 
   async prepare(payload: PrepareInput): Promise<PreparedRequest> {
+    const prepareStartedAt = performance.now();
     const did = payload.did;
     const sessionId = payload.sessionId;
     // A caller-supplied `requestId` is honored: streaming requests arrive
@@ -128,6 +137,7 @@ export class RequestPreparer {
       targetSession,
       timezone,
       currentTime,
+      prepareDurationMs: Math.round(performance.now() - prepareStartedAt),
     };
   }
 

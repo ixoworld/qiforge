@@ -8,6 +8,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
+import { clientSchemaToZod } from '../../utils/client-tool-schema.js';
 
 const manifest: PluginManifest = {
   title: 'Portal',
@@ -68,8 +69,14 @@ function parseArgs(input: unknown): Record<string, unknown> {
  * success, `tc-${requestId}` tool-call id) but sources `sessionId`,
  * `requestId`, and `roomId` from `RuntimeContext` instead of LangChain's
  * configurable bag.
+ *
+ * Returns `null` when the FE declared a schema the runtime cannot convert —
+ * that tool is dropped rather than failing the whole request.
  */
-function buildBrowserTool(descriptor: BrowserToolCall): PluginTool {
+function buildBrowserTool(descriptor: BrowserToolCall): PluginTool | null {
+  const schema = clientSchemaToZod(descriptor.schema, descriptor.name);
+  if (!schema) return null;
+
   return tool(
     async (input, ctx: RuntimeContext) => {
       const sessionId = ctx.session.id;
@@ -109,7 +116,7 @@ function buildBrowserTool(descriptor: BrowserToolCall): PluginTool {
     {
       name: descriptor.name,
       description: descriptor.description,
-      schema: z.fromJSONSchema(descriptor.schema),
+      schema,
     },
   );
 }
@@ -135,6 +142,8 @@ export class PortalPlugin extends OraclePlugin {
     const browserTools = readBrowserTools(rtCtx);
     if (browserTools.length === 0) return [];
 
-    return browserTools.map(buildBrowserTool);
+    return browserTools
+      .map(buildBrowserTool)
+      .filter((tool): tool is PluginTool => tool !== null);
   }
 }

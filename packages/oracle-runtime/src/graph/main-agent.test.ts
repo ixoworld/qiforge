@@ -210,6 +210,7 @@ describe('createMainAgent', () => {
 
     expect(names).toEqual([
       'WorkStatusMiddleware',
+      'ByoHistorySanitizerMiddleware',
       'CapabilityGateMiddleware',
       'ToolValidationMiddleware',
       'ToolRepetitionGuardMiddleware',
