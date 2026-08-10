@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { PluginManifest } from '../../plugin-api/types.js';
 import { DisplayCardSchema, type AgentCardServiceView } from './types.js';
-import { DEFAULT_CURRENCY } from './util.js';
+import { servicePriceLabel } from './util.js';
 
 /** The local agent-card file, reduced to what manifest derivation consumes. */
 export interface LocalAgentCard {
@@ -56,11 +56,8 @@ export function loadLocalAgentCard(path: string): LocalAgentCard {
 }
 
 function serviceLine(service: AgentCardServiceView): string {
-  const currency = service.price.currency ?? DEFAULT_CURRENCY;
-  const price =
-    service.price.amount === 0 ? 'free' : `${service.price.amount} ${currency}`;
   const description = service.description ? `: ${service.description}` : '';
-  return `User asks for "${service.name}" (${price})${description} — delivers ${service.deliverables}`;
+  return `User asks for "${service.name}" (${servicePriceLabel(service.price)})${description} — delivers ${service.deliverables}`;
 }
 
 /**
@@ -74,9 +71,10 @@ export function deriveManifestFromCard(
   base: PluginManifest,
   card: LocalAgentCard,
 ): PluginManifest {
+  // Prices in credits: this summary is the model's standing knowledge of what
+  // it sells, so it is where a price gets quoted from without a tool call.
   const services = card.services.map(
-    (s) =>
-      `${s.name} (${s.price.amount === 0 ? 'free' : `${s.price.amount} ${s.price.currency ?? DEFAULT_CURRENCY}`})`,
+    (s) => `${s.name} (${servicePriceLabel(s.price)})`,
   );
   const description = card.description ? ` ${card.description}` : '';
   const summary = `${card.name} —${description} Paid services: ${services.join(', ')}. ${base.summary}`;

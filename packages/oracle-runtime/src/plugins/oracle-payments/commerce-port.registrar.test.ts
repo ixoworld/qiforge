@@ -80,7 +80,11 @@ describe('CommerceRouterPortRegistrar', () => {
       adminAddress: 'ixo1admin',
       userDid: USER_DID,
     };
-    const started = await port!.startEngagement('!room:home', 'thread-1', start);
+    const started = await port!.startEngagement(
+      '!room:home',
+      'thread-1',
+      start,
+    );
     expect(sendIntent).toHaveBeenCalledWith({
       collectionId: '42',
       amount: [{ denom: 'upay', amount: '20000000' }],

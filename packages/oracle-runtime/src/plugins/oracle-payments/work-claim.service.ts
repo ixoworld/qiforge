@@ -38,11 +38,14 @@ import type { WorkSummaryExtractor } from './work-summary-extractor.js';
 import {
   claimDeepLink,
   claimNetwork,
+  creditsInChainText,
   DEFAULT_CURRENCY,
   errorMessage,
+  formatCredits,
   grantedDenom,
   isEngagementExpired,
   priceToCoin,
+  priceToCredits,
   readConfigNumber,
   readConfigString,
   resolvePortalUrl,
@@ -206,7 +209,11 @@ interface FailedSubmit {
   ok: false;
   /** Raw chain wording, matched against to tell a lapsed reservation apart. */
   detail: string;
-  /** The same failure as the sentence the tool reports it with. */
+  /**
+   * The same failure as the sentence the tool reports it with — amounts in
+   * credits, since this one is written to be read out to the user. `detail`
+   * stays raw: it is matched and logged, never spoken.
+   */
   failure: string;
 }
 
@@ -215,9 +222,13 @@ interface FailedSubmit {
  * claim can come back either way: the wallet client simulates before it
  * broadcasts, so the chain's objection usually arrives as a thrown simulate
  * error, and only a tx that made it into a block reports a non-zero code.
+ *
+ * `denom` is the coin this claim is priced in — the one denom whose micro-unit
+ * amounts can be rewritten as credits before the refusal reaches the user.
  */
 async function attemptSubmit(
   submit: () => Promise<SubmitClaimResult>,
+  denom: string,
 ): Promise<SubmitAttempt> {
   let tx: SubmitClaimResult;
   try {
@@ -227,7 +238,7 @@ async function attemptSubmit(
     return {
       ok: false,
       detail,
-      failure: `The payment record could not be submitted on-chain (${detail}).`,
+      failure: `The payment record could not be submitted on-chain (${creditsInChainText(detail, denom)}).`,
     };
   }
   if (tx.code === 0) return { ok: true, tx };
@@ -235,7 +246,7 @@ async function attemptSubmit(
   return {
     ok: false,
     detail: `code ${tx.code}: ${rawLog}`,
-    failure: `The payment record could not be submitted on-chain (code ${tx.code}): ${rawLog}.`,
+    failure: `The payment record could not be submitted on-chain (code ${tx.code}): ${creditsInChainText(rawLog, denom)}.`,
   };
 }
 
@@ -574,14 +585,17 @@ export class WorkClaimService {
     renewed: boolean;
   }): Promise<SubmitClaimResult> {
     const { roomId, threadId, engagement, claimId, amount } = input;
+    const denom = amount[0]?.denom ?? '';
     const submit = (): Promise<SubmitAttempt> =>
-      attemptSubmit(() =>
-        this.chain.submit({
-          claimId,
-          collectionId: engagement.collectionId,
-          useIntent: true,
-          amount,
-        }),
+      attemptSubmit(
+        () =>
+          this.chain.submit({
+            claimId,
+            collectionId: engagement.collectionId,
+            useIntent: true,
+            amount,
+          }),
+        denom,
       );
 
     let renewed = input.renewed;
@@ -608,7 +622,7 @@ export class WorkClaimService {
         throw await this.abandon({
           roomId,
           threadId,
-          reason: `the chain refused the payment record because its reservation is gone (${attempt.detail})`,
+          reason: `the chain refused the payment record because its reservation is gone (${creditsInChainText(attempt.detail, denom)})`,
         });
       }
       throw new Error(
@@ -681,6 +695,10 @@ export class WorkClaimService {
         roomId,
         threadId,
         reason: `reserving the payment again failed — ${reservation.detail}`,
+        // The work is finished and unbillable, but for once the user can do
+        // something about it: a balance that ran short between the start of
+        // the job and its delivery is fixed by topping up and re-running.
+        ...(reservation.insufficientFunds === true && { topUp: true }),
       });
     }
     const fresh = reservation.intent;
@@ -709,6 +727,8 @@ export class WorkClaimService {
     roomId: string;
     threadId: string;
     reason: string;
+    /** The reservation failed for want of credits — the user can fix that. */
+    topUp?: boolean;
   }): Promise<Error> {
     await this.safely('close the engagement whose reservation lapsed', () =>
       this.engagement.transition(input.roomId, input.threadId, 'closed'),
@@ -723,7 +743,11 @@ export class WorkClaimService {
         'user can start a new one whenever they like. Tell them plainly that the work is finished ' +
         'but could not be billed, and why. Hand the finished work over anyway — paste it into the ' +
         'chat if it is text — and offer to run the request again, or to contract the service ' +
-        'again, if they want it recorded.',
+        'again, if they want it recorded.' +
+        (input.topUp === true
+          ? ' Their credit balance is what stopped it, so tell them that too and ask them to top ' +
+            'up their account before asking you to run it again — nothing else needs fixing.'
+          : ''),
     );
   }
 
@@ -910,15 +934,16 @@ export class WorkClaimService {
       );
     } catch (error) {
       throw new Error(
-        `The cancellation record could not be submitted on-chain (${errorMessage(error)}). ` +
+        `The cancellation record could not be submitted on-chain (${creditsInChainText(errorMessage(error), price.denom)}). ` +
           RELEASE_FAILED_SUFFIX,
       );
     }
     if (tx.code !== 0) {
       throw new Error(
-        `The cancellation record was rejected on-chain (code ${tx.code}): ${
-          tx.rawLog || 'unknown chain error'
-        }. ${RELEASE_FAILED_SUFFIX}`,
+        `The cancellation record was rejected on-chain (code ${tx.code}): ${creditsInChainText(
+          tx.rawLog || 'unknown chain error',
+          price.denom,
+        )}. ${RELEASE_FAILED_SUFFIX}`,
       );
     }
 
@@ -1150,7 +1175,7 @@ export class WorkClaimService {
         }),
         claimUrl,
       },
-      body: `Delivered: ${engagement.serviceName} (${engagement.priceUsd} ${DEFAULT_CURRENCY}) — claim ${input.claimId}.`,
+      body: `Delivered: ${engagement.serviceName} (${formatCredits(priceToCredits(engagement.priceUsd))}) — claim ${input.claimId}.`,
       sessionId: ctx.session.id,
       requestId: ctx.session.requestId,
       ...(ctx.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),

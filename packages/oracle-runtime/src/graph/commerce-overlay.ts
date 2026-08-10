@@ -5,6 +5,26 @@ import type {
 } from '../plugin-api/types.js';
 
 /**
+ * The one money vocabulary the user hears. Credits are the unit they hold, top
+ * up and spend; everything below them — the settlement currency, the chain
+ * denom it moves in, the micro-units the chain counts — is internal accounting
+ * that means nothing to them and reads as jargon when it slips out. The
+ * conversions are stated rather than merely forbidden so that an amount which
+ * DOES reach the model (a tool result, a chain rejection) can be translated
+ * instead of parroted.
+ */
+const MONEY_VOCABULARY = [
+  'Money is quoted to the user in CREDITS, always — prices, their balance,',
+  'their per-job limit, what a job cost them. 100 credits is 1 PAY, the',
+  'platform settlement currency, and 1 PAY is $1: a service the catalog card',
+  'lists at $5 (5 PAY) costs 500 credits.',
+  'Never say "uPay", never name a chain denomination, and never repeat a raw',
+  'micro-unit amount such as "5000000 upay" — those are internal accounting',
+  'units, not money the user holds. If a tool result or an error hands you one,',
+  'convert it before you speak: 10,000 uPay = 1 credit.',
+].join('\n');
+
+/**
  * What this oracle IS, commercially. Shared by both personas so tool choices
  * follow from an understood model — why payment exists, what a contract grants,
  * and why an inflated claim costs more than an honest one — instead of from
@@ -35,6 +55,7 @@ const COMMERCE_PRIMER = [
   'rejected. Report partial or failed work as exactly that.',
   'Conversation is free. Answering questions, explaining services, and scoping',
   'a job cost the user nothing; only contracted work is paid.',
+  MONEY_VOCABULARY,
 ].join('\n');
 
 const ATTACHMENT_AWARENESS =
@@ -230,7 +251,7 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
   // the user as the agent making excuses.
   const because =
     gate.detail !== undefined && gate.detail.length > 0
-      ? ` What went wrong, specifically: ${gate.detail}. Tell the user this in your own words rather than repeating a code at them.`
+      ? ` What went wrong, specifically: ${gate.detail}. Tell the user this in your own words rather than repeating a code at them, and quote any amount in credits — never a chain denomination.`
       : '';
 
   if (reason === 'engagement_in_progress') {
@@ -270,6 +291,23 @@ export function buildGateFailureInstruction(gate: CommerceGateFailure): string {
       'requested work, do not call `show_contract` (their contract is fine), ' +
       'and do not tell them to try again shortly: nothing changes until the ' +
       'other job ends.' +
+      because
+    );
+  }
+
+  if (reason === 'insufficient_funds') {
+    // Neither a contracting problem nor a transient one: their contract is
+    // fine, and the only thing that changes this is the user adding credits.
+    // "Try again shortly" is the one instruction that must not fire here — for
+    // an account that is short, it is advice to fail again.
+    return (
+      `The user asked for "${display}" and IS contracted for it, but their account does not hold ` +
+      'enough credits to reserve the payment for the job, so nothing was reserved, nothing was ' +
+      'charged, and the work has not started. Tell them plainly that their credit balance is too ' +
+      'low to start this job, say what the job costs in credits, and ask them to top up their ' +
+      'account — say you will start it as soon as they have. Do not do the work, do not call ' +
+      '`show_contract` (nothing is wrong with their contract), and do not tell them to try again ' +
+      'shortly: nothing changes until they top up.' +
       because
     );
   }

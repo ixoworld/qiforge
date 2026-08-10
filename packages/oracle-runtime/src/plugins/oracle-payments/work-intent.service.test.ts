@@ -131,7 +131,7 @@ describe('WorkIntentService.startEngagement', () => {
 
   it("starts no engagement when the reservation tx is rejected, and carries the chain's reason", async () => {
     const { service, engagement } = makeService({
-      result: { code: 5, transactionHash: '', rawLog: 'insufficient funds' },
+      result: { code: 11, transactionHash: '', rawLog: 'out of gas' },
     });
 
     const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
@@ -141,10 +141,66 @@ describe('WorkIntentService.startEngagement', () => {
     expect(result).toEqual({
       ok: false,
       reason: 'intent_failed',
-      detail: expect.stringContaining('insufficient funds'),
+      detail: expect.stringContaining('out of gas'),
     });
-    expect(result.ok === false && result.detail).toContain('code 5');
+    expect(result.ok === false && result.detail).toContain('code 11');
     expect(await engagement.get(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('reports a short balance as insufficient_funds, priced in credits', async () => {
+    // Its own reason because it is the only reservation failure the user can
+    // fix: the agent has to ask them to top up, not to try again shortly.
+    const { service, engagement } = makeService({
+      result: {
+        code: 5,
+        transactionHash: '',
+        rawLog:
+          'spendable balance 1000000upay is smaller than 20000000upay: insufficient funds',
+      },
+    });
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'insufficient_funds',
+      // $20 = 20_000_000 micro-units = 2,000 credits.
+      detail: expect.stringContaining('2,000 credits'),
+    });
+    // The chain's own arithmetic never travels: it is micro-units of an
+    // internal denom, which is exactly what the user must not be shown.
+    const detail = result.ok === false ? result.detail : '';
+    expect(detail).not.toContain('upay');
+    expect(detail).toContain('top up');
+    expect(await engagement.get(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('reports a THROWN insufficient-funds refusal the same way', async () => {
+    // The wallet client simulates before it broadcasts, so this refusal
+    // usually arrives thrown rather than as a tx with a non-zero code.
+    const { service } = makeService({
+      throws: new Error('failed to execute message; insufficient funds'),
+    });
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
+
+    expect(result).toMatchObject({ ok: false, reason: 'insufficient_funds' });
+  });
+
+  it('rewrites micro-unit amounts in an unrelated chain rejection as credits', async () => {
+    const { service } = makeService({
+      result: {
+        code: 18,
+        transactionHash: '',
+        rawLog: 'invalid coin 20000000upay',
+      },
+    });
+
+    const result = await service.startEngagement(ROOM_ID, THREAD_ID, START);
+
+    const detail = result.ok === false ? result.detail : '';
+    expect(detail).toContain('invalid coin 2,000 credits');
+    expect(detail).not.toContain('upay');
   });
 
   it('starts no engagement when the reservation throws, and carries the thrown message', async () => {

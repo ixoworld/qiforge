@@ -269,6 +269,8 @@ describe('OraclePaymentsPlugin — start_work', () => {
     intentCode = 0,
     /** An engine that fails instead of answering the contract lookup. */
     fetchImpl?: typeof fetch,
+    /** The chain's own words for a rejected reservation. */
+    intentRawLog = 'out of gas',
   ): {
     plugin: OraclePaymentsPlugin;
     engagement: EngagementService;
@@ -283,7 +285,7 @@ describe('OraclePaymentsPlugin — start_work', () => {
     const sendIntent = vi.fn(async () => ({
       code: intentCode,
       transactionHash: intentCode === 0 ? 'TX-INTENT-1' : '',
-      rawLog: intentCode === 0 ? '' : 'insufficient funds',
+      rawLog: intentCode === 0 ? '' : intentRawLog,
     }));
     const workIntent = new WorkIntentService({
       engagement,
@@ -387,9 +389,38 @@ describe('OraclePaymentsPlugin — start_work', () => {
     expect(result).toMatchObject({
       started: false,
       reason: 'intent_failed',
-      detail: expect.stringContaining('insufficient funds'),
-      message: expect.stringContaining('insufficient funds'),
+      detail: expect.stringContaining('out of gas'),
+      message: expect.stringContaining('out of gas'),
     });
+    expect(await engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
+  });
+
+  it('refuses with insufficient_funds and tells the user to top up', async () => {
+    // The contract is fine and the chain is fine — their balance is short, so
+    // the one instruction that helps is "top up", not "try again shortly".
+    const { plugin, engagement } = makeStartWorkPlugin(
+      makeContractRecord(),
+      5,
+      undefined,
+      'spendable balance 1000000upay is smaller than 20000000upay: insufficient funds',
+    );
+    const ctx = supportCtx();
+
+    const result = await toolsOf(plugin, ctx)
+      .get('start_work')
+      .handler({ serviceId: 'tax-report' }, ctx);
+
+    expect(result).toMatchObject({
+      started: false,
+      reason: 'insufficient_funds',
+      detail: expect.stringContaining('2,000 credits'),
+      message: expect.stringContaining('top up'),
+    });
+    // Neither the chain's denom nor a contract card: the first is jargon, the
+    // second would tell a contracted user their contract is the problem.
+    const message = JSON.stringify(result);
+    expect(message).not.toContain('upay');
+    expect(message).toContain('do not call `show_contract`');
     expect(await engagement.getActive(ROOM_ID, THREAD_ID)).toBeNull();
   });
 
@@ -528,6 +559,10 @@ describe('OraclePaymentsPlugin — tools', () => {
     });
     const services = content.props.services;
     expect(Array.isArray(services)).toBe(true);
+    // The body is what a client with no component renderer shows the user, so
+    // it prices in credits like every other sentence they read.
+    expect(content.body).toContain('2,000 credits');
+    expect(content.body).not.toContain('PAY');
     expect(result).toMatchObject({ services: expect.any(Array) });
   });
 
@@ -634,12 +669,14 @@ describe('OraclePaymentsPlugin — tools', () => {
       .get('get_contract_status')
       .handler({}, ctx);
 
+    // The per-job cap in credits, never the grant's raw `{amount, denom}`:
+    // the model reads this straight out to the user.
     expect(result).toEqual({
       contracted: true,
       status: 'active',
       serviceIds: ['tax-report'],
       quotaRemaining: 3,
-      maxAmount: { amount: '20000000', denom: 'upay' },
+      perJobLimitCredits: 2000,
     });
   });
 

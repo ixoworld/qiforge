@@ -52,6 +52,20 @@ describe('buildCommerceOverlay — shared primer', () => {
     }
   });
 
+  it('fixes credits as the only money unit the user hears', () => {
+    for (const overlay of [
+      buildCommerceOverlay({ mode: 'support' }),
+      buildCommerceOverlay({ mode: 'work', engagement: ENGAGEMENT }),
+    ]) {
+      expect(overlay).toContain('quoted to the user in CREDITS');
+      // Both conversions, so an amount that DOES reach the model in another
+      // unit can be translated instead of parroted at the user.
+      expect(overlay).toContain('100 credits is 1 PAY');
+      expect(overlay).toContain('10,000 uPay = 1 credit');
+      expect(overlay).toContain('Never say "uPay"');
+    }
+  });
+
   it('renders the primer exactly once, gate reason or not', () => {
     const occurrences = (text: string) => text.split(PRIMER_MARKER).length - 1;
 
@@ -256,6 +270,29 @@ describe('buildCommerceOverlay', () => {
     expect(overlay).toContain('ask again shortly');
     // The user already holds a contract — a contract card would be nonsense.
     expect(overlay).toContain('do not call `show_contract`');
+    expect(overlay).not.toContain('no usable contract');
+  });
+
+  it('answers insufficient_funds with "top up", never "try again"', () => {
+    const overlay = buildCommerceOverlay({
+      mode: 'support',
+      gate: {
+        reason: 'insufficient_funds',
+        serviceId: 'tax-report',
+        serviceName: 'Tax report',
+        detail:
+          'their account does not hold enough credits to reserve the 2,000 credits this job costs',
+      },
+    });
+
+    expect(overlay).toContain('IS contracted');
+    expect(overlay).toContain('credit balance is too low');
+    expect(overlay).toContain('top up their account');
+    expect(overlay).toContain('2,000 credits');
+    // Their contract is fine, and nothing changes until they add credits — so
+    // both of the instructions that fit every other failure are wrong here.
+    expect(overlay).toContain('do not call `show_contract`');
+    expect(overlay).toContain('do not tell them to try again shortly');
     expect(overlay).not.toContain('no usable contract');
   });
 

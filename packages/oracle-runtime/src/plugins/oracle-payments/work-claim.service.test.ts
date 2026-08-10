@@ -380,6 +380,34 @@ describe('WorkClaimService — a reservation that lapsed mid-job', () => {
     });
   });
 
+  it('tells the user to top up when reserving again finds their balance short', async () => {
+    const h = await makeHarness({
+      engagement: makeEngagement({ intent: LAPSED_INTENT }),
+      intentResult: {
+        code: 5,
+        transactionHash: '',
+        rawLog:
+          'spendable balance 1000000upay is smaller than 20000000upay: insufficient funds',
+      },
+    });
+
+    // The work is finished and unbillable either way, but this is the one
+    // version of that the user can act on — so the instruction says how.
+    const failure = await h.service
+      .deliver(TEXT_ARGS, h.ctx)
+      .then(() => null)
+      .catch((error: unknown) => String(error));
+
+    expect(failure).toMatch(/credit balance is what stopped it/);
+    expect(failure).toMatch(/top up their account/);
+    expect(failure).toContain('2,000 credits');
+    // The chain's micro-unit arithmetic is not the user's business.
+    expect(failure).not.toContain('upay');
+    expect(await h.engagement.get(ROOM_ID, THREAD_ID)).toMatchObject({
+      status: 'closed',
+    });
+  });
+
   it('closes the engagement when no escrow lane is wired at all', async () => {
     const h = await makeHarness({
       engagement: makeEngagement({ intent: LAPSED_INTENT }),

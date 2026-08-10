@@ -19,6 +19,8 @@ import {
   claimDeepLink,
   DEFAULT_CURRENCY,
   errorMessage,
+  formatCredits,
+  priceToCredits,
   resolvePortalUrl,
   retry,
 } from './util.js';
@@ -272,7 +274,9 @@ function paymentUpdateBody(
   outcome: CommercePaymentOutcome,
   lane: ClaimLane,
 ): string {
-  const price = `${engagement.priceUsd} ${DEFAULT_CURRENCY}`;
+  // Credits: this text is read by the user, and an engagement is always
+  // priced in the settlement currency the credit rate is defined against.
+  const price = formatCredits(priceToCredits(engagement.priceUsd));
   const name = engagement.serviceName;
   const suffix = ` (claim ${claimId}).`;
 

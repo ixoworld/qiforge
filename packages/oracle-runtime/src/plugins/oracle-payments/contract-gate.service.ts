@@ -10,7 +10,13 @@ import type {
 } from './contract-record.service.js';
 import type { EngagementService } from './engagement.service.js';
 import type { ContractRecord, GrantedEngagementStart } from './types.js';
-import { isEngagementExpired, priceToCoin } from './util.js';
+import {
+  formatCredits,
+  isEngagementExpired,
+  microUnitsToCredits,
+  priceToCoin,
+  priceToCredits,
+} from './util.js';
 
 /** How long a gate consults the same contract record before re-asking. */
 const GATE_CACHE_TTL_MS = 60_000;
@@ -168,12 +174,16 @@ export class ContractGateService {
     const maxAmount = Number(max.amount);
     const maxCovers = Number.isFinite(maxAmount) && maxAmount >= price.amount;
     if (!maxCovers) {
+      // Both numbers in credits, never the grant's denom and micro-units: this
+      // detail is written to be read out to the user, and a cap they cannot
+      // compare against their own balance tells them nothing.
+      const cap = microUnitsToCredits(max.amount);
       return {
         ok: false,
         reason: 'max_amount_too_low',
-        detail:
-          `their contract authorizes at most ${max.amount} ${max.denom} per job, and this one ` +
-          `costs ${price.amount} ${price.denom}`,
+        detail: `their contract authorizes at most ${
+          cap !== undefined ? formatCredits(cap) : 'an unreadable amount'
+        } per job, and this one costs ${formatCredits(priceToCredits(service.priceUsd))}`,
       };
     }
 

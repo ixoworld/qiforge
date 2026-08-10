@@ -5,7 +5,12 @@ import type {
   MergedConfig,
 } from '../../plugin-api/types.js';
 import type { ClaimNetwork } from './claim-lane.js';
-import { MICRO_UNITS_PER_UNIT, type AgentCardServiceView } from './types.js';
+import {
+  CREDITS_PER_UNIT,
+  MICRO_UNITS_PER_CREDIT,
+  MICRO_UNITS_PER_UNIT,
+  type AgentCardServiceView,
+} from './types.js';
 
 /** Just the reservation — everything the expiry helpers need to read. */
 type Reserved = Pick<CommerceEngagement, 'intent'>;
@@ -55,6 +60,61 @@ export function priceToCoin(
     denom,
     amount: Math.round(priceUsd * MICRO_UNITS_PER_UNIT),
   };
+}
+
+/**
+ * A service price as the credits the user is quoted for it. Card prices are in
+ * settlement units (1 PAY = $1); the user never reads either, they read credits.
+ */
+export function priceToCredits(priceUsd: number): number {
+  return Math.round(priceUsd * CREDITS_PER_UNIT);
+}
+
+/**
+ * A raw micro-unit chain amount as credits, or `undefined` when it is not a
+ * number at all. Every denom this lane settles is 6-decimal and $1-pegged (uPay
+ * spec §5 R1), so the one scale answers for all of them.
+ *
+ * Rounds DOWN. The amounts read through here are balances and spend caps, and
+ * rounding a cap of 1_999_999 up to "2,000 credits" would tell a user their
+ * limit covers a 2,000-credit job it refuses.
+ */
+export function microUnitsToCredits(
+  amount: string | number,
+): number | undefined {
+  const micro = typeof amount === 'number' ? amount : Number(amount);
+  return Number.isFinite(micro)
+    ? Math.floor(micro / MICRO_UNITS_PER_CREDIT)
+    : undefined;
+}
+
+/** Credits as prose: `1 credit`, `500 credits`, `1,500 credits`. */
+export function formatCredits(credits: number): string {
+  return `${credits.toLocaleString('en-US')} credit${credits === 1 ? '' : 's'}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Rewrite the micro-unit amounts inside a chain message as credits, so a
+ * rejection relayed through the agent never reaches the user as
+ * `5000000 upay`. The bank module states its arithmetic in the denom it moves
+ * ("spendable balance 100000upay is smaller than 20000000upay"), and that
+ * sentence is otherwise the most useful thing we can tell the user.
+ *
+ * Only the denom the job is priced in is rewritten — the one denom whose scale
+ * is known here. Anything else is left exactly as the chain wrote it rather
+ * than converted by guesswork.
+ */
+export function creditsInChainText(text: string, denom: string): string {
+  if (denom.length === 0) return text;
+  const amounts = new RegExp(`(\\d+)\\s*${escapeRegExp(denom)}\\b`, 'gi');
+  return text.replace(amounts, (match, digits: string) => {
+    const credits = microUnitsToCredits(digits);
+    return credits === undefined ? match : formatCredits(credits);
+  });
 }
 
 /**
@@ -240,9 +300,30 @@ export function toRoutedService(
   };
 }
 
+/**
+ * A card price as the prose the model quotes and the user reads.
+ *
+ * Credits whenever the price is in the platform's settlement currency — the one
+ * currency whose credit rate is known here. A publisher who priced a service in
+ * something else keeps their own words: converting a rate we do not hold would
+ * invent a number, and an honest "12 EUR" beats a confident wrong one.
+ */
+export function servicePriceLabel(price: {
+  amount: number;
+  currency?: string;
+}): string {
+  if (price.amount === 0) return 'free';
+  const currency = price.currency ?? DEFAULT_CURRENCY;
+  return currency === DEFAULT_CURRENCY
+    ? formatCredits(priceToCredits(price.amount))
+    : `${price.amount} ${currency}`;
+}
+
 /** Short plain-text summary of the services, used as the card `body` fallback. */
 export function summarizeServices(services: AgentCardServiceView[]): string {
-  const parts = services.map((s) => `${s.name} ($${s.price.amount})`);
+  const parts = services.map(
+    (s) => `${s.name} (${servicePriceLabel(s.price)})`,
+  );
   return `Services: ${parts.join(', ')}`;
 }
 

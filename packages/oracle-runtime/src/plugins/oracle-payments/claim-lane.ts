@@ -91,6 +91,31 @@ export function isExpiredIntentFailure(detail: string): boolean {
 }
 
 /**
+ * `true` when a failed chain write is the user's own account being short of
+ * what the payment locks, rather than anything about the claim, the contract,
+ * or the network.
+ *
+ * The bank module's wording, in the shapes it arrives in: `insufficient funds`
+ * on its own, and the arithmetic it wraps ("spendable balance 1000upay is
+ * smaller than 20000000upay"). Matched on text for the same reason
+ * {@link isExpiredIntentFailure} is — the wallet client simulates before it
+ * broadcasts, so the refusal usually arrives as a thrown error rather than a
+ * tx with a non-zero code, and the module string is the one carrier in both.
+ *
+ * It is told apart from every other reservation failure because it is the only
+ * one the user can fix: the answer is "top up your account", not "try again
+ * shortly", and the two are not interchangeable advice.
+ */
+export function isInsufficientFundsFailure(detail: string): boolean {
+  const text = detail.toLowerCase();
+  return (
+    text.includes('insufficient funds') ||
+    text.includes('insufficient balance') ||
+    (text.includes('spendable balance') && text.includes('smaller than'))
+  );
+}
+
+/**
  * The chain's evaluation of a submitted claim. `status` is the raw
  * `EvaluationStatus` enum value from `ixo/claims/v1beta1` (0 PENDING,
  * 1 APPROVED, 2 REJECTED, 3 DISPUTED, 4 INVALIDATED, 5 FLAGGED).

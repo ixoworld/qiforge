@@ -118,17 +118,22 @@ describe('ContractGateService', () => {
     });
   });
 
-  it('fails max_amount_too_low when the grant cap is under the price', async () => {
+  it('fails max_amount_too_low with both numbers in credits', async () => {
     const record = makeContractRecord();
     // 20 USD = 20_000_000 micro-units of the granted denom; cap it below.
     record.authz.maxAmount = { amount: '19999999', denom: 'upay' };
     const { gate } = makeGate(record);
 
     // The numbers travel: "too low" alone is not something a user can act on.
-    expect(await check(gate)).toEqual({
+    // In credits, because this detail is written to be read out to them — the
+    // cap rounds DOWN to 1,999 so it never reads as covering the 2,000-credit
+    // job it in fact refuses.
+    const result = await check(gate);
+    expect(result).toEqual({
       ok: false,
       reason: 'max_amount_too_low',
-      detail: expect.stringContaining('19999999 upay'),
+      detail:
+        'their contract authorizes at most 1,999 credits per job, and this one costs 2,000 credits',
     });
   });
 

@@ -160,11 +160,13 @@ export type CommercePaymentOutcome =
 /**
  * Why a work-classified turn did not start an engagement. The first four are
  * contract-gate failures (the user needs to contract or fix their contract);
- * the last three are different in kind — the contract is fine, but the user
- * already has a job running (`engagement_in_progress`), the on-chain payment
- * reservation itself failed (`intent_failed`), or the contract could not be
- * checked at all (`contract_check_failed`, which is NOT evidence of an absent
- * contract and must never be reported as one).
+ * the last four are different in kind — the contract is fine, but the user
+ * already has a job running (`engagement_in_progress`), their account holds too
+ * few credits to reserve the payment (`insufficient_funds`, which they fix by
+ * topping up and nothing else), the on-chain payment reservation failed for
+ * some other reason (`intent_failed`), or the contract could not be checked at
+ * all (`contract_check_failed`, which is NOT evidence of an absent contract and
+ * must never be reported as one).
  */
 export type CommerceGateFailureReason =
   | 'not_contracted'
@@ -173,6 +175,7 @@ export type CommerceGateFailureReason =
   | 'service_not_contracted'
   | 'engagement_in_progress'
   | 'contract_check_failed'
+  | 'insufficient_funds'
   | 'intent_failed';
 
 /**

@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   claimDeepLink,
+  creditsInChainText,
+  formatCredits,
   grantedDenom,
   isEngagementExpired,
   isMatrixNotFound,
+  microUnitsToCredits,
   priceToCoin,
+  priceToCredits,
   resolveEvalEngineUrl,
   resolvePortalUrl,
 } from './util.js';
@@ -56,6 +60,67 @@ describe('priceToCoin', () => {
       denom: 'uusdc',
       amount: 20_000_000,
     });
+  });
+});
+
+describe('credits — the only money unit the user is quoted in', () => {
+  it('prices a service in credits: 1 PAY ($1) is 100 credits', () => {
+    expect(priceToCredits(20)).toBe(2000);
+    expect(priceToCredits(0.5)).toBe(50);
+  });
+
+  it('reads a micro-unit chain amount as credits', () => {
+    // 1 credit = 10_000 micro-units, whichever denom the grant names.
+    expect(microUnitsToCredits('20000000')).toBe(2000);
+    expect(microUnitsToCredits(10_000)).toBe(1);
+  });
+
+  it('rounds a micro-unit amount DOWN', () => {
+    // A cap of 1_999_999 that reads as "2,000 credits" would tell the user
+    // their limit covers a 2,000-credit job it in fact refuses.
+    expect(microUnitsToCredits('19999999')).toBe(1999);
+    expect(microUnitsToCredits('9999')).toBe(0);
+  });
+
+  it('is undefined for an amount that is not a number', () => {
+    expect(microUnitsToCredits('not-a-number')).toBeUndefined();
+  });
+
+  it('formats credits for prose, singular and separated', () => {
+    expect(formatCredits(1)).toBe('1 credit');
+    expect(formatCredits(500)).toBe('500 credits');
+    expect(formatCredits(20_000)).toBe('20,000 credits');
+  });
+});
+
+describe('creditsInChainText', () => {
+  it("rewrites the chain's micro-unit arithmetic as credits", () => {
+    expect(
+      creditsInChainText(
+        'spendable balance 1000000upay is smaller than 20000000upay: insufficient funds',
+        'upay',
+      ),
+    ).toBe(
+      'spendable balance 100 credits is smaller than 2,000 credits: insufficient funds',
+    );
+  });
+
+  it('follows the granted denom, whichever one the job is priced in', () => {
+    expect(creditsInChainText('invalid coin 20000000uusdc', 'uusdc')).toBe(
+      'invalid coin 2,000 credits',
+    );
+  });
+
+  it('leaves amounts in any OTHER denom exactly as the chain wrote them', () => {
+    // Converting a denom whose scale is unknown here would be guesswork, and a
+    // wrong number is worse than an opaque one.
+    expect(creditsInChainText('fee 500uixo too low', 'upay')).toBe(
+      'fee 500uixo too low',
+    );
+  });
+
+  it('passes text through untouched when the job has no denom', () => {
+    expect(creditsInChainText('rpc down', '')).toBe('rpc down');
   });
 });
 

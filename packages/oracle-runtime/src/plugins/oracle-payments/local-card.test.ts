@@ -112,9 +112,24 @@ describe('deriveManifestFromCard', () => {
   it('summary carries the card name, each service name + price, and the base summary', () => {
     const m = deriveManifestFromCard(base, card);
     expect(m.summary).toContain('Tax Oracle');
-    expect(m.summary).toContain('Alpha (12 PAY)');
+    // In credits — this summary is the model's standing knowledge of what it
+    // sells, so it is where a price gets quoted from without a tool call.
+    expect(m.summary).toContain('Alpha (1,200 credits)');
     expect(m.summary).toContain('Freebie (free)');
     expect(m.summary).toContain(base.summary);
+  });
+
+  it('keeps a price the publisher named in another currency verbatim', () => {
+    // Only PAY has a credit rate known here; converting anything else would
+    // invent a number, and an honest "12 EUR" beats a confident wrong one.
+    const m = deriveManifestFromCard(base, {
+      ...card,
+      services: [
+        { ...card.services[0]!, price: { amount: 12, currency: 'EUR' } },
+      ],
+    });
+
+    expect(m.summary).toContain('Alpha (12 EUR)');
   });
 
   it('appends exactly one whenToUse line per service and keeps the base lines first', () => {
@@ -175,8 +190,8 @@ describe('OraclePaymentsPlugin — get manifest', () => {
     process.env.AGENT_CARD_PATH = LOCAL_CARD_PATH;
     const m = new OraclePaymentsPlugin().manifest;
     expect(m.summary).toContain('Tax Oracle');
-    expect(m.summary).toContain('Tax report (20 PAY)');
-    expect(m.summary).toContain('Quick estimate (5 PAY)');
+    expect(m.summary).toContain('Tax report (2,000 credits)');
+    expect(m.summary).toContain('Quick estimate (500 credits)');
     expect(m.whenToUse).toHaveLength(baseLen + 2);
     const showContract = m.examples?.find((e) => e.tool === 'show_contract');
     expect(showContract?.args).toEqual({ serviceId: 'tax-report' });

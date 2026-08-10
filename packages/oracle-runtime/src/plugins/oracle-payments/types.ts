@@ -9,6 +9,17 @@ import type { CommerceEngagementStart } from '../../modules/messages/commerce-ro
 export const MICRO_UNITS_PER_UNIT = 1_000_000;
 
 /**
+ * Credits per settlement unit — the money unit the USER is quoted in. One PAY
+ * is the platform's settlement currency ($1-pegged) and buys 100 credits, so a
+ * credit is 10_000 micro-units. A chain denom and its micro-units are internal
+ * accounting and never reach a user; everything they read is credits.
+ */
+export const CREDITS_PER_UNIT = 100;
+
+/** Micro-units in one credit — the scale every user-facing amount divides by. */
+export const MICRO_UNITS_PER_CREDIT = MICRO_UNITS_PER_UNIT / CREDITS_PER_UNIT;
+
+/**
  * `CommerceEngagementStart` plus the denom the portal granted (uPay spec §5
  * R1) — `authz.maxAmount.denom` off the contract record, the denom every coin
  * this job builds must be priced in. The shared router type predates the

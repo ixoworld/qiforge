@@ -23,10 +23,12 @@ import {
   type WorkClaimService,
 } from './work-claim.service.js';
 import {
-  DEFAULT_CURRENCY,
+  microUnitsToCredits,
   oracleAddressFromDid,
+  priceToCredits,
   readConfigString,
   resolveEvalEngineUrl,
+  servicePriceLabel,
   summarizeServices,
   toContractServiceProp,
   toListServiceProp,
@@ -176,7 +178,6 @@ function createShowContractTool(deps: OraclePaymentsToolDeps): PluginTool {
 
       const oracleDid = readConfigString(ctx.config, 'ORACLE_DID');
       const oracleAddress = oracleDid ? oracleAddressFromDid(oracleDid) : '';
-      const currency = service.price.currency ?? DEFAULT_CURRENCY;
 
       // When the router's contract gate failed this turn, the card carries
       // the real failure reason; a plain user-initiated ask stays 'user_asked'.
@@ -190,7 +191,10 @@ function createShowContractTool(deps: OraclePaymentsToolDeps): PluginTool {
           service: toContractServiceProp(service),
           reason,
         },
-        body: `To start this work, contract the agent: ${service.name} — ${service.price.amount} ${currency}.`,
+        // The body is what a client that cannot render the card shows the
+        // user, so it prices the service the way everything else they read
+        // does — in credits.
+        body: `To start this work, contract the agent: ${service.name} — ${servicePriceLabel(service.price)}.`,
         sessionId: ctx.session.id,
         requestId: ctx.session.requestId,
         toolCallId: ctx.toolCallId,
@@ -239,12 +243,18 @@ function createGetContractStatusTool(deps: OraclePaymentsToolDeps): PluginTool {
         );
         return { contracted: false };
       }
+      // The grant's cap in credits, not the raw `{amount, denom}` it is held
+      // as: this result is read straight out to the user, and a micro-unit
+      // amount in a chain denom is not a number they can compare with anything.
+      const perJobLimitCredits = microUnitsToCredits(
+        record.authz.maxAmount.amount,
+      );
       return {
         contracted: record.authz.granted,
         status: record.status,
         serviceIds: record.serviceIds,
         quotaRemaining: record.authz.agentQuotaRemaining,
-        maxAmount: record.authz.maxAmount,
+        ...(perJobLimitCredits !== undefined && { perJobLimitCredits }),
       };
     },
     {
@@ -443,7 +453,9 @@ function createStartWorkTool(deps: StartWorkToolDeps): PluginTool {
         started: true,
         serviceId: routed.id,
         serviceName: routed.name,
-        priceUsd: routed.priceUsd,
+        // Credits, because this is the number the model quotes back at the
+        // user when it confirms the job.
+        priceCredits: priceToCredits(routed.priceUsd),
         note:
           'The job is open and its payment is reserved. Your work tools are ' +
           "not bound in this reply — they bind on the user's next message, " +

@@ -6,6 +6,7 @@ import type {
 import type { CommerceEngagement, Logger } from '../../plugin-api/types.js';
 import {
   defaultIntentChainClient,
+  isInsufficientFundsFailure,
   type ClaimCoin,
   type IntentChainClient,
   type SubmitClaimResult,
@@ -14,7 +15,15 @@ import type {
   EngagementService,
   EngagementStartData,
 } from './engagement.service.js';
-import { errorMessage, grantedDenom, priceToCoin, retry } from './util.js';
+import {
+  creditsInChainText,
+  errorMessage,
+  formatCredits,
+  grantedDenom,
+  priceToCoin,
+  priceToCredits,
+  retry,
+} from './util.js';
 
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
@@ -23,10 +32,14 @@ const NANOSECONDS_PER_MILLISECOND = 1_000_000;
  * words rather than collapsing to a null: "reserving the payment failed" with
  * nothing after it is the one thing the agent cannot explain to the user, and
  * every caller of this turns its failure into something the user reads.
+ *
+ * `insufficientFunds` marks the one failure the user can act on themselves —
+ * their balance is short, so the honest instruction is "top up" rather than the
+ * "try again shortly" every other failure earns.
  */
 export type ReservationResult =
   | { ok: true; intent: NonNullable<CommerceEngagement['intent']> }
-  | { ok: false; detail: string };
+  | { ok: false; detail: string; insufficientFunds?: true };
 
 export interface WorkIntentServiceDeps {
   engagement: EngagementService;
@@ -97,7 +110,13 @@ export class WorkIntentService {
     if (!reservation.ok) {
       return {
         ok: false,
-        reason: 'intent_failed',
+        // A balance the user can top up is not the same failure as a chain
+        // that would not take the write, and it gets its own reason so the
+        // agent asks them to add credits instead of telling them to try again
+        // shortly — which, for an empty account, is advice to fail again.
+        reason: reservation.insufficientFunds
+          ? 'insufficient_funds'
+          : 'intent_failed',
         detail: reservation.detail,
       };
     }
@@ -185,25 +204,16 @@ export class WorkIntentService {
         amount,
       });
     } catch (error) {
-      const detail = errorMessage(error);
-      this.logger.warn(
-        `[oracle-payments] claim intent failed for collection ${start.collectionId}: ${detail}`,
-      );
-      return {
-        ok: false,
-        detail: `the chain rejected the payment reservation: ${detail}`,
-      };
+      return this.refuseReservation(errorMessage(error), start, denom);
     }
 
     if (result.code !== 0) {
-      const rawLog = result.rawLog || 'unknown chain error';
-      this.logger.warn(
-        `[oracle-payments] claim intent rejected for collection ${start.collectionId} (code ${result.code}): ${rawLog}`,
+      return this.refuseReservation(
+        result.rawLog || 'unknown chain error',
+        start,
+        denom,
+        result.code,
       );
-      return {
-        ok: false,
-        detail: `the chain rejected the payment reservation (code ${result.code}): ${rawLog}`,
-      };
     }
 
     const submittedAt = this.clock();
@@ -215,6 +225,44 @@ export class WorkIntentService {
         submittedAt: submittedAt.toISOString(),
         ...(expiresAt !== undefined && { expiresAt }),
       },
+    };
+  }
+
+  /**
+   * Turn a chain refusal into a reservation failure the agent can relay, with
+   * the raw text kept for the log line and never for the user.
+   *
+   * Two jobs, both about what the user ends up reading. A refusal for want of
+   * funds is told apart and answered in the user's own money, because the
+   * chain states that one as micro-unit arithmetic in an internal denom —
+   * precisely what must not reach them. Every other refusal keeps the chain's
+   * own wording, with any amounts in it rewritten as credits.
+   */
+  private refuseReservation(
+    chainText: string,
+    start: CommerceEngagementStart,
+    denom: string,
+    code?: number,
+  ): ReservationResult {
+    const at = code !== undefined ? ` (code ${code})` : '';
+    this.logger.warn(
+      `[oracle-payments] claim intent failed for collection ${start.collectionId}${at}: ${chainText}`,
+    );
+
+    if (isInsufficientFundsFailure(chainText)) {
+      return {
+        ok: false,
+        insufficientFunds: true,
+        detail:
+          `their account does not hold enough credits to reserve the ` +
+          `${formatCredits(priceToCredits(start.priceUsd))} this job costs, so nothing was ` +
+          'reserved and nothing was charged — they need to top up their account before it can start',
+      };
+    }
+
+    return {
+      ok: false,
+      detail: `the chain rejected the payment reservation${at}: ${creditsInChainText(chainText, denom)}`,
     };
   }
 }
