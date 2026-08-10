@@ -17,6 +17,7 @@ The structure mirrors the parts of the codebase a maintainer touches:
 - **Touching `packages/oracle-runtime/src/plugin-api/`?** → update `architecture/plugin-lifecycle.md`. Public-facing changes also go in `ixo-docs/build-an-oracle/reference/plugin-api.mdx`.
 - **Adding a bundled plugin?** → follow `contributing/adding-a-bundled-plugin.md`. Add a row to `ixo-docs/build-an-oracle/reference/plugin-catalog.mdx`.
 - **Touching `packages/oracle-runtime/src/modules/`?** → update `architecture/modules.md`.
+- **Touching the Matrix commerce lane** (message router, commerce port, in-flight turn registry, `work_status`, component events)? → update `architecture/matrix-commerce.md`.
 - **Adding a graph state field?** → follow `contributing/adding-a-state-field.md`. Document the field in `ixo-docs/build-an-oracle/reference/state-schema.mdx`.
 - **Touching the meta-tools?** → update `architecture/meta-tools-and-discovery.md` and `ixo-docs/build-an-oracle/concepts/meta-tools.mdx`.
 - **Adding a follow-up ticket?** → append to `spec-and-roadmap/follow-ups.md`.

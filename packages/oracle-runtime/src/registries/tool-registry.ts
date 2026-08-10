@@ -5,10 +5,37 @@ import type {
   RuntimeContext,
 } from '../plugin-api/types.js';
 
+/** Log prefix for the registry's own diagnostics. */
+const LOG_PREFIX = '[tool-registry]';
+
+/**
+ * Render collected tools as `plugin=[toolA, toolB]; other=[toolC]` — the
+ * diagnostic that answers "which plugin contributed what on this turn".
+ */
+export function formatByPlugin(entries: readonly RegisteredTool[]): string {
+  const byPlugin = new Map<string, string[]>();
+  for (const { pluginName, tool } of entries) {
+    const names = byPlugin.get(pluginName);
+    if (names) names.push(tool.name);
+    else byPlugin.set(pluginName, [tool.name]);
+  }
+  return Array.from(
+    byPlugin,
+    ([name, tools]) => `${name}=[${tools.join(', ')}]`,
+  ).join('; ');
+}
+
 /** A collected tool tagged with the plugin that contributed it. */
 export interface RegisteredTool {
   pluginName: string;
   tool: PluginTool;
+  /**
+   * Which hook produced it — `getTools` (boot, cached for the process) or
+   * `getRequestTools` (recomputed every turn). The per-turn diagnostics need
+   * the split: request tools are the ones that can differ between two
+   * otherwise identical turns.
+   */
+  origin: 'boot' | 'request';
 }
 
 /**
@@ -58,7 +85,7 @@ export class ToolRegistry {
       if (!plugin.getTools) continue;
       const tools = await plugin.getTools(buildCtx);
       for (const tool of tools) {
-        out.push({ pluginName: plugin.name, tool });
+        out.push({ pluginName: plugin.name, tool, origin: 'boot' });
       }
     }
     this.bootCache = out;
@@ -73,18 +100,43 @@ export class ToolRegistry {
    * Hooks run concurrently — several of them open network connections
    * (MCP list-tools, secrets reads), so serializing them puts every
    * round-trip on the chat hot path back-to-back. Output order stays
-   * plugin-registration order regardless of which hook resolves first,
-   * and any hook rejection still fails the whole collection.
+   * plugin-registration order regardless of which hook resolves first.
+   *
+   * Failures are isolated PER PLUGIN: a hook that rejects contributes zero
+   * tools and is logged as an error naming the plugin, while every other
+   * plugin's tools still resolve. Sharing one rejection across the whole
+   * fan-out would let a transient upstream blip in one plugin (an MCP server
+   * that timed out, a secrets read that 500'd) silently strip the request
+   * tools of every plugin — and, because the caller awaits this, fail the
+   * turn outright. The runtime degrades the same way for sub-agents.
    */
   async collectRequest(rtCtx: RuntimeContext): Promise<RegisteredTool[]> {
     const perPlugin = await Promise.all(
-      this.plugins.map(async (plugin) => {
+      this.plugins.map(async (plugin): Promise<RegisteredTool[]> => {
         if (!plugin.getRequestTools) return [];
-        const requestTools = await plugin.getRequestTools(rtCtx);
-        return requestTools.map((tool) => ({ pluginName: plugin.name, tool }));
+        try {
+          const requestTools = await plugin.getRequestTools(rtCtx);
+          return requestTools.map((tool) => ({
+            pluginName: plugin.name,
+            tool,
+            origin: 'request' as const,
+          }));
+        } catch (error) {
+          rtCtx.logger.error(
+            `${LOG_PREFIX} plugin "${plugin.name}" getRequestTools failed — it contributes NO tools this turn ` +
+              `(other plugins are unaffected): ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+          );
+          return [];
+        }
       }),
     );
-    return perPlugin.flat();
+    const out = perPlugin.flat();
+    rtCtx.logger.debug?.(
+      `${LOG_PREFIX} request tools by plugin: ${formatByPlugin(out) || '∅'}`,
+    );
+    return out;
   }
 
   /**

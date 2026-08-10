@@ -78,6 +78,7 @@ function baseInput(overrides: Partial<ComposePromptInput>): ComposePromptInput {
     capabilityBlock: '',
     customInstructions: '',
     operationalMode: 'General conversation mode',
+    commerceOverlay: '',
     editorSection: '',
     composioContext: '',
     slackFormattingConstraints: '',
@@ -170,5 +171,56 @@ describe('composePrompt — compact memory context', () => {
     // Early facts survive; the long tail is trimmed under the budget.
     expect(prompt).toContain('distinct durable fact number 0 ');
     expect(prompt).not.toContain('distinct durable fact number 399 ');
+  });
+});
+
+describe('composePrompt — commerce overlay slot', () => {
+  it('renders the overlay after the operational mode when provided', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        commerceOverlay: '## Commerce mode\n\nYou are the front desk.',
+      }),
+    );
+
+    expect(prompt).toContain('You are the front desk.');
+    expect(prompt.indexOf('General conversation mode')).toBeLessThan(
+      prompt.indexOf('You are the front desk.'),
+    );
+  });
+
+  it('renders nothing for the empty overlay', async () => {
+    const prompt = await composePrompt(baseInput({}));
+
+    expect(prompt).not.toContain('Commerce mode');
+  });
+});
+
+describe('composePrompt — capability discovery principle', () => {
+  it('mandates discovery by default', async () => {
+    const prompt = await composePrompt(baseInput({}));
+
+    expect(prompt).toContain('**Search first, build second.**');
+    expect(prompt).toContain('`search_skills`');
+    expect(prompt).toContain('`load_capability({ names: [...] })`');
+    // The bullets around it survive.
+    expect(prompt).toContain('Being proactive does **not** mean');
+  });
+
+  it('drops it when the meta-tools are not bound', async () => {
+    // Matrix support mode binds a closed tool surface. Ordering the model to
+    // call `list_capabilities` / `load_capability` there describes a flow it
+    // cannot run.
+    const prompt = await composePrompt(
+      baseInput({ capabilityDiscovery: false }),
+    );
+
+    expect(prompt).not.toContain('Search first, build second');
+    expect(prompt).not.toContain('load_capability');
+    expect(prompt).not.toContain('list_capabilities');
+    expect(prompt).not.toContain('search_skills');
+    // Only that bullet goes — the rest of the principles stand.
+    expect(prompt).toContain('## Operating principles');
+    expect(prompt).toContain('Being proactive does **not** mean');
+    expect(prompt).toContain("Complete the user's request and stop.");
   });
 });

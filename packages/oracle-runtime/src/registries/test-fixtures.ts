@@ -154,6 +154,7 @@ export function makeRuntimeContext(
     },
     matrix: {
       postToRoom: async () => 'event-id',
+      postEvent: async () => 'event-id',
       getRoomState: async (roomId: string) => ({ roomId, state: [] }),
       getEventById: async (_roomId: string, eventId: string) => ({
         eventId,

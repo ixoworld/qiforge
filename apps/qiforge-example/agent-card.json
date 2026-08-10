@@ -1,0 +1,44 @@
+{
+  "@context": [
+    "https://www.w3.org/ns/credentials/v2",
+    "https://w3id.org/ixo/ns/agent-card/v1"
+  ],
+  "id": "did:ixo:entity:87a209c5cdd1ee544af60f06e75658b1#acard",
+  "type": ["VerifiableCredential", "ixo:AgentCard"],
+  "issuer": {
+    "id": "did:ixo:ixo15a7p9d4n8wjh6wcsqk53g4yk7u3ztqpuymznxn"
+  },
+  "validFrom": "2026-07-20T14:12:58.923Z",
+  "credentialSubject": {
+    "id": "did:ixo:entity:87a209c5cdd1ee544af60f06e75658b1",
+    "name": "PA Local",
+    "description": "We are a company that helps you with daily tasks",
+    "version": "1.0.0",
+    "services": [
+      {
+        "id": "expense-report",
+        "name": "expense report",
+        "description": "`expense-report`, `request` \\\"Summarize my Q2 spending  in      ││  USD\\\", deliverable: a spending report where every receipt appears as a line with        ││  category  and amount, amounts in **USD**, grand total stated, `resultStatus:            ││  completed`",
+        "price": {
+          "amount": 1,
+          "currency": "USDC"
+        },
+        "deliverables": "One excel file or csv file for the expense report shoing all   ││  the spending in categories and total spent at the end",
+        "doneMeans": [
+          "ready to read expenses report and the required currency from the user"
+        ]
+      },
+      {
+        "id": "tax-report",
+        "name": "tax report",
+        "description": "tax report",
+        "price": {
+          "amount": 3,
+          "currency": "USDC"
+        },
+        "deliverables": "tax report",
+        "doneMeans": ["tax report"]
+      }
+    ]
+  }
+}

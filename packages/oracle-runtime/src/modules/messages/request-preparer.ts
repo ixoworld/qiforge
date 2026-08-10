@@ -70,11 +70,12 @@ export class RequestPreparer {
     const prepareStartedAt = performance.now();
     const did = payload.did;
     const sessionId = payload.sessionId;
-    // Streaming requests arrive with `requestId` already resolved by
-    // `MessagesService` (it flushes the SSE headers, which carry the id,
-    // before this runs). Batch requests mint theirs here.
+    // A caller-supplied `requestId` is honored: streaming requests arrive
+    // with it already resolved by `MessagesService` (the SSE headers carry
+    // it), and Matrix turns arrive with the bridge-minted id that also keys
+    // the turn's `work_status` card. Only requests without one mint here.
     const requestId =
-      payload.stream && payload.requestId
+      typeof payload.requestId === 'string' && payload.requestId.length > 0
         ? payload.requestId
         : crypto.randomUUID();
 

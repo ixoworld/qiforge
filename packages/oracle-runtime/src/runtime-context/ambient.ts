@@ -40,6 +40,16 @@ export interface BlobStoreAdapter {
 /** Matrix adapter exposing only scoped operations a plugin should ever need. */
 export interface MatrixAdapter {
   postToRoom(roomId: string, content: unknown): Promise<string>;
+  /**
+   * Post a timeline event with a caller-chosen event type (e.g. the
+   * `ixo.oracle.*` protocol events). `postToRoom` is the `m.room.message`
+   * shorthand; this is the general form. Returns the new event id.
+   */
+  postEvent(
+    roomId: string,
+    eventType: string,
+    content: object,
+  ): Promise<string>;
   getRoomState(roomId: string): Promise<RoomStateSnapshot>;
   getEventById(roomId: string, eventId: string): Promise<MatrixEvent>;
 }

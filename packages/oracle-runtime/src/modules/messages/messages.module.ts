@@ -11,6 +11,7 @@ import { DelegationController } from './delegation.controller.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { HomeServerCache } from './homeserver-cache.js';
 import { MatrixListenerBridge } from './matrix-listener-bridge.js';
+import { MessageRouterService } from './message-router.service.js';
 import { MessagesController } from './messages.controller.js';
 import { MessagesService } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
@@ -34,6 +35,13 @@ import { UserContextFetcher } from './user-context-fetcher.js';
     BatchInvoker,
     PostMessageSyncer,
     MatrixListenerBridge,
+    {
+      // Plain construction: the router's collaborators (the commerce port
+      // holder, the routing-model factory, the status producer) are
+      // module-scope singletons, not Nest providers.
+      provide: MessageRouterService,
+      useFactory: () => new MessageRouterService(),
+    },
     {
       // `MemoryEngineService` is OPTIONAL. `UserContextFetcher` reads it
       // each turn (cached for 3 min) to populate `state.userContext`

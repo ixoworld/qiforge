@@ -4,6 +4,7 @@ import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
 import type {
   ChatOpenAIFields,
+  CommerceContext,
   MergedConfig,
   ModelRole,
   OracleIdentity,
@@ -51,11 +52,16 @@ export const mainAgentRequestContextSchema = z.object({
    */
   model: z.string().optional(),
   /**
+   * Commerce routing outcome produced by the Matrix message router. Shape is
+   * owned by `CommerceContext` (plugin-api); the schema passes it through
+   * unvalidated — it never crosses a trust boundary (bridge → runtime only).
+   *
    * Present when this turn runs on the user's own credential (BYO). Carries
    * only non-secret flags — the credential itself lives in the request-scoped
    * LLM adapter closure and never enters context, state, or traces. Consumed
    * by the credits middleware to skip deduction on BYO turns.
    */
+  commerce: z.custom<CommerceContext>().optional(),
   byo: z
     .object({
       provider: z.enum([

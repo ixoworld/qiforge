@@ -98,13 +98,16 @@ Other sections (identity, operating mode, user context, time context, user prefe
 
 Order is fixed:
 
-1. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
-2. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
-3. `createPageContextMiddleware()` — injects active page context for editor flows.
-4. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails.
-5. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
+1. `createWorkStatusMiddleware()` — outermost. One `work_status` beat per model call (`Thinking…`) and per tool call (the humanized tool name). Pure side effect; a no-op off the Matrix transport.
+2. `createCapabilityGateMiddleware()` — trims the bound tool list to what `loadedPlugins` allows this model call.
+3. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
+4. `createToolRepetitionGuardMiddleware()` — short-circuits a re-issued call that already failed identically this turn.
+5. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
+6. `createPageContextMiddleware()` — injects active page context for editor flows. Only when the fork supplies `hooks.getRoomTitle`.
+7. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails. Only when the fork supplies `hooks.safetyModel`.
+8. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
 
-All four always-on middlewares ship in `graph/middlewares/`. They're not removable or reorderable.
+Every always-on middleware except `toolRetryMiddleware` (a LangChain built-in) ships in `graph/middlewares/`. They're not removable or reorderable.
 
 ## Read next
 

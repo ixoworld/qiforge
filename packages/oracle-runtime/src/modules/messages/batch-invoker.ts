@@ -16,6 +16,12 @@ export interface BatchInvokeInput {
   };
   prepared: PreparedRequest;
   inputMessages: BaseMessage[];
+  /**
+   * Per-turn abort controller (the Matrix bridge constructs one per flushed
+   * turn). Wired into the invoke config's `signal` so aborting it cancels
+   * the graph run mid-flight.
+   */
+  abortController?: AbortController;
 }
 
 export interface BatchInvokeResult {
@@ -41,10 +47,13 @@ export class BatchInvoker {
   constructor(private readonly agentBuilder: AgentBuilder) {}
 
   async invoke(input: BatchInvokeInput): Promise<BatchInvokeResult> {
-    const { payload, prepared, inputMessages } = input;
+    const { payload, prepared, inputMessages, abortController } = input;
 
     const { agent, stateInput, langGraphConfig } =
-      await this.agentBuilder.build({ payload, prepared, inputMessages });
+      await this.agentBuilder.build(
+        { payload, prepared, inputMessages },
+        abortController,
+      );
 
     // The shared config from AgentBuilder is tuned for `streamEvents`
     // (`version: 'v2'`, `streamMode: ['updates','messages']`). Passing a

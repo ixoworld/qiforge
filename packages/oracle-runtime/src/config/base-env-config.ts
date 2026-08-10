@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { baseEnvSchema, type BaseEnv } from './base-env-schema.js';
+import { normalizeDid } from './normalize-did.js';
 
 /**
  * Runtime config view used by Tier-0 services that need an env var
@@ -22,24 +23,6 @@ export interface BaseEnvAccessor {
     defaultValue?: BaseEnvWithDerived[K],
   ): BaseEnvWithDerived[K] | undefined;
   getOrThrow<K extends keyof BaseEnvWithDerived>(key: K): BaseEnvWithDerived[K];
-}
-
-/**
- * Convert hyphen-delimited Matrix usernames (`@did-ixo-ixo1...:host`) to
- * colon DIDs (`did:ixo:ixo1...`). Lifted verbatim from
- * `apps/app/src/utils/header.utils.ts` so the checkpointer can derive
- * `ORACLE_DID` from `MATRIX_ORACLE_ADMIN_USER_ID` without depending on
- * the AuthModule (which lives in a parallel relocation task).
- */
-function normalizeDid(input: string): string {
-  const username = input.split(':')[0] ?? '';
-  const parts = username.split('-');
-  if (parts.length < 3 || parts[0] !== '@did') {
-    throw new Error(`Invalid DID format: ${input}`);
-  }
-  const namespace = parts[1];
-  const identifier = parts.slice(2).join('-');
-  return `did:${namespace}:${identifier}`;
 }
 
 let _singleton: ConfigService<BaseEnvWithDerived> | undefined;

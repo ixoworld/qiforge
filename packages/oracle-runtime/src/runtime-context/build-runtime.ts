@@ -1,5 +1,6 @@
 import type { BaseMessage } from '@langchain/core/messages';
 import type {
+  CommerceContext,
   MergedConfig,
   ReadonlyState,
   RuntimeContext,
@@ -38,6 +39,8 @@ export interface RuntimeSessionContext {
 export interface RunConfigContext {
   user: RuntimeUserContext;
   session: RuntimeSessionContext;
+  /** Commerce routing outcome for routed Matrix turns; absent otherwise. */
+  commerce?: CommerceContext;
 }
 
 /**
@@ -50,6 +53,15 @@ export interface RunConfig {
   context: RunConfigContext;
   signal?: AbortSignal;
   toolCall?: { id?: string };
+  /**
+   * The LIVE graph state at the moment the tool is called (LangGraph's
+   * `ToolRuntime.state`). Only `messages` is read, and it is the only source
+   * of a true transcript: the build-time snapshot is taken before the turn
+   * runs and, in production, is read from the checkpointer WITHOUT its
+   * messages on purpose (`getTupleWithoutMessages`). Absent on non-tool
+   * callers, which fall back to the snapshot.
+   */
+  state?: { messages?: readonly BaseMessage[] };
 }
 
 /**
@@ -76,7 +88,11 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   const session = runConfig.context.session;
   const user = runConfig.context.user;
 
-  const messages: readonly BaseMessage[] = state.messages ?? [];
+  // Live runtime state first: a tool that has to describe the conversation
+  // (the work-summary extractor behind `deliver_work`) needs the turn it is
+  // running in, not the state the agent was built from.
+  const messages: readonly BaseMessage[] =
+    runConfig.state?.messages ?? state.messages ?? [];
   const userContext: UserContextData = state.userContext ?? {};
   const loadedPlugins: ReadonlySet<string> =
     state.loadedPlugins ?? new Set<string>();
@@ -135,6 +151,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     matrix: {
       postToRoom: (roomId, content) =>
         ambient.matrix.postToRoom(roomId, content),
+      postEvent: (roomId, eventType, content) =>
+        ambient.matrix.postEvent(roomId, eventType, content),
       getRoomState: (roomId) => ambient.matrix.getRoomState(roomId),
       getEventById: (roomId, eventId) =>
         ambient.matrix.getEventById(roomId, eventId),
@@ -169,6 +187,9 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     logger: ambient.logger,
     abortSignal,
     shared: EMPTY_SHARED,
+    ...(runConfig.context.commerce
+      ? { commerce: runConfig.context.commerce }
+      : {}),
     ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
   };
 }

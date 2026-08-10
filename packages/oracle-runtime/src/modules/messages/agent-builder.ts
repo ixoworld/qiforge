@@ -384,6 +384,7 @@ export class AgentBuilder {
         roomId: prepared.roomId,
       },
       history: { userContext },
+      ...(payload.commerce && { commerce: payload.commerce }),
       model: byoTurn ? byoTurn.byoModelId : requestedModel,
       ...(byoTurn && {
         byo: { provider: byoTurn.provider, active: true },

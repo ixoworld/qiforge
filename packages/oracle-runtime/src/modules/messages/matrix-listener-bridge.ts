@@ -11,19 +11,47 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as crypto from 'node:crypto';
+import { normalizeDid } from '../../config/normalize-did.js';
+import { workStatusProducer } from '../../matrix/work-status-producer.js';
+import type { CommerceContext } from '../../plugin-api/types.js';
+import { MessageRouterService } from './message-router.service.js';
 
 const FILE_MSGTYPES = new Set(['m.file', 'm.image', 'm.video', 'm.audio']);
 const DEBOUNCE_MS = 500;
+/** Max wait for a superseded turn to settle before dispatching the new one. */
+const SUPERSEDE_DRAIN_MS = 3_000;
+/** Matrix typing notifications expire ~30s; refresh well inside that. */
+const TYPING_REFRESH_MS = 20_000;
+/** Capped LRU of already-handled event ids (homeserver re-delivery guard). */
+const PROCESSED_EVENTS_CAP = 500;
+
+/**
+ * Spec-standard `m.relates_to` payload. Two shapes matter here:
+ *   - a thread relation — `rel_type: 'm.thread'` plus the thread root's
+ *     `event_id`; clients that thread natively send this
+ *   - a reply-chain pointer — a bare `m.in_reply_to`
+ *
+ * They co-occur: a threaded client also sets `m.in_reply_to` (with
+ * `is_falling_back`) at the *newest* message in the thread so non-threaded
+ * clients render something sensible. That pointer is not the thread root.
+ */
+export interface MatrixRelatesTo {
+  rel_type?: string;
+  event_id?: string;
+  is_falling_back?: boolean;
+  'm.in_reply_to'?: { event_id: string };
+}
 
 /**
  * Matrix text-event content. Spec-standard fields the base
  * `MessageEventContent` type from `@ixo/matrix` doesn't enumerate:
  *   - `m.mentions` — explicit mention list (since MSC3952)
- *   - `m.relates_to.m.in_reply_to` — reply chain pointer
+ *   - `m.relates_to` — thread relation / reply chain pointer
  */
 interface MatrixTextContent extends MessageEventContent {
   'm.mentions'?: { user_ids?: string[] };
-  'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
+  'm.relates_to'?: MatrixRelatesTo;
 }
 
 interface BufferedEvent {
@@ -50,13 +78,36 @@ export interface MatrixIncomingMessage {
   /** Raw `m.mentions` payload from the event, if present. */
   mentions?: { user_ids?: string[] };
   /** Raw `m.relates_to` payload from the event, if present. */
-  relatesTo?: { 'm.in_reply_to'?: { event_id: string } };
+  relatesTo?: MatrixRelatesTo;
   attachments?: Array<{
     eventId: string;
     filename: string;
     mimetype: string;
     size?: number;
   }>;
+  /**
+   * Per-turn abort controller, constructed by `flush()`. Aborting it cancels
+   * the turn's LangGraph run end-to-end — the signal travels through the
+   * delivery into the invoke config and `RuntimeContext.abortSignal`.
+   */
+  abortController: AbortController;
+  /**
+   * Bridge-minted per-turn request id. Reused by the request preparer so the
+   * `work_status` card, the runnable config, and `ctx.session.requestId`
+   * agree for the whole turn.
+   */
+  requestId: string;
+  /** Commerce routing outcome — set only when the commerce router is active. */
+  commerce?: CommerceContext;
+}
+
+interface InFlightTurn {
+  requestId: string;
+  controller: AbortController;
+  /** The turn's coalesced user text — prepended to a superseding turn. */
+  userText: string;
+  /** Resolves when the turn's delivery settles (bounded-drain target). */
+  settled: Promise<void>;
 }
 
 /**
@@ -77,6 +128,18 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   private cleanUpListener?: () => void;
   private readonly threadRootCache = new Map<string, string>();
   private readonly buffer = new Map<string, BufferEntry>();
+  /**
+   * One entry per in-flight turn, keyed by sessionId (= thread root). A new
+   * flush for the same session aborts + drains the old turn and prepends its
+   * unanswered text (double-text supersede). Purely in-process — the Matrix
+   * sync loop is single-instance per oracle.
+   */
+  private readonly inFlight = new Map<string, InFlightTurn>();
+  /**
+   * Insertion-ordered Set as a capped LRU of handled event ids, so a
+   * homeserver re-delivering an event can't double-answer the user.
+   */
+  private readonly processedEventIds = new Set<string>();
   private readonly matrixManager: MatrixManager;
   private deliverHandler:
     | ((msg: MatrixIncomingMessage) => Promise<unknown>)
@@ -88,6 +151,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly sessions: SessionManagerService,
     private readonly config: ConfigService,
+    private readonly router: MessageRouterService,
   ) {
     this.matrixManager = this.sessions.matrixManger;
   }
@@ -131,7 +195,23 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy(): void {
     for (const [, entry] of this.buffer) clearTimeout(entry.timer);
     this.buffer.clear();
+    for (const [, turn] of this.inFlight) turn.controller.abort();
+    this.inFlight.clear();
     this.cleanUpListener?.();
+  }
+
+  /**
+   * Record an event id as handled. Returns `false` when the id was already
+   * seen — the caller drops the event (homeserver re-delivery).
+   */
+  private markProcessed(eventId: string): boolean {
+    if (this.processedEventIds.has(eventId)) return false;
+    this.processedEventIds.add(eventId);
+    if (this.processedEventIds.size > PROCESSED_EVENTS_CAP) {
+      const oldest = this.processedEventIds.values().next().value;
+      if (oldest !== undefined) this.processedEventIds.delete(oldest);
+    }
+    return true;
   }
 
   private async handleMessage(
@@ -150,6 +230,13 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       typeof event.content.body === 'string';
     const isFile = typeof msgtype === 'string' && FILE_MSGTYPES.has(msgtype);
     if (!isText && !isFile) return;
+
+    if (event.eventId && !this.markProcessed(event.eventId)) {
+      this.logger.debug(
+        `Skipping already-processed eventId=${event.eventId} (re-delivery)`,
+      );
+      return;
+    }
 
     // A plugin that owns this room can pin it to one session — every message
     // there continues that bound session, skipping reply-chain resolution.
@@ -307,19 +394,87 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // One controller per delivered turn so the run can be cancelled while
+    // in flight (the HTTP path gets the same per-turn controller from the
+    // SSE stream runner).
+    const abortController = new AbortController();
+    const requestId = crypto.randomUUID();
+
+    // Double-texting supersede: a new message into a thread whose turn is
+    // still running kills that turn, waits (bounded) for it to settle, flips
+    // its status card to `superseded`, and prepends its unanswered text so
+    // nothing the user said is lost.
+    let turnMessage = message;
+    const prior = this.inFlight.get(threadId);
+    if (prior) {
+      this.inFlight.delete(threadId);
+      prior.controller.abort();
+      await Promise.race([prior.settled, delay(SUPERSEDE_DRAIN_MS)]);
+      workStatusProducer.finish(prior.requestId, 'superseded');
+      turnMessage = `${prior.userText}\n${turnMessage}`;
+      this.logger.log(
+        `Superseded in-flight turn requestId=${prior.requestId} for threadId=${threadId}`,
+      );
+    }
+
+    // Every Matrix turn gets a liveness card, commerce or not. Registering
+    // the turn and posting the opening beat here — before any routing work —
+    // is what makes the room show progress from the instant the message
+    // lands, and gives every later phase an anchor event to replace.
+    workStatusProducer.beginTurn({
+      requestId,
+      roomId: first.roomId,
+      threadId,
+      sessionId: threadId,
+      forEventId: eventId ?? threadId,
+    });
+    workStatusProducer.emit(requestId, 'routing');
+
+    // Commerce routing — Matrix-only, inert unless the oracle-payments
+    // plugin registered its port.
+    let commerce: CommerceContext | undefined;
+    if (this.router.isActive()) {
+      commerce = await this.router.route({
+        roomId: first.roomId,
+        threadId,
+        senderDid: did,
+        text: turnMessage,
+      });
+    }
+
+    let settle: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.inFlight.set(threadId, {
+      requestId,
+      controller: abortController,
+      userText: turnMessage,
+      settled,
+    });
+
+    const typingClient = this.matrixManager.getClient()?.mxClient;
+    let typingKeepalive: NodeJS.Timeout | undefined;
     try {
-      await this.matrixManager
-        .getClient()
-        ?.mxClient.setTyping(first.roomId, true);
+      await typingClient?.setTyping(first.roomId, true);
+      // Typing notifications expire server-side (~30s); a long turn needs
+      // periodic refreshes or the indicator drops mid-run.
+      typingKeepalive = setInterval(() => {
+        typingClient?.setTyping(first.roomId, true).catch(() => undefined);
+      }, TYPING_REFRESH_MS);
+
       const aiResponse = (await this.deliverHandler({
         did,
-        message,
+        message: turnMessage,
         threadId,
         langchainThreadId,
         roomId: first.roomId,
         homeServer,
         senderMatrixUserId,
         eventId,
+        abortController,
+        requestId,
+        ...(commerce && { commerce }),
         ...(mentions && { mentions }),
         ...(relatesTo && { relatesTo }),
         ...(attachments.length > 0 && { attachments }),
@@ -343,6 +498,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      workStatusProducer.emit(requestId, 'delivering');
       await this.matrixManager.sendMessage({
         message: aiResponse.message.content,
         roomId: first.roomId,
@@ -350,27 +506,48 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         isOracleAdmin: true,
         disablePrefix: true,
       });
+      workStatusProducer.finish(requestId, 'done');
     } catch (error) {
       this.logger.error('Failed to handle Matrix message', error);
     } finally {
-      await this.matrixManager
-        .getClient()
-        ?.mxClient.setTyping(first.roomId, false);
+      if (typingKeepalive) clearInterval(typingKeepalive);
+      // Close the card on every exit — thrown error, no AI response, or a
+      // reply that was skipped — so no turn can leave a spinner running in
+      // the room. `finish` unregisters the turn, so the success path above
+      // has already consumed this and the call is a no-op there. The one
+      // turn left alone is a superseded one: the newer flush flipped its
+      // card to `superseded` and that is its terminal state.
+      if (!abortController.signal.aborted) {
+        workStatusProducer.finish(requestId, 'done');
+      }
+      const current = this.inFlight.get(threadId);
+      if (current?.requestId === requestId) this.inFlight.delete(threadId);
+      settle();
+      await typingClient?.setTyping(first.roomId, false).catch(() => undefined);
     }
   }
 
   private async getThreadRoot(
     event: MessageEvent<
-      MessageEventContent & {
-        'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
-      }
+      MessageEventContent & { 'm.relates_to'?: MatrixRelatesTo }
     >,
     roomId: string,
   ): Promise<string | undefined> {
     const eventId = event.eventId;
     if (!eventId) return undefined;
-    const inReplyTo =
-      event.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+    const relatesTo = event.content['m.relates_to'];
+    // A thread relation names its root outright — take it and skip the walk.
+    // Falling through to the reply chain would root the thread on this event,
+    // and a homeserver refuses to root a thread on an event that already
+    // carries a relation ("Cannot start threads from an event with a
+    // relation"), failing every send for the rest of the turn. The sibling
+    // `m.in_reply_to` points at the newest message in the thread, not the
+    // root, so it must not win here.
+    if (relatesTo?.rel_type === 'm.thread' && relatesTo.event_id) {
+      this.threadRootCache.set(eventId, relatesTo.event_id);
+      return relatesTo.event_id;
+    }
+    const inReplyTo = relatesTo?.['m.in_reply_to']?.event_id;
     if (!inReplyTo) {
       this.threadRootCache.set(eventId, eventId);
       return eventId;
@@ -394,10 +571,20 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         return root;
       }
       const parent = await this.matrixManager.getEventById<{
-        'm.relates_to'?: { 'm.in_reply_to'?: { event_id: string } };
+        'm.relates_to'?: MatrixRelatesTo;
       }>(roomId, cursor);
-      const parentReply =
-        parent.content['m.relates_to']?.['m.in_reply_to']?.event_id;
+      const parentRelatesTo = parent.content['m.relates_to'];
+      // Quote-reply aimed at a message that itself lives in a thread: that
+      // thread's root is the root, and `cursor` is unusable as one.
+      if (
+        parentRelatesTo?.rel_type === 'm.thread' &&
+        parentRelatesTo.event_id
+      ) {
+        const root = parentRelatesTo.event_id;
+        pathToCache.forEach((id) => this.threadRootCache.set(id, root));
+        return root;
+      }
+      const parentReply = parentRelatesTo?.['m.in_reply_to']?.event_id;
       if (!parentReply) {
         pathToCache.forEach((id) => this.threadRootCache.set(id, cursor));
         return cursor;
@@ -410,15 +597,8 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function normalizeDid(input: string): string {
-  const username = input.split(':')[0] ?? '';
-  const parts = username.split('-');
-  if (parts.length < 3 || parts[0] !== '@did') {
-    throw new Error(`Invalid DID format: ${input}`);
-  }
-  const namespace = parts[1];
-  const identifier = parts.slice(2).join('-');
-  return `did:${namespace}:${identifier}`;
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buildAttachment(event: MessageEvent<MessageEventContent>): {

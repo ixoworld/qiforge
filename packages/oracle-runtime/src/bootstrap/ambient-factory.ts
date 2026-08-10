@@ -131,6 +131,13 @@ export function buildAmbientServices(
         content as object,
       );
     },
+    async postEvent(roomId, eventType, content) {
+      return MatrixManager.getInstance().sendMatrixEvent(
+        roomId,
+        eventType,
+        content,
+      );
+    },
     async getRoomState(roomId) {
       const client = MatrixManager.getInstance().getClient();
       if (!client) {

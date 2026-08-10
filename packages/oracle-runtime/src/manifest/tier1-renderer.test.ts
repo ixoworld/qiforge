@@ -64,6 +64,20 @@ describe('renderTier1', () => {
     expect(memoryIdx).toBeLessThan(tasksIdx);
   });
 
+  it('drops the discovery footer when the meta-tools are not bound', () => {
+    // Matrix support mode binds no `list_capabilities` / `load_capability`, so
+    // a block that ends by telling the model to call them teaches a loading
+    // flow that cannot happen.
+    const result = renderTier1({
+      manifests: [memoryEntry],
+      capabilityDiscovery: false,
+    });
+
+    expect(result.block).toContain('- **memory**');
+    expect(result.block).not.toContain('list_capabilities()');
+    expect(result.block).not.toContain('load_capability');
+  });
+
   it('filters out on-demand and silent plugins', () => {
     const result = renderTier1({
       manifests: [memoryEntry, tasksEntry, slackOnDemandEntry, silentEntry],

@@ -1,0 +1,25 @@
+{
+  "credentialSubject": {
+    "id": "did:ixo:entity:oracle-1",
+    "name": "Tax Oracle",
+    "description": "Files tax reports",
+    "services": [
+      {
+        "id": "tax-report",
+        "name": "Tax report",
+        "description": "A full tax report for the year",
+        "price": { "amount": 20, "currency": "PAY" },
+        "deliverables": "A PDF tax report",
+        "doneMeans": ["All income sources are accounted for"],
+        "tags": ["tax", "finance"],
+        "examples": ["File my 2025 taxes"]
+      },
+      {
+        "id": "quick-estimate",
+        "name": "Quick estimate",
+        "price": { "amount": 5 },
+        "deliverables": "A one-line estimate"
+      }
+    ]
+  }
+}
