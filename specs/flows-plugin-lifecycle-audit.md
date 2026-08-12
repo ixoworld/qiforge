@@ -94,6 +94,11 @@ them, keeping each in its own plugin.
 
 ### B. There is no "flow recipe" as a first-class artifact — this is the root blocker
 
+> **Superseded in part.** A later clarification defines a flow recipe as an **entity of type
+> `protocol/flow`** — chain identity, Domain Card, linked resource — not a VFS artifact. The
+> "recipe is missing" finding stands; the proposed home was wrong. See
+> `specs/flow-recipe-lifecycle-design.md` for the corrected model and the creation script.
+
 Today a template *is* a Matrix room. It has no portable form, no stable identity outside Matrix,
 no manifest, no version, no provenance. (Note: the in-plugin starter templates and
 `get_flow_template` / `get_starter_template` tool referenced in the older handoff are **gone** —
