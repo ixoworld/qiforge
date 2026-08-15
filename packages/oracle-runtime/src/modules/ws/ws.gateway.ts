@@ -170,6 +170,19 @@ export class WsGateway
 
     this.wsService.addClientConnection(sessionId, client);
 
+    // The UCAN validation above is async and Nest does not serialize
+    // `handleConnection` against `handleDisconnect`: a client that dropped
+    // mid-validation already ran its disconnect (a no-op — it wasn't
+    // registered yet), so registering it now would strand a dead socket in
+    // the session map forever. Re-check and undo after the fact.
+    if (!client.connected) {
+      this.logger.warn(
+        `WebSocket client ${client.id} disconnected during handshake validation for session ${sessionId} — removing`,
+      );
+      void this.wsService.removeClientConnection(sessionId, client);
+      return;
+    }
+
     client.emit('connected', {
       message: 'Connected successfully',
       sessionId,

@@ -12,7 +12,15 @@ import {
   InMemoryActiveEngagementCache,
   type ActiveEngagementCacheStore,
 } from './active-engagement-cache.js';
+import { lruInsert } from '../../utils/lru.js';
 import { errorMessage, isEngagementExpired, isMatrixNotFound } from './util.js';
+
+/**
+ * Entry cap shared by the thread-engagement mirror and the per-room active
+ * index. Sized generously above any realistic concurrently-active set — an
+ * evicted entry only costs a Matrix state re-read.
+ */
+const ENGAGEMENT_CACHE_MAX_ENTRIES = 1_000;
 
 /**
  * Room-state key prefix — one state event per engagement, keyed by the thread
@@ -207,6 +215,11 @@ export class EngagementService {
   private cacheStore: ActiveEngagementCacheStore;
   private readonly clock: () => Date;
   private readonly logger: Logger;
+  /**
+   * Thread-keyed read-through mirror of Matrix room state. LRU-capped: keys
+   * are minted per conversation thread, so without a cap the map holds every
+   * thread the process ever routed. An evicted entry just re-reads Matrix.
+   */
   private readonly cache = new Map<string, CommerceEngagement | null>();
   /** roomId → thread id of the room's active engagement, or `null` for none. */
   private readonly activeIndexCache = new Map<string, string | null>();
@@ -238,6 +251,19 @@ export class EngagementService {
    */
   setCacheStore(store: ActiveEngagementCacheStore): void {
     this.cacheStore = store;
+  }
+
+  private cacheEngagement(key: string, value: CommerceEngagement | null): void {
+    lruInsert(this.cache, key, value, ENGAGEMENT_CACHE_MAX_ENTRIES);
+  }
+
+  private cacheActiveIndex(roomId: string, threadId: string | null): void {
+    lruInsert(
+      this.activeIndexCache,
+      roomId,
+      threadId,
+      ENGAGEMENT_CACHE_MAX_ENTRIES,
+    );
   }
 
   /** The thread's engagement in any status, or `null`. */
@@ -278,7 +304,7 @@ export class EngagementService {
         this.logger.debug?.(
           `[oracle-payments] no engagement state for thread ${threadId} — the thread routes as support`,
         );
-        this.cache.set(cacheKey, null);
+        this.cacheEngagement(cacheKey, null);
         return { engagement: null };
       }
       // Transient read failure: answer "none" but do NOT cache — a live
@@ -307,11 +333,11 @@ export class EngagementService {
             : 'state is empty'
         }) — the thread routes as support`,
       );
-      this.cache.set(cacheKey, null);
+      this.cacheEngagement(cacheKey, null);
       return { engagement: null };
     }
 
-    this.cache.set(cacheKey, parsed.data);
+    this.cacheEngagement(cacheKey, parsed.data);
     return { engagement: parsed.data };
   }
 
@@ -693,7 +719,7 @@ export class EngagementService {
       stateKey: engagementStateKey(threadId),
       data: engagement,
     });
-    this.cache.set(this.cacheKey(roomId, threadId), engagement);
+    this.cacheEngagement(this.cacheKey(roomId, threadId), engagement);
 
     if (engagement.status === 'active') {
       await this.cacheActive({ roomId, threadId, engagement });
@@ -803,7 +829,7 @@ export class EngagementService {
     } catch (error) {
       if (isMatrixNotFound(error)) {
         // No pointer yet: this room has never held an engagement.
-        this.activeIndexCache.set(roomId, null);
+        this.cacheActiveIndex(roomId, null);
         return null;
       }
       // Transient read failure: report "none" but do NOT cache it — the chain
@@ -816,7 +842,7 @@ export class EngagementService {
 
     const parsed = ActiveIndexSchema.safeParse(raw);
     const threadId = parsed.success ? parsed.data.threadId : null;
-    this.activeIndexCache.set(roomId, threadId);
+    this.cacheActiveIndex(roomId, threadId);
     return threadId;
   }
 
@@ -831,7 +857,7 @@ export class EngagementService {
       stateKey: ACTIVE_ENGAGEMENT_INDEX_STATE_KEY,
       data: threadId === null ? {} : { threadId },
     });
-    this.activeIndexCache.set(roomId, threadId);
+    this.cacheActiveIndex(roomId, threadId);
   }
 
   private cacheKey(roomId: string, threadId: string): string {

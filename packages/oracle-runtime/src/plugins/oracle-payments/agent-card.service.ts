@@ -2,6 +2,7 @@ import { IXO } from '@ixo/oracles-chain-client';
 import { Logger as NestLogger } from '@nestjs/common';
 import { z } from 'zod';
 import type { Logger } from '../../plugin-api/types.js';
+import { sweepExpired } from '../../utils/expiring-map.js';
 import {
   DisplayCardSchema,
   type AgentCardServiceView,
@@ -140,6 +141,7 @@ export class AgentCardService {
     const resolved = await this.resolve(entityDid);
     if (resolved.card) {
       this.warnOnLocalDrift(resolved.card);
+      sweepExpired(this.cache, this.clock());
       this.cache.set(entityDid, {
         card: resolved.card,
         expiresAt: this.clock() + CARD_CACHE_TTL_MS,

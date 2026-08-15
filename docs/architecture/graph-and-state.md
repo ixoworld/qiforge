@@ -99,13 +99,15 @@ Other sections (identity, operating mode, user context, time context, user prefe
 Order is fixed:
 
 1. `createWorkStatusMiddleware()` — outermost. One `work_status` beat per model call (`Thinking…`) and per tool call (the humanized tool name). Pure side effect; a no-op off the Matrix transport.
-2. `createCapabilityGateMiddleware()` — trims the bound tool list to what `loadedPlugins` allows this model call.
-3. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
-4. `createToolRepetitionGuardMiddleware()` — short-circuits a re-issued call that already failed identically this turn.
-5. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
-6. `createPageContextMiddleware()` — injects active page context for editor flows. Only when the fork supplies `hooks.getRoomTitle`.
-7. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails. Only when the fork supplies `hooks.safetyModel`.
-8. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
+2. `createByoHistorySanitizerMiddleware()` — repairs BYO-credential histories (orphaned tool calls/results) before the model sees them.
+3. `createSummarizationMiddleware()` — condenses thread history into a summary + recent tail once it crosses the trigger (20 messages or ~40k tokens; keeps 10). Uses the cheap `routing` model via the same resolver as the main model, so `hooks.resolveModel` covers it. This is what bounds per-thread state: without it, every turn reloads, re-serializes, and re-uploads an ever-growing history. The full transcript stays user-visible — list endpoints read the saver's `messages` table (`listThreadMessages`), not the condensed checkpoint.
+4. `createCapabilityGateMiddleware()` — trims the bound tool list to what `loadedPlugins` allows this model call.
+5. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
+6. `createToolRepetitionGuardMiddleware()` — short-circuits a re-issued call that already failed identically this turn.
+7. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
+8. `createPageContextMiddleware()` — injects active page context for editor flows. Only when the fork supplies `hooks.getRoomTitle`.
+9. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails. Only when the fork supplies `hooks.safetyModel`.
+10. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
 
 Every always-on middleware except `toolRetryMiddleware` (a LangChain built-in) ships in `graph/middlewares/`. They're not removable or reorderable.
 

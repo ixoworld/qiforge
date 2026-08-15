@@ -62,16 +62,32 @@ export interface RegisteredTool {
  * `user.did`, `session.id`, `ucanDelegation`, etc. The cache stores
  * static tool definitions; per-request wrapping is always fresh.
  */
+/** Name/description slice of a collected tool, tagged with its plugin. */
+export interface ToolSummary {
+  pluginName: string;
+  name: string;
+  description: string;
+  origin: 'boot' | 'request';
+}
+
 export class ToolRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredTool[] | null = null;
-  private collected: RegisteredTool[] | null = null;
+  /**
+   * Metadata snapshot of the most recent `collect()`. Deliberately NOT the
+   * tool objects: request-time tools close over that request's
+   * `RuntimeContext` (minted invocations, secrets, connected MCP clients),
+   * and retaining them on this process-wide singleton pinned a full request
+   * graph in memory between turns. The diagnostics this feeds only ever
+   * need names and descriptions.
+   */
+  private collectedMeta: ToolSummary[] | null = null;
 
   /** Add a plugin whose `getTools` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collected = null;
+    this.collectedMeta = null;
   }
 
   /**
@@ -151,15 +167,29 @@ export class ToolRegistry {
     const boot = await this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
     const out = [...boot, ...request];
-    this.collected = out;
+    this.collectedMeta = out.map(({ pluginName, tool, origin }) => ({
+      pluginName,
+      name: tool.name,
+      description: tool.description,
+      origin,
+    }));
     return out;
+  }
+
+  /** Summaries source: the last full collection, else the boot cache. */
+  private summaries(): ToolSummary[] {
+    if (this.collectedMeta !== null) return this.collectedMeta;
+    return (this.bootCache ?? []).map(({ pluginName, tool, origin }) => ({
+      pluginName,
+      name: tool.name,
+      description: tool.description,
+      origin,
+    }));
   }
 
   /** The flat list of tool names produced by the most recent `collect()`. */
   toolNames(): string[] {
-    return (this.collected ?? this.bootCache ?? []).map(
-      (entry) => entry.tool.name,
-    );
+    return this.summaries().map((entry) => entry.name);
   }
 
   /**
@@ -167,19 +197,22 @@ export class ToolRegistry {
    * (or `collectBoot()` if no full collection has happened yet).
    */
   toolNamesForPlugin(pluginName: string): string[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map((entry) => entry.tool.name);
+      .map((entry) => entry.name);
   }
 
   /**
-   * The tools contributed by a given plugin in the most recent collection
-   * (boot-only if a full request collection has not yet happened).
+   * Name/description of the tools a given plugin contributed in the most
+   * recent collection (boot-only if a full request collection has not yet
+   * happened). Summaries, not the tool objects — see `collectedMeta`.
    */
-  toolsForPlugin(pluginName: string): PluginTool[] {
-    return (this.collected ?? this.bootCache ?? [])
+  toolSummariesForPlugin(
+    pluginName: string,
+  ): Array<{ name: string; description: string }> {
+    return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map((entry) => entry.tool);
+      .map(({ name, description }) => ({ name, description }));
   }
 
   /**
@@ -188,20 +221,19 @@ export class ToolRegistry {
    * actual conflict.
    */
   assertNoCollisions(): void {
-    const source = this.collected ?? this.bootCache;
-    if (source === null) {
+    if (this.collectedMeta === null && this.bootCache === null) {
       throw new Error('ToolRegistry.assertNoCollisions called before collect');
     }
     const seen = new Map<string, string>();
     const collisions: string[] = [];
-    for (const { pluginName, tool } of source) {
-      const prev = seen.get(tool.name);
+    for (const { pluginName, name } of this.summaries()) {
+      const prev = seen.get(name);
       if (prev !== undefined && prev !== pluginName) {
         collisions.push(
-          `Tool "${tool.name}" registered by both "${prev}" and "${pluginName}"`,
+          `Tool "${name}" registered by both "${prev}" and "${pluginName}"`,
         );
       } else if (prev === undefined) {
-        seen.set(tool.name, pluginName);
+        seen.set(name, pluginName);
       }
     }
     if (collisions.length > 0) {

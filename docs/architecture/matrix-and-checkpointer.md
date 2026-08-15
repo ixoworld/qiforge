@@ -38,6 +38,13 @@ const defaultHooks: MainAgentHooks = checkpointSync
 
 `SqliteSaver` (from `@ixo/sqlite-saver`) wraps the SQLite DB as a LangGraph `BaseCheckpointSaver`. LangGraph reads/writes thread state through it.
 
+Two properties keep the per-user DB (and the process's memory) bounded:
+
+- **Checkpoint pruning.** LangGraph writes one checkpoint per super-step and never deletes them. After each `put`, the saver drops checkpoints (and their `writes` rows) beyond the newest 20 per thread (`maxCheckpointsPerThread`, `0` disables). The `messages` table is never pruned — it is the durable transcript.
+- **Transcript vs. state.** `getTuple` returns the latest checkpoint's message set, which after summarization is the summary + recent tail. `listThreadMessages(threadId)` reads the full transcript from the `messages` table (every message ever written, oldest first) — this is what `listMessages` serves to clients, with the summarization bookkeeping message filtered out.
+
+The Matrix sync path streams: uploads gzip the DB file through a temp file (only the compressed payload is buffered for upload), and downloads gunzip straight to disk. Neither direction holds the decompressed DB in heap.
+
 The `as unknown as BaseCheckpointSaver` cast is the documented cross-package interop seam: `SqliteSaver` extends `BaseCheckpointSaver` from `@langchain/langgraph-checkpoint`, but the hook's return type pulls from `@langchain/langgraph`. pnpm hoists these into separate type identities even at the same version — structurally identical at runtime, but TypeScript can't see that.
 
 ## Key setup (post-Matrix-init)

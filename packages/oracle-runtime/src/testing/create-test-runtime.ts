@@ -224,7 +224,7 @@ export async function createTestRuntime(
     });
 
   // Pre-collect tools/subagents/middlewares so the registries' query helpers
-  // (`toolsForPlugin`, `assertNoCollisions`) work synchronously thereafter.
+  // (`toolSummariesForPlugin`, `assertNoCollisions`) work synchronously thereafter.
   // Registries pass a single PluginContext to every plugin; we use the
   // generic `__test__`-scoped one — attribution is by `plugin.name`, not by
   // anything inside the ctx, so a shared ctx is correct.

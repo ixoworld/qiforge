@@ -1,6 +1,5 @@
 import { type MatrixEvent, MatrixManager } from '@ixo/matrix';
 import { Logger } from '@nestjs/common';
-import { type File } from 'node:buffer';
 
 const logger = new Logger('MatrixUploadUtils');
 
@@ -79,21 +78,33 @@ export async function uploadMediaContent(
   return { file: { url: mxc, ...encrypted.file } };
 }
 
+/** Payload for `uploadMediaToRoom` — raw bytes plus their descriptor. */
+export interface MediaUpload {
+  bytes: Buffer;
+  filename: string;
+  mimetype: string;
+}
+
 /**
- * Uploads media to a Matrix room
+ * Uploads media to a Matrix room.
+ *
+ * Takes the bytes directly (not a `File`): checkpoint uploads can run to
+ * hundreds of MB, and the `File` + `arrayBuffer()` round-trip both callers
+ * used to do materialized two extra full copies of the payload.
+ *
  * @param roomId The room ID to upload the media to
- * @param file The file to upload
+ * @param media The bytes to upload with filename/mimetype metadata
  * @returns Object containing the event ID and CID of the uploaded media
  */
 export async function uploadMediaToRoom(
   roomId: string,
-  file: File, // This is the sqlite file it's .db file
+  media: MediaUpload,
   storageKey: string,
 ): Promise<{ eventId: string; storageKey: string; event: MatrixMediaEvent }> {
   const client = getClient();
 
   logger.debug(
-    `Uploading media to room ${roomId} with storageKey ${storageKey}, file size: ${file.size} bytes`,
+    `Uploading media to room ${roomId} with storageKey ${storageKey}, file size: ${media.bytes.length} bytes`,
   );
 
   // Look up the old media event ID (if any) so we can redact it AFTER the new upload succeeds.
@@ -118,10 +129,7 @@ export async function uploadMediaToRoom(
     );
   }
 
-  const source = await uploadMediaContent(
-    roomId,
-    Buffer.from(await file.arrayBuffer()),
-  );
+  const source = await uploadMediaContent(roomId, media.bytes);
 
   const eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
     msgtype: 'm.file',
@@ -130,8 +138,8 @@ export async function uploadMediaToRoom(
     cid: storageKey,
     sender: client.mxClient.getUserId(),
     info: {
-      mimetype: 'application/x-sqlite3',
-      size: file.size,
+      mimetype: media.mimetype,
+      size: media.bytes.length,
     },
     ...source,
   });

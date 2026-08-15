@@ -42,6 +42,7 @@ import {
   createCapabilityGateMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
+  createSummarizationMiddleware,
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
   createWorkStatusMiddleware,
@@ -383,11 +384,21 @@ export async function createMainAgent(
     .collect(buildCtx)
     .map(({ middleware }) => middleware);
 
+  // Hoisted from the model section below: the summarization middleware needs
+  // the same resolver so a fork's `hooks.resolveModel` override covers the
+  // summary model too.
+  const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
+
   const middleware = [
     // Outermost: one liveness beat per model/tool call the agent issues,
     // before any inner guard can short-circuit or retry it.
     createWorkStatusMiddleware(),
     createByoHistorySanitizerMiddleware({ logger: ambient.logger }),
+    // After the sanitizer (so it condenses a well-formed history), before
+    // everything tool-related. Without this, thread state — reloaded,
+    // re-serialized, and re-uploaded to Matrix on every turn — grows without
+    // bound and is the primary memory driver of long-lived threads.
+    createSummarizationMiddleware({ model: resolveModel('routing') }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
@@ -544,7 +555,6 @@ export async function createMainAgent(
   // ── 8. Model + checkpointer ─────────────────────────────────────────────
   // A per-request model (already allow-list-validated in AgentBuilder) wins
   // over the role default; the provider factory honours `params.model`.
-  const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
   const model = resolveModel(
     'main',
     requestCtx.model ? { model: requestCtx.model } : undefined,
