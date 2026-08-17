@@ -1,4 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { BaseMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
 
 /**
@@ -46,9 +47,10 @@ Messages to summarize:
 {messages}
 </messages>`;
 
-const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
+export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
 
 const DEFAULT_TRIGGER_MESSAGES = 20;
+const DEFAULT_TRIGGER_TOKENS = 40_000;
 const DEFAULT_KEEP_MESSAGES = 10;
 
 export interface SummarizationMiddlewareOptions {
@@ -56,8 +58,27 @@ export interface SummarizationMiddlewareOptions {
   model: BaseChatModel;
   /** Override the trigger threshold for messages (default: 20). */
   triggerMessages?: number;
+  /**
+   * Also trigger on approximate token count (default: 40k). Message-count
+   * triggers alone miss threads whose few messages carry huge tool outputs —
+   * exactly the ones that blow up checkpoint size and heap.
+   */
+  triggerTokens?: number;
   /** Override the number of recent messages to keep (default: 10). */
   keepMessages?: number;
+}
+
+/**
+ * `true` for the condensed-history message the summarization middleware
+ * writes into graph state. List endpoints use this to keep it out of the
+ * user-visible transcript. Matches the `lc_source` marker LangChain stamps
+ * on the message, with a content-prefix fallback for serialization paths
+ * that drop unknown kwargs.
+ */
+export function isSummarizationMessage(message: BaseMessage): boolean {
+  if (message.additional_kwargs?.lc_source === 'summarization') return true;
+  const { content } = message;
+  return typeof content === 'string' && content.startsWith(SUMMARY_PREFIX);
 }
 
 /**
@@ -72,7 +93,10 @@ export const createSummarizationMiddleware = (
     model: options.model,
     summaryPrompt: SUMMARY_PROMPT,
     summaryPrefix: SUMMARY_PREFIX,
-    trigger: { messages: options.triggerMessages ?? DEFAULT_TRIGGER_MESSAGES },
+    trigger: [
+      { messages: options.triggerMessages ?? DEFAULT_TRIGGER_MESSAGES },
+      { tokens: options.triggerTokens ?? DEFAULT_TRIGGER_TOKENS },
+    ],
     keep: { messages: options.keepMessages ?? DEFAULT_KEEP_MESSAGES },
   });
 };

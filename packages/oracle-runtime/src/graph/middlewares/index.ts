@@ -30,6 +30,8 @@ export {
 
 export {
   createSummarizationMiddleware,
+  isSummarizationMessage,
+  SUMMARY_PREFIX,
   type SummarizationMiddlewareOptions,
 } from './summarization-middleware.js';
 

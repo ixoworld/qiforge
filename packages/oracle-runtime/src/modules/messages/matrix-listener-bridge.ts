@@ -14,6 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import * as crypto from 'node:crypto';
 import { normalizeDid } from '../../config/normalize-did.js';
 import { workStatusProducer } from '../../matrix/work-status-producer.js';
+import { lruInsert } from '../../utils/lru.js';
 import type { CommerceContext } from '../../plugin-api/types.js';
 import { MessageRouterService } from './message-router.service.js';
 
@@ -25,6 +26,8 @@ const SUPERSEDE_DRAIN_MS = 3_000;
 const TYPING_REFRESH_MS = 20_000;
 /** Capped LRU of already-handled event ids (homeserver re-delivery guard). */
 const PROCESSED_EVENTS_CAP = 500;
+/** Cap on the eventId → thread-root memo (two short strings per entry). */
+const THREAD_ROOT_CACHE_CAP = 5_000;
 
 /**
  * Spec-standard `m.relates_to` payload. Two shapes matter here:
@@ -126,6 +129,12 @@ interface InFlightTurn {
 export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MatrixListenerBridge.name);
   private cleanUpListener?: () => void;
+  /**
+   * eventId → thread-root memo for reply-chain resolution. Written on every
+   * inbound message, so it MUST be capped (like `processedEventIds` below) —
+   * an evicted entry just means a later deep reply re-walks the chain via
+   * the Matrix API instead of hitting the memo.
+   */
   private readonly threadRootCache = new Map<string, string>();
   private readonly buffer = new Map<string, BufferEntry>();
   /**
@@ -197,6 +206,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     this.buffer.clear();
     for (const [, turn] of this.inFlight) turn.controller.abort();
     this.inFlight.clear();
+    this.threadRootCache.clear();
     this.cleanUpListener?.();
   }
 
@@ -212,6 +222,11 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       if (oldest !== undefined) this.processedEventIds.delete(oldest);
     }
     return true;
+  }
+
+  /** Insert into the thread-root memo, evicting oldest entries past the cap. */
+  private cacheThreadRoot(eventId: string, root: string): void {
+    lruInsert(this.threadRootCache, eventId, root, THREAD_ROOT_CACHE_CAP);
   }
 
   private async handleMessage(
@@ -515,10 +530,16 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       // reply that was skipped — so no turn can leave a spinner running in
       // the room. `finish` unregisters the turn, so the success path above
       // has already consumed this and the call is a no-op there. The one
-      // turn left alone is a superseded one: the newer flush flipped its
-      // card to `superseded` and that is its terminal state.
+      // turn whose card is left alone is a superseded one: the newer flush
+      // flipped it to `superseded` and that is its terminal state.
       if (!abortController.signal.aborted) {
         workStatusProducer.finish(requestId, 'done');
+      } else {
+        // Aborted turns must still unregister: supersede already did (its
+        // `finish` posted the terminal card — this is a no-op there), but a
+        // user-cancel abort otherwise leaves the entry in the producer's
+        // turn map forever.
+        workStatusProducer.endTurn(requestId);
       }
       const current = this.inFlight.get(threadId);
       if (current?.requestId === requestId) this.inFlight.delete(threadId);
@@ -544,18 +565,18 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     // `m.in_reply_to` points at the newest message in the thread, not the
     // root, so it must not win here.
     if (relatesTo?.rel_type === 'm.thread' && relatesTo.event_id) {
-      this.threadRootCache.set(eventId, relatesTo.event_id);
+      this.cacheThreadRoot(eventId, relatesTo.event_id);
       return relatesTo.event_id;
     }
     const inReplyTo = relatesTo?.['m.in_reply_to']?.event_id;
     if (!inReplyTo) {
-      this.threadRootCache.set(eventId, eventId);
+      this.cacheThreadRoot(eventId, eventId);
       return eventId;
     }
     if (this.threadRootCache.has(inReplyTo)) {
       const root = this.threadRootCache.get(inReplyTo);
       if (!root) return undefined;
-      this.threadRootCache.set(eventId, root);
+      this.cacheThreadRoot(eventId, root);
       return root;
     }
     const pathToCache: string[] = [eventId];
@@ -567,7 +588,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       if (this.threadRootCache.has(cursor)) {
         const root = this.threadRootCache.get(cursor);
         if (!root) return undefined;
-        pathToCache.forEach((id) => this.threadRootCache.set(id, root));
+        pathToCache.forEach((id) => this.cacheThreadRoot(id, root));
         return root;
       }
       const parent = await this.matrixManager.getEventById<{
@@ -581,18 +602,18 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
         parentRelatesTo.event_id
       ) {
         const root = parentRelatesTo.event_id;
-        pathToCache.forEach((id) => this.threadRootCache.set(id, root));
+        pathToCache.forEach((id) => this.cacheThreadRoot(id, root));
         return root;
       }
       const parentReply = parentRelatesTo?.['m.in_reply_to']?.event_id;
       if (!parentReply) {
-        pathToCache.forEach((id) => this.threadRootCache.set(id, cursor));
+        pathToCache.forEach((id) => this.cacheThreadRoot(id, cursor));
         return cursor;
       }
       cursor = parentReply;
     }
     const fallback = cursor || eventId;
-    pathToCache.forEach((id) => this.threadRootCache.set(id, fallback));
+    pathToCache.forEach((id) => this.cacheThreadRoot(id, fallback));
     return fallback;
   }
 }

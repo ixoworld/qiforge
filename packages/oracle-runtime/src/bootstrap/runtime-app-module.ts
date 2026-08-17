@@ -25,6 +25,7 @@ import { SubscriptionModule } from '../modules/subscription/subscription.module.
 import { ThrottlerModule } from '../modules/throttler/throttler.module.js';
 import { UcanModule } from '../modules/ucan/ucan.module.js';
 import { WsModule } from '../modules/ws/ws.module.js';
+import { BoundedMemoryStore } from './bounded-memory-store.js';
 
 export interface RuntimeAppModuleOptions {
   /** Pre-validated env values, fed straight into `ConfigModule`. */
@@ -46,6 +47,13 @@ export interface RuntimeAppModuleOptions {
    */
   enableSubscriptionMiddleware: boolean;
 }
+
+/**
+ * Entry cap for the global cache. Values are small (auth verdicts,
+ * subscription snapshots, decrypted secrets, homeserver lookups) — at
+ * roughly a KB each this bounds the table around 10 MB.
+ */
+const GLOBAL_CACHE_MAX_ENTRIES = 10_000;
 
 const AUTH_EXCLUDED_ROUTES: AuthExcludedRoute[] = [
   { path: '/', method: RequestMethod.ALL },
@@ -108,7 +116,13 @@ export class RuntimeAppModule implements NestModule {
         ignoreEnvFile: true,
         load: [() => validatedEnv],
       }),
-      CacheModule.register({ isGlobal: true }),
+      // Bounded store: the default memory backend is an unbounded Map with
+      // lazy expiry, and the auth middleware keys it by token hash — one
+      // permanent entry per request for clients that rotate invocations.
+      CacheModule.register({
+        isGlobal: true,
+        stores: [new BoundedMemoryStore(GLOBAL_CACHE_MAX_ENTRIES)],
+      }),
       ScheduleModule.forRoot(),
       ThrottlerModule,
       UcanModule,

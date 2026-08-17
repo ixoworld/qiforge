@@ -1,6 +1,6 @@
 {
   "name": "qiforge-example",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Reference oracle that boots the QiForge runtime with all bundled plugins.",
   "private": true,
   "type": "module",
@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
+    "start:mem": "node --max-old-space-size=1536 --heapsnapshot-near-heap-limit=3 --heapsnapshot-signal=SIGUSR2 --inspect=9229 dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test:integration": "vitest run --mode int"

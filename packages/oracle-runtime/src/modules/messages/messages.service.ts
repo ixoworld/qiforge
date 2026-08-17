@@ -34,13 +34,17 @@ import {
   type NativeAttachment,
 } from './attachments/content-blocks.js';
 import { routeAttachment } from './attachments/route.js';
-import { FileProcessingService } from './file-processing.service.js';
+import {
+  FileProcessingService,
+  MAX_TOTAL_SIZE,
+} from './file-processing.service.js';
 import {
   MatrixListenerBridge,
   type MatrixRelatesTo,
 } from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
+import { isSummarizationMessage } from '../../graph/middlewares/index.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
 import {
   formatSSE,
@@ -191,13 +195,14 @@ export class MessagesService implements OnModuleInit {
     try {
       const db = await this.checkpointSync.getUserDatabase(did);
       const saver = SqliteSaver.fromDatabase(db);
-      const tuple = await saver.getTuple({
-        configurable: { thread_id: sessionId },
-      });
-      const messages =
-        (tuple?.checkpoint?.channel_values?.messages as
-          | BaseMessage[]
-          | undefined) ?? [];
+      // Read the full transcript from the messages table rather than the
+      // latest checkpoint: once the summarization middleware condenses graph
+      // state, the checkpoint only holds the summary + recent tail, while
+      // the table keeps every message. The summary message itself is
+      // middleware bookkeeping, not something the user wrote or saw.
+      const messages = (await saver.listThreadMessages(sessionId)).filter(
+        (message) => !isSummarizationMessage(message),
+      );
       return transformGraphStateMessageToListMessageResponse(messages);
     } finally {
       this.checkpointSync.markUserInactive(did);
@@ -412,7 +417,14 @@ export class MessagesService implements OnModuleInit {
 
     // Download + base64 the native attachments. On any failure, fall that one
     // file back to extraction so a bad download never drops the whole message.
+    //
+    // The same cumulative budget the extraction lane enforces applies here:
+    // per-file limits alone let N files hold N × 25MB of buffers plus their
+    // base64 copies in heap at once — and the base64 then lives on in graph
+    // state and the checkpoint DB. Files past the budget fall back to
+    // extraction, whose own budget then produces the clear 400.
     const natives: NativeAttachment[] = [];
+    let nativeBytesTotal = 0;
     for (const attachment of nativeAttachments) {
       try {
         const { buffer, mimetype } =
@@ -420,6 +432,14 @@ export class MessagesService implements OnModuleInit {
             attachment,
             prepared.roomId,
           );
+        if (nativeBytesTotal + buffer.length > MAX_TOTAL_SIZE) {
+          this.logger.warn(
+            `[attachments] native budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB) exceeded at "${attachment.filename}" — falling back to extraction`,
+          );
+          extractAttachments.push(attachment);
+          continue;
+        }
+        nativeBytesTotal += buffer.length;
         const kind = classifyAttachment({
           mimetype,
           filename: attachment.filename,

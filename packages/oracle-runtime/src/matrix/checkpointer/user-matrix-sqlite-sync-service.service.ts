@@ -10,11 +10,11 @@ import { createHash } from 'crypto';
 
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { hours } from '@nestjs/throttler';
-import { File } from 'node:buffer';
 import fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { promisify } from 'node:util';
-import { gunzip, gzip } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createGunzip, createGzip } from 'node:zlib';
 
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { SqliteSaver } from '@ixo/sqlite-saver';
@@ -29,9 +29,6 @@ import {
 } from './matrix-upload-utils.js';
 import { type BaseSyncArgs } from './type.js';
 import { getBaseEnvConfig as getConfig } from '../../config/base-env-config.js';
-
-const gzipAsync = promisify(gzip);
-const gunzipAsync = promisify(gunzip);
 
 /**
  * Returns true if the error is permanent (data genuinely unrecoverable),
@@ -517,7 +514,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
 
     // Delete local file + temp files + leftover WAL/SHM/journal files
-    for (const suffix of ['', '.tmp', '-wal', '-shm', '-journal']) {
+    for (const suffix of ['', '.tmp', '.gz.tmp', '-wal', '-shm', '-journal']) {
       try {
         await fs.unlink(dbPath + suffix);
       } catch {
@@ -805,59 +802,62 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return;
     }
 
-    // Decompress the checkpoint
+    // Decompress the checkpoint. Streamed to a temp file so the only full
+    // buffer in memory is the (much smaller) downloaded gzip payload — the
+    // decompressed DB can run to hundreds of MB and used to be held in heap
+    // here in its entirety.
     const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
-    let decompressedBuffer: Buffer;
-    try {
-      decompressedBuffer = await gunzipAsync(userDB.mediaBuffer);
-      Logger.log(
-        `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(userDB.mediaBuffer.length)} -> ${bytesToHumanReadable(decompressedBuffer.length)}`,
-      );
-    } catch (_error) {
-      // Decompression failed — check if the raw buffer is a valid uncompressed SQLite file
-      if (
-        userDB.mediaBuffer.length >= 16 &&
-        userDB.mediaBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
-      ) {
-        Logger.warn(
-          `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
-        );
-        decompressedBuffer = userDB.mediaBuffer;
-      } else {
-        Logger.error(
-          `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${userDB.mediaBuffer.subarray(0, 16).toString('hex')}`,
-        );
-        return;
-      }
-    }
-
-    // Validate decompressed data is a valid SQLite file
-    if (
-      decompressedBuffer.length < 16 ||
-      !decompressedBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
-    ) {
-      Logger.error(
-        `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${decompressedBuffer.subarray(0, Math.min(16, decompressedBuffer.length)).toString('hex')}`,
-      );
-      return;
-    }
-
-    Logger.debug(
-      `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
-    );
-
-    // Atomic write: write to temp file then rename (rename is atomic on POSIX)
     const tmpPath = checkpointPath + '.tmp';
     try {
-      await fs.writeFile(tmpPath, decompressedBuffer);
+      try {
+        await pipeline(
+          Readable.from(userDB.mediaBuffer),
+          createGunzip(),
+          fsSync.createWriteStream(tmpPath),
+        );
+      } catch (_error) {
+        // Decompression failed — check if the raw buffer is a valid uncompressed SQLite file
+        if (
+          userDB.mediaBuffer.length >= 16 &&
+          userDB.mediaBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
+        ) {
+          Logger.warn(
+            `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
+          );
+          await fs.writeFile(tmpPath, userDB.mediaBuffer);
+        } else {
+          Logger.error(
+            `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${userDB.mediaBuffer.subarray(0, 16).toString('hex')}`,
+          );
+          await removeIfExists(tmpPath);
+          return;
+        }
+      }
+
+      // Validate the on-disk result is a valid SQLite file
+      const header = await readFileHeader(tmpPath, 16);
+      if (header.length < 16 || !header.equals(SQLITE_MAGIC)) {
+        Logger.error(
+          `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${header.toString('hex')}`,
+        );
+        await removeIfExists(tmpPath);
+        return;
+      }
+
+      const { size: decompressedSize } = await fs.stat(tmpPath);
+      Logger.log(
+        `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(userDB.mediaBuffer.length)} -> ${bytesToHumanReadable(decompressedSize)}`,
+      );
+
+      Logger.debug(
+        `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
+      );
+
+      // Atomic publish: rename is atomic on POSIX
       await fs.rename(tmpPath, checkpointPath);
     } catch (error) {
       // Clean up orphaned temp file on failure
-      try {
-        await fs.unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
+      await removeIfExists(tmpPath);
       throw error;
     }
 
@@ -938,15 +938,27 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return;
     }
 
-    // Only load file into memory when we know the content has changed and needs uploading
+    // Compress via streaming to a temp file so the raw DB is never resident
+    // in heap — only the (much smaller) gzip output is buffered for upload.
+    // The old read-whole-file-then-gzip path held original + compressed
+    // simultaneously, a periodic RSS spike proportional to total history.
     Logger.debug(
-      `Reading checkpoint file for user ${userDid} from ${checkpointPath}`,
+      `Compressing checkpoint file for user ${userDid} from ${checkpointPath}`,
     );
-    const checkpoint = await fs.readFile(checkpointPath);
-    const originalSize = checkpoint.length;
+    const gzTmpPath = checkpointPath + '.gz.tmp';
+    let compressedCheckpoint: Buffer;
+    try {
+      await pipeline(
+        fsSync.createReadStream(checkpointPath),
+        createGzip(),
+        fsSync.createWriteStream(gzTmpPath),
+      );
+      compressedCheckpoint = await fs.readFile(gzTmpPath);
+    } finally {
+      await removeIfExists(gzTmpPath);
+    }
 
-    // Compress the database file with gzip before upload
-    const compressedCheckpoint = await gzipAsync(checkpoint);
+    const { size: originalSize } = await fs.stat(checkpointPath);
     const compressedSize = compressedCheckpoint.length;
     const compressionRatio = (
       (1 - compressedSize / originalSize) *
@@ -974,10 +986,13 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     );
     const event = await uploadMediaToRoom(
       roomId,
-      new File([compressedCheckpoint], `${storageKey}.db.gz`, {
-        type: 'application/gzip',
-        lastModified: Date.now(),
-      }),
+      {
+        bytes: compressedCheckpoint,
+        filename: `${storageKey}.db.gz`,
+        // Matches the mimetype historically written on checkpoint media
+        // events (it was hardcoded upload-side before the payload carried it).
+        mimetype: 'application/x-sqlite3',
+      },
       storageKey,
     );
     await this.saveFileEventToDB({
@@ -1150,6 +1165,30 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     if (contentChecksum) {
       this.lastUploadedChecksum.set(storageKey, contentChecksum);
     }
+  }
+}
+
+/** Delete a file, ignoring "already gone" and permission noise. */
+async function removeIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // File may not exist, that's fine
+  }
+}
+
+/** Read the first `length` bytes of a file without loading the rest. */
+async function readFileHeader(
+  filePath: string,
+  length: number,
+): Promise<Buffer> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
   }
 }
 

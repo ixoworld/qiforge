@@ -25,7 +25,9 @@ interface AiProcessResult {
 }
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file
-const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total across all attachments
+// Exported so the native-attachment lane in MessagesService can enforce the
+// same cumulative budget this service applies to the extraction lane.
+export const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total across all attachments
 const MAX_TEXT_LENGTH = 50_000;
 const MATRIX_DOWNLOAD_TIMEOUT_MS = 60_000;
 const AI_PROCESS_TIMEOUT_MS = 120_000;

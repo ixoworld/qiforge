@@ -1,7 +1,4 @@
-import {
-  MultiServerMCPClient,
-  type ClientConfig,
-} from '@langchain/mcp-adapters';
+import { type ClientConfig } from '@langchain/mcp-adapters';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
@@ -9,6 +6,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
+import { defaultSandboxMcpClientFactory } from './sandbox-bridge.js';
 import {
   createDefaultAuthBuilder,
   parseOracleSecrets,
@@ -153,6 +151,12 @@ export type SandboxMcpClientFactory = (
 /** Per-tool timeout for sandbox MCP calls (matches today's main-agent wiring). */
 const SANDBOX_MCP_TIMEOUT_MS = 180_000;
 
+/**
+ * How long a request's lazily-connected MCP client survives after its last
+ * invocation before being closed (a later call reconnects).
+ */
+const SANDBOX_IDLE_CLIENT_CLOSE_MS = 5 * 60 * 1000;
+
 export interface SandboxPluginOptions {
   /**
    * Override the auth header builder. Tests inject a stub here to skip the
@@ -237,10 +241,11 @@ export class SandboxPlugin extends OraclePlugin {
   constructor(opts: SandboxPluginOptions = {}) {
     super();
     this.authBuilder = opts.authBuilder ?? createDefaultAuthBuilder();
+    // Shared with the bridge: a cast-free wrapper that keeps `close()`
+    // reachable — the raw `MultiServerMCPClient` cast this used to be made
+    // every connect unclosable.
     this.mcpClientFactory =
-      opts.mcpClientFactory ??
-      ((config) =>
-        new MultiServerMCPClient(config) as unknown as SandboxMcpClientLike);
+      opts.mcpClientFactory ?? defaultSandboxMcpClientFactory;
     this.includeOracleManagementTools =
       opts.includeOracleManagementTools ?? false;
   }
@@ -309,9 +314,12 @@ export class SandboxPlugin extends OraclePlugin {
           oracleSecrets,
           rtCtx,
         })
-          .then((upstream) => {
+          .then(async ({ client, tools }) => {
+            // Defs are plain data — the refresh connection has nothing left
+            // to serve once they're snapshotted.
+            await client.close().catch(() => undefined);
             this.toolDefsCache.set(sandboxMcpUrl, {
-              defs: upstream.map(({ name, description, schema }) => ({
+              defs: tools.map(({ name, description, schema }) => ({
                 name,
                 description,
                 schema,
@@ -380,17 +388,34 @@ export class SandboxPlugin extends OraclePlugin {
       useStandardContentBlocks: true,
     });
 
-    const upstream = await client.getTools();
+    // The cold path only needs the definitions: close the listing client and
+    // bind lazy tools, so the first actual invocation reconnects exactly like
+    // the warm path — no connection outlives the listing.
+    let upstream: SandboxMcpTool[];
+    try {
+      upstream = await client.getTools();
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+    const defs = upstream.map(({ name, description, schema }) => ({
+      name,
+      description,
+      schema,
+    }));
     this.toolDefsCache.set(sandboxMcpUrl, {
-      defs: upstream.map(({ name, description, schema }) => ({
-        name,
-        description,
-        schema,
-      })),
+      defs,
       expiresAt: Date.now() + SANDBOX_TOOL_DEFS_TTL_MS,
     });
 
-    return this.toPluginTools(upstream, rtCtx);
+    return this.toPluginTools(
+      this.buildLazyUpstreamTools(defs, {
+        sandboxMcpUrl,
+        skillsServiceUrl,
+        oracleSecrets,
+        rtCtx,
+      }),
+      rtCtx,
+    );
   }
 
   /**
@@ -409,19 +434,48 @@ export class SandboxPlugin extends OraclePlugin {
       rtCtx: RuntimeContext;
     },
   ): SandboxMcpTool[] {
-    let upstreamByName: Promise<Map<string, SandboxMcpTool>> | null = null;
-    const connect = (): Promise<Map<string, SandboxMcpTool>> => {
-      if (!upstreamByName) {
-        upstreamByName = this.connectWithFullHeaders(args).then(
-          (tools) => new Map(tools.map((t) => [t.name, t])),
+    let connection: Promise<{
+      client: SandboxMcpClientLike;
+      byName: Map<string, SandboxMcpTool>;
+    }> | null = null;
+    let idleTimer: NodeJS.Timeout | null = null;
+
+    const closeConnection = (): void => {
+      const current = connection;
+      connection = null;
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      if (!current) return;
+      void current.then(({ client }) => client.close()).catch(() => undefined);
+    };
+
+    // There is no request-end hook on the tool path, so idle-close is what
+    // bounds the client's lifetime — without it every turn that touched the
+    // sandbox leaked a connected client for the life of the process. A later
+    // invocation simply reconnects.
+    const scheduleIdleClose = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(closeConnection, SANDBOX_IDLE_CLIENT_CLOSE_MS);
+      idleTimer.unref?.();
+    };
+
+    const connect = (): NonNullable<typeof connection> => {
+      if (!connection) {
+        connection = this.connectWithFullHeaders(args).then(
+          ({ client, tools }) => ({
+            client,
+            byName: new Map(tools.map((t) => [t.name, t])),
+          }),
         );
         // A failed connect must not poison the rest of the run — clear the
         // memo so a later invocation retries with a fresh client.
-        upstreamByName.catch(() => {
-          upstreamByName = null;
+        connection.catch(() => {
+          connection = null;
         });
       }
-      return upstreamByName;
+      return connection;
     };
 
     return defs.map((def) => ({
@@ -429,14 +483,19 @@ export class SandboxPlugin extends OraclePlugin {
       description: def.description,
       schema: def.schema,
       invoke: async (input: unknown) => {
-        const byName = await connect();
+        const { byName } = await connect();
         const upstream = byName.get(def.name);
         if (!upstream) {
+          scheduleIdleClose();
           throw new Error(
             `sandbox MCP no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
           );
         }
-        return upstream.invoke(input);
+        try {
+          return await upstream.invoke(input);
+        } finally {
+          scheduleIdleClose();
+        }
       },
     }));
   }
@@ -446,7 +505,7 @@ export class SandboxPlugin extends OraclePlugin {
     skillsServiceUrl: string | undefined;
     oracleSecrets: Record<string, string>;
     rtCtx: RuntimeContext;
-  }): Promise<SandboxMcpTool[]> {
+  }): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
     const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
     const userSecretIndex = await rtCtx.secrets.getIndex();
     const userSecretKeys = Object.keys(userSecretIndex);
@@ -477,7 +536,13 @@ export class SandboxPlugin extends OraclePlugin {
       defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
       useStandardContentBlocks: true,
     });
-    return client.getTools();
+    try {
+      const tools = await client.getTools();
+      return { client, tools };
+    } catch (error) {
+      await client.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   /**
