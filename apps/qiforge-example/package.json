@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
+    "start:mem": "node --max-old-space-size=1536 --heapsnapshot-near-heap-limit=3 --heapsnapshot-signal=SIGUSR2 --inspect=9229 dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test:integration": "vitest run --mode int"
