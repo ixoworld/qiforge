@@ -23,6 +23,23 @@ export interface AgAction {
 }
 
 /**
+ * Adapt a schema-typed handler to the registry's untyped calling convention.
+ *
+ * The registry stores every action's handler under one signature, so it can only
+ * offer `unknown` args — they arrive as unstructured JSON from the oracle. Parsing
+ * them with the action's own schema is what makes `handler`'s inferred argument
+ * type true at runtime. A mismatch throws, and the caller reports it back to the
+ * oracle as a failed action call rather than passing malformed data to the handler.
+ *
+ * Not exported from the package barrel; exported here so it can be tested directly.
+ */
+export function createValidatedHandler<TSchema extends z.ZodTypeAny>(
+  config: AgActionConfig<TSchema>,
+): (args: unknown) => Promise<unknown> | unknown {
+  return (args) => config.handler(config.parameters.parse(args));
+}
+
+/**
  * Hook for registering AG-UI actions that the oracle can invoke
  * Similar to useCopilotAction from CopilotKit but for the IXO oracles framework
  *
@@ -65,7 +82,7 @@ export function useAgAction<TSchema extends z.ZodTypeAny>(
 
     registerAgAction(
       action,
-      config.handler,
+      createValidatedHandler(config),
       config.render as
         | ((props: Record<string, unknown>) => React.ReactElement | null)
         | undefined,
