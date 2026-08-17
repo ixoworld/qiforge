@@ -35,7 +35,7 @@ overrides:
   '@langchain/langgraph-checkpoint-sqlite': '1.0.1'
   '@langchain/langgraph-checkpoint-validation': '1.0.9'
   '@langchain/langgraph-supervisor': '1.0.3'
-  '@langchain/community': '1.1.28'
+  '@langchain/community': '1.1.29'
   '@langchain/openai': '1.4.7'
   '@langchain/textsplitters': '1.0.1'
   '@langchain/mcp-adapters': '1.1.3'
