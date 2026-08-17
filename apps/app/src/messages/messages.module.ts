@@ -12,6 +12,9 @@ import { UcanModule } from 'src/ucan/ucan.module';
 import { CheckpointStorageSyncModule } from 'src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.module';
 import { UserMatrixSqliteSyncService } from 'src/user-matrix-sqlite-sync-service/user-matrix-sqlite-sync-service.service';
 import { FileProcessingService } from './file-processing.service';
+import { AnonymousFeedbackService } from './feedback/anonymous-feedback.service';
+import { FEEDBACK_SINK } from './feedback/feedback-sink';
+import { LinearFeedbackSink } from './feedback/linear-feedback.sink';
 import { MessagesController } from './messages.controller';
 import { MessagesService } from './messages.service';
 
@@ -27,6 +30,9 @@ import { MessagesService } from './messages.service';
   providers: [
     MessagesService,
     FileProcessingService,
+    AnonymousFeedbackService,
+    LinearFeedbackSink,
+    { provide: FEEDBACK_SINK, useExisting: LinearFeedbackSink },
     MainAgentGraph,
     {
       provide: MemoryEngineService,

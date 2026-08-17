@@ -30,6 +30,7 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { Database as DatabaseType } from 'better-sqlite3';
 import type { Request, Response } from 'express';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import {
@@ -73,11 +74,23 @@ import {
   sweepExpiredBotThreads,
 } from './group-chat.guard';
 import { type ListMessagesDto } from './dto/list-messages.dto';
+import {
+  type AnonymousMessageFeedbackContextDto,
+  type AnonymousMessageFeedbackResponse,
+} from './dto/message-feedback.dto';
+import { validateAnonymousFeedbackTarget } from './anonymous-feedback.utils';
+import { AnonymousFeedbackService } from './feedback/anonymous-feedback.service';
 import { type SendMessagePayload } from './dto/send-message.dto';
 import {
   FileProcessingService,
   type SandboxUploadConfig,
 } from './file-processing.service';
+
+type MessageDto = ListOracleMessagesResponse['messages'][number];
+export interface ListMessagesResponse {
+  messages: MessageDto[];
+  capabilities: { anonymousMessageFeedback?: true };
+}
 
 @Injectable()
 export class MessagesService implements OnModuleInit, OnModuleDestroy {
@@ -140,6 +153,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     private readonly checkpointStorageSyncService: UserMatrixSqliteSyncService,
     private readonly fileProcessingService: FileProcessingService,
     private readonly channelMemoryService: ChannelMemoryService,
+    private readonly anonymousFeedbackService: AnonymousFeedbackService,
     @Optional() private readonly tasksService?: TasksService,
     @Optional() private readonly approvalService?: ApprovalService,
     @Optional() private readonly ucanService?: UcanService,
@@ -941,7 +955,7 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
       did: string;
       homeServer?: string;
     },
-  ): Promise<ListOracleMessagesResponse> {
+  ): Promise<ListMessagesResponse> {
     const { did, sessionId } = params;
     if (!sessionId || !did) {
       throw new BadRequestException('Invalid parameters');
@@ -950,24 +964,66 @@ export class MessagesService implements OnModuleInit, OnModuleDestroy {
     this.checkpointStorageSyncService.markUserActive(did);
     try {
       const db = await this.checkpointStorageSyncService.getUserDatabase(did);
-      const saver = SqliteSaver.fromDatabase(db);
+      const result = await this.loadSessionMessages(db, sessionId);
 
-      const rows = db
-        .prepare(
-          `SELECT message FROM messages
-           WHERE thread_id = ? AND checkpoint_ns = ?
-           ORDER BY created_at ASC, rowid ASC`,
-        )
-        .all(sessionId, '') as { message: Buffer | string }[];
-
-      const messages: BaseMessage[] = await Promise.all(
-        rows.map((row) => saver.serde.loadsTyped('json', row.message)),
-      );
-
-      return transformGraphStateMessageToListMessageResponse(messages);
+      return {
+        capabilities: this.anonymousFeedbackService.isEnabled()
+          ? { anonymousMessageFeedback: true }
+          : {},
+        messages: result.messages,
+      };
     } finally {
       this.checkpointStorageSyncService.markUserInactive(did);
     }
+  }
+
+  public async submitAnonymousMessageFeedback(params: {
+    did: string;
+    clientIp?: string;
+    sessionId: string;
+    messageId: string;
+    submissionId: string;
+    feedback: string;
+    context: AnonymousMessageFeedbackContextDto;
+  }): Promise<AnonymousMessageFeedbackResponse> {
+    const { did, sessionId, messageId } = params;
+    this.checkpointStorageSyncService.markUserActive(did);
+
+    try {
+      const db = await this.checkpointStorageSyncService.getUserDatabase(did);
+      await this.assertAnonymousFeedbackTarget(db, sessionId, messageId);
+      return await this.anonymousFeedbackService.submit(params);
+    } finally {
+      this.checkpointStorageSyncService.markUserInactive(did);
+    }
+  }
+
+  private async loadSessionMessages(
+    db: DatabaseType,
+    sessionId: string,
+  ): Promise<ListOracleMessagesResponse> {
+    const saver = SqliteSaver.fromDatabase(db);
+    const rows = db
+      .prepare(
+        `SELECT message FROM messages
+         WHERE thread_id = ? AND checkpoint_ns = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(sessionId, '') as { message: Buffer | string }[];
+    const messages: BaseMessage[] = await Promise.all(
+      rows.map((row) => saver.serde.loadsTyped('json', row.message)),
+    );
+
+    return transformGraphStateMessageToListMessageResponse(messages);
+  }
+
+  private async assertAnonymousFeedbackTarget(
+    db: DatabaseType,
+    sessionId: string,
+    messageId: string,
+  ): Promise<MessageDto> {
+    const { messages } = await this.loadSessionMessages(db, sessionId);
+    return validateAnonymousFeedbackTarget(db, sessionId, messageId, messages);
   }
 
   public async sendMessage(

@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from 'react';
 import { type WithRequiredEventProps } from '@ixo/oracles-events/types';
@@ -24,7 +25,17 @@ import { useWebSocketEvents } from '../../use-websocket-events/use-websocket-eve
 import { resolveContent } from '../resolve-content.js';
 import transformToMessagesMap from '../transform-to-messages-map.js';
 import { OracleChat } from './oracle-chat.js';
-import { type AnyEvent, type IChatOptions, type IMessage } from './types.js';
+import {
+  isAnonymousMessageFeedbackCapabilitySupported,
+  submitAnonymousMessageFeedback,
+} from './message-feedback.js';
+import {
+  type AnonymousMessageFeedbackSubmission,
+  type AnyEvent,
+  type ChatCapabilities,
+  type IChatOptions,
+  type IMessage,
+} from './types.js';
 import { useSendMessage } from './use-send-message.js';
 
 export function useChat({
@@ -88,6 +99,10 @@ export function useChat({
   const { authedRequest, executeAgAction, getAgActionRender, agActions } =
     useOraclesContext();
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
+  const [submittingFeedbackMessageId, setSubmittingFeedbackMessageId] =
+    useState<string | null>(null);
+  const [messageFeedbackError, setMessageFeedbackError] =
+    useState<Error | null>(null);
 
   // React Query for initial data fetch
   const {
@@ -101,11 +116,12 @@ export function useChat({
     queryFn: async () => {
       const result = await authedRequest<{
         messages: IMessage[];
+        capabilities?: ChatCapabilities;
       }>(`${apiUrl}/messages/${sessionId}`, 'GET', {}, oracleDid);
 
       // Don't transform here - return raw messages
       // Transformation will happen in useEffect when agActions is available
-      return result.messages;
+      return result;
     },
     enabled: Boolean(sessionId && apiUrl),
     retry: false,
@@ -126,7 +142,7 @@ export function useChat({
       }
 
       const transformedMessages = transformToMessagesMap({
-        messages: data,
+        messages: data.messages,
         uiComponents,
         agActionNames: agActions.map((action) => action.name),
       });
@@ -135,6 +151,63 @@ export function useChat({
       void chatRef.current.setInitialMessages(messagesArray);
     }
   }, [data, queryStatus, agActions, uiComponents]);
+
+  const isAnonymousMessageFeedbackSupported =
+    isAnonymousMessageFeedbackCapabilitySupported(data?.capabilities);
+
+  useEffect(() => {
+    setSubmittingFeedbackMessageId(null);
+    setMessageFeedbackError(null);
+  }, [sessionId]);
+
+  const submitMessageFeedback = useCallback(
+    async (
+      messageId: string,
+      submission: AnonymousMessageFeedbackSubmission,
+    ) => {
+      if (!apiUrl || !sessionId) {
+        throw new Error('A configured chat session is required');
+      }
+      if (!isAnonymousMessageFeedbackSupported) {
+        throw new Error('Message feedback is not supported by this Agent');
+      }
+
+      const chat = chatRef.current;
+      const target = chat?.messages.find((message) => message.id === messageId);
+      if (!target || target.type !== 'ai' || target.isComplete === false) {
+        throw new Error('Completed Agent message not found');
+      }
+      setSubmittingFeedbackMessageId(messageId);
+      setMessageFeedbackError(null);
+
+      try {
+        return await submitAnonymousMessageFeedback({
+          apiUrl,
+          sessionId,
+          messageId,
+          submission,
+          oracleDid,
+          authedRequest,
+        });
+      } catch (feedbackError) {
+        const normalizedError =
+          feedbackError instanceof Error
+            ? feedbackError
+            : new Error('Failed to save message feedback');
+        setMessageFeedbackError(normalizedError);
+        throw normalizedError;
+      } finally {
+        setSubmittingFeedbackMessageId(null);
+      }
+    },
+    [
+      apiUrl,
+      authedRequest,
+      isAnonymousMessageFeedbackSupported,
+      oracleDid,
+      sessionId,
+    ],
+  );
 
   // Handle tool call events from streaming
   const handleToolCall = useCallback(
@@ -380,5 +453,9 @@ export function useChat({
     isRealTimeConnected: isWebSocketConnected,
     status,
     isConfigReady,
+    submitMessageFeedback,
+    isAnonymousMessageFeedbackSupported,
+    submittingFeedbackMessageId,
+    messageFeedbackError,
   };
 }

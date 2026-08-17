@@ -10,8 +10,10 @@ import {
   Res,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AbortRequestDto, SendMessageDto } from './dto/send-message.dto';
+import { SubmitAnonymousMessageFeedbackDto } from './dto/message-feedback.dto';
 import { MessagesService } from './messages.service';
 
 @ApiTags('messages')
@@ -59,6 +61,37 @@ export class MessagesController {
       sessionId,
       did,
       homeServer,
+    });
+  }
+
+  @Post(':sessionId/:messageId/feedback')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60_000, limit: 3 } })
+  @ApiOperation({ summary: 'Submit anonymous feedback for an Agent message' })
+  @ApiResponse({ status: 200, description: 'Anonymous feedback submitted.' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Feedback contains invalid data or the message is not a completed Agent response.',
+  })
+  @ApiResponse({ status: 404, description: 'Session or message not found.' })
+  @ApiResponse({ status: 429, description: 'Feedback rate limit exceeded.' })
+  @ApiResponse({ status: 503, description: 'Feedback delivery unavailable.' })
+  async submitAnonymousMessageFeedback(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+    @Param('messageId') messageId: string,
+    @Body() dto: SubmitAnonymousMessageFeedbackDto,
+  ) {
+    const { did } = req.authData;
+    return this.messagesService.submitAnonymousMessageFeedback({
+      did,
+      clientIp: req.ip,
+      sessionId,
+      messageId,
+      submissionId: dto.submissionId,
+      feedback: dto.feedback,
+      context: dto.context,
     });
   }
 

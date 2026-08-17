@@ -225,11 +225,10 @@ export class SessionsService {
           this.syncService.markUserInactive(data.did);
         });
 
-      await this.sessionManager.deleteSession({
-        did: data.did,
-        sessionId: data.sessionId,
-        oracleEntityDid,
-      });
+      const db = await this.syncService.getUserDatabase(data.did);
+      db.prepare('DELETE FROM sessions WHERE session_id = ?').run(
+        data.sessionId,
+      );
       return { message: 'Session deleted successfully' };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

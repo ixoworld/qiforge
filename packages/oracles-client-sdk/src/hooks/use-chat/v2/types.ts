@@ -43,6 +43,48 @@ export type MessageContent =
   | IComponentMetadata
   | Array<string | IComponentMetadata>;
 
+export type AnonymousMessageFeedbackSurface = 'workspace' | 'agentSidebar';
+export type AnonymousMessageFeedbackTheme = 'dark' | 'light';
+export type AnonymousMessageFeedbackDeviceClass =
+  | 'mobile'
+  | 'tablet'
+  | 'desktop';
+export type AnonymousMessageFeedbackViewportBucket =
+  | 'compact'
+  | 'medium'
+  | 'wide';
+export type AnonymousMessageFeedbackNetwork =
+  | 'mainnet'
+  | 'testnet'
+  | 'devnet'
+  | 'unknown';
+
+export interface AnonymousMessageFeedbackContext {
+  surface: AnonymousMessageFeedbackSurface;
+  locale: string;
+  theme: AnonymousMessageFeedbackTheme;
+  deviceClass: AnonymousMessageFeedbackDeviceClass;
+  viewportBucket: AnonymousMessageFeedbackViewportBucket;
+  network: AnonymousMessageFeedbackNetwork;
+  portalBuildVersion?: string;
+}
+
+export interface AnonymousMessageFeedbackSubmission {
+  submissionId: string;
+  feedback: string;
+  context: AnonymousMessageFeedbackContext;
+}
+
+export interface AnonymousMessageFeedbackResponse {
+  submissionId: string;
+  status: 'submitted';
+  submittedAt: string;
+}
+
+export interface ChatCapabilities {
+  anonymousMessageFeedback?: boolean;
+}
+
 export interface IMessage {
   id: string;
   content: MessageContent;
