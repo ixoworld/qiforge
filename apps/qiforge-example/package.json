@@ -1,6 +1,6 @@
 {
   "name": "qiforge-example",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Reference oracle that boots the QiForge runtime with all bundled plugins.",
   "private": true,
   "type": "module",
