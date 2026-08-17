@@ -35,7 +35,7 @@ importers:
         version: 0.5.2
       '@changesets/cli':
         specifier: ^2.29.7
-        version: 2.31.0(@types/node@26.2.0)
+        version: 2.31.1(@types/node@26.2.0)
       '@eslint/js':
         specifier: ^9.18.0
         version: 9.39.4
@@ -901,7 +901,7 @@ importers:
     devDependencies:
       '@graphql-codegen/cli':
         specifier: ^5.0.5
-        version: 5.0.7(@types/node@22.20.1)(enquirer@2.4.1)(graphql@16.14.2)(typescript@5.9.3)
+        version: 5.0.7(@types/node@22.10.0)(enquirer@2.4.1)(graphql@16.14.2)(typescript@5.9.3)
       '@graphql-codegen/client-preset':
         specifier: ^4.7.0
         version: 4.8.3(graphql@16.14.2)
@@ -925,7 +925,7 @@ importers:
         version: link:../vitest-config
       '@types/node':
         specifier: 22.10.0
-        version: 22.20.1
+        version: 22.10.0
       '@types/store':
         specifier: 2.0.5
         version: 2.0.5
@@ -1793,8 +1793,8 @@ packages:
   '@changesets/changelog-github@0.5.2':
     resolution: {integrity: sha512-HeGeDl8HaIGj9fQHo/tv5XKQ2SNEi9+9yl1Bss1jttPqeiASRXhfi0A2wv8yFKCp07kR1gpOI5ge6+CWNm1jPw==}
 
-  '@changesets/cli@2.31.0':
-    resolution: {integrity: sha512-AhI4enNTgHu2IZr6K4WZyf0EPch4XVMn1yOMFmCD9gsfBGqMYaHXls5HyDv6/CL5axVQABz68eG30eCtbr2wFg==}
+  '@changesets/cli@2.31.1':
+    resolution: {integrity: sha512-uO05WTcRBwuVOJVSW8Cmpqw6q0WDL53ajGCMyszutvOe5toOnunbpM4jZzf+qxBOz7i0AzopZ8diBuewjmF40w==}
     hasBin: true
 
   '@changesets/config@3.1.4':
@@ -6016,7 +6016,7 @@ packages:
     deprecated: 'replaced by the ''expo'' package, learn more: https://blog.expo.dev/whats-new-in-expo-modules-infrastructure-7a7cdda81ebc'
 
   '@veramo-community/lds-ecdsa-secp256k1-recovery2020@https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b':
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b}
+    resolution: {gitHosted: true, integrity: sha512-jJP+rCoHQRM4RVYeyCfc52aDZ4lUluAJ+HkNi7kCTLsZ5uYfE9uR+wBYw4uV02GooTfWPeCNPrFxXZpfhI4TyQ==, tarball: https://codeload.github.com/uport-project/EcdsaSecp256k1RecoverySignature2020/tar.gz/ab0db52de6f4e6663ef271a48009ba26e688ef9b}
     version: 0.0.8
 
   '@veramo/core-types@5.6.0':
@@ -6403,8 +6403,8 @@ packages:
     resolution: {integrity: sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ==}
     engines: {node: '>=8'}
 
-  ansi-regex@6.2.2:
-    resolution: {integrity: sha512-Bq3SmSpyFHaWjPk8If9yc6svM8c56dB5BAtW4Qbw5jHTwwXXcTLoRMkpDJp6VL0XzlWaCHTXrkFURMYmD0sLqg==}
+  ansi-regex@6.3.0:
+    resolution: {integrity: sha512-WpDfL7NO6j7tH88IDBNVdUJxDh9nmCteAVW9dsep846XdwF4naCBK+/tGLX3KJgcpgMRXCFlTM2hKGoK9FsdrQ==}
     engines: {node: '>=12'}
 
   ansi-styles@3.2.1:
@@ -8797,6 +8797,10 @@ packages:
     resolution: {integrity: sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==}
     engines: {node: '>=0.10.0'}
 
+  iconv-lite@0.7.3:
+    resolution: {integrity: sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ==}
+    engines: {node: '>=0.10.0'}
+
   ieee754@1.2.1:
     resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}
 
@@ -9296,6 +9300,10 @@ packages:
     resolution: {integrity: sha512-PMSmkqxr106Xa156c2M265Z+FTrPl+oxd/rgOQy2tijQeK5TxQ43psO1ZCwhVOSdnn+RzkzlRz/eY4BgJBYVpg==}
     hasBin: true
 
+  js-yaml@3.15.1:
+    resolution: {integrity: sha512-S99WuO3HlhO3XN41EtYUNl9zzXjoJx7QvmipxsJVxtCBT0YHEFy+iOJhjSvrmV12nYhWpZaM8lPHkJm0yUMbag==}
+    hasBin: true
+
   js-yaml@4.1.1:
     resolution: {integrity: sha512-qQKT4zQxXl8lLwBtHMWwaTcGfFOZviOJet3Oy/xmGk2gZH677CJM9EvtfdSkgWcATZhj/55JZ0rmy3myCT5lsA==}
     hasBin: true
@@ -9386,12 +9394,12 @@ packages:
     engines: {node: '>=12'}
 
   jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff:
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff}
+    resolution: {gitHosted: true, integrity: sha512-snoIswmD08cq+Y6reYZx7c3IXHUTwfXPiwsytIty1uQrxgPh/c6OV+d9zv/OuI4vs1OTA4tDT98Q/byYmcsv/w==, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/14357f7a1181ae769ecc50fee9303468f17665ff}
     version: 8.3.3-0
     engines: {node: '>=14'}
 
   jsonld@https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a:
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a}
+    resolution: {gitHosted: true, integrity: sha512-sEcgHpZLznRYWsX5TKWX329qxKRN4SRA2Ky1B12ilthR3OxpbCDXDHTLU9Cku/W1c7Zkp1FAiRqrdHtiI5ToNA==, tarball: https://codeload.github.com/digitalcredentials/jsonld.js/tar.gz/da0794d863eeb65faf27673d46d9cffa32e1b65a}
     version: 8.3.3-0
     engines: {node: '>=14'}
 
@@ -12775,7 +12783,7 @@ packages:
     resolution: {integrity: sha512-nSc4HxWvpW1m0xLOGDcTV7X3PrSgm3cUhQDvEPBXErjvW48njfI0Vow1qcbjwOlgeO0ugyqJeBuVOdP7rLa5Rw==}
 
   unl-core@https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f:
-    resolution: {gitHosted: true, tarball: https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f}
+    resolution: {gitHosted: true, integrity: sha512-YSnOl2HULwIa09KztU4fNt1+D0AdHP3LBHO0eiig252mrYpR13RQw1d278xeoppieklfn/C5DGx4xjSK/2hTrA==, tarball: https://codeload.github.com/u-n-l/core-js/tar.gz/59e4e48c97c6d0a907da9bf0c0c597eb78abe19f}
     version: 3.0.1
 
   unl-map-js@0.1.7:
@@ -14368,7 +14376,7 @@ snapshots:
     transitivePeerDependencies:
       - encoding
 
-  '@changesets/cli@2.31.0(@types/node@26.2.0)':
+  '@changesets/cli@2.31.1(@types/node@26.2.0)':
     dependencies:
       '@changesets/apply-release-plan': 7.1.1
       '@changesets/assemble-release-plan': 6.0.10
@@ -14454,7 +14462,7 @@ snapshots:
   '@changesets/parse@0.4.3':
     dependencies:
       '@changesets/types': 6.1.0
-      js-yaml: 4.2.0
+      js-yaml: 4.3.1
 
   '@changesets/pre@2.0.2':
     dependencies:
@@ -15650,7 +15658,7 @@ snapshots:
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/remapping': 2.3.5
       '@jridgewell/sourcemap-codec': 1.5.5
-      browserslist: 4.28.4
+      browserslist: 4.28.8
       chalk: 4.1.2
       debug: 4.4.3
       getenv: 2.0.0
@@ -15829,7 +15837,7 @@ snapshots:
       graphql: 16.14.2
       tslib: 2.6.3
 
-  '@graphql-codegen/cli@5.0.7(@types/node@22.20.1)(enquirer@2.4.1)(graphql@16.14.2)(typescript@5.9.3)':
+  '@graphql-codegen/cli@5.0.7(@types/node@22.10.0)(enquirer@2.4.1)(graphql@16.14.2)(typescript@5.9.3)':
     dependencies:
       '@babel/generator': 7.29.7
       '@babel/template': 7.29.7
@@ -15840,12 +15848,12 @@ snapshots:
       '@graphql-tools/apollo-engine-loader': 8.0.30(graphql@16.14.2)
       '@graphql-tools/code-file-loader': 8.1.32(graphql@16.14.2)
       '@graphql-tools/git-loader': 8.0.36(graphql@16.14.2)
-      '@graphql-tools/github-loader': 8.0.22(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/github-loader': 8.0.22(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/graphql-file-loader': 8.1.14(graphql@16.14.2)
       '@graphql-tools/json-file-loader': 8.0.28(graphql@16.14.2)
       '@graphql-tools/load': 8.1.10(graphql@16.14.2)
-      '@graphql-tools/prisma-loader': 8.0.17(@types/node@22.20.1)(graphql@16.14.2)
-      '@graphql-tools/url-loader': 8.0.33(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/prisma-loader': 8.0.17(@types/node@22.10.0)(graphql@16.14.2)
+      '@graphql-tools/url-loader': 8.0.33(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/utils': 10.11.0(graphql@16.14.2)
       '@whatwg-node/fetch': 0.10.13
       chalk: 4.1.2
@@ -15853,8 +15861,8 @@ snapshots:
       debounce: 1.2.1
       detect-indent: 6.1.0
       graphql: 16.14.2
-      graphql-config: 5.1.6(@types/node@22.20.1)(graphql@16.14.2)(typescript@5.9.3)
-      inquirer: 8.2.7(@types/node@22.20.1)
+      graphql-config: 5.1.6(@types/node@22.10.0)(graphql@16.14.2)(typescript@5.9.3)
+      inquirer: 8.2.7(@types/node@22.10.0)
       is-glob: 4.0.3
       jiti: 1.21.7
       json-to-pretty-yaml: 1.2.2
@@ -16132,7 +16140,7 @@ snapshots:
       - crossws
       - utf-8-validate
 
-  '@graphql-tools/executor-http@1.3.3(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/executor-http@1.3.3(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
       '@graphql-hive/signal': 1.0.0
       '@graphql-tools/executor-common': 0.0.4(graphql@16.14.2)
@@ -16142,12 +16150,12 @@ snapshots:
       '@whatwg-node/fetch': 0.10.13
       '@whatwg-node/promise-helpers': 1.3.2
       graphql: 16.14.2
-      meros: 1.3.2(@types/node@22.20.1)
+      meros: 1.3.2(@types/node@22.10.0)
       tslib: 2.8.1
     transitivePeerDependencies:
       - '@types/node'
 
-  '@graphql-tools/executor-http@3.3.0(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/executor-http@3.3.0(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
       '@graphql-hive/signal': 2.0.0
       '@graphql-tools/executor-common': 1.0.6(graphql@16.14.2)
@@ -16157,7 +16165,7 @@ snapshots:
       '@whatwg-node/fetch': 0.10.13
       '@whatwg-node/promise-helpers': 1.3.2
       graphql: 16.14.2
-      meros: 1.3.2(@types/node@22.20.1)
+      meros: 1.3.2(@types/node@22.10.0)
       tslib: 2.8.1
     transitivePeerDependencies:
       - '@types/node'
@@ -16196,9 +16204,9 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@graphql-tools/github-loader@8.0.22(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/github-loader@8.0.22(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
-      '@graphql-tools/executor-http': 1.3.3(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/executor-http': 1.3.3(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/graphql-tag-pluck': 8.3.31(graphql@16.14.2)
       '@graphql-tools/utils': 10.11.0(graphql@16.14.2)
       '@whatwg-node/fetch': 0.10.13
@@ -16271,9 +16279,9 @@ snapshots:
       graphql: 16.14.2
       tslib: 2.6.3
 
-  '@graphql-tools/prisma-loader@8.0.17(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/prisma-loader@8.0.17(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
-      '@graphql-tools/url-loader': 8.0.33(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/url-loader': 8.0.33(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/utils': 10.11.0(graphql@16.14.2)
       '@types/js-yaml': 4.0.9
       '@whatwg-node/fetch': 0.10.13
@@ -16323,10 +16331,10 @@ snapshots:
       graphql: 16.14.2
       tslib: 2.8.1
 
-  '@graphql-tools/url-loader@8.0.33(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/url-loader@8.0.33(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
       '@graphql-tools/executor-graphql-ws': 2.0.7(graphql@16.14.2)
-      '@graphql-tools/executor-http': 1.3.3(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/executor-http': 1.3.3(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/executor-legacy-ws': 1.1.28(graphql@16.14.2)
       '@graphql-tools/utils': 10.11.0(graphql@16.14.2)
       '@graphql-tools/wrap': 10.1.4(graphql@16.14.2)
@@ -16345,10 +16353,10 @@ snapshots:
       - crossws
       - utf-8-validate
 
-  '@graphql-tools/url-loader@9.1.2(@types/node@22.20.1)(graphql@16.14.2)':
+  '@graphql-tools/url-loader@9.1.2(@types/node@22.10.0)(graphql@16.14.2)':
     dependencies:
       '@graphql-tools/executor-graphql-ws': 3.1.5(graphql@16.14.2)
-      '@graphql-tools/executor-http': 3.3.0(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/executor-http': 3.3.0(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/executor-legacy-ws': 1.1.28(graphql@16.14.2)
       '@graphql-tools/utils': 11.1.0(graphql@16.14.2)
       '@graphql-tools/wrap': 11.1.16(graphql@16.14.2)
@@ -16505,17 +16513,24 @@ snapshots:
     optionalDependencies:
       '@types/node': 22.20.1
 
+  '@inquirer/external-editor@1.0.3(@types/node@22.10.0)':
+    dependencies:
+      chardet: 2.2.0
+      iconv-lite: 0.7.3
+    optionalDependencies:
+      '@types/node': 22.10.0
+
   '@inquirer/external-editor@1.0.3(@types/node@22.20.1)':
     dependencies:
       chardet: 2.2.0
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
     optionalDependencies:
       '@types/node': 22.20.1
 
   '@inquirer/external-editor@1.0.3(@types/node@26.2.0)':
     dependencies:
       chardet: 2.2.0
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
     optionalDependencies:
       '@types/node': 26.2.0
 
@@ -19526,7 +19541,6 @@ snapshots:
   '@types/node@22.10.0':
     dependencies:
       undici-types: 6.20.0
-    optional: true
 
   '@types/node@22.20.0':
     dependencies:
@@ -20658,7 +20672,7 @@ snapshots:
 
   ansi-regex@5.0.1: {}
 
-  ansi-regex@6.2.2: {}
+  ansi-regex@6.3.0: {}
 
   ansi-styles@3.2.1:
     dependencies:
@@ -21177,7 +21191,7 @@ snapshots:
       content-type: 2.0.0
       debug: 4.4.3
       http-errors: 2.0.1
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
       on-finished: 2.4.1
       qs: 6.15.2
       raw-body: 3.0.2
@@ -23284,13 +23298,13 @@ snapshots:
 
   graceful-fs@4.2.11: {}
 
-  graphql-config@5.1.6(@types/node@22.20.1)(graphql@16.14.2)(typescript@5.9.3):
+  graphql-config@5.1.6(@types/node@22.10.0)(graphql@16.14.2)(typescript@5.9.3):
     dependencies:
       '@graphql-tools/graphql-file-loader': 8.1.14(graphql@16.14.2)
       '@graphql-tools/json-file-loader': 8.0.28(graphql@16.14.2)
       '@graphql-tools/load': 8.1.10(graphql@16.14.2)
       '@graphql-tools/merge': 9.1.9(graphql@16.14.2)
-      '@graphql-tools/url-loader': 9.1.2(@types/node@22.20.1)(graphql@16.14.2)
+      '@graphql-tools/url-loader': 9.1.2(@types/node@22.10.0)(graphql@16.14.2)
       '@graphql-tools/utils': 11.1.0(graphql@16.14.2)
       cosmiconfig: 8.3.6(typescript@5.9.3)
       graphql: 16.14.2
@@ -23709,6 +23723,10 @@ snapshots:
     dependencies:
       safer-buffer: 2.1.2
 
+  iconv-lite@0.7.3:
+    dependencies:
+      safer-buffer: 2.1.2
+
   ieee754@1.2.1: {}
 
   ignore@5.3.2: {}
@@ -23753,9 +23771,9 @@ snapshots:
 
   ini@1.3.8: {}
 
-  inquirer@8.2.7(@types/node@22.20.1):
+  inquirer@8.2.7(@types/node@22.10.0):
     dependencies:
-      '@inquirer/external-editor': 1.0.3(@types/node@22.20.1)
+      '@inquirer/external-editor': 1.0.3(@types/node@22.10.0)
       ansi-escapes: 4.3.2
       chalk: 4.1.2
       cli-cursor: 3.1.0
@@ -24288,6 +24306,11 @@ snapshots:
       argparse: 1.0.10
       esprima: 4.0.1
 
+  js-yaml@3.15.1:
+    dependencies:
+      argparse: 1.0.10
+      esprima: 4.0.1
+
   js-yaml@4.1.1:
     dependencies:
       argparse: 2.0.1
@@ -24299,7 +24322,6 @@ snapshots:
   js-yaml@4.3.1:
     dependencies:
       argparse: 2.0.1
-    optional: true
 
   jsbn@0.1.1: {}
 
@@ -25143,9 +25165,9 @@ snapshots:
 
   merge2@1.4.1: {}
 
-  meros@1.3.2(@types/node@22.20.1):
+  meros@1.3.2(@types/node@22.10.0):
     optionalDependencies:
-      '@types/node': 22.20.1
+      '@types/node': 22.10.0
 
   mersenne-twister@1.1.0: {}
 
@@ -26753,7 +26775,7 @@ snapshots:
   read-yaml-file@1.1.0:
     dependencies:
       graceful-fs: 4.2.11
-      js-yaml: 3.14.2
+      js-yaml: 3.15.1
       pify: 4.0.1
       strip-bom: 3.0.0
 
@@ -27678,7 +27700,7 @@ snapshots:
 
   strip-ansi@7.2.0:
     dependencies:
-      ansi-regex: 6.2.2
+      ansi-regex: 6.3.0
 
   strip-bom-string@1.0.0: {}
 
@@ -28345,8 +28367,7 @@ snapshots:
 
   undici-types@6.19.8: {}
 
-  undici-types@6.20.0:
-    optional: true
+  undici-types@6.20.0: {}
 
   undici-types@6.21.0: {}
 
