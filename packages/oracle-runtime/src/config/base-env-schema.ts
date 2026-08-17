@@ -86,6 +86,14 @@ export const baseEnvSchema = z.object({
   DEFAULT_MODEL: z.string().optional(),
 
   /**
+   * Model used to name conversations, once per session. Defaults to a small
+   * instruction-following model per provider — override only if a deployment
+   * needs a different one (the namer must follow a short-answer instruction,
+   * so tiny completion models produce poor titles).
+   */
+  SESSION_TITLE_MODEL: z.string().optional(),
+
+  /**
    * Markup applied to raw OpenRouter list prices when the catalog is shown to
    * users, so the displayed number is what they actually pay. Mirrors the
    * credit-billing markup (1.6× on mainnet). Display-only — it does not change

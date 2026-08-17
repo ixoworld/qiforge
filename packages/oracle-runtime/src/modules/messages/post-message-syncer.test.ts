@@ -158,7 +158,7 @@ describe('PostMessageSyncer', () => {
       expect(checkpointSync.markUserInactive).toHaveBeenCalledWith(USER_DID);
     });
 
-    it('calls sessions.syncSessionSet with messages mapped from the transformed list', async () => {
+    it('calls sessions.syncSessionSet with role-tagged messages from the transformed list', async () => {
       const { svc, sessions } = build();
       const messages = [new HumanMessage('hello'), new AIMessage('world')];
       vi.mocked(SqliteSaver.fromDatabase).mockReturnValueOnce({
@@ -176,7 +176,10 @@ describe('PostMessageSyncer', () => {
         sessionId: SESSION_ID,
         oracleName: ORACLE_NAME,
         did: USER_DID,
-        messages: ['hello', 'world'],
+        messages: [
+          { type: 'human', content: 'hello' },
+          { type: 'ai', content: 'world' },
+        ],
         oracleDid: ORACLE_DID,
         oracleEntityDid: ORACLE_ENTITY_DID,
         lastProcessedCount: 7,
