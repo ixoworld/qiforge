@@ -89,6 +89,28 @@ await sessionManager.deleteSession({
 - Session state persistence in Matrix rooms
 - Type-safe operations with DTOs
 
+#### Session Titles
+
+A session is named **once**, on the first turn that carries both a real user
+message and a real oracle reply. Until then it holds the `Untitled`
+placeholder; after that the title is never regenerated.
+
+`syncSessionSet` runs after every turn, so several turns can race to name the
+same session. Two guards make the outcome exactly one title: an in-process
+single-flight map collapses concurrent turns onto one model call, and the
+write itself is conditional on the row still being untitled. The Matrix root
+event is renamed only by the writer that actually landed.
+
+The generated title is validated before it is stored — reasoning blocks,
+`Title:` labels, quotes and markdown are stripped, and output that is a
+sentence, a preamble ("Sure, here's a title…") or a verbatim slice of the
+transcript is rejected. A rejected title falls back to the user's opening
+request, clipped at a clause boundary, so the label is always about what the
+user asked for.
+
+Set `SESSION_TITLE_MODEL` to override the model used for naming; it defaults
+to a small instruction-following model per `LLM_PROVIDER`.
+
 #### Session Types
 
 ```typescript

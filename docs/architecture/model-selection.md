@@ -76,10 +76,11 @@ The default is **GPT-5.4 Nano** (`DEFAULT_MODEL_ID`) — the cheapest capable
 OpenAI model. `getModelForRole('main')` returns `getDefaultModelId()`, which an
 operator can override per deployment:
 
-| Env var              | Default               | Effect                                                        |
-| -------------------- | --------------------- | ------------------------------------------------------------- |
-| `DEFAULT_MODEL`      | `openai/gpt-5.6-luna` | Default model for new chats (OpenRouter provider only).       |
-| `MODEL_PRICE_MARKUP` | `1.6`                 | Markup applied to raw prices in `GET /models` (display only). |
+| Env var               | Default                        | Effect                                                        |
+| --------------------- | ------------------------------ | ------------------------------------------------------------- |
+| `DEFAULT_MODEL`       | `openai/gpt-5.6-luna`          | Default model for new chats (OpenRouter provider only).       |
+| `MODEL_PRICE_MARKUP`  | `1.6`                          | Markup applied to raw prices in `GET /models` (display only). |
+| `SESSION_TITLE_MODEL` | `google/gemini-3.1-flash-lite` | Model that names conversations, once per session.             |
 
 Model selection applies to the OpenRouter provider; the Nebius provider keeps
 its fixed role map.

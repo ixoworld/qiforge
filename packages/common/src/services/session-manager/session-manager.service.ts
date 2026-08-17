@@ -2,12 +2,6 @@ import { Logger } from '@ixo/logger';
 import { MatrixManager } from '@ixo/matrix';
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import { type Database } from 'better-sqlite3';
-import {
-  getChatOpenAiModel,
-  getLLMProvider,
-  getOpenRouterChatModel,
-  getProviderConfig,
-} from '../../ai/index.js';
 import { type UserContextData } from '../memory-engine/types.js';
 import {
   type ChatSession,
@@ -17,12 +11,27 @@ import {
   type ListChatSessionsDto,
   type ListChatSessionsResponseDto,
 } from './dto.js';
+import {
+  generateSessionTitle,
+  needsTitle,
+  UNTITLED_SESSION,
+  type SessionTitleInput,
+} from './session-title.js';
 
 export interface IDatabaseSyncService {
   getUserDatabase(userDid: string): Promise<Database>;
 }
 
 export class SessionManagerService {
+  /**
+   * In-flight title generations keyed by `did:sessionId`. `syncSessionSet`
+   * runs fire-and-forget after every turn, so turn 2 can start while turn 1's
+   * title is still being generated — both would otherwise see `Untitled`,
+   * spend a model call, and edit the Matrix root event. One entry per session
+   * collapses them into a single generation.
+   */
+  private readonly titleGenerations = new Map<string, Promise<string>>();
+
   constructor(
     private readonly syncService: IDatabaseSyncService,
     public readonly matrixManger = MatrixManager.getInstance(),
@@ -36,84 +45,74 @@ export class SessionManagerService {
     return `${oracleEntityDid}_sessions`;
   }
 
-  private async createMessageTitle({
+  /**
+   * Generate and persist a title for a session that still holds the
+   * placeholder — exactly once per session.
+   *
+   * Two guards stack. In-process, `titleGenerations` collapses concurrent
+   * turns onto one model call. Across processes, the write is conditional on
+   * the row still being untitled, and the Matrix root event is only edited
+   * when that write is the one that landed. A caller that loses the race
+   * re-reads the winner's title instead of overwriting it.
+   */
+  private async ensureTitle({
+    db,
+    sessionId,
+    did,
+    roomId,
     messages,
   }: {
-    messages: string[];
+    db: Database;
+    sessionId: string;
+    did: string;
+    roomId?: string;
+    messages: SessionTitleInput[];
   }): Promise<string> {
-    if (messages.length === 0) {
-      return 'Untitled';
-    }
-    const provider = getLLMProvider();
-    const config = getProviderConfig();
+    const key = `${did}:${sessionId}`;
+    const pending = this.titleGenerations.get(key);
+    if (pending) return pending;
 
-    const llm =
-      provider === 'openrouter'
-        ? getOpenRouterChatModel({
-            model: 'meta-llama/llama-3.1-8b-instruct',
-            temperature: 0.3,
-            timeout: 60_000,
+    const generation = (async (): Promise<string> => {
+      const title = await generateSessionTitle(messages);
+      if (!title) return UNTITLED_SESSION;
+
+      const result = db
+        .prepare(
+          `UPDATE sessions
+             SET title = ?
+             WHERE session_id = ?
+               AND (title IS NULL OR trim(title) = '' OR lower(title) = 'untitled')`,
+        )
+        .run(title, sessionId);
+
+      if (result.changes === 0) {
+        const winner = await this.getSession(sessionId, did, false);
+        return winner?.title ?? title;
+      }
+
+      if (roomId) {
+        // The session id is the root Matrix event; editing it renames the
+        // conversation for Matrix clients. Fire-and-forget — a failed rename
+        // must not fail the turn's session sync.
+        this.matrixManger
+          .editMessage({
+            messageId: sessionId,
+            roomId,
+            message: title,
+            isOracleAdmin: true,
           })
-        : getChatOpenAiModel({
-            model: 'meta-llama/Meta-Llama-3.1-8B-Instruct',
-            temperature: 0.3,
-            apiKey: config.apiKey,
-            timeout: 60_000,
-            configuration: {
-              baseURL: config.baseURL,
-            },
+          .catch((err) => {
+            Logger.error('Failed to update conversation title in Matrix:', err);
           });
-    const response = await llm.invoke(
-      `Based on this messages messages, Add a title for this convo and only based on the messages? MAKE SURE TO ONLY RESPOND WITH THE TITLE.
+      }
 
-      ## RESPONSE FORMAT
-      ONLY RESPOND WITH THE TITLE not anything else that title will be saved to the store directly from your response so generated based on the messages.
+      return title;
+    })().finally(() => {
+      this.titleGenerations.delete(key);
+    });
 
-      EXample
-
-      Input:
-      <messages>
-      Hello, how are you?
-      I'm good, thank you!
-      did u see the new feature i added?
-      yes but i didn't like it
-      </messages>
-
-      Output:
-      Conversation about a new feature
-
-      ___________________________________________________________
-
-      Input:
-      <messages>
-      What are the store opening hours?
-      We are open from 9am to 5pm, Monday to Friday.
-      </messages>
-
-      Output:
-      Store Opening Hours Information
-___________________________________________________________
-      Input:
-      <messages>
-      Can you help me reset my password?
-      Sure, I can assist you with that.
-      </messages>
-
-      Output:
-      Password Reset Assistance
-
-      ___________________________________________________________
-      # the out put should be only the title not anything else that title will be saved to the store directly from your response so generated based on the messages.
-
-      USER MESSAGES:
-      <messages>
-      ${messages.join('\n\n')}
-      </messages>
-      `,
-    );
-
-    const title = String(response.content);
-    return title;
+    this.titleGenerations.set(key, generation);
+    return generation;
   }
 
   public async updateLastProcessedCount({
@@ -146,7 +145,7 @@ ___________________________________________________________
   }: {
     sessionId: string;
     did: string;
-    messages: string[];
+    messages: SessionTitleInput[];
     oracleEntityDid: string;
     oracleName: string;
     roomId?: string;
@@ -163,9 +162,7 @@ ___________________________________________________________
       const session: ChatSession = {
         sessionId,
         oracleName,
-        title: await this.createMessageTitle({
-          messages,
-        }),
+        title: (await generateSessionTitle(messages)) ?? UNTITLED_SESSION,
         lastUpdatedAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
         oracleEntityDid,
@@ -202,33 +199,18 @@ ___________________________________________________________
       return session;
     }
 
-    // 1. We have at least 2 messages (enough to generate a meaningful title)
-    // 2. AND the current title is "Untitled" or undefined (hasn't been set yet)
-    const hasEnoughMessages = messages.length >= 2;
-    const needsTitleUpdate =
-      !selectedSession.title ||
-      selectedSession.title.toLowerCase() === 'untitled' ||
-      (selectedSession.title && selectedSession.title.trim() === '');
-
-    const allowTitleUpdate = hasEnoughMessages && needsTitleUpdate; // update the session
-    const title = allowTitleUpdate
-      ? await this.createMessageTitle({
+    // A session is named once, on the first turn that carries a real
+    // exchange. `ensureTitle` owns the title column from here on, so this
+    // update leaves it alone.
+    const title = needsTitle(selectedSession.title)
+      ? await this.ensureTitle({
+          db,
+          sessionId,
+          did,
+          roomId: roomId ?? selectedSession.roomId,
           messages,
         })
       : selectedSession.title;
-
-    if (allowTitleUpdate && roomId && title) {
-      this.matrixManger
-        .editMessage({
-          messageId: sessionId,
-          roomId,
-          message: title,
-          isOracleAdmin: true,
-        })
-        .catch((err) => {
-          Logger.error('Failed to update conversation title in Matrix:', err);
-        });
-    }
 
     const lastUpdatedAt = new Date().toISOString();
     const updatedSession: ChatSession = {
@@ -236,17 +218,18 @@ ___________________________________________________________
       title,
       lastUpdatedAt,
       lastProcessedCount,
-      slackThreadTs,
+      // Callers that don't own the Slack binding (the post-turn syncer) omit
+      // it; keep what the session already has instead of clearing it.
+      slackThreadTs: slackThreadTs ?? selectedSession.slackThreadTs,
     };
 
     db.prepare(
       `
       UPDATE sessions
-      SET title = ?, last_updated_at = ?, last_processed_count = ?, slack_thread_ts = ?
+      SET last_updated_at = ?, last_processed_count = ?, slack_thread_ts = ?
       WHERE session_id = ?
     `,
     ).run(
-      updatedSession.title ?? null,
       lastUpdatedAt,
       updatedSession.lastProcessedCount ?? null,
       updatedSession.slackThreadTs ?? null,
