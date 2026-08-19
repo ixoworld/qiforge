@@ -1,35 +1,5 @@
-import { AIMessage, HumanMessage } from '@langchain/core/messages';
-import {
-  type Checkpoint,
-  emptyCheckpoint,
-  uuid6,
-} from '@langchain/langgraph-checkpoint';
 import { SqliteSaver } from '../index';
-
-function checkpointWithMessages(
-  clock: number,
-  messages: Array<HumanMessage | AIMessage>,
-): Checkpoint {
-  return {
-    ...emptyCheckpoint(),
-    id: uuid6(clock),
-    channel_values: { messages },
-  };
-}
-
-function message(
-  kind: 'human' | 'ai',
-  id: string,
-  content: string,
-  timestamp: string,
-): HumanMessage | AIMessage {
-  const fields = {
-    id,
-    content,
-    additional_kwargs: { timestamp },
-  };
-  return kind === 'human' ? new HumanMessage(fields) : new AIMessage(fields);
-}
+import { checkpointWithMessages, message } from './fixtures';
 
 describe('SqliteSaver checkpoint pruning', () => {
   it('drops old checkpoints and their writes past the cap, keeping the latest tuple intact', async () => {

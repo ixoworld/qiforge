@@ -1,5 +1,6 @@
 import { type MatrixEvent, MatrixManager } from '@ixo/matrix';
 import { Logger } from '@nestjs/common';
+import { parseUploadSizeLimit } from './media-config.js';
 
 const logger = new Logger('MatrixUploadUtils');
 
@@ -403,4 +404,34 @@ export async function deleteMediaFromRoom(
       `Error deleting media with storageKey ${storageKey}: ${errorMessage}`,
     );
   }
+}
+
+/**
+ * Ask the homeserver for its media upload cap. Tries the spec-current
+ * endpoint first, then the pre-Matrix-1.11 one. Returns undefined when
+ * neither answers usably — callers decide the fallback.
+ */
+export async function fetchMediaUploadSizeLimit(): Promise<number | undefined> {
+  const client = getClient();
+  const endpoints = [
+    '/_matrix/client/v1/media/config',
+    '/_matrix/media/v3/config',
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const response: unknown = await client.mxClient.doRequest(
+        'GET',
+        endpoint,
+      );
+      const limit = parseUploadSizeLimit(response);
+      if (limit !== undefined) {
+        return limit;
+      }
+    } catch (error) {
+      logger.debug(
+        `Media config lookup failed at ${endpoint}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return undefined;
 }

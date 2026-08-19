@@ -1,5 +1,11 @@
 # @ixo/sqlite-saver
 
+## 1.2.0
+
+### Minor Changes
+
+- New databases are created with `auto_vacuum=INCREMENTAL`, and checkpoint pruning now runs `incremental_vacuum` so freed pages return to the filesystem instead of leaving the DB file at its high-water mark. Existing `auto_vacuum=NONE` databases are untouched here (no VACUUM in the request path) — the oracle-runtime sync service compacts them once, out of band.
+
 ## 1.0.4
 
 ### Patch Changes

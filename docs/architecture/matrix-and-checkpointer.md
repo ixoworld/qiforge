@@ -40,10 +40,14 @@ const defaultHooks: MainAgentHooks = checkpointSync
 
 Two properties keep the per-user DB (and the process's memory) bounded:
 
-- **Checkpoint pruning.** LangGraph writes one checkpoint per super-step and never deletes them. After each `put`, the saver drops checkpoints (and their `writes` rows) beyond the newest 20 per thread (`maxCheckpointsPerThread`, `0` disables). The `messages` table is never pruned — it is the durable transcript.
+- **Checkpoint pruning.** LangGraph writes one checkpoint per super-step and never deletes them. After each `put`, the saver drops checkpoints (and their `writes` rows) beyond the newest 20 per thread (`maxCheckpointsPerThread`, `0` disables). The `messages` table is never pruned — it is the durable transcript. Every new DB is created with `auto_vacuum = INCREMENTAL`, and each prune runs `incremental_vacuum` afterward, so freed pages are returned to the filesystem (the file shrinks) instead of piling up as dead freelist space.
 - **Transcript vs. state.** `getTuple` returns the latest checkpoint's message set, which after summarization is the summary + recent tail. `listThreadMessages(threadId)` reads the full transcript from the `messages` table (every message ever written, oldest first) — this is what `listMessages` serves to clients, with the summarization bookkeeping message filtered out.
 
-The Matrix sync path streams: uploads gzip the DB file through a temp file (only the compressed payload is buffered for upload), and downloads gunzip straight to disk. Neither direction holds the decompressed DB in heap.
+The Matrix sync path streams in both directions — downloads gunzip straight to disk, uploads never hold the decompressed DB in heap. The upload cron, while the user is inactive:
+
+1. One-time compacts DBs predating incremental auto-vacuum: if the freelist exceeds 10 MB and 20% of the file's pages, an in-place `VACUUM` reclaims it and flips the file to incremental mode (`sqlite-compaction.ts`). Newly created DBs never trip this.
+2. Takes a `VACUUM INTO` snapshot of the live file — transactionally consistent even if a request starts writing mid-upload, and free of dead pages — then gzips the snapshot streaming to disk, so only the compressed payload is ever buffered.
+3. Skips the upload if the compressed snapshot exceeds the homeserver's upload cap (`m.upload.size`, read from `/_matrix/client/v1/media/config` then the legacy `/_matrix/media/v3/config`, falling back to 100 MiB). The skip is logged as an error and the file's checksum is remembered so the same oversized snapshot isn't retried until the file actually changes.
 
 The `as unknown as BaseCheckpointSaver` cast is the documented cross-package interop seam: `SqliteSaver` extends `BaseCheckpointSaver` from `@langchain/langgraph-checkpoint`, but the hook's return type pulls from `@langchain/langgraph`. pnpm hoists these into separate type identities even at the same version — structurally identical at runtime, but TypeScript can't see that.
 

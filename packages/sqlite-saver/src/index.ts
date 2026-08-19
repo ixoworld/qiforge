@@ -349,6 +349,20 @@ export class SqliteSaver extends BaseCheckpointSaver {
     // Set busy timeout for concurrent access
     this.db.pragma('busy_timeout = 5000');
 
+    // Incremental auto-vacuum lets pruning hand freed pages back to the
+    // filesystem instead of leaving the file at its high-water mark (the
+    // file is what gets gzipped and synced to Matrix, so dead pages are
+    // uploaded forever otherwise). On a brand-new database the pragma binds
+    // immediately because it runs before the first table is created; on an
+    // existing NONE-mode file it only takes effect after a full VACUUM,
+    // which must happen outside the request path.
+    const autoVacuumModeRaw = this.db.pragma('auto_vacuum', {
+      simple: true,
+    });
+    if (typeof autoVacuumModeRaw === 'number' && autoVacuumModeRaw !== 2) {
+      this.db.pragma('auto_vacuum = INCREMENTAL');
+    }
+
     // Create base tables
     this.db.exec(`
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -536,6 +550,11 @@ ON writes(thread_id, checkpoint_id, channel);
       );
     });
     transaction();
+
+    // Hand freed pages back to the filesystem. No-op on databases whose
+    // file-level mode is still NONE — those are compacted by the sync
+    // service's cron instead.
+    this.db.pragma('incremental_vacuum');
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
