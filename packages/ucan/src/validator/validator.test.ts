@@ -6,10 +6,12 @@ import { defineCapability, Schema } from '../capabilities/capability.js';
 import {
   createDelegation,
   createInvocation,
+  getDelegationCid,
   serializeDelegation,
   serializeInvocation,
   type Capability,
 } from '../client/create-client.js';
+import { InMemoryRevocationStore } from '../store/revocation.js';
 
 /**
  * Helper: generate an ed25519 keypair
@@ -1893,6 +1895,648 @@ describe('UCAN Validator', () => {
 
       expect(result.ok).toBe(true);
       expect(result.expiration).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Revocation. A UCAN revocation targets the canonical CID of one exact
+  // delegation and is irreversible, so validation must check EVERY delegation
+  // in the cryptographically verified proof chain (plus the invocation itself)
+  // against the revocation set — in a single batched call.
+  // ---------------------------------------------------------------------------
+  describe('revocation', () => {
+    /** Build a root -> alice -> bob chain and the invocation bob presents. */
+    async function threeHopChain() {
+      const server = await keygen();
+      const root = await keygen();
+      const alice = await keygen();
+      const bob = await keygen();
+
+      const rootToAlice = await Client.delegate({
+        issuer: root.signer,
+        audience: alice.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      const aliceToBob = await Client.delegate({
+        issuer: alice.signer,
+        audience: bob.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+        proofs: [rootToAlice],
+      });
+
+      const invocation = Client.invoke({
+        issuer: bob.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [aliceToBob],
+      });
+
+      const serialized = await serializeInvocation(invocation);
+
+      return {
+        server,
+        root,
+        alice,
+        bob,
+        rootToAlice,
+        aliceToBob,
+        serialized,
+        invocationCid: await getDelegationCid(serialized),
+      };
+    }
+
+    it('reports the canonical CIDs of the verified chain, parents first', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChainCids).toEqual([
+        chain.rootToAlice.cid.toString(),
+        chain.aliceToBob.cid.toString(),
+        chain.invocationCid,
+      ]);
+    });
+
+    it('rejects when the ROOT delegation in the chain is revoked', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: new InMemoryRevocationStore([
+          chain.rootToAlice.cid.toString(),
+        ]),
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOKED');
+      expect(result.error?.message).toContain(chain.rootToAlice.cid.toString());
+    });
+
+    it('rejects when an INTERMEDIATE delegation in the chain is revoked', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: new InMemoryRevocationStore([
+          chain.aliceToBob.cid.toString(),
+        ]),
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOKED');
+      expect(result.error?.message).toContain(chain.aliceToBob.cid.toString());
+    });
+
+    it('rejects when the INVOCATION itself is revoked', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: new InMemoryRevocationStore([chain.invocationCid]),
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOKED');
+    });
+
+    it('accepts a chain with no revoked links', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        // A revocation of an unrelated delegation must not affect this chain.
+        revocationChecker: new InMemoryRevocationStore([
+          'bafyreiunrelateddelegationcidthatisnotinthischain',
+        ]),
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+    });
+
+    it('checks the whole chain in ONE batched call', async () => {
+      const chain = await threeHopChain();
+      const calls: string[][] = [];
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: {
+          check: async (cids) => {
+            calls.push(cids);
+            return [];
+          },
+        },
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual([
+        chain.rootToAlice.cid.toString(),
+        chain.aliceToBob.cid.toString(),
+        chain.invocationCid,
+      ]);
+    });
+
+    it('fails CLOSED by default when the checker itself fails', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: {
+          check: async () => {
+            throw new Error('store unreachable');
+          },
+        },
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOCATION_CHECK_FAILED');
+      expect(result.error?.message).toContain('store unreachable');
+    });
+
+    it('fails OPEN when configured to', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationFailure: 'open',
+        revocationChecker: {
+          check: async () => {
+            throw new Error('store unreachable');
+          },
+        },
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+    });
+
+    it('does not burn the replay slot when the revocation check fails', async () => {
+      const chain = await threeHopChain();
+      let failNext = true;
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        revocationChecker: {
+          check: async () => {
+            if (failNext) {
+              failNext = false;
+              throw new Error('transient outage');
+            }
+            return [];
+          },
+        },
+      });
+
+      // Transient failure -> rejected, and the invocation must remain usable.
+      const first = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(first.error?.code).toBe('REVOCATION_CHECK_FAILED');
+
+      // The client retries the SAME invocation once the store recovers.
+      const retry = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(retry.ok).toBe(true);
+
+      // ...and normal replay protection still applies afterwards.
+      const replay = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+      expect(replay.error?.code).toBe('REPLAY');
+    });
+
+    it('performs no revocation checking when no checker is configured', async () => {
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChainCids).toHaveLength(3);
+    });
+
+    it('is inert without a checker even under fail-closed config — upgrading alone changes nothing', async () => {
+      // BACKWARD COMPATIBILITY. revocationFailure defaults to 'closed', but that policy only
+      // applies to a checker that FAILED. With no checker configured there is nothing to fail, so
+      // a service that bumps the package without opting in must behave exactly as before.
+      const chain = await threeHopChain();
+
+      const validator = await createUCANValidator({
+        serverDid: chain.server.did,
+        rootIssuers: [chain.root.did],
+        // Explicitly fail-closed, and still no checker.
+        revocationFailure: 'closed',
+      });
+
+      const result = await validator.validate(
+        chain.serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('is inert without a checker in validateDelegation() too', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const delegation = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: '*' as Capability['can'],
+            with: 'ixo:oracle' as Capability['with'],
+          },
+        ],
+        expiration: Math.floor(Date.now() / 1000) + 3600,
+      });
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [],
+        revocationFailure: 'closed',
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(delegation),
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('rejects a revoked delegation in validateDelegation()', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const delegation = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: '*' as Capability['can'],
+            with: 'ixo:oracle' as Capability['with'],
+          },
+        ],
+        expiration: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const serialized = await serializeDelegation(delegation);
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [],
+        revocationChecker: new InMemoryRevocationStore([
+          delegation.cid.toString(),
+        ]),
+      });
+
+      const result = await validator.validateDelegation(serialized);
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOKED');
+    });
+
+    // -------------------------------------------------------------------------
+    // Padding resistance. A revocation check is only as good as the CID set it
+    // is given. If that set came from the RAW stapled proofs, an attacker could
+    // pad a token with cheap unverifiable decoys until the genuinely revoked
+    // delegation fell outside whatever window the checker looked at. These pin
+    // that the set comes from ucanto's VERIFIED authorization instead, which
+    // an attacker cannot inflate: a decoy that does not verify never enters it.
+    // -------------------------------------------------------------------------
+    it('cannot be padded: forged decoy proofs never enter the checked CID set', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const attacker = await keygen();
+      const victim = await keygen();
+
+      // A genuine grant the attacker really holds — this is the one that gets revoked.
+      const realGrant = await Client.delegate({
+        issuer: root.signer,
+        audience: attacker.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      // 40 forged proofs claiming to come from the victim (attacker signs them).
+      const decoyCids: string[] = [];
+      const decoys = [];
+      for (let i = 0; i < 40; i++) {
+        const decoy = await Client.delegate({
+          issuer: attacker.signer.withDID(victim.did),
+          audience: attacker.signer,
+          capabilities: [
+            { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+          ],
+          facts: [{ nonce: `decoy-${i}` }],
+        });
+        decoys.push(decoy);
+        decoyCids.push(decoy.cid.toString());
+      }
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [realGrant, ...decoys],
+      });
+      const serialized = await serializeInvocation(invocation);
+
+      const seen: string[][] = [];
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        revocationChecker: {
+          check: async (cids) => {
+            seen.push(cids);
+            return cids.includes(realGrant.cid.toString())
+              ? [realGrant.cid.toString()]
+              : [];
+          },
+        },
+      });
+
+      const result = await validator.validate(
+        serialized,
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      // The revoked grant is caught despite 40 decoys stapled alongside it.
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('REVOKED');
+
+      // The checker saw ONLY the verified chain — the decoys never diluted it.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toEqual([
+        realGrant.cid.toString(),
+        await getDelegationCid(serialized),
+      ]);
+      for (const decoyCid of decoyCids) {
+        expect(seen[0]).not.toContain(decoyCid);
+      }
+    });
+
+    it('never attributes a padded invocation to the forged victim', async () => {
+      const server = await keygen();
+      const root = await keygen();
+      const attacker = await keygen();
+      const victim = await keygen();
+
+      const realGrant = await Client.delegate({
+        issuer: root.signer,
+        audience: attacker.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+      const forged = await Client.delegate({
+        issuer: attacker.signer.withDID(victim.did),
+        audience: attacker.signer,
+        capabilities: [
+          { can: 'test/read' as const, with: 'ixo:resource:123' as const },
+        ],
+      });
+
+      const invocation = Client.invoke({
+        issuer: attacker.signer,
+        audience: ed25519.Verifier.parse(server.did),
+        capability: {
+          can: 'test/read' as const,
+          with: 'ixo:resource:123' as const,
+        },
+        proofs: [realGrant, forged],
+      });
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+      });
+      const result = await validator.validate(
+        await serializeInvocation(invocation),
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      // Authorized on the genuine grant only; the victim never appears.
+      expect(result.ok).toBe(true);
+      expect(result.proofChain).toEqual([root.did, attacker.did]);
+      expect(result.proofChain).not.toContain(victim.did);
+      expect(result.proofChainCids).not.toContain(forged.cid.toString());
+    });
+
+    it('accepts an unrevoked delegation in validateDelegation() and reports its cid', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const delegation = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: '*' as Capability['can'],
+            with: 'ixo:oracle' as Capability['with'],
+          },
+        ],
+        expiration: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const serialized = await serializeDelegation(delegation);
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [],
+        revocationChecker: new InMemoryRevocationStore(),
+      });
+
+      const result = await validator.validateDelegation(serialized);
+
+      expect(result.ok).toBe(true);
+      expect(result.proofChainCids).toEqual([delegation.cid.toString()]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // requireExpiration — a never-expiring token can only ever be neutralized by
+  // a revocation record that must then be kept forever, so production
+  // validators should refuse unbounded expiry.
+  // ---------------------------------------------------------------------------
+  describe('requireExpiration', () => {
+    it('rejects an invocation with unbounded expiry', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        requireExpiration: true,
+      });
+
+      const invocation = await createInvocation({
+        issuer: user.signer,
+        audience: server.did,
+        capability: {
+          can: 'test/read' as Capability['can'],
+          with: 'ixo:resource:123' as Capability['with'],
+        },
+        // no expiration => Infinity
+      });
+
+      const result = await validator.validate(
+        await serializeInvocation(invocation),
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('UNAUTHORIZED');
+      expect(result.error?.message).toContain('bounded expiry');
+    });
+
+    it('accepts an invocation with a bounded expiry', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: ['*'],
+        requireExpiration: true,
+      });
+
+      const invocation = await createInvocation({
+        issuer: user.signer,
+        audience: server.did,
+        capability: {
+          can: 'test/read' as Capability['can'],
+          with: 'ixo:resource:123' as Capability['with'],
+        },
+        expiration: Math.floor(Date.now() / 1000) + 300,
+      });
+
+      const result = await validator.validate(
+        await serializeInvocation(invocation),
+        TestRead,
+        'ixo:resource:123',
+      );
+
+      expect(result.ok).toBe(true);
+    });
+
+    it('rejects a delegation with unbounded expiry in validateDelegation()', async () => {
+      const server = await keygen();
+      const user = await keygen();
+
+      const validator = await createUCANValidator({
+        serverDid: server.did,
+        rootIssuers: [],
+        requireExpiration: true,
+      });
+
+      const delegation = await createDelegation({
+        issuer: user.signer,
+        audience: server.did,
+        capabilities: [
+          {
+            can: '*' as Capability['can'],
+            with: 'ixo:oracle' as Capability['with'],
+          },
+        ],
+      });
+
+      const result = await validator.validateDelegation(
+        await serializeDelegation(delegation),
+      );
+
+      expect(result.ok).toBe(false);
+      expect(result.error?.code).toBe('UNAUTHORIZED');
     });
   });
 });

@@ -78,6 +78,35 @@ export interface InvocationStore {
 }
 
 // =============================================================================
+// Revocation
+// =============================================================================
+
+/**
+ * Checker for UCAN revocation status (UCAN revocation spec semantics: a
+ * revocation targets the canonical CID of one exact delegation, is issued by
+ * an issuer in that delegation's proof chain, and is irreversible).
+ *
+ * The validator collects the canonical CIDs of the invocation and every
+ * delegation in the verified proof chain and checks them in ONE batched call,
+ * so implementations should accept arbitrary batches. Because revocations are
+ * irreversible, a "revoked" verdict may be cached forever; a "not revoked"
+ * verdict only briefly.
+ *
+ * Implementations can query the ixo-ucan-store worker (see
+ * `createUcanStoreRevocationChecker`), a local database, etc.
+ */
+export interface RevocationChecker {
+  /**
+   * Return the subset of `cids` that has been revoked (empty array = none).
+   * Throwing signals that revocation status could NOT be determined — the
+   * validator then applies its `revocationFailure` policy.
+   *
+   * @param cids - Canonical delegation/invocation CIDs (base32 CIDv1 strings)
+   */
+  check(cids: string[]): Promise<string[]>;
+}
+
+// =============================================================================
 // Validation
 // =============================================================================
 
