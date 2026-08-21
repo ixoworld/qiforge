@@ -16,13 +16,33 @@ import { ed25519 } from '@ucanto/principal';
 import { Delegation, UCAN } from '@ucanto/core';
 import { claim } from '@ucanto/validator';
 import { type capability } from '@ucanto/validator';
-import type { DIDKeyResolver, InvocationStore } from '../types.js';
+import type {
+  DIDKeyResolver,
+  InvocationStore,
+  RevocationChecker,
+} from '../types.js';
 import { InMemoryInvocationStore } from '../store/memory.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type CapabilityParser = ReturnType<typeof capability<any, any, any>>;
 
 type Verifier = ReturnType<typeof ed25519.Verifier.parse>;
+
+/**
+ * Canonical CID string of a proof-chain node.
+ *
+ * A node is normally a materialized Delegation (its block travelled inside the
+ * CAR), which carries `.cid`. It may instead be a bare CID Link when the block
+ * was not embedded — a Link is self-describing (it carries a multihash) and
+ * stringifies to the same canonical CID. Both identify a revocable delegation,
+ * so both are collected.
+ */
+function nodeCid(node: unknown): string | undefined {
+  if (typeof node !== 'object' || node === null) return undefined;
+  if ('cid' in node && node.cid) return String(node.cid);
+  if ('multihash' in node) return String(node);
+  return undefined;
+}
 
 /**
  * Options for creating a UCAN validator
@@ -58,6 +78,34 @@ export interface CreateValidatorOptions {
    * If not provided, an in-memory store is used
    */
   invocationStore?: InvocationStore;
+
+  /**
+   * Optional revocation checker. When provided, the canonical CIDs of the
+   * invocation and of every delegation in the cryptographically verified
+   * proof chain are checked in ONE batched call after chain verification;
+   * any revoked CID fails validation with code 'REVOKED'.
+   *
+   * If not provided, no revocation checking is performed (previous behavior).
+   */
+  revocationChecker?: RevocationChecker;
+
+  /**
+   * What to do when the revocation checker itself fails (network error,
+   * timeout, malformed response):
+   * - 'closed' (default): reject with code 'REVOCATION_CHECK_FAILED' —
+   *   an unverifiable revocation status is treated as unsafe.
+   * - 'open': allow the request through (availability over strictness).
+   */
+  revocationFailure?: 'open' | 'closed';
+
+  /**
+   * When true, reject tokens whose effective expiration is unbounded (no
+   * expiration anywhere in the chain). Off by default for backward
+   * compatibility, but recommended in production: a never-expiring token can
+   * only ever be neutralized by a revocation record that must then be kept
+   * forever.
+   */
+  requireExpiration?: boolean;
 }
 
 /**
@@ -93,6 +141,13 @@ export interface ValidateResult {
   proofChain?: string[];
 
   /**
+   * Canonical CIDs of the verified chain, parents first. For validate() the
+   * last entry is the invocation's own CID; for validateDelegation() it is
+   * the delegation's. These are the identifiers a revocation targets.
+   */
+  proofChainCids?: string[];
+
+  /**
    * Facts attached to the invocation (UCAN spec §3.2.4).
    * Verifiable claims and proofs of knowledge supporting the invocation.
    * Empty array if no facts were attached.
@@ -107,7 +162,9 @@ export interface ValidateResult {
       | 'UNAUTHORIZED'
       | 'REPLAY'
       | 'EXPIRED'
-      | 'CAVEAT_VIOLATION';
+      | 'CAVEAT_VIOLATION'
+      | 'REVOKED'
+      | 'REVOCATION_CHECK_FAILED';
     message: string;
   };
 }
@@ -350,6 +407,107 @@ export async function createUCANValidator(
       node = auth.proofs?.[0];
     }
     return chain;
+  }
+
+  /**
+   * Collect the canonical CIDs of every delegation in ucanto's VERIFIED
+   * authorization tree, parents first (so the last entry is the invocation's
+   * own CID).
+   *
+   * These are the identifiers a UCAN revocation targets, so — like
+   * verifiedProofChain — this MUST be derived from the Authorization ucanto
+   * returned, never from the invocation's raw stapled proofs: only the
+   * delegations ucanto actually walked and verified carry authority, and only
+   * those are worth checking. Unlike verifiedProofChain (which reports the
+   * linear issuer chain via proofs[0]) this visits EVERY branch, because a
+   * revocation anywhere in the authorizing set must be honoured.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's Authorization type is internal/union-heavy; we treat it structurally
+  function verifiedProofChainCids(authorization: any): string[] {
+    const cids: string[] = [];
+    const seen = new Set<string>();
+
+    const visit = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return;
+      const cid = nodeCid('delegation' in node ? node.delegation : node);
+      if (cid !== undefined) {
+        if (seen.has(cid)) return;
+        seen.add(cid);
+      }
+      if ('proofs' in node && Array.isArray(node.proofs)) {
+        for (const proof of node.proofs) visit(proof);
+      }
+      if (cid !== undefined) cids.push(cid);
+    };
+
+    visit(authorization);
+    return cids;
+  }
+
+  /**
+   * Collect the canonical CIDs of a delegation and its whole proof chain,
+   * parents first. Used by validateDelegation(), which verifies the chain
+   * itself rather than going through ucanto's claim().
+   */
+  function delegationChainCids(delegation: unknown): string[] {
+    const cids: string[] = [];
+    const seen = new Set<string>();
+
+    const visit = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return;
+      const cid = nodeCid(node);
+      if (cid !== undefined) {
+        if (seen.has(cid)) return;
+        seen.add(cid);
+      }
+      if ('proofs' in node && Array.isArray(node.proofs)) {
+        for (const proof of node.proofs) visit(proof);
+      }
+      if (cid !== undefined) cids.push(cid);
+    };
+
+    visit(delegation);
+    return cids;
+  }
+
+  /**
+   * Run the configured revocation checker over `cids` in ONE batched call.
+   * Returns a failing ValidateResult when any CID is revoked (or when the
+   * check itself failed and the policy is fail-closed), else null.
+   */
+  async function checkRevoked(cids: string[]): Promise<ValidateResult | null> {
+    const checker = options.revocationChecker;
+    if (!checker || cids.length === 0) return null;
+
+    let revoked: string[];
+    try {
+      revoked = await checker.check(cids);
+    } catch (err) {
+      // Revocation status is unknown. Fail closed by default: an unverifiable
+      // revocation status must not silently authorize a possibly-revoked token.
+      if (options.revocationFailure === 'open') return null;
+      const message = err instanceof Error ? err.message : 'unknown error';
+      return {
+        ok: false,
+        error: {
+          code: 'REVOCATION_CHECK_FAILED',
+          message: `Could not determine revocation status: ${message}`,
+        },
+      };
+    }
+
+    // Only trust verdicts about CIDs we actually asked about.
+    const hit = revoked.find((cid) => cids.includes(cid));
+    if (hit !== undefined) {
+      return {
+        ok: false,
+        error: {
+          code: 'REVOKED',
+          message: `Delegation ${hit} has been revoked`,
+        },
+      };
+    }
+    return null;
   }
 
   /**
@@ -601,6 +759,10 @@ export async function createUCANValidator(
             if (wildcard && issuer === structuralRoot) return true;
             return false;
           },
+          // ucanto's native per-proof-path revocation hook. Left permissive:
+          // revocation is checked ONCE against the whole verified chain after
+          // claim() (see checkRevoked), which batches all CIDs into a single
+          // checker call instead of one network round trip per candidate path.
           validateAuthorization: () => ({ ok: {} }),
         });
 
@@ -646,19 +808,40 @@ export async function createUCANValidator(
           }
         }
 
-        // 8. Success! Mark invocation as used for replay protection
-        if (invocationCid) {
-          await invocationStore.add(invocationCid);
-        }
-
-        // 9. Build proof chain and compute effective expiration.
+        // 8. Build proof chain and compute effective expiration.
         // proofChain MUST come from the VERIFIED authorization (see
         // verifiedProofChain) — never from the invocation's raw stapled proofs
         // — so a forged proof can never be reported as the row-owning root.
         const proofChain = verifiedProofChain(accessResult.ok);
+        const proofChainCids = verifiedProofChainCids(accessResult.ok);
         const expiration = computeEffectiveExpiration(invocation);
 
-        // 10. Extract facts from the invocation
+        // 9. Optional policy: refuse tokens that never expire. Such a token can
+        // only ever be neutralized by a revocation record kept forever.
+        if (options.requireExpiration === true && expiration === undefined) {
+          return {
+            ok: false,
+            error: {
+              code: 'UNAUTHORIZED',
+              message:
+                'Invocation has no expiration; this validator requires a bounded expiry',
+            },
+          };
+        }
+
+        // 10. Revocation: check the invocation and every VERIFIED delegation in
+        // its proof chain in one batched call. This runs BEFORE the replay
+        // marker is written, so a revoked (or unverifiable) token does not burn
+        // the invocation's single-use slot.
+        const revocation = await checkRevoked(proofChainCids);
+        if (revocation) return revocation;
+
+        // 11. Success! Mark invocation as used for replay protection
+        if (invocationCid) {
+          await invocationStore.add(invocationCid);
+        }
+
+        // 12. Extract facts from the invocation
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- invocation type from Delegation.extract() is complex
         const facts = (invocation as any).facts as
           | Record<string, unknown>[]
@@ -676,6 +859,7 @@ export async function createUCANValidator(
             : undefined,
           expiration,
           proofChain,
+          proofChainCids,
           facts: facts && facts.length > 0 ? facts : undefined,
         };
       } catch (err) {
@@ -745,13 +929,30 @@ export async function createUCANValidator(
           }
         }
 
+        if (options.requireExpiration === true && expiration === undefined) {
+          return {
+            ok: false,
+            error: {
+              code: 'UNAUTHORIZED',
+              message:
+                'Delegation has no expiration; this validator requires a bounded expiry',
+            },
+          };
+        }
+
         // 6. Verify signatures across the entire delegation chain
         const sigResult = await verifyDelegationChain(delegation);
         if (!sigResult.ok) {
           return sigResult;
         }
 
-        // 7. Success — return delegation details
+        // 7. Revocation: check this delegation and its whole (now verified)
+        // proof chain in one batched call.
+        const proofChainCids = delegationChainCids(delegation);
+        const revocation = await checkRevoked(proofChainCids);
+        if (revocation) return revocation;
+
+        // 8. Success — return delegation details
         const proofChain = buildProofChain(delegation);
         const cap = delegation.capabilities?.[0];
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- delegation type from Delegation.extract() is complex
@@ -771,6 +972,7 @@ export async function createUCANValidator(
             : undefined,
           expiration,
           proofChain,
+          proofChainCids,
           facts: facts && facts.length > 0 ? facts : undefined,
         };
       } catch (err) {
