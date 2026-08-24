@@ -1,5 +1,11 @@
 # @ixo/sqlite-saver
 
+## 1.2.1
+
+### Patch Changes
+
+- `put()` assigns an id (via `_updateId`, so it survives serialization) to any message that arrives without one instead of aborting the whole checkpoint write on the `messages.message_id` NOT NULL constraint. Re-puts of the same message after a reload update the same row.
+
 ## 1.2.0
 
 ### Minor Changes

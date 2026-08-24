@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Logger } from '@ixo/logger';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
@@ -872,6 +873,20 @@ ON writes(thread_id, checkpoint_id, channel);
     }
 
     const { checkpoint, messages } = removeMessagesFromCheckpoint(_checkpoint);
+
+    // LangGraph's message reducer assigns ids to what it appends, but callers
+    // that hand `put()` raw messages (direct saver use, replays, tests) may
+    // not. The messages table keys rows by id, so an id-less message would
+    // abort the whole checkpoint write. Assign one here, on the shared object.
+    // Use _updateId to set both id and lc_kwargs.id so the id survives
+    // serialization round-trips (getTuple, listThreadMessages reload from the
+    // serialized BLOB), and every later put of the same message updates the
+    // same row.
+    for (const message of messages ?? []) {
+      if (!message.id && !message.lc_kwargs?.id) {
+        message._updateId(randomUUID());
+      }
+    }
 
     const [[type1, serializedCheckpoint], [type2, serializedMetadata]] =
       await Promise.all([

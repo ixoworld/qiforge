@@ -1,32 +1,28 @@
-import { MatrixManager } from '@ixo/matrix';
-import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
-import {
-  Injectable,
-  Logger,
-  NotFoundException,
-  OnModuleInit,
-} from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { createHash } from 'crypto';
 
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { hours } from '@nestjs/throttler';
 import fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
 import { createGunzip, createGzip } from 'node:zlib';
 
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import path from 'path';
 import {
-  deleteMediaFromRoom,
+  CheckpointIntegrityError,
+  type CheckpointBackupStore,
+  type CheckpointDownloadResult,
+  type CheckpointStoreKind,
+  type CheckpointUploadResult,
+} from './checkpoint-backup-store.js';
+import { MatrixCheckpointStore } from './matrix-checkpoint-store.js';
+import {
   fetchMediaUploadSizeLimit,
-  getMediaFromRoom,
-  getMediaFromRoomByStorageKey,
-  GetMediaFromRoomByStorageKeyResult,
-  MatrixMediaEvent,
-  uploadMediaToRoom,
+  type MatrixMediaEvent,
 } from './matrix-upload-utils.js';
 import { type BaseSyncArgs } from './type.js';
 import { getBaseEnvConfig as getConfig } from '../../config/base-env-config.js';
@@ -35,6 +31,13 @@ import {
   snapshotSqliteFile,
 } from './sqlite-compaction.js';
 import { DEFAULT_MEDIA_UPLOAD_SIZE_LIMIT } from './media-config.js';
+import {
+  VfsCheckpointStore,
+  VFS_UPLOAD_SIZE_LIMIT_BYTES,
+} from './vfs-checkpoint-store.js';
+import { resolveVfsWorkerUrls } from '../../plugins/vfs/vfs-network.js';
+import { VfsAuthError, VfsHttpError } from '../../plugins/vfs/vfs-errors.js';
+import type { UcanService } from '../../modules/ucan/ucan.service.js';
 
 /**
  * Returns true if the error is permanent (data genuinely unrecoverable),
@@ -67,6 +70,17 @@ function isUnrecoverableDownloadError(error: unknown): boolean {
 
   return [...cryptoPatterns, ...matrixPatterns].some((p) => p.test(message));
 }
+
+/**
+ * How long after the VFS store is attached "not ready" still means *pending*
+ * rather than *absent*. The oracle's UCAN signing key is loaded from its
+ * Matrix account room seconds after Matrix init, which itself runs in the
+ * background while HTTP is already listening — so a request can arrive
+ * before the key lands. Inside this window a restore that needs VFS waits
+ * (transient error, the user retries); past it, the oracle simply has no
+ * signing key and VFS is skipped so Matrix-backed users still restore.
+ */
+const VFS_READINESS_GRACE_MS = 5 * 60_000;
 
 const config = getConfig();
 
@@ -163,6 +177,101 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   /** Prevents overlapping cron executions from interleaving I/O on the same files */
   private cronRunning = false;
 
+  private readonly matrixStore = new MatrixCheckpointStore((key) =>
+    this.cachedMediaEvent(key),
+  );
+
+  private vfsStore: VfsCheckpointStore | undefined;
+
+  /**
+   * The attached UcanService (narrowed to the one method readiness needs),
+   * kept so readiness (`vfsReady`) can be re-checked at USE time rather than
+   * once at attach time — the signing mnemonic lands well after boot
+   * (post-Matrix-init), so `vfsStore` must be built unconditionally and
+   * gated per-call instead. Narrowed (rather than `UcanService`) so the
+   * test-only `attachBackupStoresForTests` setter can supply a plain object
+   * without a cast — `UcanService`'s private fields make it otherwise
+   * unconstructible outside the class.
+   */
+  private ucan: Pick<UcanService, 'hasSigningKey'> | undefined;
+
+  /** When the VFS store was attached — the clock `vfsPending()` measures. */
+  private vfsAttachedAt = 0;
+
+  /** Which store holds a storage key's backup, plus the VFS file id once cut over. */
+  private readonly backupLocation = new Map<
+    string,
+    { store: CheckpointStoreKind; vfsFileId?: string }
+  >();
+
+  /**
+   * Enables VFS backups. Called by the Nest module factory: the service is a
+   * singleton, so the DI-provided UcanService is attached rather than
+   * injected. Builds `vfsStore` unconditionally — the oracle's UCAN signing
+   * mnemonic is only set later (after Matrix init completes), so gating
+   * construction on `hasSigningKey()` here would leave `vfsStore` permanently
+   * `undefined`. Readiness is instead checked per-call via `vfsReady()`;
+   * `available()` (backed by `getServiceDelegation` →
+   * `mintSelfSignedInvocation`) already returns `false` without a signing
+   * key, so no cutover can happen before the key lands.
+   */
+  attachUcanService(
+    ucan: UcanService,
+    opts: { fetchImpl?: typeof fetch } = {},
+  ): void {
+    if (!ucan) {
+      Logger.warn(
+        'VFS checkpoint backups disabled — no UcanService was provided',
+      );
+      return;
+    }
+    this.ucan = ucan;
+    this.vfsAttachedAt = Date.now();
+    this.vfsStore = new VfsCheckpointStore({
+      minter: ucan,
+      urls: resolveVfsWorkerUrls(config.get('NETWORK')),
+      oracleEntityDid: config.getOrThrow('ORACLE_ENTITY_DID'),
+      knownFileId: (storageKey) =>
+        this.backupLocation.get(storageKey)?.vfsFileId,
+      fetchImpl: opts.fetchImpl,
+    });
+  }
+
+  /** Whether the oracle's UCAN signing key has landed yet (set post-Matrix-init). */
+  private vfsReady(): boolean {
+    return this.ucan?.hasSigningKey() === true;
+  }
+
+  /**
+   * A VFS store is attached but its signing key hasn't landed *yet* — the
+   * boot window, where "not ready" is a wait, not an answer. Callers that
+   * would otherwise conclude "no backup" must fail transiently instead.
+   */
+  private vfsPending(): boolean {
+    return (
+      !!this.vfsStore &&
+      !this.vfsReady() &&
+      Date.now() - this.vfsAttachedAt < VFS_READINESS_GRACE_MS
+    );
+  }
+
+  /**
+   * Test-only seam: sets the VFS backup store directly. `attachUcanService`
+   * needs a live `UcanService` instance (a class with private fields backed
+   * by several NestJS-injected dependencies), which a unit test cannot
+   * construct without a cast — this bypasses that requirement.
+   * `ready` (default `true`) backs `vfsReady()`, simulating whether the
+   * oracle's signing key has landed yet.
+   */
+  attachBackupStoresForTests(stores: {
+    vfs: VfsCheckpointStore;
+    ready?: boolean;
+  }): void {
+    this.vfsStore = stores.vfs;
+    this.vfsAttachedAt = Date.now();
+    this.ucan = { hasSigningKey: () => stores.ready ?? true };
+  }
+
   public markUserActive(userDid: string): void {
     const count = this.activeUsers.get(userDid) ?? 0;
     this.activeUsers.set(userDid, count + 1);
@@ -229,14 +338,56 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       // Column already exists, ignore
     }
 
-    // Populate in-memory checksum cache from DB
+    // Backward-compatible migration: which store holds a storage key's
+    // backup, plus the VFS file id / cid once cut over. Same pattern as
+    // content_checksum above — each ALTER in its own try/catch.
+    try {
+      this.fileEventsDatabase
+        .prepare(
+          "ALTER TABLE file_events ADD COLUMN store TEXT DEFAULT 'matrix'",
+        )
+        .run();
+    } catch {
+      // Column already exists, ignore
+    }
+    try {
+      this.fileEventsDatabase
+        .prepare('ALTER TABLE file_events ADD COLUMN vfs_file_id TEXT')
+        .run();
+    } catch {
+      // Column already exists, ignore
+    }
+    try {
+      this.fileEventsDatabase
+        .prepare('ALTER TABLE file_events ADD COLUMN vfs_cid TEXT')
+        .run();
+    } catch {
+      // Column already exists, ignore
+    }
+
+    // Populate in-memory checksum + backup-location caches from DB
     const rows = this.fileEventsDatabase
-      .prepare(
-        'SELECT storage_key, content_checksum FROM file_events WHERE content_checksum IS NOT NULL',
+      .prepare<
+        [],
+        {
+          storage_key: string;
+          content_checksum: string | null;
+          store: string | null;
+          vfs_file_id: string | null;
+        }
+      >(
+        'SELECT storage_key, content_checksum, store, vfs_file_id FROM file_events',
       )
-      .all() as Array<{ storage_key: string; content_checksum: string }>;
+      .all();
     for (const row of rows) {
-      this.lastUploadedChecksum.set(row.storage_key, row.content_checksum);
+      if (row.content_checksum) {
+        this.lastUploadedChecksum.set(row.storage_key, row.content_checksum);
+      }
+      // `store` is NULL on rows written before this migration — treat as 'matrix'.
+      this.backupLocation.set(row.storage_key, {
+        store: row.store === 'vfs' ? 'vfs' : 'matrix',
+        vfsFileId: row.vfs_file_id ?? undefined,
+      });
     }
 
     // Seed filePathCache from disk so the upload cron can find checkpoint
@@ -419,7 +570,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       );
       await this.clearLocalCheckpoint(userDid, dbPath);
       try {
-        await this.deleteUserStorageFromMatrix(userDid);
+        await this.deleteUserBackup(userDid);
         Logger.warn(
           `Deleted corrupt Matrix backup for user ${userDid}. Corruption loop broken.`,
         );
@@ -540,6 +691,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     for (const suffix of [
       '',
       '.tmp',
+      '.raw.tmp',
       '.gz.tmp',
       '.snapshot.tmp',
       '-wal',
@@ -746,7 +898,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return existingDownload;
     }
 
-    const downloadPromise = this._syncLocalStorageFromMatrixStorage(userDid);
+    const downloadPromise = this._syncLocalStorageFromBackup(userDid);
     this.downloadInProgress.set(userDid, downloadPromise);
 
     try {
@@ -756,9 +908,34 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
   }
 
-  private async _syncLocalStorageFromMatrixStorage(
-    userDid: string,
-  ): Promise<void> {
+  /**
+   * Cached Matrix media event for a storage key, read from `file_events` so
+   * a re-download can skip the room lookup entirely. Returns `undefined` on
+   * any read failure (corrupt/locked file_events.db, no cached row, or a
+   * cached payload that fails to parse) — callers fall back to a full room
+   * lookup either way.
+   */
+  private cachedMediaEvent(storageKey: string): MatrixMediaEvent | undefined {
+    try {
+      const cachedEventText = this.fileEventsDatabase
+        .prepare<
+          [string],
+          { event: string }
+        >('SELECT event FROM file_events WHERE storage_key = ?')
+        .get(storageKey);
+      return cachedEventText
+        ? (JSON.parse(cachedEventText.event) as MatrixMediaEvent)
+        : undefined;
+    } catch (cacheError) {
+      // file_events.db corrupt or locked — skip cache, fall through to direct Matrix lookup
+      Logger.warn(
+        `Failed to read cached event for storageKey ${storageKey}, falling through to Matrix lookup: ${cacheError instanceof Error ? cacheError.message : String(cacheError)}`,
+      );
+      return undefined;
+    }
+  }
+
+  private async _syncLocalStorageFromBackup(userDid: string): Promise<void> {
     const storageKey =
       UserMatrixSqliteSyncService.createUserStorageKey(userDid);
     const checkpointPath =
@@ -800,61 +977,86 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
 
     Logger.debug(
-      `Checkpoint file not found locally for user ${userDid}, attempting to download from Matrix`,
+      `Checkpoint file not found locally for user ${userDid}, attempting to download from backup`,
     );
 
-    let userDB: GetMediaFromRoomByStorageKeyResult | null = null;
-
-    // Step 1: Try cached event lookup (local SQLite — independent concern)
-    let cachedEvent: MatrixMediaEvent | undefined;
+    // Store selection follows `file_events.store`, as three explicit
+    // branches (not a candidate loop): a 'vfs' row tries VFS only and any
+    // VFS error propagates as transient — a vfs-row user must NEVER
+    // silently fall through to "no backup found" (that would create an
+    // empty DB and the next cron tick would overwrite the real backup). A
+    // 'matrix' row tries Matrix only, unchanged. No row (fresh
+    // file_events.db) probes VFS first (the newer copy may live there) —
+    // but a probe failure must not block a perfectly good Matrix restore,
+    // since the row doesn't pin a store yet, so it's caught and only
+    // warned before falling through to Matrix. Skipping that probe is only
+    // safe once the signing key is known to be absent rather than pending
+    // (`vfsPending`), which is what makes the fresh-pod case safe.
+    const location = this.backupLocation.get(storageKey);
+    let download: CheckpointDownloadResult | null = null;
+    let source: CheckpointBackupStore | undefined;
     try {
-      const cachedEventText = this.fileEventsDatabase
-        .prepare('SELECT event FROM file_events WHERE storage_key = ?')
-        .get(storageKey) as { event: string } | undefined;
-      cachedEvent = cachedEventText
-        ? (JSON.parse(cachedEventText.event) as MatrixMediaEvent)
-        : undefined;
-    } catch (cacheError) {
-      // file_events.db corrupt or locked — skip cache, fall through to direct Matrix lookup
-      Logger.warn(
-        `Failed to read cached event for user ${userDid}, falling through to Matrix lookup: ${cacheError instanceof Error ? cacheError.message : String(cacheError)}`,
-      );
-    }
-
-    // Step 2: Download from Matrix
-    try {
-      if (cachedEvent) {
-        const result = await getMediaFromRoom(
-          undefined,
-          undefined,
-          cachedEvent,
-        );
-        userDB = {
-          ...result,
-          contentInfo: {
-            ...result.contentInfo,
-            storageKey,
-          },
-        };
-      } else {
-        const mxManager = MatrixManager.getInstance();
-        const userHomeServer = await getMatrixHomeServerCroppedForDid(userDid);
-        const { roomId } = await mxManager.getOracleRoomIdWithHomeServer({
-          userDid,
-          oracleEntityDid: config.getOrThrow('ORACLE_ENTITY_DID'),
-          userHomeServer,
-        });
-
-        if (!roomId) {
-          throw new NotFoundException('Room not found or Invalid Session Id');
+      if (location?.store === 'vfs') {
+        if (!this.vfsStore || !this.vfsReady()) {
+          throw new Error(
+            'VFS backup store not ready — cannot restore checkpoint yet',
+          );
         }
-
-        Logger.debug(
-          `Downloading checkpoint from Matrix room ${roomId} for user ${userDid}`,
-        );
-        userDB = await getMediaFromRoomByStorageKey(roomId, storageKey);
+        download = await this.vfsStore.download({ userDid, storageKey });
+        if (download) source = this.vfsStore;
+      } else if (location?.store === 'matrix') {
+        download = await this.matrixStore.download({ userDid, storageKey });
+        if (download) source = this.matrixStore;
+      } else {
+        if (this.vfsStore && this.vfsReady()) {
+          try {
+            download = await this.vfsStore.download({ userDid, storageKey });
+            if (download) source = this.vfsStore;
+          } catch (error) {
+            // Expected for every user who hasn't deposited a delegation —
+            // the overwhelming majority today — so it's debug, not a warn.
+            if (
+              error instanceof VfsAuthError &&
+              error.kind === 'no-delegation'
+            ) {
+              Logger.debug(
+                `No VFS delegation for user ${userDid}, restoring from Matrix`,
+              );
+            } else {
+              Logger.warn(
+                `VFS probe failed for user ${userDid}, falling back to Matrix: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        } else if (this.vfsPending()) {
+          // The key is still landing. Probing Matrix now and finding nothing
+          // (a cut-over user's Matrix copy is redacted) would look like "no
+          // backup" and start a fresh DB that the next cron tick pushes over
+          // the real one. Fail transiently — the retry lands after the key.
+          throw new Error('VFS backup store not ready — retry shortly');
+        } else if (this.vfsStore) {
+          Logger.error(
+            `VFS backup store has had no UCAN signing key for over ${VFS_READINESS_GRACE_MS / 60_000} minutes — restoring user ${userDid} from Matrix only. Check that the oracle's signing mnemonic loaded from its Matrix account room.`,
+          );
+        }
+        if (!download) {
+          download = await this.matrixStore.download({ userDid, storageKey });
+          if (download) source = this.matrixStore;
+        }
       }
     } catch (error) {
+      // VFS has a typed error contract (VfsHttpError / VfsAuthError), and an
+      // integrity failure is typed too — none of them need the Matrix/crypto
+      // message-regex heuristic below, which would otherwise misclassify an
+      // operational VFS error (a worker message that happens to contain
+      // "hash") or a sha256 mismatch as "safe to start fresh".
+      if (
+        error instanceof VfsHttpError ||
+        error instanceof VfsAuthError ||
+        error instanceof CheckpointIntegrityError
+      ) {
+        throw error;
+      }
       if (isUnrecoverableDownloadError(error)) {
         // Permanent failure — data genuinely unrecoverable, safe to start fresh
         Logger.warn(
@@ -864,74 +1066,114 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       }
       // Transient/unknown error — let it propagate so the request fails with 500
       // and the user retries later. This prevents creating an empty DB that would
-      // overwrite the good Matrix backup on the next upload cron cycle.
+      // overwrite the good backup on the next upload cron cycle (and means a
+      // revoked VFS delegation, or a not-yet-ready VFS store for a vfs-row
+      // user, never triggers a fresh-DB overwrite either).
       throw error;
     }
 
-    if (!userDB) {
+    if (!download || !source) {
       Logger.debug(
-        `No checkpoint found in Matrix for user ${userDid} with storageKey ${storageKey}, this is expected for new users`,
+        `No checkpoint found in any backup store for user ${userDid} with storageKey ${storageKey}, this is expected for new users`,
       );
       return;
     }
 
-    // Decompress the checkpoint. Streamed to a temp file so the only full
-    // buffer in memory is the (much smaller) downloaded gzip payload — the
-    // decompressed DB can run to hundreds of MB and used to be held in heap
-    // here in its entirety.
+    Logger.log(
+      `Checkpoint for user ${userDid} found in ${source.kind === 'vfs' ? 'VFS' : 'Matrix'}`,
+    );
+
+    // Decompress the checkpoint. Streamed end-to-end so the only bytes ever
+    // buffered in heap are individual chunks — the decompressed DB can run
+    // to hundreds of MB and used to be held in memory here in its entirety.
     const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
     const tmpPath = checkpointPath + '.tmp';
+    const rawTmpPath = checkpointPath + '.raw.tmp';
     try {
       try {
+        // Tee the raw download stream through a hasher while writing it to
+        // disk, so the store-reported content hash (currently only VFS sends
+        // one) can be verified without a second read of the file.
+        const downloadHasher = createHash('sha256');
+        const hashingTee = new Transform({
+          transform(chunk, _encoding, callback) {
+            downloadHasher.update(chunk);
+            callback(null, chunk);
+          },
+        });
         await pipeline(
-          Readable.from(userDB.mediaBuffer),
-          createGunzip(),
-          fsSync.createWriteStream(tmpPath),
+          download.stream,
+          hashingTee,
+          fsSync.createWriteStream(rawTmpPath),
         );
-      } catch (_error) {
-        // Decompression failed — check if the raw buffer is a valid uncompressed SQLite file
-        if (
-          userDB.mediaBuffer.length >= 16 &&
-          userDB.mediaBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
-        ) {
-          Logger.warn(
-            `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
+        const { size: rawSize } = await fs.stat(rawTmpPath);
+
+        if (download.contentHash) {
+          const computedHash = downloadHasher.digest('hex');
+          if (computedHash !== download.contentHash) {
+            // Transient, never "no backup": the bytes broke in flight but the
+            // store's copy is intact and re-fetchable, so the next request
+            // retries. Returning here would create a fresh empty DB that the
+            // next upload cycle writes over the good backup.
+            await removeIfExists(tmpPath);
+            await removeIfExists(rawTmpPath);
+            throw new CheckpointIntegrityError(
+              `Downloaded checkpoint for user ${userDid} from ${source.kind} failed hash verification (expected ${download.contentHash}, computed ${computedHash})`,
+            );
+          }
+        }
+
+        try {
+          await pipeline(
+            fsSync.createReadStream(rawTmpPath),
+            createGunzip(),
+            fsSync.createWriteStream(tmpPath),
           );
-          await fs.writeFile(tmpPath, userDB.mediaBuffer);
-        } else {
+        } catch (_error) {
+          // Decompression failed — check if the raw payload is a valid uncompressed SQLite file
+          const rawHeader = await readFileHeader(rawTmpPath, 16);
+          if (rawHeader.length >= 16 && rawHeader.equals(SQLITE_MAGIC)) {
+            Logger.warn(
+              `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
+            );
+            await fs.rename(rawTmpPath, tmpPath);
+          } else {
+            Logger.error(
+              `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${rawHeader.toString('hex')}`,
+            );
+            await removeIfExists(tmpPath);
+            return;
+          }
+        }
+
+        // Validate the on-disk result is a valid SQLite file
+        const header = await readFileHeader(tmpPath, 16);
+        if (header.length < 16 || !header.equals(SQLITE_MAGIC)) {
           Logger.error(
-            `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${userDB.mediaBuffer.subarray(0, 16).toString('hex')}`,
+            `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${header.toString('hex')}`,
           );
           await removeIfExists(tmpPath);
           return;
         }
-      }
 
-      // Validate the on-disk result is a valid SQLite file
-      const header = await readFileHeader(tmpPath, 16);
-      if (header.length < 16 || !header.equals(SQLITE_MAGIC)) {
-        Logger.error(
-          `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${header.toString('hex')}`,
+        const { size: decompressedSize } = await fs.stat(tmpPath);
+        Logger.log(
+          `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(rawSize)} -> ${bytesToHumanReadable(decompressedSize)}`,
         );
+
+        Logger.debug(
+          `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
+        );
+
+        // Atomic publish: rename is atomic on POSIX
+        await fs.rename(tmpPath, checkpointPath);
+      } catch (error) {
+        // Clean up orphaned temp file on failure
         await removeIfExists(tmpPath);
-        return;
+        throw error;
       }
-
-      const { size: decompressedSize } = await fs.stat(tmpPath);
-      Logger.log(
-        `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(userDB.mediaBuffer.length)} -> ${bytesToHumanReadable(decompressedSize)}`,
-      );
-
-      Logger.debug(
-        `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
-      );
-
-      // Atomic publish: rename is atomic on POSIX
-      await fs.rename(tmpPath, checkpointPath);
-    } catch (error) {
-      // Clean up orphaned temp file on failure
-      await removeIfExists(tmpPath);
-      throw error;
+    } finally {
+      await removeIfExists(rawTmpPath);
     }
 
     // Update cache AFTER file is successfully written to disk
@@ -944,6 +1186,39 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       `Successfully saved checkpoint for user ${userDid} at ${checkpointPath}`,
     );
     return;
+  }
+
+  /**
+   * VFS once a user is cut over (never back), VFS for new cutovers when the
+   * feature is on, the oracle's signing key has landed (`vfsReady()`), and
+   * the user's delegation exists, Matrix otherwise.
+   *
+   * Returns the sentinel `'skip-no-vfs-store'` — rather than silently
+   * falling back to Matrix — when a user already cut over to VFS but this
+   * process has no VFS store attached, or the store exists but the signing
+   * key hasn't landed yet (a normal window right after boot, before Matrix
+   * init completes). A `'vfs'`-store user must never fall back to Matrix.
+   */
+  private async resolveUploadStore(
+    userDid: string,
+    storageKey: string,
+  ): Promise<CheckpointBackupStore | 'skip-no-vfs-store'> {
+    const location = this.backupLocation.get(storageKey);
+    if (location?.store === 'vfs') {
+      if (!this.vfsStore || !this.vfsReady()) {
+        return 'skip-no-vfs-store';
+      }
+      return this.vfsStore;
+    }
+    if (
+      this.vfsStore &&
+      this.vfsReady() &&
+      config.get('CHECKPOINT_VFS_BACKUP_ENABLED') &&
+      (await this.vfsStore.available(userDid))
+    ) {
+      return this.vfsStore;
+    }
+    return this.matrixStore;
   }
 
   /**
@@ -1046,17 +1321,38 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return 'skipped';
     }
 
+    // Resolved before the snapshot/gzip work below so the size guard can use
+    // the RESOLVED store's own cap (VFS: a fixed 5 GiB; Matrix: the
+    // homeserver's discovered `m.upload.size`) instead of always the Matrix
+    // limit — a VFS cutover user must not be capped at the Matrix media
+    // size just because the guard ran before store selection existed.
+    const resolvedStore = await this.resolveUploadStore(userDid, storageKey);
+    if (resolvedStore === 'skip-no-vfs-store') {
+      Logger.error(
+        `VFS backup store not ready for user ${userDid} (no signing key yet) — backup skipped, never falling back to Matrix`,
+      );
+      return 'skipped';
+    }
+    const store = resolvedStore;
+    const previousLocation = this.backupLocation.get(storageKey);
+
     // Snapshot via VACUUM INTO: transactionally consistent even if a request
     // starts writing mid-upload, and free of dead freelist pages. Then gzip
     // the snapshot streaming to disk so only the (much smaller) compressed
     // payload is ever buffered in heap. The size guard runs against the
-    // on-disk gzip output (fs.stat) BEFORE the buffer is read into memory,
-    // so an oversized file never gets its compressed bytes allocated in heap
-    // at all — the `finally` still removes both temp files on every exit,
-    // including the early `return` below.
+    // on-disk gzip output (fs.stat) — an oversized file never gets uploaded
+    // at all. The snapshot temp is always removed below; the gzip temp is
+    // removed here too unless the size guard clears, in which case cleanup
+    // duty hands off to the upload's own `finally` further down — either
+    // way it's removed exactly once, on every exit path.
     const snapshotPath = checkpointPath + '.snapshot.tmp';
     const gzTmpPath = checkpointPath + '.gz.tmp';
-    let compressedCheckpoint: Buffer;
+    let compressedSize: number;
+    // Set once the size guard clears and gzTmpPath's cleanup duty is handed
+    // off to the upload's own `finally` below — every other exit from this
+    // try (the oversized early `return` or a thrown error) still owns
+    // cleaning up gzTmpPath itself, so it's removed exactly once either way.
+    let handOffGzTmpToUpload = false;
     try {
       await removeIfExists(snapshotPath);
       snapshotSqliteFile(checkpointPath, snapshotPath);
@@ -1067,63 +1363,80 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
         fsSync.createWriteStream(gzTmpPath),
       );
 
-      const { size: compressedSize } = await fs.stat(gzTmpPath);
+      compressedSize = (await fs.stat(gzTmpPath)).size;
       const { size: originalSize } = await fs.stat(checkpointPath);
       Logger.log(
         `Checkpoint for user ${userDid}: ${bytesToHumanReadable(originalSize)} on disk, ${bytesToHumanReadable(snapshotSize)} live -> ${bytesToHumanReadable(compressedSize)} compressed`,
       );
 
-      const uploadSizeLimit = await this.getUploadSizeLimit();
+      const uploadSizeLimit =
+        store.kind === 'vfs'
+          ? VFS_UPLOAD_SIZE_LIMIT_BYTES
+          : await this.getUploadSizeLimit();
       if (compressedSize > uploadSizeLimit) {
         this.oversizedChecksum.set(storageKey, currentChecksum);
         Logger.error(
-          `Checkpoint for user ${userDid} exceeds the homeserver upload limit (${bytesToHumanReadable(compressedSize)} > ${bytesToHumanReadable(uploadSizeLimit)}) — backup skipped, local file keeps serving. Investigate why this user's live state is so large.`,
+          `Checkpoint for user ${userDid} exceeds the ${store.kind === 'vfs' ? 'VFS' : 'homeserver'} upload limit (${bytesToHumanReadable(compressedSize)} > ${bytesToHumanReadable(uploadSizeLimit)}) — backup skipped, local file keeps serving. Investigate why this user's live state is so large.`,
         );
         return 'skipped';
       }
 
-      compressedCheckpoint = await fs.readFile(gzTmpPath);
+      handOffGzTmpToUpload = true;
     } finally {
       await removeIfExists(snapshotPath);
+      if (!handOffGzTmpToUpload) {
+        await removeIfExists(gzTmpPath);
+      }
+    }
+
+    let uploaded: CheckpointUploadResult;
+    try {
+      uploaded = await store.upload({
+        userDid,
+        storageKey,
+        openStream: () => fsSync.createReadStream(gzTmpPath),
+        sizeBytes: compressedSize,
+      });
+    } catch (error) {
+      // A VFS failure is a skipped cycle, never a silent fall-back to
+      // Matrix — the existing Matrix path (below) keeps its prior
+      // behaviour of letting the error propagate to the caller.
+      if (store.kind === 'vfs') {
+        Logger.error(
+          `VFS checkpoint upload failed for user ${userDid} — skipping this cycle (a VFS-store user never falls back to Matrix): ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return 'skipped';
+      }
+      throw error;
+    } finally {
       await removeIfExists(gzTmpPath);
     }
-
-    const mxManager = MatrixManager.getInstance();
-    const userHomeServer = await getMatrixHomeServerCroppedForDid(userDid);
-    const { roomId } = await mxManager.getOracleRoomIdWithHomeServer({
-      userDid,
-      oracleEntityDid: config.getOrThrow('ORACLE_ENTITY_DID'),
-      userHomeServer,
-    });
-
-    if (!roomId) {
-      throw new NotFoundException('Room not found or Invalid Session Id');
-    }
-
-    Logger.debug(
-      `Uploading compressed checkpoint to Matrix room ${roomId} for user ${userDid}`,
-    );
-    const event = await uploadMediaToRoom(
-      roomId,
-      {
-        bytes: compressedCheckpoint,
-        filename: `${storageKey}.db.gz`,
-        // Matches the mimetype historically written on checkpoint media
-        // events (it was hardcoded upload-side before the payload carried it).
-        mimetype: 'application/x-sqlite3',
-      },
-      storageKey,
-    );
     await this.saveFileEventToDB({
-      eventId: event.eventId,
-      storageKey: event.storageKey,
-      event: event.event,
+      eventId: uploaded.pointer,
+      storageKey,
+      event: uploaded.event,
       contentChecksum: currentChecksum,
+      store: store.kind,
+      vfsFileId: store.kind === 'vfs' ? uploaded.pointer : undefined,
+      vfsCid: uploaded.cid,
     });
     this.oversizedChecksum.delete(storageKey);
 
+    if (store.kind === 'vfs' && previousLocation?.store !== 'vfs') {
+      Logger.log(
+        `Checkpoint backup for user ${userDid} moved to VFS (${bytesToHumanReadable(compressedSize)}${uploaded.cid ? `, cid ${uploaded.cid}` : ''}); redacting Matrix copy`,
+      );
+      try {
+        await this.matrixStore.delete({ userDid, storageKey });
+      } catch (error) {
+        Logger.warn(
+          `Could not redact the Matrix checkpoint copy for user ${userDid}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     Logger.log(
-      `Successfully uploaded checkpoint to Matrix for user ${userDid}`,
+      `Successfully uploaded checkpoint to ${store.kind === 'vfs' ? 'VFS' : 'Matrix'} for user ${userDid}`,
     );
     return 'uploaded';
   }
@@ -1165,38 +1478,44 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   }
 
   /**
-   * Deletes user storage from Matrix and cleans up local cache
+   * Deletes user storage from whichever store `file_events` names for this
+   * key (VFS or Matrix) and cleans up local cache.
    * @param userDid The user DID
    * @param storageKey Optional storage key. If not provided, uses the default user storage key
    * @returns True if deletion was successful, false if not found
    */
-  async deleteUserStorageFromMatrix(
+  async deleteUserBackup(
     userDid: string,
     storageKey?: string,
   ): Promise<boolean> {
     const key =
       storageKey || UserMatrixSqliteSyncService.createUserStorageKey(userDid);
 
-    Logger.debug(`Deleting storage for user ${userDid} with storageKey ${key}`);
-
-    // Get the user's Matrix room
-    const mxManager = MatrixManager.getInstance();
-    const userHomeServer = await getMatrixHomeServerCroppedForDid(userDid);
-    const { roomId } = await mxManager.getOracleRoomIdWithHomeServer({
-      userDid,
-      oracleEntityDid: config.getOrThrow('ORACLE_ENTITY_DID'),
-      userHomeServer,
-    });
-
-    if (!roomId) {
-      Logger.warn(
-        `No Matrix room found for user ${userDid}, cannot delete storage`,
-      );
-      return false;
+    const location = this.backupLocation.get(key);
+    let store: CheckpointBackupStore;
+    if (location?.store === 'vfs') {
+      if (!this.vfsStore || !this.vfsReady()) {
+        // Without the readiness half, a delete in the boot window reaches the
+        // store and throws a mint failure at a caller that expects `false`.
+        Logger.error(
+          `Cannot delete VFS-backed storage for user ${userDid} — no VFS store is attached, or the oracle's UCAN signing key has not landed`,
+        );
+        return false;
+      }
+      store = this.vfsStore;
+    } else {
+      store = this.matrixStore;
     }
 
-    // Delete from Matrix
-    const deleted = await deleteMediaFromRoom(roomId, key);
+    Logger.debug(
+      `Deleting storage for user ${userDid} with storageKey ${key} from ${store.kind}`,
+    );
+
+    // Delete from the resolved store
+    const deleted = await store.delete({
+      userDid,
+      storageKey: key,
+    });
 
     if (deleted) {
       // Clean up local cache
@@ -1250,10 +1569,11 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
         }
       }
 
-      // Clear file path cache and checksum cache
+      // Clear file path cache, checksum cache, and the store-location cache
       this.filePathCache.delete(userDid);
       this.lastUploadedChecksum.delete(key);
-      // Without this, the next request for this user skips the Matrix
+      this.backupLocation.delete(key);
+      // Without this, the next request for this user skips the backup
       // re-sync check and lands in corruption recovery on the missing file.
       this.syncedUsers.delete(userDid);
 
@@ -1270,22 +1590,37 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     storageKey,
     event,
     contentChecksum,
+    store,
+    vfsFileId,
+    vfsCid,
   }: {
     eventId: string;
     storageKey: string;
-    event: MatrixMediaEvent;
+    event: unknown;
     contentChecksum?: string;
+    store: CheckpointStoreKind;
+    vfsFileId?: string;
+    vfsCid?: string;
   }): Promise<void> {
     this.fileEventsDatabase
       .prepare(
-        'INSERT OR REPLACE INTO file_events (storage_key, event_id, event, content_checksum) VALUES (?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO file_events (storage_key, event_id, event, content_checksum, store, vfs_file_id, vfs_cid) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(storageKey, eventId, JSON.stringify(event), contentChecksum ?? null);
+      .run(
+        storageKey,
+        eventId,
+        JSON.stringify(event) ?? null,
+        contentChecksum ?? null,
+        store,
+        vfsFileId ?? null,
+        vfsCid ?? null,
+      );
 
-    // Update in-memory cache
+    // Update in-memory caches
     if (contentChecksum) {
       this.lastUploadedChecksum.set(storageKey, contentChecksum);
     }
+    this.backupLocation.set(storageKey, { store, vfsFileId });
   }
 }
 

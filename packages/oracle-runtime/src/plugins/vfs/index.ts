@@ -4,7 +4,19 @@ export {
   createVfsSandboxTools,
   type CreateVfsSandboxToolsDeps,
 } from './vfs-sandbox-tools.js';
-export { vfsBearer, type VfsBearerResult } from './vfs-auth.js';
+export {
+  vfsBearer,
+  mintVfsBearerFor,
+  type VfsBearerResult,
+  type VfsDelegationMinter,
+  type VfsAuthUrls,
+} from './vfs-auth.js';
+export {
+  NETWORK_URLS,
+  resolveVfsWorkerUrls,
+  type IxoNetwork,
+  type VfsWorkerUrls,
+} from './vfs-network.js';
 export {
   VfsClient,
   type VfsClientOptions,

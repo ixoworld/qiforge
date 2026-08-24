@@ -26,18 +26,35 @@ const TMP_DIR = vi.hoisted(() => {
   // — it derives `ORACLE_DID`, which `createUserStorageKey` needs.
   process.env.MATRIX_ORACLE_ADMIN_USER_ID =
     '@did-ixo-synctestoracle:matrix.test';
+  // Read by `MatrixCheckpointStore`'s room lookup (`config.getOrThrow('ORACLE_ENTITY_DID')`)
+  // — needed for the no-room delete test below to reach the mocked "no room"
+  // response instead of failing earlier on a missing config key.
+  process.env.ORACLE_ENTITY_DID = 'did:ixo:entity:sync-test-oracle';
   return dir;
 });
 
-// MatrixManager is never reached by the code paths under test (every case
-// here returns 'skipped' before any Matrix call), but `matrix-upload-utils.js`
-// imports it at module scope, so it still needs a harmless stub.
+// MatrixManager is never reached by the "skipped"-upload code paths these
+// cases exercise (each returns before any Matrix call), but
+// `matrix-upload-utils.js` imports it at module scope, so it still needs a
+// harmless stub.
+// `getOracleRoomIdWithHomeServer` resolves to no room — exercised by the
+// delete-with-no-room test below, via `MatrixCheckpointStore`.
 vi.mock('@ixo/matrix', () => ({
   MatrixManager: {
     getInstance: vi.fn(() => ({
       getClient: vi.fn(() => undefined),
+      getOracleRoomIdWithHomeServer: vi.fn(async () => ({
+        roomId: undefined,
+      })),
     })),
   },
+}));
+
+// `MatrixCheckpointStore`'s room lookup calls this to resolve the user's
+// homeserver before asking Matrix for the room — stub it so the lookup
+// completes without a real network call.
+vi.mock('@ixo/oracles-chain-client', () => ({
+  getMatrixHomeServerCroppedForDid: vi.fn(async () => 'home'),
 }));
 
 // Partial mock: keep every real upload-utils export except
@@ -141,5 +158,12 @@ describe('UserMatrixSqliteSyncService.uploadCheckpointToMatrixStorage', () => {
     const autoVacuum: unknown = db.pragma('auto_vacuum', { simple: true });
     db.close();
     expect(autoVacuum).toBe(0);
+  });
+
+  it('deleteUserBackup returns false (no throw) when the user has no Matrix room', async () => {
+    const svc = UserMatrixSqliteSyncService.getInstance();
+    await expect(svc.deleteUserBackup('did:ixo:no-room-user')).resolves.toBe(
+      false,
+    );
   });
 });

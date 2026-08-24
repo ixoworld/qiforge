@@ -12,9 +12,21 @@ export type VfsBearerResult =
   | { bearer: string }
   | { error: VfsAuthErrorKind; detail?: string };
 
+/** The two UCAN operations the two-hop flow needs — satisfied by `rtCtx.ucan` and by `UcanService` itself. */
+export type VfsDelegationMinter = Pick<
+  RuntimeContext['ucan'],
+  'getServiceDelegation' | 'createInvocationFromDelegation'
+>;
+
+export interface VfsAuthUrls {
+  VFS_BASE_URL: string;
+  UCAN_STORE_URL: string;
+}
+
 /**
  * Resolve a fresh, single-use VFS bearer for one operation via the two-hop
- * UCAN flow:
+ * UCAN flow, for any caller that holds the UCAN operations directly — the
+ * request path (through `vfsBearer`) and background jobs alike:
  *
  *   1. Fetch the user's delegation for this oracle from the store worker
  *      (`getServiceDelegation`) over `ixo:filesystem`, requiring an ability
@@ -22,29 +34,27 @@ export type VfsBearerResult =
  *   2. Mint an invocation proved by that delegation, attenuated to
  *      `{ can: ability, with: <granted resource> }`.
  *
- * Non-throwing: every failure is returned as `{ error, detail? }` so the
- * client can surface an agent-actionable message instead of a stack.
+ * Non-throwing: every failure is returned as `{ error, detail? }`.
  */
-export async function vfsBearer(
-  rtCtx: RuntimeContext,
-  cfg: VfsConfig,
+export async function mintVfsBearerFor(
+  minter: VfsDelegationMinter,
+  userDid: string,
+  urls: VfsAuthUrls,
   ability: VfsAbility,
   targetResource?: string,
 ): Promise<VfsBearerResult> {
-  const delegation = await rtCtx.ucan.getServiceDelegation(rtCtx.user.did, {
-    storeUrl: cfg.UCAN_STORE_URL,
+  const delegation = await minter.getServiceDelegation(userDid, {
+    storeUrl: urls.UCAN_STORE_URL,
     resource: VFS_RESOURCE,
     requiredAbility: ability,
   });
   if ('error' in delegation) {
-    // `{ error: 'no-delegation' | 'store-error', detail? }` widens cleanly to
-    // `VfsBearerResult` (both kinds are in `VfsAuthErrorKind`).
     return delegation;
   }
 
-  const minted = await rtCtx.ucan.createInvocationFromDelegation(
+  const minted = await minter.createInvocationFromDelegation(
     delegation.token,
-    cfg.VFS_BASE_URL,
+    urls.VFS_BASE_URL,
     { can: ability, with: targetResource ?? delegation.with },
     { maxTtlSeconds: INVOCATION_TTL_SECONDS },
   );
@@ -53,4 +63,20 @@ export async function vfsBearer(
   }
 
   return { bearer: minted.invocation };
+}
+
+/** Request-path convenience: the same flow using the runtime context's user + UCAN adapter. */
+export function vfsBearer(
+  rtCtx: RuntimeContext,
+  cfg: VfsConfig,
+  ability: VfsAbility,
+  targetResource?: string,
+): Promise<VfsBearerResult> {
+  return mintVfsBearerFor(
+    rtCtx.ucan,
+    rtCtx.user.did,
+    cfg,
+    ability,
+    targetResource,
+  );
 }
