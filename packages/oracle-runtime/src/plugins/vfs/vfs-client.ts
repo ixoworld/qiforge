@@ -1,9 +1,11 @@
+import type { Readable } from 'node:stream';
 import {
   VfsAuthError,
   VfsHttpError,
   type VfsAbility,
   type VfsAuthErrorKind,
 } from './vfs-errors.js';
+import { nodeToWebStream, webToNodeStream } from './vfs-streams.js';
 
 /**
  * Typed HTTP client for the IXO Virtual Filesystem worker (routes under
@@ -55,6 +57,8 @@ export interface VfsFileStat {
   size: number;
   /** Anyone-can-download link, present only when the file is public. */
   publicUrl?: string;
+  /** Content id, when the worker sends one. */
+  cid?: string;
 }
 
 /** One entry in a directory listing (worker `TreeNode`). */
@@ -108,6 +112,23 @@ export interface VfsContentBytes {
   bytes: ArrayBuffer;
   mimeType: string;
   size: number;
+}
+
+/** A re-openable streamed request body: `open` is called per attempt (401 re-mint retries replay it). */
+export interface VfsStreamBody {
+  open: () => Readable;
+  sizeBytes: number;
+  mime: string;
+}
+
+export interface VfsContentStream {
+  stream: Readable;
+  sizeBytes?: number;
+  /** Worker-computed content hash (`x-vfs-content-hash`), when sent. */
+  contentHash?: string;
+  /** Content id (`x-vfs-cid`), when sent. */
+  cid?: string;
+  mimeType: string;
 }
 
 /** One item's outcome in a batch move/delete (worker `BatchResult.results[]`). */
@@ -176,6 +197,7 @@ function parseFile(v: unknown, fallbackPath?: string): VfsFileStat | null {
     mimeType: str(v.mimeType) ?? '',
     size: num(v.size) ?? 0,
     publicUrl: str(v.publicUrl),
+    cid: str(v.cid),
   };
 }
 
@@ -248,6 +270,7 @@ interface RequestInitLite {
   body?: string | Uint8Array;
   contentType?: string;
   accept?: string;
+  streamBody?: VfsStreamBody;
 }
 
 export class VfsClient {
@@ -394,6 +417,29 @@ export class VfsClient {
     return parseFile(await this.json(res)) ?? emptyStat('');
   }
 
+  /** Create a file from a streamed body (`POST /files?path=`). 409 if it exists. */
+  async createStream(path: string, body: VfsStreamBody): Promise<VfsFileStat> {
+    const res = await this.send(
+      'fs/write',
+      'POST',
+      `/files?path=${enc(path)}`,
+      {
+        streamBody: body,
+        accept: 'application/json',
+      },
+    );
+    return parseFile(await this.json(res), path) ?? emptyStat(path);
+  }
+
+  /** Replace a file's content from a streamed body (`PUT /files/:id`). */
+  async replaceStream(id: string, body: VfsStreamBody): Promise<VfsFileStat> {
+    const res = await this.send('fs/write', 'PUT', `/files/${enc(id)}`, {
+      streamBody: body,
+      accept: 'application/json',
+    });
+    return parseFile(await this.json(res)) ?? emptyStat('');
+  }
+
   /** Exact-string edit (`PATCH /files/:id/edit`). */
   async edit(
     id: string,
@@ -428,6 +474,38 @@ export class VfsClient {
   /** Move files to trash by id (`POST /batch/delete`). */
   async trash(ids: string[]): Promise<VfsBatchItemResult[]> {
     const res = await this.send('fs/delete', 'POST', `/batch/delete`, {
+      body: JSON.stringify({ ids }),
+      contentType: 'application/json',
+      accept: 'application/json',
+    });
+    return parseBatchResults(await this.json(res));
+  }
+
+  /** Stream a file's bytes by path (`GET /content?path=`); `null` when absent. */
+  async contentStreamByPath(path: string): Promise<VfsContentStream | null> {
+    let res: Response;
+    try {
+      res = await this.get('fs/read', `/content?path=${enc(path)}`, {});
+    } catch (err) {
+      if (err instanceof VfsHttpError && err.status === 404) return null;
+      throw err;
+    }
+    if (!res.body) return null;
+    const length = res.headers.get('content-length');
+    return {
+      stream: webToNodeStream(res.body),
+      sizeBytes: length === null ? undefined : num(Number(length)),
+      contentHash: res.headers.get('x-vfs-content-hash') ?? undefined,
+      cid: res.headers.get('x-vfs-cid') ?? undefined,
+      mimeType:
+        res.headers.get('content-type')?.split(';')[0]?.trim() ||
+        'application/octet-stream',
+    };
+  }
+
+  /** Permanently delete trashed files by id (`POST /batch/purge`). */
+  async purge(ids: string[]): Promise<VfsBatchItemResult[]> {
+    const res = await this.send('fs/delete', 'POST', `/batch/purge`, {
       body: JSON.stringify({ ids }),
       contentType: 'application/json',
       accept: 'application/json',
@@ -534,6 +612,10 @@ export class VfsClient {
       if (opts.body !== undefined) {
         headers['content-type'] = opts.contentType ?? 'application/json';
       }
+      if (opts.streamBody) {
+        headers['content-type'] = opts.streamBody.mime;
+        headers['content-length'] = String(opts.streamBody.sizeBytes);
+      }
 
       const controller = new AbortController();
       let timedOut = false;
@@ -551,19 +633,39 @@ export class VfsClient {
           });
       }
 
+      // Held so it can be closed below: when the worker answers before it has
+      // read the body (an auth middleware rejecting with 401/403), the fetch
+      // implementation never cancels the request stream, and the open file
+      // descriptor behind it would leak once per attempt.
+      const bodyStream: Readable | undefined = opts.streamBody?.open();
+
       let res: Response;
       try {
-        res = await this.fetchImpl(url, {
+        // `duplex` is required by undici for request streams and absent from
+        // the DOM `RequestInit` type this repo compiles against, hence the
+        // intersection annotation (not a cast).
+        const init: RequestInit & { duplex: 'half' } = {
           method,
           headers,
           // Binary bodies arrive as a `Uint8Array`; copy into a standalone
           // `ArrayBuffer` so a pooled Buffer's extra bytes are never sent.
-          body:
-            opts.body instanceof Uint8Array
+          body: bodyStream
+            ? nodeToWebStream(bodyStream)
+            : opts.body instanceof Uint8Array
               ? toArrayBuffer(opts.body)
               : opts.body,
           signal: controller.signal,
-        });
+          // Auth is a bearer header — cookies are never used. This must stay
+          // `'omit'`: on a 401 the Fetch spec re-sends the request with
+          // credentials, which needs a re-readable body source, and a stream
+          // has none — with the default (`'same-origin'`) undici rejects the
+          // whole call ("expected non-null body source") before the 401 is
+          // ever observable, so the re-mint retry below could not fire for a
+          // streamed upload.
+          credentials: 'omit',
+          duplex: 'half',
+        };
+        res = await this.fetchImpl(url, init);
       } catch (err) {
         // A caller-initiated abort is terminal — surface it, don't retry.
         if (this.callerSignal?.aborted && !timedOut) throw err;
@@ -580,6 +682,9 @@ export class VfsClient {
       } finally {
         clearTimeout(timer);
         this.callerSignal?.removeEventListener('abort', onCallerAbort);
+        // No-op once the body was fully sent (the stream has already
+        // auto-destroyed); closes the fd on every path that did not.
+        bodyStream?.destroy();
       }
 
       if (res.ok) return res;

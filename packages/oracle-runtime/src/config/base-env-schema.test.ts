@@ -118,6 +118,7 @@ describe('baseEnvSchema', () => {
       'OPEN_ROUTER_API_KEY',
       'NEBIUS_API_KEY',
       'DEFAULT_MODEL',
+      'SESSION_TITLE_MODEL',
       'MODEL_PRICE_MARKUP',
       'LIVE_AGENT_AUTH_API_KEY',
       'LANGSMITH_TRACING',
@@ -128,6 +129,7 @@ describe('baseEnvSchema', () => {
       'MAIN_REASONING_EFFORT',
       'BYO_LLM_ENABLED',
       'BYO_CHATGPT_CLIENT_ID',
+      'CHECKPOINT_VFS_BACKUP_ENABLED',
     ]);
     expect(new Set(Object.keys(baseEnvSchema.shape))).toEqual(expected);
   });

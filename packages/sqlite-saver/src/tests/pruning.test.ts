@@ -1,3 +1,4 @@
+import { HumanMessage } from '@langchain/core/messages';
 import { SqliteSaver } from '../index';
 import { checkpointWithMessages, message } from './fixtures';
 
@@ -122,5 +123,56 @@ describe('SqliteSaver checkpoint pruning', () => {
       .prepare(`SELECT COUNT(*) as count FROM checkpoints WHERE thread_id = ?`)
       .get('thread-1') as { count: number };
     expect(count).toBe(10);
+  });
+
+  it('assigns a stable id to id-less messages instead of aborting the write', async () => {
+    const saver = SqliteSaver.fromConnString(':memory:');
+    const message = new HumanMessage('no id on purpose');
+    expect(message.id).toBeUndefined();
+
+    await saver.put(
+      { configurable: { thread_id: 'thread-1' } },
+      checkpointWithMessages(0, [message]),
+      { source: 'input', step: 0, parents: {} },
+    );
+    const assigned = message.id;
+    expect(typeof assigned).toBe('string');
+
+    // The same object re-put under the next checkpoint keeps its id — one row, not two.
+    await saver.put(
+      { configurable: { thread_id: 'thread-1' } },
+      checkpointWithMessages(1, [message]),
+      { source: 'loop', step: 1, parents: {} },
+    );
+    const rows = saver.db
+      .prepare(`SELECT message_id FROM messages WHERE thread_id = ?`)
+      .all('thread-1');
+    expect(rows).toEqual([{ message_id: assigned }]);
+  });
+
+  it('keeps the assigned id across a serialization round-trip — one row after reload and re-put', async () => {
+    const saver = SqliteSaver.fromConnString(':memory:');
+    const thread = { configurable: { thread_id: 'thread-1' } };
+    await saver.put(
+      thread,
+      checkpointWithMessages(0, [new HumanMessage('no id on purpose')]),
+      { source: 'input', step: 0, parents: {} },
+    );
+
+    // Reload from the serialized row, the way every later turn does.
+    const reloaded = await saver.listThreadMessages('thread-1');
+    expect(reloaded).toHaveLength(1);
+    expect(typeof reloaded[0]?.id).toBe('string');
+
+    await saver.put(thread, checkpointWithMessages(1, reloaded), {
+      source: 'loop',
+      step: 1,
+      parents: {},
+    });
+    const rows = saver.db
+      .prepare(`SELECT COUNT(*) FROM messages WHERE thread_id = ?`)
+      .pluck()
+      .get('thread-1');
+    expect(rows).toBe(1);
   });
 });

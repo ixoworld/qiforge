@@ -5,31 +5,9 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types.js';
+import { resolveVfsWorkerUrls } from './vfs-network.js';
 import { createVfsSandboxTools } from './vfs-sandbox-tools.js';
 import { createVfsTools } from './vfs-tools.js';
-
-/**
- * VFS + UCAN Store worker URLs per IXO network. The plugin derives these from
- * the `NETWORK` env var — there is nothing to configure. Bundled and always-on;
- * opt out with `features: { vfs: false }`.
- */
-const NETWORK_URLS: Record<
-  'mainnet' | 'testnet' | 'devnet',
-  { vfs: string; store: string }
-> = {
-  mainnet: {
-    vfs: 'https://vfs.ixo.earth',
-    store: 'https://store.ucan.ixo.earth',
-  },
-  testnet: {
-    vfs: 'https://testnet.vfs.ixo.earth',
-    store: 'https://testnet.store.ucan.ixo.earth',
-  },
-  devnet: {
-    vfs: 'https://devnet.vfs.ixo.earth',
-    store: 'https://devnet.store.ucan.ixo.earth',
-  },
-};
 
 /** Optional tuning env this plugin owns (the worker URLs come from NETWORK). */
 const configSchema = z.object({
@@ -149,7 +127,7 @@ export class VfsPlugin extends OraclePlugin {
     const tuning = configSchema.safeParse(rtCtx.config);
     const siblings = siblingEnvSchema.safeParse(rtCtx.config);
     const network = (siblings.success && siblings.data.NETWORK) || 'devnet';
-    const urls = NETWORK_URLS[network];
+    const urls = resolveVfsWorkerUrls(network);
     const cfg: VfsConfig = {
       VFS_BASE_URL: urls.vfs,
       UCAN_STORE_URL: urls.store,

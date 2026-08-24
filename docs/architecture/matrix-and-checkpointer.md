@@ -1,6 +1,6 @@
 # Matrix and checkpointer
 
-How the runtime persists state. Matrix is both the transport layer (for the `matrix` client surface) and the storage layer (the checkpointer is Matrix-backed SQLite). Not pluggable.
+How the runtime persists state. Matrix is the transport layer (for the `matrix` client surface) and one of two backup stores behind the checkpointer: state lives in per-user SQLite, backed up per user to either the user's VFS or their Matrix room (see [Backup store](#backup-store-vfs-vs-matrix)). The store is pluggable behind one interface; where a given user's backup lands is not a per-oracle setting.
 
 Source: `packages/oracle-runtime/src/matrix/`, `modules/secrets/`, `modules/ucan/`.
 
@@ -8,7 +8,7 @@ Source: `packages/oracle-runtime/src/matrix/`, `modules/secrets/`, `modules/ucan
 
 1. **Transport.** When a user talks to the oracle through the Matrix client, Matrix is the protocol. The runtime sets `session.client = 'matrix'` and routes messages via the Matrix bot. Plugins access `ctx.matrix.{postToRoom, getRoomState, getEventById}`.
 
-2. **Storage.** Per-thread LangGraph state checkpoints live in per-user SQLite, which is in turn synced to a per-user Matrix room. The local SQLite file (`SQLITE_DATABASE_PATH`) is the hot path; Matrix is the durable mirror.
+2. **Storage.** Per-thread LangGraph state checkpoints live in per-user SQLite, which is in turn synced to a durable backup store — VFS or Matrix, per user (see below). The local SQLite file (`SQLITE_DATABASE_PATH`) is the hot path.
 
 ## UserMatrixSqliteSyncService
 
@@ -17,7 +17,7 @@ Source: `packages/oracle-runtime/src/matrix/`, `modules/secrets/`, `modules/ucan
 Per-user SQLite database lifecycle:
 
 - `getUserDatabase(userDid)` — opens (or creates) a SQLite DB for the user. Lazy.
-- Syncs the DB file to the user's Matrix room in the background.
+- Syncs the DB file to a backup store in the background (see below).
 - Disposes idle DBs after a timeout.
 
 Used by the default checkpointer factory:
@@ -47,9 +47,18 @@ The Matrix sync path streams in both directions — downloads gunzip straight to
 
 1. One-time compacts DBs predating incremental auto-vacuum: if the freelist exceeds 10 MB and 20% of the file's pages, an in-place `VACUUM` reclaims it and flips the file to incremental mode (`sqlite-compaction.ts`). Newly created DBs never trip this.
 2. Takes a `VACUUM INTO` snapshot of the live file — transactionally consistent even if a request starts writing mid-upload, and free of dead pages — then gzips the snapshot streaming to disk, so only the compressed payload is ever buffered.
-3. Skips the upload if the compressed snapshot exceeds the homeserver's upload cap (`m.upload.size`, read from `/_matrix/client/v1/media/config` then the legacy `/_matrix/media/v3/config`, falling back to 100 MiB). The skip is logged as an error and the file's checksum is remembered so the same oversized snapshot isn't retried until the file actually changes.
+3. Skips the upload if the compressed snapshot exceeds the resolved store's cap. For a Matrix-backed user that's the homeserver's upload cap (`m.upload.size`, read from `/_matrix/client/v1/media/config` then the legacy `/_matrix/media/v3/config`, falling back to 100 MiB); for a VFS-backed user it's a fixed 5 GiB. The skip is logged as an error and the file's checksum is remembered so the same oversized snapshot isn't retried until the file actually changes.
 
 The `as unknown as BaseCheckpointSaver` cast is the documented cross-package interop seam: `SqliteSaver` extends `BaseCheckpointSaver` from `@langchain/langgraph-checkpoint`, but the hook's return type pulls from `@langchain/langgraph`. pnpm hoists these into separate type identities even at the same version — structurally identical at runtime, but TypeScript can't see that.
+
+### Backup store: VFS vs. Matrix
+
+Each user's compressed snapshot backs up to one of two stores, tracked per storage key in `file_events.store`: **VFS**, in the user's own namespace (`oracle-data/<oracleEntityDid>/<storageKey>.db.gz`), reached via a two-hop UCAN — the oracle pulls the user's deposited `ixo:filesystem` delegation and mints a fresh single-use invocation per request; or **Matrix**, the legacy per-user room, still the default until the kill date. See `specs/checkpoint-vfs-backup.md` for the full design.
+
+- **Cutover.** A user's first successful VFS upload flips their `store` to `'vfs'` and redacts the Matrix copy on that same upload. A `'vfs'`-store user never falls back to Matrix — a VFS outage just skips that cycle, local file kept.
+- **Gating.** New cutovers need both an oracle UCAN signing key and `CHECKPOINT_VFS_BACKUP_ENABLED=true` (default `true`). Flipping it to `false` stops new cutovers only — users already on VFS stay there.
+- **Download order.** `file_events` names the store to try; with no row (fresh `file_events.db`) it's VFS first, then Matrix, then a fresh DB. Only "the store says there is no such file" counts as no-backup — an auth failure, an outage or a hash mismatch fails the request instead, so a fresh empty DB can never take a real backup's place. For the first five minutes after the store is attached, a signing key that hasn't landed yet also fails the request rather than skipping the VFS probe.
+- **Integrity.** VFS downloads are sha256-verified against the worker's reported content hash before being trusted (Matrix relies on E2E decryption integrity instead, and sends no hash).
 
 ## Key setup (post-Matrix-init)
 

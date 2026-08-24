@@ -149,6 +149,15 @@ export const baseEnvSchema = z.object({
    * to the Codex public client; override only for testing against a stub.
    */
   BYO_CHATGPT_CLIENT_ID: z.string().optional(),
+
+  /**
+   * Whether users may be cut over to VFS checkpoint backups. `false` stops
+   * new cutovers only — users already on VFS stay there and never fall back.
+   */
+  CHECKPOINT_VFS_BACKUP_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
