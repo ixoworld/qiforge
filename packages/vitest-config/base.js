@@ -11,7 +11,14 @@ export default defineConfig({
     exclude: ['node_modules', 'dist'],
     coverage: {
       provider: 'v8',
-      exclude: ['node_modules', 'dist', 'test-config', 'interfaces', '**/*.module.ts', '**/types/**'],
+      exclude: [
+        'node_modules',
+        'dist',
+        'test-config',
+        'interfaces',
+        '**/*.module.ts',
+        '**/types/**',
+      ],
     },
   },
 });

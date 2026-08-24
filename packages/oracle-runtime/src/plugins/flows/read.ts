@@ -20,7 +20,7 @@ import {
   collectAllBlocks,
   extractBlockProperties,
   readRuntimeState,
-} from '../editor/blocknote-helper.js';
+} from './ydoc-helpers.js';
 import {
   blockIdToStepId,
   canToAction,

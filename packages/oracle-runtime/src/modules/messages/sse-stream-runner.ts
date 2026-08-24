@@ -7,7 +7,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { Response } from 'express';
 import { AIMessageChunk, type BaseMessage, ToolMessage } from 'langchain';
 import { type ByoProvider } from '../../llm/byo-catalog.js';
-import { classifyLlmError } from '../../llm/provider-error.js';
+import { getLLMProvider } from '../../llm/llm-provider.js';
+import { classifyLlmError, isOperatorFault } from '../../llm/provider-error.js';
 import { emojify } from '../../utils/emoji.js';
 import { AgentBuilder } from './agent-builder.js';
 import { type SendMessagePayload } from './dto/send-message.dto.js';
@@ -357,6 +358,16 @@ export class SseStreamRunner {
             : ''),
         error instanceof Error ? error.stack : String(error),
       );
+      if (isOperatorFault(classified)) {
+        // The client is deliberately shown a generic failure for these, so
+        // this line is the only signal that the oracle's OWN provider account
+        // is out of credit or its key was rejected. Keep it explicit.
+        this.logger.error(
+          `Provider account fault — this oracle's ${getLLMProvider()} credentials failed (${classified.kind}). ` +
+            'Top up or rotate the key; clients are seeing a generic error. ' +
+            `Upstream: ${classified.detail}`,
+        );
+      }
       if (!res.writableEnded && !abortController.signal.aborted) {
         // Same cleanup the success path performs: clear stuck tool spinners
         // and close the thinking indicator, or the FE keeps both alive

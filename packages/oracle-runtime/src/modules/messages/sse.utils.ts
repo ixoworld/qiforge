@@ -1,7 +1,10 @@
 import { type AllEvents } from '@ixo/oracles-events';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { type Response } from 'express';
-import { type ClassifiedLlmError } from '../../llm/provider-error.js';
+import {
+  redactOperatorFault,
+  type ClassifiedLlmError,
+} from '../../llm/provider-error.js';
 
 interface SSEContext {
   res: Response;
@@ -93,6 +96,10 @@ export function sendSSEDone(res: Response): void {
  * the human-readable `error` message so clients can render provider-aware
  * feedback instead of the raw SDK text; without it, the legacy
  * `{error, timestamp}` shape goes out unchanged.
+ *
+ * Every classification passes through `redactOperatorFault` here rather than
+ * at the call sites: this is the one place an LLM failure becomes bytes on a
+ * client's wire, so redacting here means a new caller cannot forget to.
  */
 export function sendSSEError(
   res: Response,
@@ -100,26 +107,27 @@ export function sendSSEError(
   classified?: ClassifiedLlmError,
   ids?: { sessionId?: string; requestId?: string },
 ): void {
+  const safe = classified ? redactOperatorFault(classified) : undefined;
   if (!res.writableEnded) {
     res.write(
       formatSSE('error', {
-        error: classified
-          ? classified.message
+        error: safe
+          ? safe.message
           : error instanceof Error
             ? error.message
             : error,
-        ...(classified && {
-          kind: classified.kind,
-          source: classified.source,
-          ...(classified.provider && { provider: classified.provider }),
-          ...(classified.providerLabel && {
-            providerLabel: classified.providerLabel,
+        ...(safe && {
+          kind: safe.kind,
+          source: safe.source,
+          ...(safe.provider && { provider: safe.provider }),
+          ...(safe.providerLabel && {
+            providerLabel: safe.providerLabel,
           }),
-          ...(classified.status !== undefined && {
-            status: classified.status,
+          ...(safe.status !== undefined && {
+            status: safe.status,
           }),
-          retryable: classified.retryable,
-          detail: classified.detail,
+          retryable: safe.retryable,
+          detail: safe.detail,
         }),
         ...(ids?.sessionId && { sessionId: ids.sessionId }),
         ...(ids?.requestId && { requestId: ids.requestId }),

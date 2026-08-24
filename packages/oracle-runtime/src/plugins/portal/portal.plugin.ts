@@ -63,6 +63,81 @@ function parseArgs(input: unknown): Record<string, unknown> {
 }
 
 /**
+ * Arguments the runtime fills in itself, keyed by the config value that
+ * supplies them.
+ *
+ * `oracleUserId` is the oracle's own Matrix id. Browser tools that grant this
+ * oracle access to a room (`create_page_room`, `create_template_room`,
+ * `grant_assistant_access`) need it, but the model has no way to know it — it
+ * is server-side config, never in the prompt. Left in the schema, the model
+ * either invents an id or asks the user for one, which is what it did.
+ *
+ * It cannot be derived on the Portal side from the chat's `oracleDid` either:
+ * that is an entity DID (`did:ixo:entity:<hash>`), not the oracle's bech32
+ * address, so rebuilding a Matrix id from it produces a bogus user.
+ *
+ * So: strip these from the schema the model sees, and inject them at dispatch.
+ */
+const RUNTIME_SUPPLIED_ARGS: Record<string, string> = {
+  oracleUserId: 'MATRIX_ORACLE_ADMIN_USER_ID',
+};
+
+/**
+ * Remove the runtime-supplied keys from a JSON-schema object so they never
+ * reach the model as parameters. Returns the schema untouched when it declares
+ * none of them.
+ */
+function stripRuntimeSuppliedArgs(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const properties = schema.properties;
+  if (typeof properties !== 'object' || properties === null) return schema;
+
+  const declared = Object.keys(RUNTIME_SUPPLIED_ARGS).filter(
+    (key) => key in (properties as Record<string, unknown>),
+  );
+  if (declared.length === 0) return schema;
+
+  const nextProperties: Record<string, unknown> = {
+    ...(properties as Record<string, unknown>),
+  };
+  for (const key of declared) delete nextProperties[key];
+
+  const next: Record<string, unknown> = {
+    ...schema,
+    properties: nextProperties,
+  };
+  if (Array.isArray(schema.required)) {
+    next.required = schema.required.filter(
+      (name) => typeof name !== 'string' || !declared.includes(name),
+    );
+  }
+  return next;
+}
+
+/**
+ * Fill in the runtime-supplied arguments this descriptor declares. A value the
+ * config does not carry is omitted rather than sent as `undefined`, so the
+ * browser tool sees exactly the same shape it would from an older runtime.
+ */
+function withRuntimeSuppliedArgs(
+  args: Record<string, unknown>,
+  descriptor: BrowserToolCall,
+  config: Record<string, unknown>,
+): Record<string, unknown> {
+  const properties = descriptor.schema.properties;
+  if (typeof properties !== 'object' || properties === null) return args;
+
+  const next = { ...args };
+  for (const [argName, configKey] of Object.entries(RUNTIME_SUPPLIED_ARGS)) {
+    if (!(argName in (properties as Record<string, unknown>))) continue;
+    const value = config[configKey];
+    if (typeof value === 'string' && value.length > 0) next[argName] = value;
+  }
+  return next;
+}
+
+/**
  * Build a single PluginTool that, when invoked, dispatches the browser tool to
  * the user's frontend via the existing `callBrowserTool` helper and waits for
  * the result. Mirrors today's `parserBrowserTool` behaviour (matrix logging on
@@ -74,7 +149,10 @@ function parseArgs(input: unknown): Record<string, unknown> {
  * that tool is dropped rather than failing the whole request.
  */
 function buildBrowserTool(descriptor: BrowserToolCall): PluginTool | null {
-  const schema = clientSchemaToZod(descriptor.schema, descriptor.name);
+  const schema = clientSchemaToZod(
+    stripRuntimeSuppliedArgs(descriptor.schema),
+    descriptor.name,
+  );
   if (!schema) return null;
 
   return tool(
@@ -84,7 +162,11 @@ function buildBrowserTool(descriptor: BrowserToolCall): PluginTool | null {
         throw new Error('sessionId is required for browser tools');
       }
 
-      const args = parseArgs(input);
+      const args = withRuntimeSuppliedArgs(
+        parseArgs(input),
+        descriptor,
+        ctx.config,
+      );
       const requestId = ctx.session.requestId;
       const toolCallId = `tc-${requestId ?? 'noreq'}`;
 

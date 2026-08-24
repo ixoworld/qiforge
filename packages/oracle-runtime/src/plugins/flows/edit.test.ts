@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  collectAllBlocks,
-  extractBlockProperties,
-} from '../editor/blocknote-helper.js';
+import { collectAllBlocks, extractBlockProperties } from './ydoc-helpers.js';
 import { flowSpecToBaseUcan, stepIdToBlockId } from './translator.js';
 import { readFlowSpec, readStep } from './read.js';
 import {

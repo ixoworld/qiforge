@@ -49,6 +49,20 @@ const POINTER_REF_TOOL: BrowserToolCall = {
   },
 };
 
+/** Declares `oracleUserId`, which the runtime supplies rather than the model. */
+const CREATE_PAGE_ROOM_TOOL: BrowserToolCall = {
+  name: 'create_page_room',
+  description: "Create a page room in the user's personal Pages space.",
+  schema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string' },
+      oracleUserId: { type: 'string' },
+    },
+    required: ['oracleUserId'],
+  },
+};
+
 const UNCONVERTIBLE_TOOL: BrowserToolCall = {
   name: 'broken_tool',
   description: 'Declares a schema the runtime cannot convert.',
@@ -248,5 +262,126 @@ describe('PortalPlugin', () => {
 
     expect(callBrowserToolMock).toHaveBeenCalledTimes(1);
     expect(logActionToMatrixMock).not.toHaveBeenCalled();
+  });
+
+  describe('runtime-supplied arguments', () => {
+    const ORACLE_ID = '@did-ixo-ixo1abc:ixo.world';
+
+    it('hides oracleUserId from the model and injects it from config at dispatch', async () => {
+      const callBrowserToolMock = vi.mocked(callBrowserTool);
+      callBrowserToolMock.mockClear();
+
+      const plugin = new PortalPlugin();
+      const rtCtx = makeRuntimeContext({
+        config: { MATRIX_ORACLE_ADMIN_USER_ID: ORACLE_ID },
+        history: {
+          messages: [],
+          recent: () => [],
+          userContext: {},
+          state: { messages: [], browserTools: [CREATE_PAGE_ROOM_TOOL] },
+        },
+      });
+
+      const tools = await plugin.getRequestTools(rtCtx);
+      const [browserTool] = tools;
+      if (!browserTool) throw new Error('expected one tool');
+
+      // The FE declares `oracleUserId` as REQUIRED. The model has no way to
+      // know the oracle's Matrix id, so leaving it in the model-facing schema
+      // forces the model to either invent one or ask the user for it — which
+      // is what it did. Stripping it makes a call with just `title` valid.
+      expect(browserTool.schema?.safeParse({ title: 'Notes' }).success).toBe(
+        true,
+      );
+
+      await browserTool.handler({ title: 'Notes' }, rtCtx);
+
+      expect(callBrowserToolMock.mock.calls[0]?.[0]?.args).toEqual({
+        title: 'Notes',
+        oracleUserId: ORACLE_ID,
+      });
+    });
+
+    it('overrides an oracleUserId the model invented with the configured one', async () => {
+      const callBrowserToolMock = vi.mocked(callBrowserTool);
+      callBrowserToolMock.mockClear();
+
+      const plugin = new PortalPlugin();
+      const rtCtx = makeRuntimeContext({
+        config: { MATRIX_ORACLE_ADMIN_USER_ID: ORACLE_ID },
+        history: {
+          messages: [],
+          recent: () => [],
+          userContext: {},
+          state: { messages: [], browserTools: [CREATE_PAGE_ROOM_TOOL] },
+        },
+      });
+
+      const tools = await plugin.getRequestTools(rtCtx);
+      const [browserTool] = tools;
+      if (!browserTool) throw new Error('expected one tool');
+
+      await browserTool.handler(
+        { title: 'Notes', oracleUserId: '@did-ixo-hallucinated:ixo.world' },
+        rtCtx,
+      );
+
+      expect(callBrowserToolMock.mock.calls[0]?.[0]?.args).toEqual({
+        title: 'Notes',
+        oracleUserId: ORACLE_ID,
+      });
+    });
+
+    it('omits oracleUserId when the oracle has no Matrix id configured', async () => {
+      const callBrowserToolMock = vi.mocked(callBrowserTool);
+      callBrowserToolMock.mockClear();
+
+      const plugin = new PortalPlugin();
+      const rtCtx = makeRuntimeContext({
+        config: {},
+        history: {
+          messages: [],
+          recent: () => [],
+          userContext: {},
+          state: { messages: [], browserTools: [CREATE_PAGE_ROOM_TOOL] },
+        },
+      });
+
+      const tools = await plugin.getRequestTools(rtCtx);
+      const [browserTool] = tools;
+      if (!browserTool) throw new Error('expected one tool');
+
+      await browserTool.handler({ title: 'Notes' }, rtCtx);
+
+      const args = callBrowserToolMock.mock.calls[0]?.[0]?.args;
+      expect(args).toEqual({ title: 'Notes' });
+      expect(args && 'oracleUserId' in args).toBe(false);
+    });
+
+    it('leaves a tool that declares no runtime-supplied argument untouched', async () => {
+      const callBrowserToolMock = vi.mocked(callBrowserTool);
+      callBrowserToolMock.mockClear();
+
+      const plugin = new PortalPlugin();
+      const rtCtx = makeRuntimeContext({
+        config: { MATRIX_ORACLE_ADMIN_USER_ID: ORACLE_ID },
+        history: {
+          messages: [],
+          recent: () => [],
+          userContext: {},
+          state: { messages: [], browserTools: [OPEN_URL_TOOL] },
+        },
+      });
+
+      const tools = await plugin.getRequestTools(rtCtx);
+      const [browserTool] = tools;
+      if (!browserTool) throw new Error('expected one tool');
+
+      await browserTool.handler({ url: 'https://ixo.world' }, rtCtx);
+
+      expect(callBrowserToolMock.mock.calls[0]?.[0]?.args).toEqual({
+        url: 'https://ixo.world',
+      });
+    });
   });
 });

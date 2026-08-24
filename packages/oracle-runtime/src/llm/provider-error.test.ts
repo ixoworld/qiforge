@@ -3,6 +3,8 @@ import {
   buildByoFallbackNotice,
   BYO_FALLBACK_KIND,
   classifyLlmError,
+  isOperatorFault,
+  redactOperatorFault,
 } from './provider-error.js';
 
 /** Build an error the way the SDK stack actually throws them. */
@@ -181,5 +183,98 @@ describe('buildByoFallbackNotice', () => {
     const notice = buildByoFallbackNotice('error');
     expect(notice.provider).toBeUndefined();
     expect(notice.error).toMatch(/platform model/);
+  });
+});
+
+describe('redactOperatorFault', () => {
+  /** The real OpenRouter 402 the platform account throws when it runs dry. */
+  const openRouterOutOfCredit = sdkError(
+    '402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.',
+    { status: 402 },
+  );
+
+  it('turns the platform account running out of credit into a generic 500', () => {
+    const classified = classifyLlmError(openRouterOutOfCredit);
+    expect(classified.kind).toBe('billing');
+    expect(classified.status).toBe(402);
+
+    const safe = redactOperatorFault(classified);
+    expect(safe.kind).toBe('unknown');
+    expect(safe.status).toBe(500);
+    expect(safe.retryable).toBe(false);
+    expect(safe.message).toBe(
+      'Something went wrong while generating the reply. Please try again.',
+    );
+  });
+
+  it('leaks neither the upstream billing text nor a "top up" instruction', () => {
+    const safe = redactOperatorFault(classifyLlmError(openRouterOutOfCredit));
+    const wire = JSON.stringify(safe);
+    expect(wire).not.toMatch(/credit/i);
+    expect(wire).not.toMatch(/top up/i);
+    expect(wire).not.toMatch(/402/);
+  });
+
+  it('redacts a rejected platform key, prefix and all', () => {
+    const safe = redactOperatorFault(
+      classifyLlmError(
+        sdkError(
+          '401 Incorrect API key provided: sk-or-v1-f97***8e0. No auth credentials found',
+          { status: 401 },
+        ),
+      ),
+    );
+    expect(safe.kind).toBe('unknown');
+    expect(JSON.stringify(safe)).not.toMatch(/sk-or/);
+  });
+
+  it("passes BYO billing through — that account is the user's to top up", () => {
+    const classified = classifyLlmError(
+      sdkError('402 Insufficient Balance', { status: 402 }),
+      { byoProvider: 'deepseek' },
+    );
+    expect(redactOperatorFault(classified)).toEqual(classified);
+    expect(redactOperatorFault(classified).message).toMatch(/out of credit/i);
+  });
+
+  it('passes non-credential platform failures through untouched', () => {
+    for (const error of [
+      sdkError('429 Rate limit reached', { status: 429 }),
+      sdkError('529 Overloaded', { status: 529 }),
+      sdkError('Request timed out.'),
+      sdkError('fetch failed'),
+    ]) {
+      const classified = classifyLlmError(error);
+      expect(redactOperatorFault(classified)).toEqual(classified);
+    }
+  });
+
+  it('is idempotent — redacting an already-redacted error changes nothing', () => {
+    const once = redactOperatorFault(classifyLlmError(openRouterOutOfCredit));
+    expect(redactOperatorFault(once)).toEqual(once);
+  });
+});
+
+describe('isOperatorFault', () => {
+  it('is true only for platform billing/auth', () => {
+    const platform = (message: string, extras?: Record<string, unknown>) =>
+      isOperatorFault(classifyLlmError(sdkError(message, extras)));
+
+    expect(platform('402 Payment Required', { status: 402 })).toBe(true);
+    expect(platform('401 No auth credentials found', { status: 401 })).toBe(
+      true,
+    );
+    expect(platform('429 Rate limit reached', { status: 429 })).toBe(false);
+    expect(platform('529 Overloaded', { status: 529 })).toBe(false);
+    expect(
+      isOperatorFault(
+        classifyLlmError(
+          sdkError('402 Insufficient Balance', { status: 402 }),
+          {
+            byoProvider: 'deepseek',
+          },
+        ),
+      ),
+    ).toBe(false);
   });
 });

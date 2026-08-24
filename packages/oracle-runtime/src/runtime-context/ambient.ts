@@ -89,10 +89,9 @@ export interface UcanAdapter {
   resolveServiceDid(serviceUrl: string): Promise<string | null>;
   /**
    * `true` once the oracle has loaded its Ed25519 signing mnemonic at boot.
-   * Plugins that mint downstream invocations (e.g. the editor's
-   * `mint_invocation` tool) gate registration on this — without a signing
-   * key, minting is a no-op and the tool should advertise an error instead
-   * of pretending to work.
+   * Plugins that mint downstream invocations gate tool registration on this —
+   * without a signing key, minting is a no-op and the tool should advertise an
+   * error instead of pretending to work.
    */
   hasSigningKey(): boolean;
   /**
