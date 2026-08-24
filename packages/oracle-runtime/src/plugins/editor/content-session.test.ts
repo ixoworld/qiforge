@@ -204,7 +204,6 @@ describe('applyDocumentEdit: flush before success', () => {
   });
 });
 
-
 describe('applyDocumentEdit: title seeding', () => {
   it('seeds an untitled document from the room name on the first write', async () => {
     // `create_page_room` sets `m.room.name`, but the editor renders its heading

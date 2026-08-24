@@ -139,7 +139,7 @@ verified:
 
 1. **Dual yjs instances.** `@ixo/editor@6.0.1` resolves yjs **13.6.27**; oracle-runtime
    resolves **13.6.32**. Every `instanceof Y.XmlElement` inside those primitives is
-   therefore false, and they fail *silently*: `readBlocksFromFragment` returns `[]`,
+   therefore false, and they fail _silently_: `readBlocksFromFragment` returns `[]`,
    `setBlockProps`/`removeBlockFromFragment` return `false`,
    `writeCompiledBlocksToFragment` throws. The editor's own `core/lib/yjsTypes.ts`
    documents this hazard (it ships `isYMapLike` precisely because `instanceof` is
@@ -228,7 +228,7 @@ Status: approved 2026-08-24. Findings from live use of wave 1.
   **template-alias** room (`createAlias("template", entityDid)`) in the personal
   **flows** space, then `setSelectedRoom(roomId)` and
   `router.push({ pathname: EWorkspacePageRoutes.Pages, query: { roomId } }, undefined,
-  { shallow: true })`. It never uses the personal Pages space.
+{ shallow: true })`. It never uses the personal Pages space.
 - **Domain pages** live in the domain's Pages subspace (`useMatrixSourceSpaces().domainPages`),
   a first-class route `pages/domain/[entityDid]/[spaceId]/index.tsx`. Its "New page"
   (`handleCreateTemplateInSpace`) calls `createTemplate(name, undefined, routeSpaceId)`,
@@ -250,6 +250,7 @@ always bound, `room_id` optional and defaulting to `state.editorRoomId`; the sub
 path (`createEditorSubAgent`) is deleted; new typed failure `no_document`.
 
 Remaining:
+
 - Fix `failures.ts`: the `/** Anything unexpected … */` doc comment must sit above
   `editorError`, not above `noDocument`.
 - Re-point `editor.plugin.test.ts` to the single-tool contract (no `getRequestSubAgents`),
@@ -266,6 +267,7 @@ Remaining:
 ### Portal — `impacts-x-web`
 
 **`create_page_room`** (`lib/companion-tools/createPageRoomTool.ts`):
+
 - Inputs to the factory (resolved with hooks in the component that calls `getTools`, passed
   as plain values): `personalFlowsSpaceId`, `domainPagesSpaceId`, `entityDid`,
   `canCreateDomainPages: boolean` (the Library predicate evaluated against the Pages
