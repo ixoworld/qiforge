@@ -233,6 +233,32 @@ describe('EditorPlugin: standalone tool', () => {
     expect(standalone?.schema.safeParse({}).success).toBe(false);
   });
 
+  it('rejects a fabricated room id at the schema, before any Matrix round-trip', async () => {
+    // Seen live: with no open document reported, the model filled the field
+    // with `!,invalid:placeholder`. The old regex (`^!.+:.+$`) accepted it and
+    // the membership guard then burned a homeserver call refusing it. A real
+    // id never contains a comma or whitespace, so the schema can say no first
+    // — and its message tells the model to omit the field instead.
+    const plugin = new EditorPlugin();
+    const [tool] = await plugin.getRequestTools(contextWith({}));
+
+    for (const fake of [
+      '!,invalid:placeholder',
+      '!placeholder',
+      '!room id:x',
+    ]) {
+      const parsed = tool?.schema.safeParse({ room_id: fake, task: 'read' });
+      expect(parsed?.success).toBe(false);
+    }
+    // Real ids, including a port-qualified homeserver, still pass.
+    for (const real of [ROOM_ID, '!abc:matrix.org:8448']) {
+      expect(
+        tool?.schema.safeParse({ room_id: real, task: 'read' }).success,
+      ).toBe(true);
+    }
+    expect(isUserInRoom).not.toHaveBeenCalled();
+  });
+
   it('returns no_document when nothing is open and no room_id is given', async () => {
     const plugin = new EditorPlugin();
     const ctx = contextWith({});

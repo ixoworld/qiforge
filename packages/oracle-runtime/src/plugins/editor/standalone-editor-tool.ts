@@ -32,8 +32,11 @@ const standaloneEditorSchema = z.object({
   room_id: z
     .string()
     .regex(
-      /^!.+:.+$/,
-      'Room ID must start with "!" (e.g., "!abc123:matrix.org")',
+      /^![A-Za-z0-9._=-]+:[A-Za-z0-9.-]+(?::\d+)?$/,
+      'Not a Matrix room id. A real id looks like "!oeGkcJIKNpeSiaGHVE:devmx.ixo.earth" ' +
+        'and only ever comes from a tool result (list_workspace_pages, ' +
+        'create_page_room). Never invent or placeholder one — omit room_id ' +
+        'to target the document the user has open.',
     )
     .optional()
     .describe(

@@ -41,6 +41,7 @@ Tool results carry a \`code\` you must act on:
 - \`prop_not_editable\` — name the exact property in your reply and say why it cannot be changed. Do not retry with the same property.
 - \`block_not_found\` — the id is stale. Re-read the document and use current ids.
 - \`not_a_member\` — the document is not the user's. Say so plainly. Do not retry.
+- \`no_document\` — no document is open and no room id was given. Return the code; do not invent a room id.
 - \`flush_timeout\` — the edit could **not** be confirmed as saved. Treat it as not applied and say so.
 
 Never present a refusal as a success, and never silently retry a refusal.`;
@@ -102,7 +103,7 @@ The user has a document open, and it is the primary context for this turn.
 export const STANDALONE_EDITOR_PROMPTS = {
   operationalMode: `**DOCUMENT ASSISTANT AVAILABLE**
 
-No document is open, but you can read and edit any document in the user's workspace via \`call_editor_agent\` with its \`room_id\`.
+The client has not reported an open document. You can still read and edit any document in the user's workspace via \`call_editor_agent\`.
 
 Documents are collaborative pages — not IXO entities. Never use the Domain Indexer for them.
 
@@ -110,11 +111,13 @@ Workflow:
 1. Call the \`${LIST_PAGES_TOOL}\` browser tool to find the document and its room id.
 2. Call \`call_editor_agent({ room_id, task })\` with a self-contained task.
 
-\`room_id\` and \`task\` are separate fields: the room id never goes in the task text. Never guess a room id.`,
+**\`room_id\` is optional, and it must be real.** Either pass an id you obtained from a tool result in this turn (\`${LIST_PAGES_TOOL}\`, \`${CREATE_PAGE_TOOL}\`), or omit it entirely — omitted, the tool falls back to whatever document the client has open, and returns \`no_document\` if there is none. **Never invent, guess, or placeholder a room id** (no \`!placeholder\`, no \`!unknown\`, nothing made up): a fabricated id is refused as \`not_a_member\` and wastes the turn. If the user refers to "this page" or "the current template" and no id is known, omit \`room_id\` first; if that returns \`no_document\`, list their documents and ask which one.
+
+\`room_id\` and \`task\` are separate fields: the room id never goes in the task text.`,
 
   editorSection: `### Document assistant
 
-\`call_editor_agent({ room_id, task })\` opens one document and runs a content task against it: read, summarise, insert, edit, reorder, replace text.
+\`call_editor_agent({ room_id?, task })\` opens one document and runs a content task against it: read, summarise, insert, edit, reorder, replace text. \`room_id\` is optional: pass a real id from a tool result, or omit it to target the document the client has open. Never fabricate one.
 
 **It has no access to this conversation** — put every detail in \`task\`: which block, what change, the exact values.
 
