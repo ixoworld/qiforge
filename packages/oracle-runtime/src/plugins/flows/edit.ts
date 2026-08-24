@@ -14,11 +14,7 @@
  */
 import type { Doc as YDoc } from 'yjs';
 import * as Y from 'yjs';
-import {
-  deleteBlock,
-  editBlock,
-  findParentOf,
-} from '../editor/block-actions.js';
+import { deleteBlock, editBlock, findParentOf } from './ydoc-helpers.js';
 import { getActionDef, isEventCapable } from './actions.js';
 import { FlowError } from './errors.js';
 import { readFlowSpec } from './read.js';

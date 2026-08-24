@@ -110,6 +110,19 @@ const PRESETS: Record<string, SimulatedErrorSpec> = {
     message: '401 status code (no body)',
     byoProvider: 'chatgpt',
   },
+  // Platform presets carry no `byoProvider`: they simulate the ORACLE'S OWN
+  // provider account failing. Wording is OpenRouter's verbatim. Use these to
+  // check the client only ever sees the redacted generic failure, never the
+  // "add credits" text or the rejected key.
+  'platform:billing': {
+    status: 402,
+    message:
+      '402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.',
+  },
+  'platform:auth': {
+    status: 401,
+    message: '401 No auth credentials found',
+  },
   server: {
     status: 529,
     nested: { type: 'overloaded_error', message: 'Overloaded' },

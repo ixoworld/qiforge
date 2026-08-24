@@ -1,4 +1,5 @@
 import { RouterEvent } from '@ixo/oracles-events';
+import { classifyLlmError } from '../../llm/provider-error.js';
 import type { Response } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeResponse } from './__test-fixtures__/fake-response.js';
@@ -131,6 +132,67 @@ describe('sendSSEDone / sendSSEError', () => {
       error: string;
     };
     expect(strPayload.error).toBe('raw-string');
+  });
+
+  it('redacts an operator-account failure on the way to the wire', () => {
+    const outOfCredit = Object.assign(
+      new Error(
+        '402 This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.',
+      ),
+      { status: 402 },
+    );
+    const res = new FakeResponse();
+
+    sendSSEError(
+      res as unknown as Response,
+      outOfCredit,
+      classifyLlmError(outOfCredit),
+      { sessionId: 'sess-1', requestId: 'req-1' },
+    );
+
+    const chunk = res.writes[0]!;
+    const payload = JSON.parse(chunk.split('data: ')[1]!.trim()) as {
+      error: string;
+      kind: string;
+      status: number;
+      retryable: boolean;
+      detail: string;
+      sessionId: string;
+    };
+    expect(payload.kind).toBe('unknown');
+    expect(payload.status).toBe(500);
+    expect(payload.retryable).toBe(false);
+    expect(payload.error).toBe(
+      'Something went wrong while generating the reply. Please try again.',
+    );
+    expect(payload.detail).toBe(payload.error);
+    // Identity still rides along — only the diagnosis is withheld.
+    expect(payload.sessionId).toBe('sess-1');
+    expect(chunk).not.toMatch(/credits/i);
+  });
+
+  it("keeps a BYO account's own billing failure actionable", () => {
+    const insufficient = Object.assign(new Error('402 Insufficient Balance'), {
+      status: 402,
+    });
+    const res = new FakeResponse();
+
+    sendSSEError(
+      res as unknown as Response,
+      insufficient,
+      classifyLlmError(insufficient, { byoProvider: 'deepseek' }),
+    );
+
+    const payload = JSON.parse(res.writes[0]!.split('data: ')[1]!.trim()) as {
+      error: string;
+      kind: string;
+      source: string;
+      provider: string;
+    };
+    expect(payload.kind).toBe('billing');
+    expect(payload.source).toBe('byo');
+    expect(payload.provider).toBe('deepseek');
+    expect(payload.error).toMatch(/out of credit/i);
   });
 });
 

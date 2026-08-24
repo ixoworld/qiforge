@@ -268,3 +268,55 @@ export function classifyLlmError(
     detail: parts.text,
   };
 }
+
+/**
+ * Kinds that mean "the credential we used is the problem" — the account is
+ * out of credit, or its key was rejected.
+ */
+const OPERATOR_FAULT_KINDS: ReadonlySet<LlmErrorKind> = new Set([
+  'billing',
+  'auth',
+]);
+
+/**
+ * Strip operator-account failures before they reach a client.
+ *
+ * A `billing` / `auth` failure on `source: 'platform'` is OUR provider
+ * account failing (out of credit, key revoked) — the end user did nothing
+ * and can do nothing, so "top up with the provider" is both wrong and a leak:
+ * the raw `detail` carries the upstream billing text and, on an auth failure,
+ * the rejected key's prefix. It is also indistinguishable, at the client, from
+ * the 402 the subscription middleware raises when the *user* runs out of
+ * oracle credits. Present it as a generic server-side fault instead.
+ *
+ * BYO failures pass through untouched: there the failing account belongs to
+ * the user, so the actionable copy is exactly what they need.
+ */
+export function redactOperatorFault(
+  classified: ClassifiedLlmError,
+): ClassifiedLlmError {
+  if (
+    classified.source !== 'platform' ||
+    !OPERATOR_FAULT_KINDS.has(classified.kind)
+  ) {
+    return classified;
+  }
+  const message = fallbackMessage('unknown', undefined, undefined);
+  return {
+    kind: 'unknown',
+    source: 'platform',
+    status: 500,
+    // An identical retry hits the same exhausted account. Nothing to gain.
+    retryable: false,
+    message,
+    detail: message,
+  };
+}
+
+/** True when the failure is ours to fix (top up / rotate the key), not the user's. */
+export function isOperatorFault(classified: ClassifiedLlmError): boolean {
+  return (
+    classified.source === 'platform' &&
+    OPERATOR_FAULT_KINDS.has(classified.kind)
+  );
+}

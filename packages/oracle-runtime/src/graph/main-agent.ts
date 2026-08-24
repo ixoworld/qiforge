@@ -503,6 +503,17 @@ export async function createMainAgent(
       : editorToolBound && state.spaceId
         ? STANDALONE_EDITOR_PROMPTS
         : null;
+  // One line per request so a "which document?" mis-answer can be traced to
+  // whether the client sent `editorRoomId` at all, or the runtime dropped it.
+  ambient.logger.log(
+    `[main-agent] editor mode=${
+      editorPrompts === EDITOR_MODE_PROMPTS
+        ? 'document-open'
+        : editorPrompts === STANDALONE_EDITOR_PROMPTS
+          ? 'standalone'
+          : 'none'
+    } editorRoomId=${state.editorRoomId ?? '-'} spaceId=${state.spaceId ?? '-'} toolBound=${editorToolBound}`,
+  );
 
   // Custom Instructions section: author-supplied standing guidance
   // (config.prompt.customInstructions) plus operating guides contributed by

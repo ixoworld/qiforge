@@ -486,11 +486,11 @@ describe('createMainAgent', () => {
   it('binds the access-denied stub and the unavailable notice when editorRoomId is set but the editor did not bind', async () => {
     // Regression: the editor plugin can refuse to contribute its sub-agent
     // even when `state.editorRoomId` is set (membership check failed, Matrix
-    // down, build error). Injecting "EDITOR MODE ACTIVE — use the Editor
-    // Agent tool" without the tool bound makes the model emit its sub-agent
-    // task as user-facing text instead of calling anything. The runtime now
-    // (a) swaps the editor-mode prompt for an explicit unavailable notice and
-    // (b) binds a stub `call_editor_agent` that returns the denial reason.
+    // down, build error). Telling the model a document is open without the
+    // tool bound makes it emit its sub-agent task as user-facing text instead
+    // of calling anything. The runtime now (a) swaps the document-mode prompt
+    // for an explicit unavailable notice and (b) binds a stub
+    // `call_editor_agent` that returns the denial reason.
     const ambient = makeAmbient();
     await createMainAgent(
       baseArgs({
@@ -503,8 +503,8 @@ describe('createMainAgent', () => {
     if (!params) throw new Error('createAgent was not called');
 
     const prompt = params.systemPrompt as string;
-    expect(prompt).not.toContain('EDITOR MODE ACTIVE');
-    expect(prompt).toContain('PAGE OPEN BUT NOT ACCESSIBLE');
+    expect(prompt).not.toContain('**DOCUMENT OPEN**');
+    expect(prompt).toContain('DOCUMENT OPEN BUT NOT ACCESSIBLE');
     // MatrixManager is not initialised in unit tests, so the membership
     // re-check fails closed — same as the plugin's own guard. The wording is
     // unified (user OR oracle missing) because the lookup runs with the
@@ -519,7 +519,7 @@ describe('createMainAgent', () => {
     }[];
     const stub = boundTools.find((t) => t.name === 'call_editor_agent');
     if (!stub) throw new Error('access-denied stub was not bound');
-    const denial = await stub.invoke({ task: 'read the current page' });
+    const denial = await stub.invoke({ task: 'read the current document' });
     expect(denial).toContain('could not be verified');
     expect(denial).toContain('!room:ixo.world');
 
@@ -553,7 +553,7 @@ describe('createMainAgent', () => {
     expect(toolNames).toContain('call_editor_agent');
 
     const prompt = params.systemPrompt as string;
-    expect(prompt).toContain('EDITOR MODE ACTIVE');
+    expect(prompt).toContain('**DOCUMENT OPEN**');
   });
 
   it('renders the Tier-1 capability block in the prompt for visibility=always plugins', async () => {

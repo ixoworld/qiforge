@@ -71,8 +71,8 @@ export const createPageContextMiddleware = (
           `Previous page: ${previousLabel}. ` +
           `Previous page context in conversation history may be stale. ` +
           `Always favour the current active page. ` +
-          `Before making any edits, use read_page to confirm the current page content ` +
-          `and verify it matches what the user is asking you to work on. ` +
+          `Before making any edits, read the current page's content to confirm it ` +
+          `matches what the user is asking you to work on. ` +
           `If the content differs from what was discussed, confirm with the user before editing.`;
       } else {
         pageContext =

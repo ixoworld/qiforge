@@ -518,9 +518,9 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     hasSigningKey: () => boolean;
     /**
      * Mint a UCAN invocation from a directly-supplied delegation CAR (rather
-     * than a per-user cached one). Used by the editor's `mint_invocation`
-     * tool: it reads the CAR from a flow's Y.Doc by CID and re-mints a fresh
-     * single-use invocation targeted at a specific service route.
+     * than a per-user cached one), targeted at a specific service route. For
+     * callers that already hold the delegation and need a fresh single-use
+     * invocation.
      */
     createInvocationFromDelegation: (
       delegationCar: string,
