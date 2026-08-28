@@ -21,13 +21,6 @@ peerDependencyRules:
 
 overrides:
   ws: '8.18.2'
-  # Two copies of better-sqlite3 means two native addons, each with its own
-  # statically-linked SQLite and its own environment cleanup hook. Their
-  # Statement finalizers then run without an entered V8 context and abort the
-  # process ("RemoveEnvironmentCleanupHook: Assertion failed: (env) != nullptr").
-  # @ixo/sqlite-saver still pins ^11.10.0, so without this the runtime's 12.x
-  # and the saver's 11.x both load. Collapse to one build.
-  better-sqlite3: '^12.9.0'
   # request (deprecated, via @ixo/matrix-bot-sdk fork) locks form-data@2.3.3,
   # which has a critical predictable-boundary advisory (GHSA-fjxv-7rqg-78g4
   # family). 2.5.4+ is the patched drop-in within the same major.
