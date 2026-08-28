@@ -3,7 +3,6 @@ import {
   transformGraphStateMessageToListMessageResponse,
   type ChatSession,
 } from '@ixo/common';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type BaseMessage } from 'langchain';
@@ -41,8 +40,9 @@ export class PostMessageSyncer {
   run(input: PostSyncInput): void {
     void Promise.resolve().then(async () => {
       try {
-        const db = await this.checkpointSync.getUserDatabaseNoSync(input.did);
-        const saver = SqliteSaver.fromDatabase(db);
+        const saver = await this.checkpointSync.getUserCheckpointerNoSync(
+          input.did,
+        );
         const tuple = await saver.getTuple({
           configurable: { thread_id: input.langchainThreadId },
         });

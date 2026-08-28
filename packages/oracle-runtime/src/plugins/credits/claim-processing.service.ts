@@ -4,6 +4,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  OnModuleDestroy,
   Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -106,10 +107,10 @@ const LOG_TAG = '[Credits/Claims]';
  * and ships no tools.
  */
 @Injectable()
-export class ClaimProcessingService {
+export class ClaimProcessingService implements OnModuleDestroy {
   private readonly logger = new Logger(ClaimProcessingService.name);
   private readonly denom: Denom;
-  private readonly claimProcessingCheckpointer: BaseCheckpointSaver;
+  private readonly claimProcessingCheckpointer: SqliteSaver;
   private readonly claimProcessingDbPath: string;
   private readonly tokenLimiter: TokenLimiter;
   private readonly minimumClaimThreshold: number;
@@ -167,9 +168,27 @@ export class ClaimProcessingService {
       );
     }
 
-    const sqliteSaver = SqliteSaver.fromConnString(this.claimProcessingDbPath);
-    this.claimProcessingCheckpointer =
-      sqliteSaver as unknown as BaseCheckpointSaver;
+    this.claimProcessingCheckpointer = SqliteSaver.fromConnString(
+      this.claimProcessingDbPath,
+    );
+  }
+
+  /**
+   * Close the claim-processing SQLite handle with the Nest container. Left
+   * open, it is torn down by better-sqlite3's environment cleanup hook during
+   * process exit, which aborts the process (`RemoveEnvironmentCleanupHook`
+   * runs with no V8 context entered).
+   */
+  public onModuleDestroy(): void {
+    try {
+      this.claimProcessingCheckpointer.close();
+    } catch (error) {
+      this.logger.warn(
+        `Failed to close claim processing database during shutdown: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
@@ -424,7 +443,14 @@ export class ClaimProcessingService {
   private getProcessClaimWorkflow() {
     return entrypoint(
       {
-        checkpointer: this.claimProcessingCheckpointer,
+        // `@ixo/sqlite-saver` is still a CJS package while this one is ESM, so
+        // TypeScript resolves `@langchain/core` twice — once per resolution
+        // mode — and the two structurally identical `BaseCheckpointSaver`
+        // types are nominally distinct (protected members don't unify). The
+        // cast goes away once the saver ships as ESM; until then it is
+        // confined to this one boundary rather than erasing the field's type.
+        checkpointer: this
+          .claimProcessingCheckpointer as unknown as BaseCheckpointSaver,
         name: 'processClaim',
       },
       async (params: ProcessClaimParams) => {

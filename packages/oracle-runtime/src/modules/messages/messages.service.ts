@@ -6,7 +6,6 @@ import {
 } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import { ReasoningEvent } from '@ixo/oracles-events';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { CommerceContext } from '../../plugin-api/types.js';
@@ -193,8 +192,7 @@ export class MessagesService implements OnModuleInit {
 
     this.checkpointSync.markUserActive(did);
     try {
-      const db = await this.checkpointSync.getUserDatabase(did);
-      const saver = SqliteSaver.fromDatabase(db);
+      const saver = await this.checkpointSync.getUserCheckpointer(did);
       // Read the full transcript from the messages table rather than the
       // latest checkpoint: once the summarization middleware condenses graph
       // state, the checkpoint only holds the summary + recent tail, while
