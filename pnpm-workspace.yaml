@@ -21,6 +21,11 @@ peerDependencyRules:
 
 overrides:
   ws: '8.18.2'
+  # Two copies of better-sqlite3 means two native addons, each with its own
+  # statically-linked SQLite and its own environment cleanup hook. On exit both
+  # tear down open handles outside an entered V8 context, which aborts the
+  # process. Collapse to one build.
+  better-sqlite3: '^12.9.0'
   # request (deprecated, via @ixo/matrix-bot-sdk fork) locks form-data@2.3.3,
   # which has a critical predictable-boundary advisory (GHSA-fjxv-7rqg-78g4
   # family). 2.5.4+ is the patched drop-in within the same major.
