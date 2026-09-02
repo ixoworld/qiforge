@@ -1,5 +1,12 @@
 # @ixo/oracles-client-sdk
 
+## 1.3.7
+
+### Patch Changes
+
+- Updated dependencies [[`b6cd393`](https://github.com/ixoworld/qiforge/commit/b6cd393e52c9e375189d1d3e9900f4b5f5cf571d)]:
+  - @ixo/oracles-chain-client@2.2.0
+
 ## 1.0.11
 
 ### Patch Changes

@@ -1,5 +1,17 @@
 # @ixo/common
 
+## 1.5.0
+
+### Minor Changes
+
+- [#242](https://github.com/ixoworld/qiforge/pull/242) [`b6cd393`](https://github.com/ixoworld/qiforge/commit/b6cd393e52c9e375189d1d3e9900f4b5f5cf571d) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Bring-your-own-credential LLMs for the personal companion (`BYO_LLM_ENABLED`): users connect their ChatGPT subscription (Codex OAuth device flow) or per-provider API keys (OpenAI, Anthropic, Gemini, DeepSeek), stored as server-encrypted secrets in the canonical user↔oracle room. Per-turn a `byo:`-namespaced model id swaps a request-scoped LLM adapter into ambient so the main agent and every sub-agent role run on the user's credential; credits are skipped on BYO turns. Includes the `/byo-llm/*` connect surface (status, device flow, code exchange, API-key save, validate, disconnect), cross-provider reasoning-history sanitation, Responses-API stream handling in the SSE runner, `encryptJWE` + `SecretsService.putSecret` for server-side secret writes, and a `getChatAnthropicModel` factory.
+
+### Patch Changes
+
+- Updated dependencies [[`b6cd393`](https://github.com/ixoworld/qiforge/commit/b6cd393e52c9e375189d1d3e9900f4b5f5cf571d), [`cf21fba`](https://github.com/ixoworld/qiforge/commit/cf21fbab90d7b1e50fdd7d238ecc05375c25f8b4)]:
+  - @ixo/oracles-chain-client@2.2.0
+  - @ixo/matrix@1.3.0
+
 ## 1.1.0
 
 ### Minor Changes

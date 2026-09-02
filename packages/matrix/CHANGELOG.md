@@ -1,5 +1,11 @@
 # @ixo/matrix
 
+## 1.3.0
+
+### Minor Changes
+
+- [#233](https://github.com/ixoworld/qiforge/pull/233) [`cf21fba`](https://github.com/ixoworld/qiforge/commit/cf21fbab90d7b1e50fdd7d238ecc05375c25f8b4) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Bump matrix-bot-sdk to ^0.8.0-ixo.14 and bootstrap cross-signing after the Matrix client starts. Brings MSC4268 encrypted history sharing (send and accept), the non-blocking room tracker (instant startup with a deferred background room scan), and a fail-closed encryption check on send. Cross-signing is required for key bundles in both directions; the identity is restored from Secret Storage when available.
+
 ## 1.1.0
 
 ### Minor Changes
