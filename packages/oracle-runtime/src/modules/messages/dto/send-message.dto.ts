@@ -218,6 +218,7 @@ export class SendMessageDto {
   metadata?: Record<string, unknown> & {
     editorRoomId?: string;
     spaceId?: string;
+    sessionRunId?: string;
   };
 
   @ApiProperty({
