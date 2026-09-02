@@ -70,7 +70,7 @@
     "html-to-text": "9.0.5",
     "langchain": "1.4.2",
     "langsmith": "^0.5.25",
-    "mammoth": "1.12.0",
+    "mammoth": "1.12.2",
     "node-emoji": "^2.2.0",
     "openai": "^6.34.0",
     "pdfjs-dist": "^5.4.296",
