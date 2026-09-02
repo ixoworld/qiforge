@@ -1,10 +1,18 @@
 import type { Socket } from 'socket.io-client';
+import { type IBrowserToolParams } from '../../types/browser-tool.type.js';
 
 export interface ToolExecutionConfig {
-  socket: Socket;
+  socket: Pick<Socket, 'emit'>;
   toolId: string;
   eventName: 'tool_result' | 'action_call_result';
-  sessionId?: string;
+  sessionId: string;
+}
+
+export interface BrowserToolCall {
+  sessionId: string;
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
 }
 
 /**
@@ -41,4 +49,31 @@ export async function executeToolAndEmitResult<T>(
       error: error instanceof Error ? error.message : 'Unknown error',
     });
   }
+}
+
+/**
+ * Run a browser tool and return its result to the exact Oracle session that
+ * issued the call. Browser tools use the same session correlation contract as
+ * AG-UI actions.
+ */
+export async function executeBrowserToolCall(
+  socket: Pick<Socket, 'emit'>,
+  browserTools: Record<string, Pick<IBrowserToolParams, 'fn'>> | undefined,
+  data: BrowserToolCall,
+): Promise<void> {
+  await executeToolAndEmitResult(
+    {
+      socket,
+      toolId: data.toolCallId,
+      eventName: 'tool_result',
+      sessionId: data.sessionId,
+    },
+    async () => {
+      const tool = browserTools?.[data.toolName];
+      if (!tool) {
+        throw new Error(`Tool ${data.toolName} not found`);
+      }
+      return tool.fn(data.args);
+    },
+  );
 }
