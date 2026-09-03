@@ -185,8 +185,8 @@ importers:
         specifier: 1.0.1
         version: 1.0.1(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
       '@tavily/core':
-        specifier: 0.7.7
-        version: 0.7.7
+        specifier: 0.7.9
+        version: 0.7.9
       axios:
         specifier: ^1.7.9
         version: 1.18.1
@@ -4518,8 +4518,8 @@ packages:
     peerDependencies:
       react: ^18 || ^19
 
-  '@tavily/core@0.7.7':
-    resolution: {integrity: sha512-6Sc+u4nPEdzLB2D7Ubut/sLI2wR3Wc81P1VCJNTsdFtvgLOpVGGGEYAG9VUCLOzVCeEUT5SzHRIMSnsqJ4Pdow==}
+  '@tavily/core@0.7.9':
+    resolution: {integrity: sha512-ftOhGU0Bmatc4REwmgMyP28BNdEab6iZ1WiVjzrzDdCVxRoNLhVRp+yhEJ6Kl0OIo6wwjP2l4FWIFOakn7J16w==}
 
   '@testcontainers/postgresql@10.28.0':
     resolution: {integrity: sha512-NN25rruG5D4Q7pCNIJuHwB+G85OSeJ3xHZ2fWx0O6sPoPEfCYwvpj8mq99cyn68nxFkFYZeyrZJtSFO+FnydiA==}
@@ -16092,7 +16092,7 @@ snapshots:
       '@tanstack/query-core': 5.101.4
       react: 18.3.1
 
-  '@tavily/core@0.7.7':
+  '@tavily/core@0.7.9':
     dependencies:
       axios: 1.18.1
       https-proxy-agent: 7.0.6
