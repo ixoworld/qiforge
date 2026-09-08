@@ -12,6 +12,11 @@ implementation, and what is deliberately left out.
   manifests, `configSchema`, `autoDetect`, boot/request tools, sub-agents
   (with `forwardTools`), middlewares, shared state, auth-excluded routes.
   `getNestModules` is replaced by `getRoutes(ctx)` (plain `fetch` handlers).
+  `createOracleWorker({ features, manifestOverrides })` are Node's
+  `createOracleApp` options with the same semantics: overrides are
+  shallow-merged over a loaded plugin's manifest at boot (e.g.
+  `{ portal: { visibility: 'always' } }`), unknown names are logged and
+  ignored, the merged manifest is validated like an authored one.
 - **Wire protocol**: `POST/GET /sessions`, `POST /messages/:id` (SSE events
   `message` / `reasoning` / `tool_call` / `action_call` / `error` / `done`),
   `GET /messages/:id`, `/messages/abort`, `/delegation`, `/health`,

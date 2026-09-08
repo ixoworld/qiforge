@@ -11,6 +11,8 @@ import { createOracleWorker, WeatherPlugin } from '@ixo/oracle-runtime-workers';
 const oracle = createOracleWorker({
   config: { name: 'My Oracle', org: 'IXO', description: '…' },
   plugins: [new WeatherPlugin()],
+  // Optional, as on Node: retune a loaded plugin's manifest without forking it.
+  manifestOverrides: { weather: { visibility: 'always' } },
 });
 
 export const { UserOracleDO, MatrixGatewayDO } = oracle;
