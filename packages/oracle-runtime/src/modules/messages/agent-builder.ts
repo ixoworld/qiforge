@@ -102,7 +102,8 @@ export interface BuiltAgent {
  * would expose no on-demand plugins.
  *
  * Per-request overrides from the payload (`metadata.editorRoomId`,
- * `metadata.spaceId`, `metadata.currentEntityDid`, `tools`, `agActions`)
+ * `metadata.spaceId`, `metadata.currentEntityDid`, `metadata.sessionRunId`,
+ * `tools`, `agActions`)
  * win over the checkpointed values — both in the build-time state used by
  * `createMainAgent` and in the `stateInput` fed to `invoke` /
  * `streamEvents`. The annotation-state reducers persist the new values
@@ -412,6 +413,13 @@ export class AgentBuilder {
       userContext,
       userPreferences,
       editorRoomId: payload.metadata?.editorRoomId ?? priorState.editorRoomId,
+      // The run follows the room: a request that names the editor room also
+      // defines its session run, and "no run" must not fall back to one
+      // remembered from an earlier flow.
+      sessionRunId:
+        payload.metadata?.editorRoomId !== undefined
+          ? payload.metadata.sessionRunId
+          : priorState.sessionRunId,
       spaceId: payload.metadata?.spaceId ?? priorState.spaceId,
       currentEntityDid:
         payload.metadata?.currentEntityDid ?? priorState.currentEntityDid,
@@ -460,6 +468,9 @@ export class AgentBuilder {
       ...(userPreferences !== undefined && { userPreferences }),
       ...(payload.metadata?.editorRoomId !== undefined && {
         editorRoomId: payload.metadata.editorRoomId,
+        // Written even when undefined so a room without a run clears the
+        // checkpointed run id rather than keeping a stale one.
+        sessionRunId: payload.metadata.sessionRunId,
       }),
       ...(payload.metadata?.spaceId !== undefined && {
         spaceId: payload.metadata.spaceId,

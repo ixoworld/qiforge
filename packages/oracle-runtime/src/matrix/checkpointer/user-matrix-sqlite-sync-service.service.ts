@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
@@ -85,9 +86,29 @@ function configureSqliteConnection(db: DatabaseType): void {
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
 }
+
+/**
+ * Hard ceiling on simultaneously open user connections. Each one holds a
+ * SQLite page cache plus every prepared statement its saver owns, and none of
+ * that is visible to V8 — the heap stays small while RSS climbs, so the
+ * hourly idle sweep alone lets a busy hour push the container into an OOM
+ * kill. Past the ceiling the least-recently-used idle connection is closed.
+ */
+const MAX_CACHED_DB_CONNECTIONS = 100;
+
+/**
+ * Minimum idle time before a connection may be evicted by the size cap.
+ * `isUserActive` already excludes in-flight requests; this is a second guard
+ * so a connection opened moments ago is never closed out from under a caller
+ * that has not yet incremented the ref-count.
+ */
+const EVICTION_GRACE_MS = 60_000;
+
 @Injectable()
-export class UserMatrixSqliteSyncService implements OnModuleInit {
-  private static instance: UserMatrixSqliteSyncService;
+export class UserMatrixSqliteSyncService
+  implements OnModuleInit, OnModuleDestroy
+{
+  private static instance: UserMatrixSqliteSyncService | undefined;
 
   readonly fileEventsDatabase: DatabaseType;
   private constructor() {
@@ -378,12 +399,105 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
 
     // Cache it
+    this.evictIdleConnections();
     this.dbConnectionCache.set(userDid, {
       db,
       lastAccessedAt: Date.now(),
     });
 
     return db;
+  }
+
+  /**
+   * Close least-recently-used idle connections until the cache has room for
+   * one more. Connections serving an in-flight request (`isUserActive`) or
+   * touched within {@link EVICTION_GRACE_MS} are never closed.
+   *
+   * Evicting loses nothing: the database file stays on disk and its entry
+   * stays in `filePathCache`, so the upload cron still backs it up to Matrix.
+   * The next request for that user simply reopens the connection.
+   */
+  private evictIdleConnections(): void {
+    let overflow = this.dbConnectionCache.size - MAX_CACHED_DB_CONNECTIONS + 1;
+    if (overflow <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const evictable = [...this.dbConnectionCache.entries()]
+      .filter(
+        ([userDid, entry]) =>
+          !this.isUserActive(userDid) &&
+          now - entry.lastAccessedAt > EVICTION_GRACE_MS,
+      )
+      .sort(([, a], [, b]) => a.lastAccessedAt - b.lastAccessedAt);
+
+    for (const [userDid, entry] of evictable) {
+      if (overflow <= 0) {
+        break;
+      }
+      try {
+        entry.db.close();
+      } catch (error) {
+        // Busy connection — leave it cached and try a different one.
+        Logger.warn(
+          `Failed to evict database connection for user ${userDid}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        continue;
+      }
+      this.dbConnectionCache.delete(userDid);
+      overflow -= 1;
+    }
+
+    if (overflow > 0) {
+      Logger.warn(
+        `Database connection cache is over its ${MAX_CACHED_DB_CONNECTIONS} ceiling and ${overflow} connection(s) could not be evicted — all remaining connections are active or within the eviction grace period.`,
+      );
+    }
+  }
+
+  /**
+   * Close every SQLite handle the service owns. Without this the connections
+   * outlive the Nest container and are torn down by better-sqlite3's
+   * environment cleanup hook during process exit, which aborts the process
+   * (`RemoveEnvironmentCleanupHook`: no V8 context is entered at that point).
+   *
+   * Runs after `registerGracefulShutdown` has already uploaded checkpoints to
+   * Matrix, so closing here does not skip a backup.
+   */
+  public onModuleDestroy(): void {
+    for (const [userDid, entry] of this.dbConnectionCache.entries()) {
+      try {
+        entry.db.close();
+      } catch (error) {
+        Logger.warn(
+          `Failed to close database connection for user ${userDid} during shutdown: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    this.dbConnectionCache.clear();
+
+    try {
+      this.fileEventsDatabase.close();
+    } catch (error) {
+      Logger.warn(
+        `Failed to close file events database during shutdown: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Drop the cached singleton: every handle it owns is now closed, so a
+    // second `createOracleApp` in the same process (the integration harness
+    // boots and closes several) must build a fresh instance rather than
+    // resurrect one whose `fileEventsDatabase` is shut.
+    if (UserMatrixSqliteSyncService.instance === this) {
+      UserMatrixSqliteSyncService.instance = undefined;
+    }
   }
 
   /**

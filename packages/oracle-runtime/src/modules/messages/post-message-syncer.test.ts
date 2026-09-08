@@ -1,6 +1,5 @@
 import type * as IxoCommon from '@ixo/common';
 import { type ChatSession, type SessionManagerService } from '@ixo/common';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matrix-sqlite-sync-service.service.js';
@@ -13,12 +12,6 @@ import {
   makeCheckpointSync,
   makeSessionManagerStub,
 } from './__test-fixtures__/deps.js';
-
-vi.mock('@ixo/sqlite-saver', () => ({
-  SqliteSaver: {
-    fromDatabase: vi.fn(() => ({ getTuple: vi.fn() })),
-  },
-}));
 
 vi.mock('@ixo/common', async (importOriginal) => ({
   ...(await importOriginal<typeof IxoCommon>()),
@@ -86,13 +79,12 @@ function build(): ServiceUnderTest {
     sessions as unknown as SessionManagerService,
     config,
   );
-  checkpointSync.getUserDatabaseNoSync.mockResolvedValue({ handle: 'db' });
   sessions.syncSessionSet.mockResolvedValue(makeSession());
-  vi.mocked(SqliteSaver.fromDatabase).mockReturnValue({
+  checkpointSync.getUserCheckpointerNoSync.mockResolvedValue({
     getTuple: vi.fn().mockResolvedValue({
       checkpoint: { channel_values: { messages: [] } },
     }),
-  } as unknown as ReturnType<typeof SqliteSaver.fromDatabase>);
+  });
   return { svc, checkpointSync, sessions };
 }
 
@@ -131,9 +123,9 @@ describe('PostMessageSyncer', () => {
       expect(sessions.syncSessionSet).toHaveBeenCalledTimes(1);
     });
 
-    it('calls markUserInactive when getUserDatabaseNoSync throws', async () => {
+    it('calls markUserInactive when getUserCheckpointerNoSync throws', async () => {
       const { svc, checkpointSync, sessions } = build();
-      checkpointSync.getUserDatabaseNoSync.mockRejectedValueOnce(
+      checkpointSync.getUserCheckpointerNoSync.mockRejectedValueOnce(
         new Error('db gone'),
       );
 
@@ -159,13 +151,13 @@ describe('PostMessageSyncer', () => {
     });
 
     it('calls sessions.syncSessionSet with role-tagged messages from the transformed list', async () => {
-      const { svc, sessions } = build();
+      const { svc, sessions, checkpointSync } = build();
       const messages = [new HumanMessage('hello'), new AIMessage('world')];
-      vi.mocked(SqliteSaver.fromDatabase).mockReturnValueOnce({
+      checkpointSync.getUserCheckpointerNoSync.mockResolvedValueOnce({
         getTuple: vi.fn().mockResolvedValue({
           checkpoint: { channel_values: { messages } },
         }),
-      } as unknown as ReturnType<typeof SqliteSaver.fromDatabase>);
+      });
 
       svc.run(makeInput());
 
@@ -187,21 +179,25 @@ describe('PostMessageSyncer', () => {
       });
     });
 
-    it('reads from the cached connection via getUserDatabaseNoSync (NOT getUserDatabase)', async () => {
+    it('reads from the cached connection via getUserCheckpointerNoSync (NOT getUserCheckpointer)', async () => {
       const { svc, checkpointSync } = build();
-      const db = { handle: 'cached-db' };
-      checkpointSync.getUserDatabaseNoSync.mockResolvedValueOnce(db);
+      const getTuple = vi.fn().mockResolvedValue({
+        checkpoint: { channel_values: { messages: [] } },
+      });
+      checkpointSync.getUserCheckpointerNoSync.mockResolvedValueOnce({
+        getTuple,
+      });
 
       svc.run(makeInput());
 
       await vi.waitFor(() =>
         expect(checkpointSync.markUserInactive).toHaveBeenCalledTimes(1),
       );
-      expect(checkpointSync.getUserDatabaseNoSync).toHaveBeenCalledWith(
+      expect(checkpointSync.getUserCheckpointerNoSync).toHaveBeenCalledWith(
         USER_DID,
       );
-      expect(checkpointSync.getUserDatabase).not.toHaveBeenCalled();
-      expect(SqliteSaver.fromDatabase).toHaveBeenCalledWith(db);
+      expect(checkpointSync.getUserCheckpointer).not.toHaveBeenCalled();
+      expect(getTuple).toHaveBeenCalledTimes(1);
     });
 
     it('coalesces missing targetSession.lastProcessedCount to 0', async () => {

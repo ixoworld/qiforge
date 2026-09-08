@@ -218,6 +218,7 @@ export class SendMessageDto {
   metadata?: Record<string, unknown> & {
     editorRoomId?: string;
     spaceId?: string;
+    sessionRunId?: string;
   };
 
   @ApiProperty({
@@ -290,6 +291,11 @@ export class SendMessagePayload {
     editorRoomId?: string;
     currentEntityDid?: string;
     spaceId?: string;
+    /**
+     * Session run the client has open in `editorRoomId`. Flow documents keep
+     * per-run state, so tools that write runtime output need the exact run.
+     */
+    sessionRunId?: string;
   };
 
   /**
