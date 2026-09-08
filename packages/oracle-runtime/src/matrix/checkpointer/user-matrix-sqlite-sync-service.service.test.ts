@@ -143,3 +143,49 @@ describe('UserMatrixSqliteSyncService.uploadCheckpointToMatrixStorage', () => {
     expect(autoVacuum).toBe(0);
   });
 });
+
+describe('UserMatrixSqliteSyncService.uploadCheckpointToMatrixStorageTask', () => {
+  const service = UserMatrixSqliteSyncService.getInstance();
+
+  it('with drainMs waits for an active user to go idle before uploading; the cron path (no drain) does not wait', async () => {
+    const userDid = 'did:ixo:sync-test-drain';
+    makeSmallCheckpointDb(userDbPath(userDid));
+    // A local file already on disk seeds `filePathCache` (what the task
+    // iterates) without any Matrix round-trip.
+    await service.getUserDatabase(userDid);
+
+    let active = false;
+    const activeAtUpload: boolean[] = [];
+    const upload = vi
+      .spyOn(service, 'uploadCheckpointToMatrixStorage')
+      .mockImplementation(async ({ userDid: did }) => {
+        if (did === userDid) activeAtUpload.push(active);
+        return 'skipped';
+      });
+    try {
+      active = true;
+      service.markUserActive(userDid);
+      setTimeout(() => {
+        active = false;
+        service.markUserInactive(userDid);
+      }, 300);
+      await service.uploadCheckpointToMatrixStorageTask({ drainMs: 5_000 });
+      // Shutdown path: the upload ran only once the user was idle.
+      expect(activeAtUpload).toEqual([false]);
+
+      active = true;
+      service.markUserActive(userDid);
+      try {
+        await service.uploadCheckpointToMatrixStorageTask();
+        // Cron path: no waiting — the user is still active at upload time
+        // (and the real upload skips them; the next cycle retries).
+        expect(activeAtUpload).toEqual([false, true]);
+      } finally {
+        active = false;
+        service.markUserInactive(userDid);
+      }
+    } finally {
+      upload.mockRestore();
+    }
+  });
+});
