@@ -528,7 +528,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async ready(identity: TurnIdentity): Promise<void> {
       this.installDebugTimerTracker();
       this.adoptHibernatedSockets();
+      let delegationReplaced = false;
       if (identity.ucanDelegation) {
+        // Clients (the Portal's SDK) send their cached delegation with every
+        // request; a token this object has not seen is a re-authorization.
+        const known =
+          this.delegations.get(identity.userDid)?.raw ??
+          (await this.ctx.storage.get<StoredDelegation>(META_DELEGATION))?.raw;
+        delegationReplaced = known !== identity.ucanDelegation;
         this.delegations.set(identity.userDid, {
           raw: identity.ucanDelegation,
         });
@@ -556,6 +563,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
       }
       await this.ctx.storage.put(META_LAST_ACCESS, Date.now());
+      if (delegationReplaced) await this.onDelegationReplaced();
+    }
+
+    /**
+     * The object holds a delegation it had not seen before (a header on this
+     * request, or a deposit through the shell). A fresh delegation is the one
+     * thing that turns a "no file-storage grant" flush failure into a
+     * success: forget the failure streak and, with unsaved turns, flush now
+     * instead of at the next 10-minute retry.
+     */
+    private async onDelegationReplaced(): Promise<void> {
+      await this.ctx.storage.delete(META_FLUSH_FAILURES);
+      if (!this.db) return;
+      if (
+        !this.dirty &&
+        (await this.ctx.storage.get<boolean>(META_DIRTY)) === true
+      )
+        this.dirty = true;
+      if (this.dirty) void this.flushToOwnerStore().catch(() => undefined);
     }
 
     /**
@@ -1504,13 +1530,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         at: Date.now(),
         ...(typeof expiration === 'number' ? { expiration } : {}),
       } satisfies StoredDelegation);
-      // A fresh delegation is the one thing that turns a "no file-storage
-      // grant" flush failure into a success: forget the failure streak and,
-      // when the object is up with unsaved turns, flush now instead of at the
-      // next 10-minute retry.
-      await this.ctx.storage.delete(META_FLUSH_FAILURES);
-      if (this.db && this.dirty)
-        void this.flushToOwnerStore().catch(() => undefined);
+      await this.onDelegationReplaced();
     }
 
     /**
