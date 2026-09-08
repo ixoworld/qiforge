@@ -1,0 +1,94 @@
+{
+  // The Matrix gateway of Mike's devnet oracle as its OWN Worker script.
+  //
+  // Why two scripts: all Durable Objects of one script share that script's
+  // isolate (128 MB heap) on a server. Giving the gateway (matrix-js-sdk +
+  // crypto wasm + sync store) its own script keeps a user object's flush or
+  // import spike from resetting the bot, and the bot's footprint out of the
+  // user isolate's budget. The oracle script (wrangler.devnet.jsonc) binds
+  // `MATRIX_GATEWAY` here via `script_name`; `USER_ORACLE` below points back.
+  //
+  // Deploy ORDER (first split only): this script first — its `v1` migration
+  // TRANSFERS the existing MatrixGatewayDO namespace (device identity, crypto
+  // snapshot, caches) out of `mike-devnet-oracle`, so the bot keeps its
+  // device — then the oracle script with the `script_name` binding:
+  //   pnpm exec wrangler deploy -c wrangler.gateway.devnet.jsonc
+  //   pnpm exec wrangler secret bulk secrets.gateway.json -c wrangler.gateway.devnet.jsonc
+  //   pnpm exec wrangler deploy -c wrangler.devnet.jsonc
+  // Secrets (only the Matrix ones): MATRIX_ORACLE_ADMIN_PASSWORD,
+  // MATRIX_RECOVERY_PHRASE, MATRIX_VALUE_PIN.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mike-devnet-oracle-gateway",
+  "account_id": "ebfd8f0f0c0c84d40756de873c169c40",
+  "main": "src/gateway.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // No public URL: the shell reaches the gateway through its binding, and the
+  // operator routes (/matrix/status, /debug/matrix/*) live on the shell.
+  "workers_dev": false,
+  // The SDK's keep-alive alarm is one long invocation (a 5-minute hold while
+  // active) and a first boot runs the crypto init; both exceed the default
+  // 30 s DO CPU cap.
+  "limits": { "cpu_ms": 300000 },
+  "alias": {
+    "@matrix-org/matrix-sdk-crypto-wasm": "@ixo/matrix-bot-workers-sdk/crypto-wasm-shim",
+  },
+  // Keep-alive safety net for the sync loop (moved here from the oracle script).
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "durable_objects": {
+    "bindings": [
+      { "name": "MATRIX_GATEWAY", "class_name": "MatrixGatewayDO" },
+      // The per-user objects live in the oracle script.
+      {
+        "name": "USER_ORACLE",
+        "class_name": "UserOracleDO",
+        "script_name": "mike-devnet-oracle",
+      },
+    ],
+  },
+  "migrations": [
+    // `transferred_classes` is accepted by wrangler's validator even though
+    // the published JSON schema does not list it (editors may flag it).
+    {
+      "tag": "v1",
+      "transferred_classes": [
+        {
+          "from": "MatrixGatewayDO",
+          "from_script": "mike-devnet-oracle",
+          "to": "MatrixGatewayDO",
+        },
+      ],
+    },
+    // v2/v3: the move to @ixo/matrix-bot-workers-sdk changed the object's
+    // storage layout (identity, crypto snapshot, outbox schema). Deleting and
+    // re-creating the class wipes the pre-SDK objects so the bot boots clean
+    // (a fresh device; the previous one is retired by hand).
+    { "tag": "v2", "deleted_classes": ["MatrixGatewayDO"] },
+    { "tag": "v3", "new_sqlite_classes": ["MatrixGatewayDO"] },
+  ],
+  "vars": {
+    "ORACLE_NAME": "Mike Matrix Test",
+    "NETWORK": "devnet",
+    "ORACLE_DID": "did:ixo:ixo1seyngesnj6673qqzf0um4e6c2rutfsrafc9tw3",
+    "ORACLE_ENTITY_DID": "did:ixo:entity:309db22aa6e41e3929597dcb185a23be",
+    "BLOCKSYNC_GRAPHQL_URL": "https://devnet-blocksync-graphql.ixo.earth/graphql",
+    "MATRIX_BASE_URL": "https://mx.mike-test.ixo.world",
+    "MATRIX_HOMESERVER_NAME": "mx.mike-test.ixo.world",
+    "MATRIX_ORACLE_ADMIN_USER_ID": "@did-ixo-ixo1seyngesnj6673qqzf0um4e6c2rutfsrafc9tw3:mx.mike-test.ixo.world",
+    "MATRIX_ACCOUNT_ROOM_ID": "!CIaEYbuVpDDuIRZdGX:mx.mike-test.ixo.world",
+    "LOG_LEVEL": "info",
+    // Outgoing-message pacing for the oracle bot: the homeserver's per-sender
+    // rc_message (infra chart: per_second 3, burst_count 40; mx.mike-test
+    // behaves the same under sustained load). The scheduler also adapts
+    // downwards on 429s, so this is the ceiling, not a promise. CONCURRENCY
+    // caps parallel sends across rooms.
+    "MATRIX_SEND_RATE_PER_SECOND": "3",
+    // Burst below the server's 40: events the scheduler does not pace
+    // (work-status cards, typing) share the same server bucket.
+    "MATRIX_SEND_BURST": "20",
+    "MATRIX_SEND_CONCURRENCY": "6",
+    // Room turns in flight at once (each ends in an encrypted reply).
+    "MATRIX_TURN_CONCURRENCY": "4",
+  },
+}

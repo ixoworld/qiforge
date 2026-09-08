@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@ixo/logger": ["./logger-stub.ts"]
+    }
+  },
+  "files": ["generate-legacy-db.mjs"]
+}

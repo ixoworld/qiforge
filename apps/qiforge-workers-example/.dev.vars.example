@@ -1,0 +1,23 @@
+# Copy to .dev.vars for `wrangler dev`. Everything here is a secret or
+# environment-specific; non-secret defaults live in wrangler.jsonc `vars`.
+
+# --- identity ---------------------------------------------------------------
+ORACLE_DID=did:ixo:ixo1oracleexample
+ORACLE_ENTITY_DID=did:ixo:entity:oracleexample
+# Ed25519 mnemonic the oracle signs downstream UCAN invocations with (optional)
+# ORACLE_SIGNING_MNEMONIC=
+
+# --- auth: did:ixo key resolution ------------------------------------------
+BLOCKSYNC_GRAPHQL_URL=http://localhost:34582/graphql
+
+# --- matrix -----------------------------------------------------------------
+MATRIX_BASE_URL=http://localhost:34008
+MATRIX_HOMESERVER_NAME=ixo.test
+MATRIX_ORACLE_ADMIN_USER_ID=@oracle-example:ixo.test
+# The bot's password: the gateway logs its own devices in with it (no access token).
+MATRIX_ORACLE_ADMIN_PASSWORD=
+# MATRIX_RECOVERY_PHRASE=
+
+# --- llm --------------------------------------------------------------------
+OPEN_ROUTER_API_KEY=
+# DEFAULT_MODEL=openai/gpt-5.6-luna

@@ -1,0 +1,31 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "oracle-runtime-workers-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // The crypto crate's stock entrypoints can't load on workerd (runtime wasm
+  // compilation is disallowed). Alias to the bot SDK's loader, which imports
+  // the .wasm as a build-time CompiledWasm module; matrix-js-sdk resolves
+  // through it too.
+  "alias": {
+    "@matrix-org/matrix-sdk-crypto-wasm": "@ixo/matrix-bot-workers-sdk/crypto-wasm-shim",
+    // Real jsdom can't load on workerd (needs node:vm script contexts).
+    // @blocknote/server-util only uses it for a window/document pair, so the
+    // editor plugin substitutes a linkedom-backed shim.
+    "jsdom": "../src/plugins/editor/jsdom-shim.ts",
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SQLITE_TEST", "class_name": "SqliteTestDO" },
+      { "name": "TASKS_TEST", "class_name": "TasksTestDO" },
+      { "name": "REALTIME_TEST", "class_name": "RealtimeTestDO" },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SqliteTestDO", "TasksTestDO", "RealtimeTestDO"],
+    },
+  ],
+}
