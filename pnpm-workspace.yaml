@@ -32,6 +32,11 @@ overrides:
   '@langchain/core': '1.1.48'
   '@langchain/langgraph': '1.3.2'
   '@langchain/langgraph-checkpoint': '1.0.2'
+  # @ixo/editor 6.0.1 pins yjs 13.6.27 exactly while @blocknote/*, @ixo/matrix-crdt,
+  # y-protocols and the Workers runtime resolve 13.6.32; two copies in one
+  # Workers bundle break yjs's instanceof checks ("Yjs was already imported").
+  # Collapse to one copy until @ixo/editor widens its pin.
+  yjs: '13.6.32'
   '@langchain/langgraph-checkpoint-sqlite': '1.0.1'
   '@langchain/langgraph-checkpoint-validation': '1.0.9'
   '@langchain/langgraph-supervisor': '1.0.3'
