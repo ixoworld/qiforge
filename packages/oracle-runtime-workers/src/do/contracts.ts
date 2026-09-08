@@ -502,6 +502,16 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
    * objects fetch it once at boot and seat it into their secrets service.
    */
   getOracleSecretsKey(): Promise<JsonString | null>;
+  /**
+   * The oracle's Ed25519 UCAN signing mnemonic, read the way the Node
+   * runtime stores it: the account room's `ixo.room.state.secure` /
+   * `encrypted_mnemonic_ed_signing` state event, whose `encrypted_mnemonic`
+   * is AES-256-CBC encrypted with `MATRIX_VALUE_PIN`. Read-only (the Node
+   * runtime provisions it). Null when the env vars are unset, the event is
+   * missing or the PIN does not decrypt it — each logged, never thrown.
+   * User objects call this at boot when `ORACLE_SIGNING_MNEMONIC` is unset.
+   */
+  getOracleSigningMnemonic(): Promise<string | null>;
 }
 
 export interface BotCredentials {

@@ -567,6 +567,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The mnemonic the oracle signs downstream UCAN invocations with:
+     * `ORACLE_SIGNING_MNEMONIC` when set, otherwise the one the Node runtime
+     * keeps in the Matrix account room (read and decrypted by the gateway,
+     * memoised there). Undefined leaves the object without a signing key —
+     * plugins that need one degrade with their usual "no signing key" result
+     * — and never fails the boot.
+     */
+    private async resolveSigningMnemonic(): Promise<string | undefined> {
+      const fromEnv = this.env.ORACLE_SIGNING_MNEMONIC;
+      if (typeof fromEnv === 'string' && fromEnv.trim().length > 0)
+        return fromEnv;
+      try {
+        const fromRoom = await this.gateway.getOracleSigningMnemonic();
+        if (fromRoom) return fromRoom;
+      } catch (err) {
+        console.warn(
+          `[user-do] signing mnemonic unavailable from the account room: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      console.warn(
+        '[user-do] no UCAN signing key: ORACLE_SIGNING_MNEMONIC is unset and the account room holds no readable mnemonic — downstream minting is off',
+      );
+      return undefined;
+    }
+
+    /**
      * The object holds a delegation it had not seen before (a header on this
      * request, or a deposit through the shell). A fresh delegation is the one
      * thing that turns a "no file-storage grant" flush failure into a
@@ -654,22 +680,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.userDid = userDid;
 
       const env = this.env;
-      this.ucan = new WorkersUcanService({
-        oracleDid: env.ORACLE_DID,
-        signingMnemonic:
-          typeof env.ORACLE_SIGNING_MNEMONIC === 'string'
-            ? env.ORACLE_SIGNING_MNEMONIC
-            : undefined,
-        logger: console,
-      });
-      this.ownerStore = await this.createOwnerStore(userDid);
       // The gateway lazily starts on first use; make sure it is up before the
-      // owner store or room lookups need it (idempotent, cheap once running).
+      // signing mnemonic, the owner store or room lookups need it (idempotent,
+      // cheap once running).
       await this.gateway.ensureStarted().catch((err) => {
         console.warn(
           `[user-do] matrix gateway not available yet: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
+      this.ucan = new WorkersUcanService({
+        oracleDid: env.ORACLE_DID,
+        signingMnemonic: await this.resolveSigningMnemonic(),
+        logger: console,
+      });
+      this.ownerStore = await this.createOwnerStore(userDid);
 
       // Per-room JWE secrets: seat the oracle's P-256 key (fetched once from
       // the gateway, which reads the Matrix account room). Without a key the
