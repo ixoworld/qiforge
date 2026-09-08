@@ -121,7 +121,6 @@ import {
 } from './debug-timers';
 import {
   IxoVfsOwnerStore,
-  UCAN_STORE_DEFAULT_URLS,
   VFS_DEFAULT_BASE_URLS,
 } from '../owner-store/ixo-vfs-store';
 import type { OwnerStore } from '../owner-store/types';
@@ -1003,10 +1002,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           env.VFS_BASE_URL ??
           VFS_DEFAULT_BASE_URLS[network] ??
           VFS_DEFAULT_BASE_URLS.devnet!,
-        ucanStoreUrl:
-          env.UCAN_STORE_URL ??
-          UCAN_STORE_DEFAULT_URLS[network] ??
-          UCAN_STORE_DEFAULT_URLS.devnet!,
+        // The user's one delegation to this oracle — hydrated by `ready()`
+        // before boot, replaced at once by `setDelegation` / `clearDelegation`.
+        delegation: () => this.delegations.get(userDid)?.raw,
       });
       return new MigratingOwnerStore({
         primary: vfsStore,
@@ -1506,6 +1504,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         at: Date.now(),
         ...(typeof expiration === 'number' ? { expiration } : {}),
       } satisfies StoredDelegation);
+      // A fresh delegation is the one thing that turns a "no file-storage
+      // grant" flush failure into a success: forget the failure streak and,
+      // when the object is up with unsaved turns, flush now instead of at the
+      // next 10-minute retry.
+      await this.ctx.storage.delete(META_FLUSH_FAILURES);
+      if (this.db && this.dirty)
+        void this.flushToOwnerStore().catch(() => undefined);
     }
 
     /**

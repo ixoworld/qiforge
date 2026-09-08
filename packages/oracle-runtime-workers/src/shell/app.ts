@@ -17,6 +17,10 @@ import {
   encodeRoomStateContent,
 } from '../matrix/room-state-codec';
 import {
+  listDelegationCapabilities,
+  type DelegatedCapability,
+} from '../do/ucan-service';
+import {
   authenticate,
   isExcluded,
   type AuthResult,
@@ -358,9 +362,23 @@ export function createShell(
     const authorized =
       Boolean(state?.raw) &&
       (exp === undefined || exp > Math.floor(Date.now() / 1000));
+    // The stored delegation's capabilities, so a client can tell an older
+    // delegation (minted before a capability existed — e.g. the file-storage
+    // grant the owner copy needs) from a current one and re-authorize.
+    let capabilities: DelegatedCapability[] | undefined;
+    if (authorized && state?.raw) {
+      try {
+        capabilities = await listDelegationCapabilities(state.raw);
+      } catch (err) {
+        console.warn(
+          `[shell] stored delegation for ${auth.userDid} could not be parsed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     return c.json({
       authorized,
       ...(exp !== undefined && { expiration: exp }),
+      ...(capabilities !== undefined && { capabilities }),
     });
   });
   app.delete('/delegation', async (c) => {

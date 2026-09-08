@@ -125,7 +125,7 @@ describe('MigratingOwnerStore', () => {
       primary: {
         ...memStore('vfs').store,
         save: async () => {
-          throw new VfsNoDelegationError('did:ixo:user');
+          throw new VfsNoDelegationError('did:ixo:user', 'no-capability');
         },
       },
       legacy: legacy.store,
@@ -184,7 +184,7 @@ describe('MigratingOwnerStore', () => {
     const noDelegation = {
       ...memStore('vfs').store,
       load: async () => {
-        throw new VfsNoDelegationError('did:ixo:user');
+        throw new VfsNoDelegationError('did:ixo:user', 'no-capability');
       },
     };
     const empty = new MigratingOwnerStore({
@@ -201,7 +201,7 @@ describe('MigratingOwnerStore', () => {
       primary: {
         ...noDelegation,
         save: async () => {
-          throw new VfsNoDelegationError('did:ixo:user');
+          throw new VfsNoDelegationError('did:ixo:user', 'no-capability');
         },
       },
       legacy: legacy.store,

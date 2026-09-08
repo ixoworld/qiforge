@@ -48,7 +48,10 @@ graph LR
   media, the account-room secrets key, the plugins' second device.
 - **The user owns the file.** The object holds a working copy; the durable
   file is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS,
-  exported on a debounced alarm and re-imported on a cold boot.
+  exported on a debounced alarm and re-imported on a cold boot. The oracle
+  reaches it with the one delegation the user deposits for it
+  (`POST /delegation`), which must carry `ixo:filesystem/.oracles` next to
+  the plugin grants — see [architecture](docs/architecture.md#self-sovereign-storage).
 - **Two scripts in production.** The gateway runs in its own Worker script
   so its memory footprint never competes with user objects; the scripts
   talk over cross-script Durable Object bindings.

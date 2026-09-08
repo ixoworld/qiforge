@@ -32,7 +32,9 @@ implementation, and what is deliberately left out.
   with the `x-ucan-delegation` fallback; DID keys resolved through Blocksync.
   Header-less turns mint plugin invocations from the delegation deposited via
   `POST /delegation`, cached in the object; `POST`/`DELETE /delegation`
-  update the object at once.
+  update the object at once. `GET /delegation` additionally returns the
+  stored delegation's `capabilities` (Node returns `authorized` and
+  `expiration` only).
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
   `MODEL_PRICE_MARKUP`.
@@ -95,7 +97,9 @@ implementation, and what is deliberately left out.
   offloaded payload) fetches one again through the same pipeline.
 - **Owner copies are never written to Matrix.** The IXO VFS is the system of
   record; Matrix media is read once as legacy and then redacted (see
-  [architecture](architecture.md#self-sovereign-storage)).
+  [architecture](architecture.md#self-sovereign-storage)). The user's
+  delegation to the oracle therefore needs one capability Node never asked
+  for: `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`.
 - **Blob compression.** A file written by this runtime is not readable by
   the Node runtime; the reverse direction works.
 - **Turn resume after an isolate reset** is not built: the in-flight turn

@@ -29,6 +29,7 @@ import {
   depositVfsDelegation,
   mintAuthInvocation,
   mintDelegation,
+  VFS_OWNER_COPY_CAPABILITY,
   vfsUserRequest,
   waitFor,
   type HarnessAccount,
@@ -389,6 +390,7 @@ async function main(): Promise<void> {
         { can: '*', with: 'ixo:memory' },
         { can: '*', with: 'ixo:sandbox' },
         { can: '*', with: 'ixo:skills' },
+        VFS_OWNER_COPY_CAPABILITY,
       ]);
       const post = await authed(user, 'POST', '/delegation', {
         raw,
@@ -400,6 +402,17 @@ async function main(): Promise<void> {
         (get.json as { authorized?: boolean }).authorized,
         true,
         get.text,
+      );
+      // The status lists the stored delegation's capabilities so a client can
+      // tell an older delegation (no file-storage grant) from a current one.
+      const caps = (
+        get.json as { capabilities?: Array<{ can: string; with: string }> }
+      ).capabilities;
+      assert.ok(
+        caps?.some(
+          (c) => c.with === 'ixo:filesystem/.oracles' && c.can === '*',
+        ),
+        `GET /delegation lacks the /.oracles capability: ${get.text}`,
       );
       const del = await authed(user, 'DELETE', '/delegation');
       assert.ok(del.status < 300, del.text.slice(0, 200));
@@ -419,7 +432,7 @@ async function main(): Promise<void> {
   );
 
   await step(
-    'VFS: deposit an ixo:filesystem grant in the devnet UCAN store',
+    'vfs plugin: deposit the library-wide grant its file tools read from the UCAN store',
     async () => {
       const { cid } = await depositVfsDelegation(user, ORACLE_DID, UCAN_STORE);
       assert.ok(cid, 'no cid');
@@ -1562,6 +1575,7 @@ async function main(): Promise<void> {
         { can: '*', with: 'ixo:memory' },
         { can: '*', with: 'ixo:sandbox' },
         { can: '*', with: 'ixo:skills' },
+        VFS_OWNER_COPY_CAPABILITY,
       ]);
       const expiration = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
       const post = await authed(user, 'POST', '/delegation', {
@@ -2638,9 +2652,19 @@ async function main(): Promise<void> {
       matrixUserId: o.matrixUserId!,
       matrixPassword: o.matrixPassword!,
     };
-    // The other user needs a file-storage grant of their own before their
-    // object can boot; without one GET /sessions is a 403 (next step).
-    await depositVfsDelegation(other, ORACLE_DID, UCAN_STORE);
+    // The other user's object boots from THEIR delegation to the oracle — it
+    // must carry the /.oracles file-storage capability, or GET /sessions is
+    // a 403 (next step).
+    const otherRaw = await mintDelegation(other, ORACLE_DID, [
+      { can: '*', with: 'ixo:oracle' },
+      { can: '*', with: 'ixo:memory' },
+      VFS_OWNER_COPY_CAPABILITY,
+    ]);
+    const otherPost = await authed(other, 'POST', '/delegation', {
+      raw: otherRaw,
+      expiration: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+    });
+    assert.equal(otherPost.status, 200, otherPost.text.slice(0, 200));
     const list = await authed(other, 'GET', '/sessions');
     assert.equal(list.status, 200, list.text.slice(0, 200));
     const ids = (
@@ -2664,7 +2688,7 @@ async function main(): Promise<void> {
     );
   });
   await step(
-    'edge: a user with no file-storage grant gets 403 NO_VFS_DELEGATION over RPC routes',
+    'edge: a user whose delegation lacks the /.oracles capability gets 403 NO_VFS_DELEGATION over RPC routes',
     async () => {
       const file = `${SCRATCH}/devnet-user-6.json`;
       if (!existsSync(file))
@@ -2684,13 +2708,31 @@ async function main(): Promise<void> {
         matrixUserId: o.matrixUserId!,
         matrixPassword: o.matrixPassword!,
       };
+      // Every grant EXCEPT file storage: the object has nothing to reach the
+      // user's VFS with and (no legacy Matrix copy) nothing else to boot from.
+      const raw = await mintDelegation(ungranted, ORACLE_DID, [
+        { can: '*', with: 'ixo:oracle' },
+        { can: '*', with: 'ixo:memory' },
+        { can: '*', with: 'ixo:sandbox' },
+        { can: '*', with: 'ixo:skills' },
+      ]);
+      const post = await authed(ungranted, 'POST', '/delegation', {
+        raw,
+        expiration: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+      });
+      assert.equal(post.status, 200, post.text.slice(0, 200));
       // GET /sessions reaches the object over RPC (not fetch): the typed
       // owner-copy error must survive the RPC boundary and map to 403.
       const list = await authed(ungranted, 'GET', '/sessions');
       assert.equal(list.status, 403, list.text.slice(0, 200));
-      const body = list.json as { code?: string; retryable?: boolean };
+      const body = list.json as {
+        code?: string;
+        retryable?: boolean;
+        message?: string;
+      };
       assert.equal(body.code, 'NO_VFS_DELEGATION');
       assert.equal(body.retryable, false);
+      assert.match(body.message ?? '', /file storage/);
       // The fetch path (a turn) answers the same way.
       const turn = await authed(ungranted, 'POST', '/messages/any-session', {
         message: 'hi',

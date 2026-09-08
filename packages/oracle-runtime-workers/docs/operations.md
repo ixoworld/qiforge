@@ -184,9 +184,9 @@ catch-up, but it stalls sends for ~30 s.
   and, once dirtied, be flushed over the real copy. The shell answers with an
   honest code (`owner-store/owner-copy-errors.ts`): 503
   `OWNER_COPY_UNAVAILABLE` (`retryable: true`) for a transient failure; 403
-  `NO_VFS_DELEGATION` when the user has not deposited an `ixo:filesystem`
-  delegation; 403 `VFS_AUTH_FAILED` when the VFS rejected the oracle's
-  credentials. Only a successful listing with no file yields an empty
+  `NO_VFS_DELEGATION` when the user's delegation to the oracle (or the lack
+  of one) carries no `ixo:filesystem` capability over `/.oracles`; 403
+  `VFS_AUTH_FAILED` when the VFS rejected the oracle's credentials. Only a successful listing with no file yields an empty
   working copy.
 - **Never wipe on a failed check.** A `head()` that fails (a VFS error, or the
   flush's own delete → move window) is UNKNOWN, never a deletion. Even a
@@ -299,5 +299,5 @@ that can handle the requested parameters` is the memory engine's own
 | `GET /sessions` empty for a migrated user, `HISTORICAL_MESSAGE_NO_KEY_BACKUP`           | `keyBackupVersion`, `secretStorageUnlocked`                                                                     | Provision the key backup and `MATRIX_RECOVERY_PHRASE` (see configuration → first-time setup).                                     |
 | Page edits fail with `401 Invalid access token`                                         | Device list of the bot account                                                                                  | The plugins device was deleted; the gateway re-logs it in on the next use — do not delete `identity:bot-client`'s device again.   |
 | A user object never unloads (`instanceUptimeMs` grows while idle)                       | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).     |
-| Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                              | VFS / UCAN store health                                                                                         | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                         |
+| Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                              | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                         |
 | `Network connection lost` on a gateway RPC                                              | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                      |

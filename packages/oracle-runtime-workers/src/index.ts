@@ -35,7 +35,11 @@ export * from './plugins';
 export * from './do/contracts';
 export type { OwnerStore } from './owner-store/types';
 export { MigratingOwnerStore } from './owner-store/migrating-store';
-export { IxoVfsOwnerStore } from './owner-store/ixo-vfs-store';
+export {
+  IxoVfsOwnerStore,
+  VFS_OWNER_COPY_RESOURCE,
+  ownerCopyCapability,
+} from './owner-store/ixo-vfs-store';
 export { MatrixMediaOwnerStore } from './owner-store/matrix-media-store';
 export { MatrixGatewayDO } from './matrix/gateway-do';
 export {

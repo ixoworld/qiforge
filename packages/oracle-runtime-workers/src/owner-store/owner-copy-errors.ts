@@ -3,22 +3,19 @@
  * the object retries only what can succeed on its own and the shell can
  * answer with an honest status code:
  *
- *   - `NO_VFS_DELEGATION` (403, not retryable): the user has not deposited an
- *     `ixo:filesystem` delegation for this oracle. Retrying cannot help; the
- *     client must deposit the grant and try again.
+ *   - `NO_VFS_DELEGATION` (403, not retryable): the user's delegation to this
+ *     oracle (or the lack of one) grants no `ixo:filesystem` capability over
+ *     `/.oracles`. Retrying cannot help; the client must authorize the oracle
+ *     again with file storage included and try again.
  *   - `VFS_AUTH_FAILED` (403, not retryable): the VFS rejected the oracle's
  *     credentials (401/403). Something is misconfigured; retrying cannot help.
- *   - `OWNER_COPY_UNAVAILABLE` (503, retryable): the UCAN store or the VFS was
- *     unreachable or failing (network, 5xx, 429, timeout). The object already
- *     retried with backoff; the next request tries again from scratch.
+ *   - `OWNER_COPY_UNAVAILABLE` (503, retryable): the VFS was unreachable or
+ *     failing (network, 5xx, 429, timeout). The object already retried with
+ *     backoff; the next request tries again from scratch.
  *
  * In every case nothing was written — the boot is not memoised on failure.
  */
-import {
-  VfsNoDelegationError,
-  VfsRequestError,
-  VfsStoreUnavailableError,
-} from './ixo-vfs-store';
+import { VfsNoDelegationError, VfsRequestError } from './ixo-vfs-store';
 
 export type OwnerCopyErrorCode =
   | 'NO_VFS_DELEGATION'
@@ -73,16 +70,13 @@ function messageFor(
 ): string {
   switch (code) {
     case 'NO_VFS_DELEGATION':
-      return `Your oracle data cannot be loaded because this oracle has no file-storage permission from you yet. Deposit an ixo:filesystem delegation for it, then try again. Nothing was changed. (${detail})`;
+      return `Your oracle data cannot be loaded because your authorization for this oracle does not include file storage (ixo:filesystem over /.oracles). Authorize the oracle again to grant it, then try again. Nothing was changed. (${detail})`;
     case 'VFS_AUTH_FAILED':
       return `Your oracle data cannot be loaded because your file storage rejected the oracle's credentials. Nothing was changed. (${detail})`;
     default:
       return `Your oracle data could not be loaded from your file storage after ${attempts} attempt(s). Nothing was changed — please try again in a moment. (${detail})`;
   }
 }
-
-// Re-exported so the shell can map the transient store failure too.
-export { VfsStoreUnavailableError };
 
 /** What the shell needs to answer a request whose owner copy could not load. */
 export interface OwnerCopyFailure {
@@ -160,14 +154,6 @@ export function parseOwnerCopyFailure(error: unknown): OwnerCopyFailure | null {
       code: 'NO_VFS_DELEGATION',
       httpStatus: 403,
       retryable: false,
-      message: error.message,
-    };
-  }
-  if (error.name === 'VfsStoreUnavailableError') {
-    return {
-      code: 'OWNER_COPY_UNAVAILABLE',
-      httpStatus: 503,
-      retryable: true,
       message: error.message,
     };
   }

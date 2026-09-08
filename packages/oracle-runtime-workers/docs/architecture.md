@@ -94,9 +94,23 @@ migrate a deployment between layouts is in
 ## Self-sovereign storage
 
 The Durable Object only ever holds a **working copy**. The durable file the
-user owns is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS
-(UCAN two-hop auth) — the system of record.
+user owns is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS — the
+system of record.
 
+- **One delegation, no other grant channel.** Every VFS request is a
+  single-use invocation minted from the delegation the user deposited for
+  this oracle (`POST /delegation`, the `ucan_delegation` room state — the
+  same delegation Matrix turns and every plugin mint from). It must carry
+  `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`
+  (the whole personal library, `ixo:filesystem`, also qualifies; nothing
+  narrower does, because the store lists `/.oracles`). A delegation without
+  it means the user is "not on VFS": an existing legacy copy still boots
+  from Matrix media and stays in the object until the user re-authorizes,
+  a user with nothing else is refused with 403 `NO_VFS_DELEGATION`.
+  `GET /delegation` reports the stored delegation's `capabilities` so a
+  client can detect an older delegation and re-mint. The UCAN store worker
+  plays no part in the owner copy (the vfs plugin's file tools still read
+  their library-wide grant from it).
 - The user's Matrix room media (`m.ixo.media_upload` + `m.ixo.media_state`)
   is a **read-only legacy source**: checked once when the VFS has no file
   yet, migrated into the VFS on first touch, never written again. Once the

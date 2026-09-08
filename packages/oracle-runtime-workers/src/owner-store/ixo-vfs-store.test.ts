@@ -6,11 +6,16 @@
  */
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { WorkersUcanService } from '../do/ucan-service';
+import type {
+  DelegatedCapability,
+  WorkersUcanService,
+} from '../do/ucan-service';
 import {
   IxoVfsOwnerStore,
+  ownerCopyCapability,
   SINGLE_SHOT_MAX_BYTES,
   TEMP_PATH_INFIX,
+  VfsNoDelegationError,
   VfsRequestError,
 } from './ixo-vfs-store';
 import { bytesOfStream, gunzip, snapshotOfBytes } from './types';
@@ -244,23 +249,145 @@ function fakeVfs(opts: FakeVfsOptions = {}) {
   };
 }
 
-const ucanStub = {
-  getServiceDelegation: async () => ({ token: 'car', with: 'ixo:filesystem' }),
-  createInvocationFromDelegation: async () => ({ invocation: 'inv' }),
-} as never as WorkersUcanService;
+/** The capability the Portal mints into the user's oracle delegation. */
+const OWNER_COPY_GRANT = {
+  can: '*',
+  with: 'ixo:filesystem/.oracles',
+  nb: { hidden: ['/.oracles'] },
+};
 
-function makeStore(fetchImpl: typeof fetch): IxoVfsOwnerStore {
+interface UcanStubOptions {
+  capabilities?: DelegatedCapability[];
+  /** Every `createInvocationFromDelegation` call: `[rawDelegation, capability]`. */
+  mints?: Array<[string, { can: string; with: string; nb?: unknown }]>;
+}
+
+function ucanStubWith(opts: UcanStubOptions = {}): WorkersUcanService {
+  return {
+    delegationCapabilities: async () => opts.capabilities ?? [OWNER_COPY_GRANT],
+    createInvocationFromDelegation: async (
+      raw: string,
+      _url: string,
+      capability: { can: string; with: string; nb?: unknown },
+    ) => {
+      opts.mints?.push([raw, capability]);
+      return { invocation: 'inv' };
+    },
+  } as never as WorkersUcanService;
+}
+
+function makeStore(
+  fetchImpl: typeof fetch,
+  overrides: {
+    ucan?: WorkersUcanService;
+    delegation?: () => string | undefined;
+  } = {},
+): IxoVfsOwnerStore {
   return new IxoVfsOwnerStore({
-    ucan: ucanStub,
+    ucan: overrides.ucan ?? ucanStubWith(),
     userDid: 'did:ixo:user',
     oracleDid: ORACLE,
     vfsBaseUrl: 'https://vfs.test',
-    ucanStoreUrl: 'https://store.test',
+    delegation: overrides.delegation ?? (() => 'car'),
     fetchImpl,
     retryDelaysMs: [0, 0, 0],
     sleep: async () => undefined,
   });
 }
+
+describe('ownerCopyCapability', () => {
+  const pick = (
+    caps: Array<{ can: string; with: string }>,
+    ability = 'fs/list',
+  ) => ownerCopyCapability(caps, ability)?.with ?? null;
+
+  it('accepts the personal filesystem or exactly its /.oracles subtree', () => {
+    expect(pick([{ can: '*', with: 'ixo:filesystem' }])).toBe('ixo:filesystem');
+    expect(pick([OWNER_COPY_GRANT])).toBe('ixo:filesystem/.oracles');
+    expect(pick([{ can: '*', with: 'ixo:filesystem/.oracles/' }])).toBe(
+      'ixo:filesystem/.oracles/',
+    );
+    expect(pick([{ can: '*', with: 'ixo:filesystem/' }])).toBe(
+      'ixo:filesystem/',
+    );
+  });
+
+  it('rejects narrower, sibling, domain and look-alike resources', () => {
+    const rejected = [
+      `ixo:filesystem/.oracles/${ORACLE}`,
+      'ixo:filesystem/photos',
+      'ixo:filesystem/did:ixo:entity:abc',
+      'ixo:filesystemx',
+      'ixo:memory',
+    ].filter((w) => pick([{ can: '*', with: w }]) === null);
+    expect(rejected).toHaveLength(5);
+  });
+
+  it('requires the ability to be covered and takes the first match', () => {
+    expect(
+      pick([{ can: 'fs/write', with: 'ixo:filesystem' }], 'fs/list'),
+    ).toBeNull();
+    expect(pick([{ can: 'fs/*', with: 'ixo:filesystem' }], 'fs/list')).toBe(
+      'ixo:filesystem',
+    );
+    expect(
+      pick(
+        [
+          { can: '*', with: 'ixo:memory' },
+          { can: 'fs/list', with: 'ixo:filesystem/.oracles' },
+          { can: '*', with: 'ixo:filesystem' },
+        ],
+        'fs/list',
+      ),
+    ).toBe('ixo:filesystem/.oracles');
+  });
+});
+
+describe('IxoVfsOwnerStore auth: the one user→oracle delegation', () => {
+  it('mints every request from that delegation, attenuated to the ability, revealing hidden files', async () => {
+    const mints: NonNullable<UcanStubOptions['mints']> = [];
+    const store = makeStore(fakeVfs().fetchImpl, {
+      ucan: ucanStubWith({ mints }),
+      delegation: () => 'the-users-car',
+    });
+    expect(await store.load()).toBeNull();
+    expect(mints).toEqual([
+      [
+        'the-users-car',
+        {
+          can: 'fs/list',
+          with: 'ixo:filesystem/.oracles',
+          nb: { hidden: ['*'] },
+        },
+      ],
+    ]);
+  });
+
+  it('is "not on VFS" when the user deposited no delegation at all', async () => {
+    const store = makeStore(fakeVfs().fetchImpl, {
+      delegation: () => undefined,
+    });
+    await expect(store.load()).rejects.toThrow(VfsNoDelegationError);
+    await expect(store.load()).rejects.toThrow(
+      /has not deposited a delegation/,
+    );
+  });
+
+  it('is "not on VFS" when the delegation carries no file-storage capability over /.oracles', async () => {
+    const store = makeStore(fakeVfs().fetchImpl, {
+      ucan: ucanStubWith({
+        capabilities: [
+          { can: 'memory/*', with: 'ixo:memory' },
+          { can: '*', with: 'ixo:filesystem/photos' },
+        ],
+      }),
+    });
+    await expect(store.load()).rejects.toThrow(VfsNoDelegationError);
+    await expect(store.load()).rejects.toThrow(
+      /carries no ixo:filesystem capability covering \/\.oracles/,
+    );
+  });
+});
 
 /** Method + path with the `?query` and temp-file suffix stripped, for ordering assertions. */
 function shape(calls: string[]): string[] {

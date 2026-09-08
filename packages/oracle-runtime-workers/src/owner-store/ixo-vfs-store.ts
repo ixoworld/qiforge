@@ -5,14 +5,18 @@
  * The file lives at `/.oracles/<oracleDid>/state.db.gz` in the user's own
  * namespace — they can list, download, share or delete it like any file.
  * Every request carries a fresh single-use UCAN invocation minted from the
- * delegation the user deposited for this oracle in the UCAN store worker
- * (two-hop flow, same as the Node runtime's VFS plugin):
+ * ONE delegation the user deposited for this oracle (`POST /delegation`,
+ * the `ucan_delegation` room state — the same delegation Matrix turns and
+ * every plugin mint from). That delegation must carry a capability over the
+ * user's own filesystem covering the `/.oracles` folder:
  *
- *   store worker `GET /api/delegations?rootIssuer=<user>` (oracle self-signed)
- *   → delegation over `ixo:filesystem` granting `can: '*'` (the VFS grant
- *     lattice has no `fs/*` — `'*'` is the owner grant covering
- *     read/write/list/delete)
- *   → invocation attenuated to the one ability, proved by that delegation.
+ *   `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`
+ *
+ * (`with: 'ixo:filesystem'`, the whole personal library, also qualifies; the
+ * VFS grant lattice has no `fs/*`, so `'*'` is the owner grant covering
+ * read/write/list/delete.) The invocation is attenuated to the one ability
+ * and proved by that delegation. There is no other source of file access:
+ * without that capability the user is "not on VFS" (`VfsNoDelegationError`).
  *
  * Endpoints are the VFS worker's `/api/fs/*` (see the Node runtime's
  * `plugins/vfs/vfs-client.ts`): `GET /files?path=` (stat via a SHORT prefix —
@@ -34,7 +38,7 @@
  *     `stat()` lists under the short literal `/.oracles` prefix and matches
  *     the exact path client-side.
  */
-import type { WorkersUcanService } from '../do/ucan-service';
+import { abilityCovers, type WorkersUcanService } from '../do/ucan-service';
 import { isNetworkError, withRetry } from './retry';
 import { tusUpload } from './tus-upload';
 import {
@@ -52,12 +56,15 @@ const VFS_RESOURCE = 'ixo:filesystem';
 const INVOCATION_TTL_SECONDS = 60;
 /** Root folder for per-oracle state files — also the short stat prefix. */
 const ORACLES_ROOT = '/.oracles';
+/** The `with` a user's delegation needs at minimum: the personal `/.oracles` folder. */
+export const VFS_OWNER_COPY_RESOURCE = `${VFS_RESOURCE}${ORACLES_ROOT}`;
 
 export const VFS_DEFAULT_BASE_URLS: Record<string, string> = {
   mainnet: 'https://vfs.ixo.earth',
   testnet: 'https://testnet.vfs.ixo.earth',
   devnet: 'https://devnet.vfs.ixo.earth',
 };
+/** UCAN store worker per network — used by the VFS plugin's file tools, not by this store. */
 export const UCAN_STORE_DEFAULT_URLS: Record<string, string> = {
   mainnet: 'https://store.ucan.ixo.earth',
   testnet: 'https://testnet.store.ucan.ixo.earth',
@@ -65,32 +72,49 @@ export const UCAN_STORE_DEFAULT_URLS: Record<string, string> = {
 };
 
 /**
- * The user has not deposited an `ixo:filesystem` delegation for this oracle
- * in the UCAN store (yet). Distinguished from transient store/VFS failures so
- * the migrating store can treat "not on VFS yet" as *no VFS copy* (and read
- * the legacy Matrix media) instead of failing the whole boot — while genuine
- * outages still fail loudly rather than silently serving a stale legacy copy.
+ * The user's delegation to this oracle (if any) grants no `ixo:filesystem`
+ * capability covering `/.oracles`. Distinguished from transient VFS failures
+ * so the migrating store can treat "not on VFS yet" as *no VFS copy* (and
+ * read the legacy Matrix media) instead of failing the whole boot — while
+ * genuine outages still fail loudly rather than silently serving a stale
+ * legacy copy.
  */
 export class VfsNoDelegationError extends Error {
-  constructor(userDid: string) {
+  constructor(userDid: string, reason: VfsNoDelegationReason) {
     super(
-      `No active ixo:filesystem delegation from ${userDid} in the UCAN store`,
+      reason === 'no-delegation'
+        ? `${userDid} has not deposited a delegation for this oracle (POST /delegation)`
+        : `${userDid}'s delegation to this oracle carries no ixo:filesystem capability covering ${ORACLES_ROOT}`,
     );
     this.name = 'VfsNoDelegationError';
   }
 }
+export type VfsNoDelegationReason = 'no-delegation' | 'no-capability';
 
 /**
- * The UCAN store (which holds the user's delegation) was unreachable or
- * failing — transient, unlike a missing delegation. Retried like a 5xx.
+ * The capability of a user's delegation that lets this store reach the
+ * `/.oracles` folder with `ability`, or null. A qualifying `with` is the
+ * whole personal filesystem or exactly its `/.oracles` subtree — a narrower
+ * scope (say `/.oracles/<oracleDid>`) cannot list `/.oracles`, which the
+ * store must do because a full path with the DID embedded is too long for
+ * the VFS's filter (see `listOracleFiles()`). Domain namespaces
+ * (`ixo:filesystem/did:…`) never qualify.
  */
-export class VfsStoreUnavailableError extends Error {
-  readonly retryable = true as const;
-
-  constructor(detail: string) {
-    super(`UCAN store unavailable while resolving VFS access: ${detail}`);
-    this.name = 'VfsStoreUnavailableError';
-  }
+export function ownerCopyCapability<C extends { can: string; with: string }>(
+  capabilities: readonly C[],
+  ability: string,
+): C | null {
+  const qualifyingScope = (resource: string): boolean => {
+    if (resource === VFS_RESOURCE) return true;
+    if (!resource.startsWith(`${VFS_RESOURCE}/`)) return false;
+    const scope = resource.slice(VFS_RESOURCE.length).replace(/\/+$/, '');
+    return scope === '' || scope === ORACLES_ROOT;
+  };
+  return (
+    capabilities.find(
+      (c) => qualifyingScope(c.with) && abilityCovers(c.can, ability),
+    ) ?? null
+  );
 }
 
 /** A non-2xx VFS response, with the status and body for callers that recover. */
@@ -134,7 +158,6 @@ function describe(error: unknown): string {
 export function isRetryableRequest(error: unknown): boolean {
   if (error instanceof VfsRequestError)
     return error.status >= 500 || error.status === 429;
-  if (error instanceof VfsStoreUnavailableError) return true;
   return isNetworkError(error);
 }
 
@@ -144,7 +167,12 @@ export interface IxoVfsOwnerStoreOptions {
   oracleDid: string;
   /** VFS worker origin, e.g. `https://devnet.vfs.ixo.earth`. */
   vfsBaseUrl: string;
-  ucanStoreUrl: string;
+  /**
+   * The user's current delegation to this oracle (serialized CAR), or
+   * undefined when none is deposited. Read on every request so a delegation
+   * deposited or revoked mid-life takes effect at once.
+   */
+  delegation: () => string | undefined;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   /** Backoff between retries of a failed request (tests: zeros). */
@@ -468,30 +496,23 @@ export class IxoVfsOwnerStore implements OwnerStore {
   private async bearer(
     ability: 'fs/list' | 'fs/read' | 'fs/write' | 'fs/delete',
   ): Promise<string> {
-    const delegation = await this.opts.ucan.getServiceDelegation(
-      this.opts.userDid,
-      {
-        storeUrl: this.opts.ucanStoreUrl,
-        resource: VFS_RESOURCE,
-        requiredAbility: ability,
-      },
+    const raw = this.opts.delegation();
+    if (!raw)
+      throw new VfsNoDelegationError(this.opts.userDid, 'no-delegation');
+    const capability = ownerCopyCapability(
+      await this.opts.ucan.delegationCapabilities(raw),
+      ability,
     );
-    if ('error' in delegation) {
-      if (delegation.error === 'no-delegation')
-        throw new VfsNoDelegationError(this.opts.userDid);
-      // 'store-error': the UCAN store itself failed (5xx, network) — transient.
-      throw new VfsStoreUnavailableError(
-        `${delegation.error}${delegation.detail ? ` (${delegation.detail})` : ''}`,
-      );
-    }
+    if (!capability)
+      throw new VfsNoDelegationError(this.opts.userDid, 'no-capability');
     const minted = await this.opts.ucan.createInvocationFromDelegation(
-      delegation.token,
+      raw,
       this.opts.vfsBaseUrl,
       // `nb.hidden: ['*']` imposes NO widening — the VFS intersects reveal
       // sets across the chain, so the effective reveal is exactly what the
       // user's delegation granted. Omitting it would zero the reveal and make
       // the dot-folder state file invisible to its own writer.
-      { can: ability, with: delegation.with, nb: { hidden: ['*'] } },
+      { can: ability, with: capability.with, nb: { hidden: ['*'] } },
       { maxTtlSeconds: INVOCATION_TTL_SECONDS },
     );
     if ('error' in minted)

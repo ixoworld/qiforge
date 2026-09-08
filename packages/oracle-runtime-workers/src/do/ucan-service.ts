@@ -36,7 +36,8 @@ function toSupportedDid(did: string): SupportedDID {
   throw new Error(`Unsupported oracle DID method: ${did}`);
 }
 
-function abilityCovers(granted: string, required: string): boolean {
+/** Does a granted ability (`*`, `ns/*`, or an exact ability) cover `required`? */
+export function abilityCovers(granted: string, required: string): boolean {
   if (granted === '*' || granted === required) return true;
   if (granted.endsWith('/*')) {
     const ns = granted.slice(0, -2);
@@ -45,8 +46,35 @@ function abilityCovers(granted: string, required: string): boolean {
   return false;
 }
 
+/** One capability of a delegation, as the wire carries it. */
+export interface DelegatedCapability {
+  can: string;
+  with: string;
+  nb?: Record<string, unknown>;
+}
+
+/**
+ * The capabilities a serialized delegation grants, without validating it
+ * (the shell validated it when it was deposited; callers that mint from it
+ * are checked again by the service that receives the invocation).
+ */
+export async function listDelegationCapabilities(
+  delegationCar: string,
+): Promise<DelegatedCapability[]> {
+  const delegation = await parseDelegation(delegationCar);
+  return delegation.capabilities.map((c) => ({
+    can: c.can,
+    with: c.with,
+    ...(c.nb !== undefined && c.nb !== null
+      ? { nb: c.nb as Record<string, unknown> }
+      : {}),
+  }));
+}
+
 /** Upper bound on a delegated invocation's lifetime (mirrors the Node runtime). */
 const MAX_INVOCATION_TTL_SECONDS = 60 * 60;
+/** Parsed capability lists kept per raw delegation (the owner store asks per request). */
+const DELEGATION_CAPABILITIES_CACHE_SIZE = 8;
 
 export class WorkersUcanService {
   private readonly serviceDidCache = new Map<
@@ -57,11 +85,27 @@ export class WorkersUcanService {
     string,
     { value: { token: string; with: string }; expiresAt: number }
   >();
+  private readonly capabilitiesCache = new Map<string, DelegatedCapability[]>();
 
   constructor(private readonly opts: UcanServiceOptions) {}
 
   hasSigningKey(): boolean {
     return Boolean(this.opts.signingMnemonic);
+  }
+
+  /** `listDelegationCapabilities`, memoised on the raw token. */
+  async delegationCapabilities(
+    delegationCar: string,
+  ): Promise<DelegatedCapability[]> {
+    const cached = this.capabilitiesCache.get(delegationCar);
+    if (cached) return cached;
+    const capabilities = await listDelegationCapabilities(delegationCar);
+    if (this.capabilitiesCache.size >= DELEGATION_CAPABILITIES_CACHE_SIZE) {
+      const oldest = this.capabilitiesCache.keys().next().value;
+      if (oldest !== undefined) this.capabilitiesCache.delete(oldest);
+    }
+    this.capabilitiesCache.set(delegationCar, capabilities);
+    return capabilities;
   }
 
   async resolveServiceDid(serviceUrl: string): Promise<string | null> {
