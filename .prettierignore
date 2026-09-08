@@ -4,3 +4,6 @@ node_modules
 pnpm-lock.yaml
 .turbo
 **/gql/generated/**
+
+# devnet test accounts (gitignored, local only)
+apps/qiforge-workers-example/test/.devnet-accounts/

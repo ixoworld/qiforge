@@ -27,7 +27,16 @@ export interface TurnBody {
   returnAllMessages?: boolean;
   timezone?: string;
   model?: string;
-  metadata?: Record<string, unknown>;
+  /**
+   * Free-form client metadata (Node's `SendMessageDto.metadata`); the runtime
+   * reads `editorRoomId`, `spaceId`, `sessionRunId` and `currentEntityDid`.
+   */
+  metadata?: Record<string, unknown> & {
+    editorRoomId?: string;
+    spaceId?: string;
+    sessionRunId?: string;
+    currentEntityDid?: string;
+  };
   tools?: Array<{
     name: string;
     description: string;

@@ -23,6 +23,11 @@ implementation, and what is deliberately left out.
   `ValidationPipe` and body parser: malformed JSON → 400, unknown top-level
   fields → 400, empty `message` → 400, bodies over 100 KiB → 413, unknown
   session → 404, transcript of an unknown session → `{ messages: [] }`.
+- **Request metadata → agent state**: `metadata.editorRoomId`, `spaceId`,
+  `sessionRunId` and `currentEntityDid` update the thread's checkpointed
+  state by the Node agent-builder's rules (`src/do/turn-metadata.ts`): a
+  request that names the editor room also defines its session run, an active
+  editor context seeds the editor plugin into `loadedPlugins`.
 - **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`)
   with the `x-ucan-delegation` fallback; DID keys resolved through Blocksync.
   Header-less turns mint plugin invocations from the delegation deposited via

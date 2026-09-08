@@ -32,9 +32,8 @@ export interface AgAction {
 }
 
 /**
- * Master annotation state for the runtime's main agent. Same channels as the
- * Node runtime minus the editor-only `editorRoomId` / `spaceId` — the editor
- * plugin is not part of the Workers runtime.
+ * Master annotation state for the runtime's main agent — the same channels as
+ * the Node runtime, so a checkpoint written by either runtime reads the same.
  */
 export const MainAgentGraphState = Annotation.Root({
   config: Annotation<{
@@ -55,6 +54,21 @@ export const MainAgentGraphState = Annotation.Root({
     default: () => [],
   }),
 
+  /** Document the user has open (from request `metadata.editorRoomId`). */
+  editorRoomId: Annotation<string | undefined>({
+    default: () => undefined,
+    reducer: (_, curr) => curr,
+  }),
+  /** Session run selected in `editorRoomId`; forwarded from request metadata. */
+  sessionRunId: Annotation<string | undefined>({
+    default: () => undefined,
+    reducer: (_, curr) => curr,
+  }),
+  /** Workspace in scope (from request `metadata.spaceId`). */
+  spaceId: Annotation<string | undefined>({
+    default: () => undefined,
+    reducer: (_, curr) => curr,
+  }),
   currentEntityDid: Annotation<string | undefined>({
     default: () => undefined,
     reducer: (_, curr) => curr,

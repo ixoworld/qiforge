@@ -66,6 +66,12 @@ import { parseJwk } from '../secrets/jwe';
 import { WorkersSecretsService } from '../secrets/secrets-service';
 import { createSecretsAdapter } from './secrets-adapter';
 import {
+  metadataBuildState,
+  metadataGraphInput,
+  parseTurnMetadata,
+  priorMetadataState,
+} from './turn-metadata';
+import {
   RealtimeEndpoint,
   type RealtimeStatus,
 } from '../realtime/realtime-endpoint';
@@ -2701,6 +2707,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         configurable: { thread_id: req.sessionId },
       });
       const priorState = existing?.checkpoint.channel_values ?? {};
+      // Request metadata (editor room, space, session run, entity) → state,
+      // by the Node agent-builder's rules (see turn-metadata.ts).
+      const meta = parseTurnMetadata(req.metadata);
+      const priorMeta = priorMetadataState(priorState);
 
       // Host page-context / safety-guardrail hooks, resolved against this
       // object's ambient services (see `OracleWorkerHooks`).
@@ -2754,9 +2764,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         state: {
           ...priorState,
           userPreferences,
-          loadedPlugins: Array.isArray(priorState.loadedPlugins)
-            ? (priorState.loadedPlugins as string[])
-            : [],
+          ...metadataBuildState(meta, priorMeta),
           // The client-declared surface of THIS request: the portal and
           // AG-UI plugins turn these into tools at build time
           // (`getRequestTools` reads `history.state`), so they must be here
@@ -2799,6 +2807,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ],
         config: { did: req.identity.userDid },
         client: req.client,
+        ...metadataGraphInput(meta, priorMeta),
         browserTools: body.tools ?? [],
         agActions: body.agActions ?? [],
       };

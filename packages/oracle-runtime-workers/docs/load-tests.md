@@ -74,7 +74,7 @@ replay sends on the same bot ahead of the next marker:
 | per-room priority scheduler (markers before replays)          | p50 9.6 s, p95 17 s  | p50 2.0 s            |
 | + durable outbox, gates, patched SDK (2026-09-04 final)       | p50 2.6 s, p95 3.9 s | p50 1.8 s, p95 2.5 s |
 | `@ixo/matrix-bot-workers-sdk` 0.1.0 (2026-09-07, 9 + 9 users) | p50 18 s, p95 35.6 s | p50 2.1 s, p95 3.1 s |
-| `@ixo/matrix-bot-workers-sdk` 0.1.3 (2026-09-08, 8 + 8 users) | p50 2.2 s, p95 2.7 s  | p50 1.9 s, p95 4.5 s |
+| `@ixo/matrix-bot-workers-sdk` 0.1.3 (2026-09-08, 8 + 8 users) | p50 2.2 s, p95 2.7 s | p50 1.9 s, p95 4.5 s |
 
 The 0.1.0 row was the SDK taking its encryption gate before its priority
 scheduler saw the event, so background replays holding gate slots delayed
