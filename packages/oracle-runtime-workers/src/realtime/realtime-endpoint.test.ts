@@ -108,6 +108,20 @@ const event = (frame: string): { name: string; payload: unknown } => {
 };
 const isEvent = (name: string) => (f: string) =>
   f.startsWith('42') && event(f).name === name;
+/** A runtime event on Node's wire: socket event `event` whose envelope names `eventName`. */
+const isEnvelope = (eventName: string) => (f: string) =>
+  isEvent('event')(f) &&
+  (event(f).payload as { eventName?: string }).eventName === eventName;
+/** The client SDK's `isWebSocketEvent` guard (use-websocket-events.tsx), verbatim. */
+const sdkAcceptsEnvelope = (ev: unknown): boolean =>
+  typeof ev === 'object' &&
+  ev !== null &&
+  'eventName' in ev &&
+  'payload' in ev &&
+  typeof ev.payload === 'object' &&
+  ev.payload !== null &&
+  'sessionId' in ev.payload &&
+  'requestId' in ev.payload;
 
 async function connect(
   s: DurableObjectStub<RealtimeTestDO>,
@@ -251,25 +265,44 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     expect(await noSession.res.text()).toContain('sessionId');
   });
 
-  it('fans runtime events out to the session that owns them only', async () => {
+  it('fans runtime events out to the session that owns them only, in the SDK envelope', async () => {
     const s = stub('fanout');
     const a = await connect(s, { sessionId: 'sa' });
     const b = await connect(s, { sessionId: 'sb' });
     await s.emitForSession('sa', 'tool_call', {
+      requestId: 'r1',
       toolName: 'x',
       status: 'done',
     });
     await s.emitForSession('sb', 'render_component', { component: 'card' });
-    const toA = event(await a.next(isEvent('tool_call')));
-    expect(toA.payload).toEqual({
-      toolName: 'x',
-      status: 'done',
-      sessionId: 'sa',
+    // Node's wire, which the client SDK validates before it dispatches: the
+    // socket event is `event` and carries `{ eventName, payload }` with the
+    // session and request ids inside the payload.
+    const toA = event(await a.next(isEnvelope('tool_call')));
+    expect(toA).toEqual({
+      name: 'event',
+      payload: {
+        eventName: 'tool_call',
+        payload: {
+          requestId: 'r1',
+          toolName: 'x',
+          status: 'done',
+          sessionId: 'sa',
+        },
+      },
     });
-    const toB = event(await b.next(isEvent('render_component')));
-    expect(toB.payload).toEqual({ component: 'card', sessionId: 'sb' });
-    expect(a.frames.some(isEvent('render_component'))).toBe(false);
-    expect(b.frames.some(isEvent('tool_call'))).toBe(false);
+    expect(sdkAcceptsEnvelope(toA.payload)).toBe(true);
+    const toB = event(await b.next(isEnvelope('render_component')));
+    expect(toB.payload).toEqual({
+      eventName: 'render_component',
+      payload: { component: 'card', sessionId: 'sb' },
+    });
+    // Never as a bare named frame — the SDK's named listener would read
+    // `payload.sessionId` off the raw payload and throw.
+    expect(a.frames.some(isEvent('tool_call'))).toBe(false);
+    expect(b.frames.some(isEvent('render_component'))).toBe(false);
+    expect(a.frames.some(isEnvelope('render_component'))).toBe(false);
+    expect(b.frames.some(isEnvelope('tool_call'))).toBe(false);
     expect(await s.status()).toMatchObject({
       sockets: 2,
       authenticated: 2,
@@ -420,7 +453,7 @@ describe('RealtimeEndpoint heartbeat (alarm-driven, hibernation-safe)', () => {
     expect(woken.socketDetails[0]?.sessionId).toBe('s1');
     expect(woken.authenticated).toBe(1);
     await s.emitForSession('s1', 'tool_call', { toolName: 'x' });
-    await client.next(isEvent('tool_call'), 'tool_call after wake');
+    await client.next(isEnvelope('tool_call'), 'tool_call after wake');
     expect(await s.pingTick()).not.toBeNull();
     await client.next(
       (f) => client.frames.filter((x) => x === '2').length >= 2 && f === '2',

@@ -2095,10 +2095,26 @@ async function main(): Promise<void> {
           doneTools(r.events).includes('list_capabilities'),
           `no list_capabilities call; tools: ${toolCalls(r.events).join(', ') || '(none)'}`,
         );
-        await sock.waitFor(
-          (e) => e.name === 'tool_call',
+        // Chat events travel on Node's wire — socket event `event` carrying
+        // `{ eventName, payload }` — because that is the envelope the client
+        // SDK validates before it dispatches (a bare `tool_call` frame makes
+        // its named listener throw on `payload.sessionId`).
+        const mirrored = await sock.waitFor(
+          (e) =>
+            e.name === 'event' &&
+            (e.payload as { eventName?: string }).eventName === 'tool_call',
           15_000,
           'a tool_call event on the re-adopted socket',
+        );
+        const envelope = mirrored.payload as {
+          eventName: string;
+          payload?: { sessionId?: string; requestId?: string };
+        };
+        assert.equal(envelope.payload?.sessionId, session);
+        assert.ok(envelope.payload?.requestId, 'envelope lacks requestId');
+        assert.ok(
+          !sock.events.some((e) => e.name === 'tool_call'),
+          'a bare tool_call frame was sent alongside the envelope',
         );
         sock.emit('ping');
         await sock.waitFor((e) => e.name === 'pong', 10_000, 'pong after wake');

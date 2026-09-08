@@ -97,6 +97,14 @@ const SERVER_EVENTS = [
   'message_cache_invalidation',
 ] as const;
 
+/** Socket event every runtime event travels under, carrying `{ eventName, payload }` (Node's wire). */
+const ENVELOPE_EVENT = 'event';
+/** Frontend calls the client SDK listens for by name with the raw payload. */
+const RAW_NAMED_EVENTS: ReadonlySet<string> = new Set([
+  'browser_tool_call',
+  'action_call',
+]);
+
 /** Close codes in the 4000–4999 application range. */
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_HANDSHAKE_TIMEOUT = 4408;
@@ -547,11 +555,25 @@ export class RealtimeEndpoint {
 
   // ── outbound ────────────────────────────────────────────────────────────
 
+  /**
+   * Mirror a runtime event to the sockets of the session it belongs to, on
+   * the Node runtime's wire: the socket event is `event` and its argument is
+   * the `@ixo/oracles-events` envelope `{ eventName, payload }`. The client
+   * SDK's catch-all listener validates exactly that (`payload.sessionId` and
+   * `payload.requestId`) and drops a bare payload, while its named
+   * `tool_call` / `render_component` listeners crash on one. The two calls
+   * the SDK answers (`browser_tool_call`, `action_call`) are the exception:
+   * it listens for them by name with the raw payload, on both runtimes.
+   */
   private fanOut(eventName: string, payload: RawEventPayload): void {
     const sessionId =
       typeof payload.sessionId === 'string' ? payload.sessionId : undefined;
     if (!sessionId) return;
-    this.hub.emitToSession(sessionId, eventName, payload);
+    if (RAW_NAMED_EVENTS.has(eventName)) {
+      this.hub.emitToSession(sessionId, eventName, payload);
+      return;
+    }
+    this.hub.emitToSession(sessionId, ENVELOPE_EVENT, { eventName, payload });
   }
 
   private call(
