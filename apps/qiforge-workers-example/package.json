@@ -1,0 +1,40 @@
+{
+  "name": "qiforge-workers-example",
+  "version": "0.0.1",
+  "description": "Reference QiForge oracle running on Cloudflare Workers (@ixo/oracle-runtime-workers).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:devnet": "wrangler deploy -c wrangler.gateway.devnet.jsonc && wrangler deploy -c wrangler.devnet.jsonc",
+    "deploy:devnet:gateway": "wrangler deploy -c wrangler.gateway.devnet.jsonc",
+    "deploy:devnet:oracle": "wrangler deploy -c wrangler.devnet.jsonc",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "test:e2e": "tsx test/e2e.ts",
+    "test:e2e:vfs": "tsx test/e2e-vfs.ts",
+    "test:e2e:mcp": "tsx test/e2e-mcp.ts",
+    "test:stress": "tsx test/stress.ts"
+  },
+  "dependencies": {
+    "@ixo/matrix-bot-workers-sdk": "0.1.3",
+    "@ixo/oracle-runtime-workers": "workspace:*",
+    "hono": "^4.13.4",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260825.1",
+    "@ixo/ucan": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@types/node": "^22.10.7",
+    "matrix-js-sdk": "^42.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.125.0",
+    "yjs": "13.6.32"
+  }
+}

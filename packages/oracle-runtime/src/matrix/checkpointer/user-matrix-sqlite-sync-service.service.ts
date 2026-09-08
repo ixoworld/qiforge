@@ -1242,20 +1242,51 @@ export class UserMatrixSqliteSyncService
     return 'uploaded';
   }
 
+  /**
+   * Wait (bounded) for a user's in-flight work to finish. Returns false if the
+   * user is still active at the deadline.
+   */
+  private async waitForUserIdle(
+    userDid: string,
+    deadlineMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + deadlineMs;
+    while (this.isUserActive(userDid)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return true;
+  }
+
   // Run at :10, :20, :30, :40, :50 — skips :00 to avoid overlapping with the hourly cleanup cron
   @Cron('0 10,20,30,40,50 * * * *')
-  async uploadCheckpointToMatrixStorageTask(): Promise<void> {
+  async uploadCheckpointToMatrixStorageTask(options?: {
+    /**
+     * Graceful shutdown: how long to wait for each user's in-flight work
+     * (the post-turn session sync, an open stream) to finish before
+     * uploading. Without it a user who was active a moment ago is skipped —
+     * fine for the cron ("next cycle will pick it up"), but on shutdown there
+     * is no next cycle and their last turns never reach the owner copy.
+     */
+    drainMs?: number;
+  }): Promise<void> {
     if (this.cronRunning) {
       Logger.debug('Skipping upload task — another cron task is still running');
       return;
     }
     this.cronRunning = true;
+    const drainMs = options?.drainMs ?? 0;
     try {
       Logger.log(`Uploading checkpoint to Matrix storage task started`);
       // Iterate cached file paths instead of scanning the filesystem —
       // only users with known local checkpoints need uploading.
       for (const userDid of this.filePathCache.keys()) {
         try {
+          if (drainMs > 0 && !(await this.waitForUserIdle(userDid, drainMs))) {
+            Logger.warn(
+              `User ${userDid} still active after ${drainMs}ms drain — their latest checkpoint will NOT be uploaded before shutdown`,
+            );
+          }
           await this.uploadCheckpointToMatrixStorage({ userDid });
         } catch (error) {
           Logger.error(

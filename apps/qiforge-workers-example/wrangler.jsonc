@@ -1,0 +1,62 @@
+{
+  // Single-script layout (shell + user objects + Matrix gateway in one
+  // Worker) — used by the local harness. The devnet configs show the split
+  // layout with the gateway in its own script (wrangler.gateway.devnet.jsonc).
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "qiforge-workers-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  // @matrix-org/matrix-sdk-crypto-wasm's stock entrypoints can't load on
+  // workerd (runtime wasm compilation is disallowed; the node entry reads from
+  // disk). The bot SDK ships a loader that imports the .wasm as a build-time
+  // CompiledWasm module; aliasing makes matrix-js-sdk resolve through it too.
+  "alias": {
+    "@matrix-org/matrix-sdk-crypto-wasm": "@ixo/matrix-bot-workers-sdk/crypto-wasm-shim",
+    // The editor plugin's markdown→blocks bridge (@blocknote/server-util) needs
+    // a DOM; on workerd we alias jsdom to a linkedom-backed shim.
+    "jsdom": "../../packages/oracle-runtime-workers/src/plugins/editor/jsdom-shim.ts",
+  },
+  "dev": { "port": 8787 },
+  // Safety net for the Matrix gateway's keep-alive loop.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  // Per-user-DID rate limit (Cloudflare native binding; enforced by the shell
+  // after auth). 100 req/60s ≈ 30–40 chat turns a minute — comfortable for a
+  // human, a wall for a runaway client or leaked token.
+  "ratelimits": [
+    {
+      "name": "RATE_LIMIT",
+      "namespace_id": "1001",
+      "simple": { "limit": 100, "period": 60 },
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      // One instance per (user DID, oracle): the user's SQLite working copy +
+      // sessions + the agent turn itself.
+      { "name": "USER_ORACLE", "class_name": "UserOracleDO" },
+      // One instance per oracle: the Matrix bot identity — E2EE crypto store,
+      // /sync loop, room→user routing, media owner-copy upload/download.
+      { "name": "MATRIX_GATEWAY", "class_name": "MatrixGatewayDO" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["UserOracleDO", "MatrixGatewayDO"] },
+  ],
+  // Non-secret config. Secrets (OPEN_ROUTER_API_KEY, MATRIX_ORACLE_ADMIN_PASSWORD,
+  // MATRIX_RECOVERY_PHRASE, ...) go in `.dev.vars` locally / `wrangler secret put` in prod.
+  "vars": {
+    "ORACLE_NAME": "QiForge Workers Example",
+    "NETWORK": "devnet",
+    // LOCAL DEV ONLY: the testing harness has no VFS worker, so this example
+    // pins legacy Matrix-media storage. Leave OWNER_STORE unset in production —
+    // the default is the IXO VFS (system of record), with Matrix media read
+    // once as a legacy source and migrated in.
+    "OWNER_STORE": "matrix",
+    "LOG_LEVEL": "info",
+    // Operator/test routes under /debug/* (storage flush/reset, matrix restart).
+    // Leave off in production.
+    "ORACLE_DEBUG_ROUTES": "true",
+  },
+}
