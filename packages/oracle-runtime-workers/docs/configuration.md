@@ -63,6 +63,32 @@ script>`), which moves the existing `MatrixGatewayDO` namespace — crypto
    deployment that still carries pre-SDK gateway objects needs the same
    sequence.
 
+## Dependencies
+
+The editor chain (`@ixo/editor`, `@ixo/matrix-crdt`, `@blocknote/*`,
+`y-prosemirror`, `y-protocols`) and the runtime's own editor and flows
+plugins hand `Y.Doc`s to each other, so a Workers bundle must contain exactly
+one copy of `yjs`. A second copy makes yjs log `Yjs was already imported` at
+isolate boot and breaks the `instanceof` checks the CRDT libraries rely on.
+`@ixo/editor` 6.0.1 pins `yjs` 13.6.27 exactly while everything else resolves
+to 13.6.32, which is enough to split the bundle. This repo collapses it with a
+pnpm override (`pnpm-workspace.yaml` → `overrides.yjs`) and the runtime
+declares the same exact version. **Every app built on the runtime has to
+carry the same override** until `@ixo/editor` widens its pin — pnpm does not
+inherit overrides from a dependency:
+
+```yaml
+# pnpm-workspace.yaml (or "pnpm": { "overrides": { … } } in package.json)
+overrides:
+  yjs: '13.6.32'
+```
+
+Verify after `pnpm install`: the bundle from
+`wrangler deploy --dry-run --outdir <dir>` must contain the string
+`Yjs was already imported` exactly once (yjs embeds it once per copy).
+`lib0`, `y-protocols` and `@ixo/matrix-crdt` already resolve to single
+copies.
+
 ## Environment
 
 Non-secret values go in `vars`; secrets through `wrangler secret put` (or
