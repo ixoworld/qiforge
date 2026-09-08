@@ -261,18 +261,31 @@ export async function resolveServiceDid(serviceUrl: string): Promise<string> {
 }
 
 /**
- * The production VFS onboarding step: the user mints an `ixo:filesystem`
- * delegation to the oracle and deposits it into the UCAN store worker with a
- * self-signed `store/add` invocation.
- *
- * Delegation shape (all three parts matter):
+ * The capability the user's ONE delegation to the oracle must carry for the
+ * Workers runtime to keep the owner copy in the user's VFS — the Portal
+ * mints it into the same delegation as the sandbox/memory/skills grants.
+ * All three parts matter:
  *   - `can: '*'`   — the VFS grant lattice has no `fs/*` entry; `'*'` is the
  *     owner grant that covers fs/read|write|list|delete.
- *   - `with: 'ixo:filesystem'` — the user's own namespace.
+ *   - `with: 'ixo:filesystem/.oracles'` — the user's own namespace, scoped to
+ *     the dot-folder that holds per-oracle state (the whole personal library
+ *     `ixo:filesystem` would qualify too; nothing narrower does).
  *   - `nb.hidden: ['/.oracles']` — the state file lives in a dot-folder, so
  *     it is HIDDEN by the VFS dotfile convention; this reveal (intersected
  *     with the oracle's own `nb.hidden: ['*']` invocations) is what lets the
  *     oracle see the `/.oracles` subtree — and nothing else that is hidden.
+ */
+export const VFS_OWNER_COPY_CAPABILITY: Capability = {
+  can: '*',
+  with: 'ixo:filesystem/.oracles',
+  nb: { hidden: ['/.oracles'] },
+} as Capability;
+
+/**
+ * The library-wide grant the vfs PLUGIN's file tools (`vfs_read`, `vfs_write`,
+ * …) resolve from the UCAN store worker — a separate, user-initiated share
+ * of the whole personal filesystem, unrelated to the owner copy above. The
+ * user mints it to the oracle and deposits it with a self-signed `store/add`.
  */
 export async function depositVfsDelegation(
   account: HarnessAccount,

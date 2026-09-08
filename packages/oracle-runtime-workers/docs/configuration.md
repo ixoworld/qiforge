@@ -105,12 +105,12 @@ same object; each plugin's `configSchema` is the reference.
 
 ### Storage
 
-| Variable            | Required | Meaning                                                                                                                                                     |
-| ------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OWNER_STORE`       | no       | Unset = the IXO VFS is the system of record (Matrix media read once as legacy). `matrix` forces legacy room-media storage — local harness only.             |
-| `VFS_BASE_URL`      | no       | IXO VFS worker (defaults per `NETWORK`). Setting it explicitly also activates the vfs plugin.                                                               |
-| `UCAN_STORE_URL`    | no       | UCAN store worker (defaults per `NETWORK`).                                                                                                                 |
-| `CHUNK_CACHE_BYTES` | no       | Per-object budget of clean 64 KiB chunks kept in memory (default 4 MiB, 1–64 MiB, `8m` / `8192k` accepted); `GET /debug/storage` reports hit/miss counters. |
+| Variable            | Required | Meaning                                                                                                                                                           |
+| ------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OWNER_STORE`       | no       | Unset = the IXO VFS is the system of record (Matrix media read once as legacy). `matrix` forces legacy room-media storage — local harness only.                   |
+| `VFS_BASE_URL`      | no       | IXO VFS worker (defaults per `NETWORK`). Setting it explicitly also activates the vfs plugin.                                                                     |
+| `UCAN_STORE_URL`    | no       | UCAN store worker the vfs plugin's file tools read their grant from (defaults per `NETWORK`). The owner copy never uses it — it mints from the user's delegation. |
+| `CHUNK_CACHE_BYTES` | no       | Per-object budget of clean 64 KiB chunks kept in memory (default 4 MiB, 1–64 MiB, `8m` / `8192k` accepted); `GET /debug/storage` reports hit/miss counters.       |
 
 ### LLM, tracing, BYO
 

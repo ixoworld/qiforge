@@ -27,13 +27,13 @@ covered by the devnet matrix below.
 From `apps/qiforge-workers-example`, against the ixo testing harness and a
 real LLM:
 
-| Script                  | Covers                                                                                                                                                   |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test:e2e`         | Auth, streaming, tools, memory, transcript, abort, owner-copy round-trip, E2EE chat, device-stable restart, a live scheduled task fired by a DO alarm.   |
-| `pnpm test:e2e:vfs`     | The default owner-store path: real VFS + UCAN store workers, delegation deposit, flush → file in the user's VFS → reload from the VFS, Matrix untouched. |
-| `pnpm test:e2e:mcp`     | A real Streamable-HTTP MCP handshake from workerd with per-user UCAN headers, cross-session memory recall.                                               |
-| `test/e2e-migration.ts` | Node → Workers migration of a user's history including the key backup and a token rotation.                                                              |
-| `pnpm test:stress`      | N users concurrently, per-user isolation checks.                                                                                                         |
+| Script                  | Covers                                                                                                                                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test:e2e`         | Auth, streaming, tools, memory, transcript, abort, owner-copy round-trip, E2EE chat, device-stable restart, a live scheduled task fired by a DO alarm.                                            |
+| `pnpm test:e2e:vfs`     | The default owner-store path: a real VFS worker, the user's delegation carrying `ixo:filesystem/.oracles`, flush → file in the user's VFS → reload, Matrix untouched, 403 without the capability. |
+| `pnpm test:e2e:mcp`     | A real Streamable-HTTP MCP handshake from workerd with per-user UCAN headers, cross-session memory recall.                                                                                        |
+| `test/e2e-migration.ts` | Node → Workers migration of a user's history including the key backup and a token rotation.                                                                                                       |
+| `pnpm test:stress`      | N users concurrently, per-user isolation checks.                                                                                                                                                  |
 
 ## The devnet feature matrix (minutes, deployed worker)
 
@@ -62,7 +62,8 @@ STEP_FILTER='^gateway restart' ACCOUNT_JSON=… pnpm exec tsx test/devnet-featur
   `matrixUserId`, `matrixPassword`, `roomId`) created with the testing
   harness's `devnet-mig-account.mjs`. Two more are read from the same
   directory: `devnet-user-2.json` as the "other user" and `devnet-user-6.json`
-  as the user without a file-storage grant — keep that one ungranted.
+  as the user whose delegation lacks the file-storage capability — never
+  give that one a delegation carrying `ixo:filesystem`, or a working copy.
 - A full run takes 15–20 minutes; split it with `STEP_FILTER` when a shell
   or CI step has a shorter limit. Some steps depend on earlier ones in the
   same run (the edge steps need "edge: create a scratch session"; the

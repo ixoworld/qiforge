@@ -121,7 +121,6 @@ import {
 } from './debug-timers';
 import {
   IxoVfsOwnerStore,
-  UCAN_STORE_DEFAULT_URLS,
   VFS_DEFAULT_BASE_URLS,
 } from '../owner-store/ixo-vfs-store';
 import type { OwnerStore } from '../owner-store/types';
@@ -529,7 +528,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async ready(identity: TurnIdentity): Promise<void> {
       this.installDebugTimerTracker();
       this.adoptHibernatedSockets();
+      let delegationReplaced = false;
       if (identity.ucanDelegation) {
+        // Clients (the Portal's SDK) send their cached delegation with every
+        // request; a token this object has not seen is a re-authorization.
+        const known =
+          this.delegations.get(identity.userDid)?.raw ??
+          (await this.ctx.storage.get<StoredDelegation>(META_DELEGATION))?.raw;
+        delegationReplaced = known !== identity.ucanDelegation;
         this.delegations.set(identity.userDid, {
           raw: identity.ucanDelegation,
         });
@@ -557,6 +563,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
       }
       await this.ctx.storage.put(META_LAST_ACCESS, Date.now());
+      if (delegationReplaced) await this.onDelegationReplaced();
+    }
+
+    /**
+     * The object holds a delegation it had not seen before (a header on this
+     * request, or a deposit through the shell). A fresh delegation is the one
+     * thing that turns a "no file-storage grant" flush failure into a
+     * success: forget the failure streak and, with unsaved turns, flush now
+     * instead of at the next 10-minute retry.
+     */
+    private async onDelegationReplaced(): Promise<void> {
+      await this.ctx.storage.delete(META_FLUSH_FAILURES);
+      if (!this.db) return;
+      if (
+        !this.dirty &&
+        (await this.ctx.storage.get<boolean>(META_DIRTY)) === true
+      )
+        this.dirty = true;
+      if (this.dirty) void this.flushToOwnerStore().catch(() => undefined);
     }
 
     /**
@@ -1003,10 +1028,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           env.VFS_BASE_URL ??
           VFS_DEFAULT_BASE_URLS[network] ??
           VFS_DEFAULT_BASE_URLS.devnet!,
-        ucanStoreUrl:
-          env.UCAN_STORE_URL ??
-          UCAN_STORE_DEFAULT_URLS[network] ??
-          UCAN_STORE_DEFAULT_URLS.devnet!,
+        // The user's one delegation to this oracle — hydrated by `ready()`
+        // before boot, replaced at once by `setDelegation` / `clearDelegation`.
+        delegation: () => this.delegations.get(userDid)?.raw,
       });
       return new MigratingOwnerStore({
         primary: vfsStore,
@@ -1506,6 +1530,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         at: Date.now(),
         ...(typeof expiration === 'number' ? { expiration } : {}),
       } satisfies StoredDelegation);
+      await this.onDelegationReplaced();
     }
 
     /**

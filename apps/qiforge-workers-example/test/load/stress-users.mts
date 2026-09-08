@@ -6,15 +6,13 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import {
   mintAuthInvocation,
   mintDelegation,
-  depositVfsDelegation,
+  VFS_OWNER_COPY_CAPABILITY,
   type HarnessAccount,
 } from '../lib/harness';
 import { ChatClient } from '../lib/chat-client';
 const ORACLE_URL =
   process.env.ORACLE_URL ?? 'https://mike-devnet-oracle.ixo-api.workers.dev';
 const ORACLE_DID = 'did:ixo:ixo1seyngesnj6673qqzf0um4e6c2rutfsrafc9tw3';
-const UCAN_STORE =
-  process.env.UCAN_STORE ?? 'https://devnet.store.ucan.ixo.earth';
 const SP = fileURLToPath(new URL('../.devnet-accounts', import.meta.url));
 const EXCLUDE = new Set((process.env.EXCLUDE_USERS ?? '6').split(',')); // user-6 stays ungranted for the 403 step
 const TURNS = Number(process.env.TURNS ?? '4');
@@ -133,12 +131,12 @@ const t0 = Date.now();
 await Promise.all(
   users.map(async (u) => {
     try {
-      await depositVfsDelegation(u.acct, ORACLE_DID, UCAN_STORE);
       const raw = await mintDelegation(u.acct, ORACLE_DID, [
         { can: '*', with: 'ixo:oracle' },
         { can: '*', with: 'ixo:memory' },
         { can: '*', with: 'ixo:sandbox' },
         { can: '*', with: 'ixo:skills' },
+        VFS_OWNER_COPY_CAPABILITY,
       ]);
       const post = await api(u, 'POST', '/delegation', {
         raw,

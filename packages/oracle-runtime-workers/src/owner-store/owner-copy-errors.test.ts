@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  VfsNoDelegationError,
-  VfsRequestError,
-  VfsStoreUnavailableError,
-} from './ixo-vfs-store';
+import { VfsNoDelegationError, VfsRequestError } from './ixo-vfs-store';
 import {
   classifyOwnerCopyError,
   isRetryableOwnerCopyError,
@@ -14,9 +10,11 @@ import {
 
 describe('owner-copy error classification', () => {
   it('never retries a missing delegation or an auth rejection', () => {
-    expect(classifyOwnerCopyError(new VfsNoDelegationError('did:ixo:u'))).toBe(
-      'NO_VFS_DELEGATION',
-    );
+    expect(
+      classifyOwnerCopyError(
+        new VfsNoDelegationError('did:ixo:u', 'no-capability'),
+      ),
+    ).toBe('NO_VFS_DELEGATION');
     expect(
       classifyOwnerCopyError(new VfsRequestError(403, '', 'VFS GET → 403')),
     ).toBe('VFS_AUTH_FAILED');
@@ -24,13 +22,14 @@ describe('owner-copy error classification', () => {
       classifyOwnerCopyError(new VfsRequestError(401, '', 'VFS GET → 401')),
     ).toBe('VFS_AUTH_FAILED');
     expect(
-      isRetryableOwnerCopyError(new VfsNoDelegationError('did:ixo:u')),
+      isRetryableOwnerCopyError(
+        new VfsNoDelegationError('did:ixo:u', 'no-capability'),
+      ),
     ).toBe(false);
   });
 
-  it('retries transient failures: store outage, 5xx, 429, network', () => {
+  it('retries transient failures: 5xx, 429, network', () => {
     for (const err of [
-      new VfsStoreUnavailableError('store 503'),
       new VfsRequestError(503, '', 'VFS GET → 503'),
       new VfsRequestError(429, '', 'VFS GET → 429'),
       new TypeError('fetch failed'),
@@ -43,7 +42,7 @@ describe('owner-copy error classification', () => {
   it('carries the status code and retryability the shell answers with', () => {
     const transient = new OwnerCopyUnavailableError(
       'did:ixo:u',
-      new VfsStoreUnavailableError('store 503'),
+      new VfsRequestError(503, '', 'VFS GET → 503'),
       4,
     );
     expect(transient.httpStatus).toBe(503);
@@ -51,20 +50,20 @@ describe('owner-copy error classification', () => {
     expect(transient.message).toMatch(/after 4 attempt/);
     const noGrant = new OwnerCopyUnavailableError(
       'did:ixo:u',
-      new VfsNoDelegationError('did:ixo:u'),
+      new VfsNoDelegationError('did:ixo:u', 'no-capability'),
       1,
     );
     expect(noGrant.httpStatus).toBe(403);
     expect(noGrant.retryable).toBe(false);
     expect(noGrant.code).toBe('NO_VFS_DELEGATION');
-    expect(noGrant.message).toMatch(/ixo:filesystem delegation/);
+    expect(noGrant.message).toMatch(/ixo:filesystem over \/\.oracles/);
   });
 });
 
 describe('owner-copy failures across the RPC boundary', () => {
   const failure = new OwnerCopyUnavailableError(
     'did:ixo:u',
-    new VfsNoDelegationError('no grant'),
+    new VfsNoDelegationError('did:ixo:u', 'no-capability'),
     1,
   );
 
@@ -88,10 +87,10 @@ describe('owner-copy failures across the RPC boundary', () => {
     });
   });
 
-  it('maps a transient store failure to a retryable 503', () => {
+  it('maps a transient VFS failure to a retryable 503', () => {
     const transient = new OwnerCopyUnavailableError(
       'did:ixo:u',
-      new VfsStoreUnavailableError('store-error'),
+      new VfsRequestError(503, '', 'VFS GET → 503'),
       3,
     );
     const overRpc = new Error(toRpcError(transient).message);
@@ -102,14 +101,13 @@ describe('owner-copy failures across the RPC boundary', () => {
     });
   });
 
-  it('still recognises the raw store errors by name', () => {
-    expect(parseOwnerCopyFailure(new VfsNoDelegationError('x'))).toMatchObject({
+  it('still recognises the raw no-delegation error by name', () => {
+    expect(
+      parseOwnerCopyFailure(new VfsNoDelegationError('x', 'no-delegation')),
+    ).toMatchObject({
       code: 'NO_VFS_DELEGATION',
       httpStatus: 403,
     });
-    expect(
-      parseOwnerCopyFailure(new VfsStoreUnavailableError('y')),
-    ).toMatchObject({ code: 'OWNER_COPY_UNAVAILABLE', httpStatus: 503 });
   });
 
   it('returns null for anything else, including JSON-looking messages', () => {

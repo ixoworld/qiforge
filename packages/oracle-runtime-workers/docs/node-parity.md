@@ -12,6 +12,11 @@ implementation, and what is deliberately left out.
   manifests, `configSchema`, `autoDetect`, boot/request tools, sub-agents
   (with `forwardTools`), middlewares, shared state, auth-excluded routes.
   `getNestModules` is replaced by `getRoutes(ctx)` (plain `fetch` handlers).
+  `createOracleWorker({ features, manifestOverrides })` are Node's
+  `createOracleApp` options with the same semantics: overrides are
+  shallow-merged over a loaded plugin's manifest at boot (e.g.
+  `{ portal: { visibility: 'always' } }`), unknown names are logged and
+  ignored, the merged manifest is validated like an authored one.
 - **Wire protocol**: `POST/GET /sessions`, `POST /messages/:id` (SSE events
   `message` / `reasoning` / `tool_call` / `action_call` / `error` / `done`),
   `GET /messages/:id`, `/messages/abort`, `/delegation`, `/health`,
@@ -32,7 +37,9 @@ implementation, and what is deliberately left out.
   with the `x-ucan-delegation` fallback; DID keys resolved through Blocksync.
   Header-less turns mint plugin invocations from the delegation deposited via
   `POST /delegation`, cached in the object; `POST`/`DELETE /delegation`
-  update the object at once.
+  update the object at once. `GET /delegation` additionally returns the
+  stored delegation's `capabilities` (Node returns `authorized` and
+  `expiration` only).
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
   `MODEL_PRICE_MARKUP`.
@@ -72,18 +79,18 @@ implementation, and what is deliberately left out.
 
 ## Ported with a different implementation
 
-| Surface                            | Node                                 | Workers                                                                                                                                                                                                                                                                        |
-| ---------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences; `FlowsPlugin` exported for opt-in wiring. MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers. |
-| Tasks                              | BullMQ / Redis                       | DO alarms; records live in the user's SQLite file; runs re-enter the agent as background sessions and deliver to the room, same preview → confirm → create and approval-gate contract; dedicated `[Task] <title>` rooms as on Node.                                            |
-| Editor / flows                     | JSDOM                                | linkedom DOM shim; the heavy chain is lazy-imported; a second, crypto-less bot device from the gateway (`ctx.matrix.botCredentials()`).                                                                                                                                        |
-| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn). No local PDF/office parser on workerd (those go to the helper model).                                                                       |
-| Realtime channel                   | socket.io server                     | socket.io v4 wire protocol over Hibernatable WebSockets, one socket per tab, addressed by session; heartbeat from the object's alarm so an idle tab lets the object hibernate; websocket transport only (a polling handshake gets a 426).                                      |
-| Portal browser tools / AG-UI       | portal + agui plugins                | Same contract over the realtime channel (`ctx.frontend.callBrowserTool` / `callAgAction`, 15 s / 10 s timeouts); proven live with the Portal's `create_page_room`.                                                                                                             |
-| User preferences                   | `user_prefs` room state              | Same envelope; hydrated into `state.userPreferences` before every agent build (5-minute read cache, invalidated by the tool's own write).                                                                                                                                      |
-| Matrix user id on non-Matrix turns | `didToMatrixUserId(did, homeServer)` | Same derivation (homeserver from the DID document via Blocksync, fallback to the oracle's server), cached in object storage (`meta:matrixUserId`).                                                                                                                             |
-| Session creation                   | marker event id = session id         | Same; the marker send is retried with the same transaction id across a gateway restart (`src/do/gateway-retry.ts`), never replayed blindly. If every attempt fails the create fails — no silent local id when the user has an oracle room.                                     |
-| LLM                                | OpenRouter                           | OpenRouter or Nebius (`LLM_PROVIDER`), optional LangSmith tracing, the full BYO-LLM lane (catalog, per-user keys, ChatGPT OAuth — see the proxy note in [operations](operations.md#chatgpt-subscription-lane-needs-a-proxy)).                                                  |
+| Surface                            | Node                                 | Workers                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences; `FlowsPlugin` exported for opt-in wiring. MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                                                            |
+| Tasks                              | BullMQ / Redis                       | DO alarms; records live in the user's SQLite file; runs re-enter the agent as background sessions and deliver to the room, same preview → confirm → create and approval-gate contract; dedicated `[Task] <title>` rooms as on Node.                                                                                                                                       |
+| Editor / flows                     | JSDOM                                | linkedom DOM shim; the heavy chain is lazy-imported; a second, crypto-less bot device from the gateway (`ctx.matrix.botCredentials()`).                                                                                                                                                                                                                                   |
+| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                  |
+| Realtime channel                   | socket.io server                     | socket.io v4 wire protocol over Hibernatable WebSockets, one socket per tab, addressed by session; heartbeat from the object's alarm so an idle tab lets the object hibernate; websocket transport only (a polling handshake gets a 426). Chat events use Node's wire envelope (`event` → `{ eventName, payload }`); `browser_tool_call` / `action_call` are raw by name. |
+| Portal browser tools / AG-UI       | portal + agui plugins                | Same contract over the realtime channel (`ctx.frontend.callBrowserTool` / `callAgAction`, 15 s / 10 s timeouts); proven live with the Portal's `create_page_room`.                                                                                                                                                                                                        |
+| User preferences                   | `user_prefs` room state              | Same envelope; hydrated into `state.userPreferences` before every agent build (5-minute read cache, invalidated by the tool's own write).                                                                                                                                                                                                                                 |
+| Matrix user id on non-Matrix turns | `didToMatrixUserId(did, homeServer)` | Same derivation (homeserver from the DID document via Blocksync, fallback to the oracle's server), cached in object storage (`meta:matrixUserId`).                                                                                                                                                                                                                        |
+| Session creation                   | marker event id = session id         | Same; the marker send is retried with the same transaction id across a gateway restart (`src/do/gateway-retry.ts`), never replayed blindly. If every attempt fails the create fails — no silent local id when the user has an oracle room.                                                                                                                                |
+| LLM                                | OpenRouter                           | OpenRouter or Nebius (`LLM_PROVIDER`), optional LangSmith tracing, the full BYO-LLM lane (catalog, per-user keys, ChatGPT OAuth — see the proxy note in [operations](operations.md#chatgpt-subscription-lane-needs-a-proxy)).                                                                                                                                             |
 
 ## Deliberate divergences
 
@@ -95,7 +102,9 @@ implementation, and what is deliberately left out.
   offloaded payload) fetches one again through the same pipeline.
 - **Owner copies are never written to Matrix.** The IXO VFS is the system of
   record; Matrix media is read once as legacy and then redacted (see
-  [architecture](architecture.md#self-sovereign-storage)).
+  [architecture](architecture.md#self-sovereign-storage)). The user's
+  delegation to the oracle therefore needs one capability Node never asked
+  for: `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`.
 - **Blob compression.** A file written by this runtime is not readable by
   the Node runtime; the reverse direction works.
 - **Turn resume after an isolate reset** is not built: the in-flight turn

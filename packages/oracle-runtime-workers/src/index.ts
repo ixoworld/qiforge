@@ -35,7 +35,11 @@ export * from './plugins';
 export * from './do/contracts';
 export type { OwnerStore } from './owner-store/types';
 export { MigratingOwnerStore } from './owner-store/migrating-store';
-export { IxoVfsOwnerStore } from './owner-store/ixo-vfs-store';
+export {
+  IxoVfsOwnerStore,
+  VFS_OWNER_COPY_RESOURCE,
+  ownerCopyCapability,
+} from './owner-store/ixo-vfs-store';
 export { MatrixMediaOwnerStore } from './owner-store/matrix-media-store';
 export { MatrixGatewayDO } from './matrix/gateway-do';
 export {
@@ -131,6 +135,16 @@ export interface CreateOracleWorkerOptions {
   config: OracleConfig;
   plugins?: OraclePlugin[];
   features?: RuntimeCoreOptions['features'];
+  /**
+   * Per-plugin manifest overrides, shallow-merged over each loaded plugin's
+   * own `manifest` at boot (the Node runtime's `createOracleApp` option of
+   * the same name): retune a bundled plugin's summary, hints or
+   * `visibility` — e.g. `{ portal: { visibility: 'always' } }` binds the
+   * Portal's browser tools on every turn instead of behind
+   * `load_capability`. Keys naming no loaded plugin are logged and ignored;
+   * the merged manifest is validated like an authored one.
+   */
+  manifestOverrides?: RuntimeCoreOptions['manifestOverrides'];
   /** Extra host routes mounted on the shell. */
   routes?: PluginRoute[];
   /** Host routes exempt from UCAN auth. */
@@ -179,6 +193,7 @@ export function createOracleWorker(
         config: opts.config,
         plugins: opts.plugins ?? [],
         features: opts.features,
+        manifestOverrides: opts.manifestOverrides,
         env,
         logger: console,
       });

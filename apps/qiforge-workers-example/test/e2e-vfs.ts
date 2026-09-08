@@ -30,10 +30,10 @@ import { gunzipSync } from 'node:zlib';
 import { ChatClient } from './lib/chat-client';
 import {
   MATRIX_BASE_URL,
-  depositVfsDelegation,
   ensureNamedAccount,
   mintAuthInvocation,
   mintDelegation,
+  VFS_OWNER_COPY_CAPABILITY,
   vfsUserRequest,
   type HarnessAccount,
 } from './lib/harness';
@@ -113,18 +113,13 @@ async function main(): Promise<void> {
     const statePath = `/.oracles/${ORACLE_DID}/state.db.gz`;
 
     // ---------------------------------------------------------- onboarding
-    await step(
-      'user deposits the ixo:filesystem delegation into the UCAN store',
-      async () => {
-        const { cid } = await depositVfsDelegation(user, ORACLE_DID);
-        assert.ok(cid.length > 0, 'delegation cid');
-      },
-    );
-
-    // ---------------------------------------------------------- chat turn
+    // The user's ONE delegation to the oracle carries the file-storage
+    // capability the owner copy needs, next to the plugin grants — there is
+    // no separate deposit anywhere.
     const invocation = await mintAuthInvocation(user, ORACLE_DID);
     const delegation = await mintDelegation(user, ORACLE_DID, [
       { can: 'memory/*', with: 'ixo:memory' },
+      VFS_OWNER_COPY_CAPABILITY,
     ]);
     const client = new ChatClient(oracle.url, { invocation, delegation });
 
@@ -266,9 +261,9 @@ async function main(): Promise<void> {
       },
     );
 
-    // ------------------------------------------------- no-delegation boot path
+    // --------------------------------------------- no-capability boot path
     await step(
-      'a user with NO deposited delegation still gets a working oracle',
+      'a user whose delegation lacks the /.oracles capability is refused with 403 NO_VFS_DELEGATION',
       async () => {
         const stranger = await ensureNamedAccount('qf-vfs-nodeleg');
         const inv = await mintAuthInvocation(stranger, ORACLE_DID);
@@ -279,19 +274,19 @@ async function main(): Promise<void> {
           invocation: inv,
           delegation: del,
         });
-        const sid = await strangerClient.createSession();
-        const r = await strangerClient.stream(
-          sid,
-          'Say the single word: ready',
+        await assert.rejects(
+          () => strangerClient.createSession(),
+          (err: unknown) =>
+            err instanceof Error &&
+            /NO_VFS_DELEGATION|\b403\b/.test(err.message),
+          'a user without file storage must not get an object',
         );
-        assert.equal(r.status, 200, `status ${r.status}: ${r.text}`);
-        assert.match(r.text, /ready/i, `expected "ready" in "${r.text}"`);
         // And their file must NOT appear in the VFS (nothing to write with).
         const files = await listOraclesSubtree(stranger);
         assert.equal(
           files.length,
           0,
-          `unexpected VFS files for a no-delegation user: ${files
+          `unexpected VFS files for a no-capability user: ${files
             .map((f) => f.path)
             .join(', ')}`,
         );
