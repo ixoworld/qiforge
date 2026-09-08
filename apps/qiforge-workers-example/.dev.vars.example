@@ -4,7 +4,9 @@
 # --- identity ---------------------------------------------------------------
 ORACLE_DID=did:ixo:ixo1oracleexample
 ORACLE_ENTITY_DID=did:ixo:entity:oracleexample
-# Ed25519 mnemonic the oracle signs downstream UCAN invocations with (optional)
+# Ed25519 mnemonic the oracle signs downstream UCAN invocations with (optional:
+# when unset it is read from the Matrix account room the way the Node runtime
+# stores it — needs MATRIX_ACCOUNT_ROOM_ID + MATRIX_VALUE_PIN below)
 # ORACLE_SIGNING_MNEMONIC=
 
 # --- auth: did:ixo key resolution ------------------------------------------

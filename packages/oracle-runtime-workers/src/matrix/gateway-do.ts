@@ -45,6 +45,12 @@ import {
 } from '../do/contracts';
 import { decryptWithPin } from '../secrets/pin-cipher';
 import {
+  encryptedMnemonicOf,
+  parseSigningMnemonic,
+  SIGNING_MNEMONIC_STATE_KEY,
+  SIGNING_MNEMONIC_STATE_TYPE,
+} from '../secrets/signing-mnemonic';
+import {
   IngestPipeline,
   type InboundAttachment,
   type IngestTurn,
@@ -202,6 +208,7 @@ export class MatrixGatewayDO
   private pluginDevice: BotCredentials | null = null;
   /** Memoised `getOracleSecretsKey` result (private JWK JSON). */
   private oracleSecretsKeyJson: string | null = null;
+  private oracleSigningMnemonic: string | null = null;
 
   // -------------------------------------------------------------------------
   // Configuration
@@ -642,6 +649,75 @@ export class MatrixGatewayDO
     this.oracleSecretsKeyJson = jwkJson;
     this.log('info', 'oracle secrets key loaded from the account room');
     return jwkJson;
+  }
+
+  /**
+   * The oracle's UCAN signing mnemonic from the account room — the Node
+   * runtime's storage (`setup-claim-signing-mnemonics.ts`): state event
+   * `ixo.room.state.secure` / `encrypted_mnemonic_ed_signing`, content
+   * `{ encrypted_mnemonic: 'ivHex:cipherHex' }`, AES-256-CBC with
+   * `MATRIX_VALUE_PIN` (the same cipher as the secrets key above). Read-only:
+   * provisioning (generate, store, publish the verification method on chain)
+   * stays with the Node runtime and the CLI. Memoised for the life of this
+   * object. Every failure is logged and yields null — a user object then
+   * runs without a signing key, exactly as with no `ORACLE_SIGNING_MNEMONIC`.
+   */
+  async getOracleSigningMnemonic(): Promise<string | null> {
+    if (this.oracleSigningMnemonic !== null) return this.oracleSigningMnemonic;
+    const roomId = this.env.MATRIX_ACCOUNT_ROOM_ID;
+    const pin = this.env.MATRIX_VALUE_PIN;
+    if (!roomId || !pin) {
+      this.log(
+        'warn',
+        'signing mnemonic unavailable: ORACLE_SIGNING_MNEMONIC is unset and MATRIX_ACCOUNT_ROOM_ID / MATRIX_VALUE_PIN are not set',
+      );
+      return null;
+    }
+    await this.ensureStarted();
+    const stateJson = await this.getRoomStateEvent(
+      roomId,
+      SIGNING_MNEMONIC_STATE_TYPE,
+      SIGNING_MNEMONIC_STATE_KEY,
+    );
+    if (!stateJson) {
+      this.log(
+        'warn',
+        `no ${SIGNING_MNEMONIC_STATE_TYPE}/${SIGNING_MNEMONIC_STATE_KEY} in the account room — set ORACLE_SIGNING_MNEMONIC or provision the mnemonic with the Node runtime / CLI; downstream UCAN minting stays off`,
+      );
+      return null;
+    }
+    const encrypted = encryptedMnemonicOf(stateJson);
+    if (!encrypted) {
+      this.log(
+        'warn',
+        `${SIGNING_MNEMONIC_STATE_KEY} in the account room carries no encrypted_mnemonic — downstream UCAN minting stays off`,
+      );
+      return null;
+    }
+    let plain: string;
+    try {
+      plain = await decryptWithPin(encrypted, pin);
+    } catch (err) {
+      this.log(
+        'error',
+        `could not decrypt ${SIGNING_MNEMONIC_STATE_KEY} with MATRIX_VALUE_PIN (wrong PIN?): ${err instanceof Error ? err.message : String(err)} — downstream UCAN minting stays off`,
+      );
+      return null;
+    }
+    const mnemonic = parseSigningMnemonic(plain);
+    if (!mnemonic) {
+      this.log(
+        'error',
+        `${SIGNING_MNEMONIC_STATE_KEY} decrypted to something that is not a BIP-39 mnemonic (wrong PIN?) — downstream UCAN minting stays off`,
+      );
+      return null;
+    }
+    this.oracleSigningMnemonic = mnemonic;
+    this.log(
+      'info',
+      `oracle signing mnemonic loaded from the account room (${mnemonic.split(' ').length} words)`,
+    );
+    return mnemonic;
   }
 
   // -------------------------------------------------------------------------

@@ -67,7 +67,9 @@ graph LR
    (`MATRIX_ORACLE_ADMIN_PASSWORD`, `MATRIX_RECOVERY_PHRASE`,
    `MATRIX_VALUE_PIN`).
 3. Deploy the oracle script with its secrets (`OPEN_ROUTER_API_KEY`, the
-   same Matrix secrets, `ORACLE_SIGNING_MNEMONIC`).
+   same Matrix secrets, and `ORACLE_SIGNING_MNEMONIC` unless the account
+   room already holds the mnemonic the Node runtime or the CLI provisioned —
+   then the runtime reads it from there).
 4. `POST /matrix/start`, then `GET /matrix/status` until `running` and
    `cryptoReady` are true.
 5. Run the feature matrix against it (see [testing](docs/testing.md)).
