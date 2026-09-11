@@ -26,8 +26,13 @@ implementation, and what is deliberately left out.
   and auth faults redacted before the wire.
 - **Request validation** on `POST /messages/:id` mirrors Node's
   `ValidationPipe` and body parser: malformed JSON → 400, unknown top-level
-  fields → 400, empty `message` → 400, bodies over 100 KiB → 413, unknown
-  session → 404, transcript of an unknown session → `{ messages: [] }`.
+  fields → 400, empty `message` → 400, oversized bodies → 413, unknown
+  session → 404, transcript of an unknown session → `{ messages: [] }`. The
+  body cap itself differs: 256 KiB here (`src/shell/turn-body-cap.ts`) against
+  Express body-parser's 100 kb on Node. A Portal turn carries the browser-tool
+  catalogue and the AG-UI action schemas (~92–98 KiB before the message
+  text), so Node's default refuses ordinary turns; the Workers cap exists to
+  bound memory per request, not to match Node.
 - **Request metadata → agent state**: `metadata.editorRoomId`, `spaceId`,
   `sessionRunId` and `currentEntityDid` update the thread's checkpointed
   state by the Node agent-builder's rules (`src/do/turn-metadata.ts`): a
