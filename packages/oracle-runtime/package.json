@@ -31,6 +31,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./plugin-api": {
+      "types": "./dist/plugin-api/index.d.ts",
+      "import": "./dist/plugin-api/index.js",
+      "default": "./dist/plugin-api/index.js"
+    },
     "./testing": {
       "types": "./dist/testing/index.d.ts",
       "import": "./dist/testing/index.js",
