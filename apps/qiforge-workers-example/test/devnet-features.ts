@@ -1373,6 +1373,135 @@ async function main(): Promise<void> {
         assert.equal(status.status, 200, status.text.slice(0, 200));
       },
     );
+
+    // ── reset safety: unplanned Durable Object resets mid-turn ─────────────
+    // A slow tool keeps the turn in flight long enough to reset an object
+    // under it. `sandbox_run` needs the deposited delegation (left in place
+    // by the delegation step above).
+    const slowToolPrompt = (marker: string) =>
+      `Use the sandbox_run tool exactly once to run this shell command and nothing else: sleep 20 && echo "${marker}". Do not use any other tool. When the tool has returned, reply with exactly ${marker} and nothing else.`;
+    const countBotMessages = async (
+      after: number,
+      pattern: RegExp,
+    ): Promise<number> => {
+      const room = mx.getRoom(roomId);
+      let n = 0;
+      for (const e of room?.getLiveTimeline().getEvents() ?? []) {
+        if (e.getSender() !== BOT_USER_ID || e.getTs() < after) continue;
+        await mx.decryptEventIfNeeded(e);
+        if (e.getType() !== 'm.room.message') continue;
+        if (pattern.test(String(e.getContent().body ?? ''))) n += 1;
+      }
+      return n;
+    };
+    const FAILED_NOTICE = /something went wrong/i;
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    await step(
+      'reset safety: gateway hard reset mid-turn → the reply still arrives, exactly once (inbox replay)',
+      async () => {
+        const since = Date.now();
+        const marker = `INBOX-${tag.toUpperCase()}`;
+        await mx.sendTextMessage(roomId, slowToolPrompt(marker));
+        // Debounce + dispatch + first model call: the tool is running now.
+        await pause(8_000);
+        const reset = await authed(user, 'POST', '/debug/matrix/abort');
+        assert.equal(reset.status, 200, reset.text.slice(0, 200));
+        // Bring the gateway back at once (the keep-alive alarm would too).
+        const status = await authed(user, 'GET', '/matrix/status');
+        assert.equal(status.status, 200, status.text.slice(0, 200));
+        const reply = await waitForBotReply(since, new RegExp(marker), 180_000);
+        assert.ok(reply.includes(marker));
+        await pause(20_000);
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          1,
+          'the reply was delivered more than once',
+        );
+        assert.equal(
+          await countBotMessages(since, FAILED_NOTICE),
+          0,
+          'an error notice was posted although the reply arrived',
+        );
+        const after = await authed(user, 'GET', '/matrix/status');
+        assert.equal(
+          (after.json as { inbox?: number }).inbox,
+          0,
+          after.text.slice(0, 200),
+        );
+      },
+    );
+
+    await step(
+      'reset safety: user object hard reset mid-turn → one "try again" notice, no automatic re-run, session still usable',
+      async () => {
+        const since = Date.now();
+        const marker = `OBJRESET-${tag.toUpperCase()}`;
+        await mx.sendTextMessage(roomId, slowToolPrompt(marker));
+        await pause(8_000);
+        const reset = await authed(user, 'POST', '/debug/object/abort');
+        assert.equal(reset.status, 200, reset.text.slice(0, 200));
+        const notice = await waitForBotReply(since, FAILED_NOTICE, 90_000);
+        assert.ok(notice);
+        await pause(15_000);
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          0,
+          'the turn was re-run after the object reset',
+        );
+        assert.equal(await countBotMessages(since, FAILED_NOTICE), 1);
+        // The session is not poisoned by the interrupted tool call.
+        const since2 = Date.now();
+        const marker2 = `AFTER-${tag.toUpperCase()}`;
+        await mx.sendTextMessage(
+          roomId,
+          `Reply with exactly ${marker2} and nothing else.`,
+        );
+        const reply = await waitForBotReply(
+          since2,
+          new RegExp(marker2),
+          150_000,
+        );
+        assert.ok(reply.includes(marker2));
+      },
+    );
+
+    await step(
+      'reset safety: gateway AND user object reset mid-turn → one notice, no re-run, no duplicate',
+      async () => {
+        const since = Date.now();
+        const marker = `BOTH-${tag.toUpperCase()}`;
+        await mx.sendTextMessage(roomId, slowToolPrompt(marker));
+        await pause(8_000);
+        // Gateway first (its dispatch dies without posting anything), then
+        // the object (the turn dies with a started, unanswered ledger row).
+        const gw = await authed(user, 'POST', '/debug/matrix/abort');
+        assert.equal(gw.status, 200, gw.text.slice(0, 200));
+        const obj = await authed(user, 'POST', '/debug/object/abort');
+        assert.equal(obj.status, 200, obj.text.slice(0, 200));
+        const status = await authed(user, 'GET', '/matrix/status');
+        assert.equal(status.status, 200, status.text.slice(0, 200));
+        const notice = await waitForBotReply(since, FAILED_NOTICE, 150_000);
+        assert.ok(notice);
+        await pause(20_000);
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          0,
+          'the turn was re-run',
+        );
+        assert.equal(
+          await countBotMessages(since, FAILED_NOTICE),
+          1,
+          'more than one notice',
+        );
+        const after = await authed(user, 'GET', '/matrix/status');
+        assert.equal(
+          (after.json as { inbox?: number }).inbox,
+          0,
+          after.text.slice(0, 200),
+        );
+      },
+    );
   } finally {
     mx.stopClient();
   }

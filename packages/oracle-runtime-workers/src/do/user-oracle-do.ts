@@ -135,7 +135,10 @@ import {
   type TurnRequest,
   type TurnResult,
   type MemorySchemaDebug,
+  TURN_INTERRUPTED_MARKER,
 } from './contracts';
+import { turnRecursionLimit } from './turn-config';
+import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
 import {
   createTaskScheduler,
   TASK_SESSION_PREFIX,
@@ -433,6 +436,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /** In-flight Matrix turn per session (sessionId → requestId), for supersede. */
     private readonly matrixTurns = new Map<string, string>();
+    /** What this object remembers about each room message it answered (see matrix-turn-ledger.ts). */
+    private matrixLedger: MatrixTurnLedger | null = null;
+    /** Room turns running right now, by Matrix event id: a gateway that asks again attaches instead of re-running. */
+    private readonly matrixTurnRuns = new Map<string, Promise<TurnResult>>();
 
     /** Session-history → memory-engine indexing (built lazily, see `scheduleHistoryIndexing`). */
     private historyIndexer: SessionHistoryIndexer | null = null;
@@ -959,6 +966,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.saver.setup();
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
+      this.matrixLedger = new MatrixTurnLedger(liveDb);
+      await this.matrixLedger.setup();
 
       const core = this.core;
       // Boot-time plugin hooks + collision checks, once per object (memoised).
@@ -1656,8 +1665,68 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return true;
     }
 
+    /**
+     * A room turn runs at most once per Matrix event, however many times the
+     * gateway asks (it asks again after a reset, see the inbox in
+     * `src/matrix/gateway-do.ts`). The ledger and the in-flight map decide:
+     * answered → stored reply; running → attach; started but lost in a reset
+     * of this object → refused (tools may have run), the user is told to
+     * retry; unknown → run once. HTTP and task turns carry no event id and
+     * always run.
+     */
     async runTurn(req: TurnRequest): Promise<TurnResult> {
       await this.ready(req.identity);
+      const eventId = req.client === 'matrix' ? req.eventId : undefined;
+      const ledger = this.matrixLedger;
+      if (!eventId || !ledger) return this.runTurnOnce(req);
+
+      const running = this.matrixTurnRuns.get(eventId);
+      if (running) {
+        console.log(
+          `[user-do] turn for ${eventId} is still running; the gateway asked again and attaches to it`,
+        );
+        return running;
+      }
+      const existing = await ledger.get(eventId);
+      switch (decideMatrixTurn(existing)) {
+        case 'answered':
+          console.log(
+            `[user-do] turn for ${eventId} already answered; returning the stored reply`,
+          );
+          return {
+            sessionId: req.sessionId,
+            requestId: req.requestId,
+            text: existing?.replyText ?? '',
+            toolCalls: [],
+            replayed: true,
+          };
+        case 'interrupted':
+          throw new Error(`${TURN_INTERRUPTED_MARKER} (${eventId})`);
+        case 'run':
+          break;
+      }
+      await ledger.start(eventId, req.sessionId, req.requestId);
+      const run = this.runTurnOnce(req)
+        .then(async (result) => {
+          await ledger.answer(eventId, result.text);
+          return result;
+        })
+        .finally(() => {
+          this.matrixTurnRuns.delete(eventId);
+        });
+      this.matrixTurnRuns.set(eventId, run);
+      // The turn's I/O belongs to this RPC's request context. If the gateway
+      // that made the call is reset, the context would be cancelled with it:
+      // fetches started afterwards (the next model call, the next tool) never
+      // settle, and the turn hangs forever — with a replay attached to it.
+      // `waitUntil` keeps the context alive until the turn has ended, so the
+      // turn finishes, the ledger records the reply, and the replayed request
+      // returns it.
+      this.ctx.waitUntil(run.catch(() => undefined));
+      return run;
+    }
+
+    private async runTurnOnce(req: TurnRequest): Promise<TurnResult> {
       // Matrix turns drive a `work_status` card in the user's thread; a newer
       // message on the same session supersedes the previous card (the
       // previous turn itself is aborted by prepareTurn).
@@ -1976,6 +2045,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.db = null;
       this.saver = null;
       this.sessions = null;
+      this.matrixLedger = null;
       this.ambient = null;
       this.secretsService = null;
       this.byo = null;
@@ -2004,6 +2074,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * this user's credentials and return `search_memory_engine`'s raw schema
      * plus whether it converts to Zod. Same headers the memory plugin sends.
      */
+    /**
+     * Operator / testing aid behind `ORACLE_DEBUG_ROUTES`: reset this object
+     * the way an unplanned platform reset does — in-memory state and every
+     * in-flight turn are gone, committed storage survives, the next request
+     * boots a fresh instance. The RPC rejects by design.
+     */
+    async debugAbortObject(): Promise<void> {
+      this.ctx.abort('debug reset requested');
+    }
+
     async debugMemorySchema(userDid: string): Promise<MemorySchemaDebug> {
       await this.ready({ userDid });
       const ambient = this.ambient;
@@ -2873,7 +2953,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         configurable: { thread_id: req.sessionId },
         context,
         signal: abortController.signal,
-        recursionLimit: 60,
+        recursionLimit: turnRecursionLimit(this.env),
         metadata: tracing.metadata,
         ...(tracing.callbacks ? { callbacks: tracing.callbacks } : {}),
       };
