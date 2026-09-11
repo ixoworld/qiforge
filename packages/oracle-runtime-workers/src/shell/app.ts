@@ -452,6 +452,15 @@ export function createShell(
   app.post('/debug/storage/reset', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).resetWorkingCopy()),
   );
+  app.post('/debug/object/abort', async (c) => {
+    try {
+      await userStub(c.env, c.get('auth').userDid).debugAbortObject();
+    } catch {
+      // The abort tears the object down under the call: the rejection is the
+      // expected signal that it happened.
+    }
+    return c.json({ aborted: true });
+  });
   app.get('/debug/memory-schema', async (c) => {
     const userDid = c.get('auth').userDid;
     return c.json(await userStub(c.env, userDid).debugMemorySchema(userDid));
@@ -485,6 +494,15 @@ export function createShell(
   app.get('/debug/matrix/outbox', async (c) =>
     c.json({ rows: await gateway(c.env).listOutbox() }),
   );
+  app.post('/debug/matrix/abort', async (c) => {
+    try {
+      await gateway(c.env).debugAbortObject();
+    } catch {
+      // The abort tears the object down under the call: the rejection is the
+      // expected signal that it happened.
+    }
+    return c.json({ aborted: true });
+  });
   app.post('/debug/matrix/restart', async (c) =>
     c.json(await gateway(c.env).restart()),
   );

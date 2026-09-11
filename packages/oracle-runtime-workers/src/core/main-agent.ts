@@ -16,6 +16,7 @@ import { buildMetaTools } from './meta-tools';
 import {
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
+  createDanglingToolCallRepairMiddleware,
   createPageContextMiddleware,
   createSafetyGuardrailMiddleware,
   createSummarizationMiddleware,
@@ -295,8 +296,11 @@ export async function createMainAgent(
   const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
 
   const middleware = [
-    // Outermost, as on Node: rewrite cross-provider reasoning residue before
-    // the summarizer condenses (a well-formed) history.
+    // Outermost: a turn that died between a tool call and its result (abort,
+    // object reset) must not poison every later model request on the thread.
+    createDanglingToolCallRepairMiddleware({ logger: ambient.logger }),
+    // Then, as on Node: rewrite cross-provider reasoning residue before the
+    // summarizer condenses (a well-formed) history.
     createByoHistorySanitizerMiddleware({ logger: ambient.logger }),
     // Condense long threads before everything tool-related.
     // Without this, thread state — reloaded, re-serialized, and re-uploaded to

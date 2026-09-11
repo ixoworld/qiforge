@@ -107,6 +107,8 @@ export interface OracleWorkerEnv {
   /** Display markup for `GET /models` prices (default 1.6). */
   MODEL_PRICE_MARKUP?: string;
   MAIN_REASONING_EFFORT?: string;
+  /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
+  TURN_RECURSION_LIMIT?: string;
   /** Platform model provider. Default `openrouter`; `nebius` for self-hosted. */
   LLM_PROVIDER?: 'openrouter' | 'nebius';
   /** Nebius Token Factory API key — required when `LLM_PROVIDER=nebius`. */
@@ -205,6 +207,21 @@ export interface TurnResult {
   messageId?: string;
   /** Tool calls made during the turn (name + summarized status), for logging. */
   toolCalls: Array<{ name: string; status: 'done' | 'error' }>;
+  /** The stored reply of a turn that had already finished (a gateway asked again after a reset). */
+  replayed?: boolean;
+}
+
+/**
+ * Prefix of the error a user object raises when a gateway asks again about a
+ * room message whose turn the object itself lost mid-run (see
+ * `src/do/matrix-turn-ledger.ts`): not re-run, the user is told to retry.
+ */
+export const TURN_INTERRUPTED_MARKER =
+  'turn interrupted by a runtime reset before it finished; not re-run';
+
+export function isInterruptedTurnError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(TURN_INTERRUPTED_MARKER);
 }
 
 /** Row shape served by `GET /sessions`. */
@@ -341,6 +358,8 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }>;
   /** Raw upstream schema of the memory search tool as fetched right now. */
   debugMemorySchema(userDid: string): Promise<MemorySchemaDebug>;
+  /** Forcibly reset the object like a platform host drain (debug routes only). The call itself rejects. */
+  debugAbortObject(): Promise<void>;
   /** Raw session row for `GET /debug/sessions/:id` (null when unknown). */
   debugSession(
     userDid: string,
@@ -399,6 +418,8 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   } | null>;
   /** Authenticated media download of an `mxc://` URI. */
   downloadMxcMedia(mxc: string): Promise<Uint8Array>;
+  /** Forcibly reset the gateway object like a platform host drain (debug routes only). The call itself rejects. */
+  debugAbortObject(): Promise<void>;
   /** Stop the bot (operator/debug; `ensureStarted`/cron brings it back). */
   stop(): Promise<void>;
   /** Idempotent — starts the bot + keep-alive alarm if not running. */
@@ -537,6 +558,8 @@ export interface GatewayStatus extends BotStatus {
   turns: { inFlight: number; waiting: number };
   /** Debounce buffers waiting to become turns. */
   ingestPending: number;
+  /** Room messages whose turn has not ended yet (durable; replayed after a reset). */
+  inbox: number;
 }
 
 /** Derive the durable-object name for a user's object. */

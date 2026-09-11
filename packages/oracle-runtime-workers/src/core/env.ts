@@ -21,6 +21,14 @@ import { NOOP_LOGGER } from './utils';
  * other non-string bindings on the Worker `env` object never reach plugins
  * through `ctx.config`.
  */
+/**
+ * Three times the Node runtime's hard-coded `recursionLimit: 200`. A tool-call
+ * round trip costs about 6 steps with the bundled middlewares, so 600 is
+ * roughly 100 chained tool calls — room for long research turns without an
+ * env override.
+ */
+export const TURN_RECURSION_LIMIT_DEFAULT = 600;
+
 export const baseEnvSchema = z.object({
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
@@ -86,6 +94,17 @@ export const baseEnvSchema = z.object({
    * token, at some cost to hard multi-step reasoning.
    */
   MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+  /**
+   * LangGraph `recursionLimit` for one turn — the super-steps (a model call,
+   * a batch of tool calls, a middleware hook) a turn may take before it fails
+   * with `GraphRecursionError`. Default 600 (the Node runtime hard-codes 200);
+   * see `TURN_RECURSION_LIMIT_DEFAULT`.
+   */
+  TURN_RECURSION_LIMIT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(TURN_RECURSION_LIMIT_DEFAULT),
 
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),

@@ -44,6 +44,7 @@ describe('validateEnv', () => {
     expect(result.valid).toBe(true);
     expect(result.config.MAIN_REASONING_EFFORT).toBe('medium');
     expect(result.config.UCAN_AUTH_MAX_TTL_SECONDS).toBe(900);
+    expect(result.config.TURN_RECURSION_LIMIT).toBe(600);
     expect(result.config.OWNER_STORE).toBeUndefined();
     expect(result.config.CORS_ORIGIN).toBe('*');
     // Durable Object namespaces never leak into plugin-visible config.
@@ -55,11 +56,33 @@ describe('validateEnv', () => {
     const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
     const result = validateEnv(
       schema,
-      makeEnv({ UCAN_AUTH_MAX_TTL_SECONDS: '120' }),
+      makeEnv({
+        UCAN_AUTH_MAX_TTL_SECONDS: '120',
+        TURN_RECURSION_LIMIT: '350',
+      }),
       pluginOwnership,
     );
     expect(result.valid).toBe(true);
     expect(result.config.UCAN_AUTH_MAX_TTL_SECONDS).toBe(120);
+    expect(result.config.TURN_RECURSION_LIMIT).toBe(350);
+  });
+
+  it('rejects a turn recursion limit below 1 and attributes it to core', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const result = validateEnv(
+      schema,
+      makeEnv({ TURN_RECURSION_LIMIT: '0' }),
+      pluginOwnership,
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          plugin: 'core',
+          field: 'TURN_RECURSION_LIMIT',
+        }),
+      ]),
+    );
   });
 
   it('attributes each failing field to its owner', () => {

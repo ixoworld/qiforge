@@ -23,3 +23,7 @@ MATRIX_ORACLE_ADMIN_PASSWORD=
 # --- llm --------------------------------------------------------------------
 OPEN_ROUTER_API_KEY=
 # DEFAULT_MODEL=openai/gpt-5.6-luna
+# LangGraph steps a single turn may take before GraphRecursionError (default
+# 600, three times the Node runtime's 200; a tool-call round trip costs ~6
+# steps with the bundled middlewares, so 600 is roughly 100 chained tool calls)
+# TURN_RECURSION_LIMIT=600
