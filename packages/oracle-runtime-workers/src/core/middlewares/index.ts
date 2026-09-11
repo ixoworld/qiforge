@@ -11,6 +11,11 @@ export {
 } from './summarization';
 export type { SummarizationMiddlewareOptions } from './summarization';
 export { createByoHistorySanitizerMiddleware } from './byo-history-sanitizer';
+export {
+  createDanglingToolCallRepairMiddleware,
+  repairDanglingToolCalls,
+} from './dangling-tool-calls';
+export type { DanglingToolCallRepairMiddlewareOptions } from './dangling-tool-calls';
 export type { ByoHistorySanitizerMiddlewareOptions } from './byo-history-sanitizer';
 export { createPageContextMiddleware } from './page-context';
 export type { PageContextMiddlewareOptions } from './page-context';
