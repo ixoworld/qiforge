@@ -105,7 +105,9 @@ const result = await client.stream(sessionId, prompt, {
 });
 const secs = (result.durationMs / 1000).toFixed(1);
 console.log(`request id: ${result.requestId}`);
-console.log(`answer (${result.text.length} chars): ${result.text.slice(0, 200)}`);
+console.log(
+  `answer (${result.text.length} chars): ${result.text.slice(0, 200)}`,
+);
 console.log(
   `RESULT: ${errors.length ? 'error' : 'ok'} http=${result.status} toolCalls=${toolCalls} seconds=${secs} errors=${errors.length}${errors.length ? ' first=' + errors[0] : ''}`,
 );

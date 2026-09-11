@@ -115,12 +115,18 @@ console.log(`request id: ${result.requestId}`);
 console.log(
   `events: ${result.events.length} (message ${messageChunks}, reasoning ${reasoningChunks}, tool calls ${[...toolCounts].map(([n, c]) => `${n}×${c}`).join(', ') || 'none'})`,
 );
-console.log(`answer: ${result.text.length} chars, ~${result.text.split(/\s+/).length} words`);
-console.log(`--- first 600 chars ---\n${result.text.slice(0, 600)}\n--- last 400 chars ---\n${result.text.slice(-400)}`);
+console.log(
+  `answer: ${result.text.length} chars, ~${result.text.split(/\s+/).length} words`,
+);
+console.log(
+  `--- first 600 chars ---\n${result.text.slice(0, 600)}\n--- last 400 chars ---\n${result.text.slice(-400)}`,
+);
 const urls = new Set(result.text.match(/https?:\/\/[^\s)\]>]+/g) ?? []);
 console.log(`distinct URLs cited: ${urls.size}`);
 
 const storage = await authed('GET', '/debug/storage');
-console.log(`\n/debug/storage: ${storage.status} ${storage.text.slice(0, 500)}`);
+console.log(
+  `\n/debug/storage: ${storage.status} ${storage.text.slice(0, 500)}`,
+);
 const errors = result.events.filter((e: SSEEvent) => e.event === 'error');
 if (errors.length || result.status !== 200) process.exitCode = 1;
