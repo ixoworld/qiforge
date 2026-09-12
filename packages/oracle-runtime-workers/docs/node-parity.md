@@ -141,6 +141,26 @@ implementation, and what is deliberately left out.
   `DanglingToolCallRepair` middleware (main agent and sub-agents) answers
   each such call, for the model request only, with a result saying it was
   interrupted; the checkpoint is untouched. Node has no equivalent.
+- **Task schedule at the tool boundary.** `preview_task` / `create_task` /
+  `update_task` take the schedule as one flat object (`kind` enum plus the
+  optional per-kind fields) and convert it to the scheduler's discriminated
+  union on parse (`src/tasks/schedule-input.ts`). Node exposes the union
+  itself, which LangChain renders as JSON-schema `oneOf` + `const`; Gemini
+  models answer that shape with a bare timestamp string, so every task
+  creation failed on the default platform model. The store, the spec
+  frontmatter and the scheduler are unchanged.
+- **Internal model calls stay off the wire.** The summarization
+  middleware's model and a sub-agent's inner turn stream through the same
+  `streamEvents` pipe as the reply; the SSE stream drops model events
+  tagged `lc_source: 'summarization'` or `internal` (and the summarizer's
+  model is created with streaming off), so the condensed history never
+  appears in a user's reply. Node's `sse-stream-runner` has the same gap.
+- **Rejected tool calls are visible.** A call whose arguments fail the
+  tool's schema is not retried (a `ToolInvocationError` gives the same
+  answer every time), is logged (`[tool-retry] tool call rejected by the
+tool schema: …`), and reaches the client as a `tool_call` frame with
+  `status: 'error'` and the message, so the Portal renders it as failed
+  instead of as a finished call.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
 

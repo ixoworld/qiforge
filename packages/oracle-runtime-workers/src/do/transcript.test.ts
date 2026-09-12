@@ -71,3 +71,39 @@ describe('transcript + attachment retention', () => {
     ]);
   });
 });
+
+describe('isSummarizationMessage', () => {
+  it('matches the LangChain 1.4 summary message (a tagged human message with the prefix) and the older shapes', async () => {
+    const { HumanMessage, SystemMessage, AIMessage } =
+      await import('@langchain/core/messages');
+    const { isSummarizationMessage } = await import('./transcript');
+    const { SUMMARY_PREFIX } =
+      await import('../core/middlewares/summarization');
+    expect(
+      isSummarizationMessage(
+        new HumanMessage({
+          content: `${SUMMARY_PREFIX}\n\n**Active task**: …`,
+          additional_kwargs: { lc_source: 'summarization' },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isSummarizationMessage(
+        new HumanMessage({ content: `${SUMMARY_PREFIX} the user asked…` }),
+      ),
+    ).toBe(true);
+    expect(
+      isSummarizationMessage(
+        new SystemMessage('Here is a summary of the conversation so far: …'),
+      ),
+    ).toBe(true);
+    expect(
+      isSummarizationMessage(new HumanMessage('Turn 3: call list_my_tasks')),
+    ).toBe(false);
+    expect(
+      isSummarizationMessage(
+        new AIMessage('Sure — here is a summary of the article you sent.'),
+      ),
+    ).toBe(false);
+  });
+});

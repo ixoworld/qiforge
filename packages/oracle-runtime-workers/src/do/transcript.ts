@@ -12,6 +12,7 @@ import {
   isAttachmentPlaceholderText,
   isAttachmentViewMessage,
 } from '../attachments/retention';
+import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
 
 export interface ToolCallDto {
   name: string;
@@ -103,11 +104,23 @@ export function contentToText(content: BaseMessage['content']): string {
   return String(content);
 }
 
-/** The summarization middleware's bookkeeping message — never shown to users. */
+/**
+ * The summarization middleware's bookkeeping message — never shown to users.
+ * LangChain 1.4 writes it as a HUMAN message tagged
+ * `additional_kwargs.lc_source: 'summarization'` whose text starts with the
+ * summary prefix; older versions used a system message and other tags. All
+ * of them match here, so a condensed thread lists as the kept tail only.
+ */
 export function isSummarizationMessage(message: BaseMessage): boolean {
   const kw = message.additional_kwargs as Record<string, unknown> | undefined;
-  if (kw?.lc_summary_message === true || kw?.summary === true) return true;
+  if (
+    kw?.lc_source === 'summarization' ||
+    kw?.lc_summary_message === true ||
+    kw?.summary === true
+  )
+    return true;
   const text = contentToText(message.content);
+  if (text.startsWith(SUMMARY_PREFIX)) return true;
   return message.type === 'system' && /summary of the conversation/i.test(text);
 }
 

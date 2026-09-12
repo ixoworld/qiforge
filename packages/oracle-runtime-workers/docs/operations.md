@@ -24,19 +24,19 @@ Public (UCAN-authenticated unless noted):
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
 
-| Route                                                                          | Purpose                                                                                                                                       |
-| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload.      |
-| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                                                              |
-| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                         |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                         |
-| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                               |
-| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                       |
-| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                             |
-| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                            |
-| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.            |
-| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                         |
-| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests. |
+| Route                                                                          | Purpose                                                                                                                                                        |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload.                       |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed. |
+| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                          |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                          |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                        |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                              |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                             |
+| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                             |
+| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                          |
+| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                  |
 
 ## The gateway
 
@@ -132,6 +132,29 @@ the file moved on (`src/do/boot-dirty.ts`, one batched storage read per
 boot), so the next flush carries those steps and a later reload from the
 system of record cannot drop them. A copy that was never uploaded is left to
 its first completed turn.
+
+### Turns: what is and is not on the wire
+
+Three things the SSE stream (`src/do/sse-stream.ts`) decides per event:
+
+- model events tagged `lc_source: 'summarization'` (the summarization
+  middleware condensing the thread) or `internal` (a sub-agent's inner
+  turn) are dropped — neither their text nor their reasoning is a
+  `message` / `reasoning` frame; only the outermost agent's model output
+  streams;
+- a tool call whose arguments failed the tool's schema comes back from
+  LangChain's `toolRetryMiddleware` as an error `ToolMessage` (not as
+  `on_tool_error`): it is forwarded as `tool_call` with `status: 'error'`
+  and `error: <message>`, and logged as `[tool-retry] tool call rejected by
+the tool schema: …` — grep the tail for it when a model keeps "creating"
+  things that never appear;
+- a tool that threw is `status: 'error'` from `on_tool_error`, as before.
+
+`GET /messages/:id` lists the thread's full history from the saver, not the
+agent's live context: after the summarization middleware condensed the
+context, every earlier message still lists (Node parity) and only the
+summary message itself is hidden. `GET /debug/sessions/:id` reports the
+counts.
 
 ### Turns: the inbox
 
