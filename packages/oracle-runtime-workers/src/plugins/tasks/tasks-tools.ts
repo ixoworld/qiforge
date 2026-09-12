@@ -17,11 +17,8 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { summarizeSchedule } from '../../tasks/schedule';
-import {
-  TASK_ID_PATTERN,
-  TASK_STATUSES,
-  TaskScheduleSchema,
-} from '../../tasks/spec';
+import { TASK_ID_PATTERN, TASK_STATUSES } from '../../tasks/spec';
+import { ScheduleInputToScheduleSchema } from '../../tasks/schedule-input';
 import { pendingApprovalOf } from '../../tasks/store';
 
 const TASKS_UNAVAILABLE = {
@@ -51,7 +48,10 @@ const taskInputShape = {
     .describe(
       'Markdown instructions the run executes. Scheduled runs are BACKGROUND sessions with NO memory of this conversation — put every ID, URL, and name the run needs into this text, never assume the run "knows" anything discussed here.',
     ),
-  schedule: TaskScheduleSchema,
+  // Flat at the tool boundary (a `kind` enum + optional per-kind fields),
+  // converted to the store's discriminated union on parse — see
+  // tasks/schedule-input.ts for why the union itself cannot be the input.
+  schedule: ScheduleInputToScheduleSchema,
   approval: z
     .enum(['never', 'before-action'])
     .default('never')
@@ -259,7 +259,7 @@ const updateInput = z.object({
   taskId: taskIdSchema.shape.taskId,
   title: z.string().min(1).max(120).optional(),
   intent: taskInputShape.intent.optional(),
-  schedule: TaskScheduleSchema.optional(),
+  schedule: ScheduleInputToScheduleSchema.optional(),
   approval: z
     .enum(['never', 'before-action'])
     .optional()

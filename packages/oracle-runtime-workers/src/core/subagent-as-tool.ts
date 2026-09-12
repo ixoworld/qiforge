@@ -221,6 +221,11 @@ export function createSubagentAsTool(
         },
         ...(parentContext ? { context: parentContext } : {}),
         runName: spec.name,
+        // The sub-agent's model calls are the parent's tool work, not the
+        // reply: the SSE stream drops model events carrying this tag so its
+        // tokens never surface as user-visible text (its result reaches the
+        // model as the tool's output).
+        tags: ['internal', `subagent:${spec.name}`],
       },
     );
     return result.messages as BaseMessage[];

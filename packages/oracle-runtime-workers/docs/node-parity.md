@@ -127,8 +127,10 @@ implementation, and what is deliberately left out.
   ([operations](operations.md#turns-the-inbox)).
 - **Best-effort room posts are retried.** The room mirror of HTTP turns, the
   `ixo.action.log` audit event and the `delegation_required` prompt are
-  fire-and-forget on Node; here they are retried across a gateway restart
-  (the mirror with a fixed transaction id, serialised per session), the
+  fire-and-forget on Node; here they are retried across a gateway restart,
+  each under a fixed transaction id so a post whose response was lost lands
+  once (the mirror's derived from session and request and serialised per
+  session, the two custom events' minted once per post), the
   prompt's throttle is stamped only after a successful post, and a working
   copy left ahead of its last upload by an interrupted turn is marked dirty
   on boot ([operations](operations.md#best-effort-room-posts)).
@@ -141,6 +143,26 @@ implementation, and what is deliberately left out.
   `DanglingToolCallRepair` middleware (main agent and sub-agents) answers
   each such call, for the model request only, with a result saying it was
   interrupted; the checkpoint is untouched. Node has no equivalent.
+- **Task schedule at the tool boundary.** `preview_task` / `create_task` /
+  `update_task` take the schedule as one flat object (`kind` enum plus the
+  optional per-kind fields) and convert it to the scheduler's discriminated
+  union on parse (`src/tasks/schedule-input.ts`). Node exposes the union
+  itself, which LangChain renders as JSON-schema `oneOf` + `const`; Gemini
+  models answer that shape with a bare timestamp string, so every task
+  creation failed on the default platform model. The store, the spec
+  frontmatter and the scheduler are unchanged.
+- **Internal model calls stay off the wire.** The summarization
+  middleware's model and a sub-agent's inner turn stream through the same
+  `streamEvents` pipe as the reply; the SSE stream drops model events
+  tagged `lc_source: 'summarization'` or `internal` (and the summarizer's
+  model is created with streaming off), so the condensed history never
+  appears in a user's reply. Node's `sse-stream-runner` has the same gap.
+- **Rejected tool calls are visible.** A call whose arguments fail the
+  tool's schema is not retried (a `ToolInvocationError` gives the same
+  answer every time), is logged (`[tool-retry] tool call rejected by the
+tool schema: …`), and reaches the client as a `tool_call` frame with
+  `status: 'error'` and the message, so the Portal renders it as failed
+  instead of as a finished call.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
 

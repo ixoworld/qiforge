@@ -4,11 +4,11 @@ import { ReauthPrompter } from './reauth-prompt';
 const transient = () => new Error('Durable Object reset');
 const HOUR = 3_600_000;
 
-function harness(
-  opts: { send?: () => Promise<string>; now?: () => number } = {},
-) {
+type Send = (roomId: string, txnId: string) => Promise<string>;
+
+function harness(opts: { send?: Send; now?: () => number } = {}) {
   let stamp: number | undefined;
-  const send = vi.fn(opts.send ?? (async () => '$ev'));
+  const send = vi.fn<Send>(opts.send ?? (async () => '$ev'));
   const kept: Promise<unknown>[] = [];
   const warn = vi.fn();
   const log = vi.fn();
@@ -42,6 +42,9 @@ describe('ReauthPrompter', () => {
     now += 6 * HOUR; // window over: prompts again
     await prompter.prompt('did:u', '!room');
     expect(send).toHaveBeenCalledTimes(2);
+    // Each prompt is its own post: a fresh transaction id.
+    expect(send.mock.calls[0]?.[1]).toMatch(/^reauth-[0-9a-f-]{36}$/);
+    expect(send.mock.calls[1]?.[1]).not.toBe(send.mock.calls[0]?.[1]);
   });
 
   it('leaves the throttle unstamped when the send fails, so the next message prompts again', async () => {
@@ -69,6 +72,9 @@ describe('ReauthPrompter', () => {
     expect(send).toHaveBeenCalledTimes(3);
     expect(stamp()).toBeDefined();
     expect(warn).toHaveBeenCalledTimes(2);
+    // One transaction id for the whole loop: a send that did land is
+    // deduplicated by the homeserver on the retry.
+    expect(new Set(send.mock.calls.map((call) => call[1])).size).toBe(1);
   });
 
   it('joins a prompt already in flight instead of posting a second one', async () => {

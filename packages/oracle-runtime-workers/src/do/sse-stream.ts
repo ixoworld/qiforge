@@ -15,6 +15,7 @@ import {
   redactOperatorFault,
 } from '../llm/provider-error';
 import type { AIMessageChunk, ToolMessage } from '@langchain/core/messages';
+import { isToolMessage } from '@langchain/core/messages';
 
 export interface SseTurnRunnerInput {
   /** `agent.streamEvents(stateInput, config)` async iterable. */
@@ -75,9 +76,30 @@ interface ToolCallPayload {
   requestId: string;
   toolName: string;
   args: Record<string, unknown>;
-  status: 'isRunning' | 'done';
+  status: 'isRunning' | 'done' | 'error';
   output?: string;
   eventId?: string;
+  /** Set with `status: 'error'`: what the tool reported (schema rejection, retries exhausted). */
+  error?: string;
+}
+
+/**
+ * Model calls the agent makes for itself — the summarization middleware
+ * condensing the thread, a sub-agent's inner turn — stream through the same
+ * `streamEvents` pipe as the user-facing reply. Only the outermost agent's
+ * model output belongs on the wire; everything else is bookkeeping the user
+ * never asked to read (the "Here is a summary of the conversation to date"
+ * leak). The summarizer tags its invoke with `lc_source: 'summarization'`;
+ * sub-agents run under their own run name below the main agent.
+ */
+export function isInternalModelEvent(evt: {
+  metadata?: Record<string, unknown>;
+  tags?: string[];
+}): boolean {
+  const source = evt.metadata?.['lc_source'];
+  if (source === 'summarization') return true;
+  const tags = evt.tags ?? [];
+  return tags.some((t) => t === 'summarization' || t === 'internal');
 }
 
 interface ActionCallPayload {
@@ -230,6 +252,32 @@ export function createSseTurnStream(
         toolCallMap.clear();
       };
 
+      // Tool calls the main agent's model produced, by call id, until their
+      // tool run starts. A call whose arguments fail the tool's schema never
+      // starts (LangChain validates before the tool's start callback), so
+      // `on_tool_start` / `on_tool_end` never fire for it; the error tool
+      // message the tools node returns is the only trace. Anything still
+      // recorded when that node ends is reported from that message.
+      const pendingCalls = new Map<
+        string,
+        { toolName: string; args: Record<string, unknown> }
+      >();
+      const sameArgs = (a: unknown, b: unknown) => {
+        try {
+          return JSON.stringify(a) === JSON.stringify(b);
+        } catch {
+          return false;
+        }
+      };
+      const forgetStartedCall = (toolName: string, args: unknown) => {
+        for (const [id, call] of pendingCalls) {
+          if (call.toolName === toolName && sameArgs(call.args, args)) {
+            pendingCalls.delete(id);
+            return;
+          }
+        }
+      };
+
       const run = async () => {
         let fullContent = '';
         try {
@@ -240,12 +288,59 @@ export function createSseTurnStream(
               run_id: string;
               name?: string;
               data: unknown;
+              metadata?: Record<string, unknown>;
+              tags?: string[];
             };
+            if (evt.event === 'on_chat_model_end') {
+              if (isInternalModelEvent(evt)) continue;
+              const output = (evt.data as { output?: AIMessageChunk })?.output;
+              for (const call of output?.tool_calls ?? []) {
+                if (call.id)
+                  pendingCalls.set(call.id, {
+                    toolName: call.name,
+                    args: (call.args ?? {}) as Record<string, unknown>,
+                  });
+              }
+              continue;
+            }
+            if (evt.event === 'on_chain_end' && evt.name === 'tools') {
+              if (pendingCalls.size === 0) continue;
+              const output = (evt.data as { output?: unknown })?.output;
+              const messages: unknown[] = Array.isArray(output)
+                ? output
+                : Array.isArray((output as { messages?: unknown[] })?.messages)
+                  ? ((output as { messages: unknown[] }).messages ?? [])
+                  : [];
+              for (const message of messages) {
+                if (!isToolMessage(message)) continue;
+                const call = pendingCalls.get(message.tool_call_id);
+                if (!call) continue;
+                pendingCalls.delete(message.tool_call_id);
+                const text = toText(message.content);
+                const failed = message.status === 'error';
+                write('tool_call', {
+                  sessionId,
+                  requestId,
+                  toolName: message.name ?? call.toolName,
+                  args: {
+                    ...call.args,
+                    toolName: message.name ?? call.toolName,
+                  },
+                  status: failed ? 'error' : 'done',
+                  output: text,
+                  ...(failed && { error: text || 'Tool call rejected' }),
+                  eventId: message.tool_call_id,
+                });
+              }
+              pendingCalls.clear();
+              continue;
+            }
             if (evt.event === 'on_tool_start') {
               const toolName = evt.name ?? 'tool';
               const args = extractToolArgs(
                 (evt.data as { input?: unknown })?.input,
               );
+              forgetStartedCall(toolName, args);
               if (input.agActionNames?.has(toolName)) {
                 const payload: ActionCallPayload = {
                   requestId,
@@ -295,10 +390,16 @@ export function createSseTurnStream(
               }
               const tool = toolCallMap.get(evt.run_id);
               if (tool) {
+                // A tool whose call was rejected (schema mismatch) or whose
+                // retries ran out comes back as a ToolMessage with
+                // `status: 'error'`, not as `on_tool_error`; the client must
+                // see it as failed, not as a finished call with odd output.
+                const failed = output?.status === 'error';
                 write('tool_call', {
                   ...tool,
-                  status: 'done',
+                  status: failed ? 'error' : 'done',
                   output: text,
+                  ...(failed && { error: text || 'Tool failed' }),
                   eventId: evt.run_id,
                   args: {
                     ...tool.args,
@@ -342,6 +443,7 @@ export function createSseTurnStream(
               continue;
             }
             if (evt.event === 'on_chat_model_stream') {
+              if (isInternalModelEvent(evt)) continue;
               const chunk = (evt.data as { chunk?: AIMessageChunk })?.chunk;
               if (!chunk) continue;
               const raw = chunk.additional_kwargs?.__raw_response as

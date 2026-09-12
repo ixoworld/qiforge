@@ -1932,6 +1932,41 @@ async function main(): Promise<void> {
         }
       },
     );
+
+    await step(
+      'reset leaks: a custom event re-sent under the same transaction id lands once (gateway sendEvent txnId)',
+      async () => {
+        const type = 'ixo.test.txn_dedupe';
+        const txnId = `drill-${tag}-${Date.now()}`;
+        const since = Date.now();
+        const post = (n: number, id: string) =>
+          authed(user, 'POST', '/debug/matrix/event', {
+            type,
+            content: { tag, n },
+            txnId: id,
+          });
+        const first = await post(1, txnId);
+        assert.equal(first.status, 200, first.text.slice(0, 200));
+        const again = await post(1, txnId);
+        assert.equal(again.status, 200, again.text.slice(0, 200));
+        const a = (first.json as { eventId: string }).eventId;
+        const b = (again.json as { eventId: string }).eventId;
+        assert.equal(b, a, `the re-send posted a second event: ${a} vs ${b}`);
+        const fresh = await post(2, `${txnId}-2`);
+        assert.equal(fresh.status, 200, fresh.text.slice(0, 200));
+        assert.notEqual(
+          (fresh.json as { eventId: string }).eventId,
+          a,
+          'a new transaction id returned the old event',
+        );
+        await pauseMs(3_000);
+        assert.equal(
+          await botEventsSince(since, type),
+          2,
+          'expected exactly two events in the room (the re-send deduplicated)',
+        );
+      },
+    );
   } finally {
     mx.stopClient();
   }

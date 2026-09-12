@@ -15,6 +15,7 @@
  * replaces it — which also guarantees a terminal phase is never dropped.
  * Fire-and-forget throughout: a failed post is logged, never thrown.
  */
+import { retryTxnId } from './txn-id';
 
 export const ORACLE_COMPONENT_EVENT_TYPE = 'ixo.oracle.component';
 
@@ -129,11 +130,16 @@ interface TurnEntry extends WorkStatusTurn {
 }
 
 export interface WorkStatusProducerDeps {
-  /** Posts a room event and resolves its event id (the gateway's `sendEvent`). */
+  /**
+   * Posts a room event and resolves its event id (the gateway's `sendEvent`).
+   * `txnId` pins the transaction id so the anchor's single retry cannot post
+   * a second card when only the response was lost.
+   */
   postEvent: (
     roomId: string,
     eventType: string,
     content: object,
+    opts?: { txnId?: string },
   ) => Promise<string>;
   clock?: () => Date;
   logger?: { warn: (message: string) => void };
@@ -205,14 +211,20 @@ export class WorkStatusProducer {
     content: object,
     retryOnce: boolean,
   ): Promise<string> {
+    const opts = { txnId: retryTxnId('work-status') };
     try {
-      return await this.postEvent(roomId, ORACLE_COMPONENT_EVENT_TYPE, content);
+      return await this.postEvent(
+        roomId,
+        ORACLE_COMPONENT_EVENT_TYPE,
+        content,
+        opts,
+      );
     } catch (error) {
       if (!retryOnce) throw error;
       await new Promise((resolve) =>
         setTimeout(resolve, this.anchorRetryDelayMs),
       );
-      return this.postEvent(roomId, ORACLE_COMPONENT_EVENT_TYPE, content);
+      return this.postEvent(roomId, ORACLE_COMPONENT_EVENT_TYPE, content, opts);
     }
   }
 

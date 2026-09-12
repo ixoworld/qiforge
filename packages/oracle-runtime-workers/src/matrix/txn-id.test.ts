@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { matrixTxnId, MAX_TXN_ID_LENGTH } from './txn-id';
+import { matrixTxnId, MAX_TXN_ID_LENGTH, retryTxnId } from './txn-id';
 
 describe('matrixTxnId', () => {
   it('joins the prefix and parts with dashes, deterministically', () => {
@@ -22,5 +22,15 @@ describe('matrixTxnId', () => {
 
   it('never exceeds the homeserver limit', () => {
     expect(matrixTxnId('r', 'x'.repeat(400)).length).toBe(MAX_TXN_ID_LENGTH);
+  });
+});
+
+describe('retryTxnId', () => {
+  it('mints a fresh, well-formed id per call', () => {
+    const a = retryTxnId('action-log');
+    const b = retryTxnId('action-log');
+    expect(a).toMatch(/^action-log-[0-9a-f-]{36}$/);
+    expect(a).not.toBe(b);
+    expect(a.length).toBeLessThanOrEqual(MAX_TXN_ID_LENGTH);
   });
 });

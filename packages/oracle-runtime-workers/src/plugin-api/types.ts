@@ -415,6 +415,17 @@ export interface PluginContext<TConfig = MergedConfig> {
  * Passed to tool handlers, sub-agent handlers, and to plugin middlewares' hook
  * functions. Built fresh per graph invocation.
  */
+/**
+ * Options of a room post made through `RuntimeContext.matrix`. A plugin
+ * that retries a post after a lost response should pin `txnId` (one id for
+ * the whole retry loop, see `retryTxnId`): the homeserver deduplicates sends
+ * by transaction id per device, so the retried post lands once. Printable
+ * ASCII without `/`, at most 255 characters.
+ */
+export interface MatrixPostOpts {
+  txnId?: string;
+}
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -492,7 +503,11 @@ export interface RuntimeContext<TConfig = MergedConfig> {
 
   /** Matrix client, scoped operations only. */
   matrix: {
-    postToRoom: (roomId: string, content: unknown) => Promise<string>;
+    postToRoom: (
+      roomId: string,
+      content: unknown,
+      opts?: MatrixPostOpts,
+    ) => Promise<string>;
     /**
      * Post a timeline event with a caller-chosen event type (e.g. the
      * `ixo.oracle.*` protocol events). `postToRoom` is the `m.room.message`
@@ -502,6 +517,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       roomId: string,
       eventType: string,
       content: object,
+      opts?: MatrixPostOpts,
     ) => Promise<string>;
     getRoomState: (roomId: string) => Promise<RoomStateSnapshot>;
     getEventById: (roomId: string, eventId: string) => Promise<MatrixEvent>;

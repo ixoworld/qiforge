@@ -1061,8 +1061,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.workStatus = new WorkStatusProducer({
-        postEvent: (roomId, type, content) =>
-          this.gateway.sendEvent(roomId, type, JSON.stringify(content)),
+        postEvent: (roomId, type, content, opts) =>
+          this.gateway.sendEvent(
+            roomId,
+            type,
+            JSON.stringify(content),
+            opts ?? {},
+          ),
         logger: console,
       });
       this.ambient = createAmbientServices({
@@ -1670,7 +1675,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throttleMs: reauthThrottleSeconds(this.env) * 1000,
         getStamp: () => this.ctx.storage.get<number>(META_REAUTH_PROMPT_AT),
         setStamp: (at) => this.ctx.storage.put(META_REAUTH_PROMPT_AT, at),
-        send: (room) =>
+        send: (room, txnId) =>
           this.gateway.sendEvent(
             room,
             'ixo.oracle.delegation_required',
@@ -1678,6 +1683,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               oracleEntityDid: this.core.identity.entityDid,
               oracleDid: this.env.ORACLE_DID,
             }),
+            { txnId },
           ),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),
@@ -2169,9 +2175,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async debugSession(
       userDid: string,
       sessionId: string,
-    ): Promise<SessionRecord | null> {
+    ): Promise<Record<string, unknown> | null> {
       await this.ready({ userDid });
-      return (await this.sessions!.getSession(sessionId)) ?? null;
+      const session = await this.sessions!.getSession(sessionId);
+      if (!session) return null;
+      // Whether the thread's agent context was condensed: the summarization
+      // middleware's bookkeeping message is stored with the history but
+      // never listed, so `GET /messages/:id` alone cannot tell.
+      const all = await this.saver!.listThreadMessages(sessionId);
+      return {
+        ...session,
+        threadMessages: all.length,
+        summaryMessages: all.filter(isSummarizationMessage).length,
+        // Folded into their assistant messages by the listing, not shown alone.
+        toolMessages: all.filter((m) => m.type === 'tool').length,
+      };
     }
 
     /**

@@ -1,5 +1,6 @@
 import {
   createAgent,
+  ToolInvocationError,
   toolRetryMiddleware,
   type StructuredTool,
 } from 'langchain';
@@ -23,6 +24,21 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares';
+
+/**
+ * The model's arguments failed the tool's schema (LangChain's ToolNode
+ * throws `ToolInvocationError` before the tool runs). Matched by class AND by
+ * name / message shape: a bundle can carry the class twice (ESM and CJS
+ * entry points), and then `instanceof` is false for the very error it names.
+ */
+function isToolInvocationError(error: unknown): boolean {
+  if (error instanceof ToolInvocationError) return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === 'ToolInvocationError' ||
+    /^Error invoking tool '.+' with kwargs /.test(error.message)
+  );
+}
 import {
   composePrompt,
   formatTimeContext,
@@ -305,7 +321,12 @@ export async function createMainAgent(
     // Condense long threads before everything tool-related.
     // Without this, thread state — reloaded, re-serialized, and re-uploaded to
     // the owner store on every turn — grows without bound.
-    createSummarizationMiddleware({ model: resolveModel('routing') }),
+    // The summarizer's own model call is internal: it must never stream its
+    // tokens into the user's reply (belt: no streaming here; braces: the SSE
+    // stream drops `lc_source: 'summarization'` events).
+    createSummarizationMiddleware({
+      model: resolveModel('routing', { disableStreaming: true }),
+    }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
@@ -316,7 +337,34 @@ export async function createMainAgent(
       logger: ambient.logger,
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
-    toolRetryMiddleware({ onFailure: (error) => error.message }),
+    // Retries are for transient failures. A ToolInvocationError is the
+    // model's arguments failing the tool's schema: the same call again gives
+    // the same rejection, so it is not retried — and it is logged, because
+    // the error ToolMessage it becomes is otherwise invisible in the logs
+    // (the tool-validation middleware above never sees it; ToolNode throws
+    // it before the tool runs).
+    toolRetryMiddleware({
+      retryOn: (error) => !isToolInvocationError(error),
+      onFailure: (error) => {
+        const rejected = isToolInvocationError(error);
+        ambient.logger.warn(
+          `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed after retries'}: ${error.message.split('\n')[0] ?? error.message}`,
+        );
+        if (!rejected) return error.message;
+        // The model (and the Portal's card) get the reason, not the kwargs
+        // dump — `Error invoking tool 'x' with kwargs {…} with error: Error:
+        // Received tool input did not match expected schema` stays in the tail.
+        const toolName = /^Error invoking tool '([^']+)'/.exec(
+          error.message,
+        )?.[1];
+        const reason =
+          error.message
+            .split(' with error: ')
+            .at(-1)
+            ?.replace(/^Error: /, '') ?? error.message;
+        return `Invalid arguments for ${toolName ?? 'the tool'}: ${reason}. Check the tool's parameter schema and call it again with corrected arguments.`;
+      },
+    }),
     // Same host-gated pair as the Node runtime: the page-context block needs a
     // title lookup, the safety guardrail a classification model.
     ...(hooks?.getRoomTitle

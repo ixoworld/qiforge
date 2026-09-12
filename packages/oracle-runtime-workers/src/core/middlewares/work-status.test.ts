@@ -145,9 +145,11 @@ describe('WorkStatusProducer', () => {
 
   it('survives a failing homeserver (logs, never throws)', async () => {
     const warnings: string[] = [];
+    const txnIds: (string | undefined)[] = [];
     let attempts = 0;
     const producer = new WorkStatusProducer({
-      postEvent: async () => {
+      postEvent: async (_roomId, _type, _content, opts) => {
+        txnIds.push(opts?.txnId);
         attempts += 1;
         throw new Error('homeserver down');
       },
@@ -164,6 +166,10 @@ describe('WorkStatusProducer', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(attempts).toBe(2);
     expect(warnings.some((w) => /homeserver down/.test(w))).toBe(true);
+    // Both attempts carry the same pinned transaction id: if the first one
+    // did land and only its response was lost, the retry is deduplicated.
+    expect(txnIds[0]).toMatch(/^work-status-[0-9a-f-]{36}$/);
+    expect(txnIds[1]).toBe(txnIds[0]);
   });
 
   it('builds the Node envelope byte-for-byte', () => {
