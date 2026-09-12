@@ -22,6 +22,8 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ixo/ucan build
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
+      - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
       - run: pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts
