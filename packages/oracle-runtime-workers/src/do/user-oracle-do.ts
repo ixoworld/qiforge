@@ -37,6 +37,8 @@ import {
   type AttachmentViewSurface,
   type MatrixMediaSource,
   type SandboxUploadConfig,
+  MAX_FILE_SIZE,
+  readBytesCapped,
 } from '../attachments';
 import type { RuntimeCore } from '../core';
 import {
@@ -103,6 +105,7 @@ import {
   UNTITLED_SESSION,
   type SessionRecord,
 } from '../sqlite/sessions-store';
+import { createAttachmentDecryptor } from '@ixo/matrix-bot-workers-sdk';
 import { MatrixMediaOwnerStore } from '../owner-store/matrix-media-store';
 import { MigratingOwnerStore } from '../owner-store/migrating-store';
 import type { OwnerCopy } from '../owner-store/types';
@@ -447,6 +450,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     >();
     private initPromise: Promise<void> | null = null;
     private reloadedFromOwnerStore = false;
+    /** Set by `adoptOwnerCopy` for a legacy copy: `ready()` flushes it to the system of record right after. */
+    private pendingLegacyMigration: { bytes: number } | null = null;
 
     // ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -792,7 +797,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const imported = await this.adoptOwnerCopy(db, loaded);
           this.reloadedFromOwnerStore = true;
           console.log(
-            `[user-do] imported ${imported} bytes from ${this.ownerStore.kind} for ${userDid}`,
+            `[user-do] imported ${imported} bytes from ${loaded.fromLegacy ? 'legacy Matrix media' : this.ownerStore.kind} for ${userDid}`,
           );
         }
       } else {
@@ -926,6 +931,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       this.db ??= db;
       const liveDb = this.db;
+      if (this.pendingLegacyMigration) {
+        const { bytes } = this.pendingLegacyMigration;
+        this.pendingLegacyMigration = null;
+        // Second half of the one-time migration: the legacy copy just
+        // imported goes to the system of record from the working copy —
+        // streamed from a snapshot like every flush, so a Node-era history of
+        // any size costs a few chunks of memory. A failure (no
+        // `ixo:filesystem` delegation yet, a VFS outage) keeps the copy dirty
+        // and retried every 10 min; the object serves the legacy history
+        // meanwhile, and the Matrix copy is only redacted once VFS holds it.
+        try {
+          const flushed = await this.flushToOwnerStore();
+          console.log(
+            `[user-do] migrated ${bytes} bytes from legacy Matrix media to ${this.ownerStore.kind} for ${userDid} (${flushed.etag ?? '-'})`,
+          );
+        } catch (err) {
+          console.warn(
+            `[user-do] VFS migration write failed for ${userDid} — serving the legacy Matrix copy for now: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          // Sooner than the 24 h debounce `markDirty` armed: the system of
+          // record is still empty for this user.
+          this.requestAlarm(Date.now() + FLUSH_RETRY_DELAY_MS);
+        }
+      }
       {
         // One line per boot so an operator can tell what a user's object
         // actually holds without a debug route: which store, how big, how
@@ -1094,10 +1123,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      */
     private async adoptOwnerCopy(
       db: DoSqliteDatabase,
-      copy: { stream: ReadableStream<Uint8Array>; etag: string },
+      copy: OwnerCopy,
     ): Promise<number> {
       const bytes = await db.importFromStream(copy.stream);
       await this.ctx.storage.put(META_OWNER_ETAG, copy.etag);
+      if (copy.fromLegacy) {
+        // Streamed in from the legacy Matrix media, not in the system of
+        // record yet: forget any earlier upload markers so the flush that
+        // `ready()` runs next (`pendingLegacyMigration`) actually sends it,
+        // and forget "no legacy copy, stop looking" — a copy evidently
+        // exists now, and the flush must be able to redact it.
+        await this.ctx.storage.delete([
+          META_LAST_CHECKSUM,
+          META_UPLOADED_GEN,
+          META_LEGACY_CLEARED,
+        ]);
+        this.markDirty();
+        this.pendingLegacyMigration = { bytes };
+        return bytes;
+      }
       await this.ctx.storage.put(META_LAST_CHECKSUM, await db.checksum());
       await this.ctx.storage.put(META_UPLOADED_GEN, db.writeGeneration);
       return bytes;
@@ -1226,8 +1270,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
 
       // Legacy-blob compaction: one bounded batch per tick until the whole
-      // file is codec-compressed (see sqlite/blob-compactor.ts).
-      if (this.db) {
+      // file is codec-compressed (see sqlite/blob-compactor.ts). A flush in
+      // flight holds a snapshot of the file, which the compactor's swap-in
+      // cannot replace — a large migration flush (streamed, seconds long)
+      // routinely overlaps the first tick, so wait for it instead of erroring.
+      if (this.db && this.flushInFlight) {
+        deadlines.push(now + 5000);
+      } else if (this.db) {
         try {
           if (await this.compactionTick(this.db)) deadlines.push(now + 2000);
         } catch (err) {
@@ -1809,6 +1858,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * while one runs joins it.
      */
     async flushToOwnerStore(): Promise<FlushResult> {
+      if (!this.db) {
+        // A cold (evicted) object: boot from the persisted identity first, so
+        // an operator's `POST /debug/storage/flush` is never a silent no-op.
+        const userDid =
+          this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+        if (userDid) await this.ready({ userDid });
+      }
       if (this.flushInFlight) return this.flushInFlight;
       const run = this.flushOnce().finally(() => {
         this.flushInFlight = null;
@@ -2392,12 +2448,36 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     // ── turn plumbing ──────────────────────────────────────────────────────
 
-    /** Matrix media access for the attachments pipeline, through the gateway. */
+    /**
+     * Matrix media access for the attachments pipeline, through the gateway.
+     * Both transfers stream across the object boundary and are cut off at
+     * the attachment cap; an encrypted attachment is decrypted HERE, not in
+     * the gateway (its whole-buffer download grew the crypto WASM heap for
+     * good, and a hash mismatch on the far side of the RPC would only reach
+     * this object as a disconnect).
+     */
     private matrixMediaSource(): MatrixMediaSource {
       return {
-        downloadMxc: (mxc) => this.gateway.downloadMxcMedia(mxc),
-        downloadEvent: (roomId, eventId) =>
-          this.gateway.downloadEventMedia(roomId, eventId),
+        downloadMxc: async (mxc, maxBytes = MAX_FILE_SIZE) =>
+          readBytesCapped(
+            await this.gateway.downloadMxcMediaStream(mxc),
+            maxBytes,
+          ),
+        downloadEvent: async (roomId, eventId, maxBytes = MAX_FILE_SIZE) => {
+          const media = await this.gateway.downloadEventMediaStream(
+            roomId,
+            eventId,
+          );
+          if (!media) return null;
+          const plain = media.file
+            ? media.stream.pipeThrough(createAttachmentDecryptor(media.file))
+            : media.stream;
+          return {
+            bytes: await readBytesCapped(plain, maxBytes),
+            ...(media.mimetype ? { mimetype: media.mimetype } : {}),
+            ...(media.filename ? { filename: media.filename } : {}),
+          };
+        },
       };
     }
 

@@ -1,4 +1,4 @@
-import type { BotStatus } from '@ixo/matrix-bot-workers-sdk';
+import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
 /**
@@ -388,17 +388,19 @@ export interface CreateRoomOptions {
  * rest is the oracle's.
  */
 export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
-  /** Bytes of a media event (decrypted when it carries an encrypted `file`); null when unknown. */
-  downloadEventMedia(
+  /**
+   * A media event's content as a stream, AS STORED: in an E2EE room the
+   * ciphertext plus the `EncryptedFile` fields to pipe through the SDK's
+   * `createAttachmentDecryptor` on the caller's side (a stream that errors
+   * on the far side of an RPC only surfaces here as a disconnect, so the
+   * hash check belongs to the consumer). Null when unknown or redacted.
+   */
+  downloadEventMediaStream(
     roomId: string,
     eventId: string,
-  ): Promise<{
-    bytes: Uint8Array;
-    mimetype?: string;
-    filename?: string;
-  } | null>;
-  /** Authenticated media download of an `mxc://` URI. */
-  downloadMxcMedia(mxc: string): Promise<Uint8Array>;
+  ): Promise<MediaStream | null>;
+  /** Authenticated media download of an `mxc://` URI, as a stream. */
+  downloadMxcMediaStream(mxc: string): Promise<ReadableStream<Uint8Array>>;
   /** Stop the bot (operator/debug; `ensureStarted`/cron brings it back). */
   stop(): Promise<void>;
   /** Idempotent — starts the bot + keep-alive alarm if not running. */
@@ -465,17 +467,23 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
    * Returns the new event id. Wire-compatible with the Node runtime so
    * existing users migrate transparently.
    */
-  uploadUserSnapshot(
+  uploadUserSnapshotStream(
     userDid: string,
     storageKey: string,
-    bytes: Uint8Array,
+    /** The gzipped file; encrypted chunk by chunk in an E2EE room, never buffered. */
+    body: ReadableStream<Uint8Array>,
     filename: string,
+    /** Exact byte length of `body` (the homeserver needs a Content-Length). */
+    size: number,
   ): Promise<{ eventId: string }>;
-  /** Download the latest snapshot for `storageKey`, or null when none exists. */
-  downloadUserSnapshot(
+  /**
+   * The latest snapshot for `storageKey` as a stream, as stored (see
+   * `downloadEventMediaStream`), or null when none exists.
+   */
+  downloadUserSnapshotStream(
     userDid: string,
     storageKey: string,
-  ): Promise<{ bytes: Uint8Array; eventId: string } | null>;
+  ): Promise<SnapshotStream | null>;
   /** Read a room state event's content, JSON-encoded (state is never E2EE). Null when absent. */
   getRoomStateEvent(
     roomId: string,
@@ -533,6 +541,26 @@ export interface OutboxRow {
 }
 
 /** `MatrixBotDO.status()` plus the gateway's own turn bookkeeping. */
+/**
+ * Media handed across the Durable Object boundary as a stream, as stored on
+ * the homeserver: `file` is present when the event carried an encrypted
+ * attachment — pipe `stream` through the SDK's `createAttachmentDecryptor`
+ * with it; without `file` the stream is the plain upload. `size` is the
+ * sender's `info.size` when it set one.
+ */
+export interface MediaStream {
+  stream: ReadableStream<Uint8Array>;
+  file?: EncryptedFileInfo;
+  size?: number;
+  mimetype?: string;
+  filename?: string;
+}
+
+/** `MediaStream` of a user's snapshot, plus the media event that carries it. */
+export interface SnapshotStream extends MediaStream {
+  eventId: string;
+}
+
 export interface GatewayStatus extends BotStatus {
   turns: { inFlight: number; waiting: number };
   /** Debounce buffers waiting to become turns. */

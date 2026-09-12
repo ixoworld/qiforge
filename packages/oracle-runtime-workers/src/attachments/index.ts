@@ -8,6 +8,7 @@ export {
   downloadFromUrl,
   loadAttachmentBytes,
   MAX_FILE_SIZE,
+  readBytesCapped,
   MAX_TOTAL_SIZE,
   validateUrlTarget,
   type DownloadOptions,

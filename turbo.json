@@ -3,6 +3,7 @@
   "globalDependencies": ["**/.env"],
   "globalEnv": [
     "ORACLE_URL",
+    "LEGACY_MB",
     "MATRIX_BASE",
     "BOT_USER_ID",
     "UCAN_STORE_URL",

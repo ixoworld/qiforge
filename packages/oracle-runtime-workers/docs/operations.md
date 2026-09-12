@@ -24,16 +24,16 @@ Public (UCAN-authenticated unless noted):
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
 
-| Route                                                                          | Purpose                                                                                                  |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush; wipe and reload. |
-| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                         |
-| `GET /debug/tasks`                                                             | The caller's task records and the object's current alarm.                                                |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                    |
-| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                          |
-| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                  |
-| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                        |
-| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                       |
+| Route                                                                          | Purpose                                                                                                                                  |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload. |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                                                         |
+| `GET /debug/tasks`                                                             | The caller's task records and the object's current alarm.                                                                                |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                    |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                          |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                  |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                        |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                       |
 
 ## The gateway
 
@@ -143,6 +143,13 @@ catch-up, but it stalls sends for ~30 s.
   account backup, the old device drained and logged out. Each rotation costs
   a fresh boot with a backup restore. `POST /debug/matrix/rotate-device`
   does it on demand.
+- **Media never sits in the gateway.** Snapshots (the legacy owner copy)
+  and attachments cross the RPC to the user object as streams, as stored:
+  the object decrypts them (`createAttachmentDecryptor`) and enforces the
+  size caps chunk by chunk. The SDK's whole-buffer download decrypted inside
+  the crypto WASM and grew its heap for good (a buffered 10 MiB round trip
+  took it from 7 to 41 MB); the streamed calls keep the gateway's memory
+  flat whatever the file size.
 - **Shared bot account.** Every extra client logged in as the oracle user is
   a separate device that also answers room messages and that every peer has
   to encrypt to. Keep the device list short: the gateway device (`deviceId`
@@ -222,6 +229,13 @@ catch-up, but it stalls sends for ~30 s.
 - **Legacy Matrix copies** of migrated users are redacted once the VFS is
   confirmed to hold the file (`removeLegacyCopy`, logged as `legacy Matrix
 copy removed`; `legacyCleared` in `/debug/storage`).
+  The import itself is streamed (see [architecture](architecture.md#self-sovereign-storage)):
+  decrypt → gunzip → header check → chunk VFS, then the flush to the VFS
+  from a snapshot; a legacy file of any size costs a few chunks of memory,
+  and a failed VFS write after the import keeps the working copy dirty and
+  retried every 10 min while the object serves the imported history. The
+  boot log reads `imported N bytes from legacy Matrix media` followed by
+  `migrated N bytes from legacy Matrix media to vfs (<etag>)`.
 
 ## Realtime channel
 

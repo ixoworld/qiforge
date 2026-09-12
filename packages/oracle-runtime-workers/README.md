@@ -109,7 +109,11 @@ lifetime are in [operations](docs/operations.md).
   for production (0.1.0–0.1.2 could send plaintext into an encrypted room
   after a lazy-member sync delta, and queued session markers behind
   background replays — both fixed in 0.1.3 and re-measured, see
-  [load-tests](docs/load-tests.md#session-creation-is-the-one-funnel)).
+  [load-tests](docs/load-tests.md#session-creation-is-the-one-funnel));
+  0.3.1 brings the streamed media calls the legacy-copy import and the
+  attachments now use (a 50 MB Node-era checkpoint no longer resets the
+  user object's isolate) and the crypto-snapshot flush before every keys
+  upload.
 - Open: the memory engine's recall ranking on accounts with a long history;
   the storage cost of task-holding users at scale (R2 page tier, see
   [architecture](docs/architecture.md#storage-cost-planning)).

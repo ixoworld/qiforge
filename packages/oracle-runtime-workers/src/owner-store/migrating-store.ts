@@ -3,10 +3,12 @@
  * Matrix room media is only a read-only *legacy* source, checked when VFS has
  * no file yet so users coming from the Node runtime keep their history.
  *
- *   load():  VFS first. If absent there but present in Matrix media, import
- *            the legacy file AND write it to VFS immediately — from that
- *            moment the VFS copy is authoritative and Matrix is never
- *            consulted again (head() sees the VFS file).
+ *   load():  VFS first. If absent there but present in Matrix media, hand
+ *            the legacy stream over flagged `fromLegacy`: the object imports
+ *            it chunk by chunk and writes it to VFS from its working copy at
+ *            once (`flushToOwnerStore`) — from that moment the VFS copy is
+ *            authoritative and Matrix is never consulted again (head() sees
+ *            the VFS file). Nothing on this path holds the file in memory.
  *   save():  VFS, and only VFS. Nothing is ever written to Matrix media any
  *            more: a failed VFS write (no `ixo:filesystem` delegation yet, a
  *            VFS outage) propagates, and the object keeps its working copy
@@ -18,15 +20,7 @@
  *            Matrix copy so no second copy of the user's history lingers.
  */
 import { VfsNoDelegationError } from './ixo-vfs-store';
-import {
-  bytesOfStream,
-  snapshotOfBytes,
-  streamOfBytes,
-  type FileSnapshot,
-  type OwnerCopy,
-  type OwnerStore,
-  type SaveResult,
-} from './types';
+import type { FileSnapshot, OwnerCopy, OwnerStore, SaveResult } from './types';
 
 export interface MigratingOwnerStoreOptions {
   /** System of record (IXO VFS). */
@@ -93,24 +87,16 @@ export class MigratingOwnerStore implements OwnerStore {
       return null;
     }
 
-    // One-time migration: the legacy file becomes the first VFS version. The
-    // legacy copy is already in memory (gateway RPCs hand over bytes), so
-    // re-opening it for the VFS upload costs nothing extra.
-    const legacyBytes = await bytesOfStream(fromLegacy.stream);
-    try {
-      const { etag } = await this.primary.save(snapshotOfBytes(legacyBytes));
-      this.log(
-        'log',
-        `[owner-store] migrated ${legacyBytes.byteLength} bytes from Matrix media to VFS (${etag})`,
-      );
-      return { stream: streamOfBytes(legacyBytes), etag };
-    } catch (err) {
-      this.log(
-        'warn',
-        `[owner-store] VFS migration write failed — serving the legacy Matrix copy for now: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return { stream: streamOfBytes(legacyBytes), etag: fromLegacy.etag };
-    }
+    // One-time migration, streamed: the object imports this copy chunk by
+    // chunk and then flushes its working copy to VFS (`fromLegacy`). Writing
+    // VFS from here would need the whole file in memory twice over (the VFS
+    // store measures the gzip before it uploads) — what used to reset the
+    // isolate on large Node-era histories.
+    this.log(
+      'log',
+      `[owner-store] legacy Matrix copy ${fromLegacy.etag} found and no VFS copy yet — importing it for migration`,
+    );
+    return { ...fromLegacy, fromLegacy: true };
   }
 
   /**
@@ -159,13 +145,16 @@ export class MigratingOwnerStore implements OwnerStore {
 
   /** The legacy Matrix copy regardless of what VFS holds (see `OwnerStore.loadLegacy`). */
   async loadLegacy(): Promise<OwnerCopy | null> {
-    return this.legacy.load().catch((err) => {
+    try {
+      const copy = await this.legacy.load();
+      return copy ? { ...copy, fromLegacy: true } : null;
+    } catch (err) {
       this.log(
         'warn',
         `[owner-store] legacy Matrix load failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
-    });
+    }
   }
 
   async remove(): Promise<void> {

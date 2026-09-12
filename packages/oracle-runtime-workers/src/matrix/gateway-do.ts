@@ -42,6 +42,8 @@ import {
   type OutboxRow,
   type TurnResult,
   type UserOracleObject,
+  type MediaStream,
+  type SnapshotStream,
 } from '../do/contracts';
 import { decryptWithPin } from '../secrets/pin-cipher';
 import {
@@ -724,11 +726,12 @@ export class MatrixGatewayDO
   // User snapshots (SQLite files as room media) and media downloads
   // -------------------------------------------------------------------------
 
-  async uploadUserSnapshot(
+  async uploadUserSnapshotStream(
     userDid: string,
     storageKey: string,
-    bytes: Uint8Array,
+    body: ReadableStream<Uint8Array>,
     filename: string,
+    size: number,
   ): Promise<{ eventId: string }> {
     const target = await this.resolveUserRoom(userDid);
     if (!target)
@@ -740,10 +743,13 @@ export class MatrixGatewayDO
       await this.getRoomStateEvent(roomId, MEDIA_STATE_TYPE, storageKey),
     );
     // `{"file":{…}}` (encrypted) or `{"url":"mxc://…"}`, per the room.
+    // Streamed: encrypted chunk by chunk in an E2EE room and sent with the
+    // exact length; the whole-buffer upload grew the crypto WASM heap for good.
     const source: unknown = JSON.parse(
-      await this.uploadFile(roomId, bytes, {
+      await this.uploadFileStream(roomId, body, {
         filename,
         mimetype: SNAPSHOT_MIMETYPE,
+        size,
       }),
     );
     const content = {
@@ -752,7 +758,7 @@ export class MatrixGatewayDO
       filename: storageKey,
       cid: storageKey,
       sender: this.cfg().userId,
-      info: { mimetype: SNAPSHOT_MIMETYPE, size: bytes.byteLength },
+      info: { mimetype: SNAPSHOT_MIMETYPE, size },
       ...(typeof source === 'object' && source !== null ? source : {}),
     };
     const eventId = await this.sendEvent(
@@ -786,43 +792,64 @@ export class MatrixGatewayDO
     }
     this.log(
       'info',
-      `uploaded snapshot ${storageKey} (${bytes.byteLength} bytes) for ${userDid} → ${eventId}`,
+      `uploaded snapshot ${storageKey} (${size} bytes) for ${userDid} → ${eventId}`,
     );
     return { eventId };
   }
 
-  async downloadUserSnapshot(
+  async downloadUserSnapshotStream(
     userDid: string,
     storageKey: string,
-  ): Promise<{ bytes: Uint8Array; eventId: string } | null> {
+  ): Promise<SnapshotStream | null> {
     const target = await this.resolveUserRoom(userDid);
     if (!target) return null;
     const eventId = stateEventId(
       await this.getRoomStateEvent(target.roomId, MEDIA_STATE_TYPE, storageKey),
     );
     if (!eventId) return null;
-    const file = await this.downloadFile(target.roomId, eventId);
-    return file ? { bytes: file.bytes, eventId } : null;
+    const media = await this.mediaStream(target.roomId, eventId);
+    return media ? { ...media, eventId } : null;
   }
 
   /**
-   * Bytes of a media message (`m.image` / `m.file` / …) for the attachments
-   * pipeline — decrypted when the event carries an encrypted `file`. Null
-   * when the event is unknown or redacted.
+   * A media event as a stream, AS STORED — raw ciphertext plus the
+   * `EncryptedFile` fields in an E2EE room. Decryption happens in the calling
+   * object: the SDK's whole-buffer `downloadFile` decrypts in the crypto WASM
+   * and grows its heap for good, and a stream that fails its hash check on
+   * this side of the RPC would reach the caller as a bare disconnect.
    */
-  async downloadEventMedia(
+  private async mediaStream(
     roomId: string,
     eventId: string,
-  ): Promise<{
-    bytes: Uint8Array;
-    mimetype?: string;
-    filename?: string;
-  } | null> {
-    return this.downloadFile(roomId, eventId);
+  ): Promise<MediaStream | null> {
+    const media = await this.downloadFileStream(roomId, eventId, {
+      raw: true,
+    });
+    if (!media) return null;
+    return {
+      stream: media.stream,
+      ...(media.file ? { file: media.file } : {}),
+      ...(media.size !== undefined ? { size: media.size } : {}),
+      ...(media.mimetype ? { mimetype: media.mimetype } : {}),
+      ...(media.filename ? { filename: media.filename } : {}),
+    };
   }
 
-  /** Authenticated download of an `mxc://` URI (`/_matrix/client/v1/media/download`, legacy fallback on 404). */
-  async downloadMxcMedia(mxc: string): Promise<Uint8Array> {
+  /**
+   * A media message (`m.image` / `m.file` / …) for the attachments pipeline,
+   * as stored (see `mediaStream`). Null when the event is unknown or redacted.
+   */
+  async downloadEventMediaStream(
+    roomId: string,
+    eventId: string,
+  ): Promise<MediaStream | null> {
+    return this.mediaStream(roomId, eventId);
+  }
+
+  /** Authenticated download of an `mxc://` URI as a stream (`/_matrix/client/v1/media/download`, legacy fallback on 404). */
+  async downloadMxcMediaStream(
+    mxc: string,
+  ): Promise<ReadableStream<Uint8Array>> {
     const client = await this.startedClient();
     const token = client.getAccessToken();
     const headers: Record<string, string> = token
@@ -855,7 +882,9 @@ export class MatrixGatewayDO
       throw new Error(
         `MatrixGatewayDO: media download failed: ${res.status} ${res.statusText}`,
       );
-    return new Uint8Array(await res.arrayBuffer());
+    if (!res.body)
+      throw new Error('MatrixGatewayDO: media download has no body');
+    return res.body;
   }
 
   // -------------------------------------------------------------------------

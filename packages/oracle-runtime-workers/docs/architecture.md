@@ -113,10 +113,17 @@ system of record.
   their library-wide grant from it).
 - The user's Matrix room media (`m.ixo.media_upload` + `m.ixo.media_state`)
   is a **read-only legacy source**: checked once when the VFS has no file
-  yet, migrated into the VFS on first touch, never written again. Once the
-  VFS is confirmed to hold the file (the first verified flush, or the first
-  boot that loads it from the VFS), the old Matrix copy is redacted so no
-  second copy of the history lingers. `OWNER_STORE=matrix` forces legacy
+  yet, migrated into the VFS on first touch, never written again. The
+  migration is streamed end to end: the gateway hands the media across the
+  object boundary as stored (ciphertext plus its `EncryptedFile` fields),
+  the user object decrypts, gunzips and header-checks it chunk by chunk into
+  its working copy, then flushes that copy to the VFS from a snapshot like
+  every other flush — so a Node-era history of any size costs a few chunks
+  of memory (a 50 MB checkpoint used to be materialised three times over in
+  the object and reset its 128 MB isolate on the first Portal open after
+  cutover). Once the VFS is confirmed to hold the file (the first verified
+  flush, or the first boot that loads it from the VFS), the old Matrix copy
+  is redacted so no second copy of the history lingers. `OWNER_STORE=matrix` forces legacy
   room-media storage for environments without a VFS worker (the local
   harness only).
 - There is no Matrix fallback for writes: a failed VFS flush keeps the

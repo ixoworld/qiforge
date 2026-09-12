@@ -101,7 +101,8 @@ implementation, and what is deliberately left out.
   the database. The `view_attachment` tool (offered only in sessions with an
   offloaded payload) fetches one again through the same pipeline.
 - **Owner copies are never written to Matrix.** The IXO VFS is the system of
-  record; Matrix media is read once as legacy and then redacted (see
+  record; Matrix media is read once as legacy — streamed, never held whole,
+  where Node buffered the file — and then redacted (see
   [architecture](architecture.md#self-sovereign-storage)). The user's
   delegation to the oracle therefore needs one capability Node never asked
   for: `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`.

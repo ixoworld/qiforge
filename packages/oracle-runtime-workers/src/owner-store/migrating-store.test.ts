@@ -63,10 +63,25 @@ describe('MigratingOwnerStore', () => {
     expect((await store.head())?.etag).toBe('vfs-v1');
   });
 
-  it('migrates a legacy Matrix file into VFS on first load, then serves from VFS', async () => {
+  it('hands the legacy copy to the object flagged for migration — unread, and without a VFS write of its own', async () => {
     const vfs = memStore('vfs');
     const legacy = memStore('matrix');
     legacy.seed(bytes(4, 5, 6));
+    let pulled = 0;
+    // The bytes are only handed out when pulled: the store must not read them.
+    legacy.store.load = async () => ({
+      stream: new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            pulled += 1;
+            if (pulled === 1) controller.enqueue(bytes(4, 5, 6));
+            else controller.close();
+          },
+        },
+        { highWaterMark: 0 },
+      ),
+      etag: 'matrix-v1',
+    });
 
     const store = new MigratingOwnerStore({
       primary: vfs.store,
@@ -74,16 +89,20 @@ describe('MigratingOwnerStore', () => {
       log: noopLog,
     });
     const loaded = await store.load();
-    expect(await bytesOfStream(loaded!.stream)).toEqual(bytes(4, 5, 6));
-    // The returned etag is the NEW VFS version — the working copy tracks VFS.
-    expect(loaded?.etag).toBe('vfs-v1');
-    expect(vfs.file?.bytes).toEqual(bytes(4, 5, 6));
-    // Legacy copy intentionally left in place; head() now answers from VFS.
+    expect(loaded?.fromLegacy).toBe(true);
+    expect(loaded?.etag).toBe('matrix-v1');
+    expect(pulled).toBe(0);
+    // VFS is written by the OBJECT from its working copy (streamed), not here.
+    expect(vfs.file).toBeNull();
     expect(legacy.file).not.toBeNull();
+    expect(await bytesOfStream(loaded!.stream)).toEqual(bytes(4, 5, 6));
+    expect((await store.head())?.etag).toBe('matrix-v1');
+    // Once the object has flushed, head() answers from VFS.
+    await store.save(snapshotOfBytes(bytes(4, 5, 6)));
     expect((await store.head())?.etag).toBe('vfs-v1');
   });
 
-  it('serves the legacy copy when the migration write fails, without losing it', async () => {
+  it('keeps serving the legacy copy while VFS cannot be written (the object retries the flush)', async () => {
     const vfs = memStore('vfs', { failSave: true });
     const legacy = memStore('matrix');
     legacy.seed(bytes(7, 7));
@@ -94,8 +113,12 @@ describe('MigratingOwnerStore', () => {
       log: noopLog,
     });
     const loaded = await store.load();
+    expect(loaded?.fromLegacy).toBe(true);
     expect(await bytesOfStream(loaded!.stream)).toEqual(bytes(7, 7));
-    expect(loaded?.etag).toBe('matrix-v1');
+    await expect(store.save(snapshotOfBytes(bytes(7, 7)))).rejects.toThrow(
+      /vfs save unavailable/,
+    );
+    expect(legacy.file).not.toBeNull();
     expect((await store.head())?.etag).toBe('matrix-v1');
   });
 
@@ -211,6 +234,7 @@ describe('MigratingOwnerStore', () => {
     expect(served && (await bytesOfStream(served.stream))).toEqual(
       bytes(7, 7, 7),
     );
+    expect(served?.fromLegacy).toBe(true);
   });
 
   it('remove() clears both copies', async () => {
