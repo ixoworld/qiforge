@@ -207,6 +207,71 @@ record — so it can ship later with no data migration. The Slack watermark
 alerts (`SLACK_ALERT_WEBHOOK_URL`, one alert per whole GB from 1 GB) are the
 tripwire to build it with runway.
 
+### Running cost at scale
+
+What one oracle costs on Cloudflare per month, excluding model tokens and the
+services it calls (Matrix, memory engine, sandbox, VFS). Estimated
+2026-09-12 from the meters above and the measured checkpointer write rate
+(5.2 rows per turn, `chunk-billing.test.ts`), at Workers Paid list prices
+with the plan's included allowances subtracted (10 M Worker requests, 30 M
+CPU-ms, 1 M DO requests, 400 k GB-s, 50 M rows written, 25 B rows read, 5 GB
+SQL storage, 20 M log events).
+
+Assumptions per daily user: 10 turns a day; an object loaded ~40 s per turn
+(the model wait plus the 10 s idle tail); ~12 rows written and ~500 read per
+turn; ~15 shell requests and ~40 console lines per turn; a 100 MB average
+resident working copy.
+
+| Monthly cost line            | What it pays for                                    | 100 users | 1,000    | 10,000    | 100,000     |
+| ---------------------------- | --------------------------------------------------- | --------- | -------- | --------- | ----------- |
+| Workers Paid base            | the account plan                                    | $5        | $5       | $5        | $5          |
+| DO loaded time, gateway      | one bot object resident around the clock (fixed)    | $0        | $4       | $4        | $4          |
+| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work | $1        | $14      | $187      | $1,915      |
+| DO requests                  | shell→object calls, gateway RPCs, alarms, pings     | $0        | $0.4     | $5        | $54         |
+| SQLite rows written          | checkpoints, sessions, tasks, meta                  | $0        | $0       | $0        | $310        |
+| SQLite rows read             | object boots and turn reads                         | $0        | $0       | $0        | $0          |
+| SQLite storage               | resident working copies (100 MB average)            | $1        | $19      | $199      | $1,999      |
+| Worker requests + CPU        | the HTTP shell, auth, rate limiting                 | $0        | $0       | $13       | $158        |
+| Workers Logs                 | observability events from console output            | $0        | $0       | $60       | $708        |
+| **Total**                    |                                                     | **~$7**   | **~$42** | **~$470** | **~$5,150** |
+| Per user per month           |                                                     | $0.07     | $0.04    | $0.05     | $0.05       |
+
+How to read it:
+
+- **Loaded time and storage carry the bill.** Both scale linearly with
+  users; everything else stays inside the allowances until roughly 10,000
+  daily users. Storage is the swing line: at a 1 GB average instead of
+  100 MB the 100,000-user storage line is $20,000.
+- **The gateway is a throughput limit before it is a cost.** Its loaded time
+  is fixed at ≈ $4 whatever the user count, but one object with a
+  3-messages-per-second Matrix send budget cannot mirror the traffic of
+  10,000-plus daily users.
+- **Logs are the avoidable line.** At the current verbosity they are the
+  third-largest cost at scale.
+
+Future improvements, in the order they pay off:
+
+1. **Log volume.** Lower the default `LOG_LEVEL`, keep per-turn diagnostics
+   behind `debug`, and set a `head_sampling_rate` in the observability
+   config. Removes most of the Workers Logs line with no runtime change.
+2. **R2 page tier** (above). Cuts the storage line ~13× and lifts the 10 GB
+   per-user cap; the user's VFS file stays the system of record, so no data
+   migration.
+3. **Gateway sharding.** Split the always-loaded gateway per user cohort (or
+   raise `MATRIX_SEND_RATE_PER_SECOND` with the homeserver's consent) before
+   the mirror traffic of ~10,000 daily users saturates one object.
+4. **Shorter loaded time per turn.** The model wait is billed as loaded
+   time. Long tool chains belong in sub-agents, after-turn work (titles,
+   history indexing) should not extend the tail, and a cheaper routing model
+   for the summariser keeps that call short.
+5. **Resident task holders.** A recurring task keeps its user's working copy
+   resident; once task users are a large share of storage, a lighter
+   representation for idle-but-scheduled users (the R2 tier again, or a
+   task-only object) is the fix.
+6. **Row writes at scale.** They only surface past ~50,000 daily users; the
+   chunked page store already batches 16 pages per row, so the next step is
+   a larger chunk or fewer checkpoints per turn.
+
 ## Rules of the road on workerd
 
 These came out of production incidents and are enforced in code; break one
