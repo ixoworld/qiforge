@@ -40,7 +40,7 @@
     "typescript-eslint": "^8.20.0",
     "unplugin-swc": "^1.5.9"
   },
-  "packageManager": "pnpm@11.5.1",
+  "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=22",
     "pnpm": ">=10.0.0"

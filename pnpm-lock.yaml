@@ -3329,7 +3329,7 @@ packages:
     resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
 
   '@ixo/domain.md@https://codeload.github.com/ixoworld/domain.md/tar.gz/cf8a575ed254ae3fced7f91535ac04391b90e816#path:packages/cli':
-    resolution: {gitHosted: true, integrity: sha512-YaPLGs350ZPeoUOe6uuJq3U3P0VzTuOEFPRPPZIRQerWXd/Yh4G23/sb8LYo/OY/yKdVcjwzQVq/Z060BV0dJQ==, tarball: https://codeload.github.com/ixoworld/domain.md/tar.gz/cf8a575ed254ae3fced7f91535ac04391b90e816}
+    resolution: {gitHosted: true, integrity: sha512-YaPLGs350ZPeoUOe6uuJq3U3P0VzTuOEFPRPPZIRQerWXd/Yh4G23/sb8LYo/OY/yKdVcjwzQVq/Z060BV0dJQ==, path: packages/cli, tarball: https://codeload.github.com/ixoworld/domain.md/tar.gz/cf8a575ed254ae3fced7f91535ac04391b90e816}
     version: 0.3.0
     engines: {node: '>=20.10.0'}
     hasBin: true
