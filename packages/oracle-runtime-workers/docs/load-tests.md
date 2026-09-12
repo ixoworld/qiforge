@@ -46,7 +46,8 @@ client hits.
 A new session is a Matrix event: the new-conversation marker is sent into
 the user's room through the one gateway object, and its event id becomes the
 session id (Node parity). Turns and reads never wait on the gateway (the
-per-turn room replay is fire-and-forget), so creates are the only operation
+per-turn room replay is sent in the background, retried but never awaited
+by the turn), so creates are the only operation
 whose latency grows with the number of simultaneous creators across all
 users.
 

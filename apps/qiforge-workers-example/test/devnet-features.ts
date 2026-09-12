@@ -1728,6 +1728,210 @@ async function main(): Promise<void> {
         );
       },
     );
+
+    // ── reset leaks: best-effort room posts and the dirty mark ─────────────
+    const storageStatus = async () => {
+      await authed(user, 'GET', '/sessions'); // boots the object
+      const res = await authed(user, 'GET', '/debug/storage');
+      assert.equal(res.status, 200, res.text.slice(0, 200));
+      return res.json as {
+        dirty: boolean;
+        writeGeneration?: number;
+        uploadedGeneration?: number;
+      };
+    };
+    const botEventsSince = async (after: number, type: string) => {
+      const room = mx.getRoom(roomId);
+      let n = 0;
+      for (const e of room?.getLiveTimeline().getEvents() ?? []) {
+        if (e.getSender() !== BOT_USER_ID || e.getTs() < after) continue;
+        await mx.decryptEventIfNeeded(e);
+        if (e.getType() === type) n += 1;
+      }
+      return n;
+    };
+    const threadBodies = async (sid: string) => {
+      const room = mx.getRoom(roomId);
+      const bodies: string[] = [];
+      for (const e of room?.getLiveTimeline().getEvents() ?? []) {
+        if (e.getSender() !== BOT_USER_ID) continue;
+        await mx.decryptEventIfNeeded(e);
+        if (e.threadRootId !== sid) continue;
+        bodies.push(String((e.getContent() as { body?: string }).body ?? ''));
+      }
+      return bodies;
+    };
+    const pauseMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    await step(
+      'reset leaks: the replay mirror survives a gateway reset mid-turn — both mirrors land exactly once, in order',
+      async () => {
+        const created = await authed(user, 'POST', '/sessions', {});
+        assert.equal(created.status, 201, created.text.slice(0, 200));
+        const sid = (created.json as { sessionId: string }).sessionId;
+        const marker = `MIRROR-${tag.toUpperCase()}`;
+        const turn = authed(user, 'POST', `/messages/${sid}`, {
+          message: `Reply with exactly ${marker} and nothing else.`,
+          stream: false,
+        });
+        // A burst of resets over ~2 s: the mirror's RPC (which also boots a
+        // dead gateway, ~1.5 s) cannot dodge all of them, so the send fails
+        // in flight at least once and the retry path is what delivers it.
+        let resets = 0;
+        for (let i = 0; i < 8; i += 1) {
+          const reset = await authed(user, 'POST', '/debug/matrix/abort');
+          if (reset.status === 200) resets += 1;
+          await pauseMs(250);
+        }
+        assert.ok(resets >= 1, 'no gateway reset succeeded');
+        const res = await turn;
+        assert.equal(res.status, 200, res.text.slice(0, 200));
+        // Nothing but the keep-alive alarm wakes the gateway after a reset.
+        const status = await authed(user, 'GET', '/matrix/status');
+        assert.equal(status.status, 200, status.text.slice(0, 200));
+        await waitFor(
+          async () => (await threadBodies(sid)).length >= 2,
+          120_000,
+          `two mirrors threaded under ${sid}`,
+          2_000,
+        );
+        await pauseMs(10_000);
+        const bodies = await threadBodies(sid);
+        assert.equal(
+          bodies.length,
+          2,
+          `expected exactly two mirrors: ${JSON.stringify(bodies)}`,
+        );
+        assert.match(bodies[0] ?? '', /\*\*You:\*\*/, JSON.stringify(bodies));
+        assert.ok(
+          bodies[0]?.includes(marker) &&
+            bodies[1]?.includes(marker) &&
+            !/\*\*You:\*\*/.test(bodies[1] ?? ''),
+          `mirrors out of order or wrong: ${JSON.stringify(bodies)}`,
+        );
+      },
+    );
+
+    await step(
+      "reset leaks: an interrupted turn's committed steps are marked dirty on boot and flushed",
+      async () => {
+        // The session is created BEFORE the baseline flush: creating one
+        // marks the copy dirty itself, which would mask the boot check.
+        const c = await client();
+        const s = await c.createSession();
+        const flushed = await authed(user, 'POST', '/debug/storage/flush');
+        assert.equal(flushed.status, 200, flushed.text.slice(0, 200));
+        const clean = await storageStatus();
+        assert.equal(clean.dirty, false, JSON.stringify(clean));
+        assert.equal(
+          clean.writeGeneration,
+          clean.uploadedGeneration,
+          JSON.stringify(clean),
+        );
+        const ac = new AbortController();
+        let aborted = false;
+        await c
+          .stream(s, 'Write a 1500-word essay about the sea.', {
+            signal: ac.signal,
+            onEvent: (e) => {
+              if (
+                !aborted &&
+                (e.event === 'message' || e.event === 'reasoning')
+              ) {
+                aborted = true;
+                void c.abort(s);
+              }
+            },
+          })
+          .catch(() => undefined);
+        assert.ok(aborted, 'the turn produced nothing to abort on');
+        await pauseMs(2_000);
+        const interrupted = await storageStatus();
+        assert.ok(
+          (interrupted.writeGeneration ?? 0) >
+            (interrupted.uploadedGeneration ?? 0),
+          `the interrupted turn committed nothing: ${JSON.stringify(interrupted)}`,
+        );
+        assert.equal(
+          interrupted.dirty,
+          false,
+          `already marked before the reset — the drill would not exercise the boot check: ${JSON.stringify(interrupted)}`,
+        );
+        const reset = await authed(user, 'POST', '/debug/object/abort');
+        assert.equal(reset.status, 200, reset.text.slice(0, 200));
+        const rebooted = await storageStatus();
+        assert.equal(
+          rebooted.dirty,
+          true,
+          `boot did not mark the copy dirty: ${JSON.stringify(rebooted)}`,
+        );
+        const flushed2 = await authed(user, 'POST', '/debug/storage/flush');
+        assert.equal(flushed2.status, 200, flushed2.text.slice(0, 200));
+        const after = await storageStatus();
+        assert.equal(after.dirty, false, JSON.stringify(after));
+        assert.equal(
+          after.writeGeneration,
+          after.uploadedGeneration,
+          JSON.stringify(after),
+        );
+      },
+    );
+
+    await step(
+      'reset leaks: a room message without a delegation posts delegation_required once per throttle window (throttle stamped after the send)',
+      async () => {
+        const del = await authed(user, 'DELETE', '/delegation');
+        assert.ok(del.status < 300, del.text.slice(0, 200));
+        try {
+          const reset = await authed(
+            user,
+            'POST',
+            '/debug/reauth-prompt/reset',
+          );
+          assert.equal(reset.status, 200, reset.text.slice(0, 200));
+          const since = Date.now();
+          await mx.sendTextMessage(
+            roomId,
+            'Reply with the single word PROMPT.',
+          );
+          await waitFor(
+            async () =>
+              (await botEventsSince(since, 'ixo.oracle.delegation_required')) >=
+              1,
+            120_000,
+            'the delegation_required prompt',
+            2_000,
+          );
+          await waitForBotReply(since, /PROMPT/i, 120_000);
+          const since2 = Date.now();
+          await mx.sendTextMessage(roomId, 'Reply with the single word AGAIN.');
+          await waitForBotReply(since2, /AGAIN/i, 120_000);
+          await pauseMs(3_000);
+          assert.equal(
+            await botEventsSince(since2, 'ixo.oracle.delegation_required'),
+            0,
+            'prompted again inside the throttle window',
+          );
+          assert.equal(
+            await botEventsSince(since, 'ixo.oracle.delegation_required'),
+            1,
+          );
+        } finally {
+          const raw = await mintDelegation(user, ORACLE_DID, [
+            { can: '*', with: 'ixo:oracle' },
+            { can: '*', with: 'ixo:memory' },
+            { can: '*', with: 'ixo:sandbox' },
+            { can: '*', with: 'ixo:skills' },
+            VFS_OWNER_COPY_CAPABILITY,
+          ]);
+          const post = await authed(user, 'POST', '/delegation', {
+            raw,
+            expiration: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+          });
+          assert.equal(post.status, 200, post.text.slice(0, 200));
+        }
+      },
+    );
   } finally {
     mx.stopClient();
   }

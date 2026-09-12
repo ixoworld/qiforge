@@ -432,6 +432,216 @@ async function main(): Promise<void> {
           assert.ok(last?.isEncrypted(), 'bot reply event is E2EE');
         },
       );
+
+      // ── reset leaks: best-effort room posts and the dirty mark ──────────
+      const debugPost = async (path: string) => {
+        const res = await fetch(`${oracle.url}${path}`, {
+          method: 'POST',
+          headers: client.headers(),
+        });
+        return { status: res.status, text: await res.text() };
+      };
+      const storageStatus = async () => {
+        // Boot the object first: the status route only reports what is open.
+        await fetch(`${oracle.url}/sessions`, { headers: client.headers() });
+        const res = await fetch(`${oracle.url}/debug/storage`, {
+          headers: client.headers(),
+        });
+        assert.equal(res.status, 200, await res.clone().text());
+        return (await res.json()) as {
+          dirty: boolean;
+          writeGeneration?: number;
+          uploadedGeneration?: number;
+        };
+      };
+      const botEventsSince = async (after: number, type: string) => {
+        const room = mx.getRoom(roomId);
+        let n = 0;
+        for (const e of room?.getLiveTimeline().getEvents() ?? []) {
+          if (e.getSender() !== BOT_USER_ID || e.getTs() < after) continue;
+          await mx.decryptEventIfNeeded(e);
+          if (e.getType() === type) n += 1;
+        }
+        return n;
+      };
+      const threadBodies = async (sid: string) => {
+        const room = mx.getRoom(roomId);
+        const bodies: string[] = [];
+        for (const e of room?.getLiveTimeline().getEvents() ?? []) {
+          if (e.getSender() !== BOT_USER_ID) continue;
+          await mx.decryptEventIfNeeded(e);
+          if (e.threadRootId !== sid) continue;
+          bodies.push(String((e.getContent() as { body?: string }).body ?? ''));
+        }
+        return bodies;
+      };
+      const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+      await step(
+        'replay mirror survives a gateway reset mid-turn: both mirrors land exactly once, in order',
+        async () => {
+          const sid = await client.createSession();
+          assert.ok(sid.startsWith('$'), `session has no marker event: ${sid}`);
+          const marker = `MIRROR-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+          const turn = fetch(
+            `${oracle.url}/messages/${encodeURIComponent(sid)}`,
+            {
+              method: 'POST',
+              headers: client.headers(),
+              body: JSON.stringify({
+                message: `Reply with exactly ${marker} and nothing else.`,
+                stream: false,
+              }),
+            },
+          );
+          // The user-message mirror is in flight now: kill the gateway under it.
+          await pause(200);
+          const reset = await debugPost('/debug/matrix/abort');
+          assert.equal(reset.status, 200, reset.text.slice(0, 200));
+          const res = await turn;
+          assert.equal(res.status, 200, (await res.text()).slice(0, 200));
+          await waitFor(
+            async () => (await threadBodies(sid)).length >= 2,
+            90_000,
+            `two mirrors threaded under ${sid}`,
+            2_000,
+          );
+          await pause(10_000); // a duplicate would have arrived by now
+          const bodies = await threadBodies(sid);
+          assert.equal(
+            bodies.length,
+            2,
+            `expected exactly two mirrors: ${JSON.stringify(bodies)}`,
+          );
+          assert.match(bodies[0] ?? '', /\*\*You:\*\*/, JSON.stringify(bodies));
+          assert.ok(
+            bodies[0]?.includes(marker) &&
+              bodies[1]?.includes(marker) &&
+              !/\*\*You:\*\*/.test(bodies[1] ?? ''),
+            `mirrors out of order or wrong: ${JSON.stringify(bodies)}`,
+          );
+        },
+      );
+
+      await step(
+        "dirty mark: an interrupted turn's committed steps are flushed after an object reset",
+        async () => {
+          const flushed = await debugPost('/debug/storage/flush');
+          assert.equal(flushed.status, 200, flushed.text.slice(0, 200));
+          const clean = await storageStatus();
+          assert.equal(clean.dirty, false, JSON.stringify(clean));
+          assert.equal(
+            clean.writeGeneration,
+            clean.uploadedGeneration,
+            JSON.stringify(clean),
+          );
+          // A turn that dies in the middle: abort as soon as the model streams.
+          const ac = new AbortController();
+          let aborted = false;
+          await client
+            .stream(sessionId, 'Write a 1500-word essay about the sea.', {
+              signal: ac.signal,
+              onEvent: (e) => {
+                if (
+                  !aborted &&
+                  (e.event === 'message' || e.event === 'reasoning')
+                ) {
+                  aborted = true;
+                  void client.abort(sessionId);
+                }
+              },
+            })
+            .catch(() => undefined);
+          assert.ok(aborted, 'the turn produced nothing to abort on');
+          await pause(2_000);
+          const interrupted = await storageStatus();
+          assert.ok(
+            (interrupted.writeGeneration ?? 0) >
+              (interrupted.uploadedGeneration ?? 0),
+            `the interrupted turn committed nothing: ${JSON.stringify(interrupted)}`,
+          );
+          assert.equal(
+            interrupted.dirty,
+            false,
+            `already marked before the reset — the drill would not exercise the boot check: ${JSON.stringify(interrupted)}`,
+          );
+          // Reset the object: the boot must notice the file moved past its upload.
+          const reset = await debugPost('/debug/object/abort');
+          assert.equal(reset.status, 200, reset.text.slice(0, 200));
+          const rebooted = await storageStatus();
+          assert.equal(
+            rebooted.dirty,
+            true,
+            `boot did not mark the copy dirty: ${JSON.stringify(rebooted)}`,
+          );
+          const flushed2 = await debugPost('/debug/storage/flush');
+          assert.equal(flushed2.status, 200, flushed2.text.slice(0, 200));
+          const after = await storageStatus();
+          assert.equal(after.dirty, false, JSON.stringify(after));
+          assert.equal(
+            after.writeGeneration,
+            after.uploadedGeneration,
+            JSON.stringify(after),
+          );
+        },
+      );
+
+      await step(
+        'reauth prompt: a room message without a delegation posts delegation_required once per throttle window',
+        async () => {
+          // Every HTTP call of `client` carries alice's delegation header and
+          // the object adopts it, so a Matrix turn would find one. Use a
+          // header-less client to reset the throttle, revoke the delegation
+          // and confirm the object holds none before the room message.
+          const bare = new ChatClient(oracle.url, { invocation });
+          const barePost = async (path: string, method = 'POST') => {
+            const res = await fetch(`${oracle.url}${path}`, {
+              method,
+              headers: bare.headers(),
+            });
+            return { status: res.status, text: await res.text() };
+          };
+          const reset = await barePost('/debug/reauth-prompt/reset');
+          assert.equal(reset.status, 200, reset.text.slice(0, 200));
+          const revoked = await barePost('/delegation', 'DELETE');
+          assert.ok(revoked.status < 300, revoked.text.slice(0, 200));
+          const none = await barePost('/debug/delegation', 'GET');
+          assert.equal(none.status, 200, none.text.slice(0, 200));
+          assert.equal(
+            (JSON.parse(none.text) as { present?: boolean }).present,
+            false,
+            `object still holds a delegation: ${none.text}`,
+          );
+          const since = Date.now();
+          await mx.sendTextMessage(
+            roomId,
+            'Reply with the single word PROMPT.',
+          );
+          await waitFor(
+            async () =>
+              (await botEventsSince(since, 'ixo.oracle.delegation_required')) >=
+              1,
+            90_000,
+            'the delegation_required prompt',
+            2_000,
+          );
+          await waitForBotReply(since, /PROMPT/i);
+          // Inside the window a second message must not prompt again.
+          const since2 = Date.now();
+          await mx.sendTextMessage(roomId, 'Reply with the single word AGAIN.');
+          await waitForBotReply(since2, /AGAIN/i);
+          await pause(3_000);
+          assert.equal(
+            await botEventsSince(since2, 'ixo.oracle.delegation_required'),
+            0,
+            'prompted again inside the throttle window',
+          );
+          assert.equal(
+            await botEventsSince(since, 'ixo.oracle.delegation_required'),
+            1,
+          );
+        },
+      );
       await step(
         'matrix conversation keeps memory (room-default session)',
         async () => {

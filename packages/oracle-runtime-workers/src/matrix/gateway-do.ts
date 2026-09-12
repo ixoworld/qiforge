@@ -618,7 +618,9 @@ export class MatrixGatewayDO
    * the next request or alarm boots a fresh instance. The RPC rejects.
    */
   async debugAbortObject(): Promise<void> {
-    this.ctx.abort('debug reset requested');
+    // Worded like the platform's own reset so RPC callers classify it as
+    // transient (see `isTransientGatewayError`), exactly as in production.
+    this.ctx.abort('gateway reset requested by the debug route');
   }
 
   override async stop(): Promise<void> {

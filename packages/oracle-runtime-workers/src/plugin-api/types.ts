@@ -637,6 +637,14 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    */
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
 
+  /**
+   * Keep un-awaited work alive past the end of the request that started it
+   * (a best-effort room post retried across a gateway restart). On Workers
+   * this is the Durable Object's `waitUntil`; absent on hosts where pending
+   * promises run to completion on their own.
+   */
+  background?: (work: Promise<unknown>) => void;
+
   /** Propagates from the HTTP request / graph invocation. */
   abortSignal: AbortSignal;
 

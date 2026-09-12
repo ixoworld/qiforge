@@ -165,6 +165,8 @@ export interface AmbientServices {
   /** Host attachment access for the current session, when provided. */
   attachments?: AttachmentViewSurface;
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
+  /** Host keep-alive for un-awaited work (`ctx.waitUntil` on Workers). */
+  background?: (work: Promise<unknown>) => void;
 }
 
 // ── Scoped emitter ──────────────────────────────────────────────────────────
@@ -444,6 +446,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     ...(ambient.frontend ? { frontend: ambient.frontend } : {}),
     ...(ambient.attachments ? { attachments: ambient.attachments } : {}),
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
+    ...(ambient.background ? { background: ambient.background } : {}),
     shared: EMPTY_SHARED,
     ...(runConfig.toolCall?.id ? { toolCallId: runConfig.toolCall.id } : {}),
   };

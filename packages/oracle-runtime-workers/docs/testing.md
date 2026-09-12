@@ -27,14 +27,14 @@ covered by the devnet matrix below.
 From `apps/qiforge-workers-example`, against the ixo testing harness and a
 real LLM:
 
-| Script                       | Covers                                                                                                                                                                                                                                                                    |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test:e2e`              | Auth, streaming, tools, memory, transcript, abort, owner-copy round-trip, E2EE chat, device-stable restart, a live scheduled task fired by a DO alarm.                                                                                                                    |
-| `pnpm test:e2e:vfs`          | The default owner-store path: a real VFS worker, the user's delegation carrying `ixo:filesystem/.oracles`, flush → file in the user's VFS → reload, Matrix untouched, 403 without the capability.                                                                         |
-| `pnpm test:e2e:mcp`          | A real Streamable-HTTP MCP handshake from workerd with per-user UCAN headers, cross-session memory recall.                                                                                                                                                                |
-| `pnpm test:e2e:legacy-large` | A ≥ 64 MB gzipped Node-era Matrix checkpoint (synthetic, saver schema, uploaded as the bot from a second device) imported on the VFS path: streamed in, flushed to the VFS, legacy copy redacted, workerd's memory growth bounded by the file, the seeded session listed. |
-| `test/e2e-migration.ts`      | Node → Workers migration of a user's history including the key backup and a token rotation.                                                                                                                                                                               |
-| `pnpm test:stress`           | N users concurrently, per-user isolation checks.                                                                                                                                                                                                                          |
+| Script                       | Covers                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm test:e2e`              | Auth, streaming, tools, memory, transcript, abort, owner-copy round-trip, E2EE chat, the reset-leak drills (room mirror across a gateway reset, dirty mark after an interrupted turn and object reset, the `delegation_required` prompt and its throttle), device-stable restart, a live scheduled task fired by a DO alarm. |
+| `pnpm test:e2e:vfs`          | The default owner-store path: a real VFS worker, the user's delegation carrying `ixo:filesystem/.oracles`, flush → file in the user's VFS → reload, Matrix untouched, 403 without the capability.                                                                                                                            |
+| `pnpm test:e2e:mcp`          | A real Streamable-HTTP MCP handshake from workerd with per-user UCAN headers, cross-session memory recall.                                                                                                                                                                                                                   |
+| `pnpm test:e2e:legacy-large` | A ≥ 64 MB gzipped Node-era Matrix checkpoint (synthetic, saver schema, uploaded as the bot from a second device) imported on the VFS path: streamed in, flushed to the VFS, legacy copy redacted, workerd's memory growth bounded by the file, the seeded session listed.                                                    |
+| `test/e2e-migration.ts`      | Node → Workers migration of a user's history including the key backup and a token rotation.                                                                                                                                                                                                                                  |
+| `pnpm test:stress`           | N users concurrently, per-user isolation checks.                                                                                                                                                                                                                                                                             |
 
 ## The devnet feature matrix (minutes, deployed worker)
 
@@ -47,8 +47,12 @@ reset/reload, E2EE Matrix ingress, scheduled tasks including a dedicated
 room, HTTP and Matrix attachments with payload retention, user preferences,
 the Node room-state envelope, the socket.io channel (handshake, browser tool
 and AG-UI round trips, `create_page_room` with the CRDT edit replayed),
-gateway restarts (catch-up, creates during a restart), the validation and
-auth-boundary edge cases, cross-user isolation and the per-user rate limit.
+gateway restarts (catch-up, creates during a restart), the reset-safety
+drills (gateway and user-object hard resets mid-turn) and the reset-leak
+drills (the room mirror under a burst of gateway resets, the dirty mark
+after an interrupted turn, the `delegation_required` prompt), the
+validation and auth-boundary edge cases, cross-user isolation and the
+per-user rate limit.
 
 ```bash
 cd apps/qiforge-workers-example

@@ -61,7 +61,7 @@ function errorText(err: unknown): string {
 
 /** The rejection an in-flight RPC gets when `ctx.abort()` resets its object. */
 function isAbortRejection(err: unknown): boolean {
-  return /debug reset requested|durable object reset|no longer active|aborted/i.test(
+  return /debug reset requested|reset requested by the debug route|durable object reset|no longer active|aborted/i.test(
     errorText(err),
   );
 }
@@ -499,6 +499,10 @@ export function createShell(
   app.get('/debug/realtime', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).realtimeStatus()),
   );
+  app.post('/debug/reauth-prompt/reset', async (c) => {
+    await userStub(c.env, c.get('auth').userDid).debugResetReauthThrottle();
+    return c.json({ reset: true });
+  });
   app.get('/debug/delegation', async (c) =>
     c.json(
       await userStub(c.env, c.get('auth').userDid).delegationStatus(
