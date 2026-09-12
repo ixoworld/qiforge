@@ -1,0 +1,29 @@
+name: Workers harness
+
+on:
+  pull_request:
+    branches: ['**']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workers-harness:
+    name: Workers harness regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ixo/ucan build
+      - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
+      - run: pnpm --filter @ixo/oracle-runtime-workers test:core
+      - run: pnpm --filter @ixo/oracle-runtime-workers test
+      - run: pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts

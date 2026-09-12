@@ -27,7 +27,7 @@ export interface DanglingToolCallRepairMiddlewareOptions {
 
 /** The result handed to the model for a tool call that never returned. */
 export function interruptedToolResult(toolName: string): string {
-  return `The call to ${toolName} was interrupted before it returned a result (the turn was aborted or the runtime restarted while it ran), so nothing from it was recorded. Call it again if its result is still needed.`;
+  return `The call to ${toolName} was interrupted before it returned a result (the turn was aborted or the runtime restarted while it ran), so nothing from it was recorded. Its external outcome is unknown: it may already have completed. Reconcile the result before repeating any write; only safe reads may be retried.`;
 }
 
 export interface DanglingToolCallRepair {

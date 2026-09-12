@@ -153,111 +153,36 @@ export async function* parseSSEStream(
 ): AsyncGenerator<SSEEvent> {
   const decoder = new TextDecoder();
   let buffer = '';
-
+  let event = '';
+  let data: string[] = [];
   try {
     while (true) {
-      let readResult;
-      try {
-        readResult = await reader.read();
-      } catch (readError) {
-        // Handle abort errors gracefully - this is expected when user cancels
-        if (
-          readError instanceof Error &&
-          (readError.name === 'AbortError' ||
-            (readError instanceof DOMException &&
-              readError.name === 'AbortError'))
-        ) {
-          // Stream was intentionally aborted, exit gracefully
-          break;
-        }
-        // Re-throw other errors
-        throw readError;
-      }
-
-      const { done, value } = readResult;
-      if (done) break;
-
-      // Decode chunk and add to buffer
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-
-      // Keep last incomplete line in buffer
-      buffer = lines.pop() || '';
-
-      let event = '';
-      let data = '';
-
-      // Process complete lines
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-
-        // Skip empty lines and comments
-        if (trimmedLine === '' || trimmedLine.startsWith(':')) {
-          // Empty line = event complete
-          if (event && data) {
-            try {
-              const parsedData = JSON.parse(data);
-              // Type-safe event creation with fallback for unknown events
-              if (isValidSSEEventType(event)) {
-                yield { event, data: parsedData };
-              } else {
-                continue;
-              }
-            } catch (parseError) {
-              console.warn('Failed to parse SSE data:', data, parseError);
-            }
-            event = '';
-            data = '';
-          }
-          continue;
-        }
-
-        if (trimmedLine.startsWith('event:')) {
-          event = trimmedLine.slice(6).trim();
-        } else if (trimmedLine.startsWith('data:')) {
-          data = trimmedLine.slice(5).trim();
-        }
-      }
-    }
-
-    // Process any remaining data in buffer
-    if (buffer.trim()) {
-      const lines = buffer.split('\n');
-      let event = '';
-      let data = '';
-
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine.startsWith('event:')) {
-          event = trimmedLine.slice(6).trim();
-        } else if (trimmedLine.startsWith('data:')) {
-          data = trimmedLine.slice(5).trim();
-        }
-      }
-
-      if (event && data) {
-        try {
-          const parsedData = JSON.parse(data);
-          // Type-safe event creation with fallback for unknown events
-          if (isValidSSEEventType(event)) {
+      const { done, value } = await reader.read();
+      buffer += done
+        ? decoder.decode() + '\n\n'
+        : decoder.decode(value, { stream: true });
+      let end: number;
+      while ((end = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, end).replace(/\r$/, '');
+        buffer = buffer.slice(end + 1);
+        if (line === '') {
+          if (event && data.length && isValidSSEEventType(event)) {
+            const parsedData = JSON.parse(data.join('\n'));
             yield { event, data: parsedData };
           }
-        } catch (parseError) {
-          console.warn('Failed to parse final SSE data:', data, parseError);
+          event = '';
+          data = [];
+        } else if (line.startsWith('event:')) {
+          event = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          data.push(line.slice(5).replace(/^ /, ''));
         }
+        // Comments/heartbeats do not terminate a partially received event.
       }
+      if (done) return;
     }
   } catch (error) {
-    // Handle abort errors gracefully - expected when stream is cancelled
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' ||
-        (error instanceof DOMException && error.name === 'AbortError'))
-    ) {
-      // Stream was aborted, exit gracefully without throwing
-      return;
-    }
-    console.error('Error parsing SSE stream:', error);
+    if (error instanceof Error && error.name === 'AbortError') return;
     throw error;
   }
 }

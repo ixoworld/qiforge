@@ -109,6 +109,11 @@ export interface OracleWorkerEnv {
   MAIN_REASONING_EFFORT?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
+  TURN_MAX_TOKENS?: string;
+  TURN_MAX_TOOL_CALLS?: string;
+  TURN_TIMEOUT_MS?: string;
+  MODEL_CONTEXT_TOKENS?: string;
+  MODEL_OUTPUT_TOKENS?: string;
   /** Platform model provider. Default `openrouter`; `nebius` for self-hosted. */
   LLM_PROVIDER?: 'openrouter' | 'nebius';
   /** Nebius Token Factory API key — required when `LLM_PROVIDER=nebius`. */

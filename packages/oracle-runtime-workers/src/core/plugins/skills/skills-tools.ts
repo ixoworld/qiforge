@@ -347,6 +347,7 @@ export function createSkillsTools(opts: SkillsToolsOptions): PluginTool[] {
     },
     {
       name: 'search_skills',
+      effect: 'read',
       description: SEARCH_DESCRIPTION,
       schema: searchSchema,
     },

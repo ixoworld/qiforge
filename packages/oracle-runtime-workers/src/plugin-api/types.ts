@@ -760,6 +760,8 @@ export interface OracleTasksSurface {
 }
 
 export interface PluginTool {
+  /** Explicitly mark safe reads for concurrent execution. Unclassified tools serialize as writes. */
+  effect?: 'read' | 'write';
   name: string;
   description: string;
   schema: z.ZodType;

@@ -1,3 +1,5 @@
+import { savedResultNotice } from './result-tool';
+import { executeTool, type ToolExecutionContext } from './tool-execution';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
 import type {
@@ -19,6 +21,7 @@ import {
  */
 export interface WrapPluginToolOptions {
   ambient: AmbientServices;
+  execution?: ToolExecutionContext;
   /** Snapshot of the graph state for the in-flight build. */
   state: RuntimeStateInput;
   /** Plugin manifest title used to auto-prefix the description. */
@@ -89,7 +92,28 @@ export function wrapPluginTool(
         state,
         sharedFactory,
       );
-      return pluginTool.handler(args, ctx);
+      const result = options.execution
+        ? await executeTool(
+            options.execution,
+            pluginTool.name,
+            args,
+            pluginTool.effect ?? 'write',
+            () => pluginTool.handler(args, ctx),
+          )
+        : await pluginTool.handler(args, ctx);
+      if (
+        options.execution?.store &&
+        typeof result === 'string' &&
+        result.length > 24_000
+      ) {
+        return savedResultNotice(
+          await options.execution.store.putResult(
+            options.execution.sessionId,
+            result,
+          ),
+        );
+      }
+      return result;
     },
     {
       name: pluginTool.name,

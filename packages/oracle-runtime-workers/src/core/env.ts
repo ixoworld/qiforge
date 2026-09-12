@@ -106,6 +106,12 @@ export const baseEnvSchema = z.object({
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
 
+  TURN_MAX_TOKENS: z.coerce.number().int().positive().default(500_000),
+  TURN_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(120),
+  TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  MODEL_CONTEXT_TOKENS: z.coerce.number().int().min(16_000).default(100_000),
+  MODEL_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8_000),
+
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
   CORS_ORIGIN: z.string().default('*'),

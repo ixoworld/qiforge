@@ -1,3 +1,4 @@
+import type { ToolExecutionContext } from './tool-execution';
 import type { AgentMiddleware } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
@@ -78,6 +79,7 @@ export interface MainAgentHooks {
 }
 
 export interface MainAgentArgs {
+  execution?: ToolExecutionContext;
   registries: MainAgentRegistries;
   identity: OracleIdentity;
   config: MergedConfig;

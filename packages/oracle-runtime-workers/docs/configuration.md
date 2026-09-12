@@ -251,3 +251,23 @@ curl -X POST https://<oracle>/matrix/start && curl https://<oracle>/matrix/statu
 
 `wrangler deploy --dry-run --outdir <dir>` builds both bundles without
 uploading and is the fastest check that the aliases resolve.
+
+## Turn budgets and tool execution
+
+The Workers harness accepts the following operator limits. They apply to the main agent, subagents, and helper models resolved through the turn's LLM adapter. The deadline starts when agent construction begins; attachment preparation is outside this budget.
+
+| Variable               | Default  | Meaning                                                                                                        |
+| ---------------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `TURN_MAX_TOKENS`      | `500000` | Cumulative estimated input plus reserved output across model calls.                                            |
+| `TURN_MAX_TOOL_CALLS`  | `120`    | Tool attempts, including a safe-read retry and subagent dispatch.                                              |
+| `TURN_TIMEOUT_MS`      | `600000` | Execution deadline in milliseconds; cancellation propagates to child invocations.                              |
+| `MODEL_CONTEXT_TOKENS` | `100000` | Conservative configured context window, with 5% headroom. Set for the smallest supported model/provider limit. |
+| `MODEL_OUTPUT_TOKENS`  | `8000`   | Output allowance reserved and passed to each model.                                                            |
+
+These are estimated resource limits, not a billing guarantee. Provider tokenization, image/audio inputs and provider-side fallback behavior can differ. Retain `TURN_RECURSION_LIMIT=600` as a separate graph runaway guard. A budget exhaustion is terminal and preserves already completed work; increasing recursion does not increase any budget above.
+
+Tools default to serialized, non-retrying writes. Plugin authors may set `effect: 'read'` only for operations without side effects. Up to four reads and four subagents run concurrently, with separate pools so children do not deadlock waiting for their own tools. An explicitly safe read may retry a transient transport/429/5xx failure once; unknown writes never automatically retry. Existing UCAN and plugin authorization still run; effect metadata is not authorization.
+
+Large string tool results are stored before entering history, with a reference readable through `read_harness_result` in 4000-character chunks. Legacy oversized tool messages can also be offloaded at the final request boundary, after capability gating. Tool-call IDs and message IDs survive; original checkpoints are not rewritten by the reactive guard. System text and actual bound schemas count toward the context limit. A provider overflow gets at most one strictly smaller request, never an unchanged retry.
+
+Use the `@ixo/oracle-runtime-workers/prompt` export to render a consuming instance's actual composed prompt in contract tests without importing the Worker bootstrap.

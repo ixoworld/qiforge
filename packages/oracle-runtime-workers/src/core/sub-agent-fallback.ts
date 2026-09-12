@@ -1,3 +1,4 @@
+import type { ToolExecutionContext } from './tool-execution';
 import type { StructuredTool } from 'langchain';
 import type {
   PluginContext,
@@ -18,6 +19,7 @@ import { wrapPluginTool } from './wrap-plugin-tool';
 /** Inputs for collecting and wrapping sub-agents. */
 export interface CollectSubAgentsInput {
   registry: SubAgentRegistry;
+  execution?: ToolExecutionContext;
   buildCtx: PluginContext;
   ambient: AmbientServices;
   /** Snapshot of state used when handlers need to build a `RuntimeContext`. */
@@ -78,6 +80,7 @@ function defaultToAgentSpec(
   sessionId: string,
   sharedFactory: ((ctx: RuntimeContext) => SharedAccessors) | undefined,
   fallbackContext: RunConfigContext | undefined,
+  execution?: ToolExecutionContext,
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -89,7 +92,13 @@ function defaultToAgentSpec(
     : subAgent.tools(buildCtx);
 
   const tools: StructuredTool[] = pluginTools.map((t) =>
-    wrapPluginTool(t, { ambient, state, sharedFactory, fallbackContext }),
+    wrapPluginTool(t, {
+      ambient,
+      state,
+      sharedFactory,
+      fallbackContext,
+      execution,
+    }),
   );
 
   const model = ambient.llm.get(subAgent.model ?? 'subagent');
@@ -107,6 +116,7 @@ function defaultToAgentSpec(
   }
 
   return {
+    execution,
     name: subAgent.name,
     description: subAgent.description,
     systemPrompt,
@@ -160,6 +170,7 @@ export async function collectSubAgentsWithFallback(
               sessionId,
               sharedFactory,
               fallbackContext,
+              input.execution,
             );
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }

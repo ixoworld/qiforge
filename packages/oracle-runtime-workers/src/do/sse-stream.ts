@@ -1,3 +1,4 @@
+import { HarnessLimitError } from '../core/turn-budget';
 /**
  * LangGraph `streamEvents` → Server-Sent Events, as a Web `ReadableStream`.
  *
@@ -185,9 +186,9 @@ export function createSseTurnStream(
           input.mirror(mirrored, payload as Record<string, unknown>);
       };
       const finish = () => {
+        if (heartbeat) clearInterval(heartbeat);
         if (closed) return;
         closed = true;
-        if (heartbeat) clearInterval(heartbeat);
         try {
           controller.close();
         } catch {
@@ -211,21 +212,29 @@ export function createSseTurnStream(
 
       const flushOrphans = () => {
         for (const [runId, evt] of actionCallMap) {
-          write('action_call', {
-            ...evt,
-            status: 'error',
-            error: 'Action did not complete',
-            toolCallId: runId,
-          });
+          write(
+            'action_call',
+            {
+              ...evt,
+              status: 'error',
+              error: 'Action did not complete',
+              toolCallId: runId,
+            },
+            { force: true },
+          );
         }
         actionCallMap.clear();
         for (const [runId, evt] of toolCallMap) {
-          write('tool_call', {
-            ...evt,
-            status: 'done',
-            output: '⏱️ Tool did not complete',
-            eventId: runId,
-          });
+          write(
+            'tool_call',
+            {
+              ...evt,
+              status: 'done',
+              output: '⏱️ Tool did not complete',
+              eventId: runId,
+            },
+            { force: true },
+          );
         }
         toolCallMap.clear();
       };
@@ -413,11 +422,47 @@ export function createSseTurnStream(
             write('done', {});
             await input.onComplete?.(fullContent);
           } else {
+            flushOrphans();
+            if (abortController.signal.reason instanceof HarnessLimitError)
+              write(
+                'error',
+                {
+                  error: abortController.signal.reason.message,
+                  kind: 'budget_exhausted',
+                  retryable: false,
+                  sessionId,
+                  requestId,
+                },
+                { force: true },
+              );
             // Aborted by the client (POST /messages/abort): close the stream
             // cleanly so the UI leaves its "thinking" state.
             write('done', {}, { force: true });
           }
         } catch (error) {
+          flushOrphans();
+          if (
+            error instanceof HarnessLimitError ||
+            abortController.signal.reason instanceof HarnessLimitError
+          ) {
+            const limit =
+              error instanceof HarnessLimitError
+                ? error
+                : abortController.signal.reason;
+            write(
+              'error',
+              {
+                error: limit.message,
+                kind: limit.kind,
+                retryable: false,
+                sessionId,
+                requestId,
+              },
+              { force: true },
+            );
+            write('done', {}, { force: true });
+            return;
+          }
           const aborted =
             error instanceof Error &&
             (error.name === 'AbortError' || /abort/i.test(error.message));
