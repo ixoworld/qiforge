@@ -272,6 +272,53 @@ Future improvements, in the order they pay off:
    chunked page store already batches 16 pages per row, so the next step is
    a larger chunk or fewer checkpoints per turn.
 
+### Compared with the Node runtime on Vultr
+
+The same oracle on the Node runtime (`@ixo/oracle-runtime` on a Vultr
+Kubernetes cluster), same assumptions, at Vultr list prices (2026-09):
+Optimized Cloud General Purpose nodes, 8 vCPU / 32 GB at $240 a month
+(smaller sizes at the low end); NVMe block storage $0.10 per GB-month; load
+balancer $10; managed Redis $15–60 (the Node runtime needs it for tasks and
+throttling); VKE control plane free. Sizing: 150 MB of RAM per in-flight
+turn plus the process baseline, peak concurrency 4× the daily average, one
+spare node for HA. Disk: the Node saver stores pages raw, so a user's file
+is ~5× the Workers working copy — 500 MB average. Model tokens and shared
+services are excluded on both sides.
+
+| Monthly cost                                     | 100 users     | 1,000         | 10,000        | 100,000       |
+| ------------------------------------------------ | ------------- | ------------- | ------------- | ------------- |
+| **Cloudflare total** (table above)               | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
+| Vultr nodes (RAM for in-flight turns + HA spare) | $120          | $240          | $720          | $2,640        |
+| Vultr block storage (user SQLite files, NVMe)    | $5            | $50           | $500          | $5,000        |
+| Redis + load balancer                            | $25           | $25           | $70           | $70           |
+| **Vultr total**                                  | **~$150**     | **~$315**     | **~$1,290**   | **~$7,700**   |
+| Per user per month (Cloudflare / Vultr)          | $0.07 / $1.50 | $0.04 / $0.32 | $0.05 / $0.13 | $0.05 / $0.08 |
+
+Cloudflare is cheaper at every scale, and the gap is widest where it
+matters most for a new oracle:
+
+- **Small scale.** Workers meter per second and per GB, so 100 users cost
+  pocket change. A Node deployment pays for two nodes, a balancer and Redis
+  whether or not anyone chats — unless it rides on spare capacity in a
+  cluster that already exists, which is what the devnet Node companion did.
+- **Large scale.** Both converge on the same two lines. Storage is $2,000
+  against $5,000 because the Workers saver gzips pages and Node stores them
+  raw; compute is $1,900 of loaded time against $2,600 of nodes. HDD block
+  storage at $0.04 per GB would pull the Vultr total to about $4,700, at
+  the cost of slower page reads.
+- **Node needs a redesign before ~10,000 users.** Each user's database lives
+  on one pod's volume, so several pods mean pinning users to pods behind a
+  sharding layer, a 10 TB per-volume ceiling on Vultr, and a Matrix upload
+  cron that scales with users. None of that is in the table; it is the
+  reason the Workers port exists.
+- **Only the Cloudflare number still has cheap moves left.** The R2 page
+  tier takes its storage line from $2,000 to about $150 at 100,000 users
+  and log sampling removes most of the $700 log line. There is no
+  equivalent on the Node side.
+
+Every figure is ±50%; the Vultr numbers in particular depend on how much
+headroom a cluster runs with.
+
 ## Rules of the road on workerd
 
 These came out of production incidents and are enforced in code; break one
