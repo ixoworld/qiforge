@@ -1,3 +1,4 @@
+import { HarnessLimitError, type TurnBudget } from '../turn-budget';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
@@ -56,6 +57,7 @@ const DEFAULT_KEEP_MESSAGES = 10;
 export interface SummarizationMiddlewareOptions {
   /** Model used to generate the summary (typically a small/cheap router model). */
   model: BaseChatModel;
+  budget?: TurnBudget;
   /** Override the trigger threshold for messages (default: 20). */
   triggerMessages?: number;
   /**
@@ -86,7 +88,7 @@ export function isSummarizationMessage(message: BaseMessage): boolean {
 export const createSummarizationMiddleware = (
   options: SummarizationMiddlewareOptions,
 ): AgentMiddleware => {
-  return summarizationMiddleware({
+  const middleware = summarizationMiddleware({
     model: options.model,
     summaryPrompt: SUMMARY_PROMPT,
     summaryPrefix: SUMMARY_PREFIX,
@@ -95,5 +97,43 @@ export const createSummarizationMiddleware = (
       { tokens: options.triggerTokens ?? DEFAULT_TRIGGER_TOKENS },
     ],
     keep: { messages: options.keepMessages ?? DEFAULT_KEEP_MESSAGES },
+    trimTokensToSummarize: options.budget
+      ? Math.max(
+          1000,
+          options.budget.limits.contextTokens -
+            options.budget.limits.outputTokens -
+            4000,
+        )
+      : undefined,
   });
+  const before = middleware.beforeModel;
+  if (!options.budget || typeof before !== 'function') return middleware;
+  const budget = options.budget;
+  return {
+    ...middleware,
+    beforeModel: async (state, runtime) => {
+      budget.check(runtime.signal);
+      const update = await before(state, {
+        ...runtime,
+        context: runtime.context ?? {},
+      });
+      budget.check(runtime.signal);
+      if (
+        update &&
+        'messages' in update &&
+        Array.isArray(update.messages) &&
+        update.messages.some(
+          (message) =>
+            typeof message.content === 'string' &&
+            message.content.includes('Error generating summary:'),
+        )
+      ) {
+        throw new HarnessLimitError(
+          'context_overflow',
+          'Summarization failed; original history was retained.',
+        );
+      }
+      return update;
+    },
+  };
 };

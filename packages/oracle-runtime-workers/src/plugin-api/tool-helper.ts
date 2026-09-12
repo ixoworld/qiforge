@@ -6,6 +6,7 @@ import type { PluginTool, RuntimeContext } from './types';
  * minus the handler (which is the first positional argument).
  */
 export interface ToolHelperOptions {
+  effect?: PluginTool['effect'];
   /** Tool name shown to the agent. Must be unique within the plugin. */
   name: string;
   /** Tool description shown to the agent. */
@@ -72,6 +73,7 @@ export function tool(
     schema,
     handler,
   };
+  if (options.effect !== undefined) pluginTool.effect = options.effect;
   if (visibility !== undefined) {
     pluginTool.visibility = visibility;
   }

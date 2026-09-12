@@ -375,6 +375,7 @@ const askOracleStream = async (props: {
 
   const reader = response.body.getReader();
   let accumulatedText = '';
+  let completed = false;
 
   try {
     // Parse SSE events from the stream
@@ -412,6 +413,7 @@ const askOracleStream = async (props: {
           break;
 
         case 'done':
+          completed = true;
           props.onDone?.();
           break;
 
@@ -450,6 +452,11 @@ const askOracleStream = async (props: {
       }
     }
 
+    if (!completed && !props.abortSignal?.aborted) {
+      throw new Error(
+        'The connection closed before completion. Check the conversation before repeating any action.',
+      );
+    }
     return {
       text: accumulatedText,
       requestId,

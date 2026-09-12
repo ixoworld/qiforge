@@ -73,6 +73,7 @@ export function buildListCapabilitiesTool(
     },
     {
       name: 'list_capabilities',
+      effect: 'read',
       description: 'List all available capabilities and their summaries.',
       schema: listCapabilitiesSchema,
     },

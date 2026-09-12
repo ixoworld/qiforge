@@ -1,8 +1,6 @@
-import {
-  createAgent,
-  toolRetryMiddleware,
-  type StructuredTool,
-} from 'langchain';
+import { createResultTool } from './result-tool';
+import { createRequestBudgetMiddleware } from './middlewares/request-budget';
+import { createAgent, type StructuredTool } from 'langchain';
 import type {
   PluginContext,
   PluginManifest,
@@ -224,6 +222,7 @@ export async function createMainAgent(
       pluginTitle: titleByPlugin.get(entry.pluginName),
       sharedFactory,
       fallbackContext,
+      execution: args.execution,
     });
 
   // ── 5. Sub-agents — bind all at compile time; gating happens at runtime ─
@@ -240,6 +239,7 @@ export async function createMainAgent(
     sharedFactory,
     fallbackContext,
     subAgents: subAgentEntries,
+    execution: args.execution,
   });
 
   ambient.logger.debug?.(
@@ -255,6 +255,7 @@ export async function createMainAgent(
         state: wrapState,
         sharedFactory,
         fallbackContext,
+        execution: args.execution,
       }),
     ),
     ...eagerTools.map(wrap),
@@ -262,6 +263,8 @@ export async function createMainAgent(
     ...silentTools.map(wrap),
     ...subAgentTools,
   ];
+
+  if (args.execution?.store) tools.push(createResultTool(args.execution));
 
   // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
   // and sub-agents per model call. Meta-tools omitted from the map are
@@ -305,7 +308,18 @@ export async function createMainAgent(
     // Condense long threads before everything tool-related.
     // Without this, thread state — reloaded, re-serialized, and re-uploaded to
     // the owner store on every turn — grows without bound.
-    createSummarizationMiddleware({ model: resolveModel('routing') }),
+    createSummarizationMiddleware({
+      model: resolveModel(
+        'routing',
+        args.execution
+          ? {
+              maxTokens: args.execution.budget.limits.outputTokens,
+              maxRetries: 0,
+            }
+          : undefined,
+      ),
+      budget: args.execution?.budget,
+    }),
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
@@ -316,7 +330,7 @@ export async function createMainAgent(
       logger: ambient.logger,
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
-    toolRetryMiddleware({ onFailure: (error) => error.message }),
+
     // Same host-gated pair as the Node runtime: the page-context block needs a
     // title lookup, the safety guardrail a classification model.
     ...(hooks?.getRoomTitle
@@ -337,6 +351,14 @@ export async function createMainAgent(
       : []),
     ...pluginMiddlewares,
     ...(hooks?.middlewares ?? []),
+    ...(args.execution
+      ? [
+          createRequestBudgetMiddleware({
+            ...args.execution,
+            log: (message) => ambient.logger.log(message),
+          }),
+        ]
+      : []),
   ];
 
   // ── 7. Prompt composition ───────────────────────────────────────────────

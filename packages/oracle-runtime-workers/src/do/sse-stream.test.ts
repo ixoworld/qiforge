@@ -78,3 +78,28 @@ describe('createSseTurnStream tool errors', () => {
     expect(sse).not.toContain('Tool did not complete');
   });
 });
+
+describe('terminal cleanup', () => {
+  it('settles an in-flight action when the turn is aborted', async () => {
+    const controller = new AbortController();
+    async function* events() {
+      yield {
+        event: 'on_tool_start',
+        run_id: 'action',
+        name: 'send',
+        data: { input: {} },
+      };
+      controller.abort();
+    }
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's',
+      requestId: 'r',
+      abortController: controller,
+      agActionNames: new Set(['send']),
+    });
+    const text = await new Response(stream).text();
+    expect(text).toContain('"status":"error"');
+    expect(text.match(/event: done/g)).toHaveLength(1);
+  });
+});

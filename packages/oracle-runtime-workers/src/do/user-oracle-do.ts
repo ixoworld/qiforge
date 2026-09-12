@@ -1,3 +1,7 @@
+import { budgetedLlm } from '../core/budgeted-llm';
+import { SqliteHarnessStore } from './harness-store';
+import { TurnBudget, HarnessLimitError } from '../core/turn-budget';
+import { ToolScheduler } from '../core/tool-execution';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * `UserOracleDO` — one Durable Object per (user DID, oracle).
@@ -378,6 +382,7 @@ function lastAiMessageId(messages: BaseMessage[]): string | undefined {
 export function createUserOracleDO(opts: UserOracleDOOptions) {
   return class UserOracleDO extends DurableObject<OracleWorkerEnv> {
     private db: DoSqliteDatabase | null = null;
+    private readonly toolScheduler = new ToolScheduler();
     private saver: SqliteSaver | null = null;
     private sessions: SessionsStore | null = null;
     private ownerStore: OwnerStore | null = null;
@@ -1439,6 +1444,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const deleted = await this.sessions!.deleteSession(sessionId);
       if (deleted) {
         await this.saver!.deleteThread(sessionId);
+        if (this.db)
+          await new SqliteHarnessStore(this.db).deleteSessionResults(sessionId);
         this.markDirty();
       }
       return deleted;
@@ -2846,7 +2853,52 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const hostRoomTitle = opts.hooks?.getRoomTitle;
       const hostSafetyModel = opts.hooks?.safetyModel;
 
+      const limits = {
+        tokens: Number(core.validatedEnv.TURN_MAX_TOKENS),
+        tools: Number(core.validatedEnv.TURN_MAX_TOOL_CALLS),
+        durationMs: Number(core.validatedEnv.TURN_TIMEOUT_MS),
+        contextTokens: Number(core.validatedEnv.MODEL_CONTEXT_TOKENS),
+        outputTokens: Number(core.validatedEnv.MODEL_OUTPUT_TOKENS),
+      };
+      const budget = new TurnBudget(limits);
+      const harnessStore = this.db
+        ? new SqliteHarnessStore(this.db)
+        : undefined;
+      const meteredLlm = budgetedLlm(
+        ambient.llm,
+        budget,
+        abortController.signal,
+        async () => {
+          await harnessStore?.recordUsage(
+            req.requestId,
+            req.sessionId,
+            budget.snapshot(),
+          );
+        },
+      );
+      const deadline = setTimeout(
+        () =>
+          abortController.abort(
+            new HarnessLimitError(
+              'budget_exhausted',
+              'The turn reached its time limit. Completed work is preserved.',
+            ),
+          ),
+        limits.durationMs,
+      );
+      turnDisposables.add(() => {
+        clearTimeout(deadline);
+        console.log('[harness] turn usage', budget.snapshot());
+      });
       const { agent, context } = await createMainAgent({
+        execution: {
+          budget,
+          scheduler: this.toolScheduler,
+          store: harnessStore,
+          sessionId: req.sessionId,
+          requestId: req.requestId,
+          signal: abortController.signal,
+        },
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
@@ -2854,6 +2906,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider: byoTurn?.provider,
         ambient: {
           ...ambient,
+          llm: meteredLlm,
           attachments: attachmentAccess,
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
         },
@@ -2903,6 +2956,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         checkpointer: saver,
         abortSignal: abortController.signal,
+      }).catch((error: unknown) => {
+        abortController.abort(error);
+        throw error;
       });
 
       const attachmentKwargs =
@@ -2955,7 +3011,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         signal: abortController.signal,
         recursionLimit: turnRecursionLimit(this.env),
         metadata: tracing.metadata,
-        ...(tracing.callbacks ? { callbacks: tracing.callbacks } : {}),
+        callbacks: [meteredLlm.callback, ...(tracing.callbacks ?? [])],
       };
       return {
         agent,
