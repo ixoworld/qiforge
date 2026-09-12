@@ -65,9 +65,10 @@ implementation, and what is deliberately left out.
   user's oracle room as a thread under the session's root event, the user
   message as `**You:**`, the reply prefixed with the oracle name, markdown
   rendered like `@ixo/matrix`'s `formatMsg` (`src/matrix/replay-format.ts`).
-  Fire-and-forget, exactly as Node's `MessagesService`. Room-originated turns
-  are answered in the room by the gateway; synthetic `$task-` sessions are
-  skipped.
+  The turn never waits on it, as with Node's `MessagesService`; unlike Node
+  it is queued per session and retried across a gateway restart (see the
+  divergences below). Room-originated turns are answered in the room by the
+  gateway; synthetic `$task-` sessions are skipped.
 - **Session history → memory**: the previous session's transcript goes to
   the memory engine when a session is created and when a session is deleted;
   the watermark is the same `last_processed_count` column. A second trigger
@@ -124,6 +125,13 @@ implementation, and what is deliberately left out.
   object's turn ledger makes a re-dispatch return the stored reply, attach to
   the running turn, or refuse — a turn never runs twice for one event
   ([operations](operations.md#turns-the-inbox)).
+- **Best-effort room posts are retried.** The room mirror of HTTP turns, the
+  `ixo.action.log` audit event and the `delegation_required` prompt are
+  fire-and-forget on Node; here they are retried across a gateway restart
+  (the mirror with a fixed transaction id, serialised per session), the
+  prompt's throttle is stamped only after a successful post, and a working
+  copy left ahead of its last upload by an interrupted turn is marked dirty
+  on boot ([operations](operations.md#best-effort-room-posts)).
 - **Interrupted tool calls are answered.** A turn that dies between a
   tool call and its result (the user's abort, an object reset) leaves the
   checkpoint with an assistant message whose `tool_calls` have no

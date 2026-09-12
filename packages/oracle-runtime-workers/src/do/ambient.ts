@@ -221,6 +221,8 @@ export interface CreateAmbientInput {
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Per-turn cleanup registry (see `RuntimeContext.onTurnEnd`). */
   onTurnEnd?: (dispose: () => void | Promise<void>) => void;
+  /** Keep-alive for un-awaited work (see `RuntimeContext.background`). */
+  background?: (work: Promise<unknown>) => void;
   config: Record<string, unknown>;
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
@@ -246,6 +248,8 @@ export function createAmbientServices(
     ...(input.tasks ? { tasks: input.tasks } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
     ...(input.frontend ? { frontend: input.frontend } : {}),
+    ...(input.onTurnEnd ? { onTurnEnd: input.onTurnEnd } : {}),
+    ...(input.background ? { background: input.background } : {}),
     config: input.config,
     identity: input.identity,
     availablePlugins: input.availablePlugins,

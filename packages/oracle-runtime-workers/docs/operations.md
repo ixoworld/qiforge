@@ -35,6 +35,7 @@ the calling user:
 | `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                             |
 | `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                            |
 | `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.            |
+| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                         |
 | `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests. |
 
 ## The gateway
@@ -98,6 +99,39 @@ markers are the exception — their event id becomes the session id, so they
 are not replayed; the user object retries the marker with the same
 transaction id for ~30 s (`src/do/gateway-retry.ts`) instead, and if every
 attempt fails the create fails.
+
+### Best-effort room posts
+
+Three posts the user object makes are best-effort by design (Node fires and
+forgets them too): the room mirror of every HTTP turn (the user message and
+the reply, threaded under the session's marker), the `ixo.action.log` audit
+event of every browser tool / AG-UI action, and the `delegation_required`
+prompt a Matrix turn posts when the user has no usable delegation. On Workers
+the gateway object is replaced on every deploy and can be drained mid-turn,
+so each of these is now retried across a restart for ~30 s
+(`src/do/gateway-retry.ts`) and kept alive past the request under
+`waitUntil`. The mirror is serialised per session and sent with the
+transaction id `replay-<session>-<request>-<u|o>`, so a response lost to a
+reset is deduplicated by the homeserver and a reply never overtakes the
+message it answers (`src/do/room-mirror.ts`). The two custom events carry no
+transaction id in the SDK: the one window that can post one of them twice is
+a response lost between the homeserver's ack and the reply to the gateway,
+sub-second, and a duplicate audit line or prompt is harmless.
+
+The prompt's 6-hour throttle (`UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`) is
+stamped only after the homeserver accepted the event
+(`src/do/reauth-prompt.ts`); a prompt lost to a restart is therefore posted
+on the user's next message instead of being suppressed for the whole window.
+`POST /debug/reauth-prompt/reset` forgets the stamp for drills.
+
+A turn that dies mid-way (an object reset, a provider error, the user's
+stop) leaves committed checkpoint steps with no dirty mark — the mark is set
+at the end of a turn. On boot the object compares the file's write
+generation with the generation it last uploaded and marks the copy dirty when
+the file moved on (`src/do/boot-dirty.ts`, one batched storage read per
+boot), so the next flush carries those steps and a later reload from the
+system of record cannot drop them. A copy that was never uploaded is left to
+its first completed turn.
 
 ### Turns: the inbox
 

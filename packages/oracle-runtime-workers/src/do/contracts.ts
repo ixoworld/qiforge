@@ -360,6 +360,8 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   debugMemorySchema(userDid: string): Promise<MemorySchemaDebug>;
   /** Forcibly reset the object like a platform host drain (debug routes only). The call itself rejects. */
   debugAbortObject(): Promise<void>;
+  /** Forget when the last re-authorise prompt was posted (debug routes only). */
+  debugResetReauthThrottle(): Promise<void>;
   /** Raw session row for `GET /debug/sessions/:id` (null when unknown). */
   debugSession(
     userDid: string,

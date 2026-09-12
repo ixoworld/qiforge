@@ -142,6 +142,9 @@ import {
 } from './contracts';
 import { turnRecursionLimit } from './turn-config';
 import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
+import { decideBootDirty } from './boot-dirty';
+import { mirrorTxnId, RoomMirror } from './room-mirror';
+import { ReauthPrompter } from './reauth-prompt';
 import {
   createTaskScheduler,
   TASK_SESSION_PREFIX,
@@ -245,6 +248,16 @@ const DELEGATION_MISS_TTL_MS = 60_000;
 const META_REAUTH_PROMPT_AT = 'meta:reauthPromptAt';
 /** Node's `AgentBuilder.DEFAULT_REAUTH_THROTTLE_SECONDS`. */
 const DEFAULT_REAUTH_THROTTLE_SECONDS = 6 * 60 * 60;
+
+/** `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` as a positive number, else the default. */
+function reauthThrottleSeconds(env: OracleWorkerEnv): number {
+  const raw = env.UCAN_REAUTH_PROMPT_THROTTLE_SECONDS;
+  return typeof raw === 'string' &&
+    Number.isFinite(Number(raw)) &&
+    Number(raw) > 0
+    ? Number(raw)
+    : DEFAULT_REAUTH_THROTTLE_SECONDS;
+}
 /** Highest whole-GB size watermark already alerted to Slack (0 = none). */
 const META_SIZE_ALERT_GB = 'meta:sizeAlertGb';
 /** Blob re-compression bookkeeping (see sqlite/blob-compactor.ts). */
@@ -441,6 +454,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private readonly matrixTurns = new Map<string, string>();
     /** What this object remembers about each room message it answered (see matrix-turn-ledger.ts). */
     private matrixLedger: MatrixTurnLedger | null = null;
+    /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
+    private mirror: RoomMirror | null = null;
+    /** The oracle room of each session this instance resolved: spares the mirrors a row read per send. */
+    private readonly sessionRooms = new Map<string, string>();
+    /** The throttled `delegation_required` prompt (see reauth-prompt.ts). */
+    private reauthPrompter: ReauthPrompter | null = null;
     /** Room turns running right now, by Matrix event id: a gateway that asks again attaches instead of re-running. */
     private readonly matrixTurnRuns = new Map<string, Promise<TurnResult>>();
 
@@ -962,6 +981,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           this.requestAlarm(Date.now() + FLUSH_RETRY_DELAY_MS);
         }
       }
+      await this.reconcileDirtyOnBoot(liveDb, userDid);
       {
         // One line per boot so an operator can tell what a user's object
         // actually holds without a debug route: which store, how big, how
@@ -1060,6 +1080,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         delegationFor: (did) => this.delegations.get(did),
         events: this.events,
         secrets: createSecretsAdapter(secretsService),
+        background: (work) => this.ctx.waitUntil(work),
       });
     }
 
@@ -1637,42 +1658,69 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * Emit a single throttled `ixo.oracle.delegation_required` event into the
-     * user's room when a Matrix turn finds no valid delegation; the web app
-     * listens for it and opens the authorize modal in place. Throttled per
-     * object (`UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`, default 6 h). Never throws.
+     * Ask the web app to open its "authorize for Matrix" modal in place when a
+     * Matrix turn finds no valid delegation — the Node AgentBuilder's
+     * `maybePromptReauth`, throttled per object
+     * (`UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`, default 6 h). Never throws; the
+     * prompt outlives the turn under `waitUntil` while it is retried across a
+     * gateway restart (see reauth-prompt.ts for the ordering that matters).
      */
-    private async maybePromptReauth(
+    private promptReauth(userDid: string, roomId: string): void {
+      this.reauthPrompter ??= new ReauthPrompter({
+        throttleMs: reauthThrottleSeconds(this.env) * 1000,
+        getStamp: () => this.ctx.storage.get<number>(META_REAUTH_PROMPT_AT),
+        setStamp: (at) => this.ctx.storage.put(META_REAUTH_PROMPT_AT, at),
+        send: (room) =>
+          this.gateway.sendEvent(
+            room,
+            'ixo.oracle.delegation_required',
+            JSON.stringify({
+              oracleEntityDid: this.core.identity.entityDid,
+              oracleDid: this.env.ORACLE_DID,
+            }),
+          ),
+        keepAlive: (work) => this.ctx.waitUntil(work),
+        log: (message) => console.log(message),
+        warn: (message) => console.warn(message),
+      });
+      void this.reauthPrompter.prompt(userDid, roomId);
+    }
+
+    /** Debug route: forget when the last re-authorise prompt was posted, so a drill can trigger the next one. */
+    async debugResetReauthThrottle(): Promise<void> {
+      await this.ctx.storage.delete(META_REAUTH_PROMPT_AT);
+    }
+
+    /**
+     * A turn that died mid-way leaves committed checkpoint steps with no dirty
+     * mark (the mark is set at the end of a turn). Compare the file's write
+     * generation with the last upload's on boot and mark the copy dirty when
+     * it moved on; one batched storage read per boot (see boot-dirty.ts).
+     */
+    private async reconcileDirtyOnBoot(
+      db: DoSqliteDatabase,
       userDid: string,
-      roomId: string,
     ): Promise<void> {
-      try {
-        const raw = this.env.UCAN_REAUTH_PROMPT_THROTTLE_SECONDS;
-        const throttleSeconds =
-          typeof raw === 'string' &&
-          Number.isFinite(Number(raw)) &&
-          Number(raw) > 0
-            ? Number(raw)
-            : DEFAULT_REAUTH_THROTTLE_SECONDS;
-        const last = await this.ctx.storage.get<number>(META_REAUTH_PROMPT_AT);
-        if (last !== undefined && Date.now() - last < throttleSeconds * 1000)
-          return;
-        await this.ctx.storage.put(META_REAUTH_PROMPT_AT, Date.now());
-        await this.gateway.sendEvent(
-          roomId,
-          'ixo.oracle.delegation_required',
-          JSON.stringify({
-            oracleEntityDid: this.core.identity.entityDid,
-            oracleDid: this.env.ORACLE_DID,
-          }),
-        );
+      if (this.dirty) return;
+      const got = await this.ctx.storage.get<unknown>([
+        META_DIRTY,
+        META_UPLOADED_GEN,
+      ]);
+      const decision = decideBootDirty({
+        dirtyInMemory: this.dirty,
+        dirtyFlag: got.get(META_DIRTY),
+        uploadedGen: got.get(META_UPLOADED_GEN),
+        writeGeneration: db.writeGeneration,
+      });
+      if (decision === 'flagged') {
+        // The mark is on disk already (its flush alarm too); just adopt it.
+        this.dirty = true;
+        this.requestAlarm(Date.now() + FLUSH_DEBOUNCE_MS);
+      } else if (decision === 'behind-upload') {
         console.log(
-          `[user-do] sent ixo.oracle.delegation_required to ${roomId} for ${userDid}`,
+          `[user-do] working copy of ${userDid} is at generation ${db.writeGeneration}, last upload at ${String(got.get(META_UPLOADED_GEN))} — a turn ended without marking it; flushing`,
         );
-      } catch (err) {
-        console.warn(
-          `[user-do] delegation-required event failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        this.markDirty();
       }
     }
 
@@ -2102,6 +2150,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.saver = null;
       this.sessions = null;
       this.matrixLedger = null;
+      this.sessionRooms.clear();
       this.ambient = null;
       this.secretsService = null;
       this.byo = null;
@@ -2859,6 +2908,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[user-do] no oracle room resolved for ${req.identity.userDid}; room-scoped plugins (memory) will be unavailable this turn`,
         );
       }
+      if (sessionRoomId) this.sessionRooms.set(req.sessionId, sessionRoomId);
 
       // A Matrix turn with no usable delegation: ask the web app to open its
       // "authorize for Matrix" modal (throttled per user, best-effort) — the
@@ -2868,7 +2918,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         sessionRoomId &&
         !this.delegations.get(req.identity.userDid)?.raw
       ) {
-        void this.maybePromptReauth(req.identity.userDid, sessionRoomId);
+        this.promptReauth(req.identity.userDid, sessionRoomId);
       }
 
       // Per-room user preferences (tone, language, what to call whom) —
@@ -3096,38 +3146,55 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!req.sessionId.startsWith('$')) return;
       if (!text.trim()) return;
       const label = who === 'user' ? 'user message' : 'AI response';
-      // `waitUntil`: the non-streaming handler returns its Response right
-      // after the turn, and un-awaited I/O started inside a request is torn
-      // down with it ("Network connection lost") unless the object is told
-      // to keep the work alive.
-      this.ctx.waitUntil(
-        (async () => {
+      // Serialised per session, retried across a gateway restart with a fixed
+      // transaction id, kept alive past the request (room-mirror.ts).
+      void this.roomMirror().enqueue(
+        req.sessionId,
+        async () => {
           const roomId =
+            this.sessionRooms.get(req.sessionId) ??
             req.roomId ??
             (await this.sessions?.getSession(req.sessionId))?.roomId ??
-            (await this.gateway.resolveUserRoom(req.identity.userDid))?.roomId;
+            (
+              await retryGateway(() =>
+                this.gateway.resolveUserRoom(req.identity.userDid),
+              )
+            )?.roomId;
           if (!roomId) throw new Error('no oracle room for this user');
+          this.sessionRooms.set(req.sessionId, roomId);
           const { body, formattedBody } = formatReplay({
             message: text,
             isOracle: who === 'oracle',
             oracleName: this.core.identity.name,
           });
-          const eventId = await this.gateway.sendText(roomId, body, {
+          return {
+            roomId,
+            body,
+            ...(formattedBody ? { formattedBody } : {}),
             threadId: req.sessionId,
-            formattedBody,
-            priority: 'background',
-          });
-          console.log(
-            `[user-do] Matrix replay (${label}) → ${eventId} in thread ${req.sessionId}`,
-          );
-        })().catch((err: unknown) => {
-          console.error(
-            `[user-do] Matrix replay (${label}) failed — session=${req.sessionId}: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }),
+            txnId: mirrorTxnId(req.sessionId, req.requestId, who),
+          };
+        },
+        label,
       );
+    }
+
+    private roomMirror(): RoomMirror {
+      this.mirror ??= new RoomMirror({
+        sendText: (send) =>
+          this.gateway.sendText(send.roomId, send.body, {
+            threadId: send.threadId,
+            ...(send.formattedBody
+              ? { formattedBody: send.formattedBody }
+              : {}),
+            priority: 'background',
+            txnId: send.txnId,
+          }),
+        keepAlive: (work) => this.ctx.waitUntil(work),
+        log: (message) => console.log(message),
+        warn: (message) => console.warn(message),
+      });
+      return this.mirror;
     }
 
     private async afterTurn(

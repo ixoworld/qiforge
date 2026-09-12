@@ -17,6 +17,7 @@
  * read): one row written on receipt, one delete when the turn ends.
  */
 import type { InboundAttachment, InboundMessage } from './ingest';
+import { matrixTxnId } from './txn-id';
 
 export interface InboxRow extends InboundMessage {
   receivedAt: number;
@@ -183,12 +184,5 @@ export function planInboxReplay(
  * contain `/`, whitespace or control characters, and stays under 255 bytes.
  */
 export function replyTxnId(eventId: string): string {
-  let safe = '';
-  for (const ch of eventId) {
-    const code = ch.charCodeAt(0);
-    if (ch === '/') safe += '_';
-    else if (ch === '+') safe += '-';
-    else if (code > 0x20 && code !== 0x7f) safe += ch;
-  }
-  return `reply-${safe}`.slice(0, 255);
+  return matrixTxnId('reply', eventId);
 }
