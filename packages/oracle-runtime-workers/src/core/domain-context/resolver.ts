@@ -107,7 +107,10 @@ export class DomainContextResolver {
   private contentBytes = 0;
   constructor(private readonly now = Date.now) {}
   invalidate(did: string): void {
-    this.anchors.delete(did);
+    const old = this.anchors.get(did);
+    if (old) this.anchors.set(did, { ...old, checked: -Infinity });
+    // Existing subscribers keep their lookup, but the next turn starts a new one.
+    this.pending.delete(did);
   }
   private async anchor(
     did: string,
@@ -123,24 +126,32 @@ export class DomainContextResolver {
       pending = transport
         .resolve(did, AbortSignal.timeout(10_000))
         .then((anchor) => {
-          if (this.anchors.size >= 32)
-            this.anchors.delete(this.anchors.keys().next().value ?? '');
-          this.anchors.set(did, { anchor, checked: this.now() });
+          if (this.pending.get(did) === pending) {
+            if (this.anchors.size >= 32)
+              this.anchors.delete(this.anchors.keys().next().value ?? '');
+            this.anchors.set(did, { anchor, checked: this.now() });
+          }
           return anchor;
         })
-        .finally(() => this.pending.delete(did));
+        .catch((error: unknown) => {
+          if (
+            this.pending.get(did) === pending &&
+            error instanceof Error &&
+            error.message.startsWith('invalid-anchor')
+          )
+            this.anchors.delete(did);
+          throw error;
+        })
+        .finally(() => {
+          if (this.pending.get(did) === pending) this.pending.delete(did);
+        });
       this.pending.set(did, pending);
     }
     try {
       return { value: await pending, stale: false };
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.startsWith('invalid-anchor')
-      ) {
-        this.anchors.delete(did);
+      if (error instanceof Error && error.message.startsWith('invalid-anchor'))
         throw error;
-      }
       if (old?.anchor) return { value: old.anchor, stale: true };
       throw error;
     }

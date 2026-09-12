@@ -358,3 +358,82 @@ it('does not cache an authenticated transport merely because the anchor says une
     resolver.bytes({ ...anchor, maxBytes: 1024 * 1024 }, authenticated),
   ).rejects.toThrow('access-revoked');
 });
+
+it('retains verified stale fallback after explicit refresh fails', async () => {
+  const { transport } = await setup();
+  const resolver = new DomainContextResolver();
+  expect((await resolver.load(did, transport)).status).toBe('verified');
+  resolver.invalidate(did);
+  transport.resolve.mockRejectedValueOnce(new Error('offline'));
+  const next = await resolver.load(did, transport);
+  expect(next.status).toBe('verified');
+  expect(next.stale).toBe(true);
+  expect(next.findings).toContain('anchor-stale');
+  transport.resolve.mockResolvedValueOnce(null);
+  expect((await resolver.load(did, transport)).status).toBe('missing');
+  transport.resolve.mockRejectedValueOnce(new Error('offline'));
+  resolver.invalidate(did);
+  expect((await resolver.load(did, transport)).status).toBe('unavailable');
+});
+
+it('does not let a pre-refresh lookup repopulate the next-turn cache', async () => {
+  const { anchor, transport } = await setup();
+  const resolver = new DomainContextResolver();
+  let finish!: (value: DomainAnchor | null) => void;
+  transport.resolve.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = resolver.load(did, transport);
+  resolver.invalidate(did);
+  finish(anchor);
+  expect((await pending).status).toBe('verified');
+  transport.resolve.mockResolvedValueOnce(null);
+  expect((await resolver.load(did, transport)).status).toBe('missing');
+  expect(transport.resolve).toHaveBeenCalledTimes(2);
+});
+
+it('keeps a post-refresh lookup deduplicated when the older lookup finishes', async () => {
+  const { anchor, transport } = await setup();
+  const resolver = new DomainContextResolver();
+  const finishes: Array<(value: DomainAnchor | null) => void> = [];
+  transport.resolve.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finishes.push(resolve);
+      }),
+  );
+  const older = resolver.load(did, transport);
+  resolver.invalidate(did);
+  const newer = resolver.load(did, transport);
+  finishes[0]!(anchor);
+  await older;
+  const subscriber = resolver.load(did, transport);
+  expect(transport.resolve).toHaveBeenCalledTimes(2);
+  finishes[1]!(null);
+  expect((await newer).status).toBe('missing');
+  expect((await subscriber).status).toBe('missing');
+  expect((await resolver.load(did, transport)).status).toBe('missing');
+  expect(transport.resolve).toHaveBeenCalledTimes(2);
+});
+
+it('does not let an older invalid lookup erase a newer confirmed binding', async () => {
+  const { transport } = await setup();
+  const resolver = new DomainContextResolver();
+  let fail!: (error: Error) => void;
+  transport.resolve.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+  );
+  const older = resolver.load(did, transport);
+  resolver.invalidate(did);
+  expect((await resolver.load(did, transport)).status).toBe('verified');
+  fail(new Error('invalid-anchor-ambiguous'));
+  expect((await older).status).toBe('invalid');
+  expect((await resolver.load(did, transport)).status).toBe('verified');
+  expect(transport.resolve).toHaveBeenCalledTimes(2);
+});
