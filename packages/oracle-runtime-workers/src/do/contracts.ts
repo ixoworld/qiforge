@@ -373,7 +373,8 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
    * Diagnostics: the object's current alarm and the user's task records — the
    * pair that answers "is this task going to fire, and when?".
    */
-  tasksStatus(): Promise<{
+  /** Task records, open runs and the alarm; boots the object when cold (`userDid` = the caller). */
+  tasksStatus(userDid?: string): Promise<{
     now: number;
     alarm: number | null;
     schedulerActive: boolean;
@@ -385,6 +386,15 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
       lastResult: { ok: boolean; summary: string; at: string } | null;
       consecutiveFailures: number;
       deliveryRoomId: string | null;
+    }>;
+    /** Runs no incarnation has finished: what an alarm will re-deliver or close. */
+    openRuns: Array<{
+      runId: string;
+      taskId: string;
+      startedAt: string;
+      state: 'running' | 'delivering';
+      attempts: number;
+      retryAt: number | null;
     }>;
   }>;
 }

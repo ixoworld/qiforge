@@ -1502,6 +1502,232 @@ async function main(): Promise<void> {
         );
       },
     );
+
+    // ── tasks: the run ledger under resets ─────────────────────────────────
+    interface TasksDebug {
+      tasks: Array<{ id: string; title: string; status: string }>;
+      openRuns: Array<{
+        runId: string;
+        taskId: string;
+        state: string;
+        attempts: number;
+      }>;
+    }
+    const tasksDebug = async (): Promise<TasksDebug> => {
+      const r = await authed(user, 'GET', '/debug/tasks');
+      assert.equal(r.status, 200, r.text.slice(0, 200));
+      return r.json as TasksDebug;
+    };
+    const taskByTitle = async (title: string) =>
+      (await tasksDebug()).tasks.find((t) => t.title === title);
+    /** Poll until a run of the task is open (the turn owns it), or time out. */
+    const waitForOpenRun = async (taskId: string, timeoutMs: number) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const open = (await tasksDebug()).openRuns.find(
+          (r) => r.taskId === taskId,
+        );
+        if (open) return open;
+        await pause(2_000);
+      }
+      throw new Error(`no open run for ${taskId} within ${timeoutMs} ms`);
+    };
+    const createTaskViaChat = async (
+      title: string,
+      schedule: string,
+      intent: string,
+    ): Promise<string> => {
+      let since = Date.now();
+      await mx.sendTextMessage(
+        roomId,
+        `Preview a background task for me (preview_task): title "${title}", ${schedule}, dedicatedRoom "no", intent: '${intent}' Show me the preview.`,
+      );
+      await waitForBotReply(since, /./s);
+      since = Date.now();
+      await mx.sendTextMessage(
+        roomId,
+        'Yes, that looks right — call create_task now with exactly the previewed title/intent/schedule/dedicatedRoom, then reply with the task id the tool returned (it starts with "task_").',
+      );
+      const confirmation = await waitForBotReply(since, /./s);
+      assert.match(
+        confirmation,
+        /task_/,
+        `no task id — was create_task called? Reply: "${confirmation.slice(0, 200)}"`,
+      );
+      const task = await taskByTitle(title);
+      assert.ok(task, `task "${title}" not in /debug/tasks`);
+      return task.id;
+    };
+    const TASK_FAILED_NOTICE = /could not be completed|has been stopped/;
+
+    await step(
+      'tasks reset safety: a one-shot task lost mid-run → one friendly notice, no result, no re-run, run closed as interrupted',
+      async () => {
+        const marker = `TASKRESET-${tag.toUpperCase()}`;
+        const at = new Date(Date.now() + 90_000).toISOString();
+        const taskId = await createTaskViaChat(
+          `Drill one ${tag}`,
+          `schedule kind "once" at exactly "${at}"`,
+          `Use the sandbox_run tool exactly once to run this shell command and nothing else: sleep 25 && echo "${marker}". When the tool has returned, reply with exactly ${marker} and nothing else.`,
+        );
+        const since = Date.now();
+        const open = await waitForOpenRun(taskId, 150_000);
+        assert.equal(open.state, 'running');
+        await pause(6_000); // the tool is in flight
+        const reset = await authed(user, 'POST', '/debug/object/abort');
+        assert.equal(reset.status, 200, reset.text.slice(0, 200));
+        const notice = await waitForBotReply(
+          since,
+          TASK_FAILED_NOTICE,
+          120_000,
+        );
+        assert.doesNotMatch(notice, /interrupt|reset|runtime|error/i);
+        await pause(45_000); // longer than the tool + a re-run would take
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          0,
+          'the run was re-run after the reset',
+        );
+        assert.equal(await countBotMessages(since, TASK_FAILED_NOTICE), 1);
+        const debug = await tasksDebug();
+        assert.equal(
+          debug.tasks.find((t) => t.id === taskId)?.status,
+          'failed',
+        );
+        assert.equal(
+          debug.openRuns.filter((r) => r.taskId === taskId).length,
+          0,
+        );
+      },
+    );
+
+    await step(
+      'tasks reset safety: a one-shot result is delivered exactly once while the gateway is reset around delivery',
+      async () => {
+        const marker = `TASKGW-${tag.toUpperCase()}`;
+        const atMs = Date.now() + 90_000;
+        const taskId = await createTaskViaChat(
+          `Drill two ${tag}`,
+          `schedule kind "once" at exactly "${new Date(atMs).toISOString()}"`,
+          `Reply with exactly ${marker} and nothing else. Do not use any tool.`,
+        );
+        const since = Date.now();
+        // Arm the wait BEFORE the reset loop: the result may land during it.
+        const replyPromise = waitForBotReply(
+          since,
+          new RegExp(marker),
+          360_000,
+        );
+        replyPromise.catch(() => undefined); // awaited below
+        // Hard-reset the gateway every 0.7 s (its boot takes ~1.5 s, so it
+        // never comes up) from just before the run fires until well past
+        // the turn: every send attempt of the first delivery round hits a
+        // dying or booting gateway, the run is parked with its stored
+        // result, and the next round on the alarm delivers it — under the
+        // run's fixed transaction id, so never twice.
+        await pause(Math.max(0, atMs - Date.now() - 3_000));
+        const stopAt = Date.now() + 40_000;
+        while (Date.now() < stopAt) {
+          const hit = await authed(user, 'POST', '/debug/matrix/abort');
+          assert.equal(hit.status, 200, hit.text.slice(0, 200));
+          await pause(700);
+        }
+        // What the loop did to the run: either parked (attempts ≥ 1, the
+        // next round re-sends the stored result) or already handed to the
+        // outbox during a gap between resets. Both must end in one message.
+        const parked = (await tasksDebug()).openRuns.find(
+          (r) => r.taskId === taskId,
+        );
+        console.log(
+          parked
+            ? `\n    run parked in '${parked.state}' after ${parked.attempts} delivery round(s)`
+            : '\n    run already handed to the outbox during the loop',
+        );
+        // In production the keep-alive alarm or cron brings the gateway
+        // back; here nothing else would touch it, so wake it explicitly and
+        // let the outbox / the next delivery round drain.
+        const woke = await authed(user, 'GET', '/matrix/status');
+        assert.equal(woke.status, 200, woke.text.slice(0, 200));
+        const reply = await replyPromise;
+        assert.ok(reply.includes(marker));
+        await pause(20_000);
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          1,
+          'the result was delivered more than once',
+        );
+        assert.equal(await countBotMessages(since, TASK_FAILED_NOTICE), 0);
+        const debug = await tasksDebug();
+        assert.equal(
+          debug.tasks.find((t) => t.id === taskId)?.status,
+          'completed',
+        );
+        assert.equal(
+          debug.openRuns.filter((r) => r.taskId === taskId).length,
+          0,
+        );
+      },
+    );
+
+    await step(
+      'tasks reset safety: a recurring task lost mid-run skips the occurrence, keeps its cadence, and the next run delivers once',
+      async () => {
+        const marker = `TASKREC-${tag.toUpperCase()}`;
+        const taskId = await createTaskViaChat(
+          `Drill three ${tag}`,
+          'schedule kind "interval" with everySeconds 300',
+          `Use the sandbox_run tool exactly once to run this shell command and nothing else: sleep 25 && echo "${marker}". When the tool has returned, reply with exactly ${marker} and nothing else.`,
+        );
+        const since = Date.now();
+        // First occurrence (~5 min out): reset the object mid-run.
+        const open = await waitForOpenRun(taskId, 420_000);
+        assert.equal(open.state, 'running');
+        await pause(6_000);
+        const reset = await authed(user, 'POST', '/debug/object/abort');
+        assert.equal(reset.status, 200, reset.text.slice(0, 200));
+        await pause(60_000);
+        assert.equal(
+          await countBotMessages(since, new RegExp(marker)),
+          0,
+          'the interrupted occurrence delivered a result',
+        );
+        assert.equal(
+          await countBotMessages(since, TASK_FAILED_NOTICE),
+          0,
+          'a recurring task was stopped after one interruption',
+        );
+        let debug = await tasksDebug();
+        assert.equal(
+          debug.tasks.find((t) => t.id === taskId)?.status,
+          'active',
+        );
+        assert.equal(
+          debug.openRuns.filter((r) => r.taskId === taskId).length,
+          0,
+        );
+        // Second occurrence delivers exactly once.
+        const reply = await waitForBotReply(since, new RegExp(marker), 420_000);
+        assert.ok(reply.includes(marker));
+        await pause(30_000);
+        assert.equal(await countBotMessages(since, new RegExp(marker)), 1);
+        debug = await tasksDebug();
+        assert.equal(
+          debug.tasks.find((t) => t.id === taskId)?.status,
+          'active',
+        );
+        // Clean up: cancel it through chat.
+        const cancelSince = Date.now();
+        await mx.sendTextMessage(
+          roomId,
+          `Call cancel_task on the task titled "Drill three ${tag}" and confirm.`,
+        );
+        await waitForBotReply(cancelSince, /./s);
+        assert.equal(
+          (await taskByTitle(`Drill three ${tag}`))?.status,
+          'cancelled',
+        );
+      },
+    );
   } finally {
     mx.stopClient();
   }
