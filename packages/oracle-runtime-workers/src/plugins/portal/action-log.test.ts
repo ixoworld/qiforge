@@ -37,6 +37,20 @@ describe('logActionToMatrix', () => {
     expect(postEvent).toHaveBeenCalledOnce();
     expect(postEvent.mock.calls[0]?.[1]).toBe(ACTION_LOG_EVENT_TYPE);
     expect(postEvent.mock.calls[0]?.[2]).toEqual({ action, threadId: '$sess' });
+    expect(postEvent.mock.calls[0]?.[3]).toEqual({
+      txnId: expect.stringMatching(/^action-log-[0-9a-f-]{36}$/),
+    });
+  });
+
+  it('gives every entry its own transaction id', async () => {
+    const postEvent = vi.fn().mockResolvedValue('$ev');
+    const { ctx, kept } = ctxWith(postEvent);
+    logActionToMatrix(ctx, action);
+    logActionToMatrix(ctx, { ...action, name: 'click' });
+    await Promise.all(kept);
+    expect(postEvent.mock.calls[0]?.[3]).not.toEqual(
+      postEvent.mock.calls[1]?.[3],
+    );
   });
 
   it('retries a transient gateway failure; the entry lands once', async () => {
@@ -52,6 +66,8 @@ describe('logActionToMatrix', () => {
     await kept[0];
     expect(postEvent).toHaveBeenCalledTimes(2);
     expect(warn).toHaveBeenCalledOnce(); // the retry line
+    // The retry re-sends under the same transaction id.
+    expect(postEvent.mock.calls[1]?.[3]).toEqual(postEvent.mock.calls[0]?.[3]);
   });
 
   it('logs and gives up on a non-transient failure', async () => {

@@ -5,13 +5,13 @@
  *
  * Retried across a gateway restart (the gateway object is replaced on every
  * deploy and can be drained mid-turn) and handed to the host to keep alive
- * past the turn, so the audit trail does not lose entries to resets. A
- * custom event carries no transaction id in the SDK, so the one window that
- * can duplicate an entry is a response lost between the homeserver's ack and
- * the reply to the gateway — sub-second, and a duplicate audit line is
- * harmless.
+ * past the turn, so the audit trail does not lose entries to resets. The
+ * post carries one transaction id for the life of its retry loop, so a
+ * response lost between the homeserver's ack and the reply to the gateway
+ * is deduplicated instead of logged twice.
  */
 import { retryGateway, type RetryGatewayOptions } from '../../do/gateway-retry';
+import { retryTxnId } from '../../matrix/txn-id';
 import type { RuntimeContext } from '../../plugin-api/types';
 
 export const ACTION_LOG_EVENT_TYPE = 'ixo.action.log';
@@ -33,12 +33,15 @@ export function logActionToMatrix(
   if (!roomId) return;
   const errorText = (err: unknown): string =>
     err instanceof Error ? err.message : String(err);
+  const txnId = retryTxnId('action-log');
   const work = retryGateway(
     () =>
-      ctx.matrix.postEvent(roomId, ACTION_LOG_EVENT_TYPE, {
-        action,
-        threadId: ctx.session.id,
-      }),
+      ctx.matrix.postEvent(
+        roomId,
+        ACTION_LOG_EVENT_TYPE,
+        { action, threadId: ctx.session.id },
+        { txnId },
+      ),
     {
       ...retry,
       onRetry: (err, attempt, delayMs) =>

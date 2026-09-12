@@ -486,8 +486,18 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
       txnId?: string;
     },
   ): Promise<string>;
-  /** Send an arbitrary timeline event (`content` JSON-encoded). Returns the event id. */
-  sendEvent(roomId: string, type: string, content: JsonString): Promise<string>;
+  /**
+   * Send an arbitrary timeline event (`content` JSON-encoded). Returns the
+   * event id. `txnId` pins the transaction id, as for `sendText`: the
+   * homeserver deduplicates by it per device, so a send retried after a lost
+   * response returns the original event instead of posting a second one.
+   */
+  sendEvent(
+    roomId: string,
+    type: string,
+    content: JsonString,
+    opts?: { txnId?: string },
+  ): Promise<string>;
   /** Resolve the canonical user↔oracle room for a user DID (alias lookup, cached). */
   resolveUserRoom(
     userDid: string,

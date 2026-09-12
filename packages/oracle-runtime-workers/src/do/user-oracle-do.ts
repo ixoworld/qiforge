@@ -1061,8 +1061,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.workStatus = new WorkStatusProducer({
-        postEvent: (roomId, type, content) =>
-          this.gateway.sendEvent(roomId, type, JSON.stringify(content)),
+        postEvent: (roomId, type, content, opts) =>
+          this.gateway.sendEvent(
+            roomId,
+            type,
+            JSON.stringify(content),
+            opts ?? {},
+          ),
         logger: console,
       });
       this.ambient = createAmbientServices({
@@ -1670,7 +1675,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         throttleMs: reauthThrottleSeconds(this.env) * 1000,
         getStamp: () => this.ctx.storage.get<number>(META_REAUTH_PROMPT_AT),
         setStamp: (at) => this.ctx.storage.put(META_REAUTH_PROMPT_AT, at),
-        send: (room) =>
+        send: (room, txnId) =>
           this.gateway.sendEvent(
             room,
             'ixo.oracle.delegation_required',
@@ -1678,6 +1683,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               oracleEntityDid: this.core.identity.entityDid,
               oracleDid: this.env.ORACLE_DID,
             }),
+            { txnId },
           ),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),

@@ -34,6 +34,7 @@ the calling user:
 | `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                        |
 | `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                              |
 | `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                             |
+| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                      |
 | `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                             |
 | `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                          |
 | `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                  |
@@ -113,10 +114,11 @@ so each of these is now retried across a restart for ~30 s
 `waitUntil`. The mirror is serialised per session and sent with the
 transaction id `replay-<session>-<request>-<u|o>`, so a response lost to a
 reset is deduplicated by the homeserver and a reply never overtakes the
-message it answers (`src/do/room-mirror.ts`). The two custom events carry no
-transaction id in the SDK: the one window that can post one of them twice is
-a response lost between the homeserver's ack and the reply to the gateway,
-sub-second, and a duplicate audit line or prompt is harmless.
+message it answers (`src/do/room-mirror.ts`). The two custom events are sent
+under a transaction id minted once per post and kept for the life of the
+retry loop (`sendEvent` takes one since `@ixo/matrix-bot-workers-sdk` 0.4.0),
+so a response lost between the homeserver's ack and the reply to the gateway
+is deduplicated as well — a retried post lands once.
 
 The prompt's 6-hour throttle (`UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`) is
 stamped only after the homeserver accepted the event

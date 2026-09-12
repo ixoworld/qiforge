@@ -23,3 +23,13 @@ export function matrixTxnId(prefix: string, ...parts: string[]): string {
   }
   return out.slice(0, MAX_TXN_ID_LENGTH);
 }
+
+/**
+ * A transaction id for a best-effort post whose retries all live in one
+ * in-memory loop (an audit entry, a prompt): fixed for the life of that loop,
+ * so a response lost after the homeserver accepted the event is deduplicated
+ * instead of posted twice, and fresh for every new post.
+ */
+export function retryTxnId(prefix: string): string {
+  return matrixTxnId(prefix, crypto.randomUUID());
+}

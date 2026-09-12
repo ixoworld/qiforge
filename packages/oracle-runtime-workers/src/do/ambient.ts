@@ -131,10 +131,15 @@ export function createMatrixAdapter(
   gateway: DurableObjectStub<MatrixGatewayObject>,
 ): AmbientServices['matrix'] {
   return {
-    postToRoom: (roomId, content) =>
-      gateway.sendEvent(roomId, 'm.room.message', JSON.stringify(content)),
-    postEvent: (roomId, eventType, content) =>
-      gateway.sendEvent(roomId, eventType, JSON.stringify(content)),
+    postToRoom: (roomId, content, opts) =>
+      gateway.sendEvent(
+        roomId,
+        'm.room.message',
+        JSON.stringify(content),
+        opts ?? {},
+      ),
+    postEvent: (roomId, eventType, content, opts) =>
+      gateway.sendEvent(roomId, eventType, JSON.stringify(content), opts ?? {}),
     botCredentials: () => gateway.botCredentials(),
     getRoomState: async (roomId): Promise<RoomStateSnapshot> => {
       const raw = await gateway.getRoomState(roomId);

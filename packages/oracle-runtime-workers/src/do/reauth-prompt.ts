@@ -8,10 +8,12 @@
  * The throttle is stamped only AFTER the homeserver accepted the event. The
  * earlier order — stamp, then send — turned a send lost to a gateway restart
  * into six hours of silence: the user kept messaging an oracle that could
- * not act, and nothing told them why. The send is retried across a restart;
- * a second turn arriving while a prompt is in flight joins it instead of
- * posting another.
+ * not act, and nothing told them why. The send is retried across a restart
+ * under one transaction id, so a response lost after the homeserver accepted
+ * the event is deduplicated rather than posted twice; a second turn arriving
+ * while a prompt is in flight joins it instead of posting another.
  */
+import { retryTxnId } from '../matrix/txn-id';
 import { retryGateway, type RetryGatewayOptions } from './gateway-retry';
 
 export interface ReauthPromptDeps {
@@ -19,8 +21,8 @@ export interface ReauthPromptDeps {
   /** When the last prompt was accepted (undefined = never). */
   getStamp(): Promise<number | undefined>;
   setStamp(at: number): Promise<void>;
-  /** Post the event; resolves to its event id. */
-  send(roomId: string): Promise<string>;
+  /** Post the event under the transaction id; resolves to its event id. */
+  send(roomId: string, txnId: string): Promise<string>;
   /** Keeps the (un-awaited) prompt alive past the request that started it: `ctx.waitUntil`. */
   keepAlive(work: Promise<unknown>): void;
   log(message: string): void;
@@ -58,7 +60,8 @@ export class ReauthPrompter {
     const now = this.deps.now?.() ?? Date.now();
     const last = await this.deps.getStamp();
     if (last !== undefined && now - last < this.deps.throttleMs) return;
-    const eventId = await retryGateway(() => this.deps.send(roomId), {
+    const txnId = retryTxnId('reauth');
+    const eventId = await retryGateway(() => this.deps.send(roomId, txnId), {
       ...this.deps.retry,
       onRetry: (err, attempt, delayMs) =>
         this.deps.warn(

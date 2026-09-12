@@ -27,6 +27,17 @@ import {
   type RouteExclusion,
 } from './auth';
 import { turnBodyTooLarge } from './turn-body-cap';
+import { z } from 'zod';
+
+const DebugEventBody = z.object({
+  type: z
+    .string()
+    .min(1)
+    .max(255)
+    .refine((t) => t !== 'm.room.redaction', 'redactions are not events'),
+  content: z.record(z.string(), z.unknown()).default({}),
+  txnId: z.string().min(1).max(255).optional(),
+});
 
 export interface PluginRoute {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
@@ -516,6 +527,30 @@ export function createShell(
   app.get('/debug/matrix/outbox', async (c) =>
     c.json({ rows: await gateway(c.env).listOutbox() }),
   );
+  // Drill: post a custom event into the caller's own room under a
+  // caller-pinned transaction id. The same id twice returns the same event
+  // (the homeserver deduplicates per device), which is what makes a
+  // best-effort post retried across a gateway restart land once.
+  app.post('/debug/matrix/event', async (c) => {
+    const parsed = DebugEventBody.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json(
+        { error: 'expected { type: string, content: object, txnId?: string }' },
+        400,
+      );
+    const room = await gateway(c.env).resolveUserRoom(c.get('auth').userDid);
+    if (!room) return c.json({ error: 'no room for this user' }, 404);
+    const { type, content, txnId } = parsed.data;
+    const eventId = await gateway(c.env).sendEvent(
+      room.roomId,
+      type,
+      JSON.stringify(content),
+      txnId === undefined ? {} : { txnId },
+    );
+    return c.json({ roomId: room.roomId, eventId });
+  });
   app.post('/debug/matrix/abort', async (c) => {
     try {
       await gateway(c.env).debugAbortObject();

@@ -127,8 +127,10 @@ implementation, and what is deliberately left out.
   ([operations](operations.md#turns-the-inbox)).
 - **Best-effort room posts are retried.** The room mirror of HTTP turns, the
   `ixo.action.log` audit event and the `delegation_required` prompt are
-  fire-and-forget on Node; here they are retried across a gateway restart
-  (the mirror with a fixed transaction id, serialised per session), the
+  fire-and-forget on Node; here they are retried across a gateway restart,
+  each under a fixed transaction id so a post whose response was lost lands
+  once (the mirror's derived from session and request and serialised per
+  session, the two custom events' minted once per post), the
   prompt's throttle is stamped only after a successful post, and a working
   copy left ahead of its last upload by an interrupted turn is marked dirty
   on boot ([operations](operations.md#best-effort-room-posts)).

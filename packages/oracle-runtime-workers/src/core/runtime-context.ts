@@ -8,6 +8,7 @@ import type {
   ChatOpenAIFields,
   Logger,
   MatrixEvent,
+  MatrixPostOpts,
   MergedConfig,
   MessageCacheInvalidationPayload,
   ModelRole,
@@ -60,7 +61,11 @@ export interface BlobStoreAdapter {
 
 /** Matrix adapter exposing only scoped operations a plugin should ever need. */
 export interface MatrixAdapter {
-  postToRoom(roomId: string, content: unknown): Promise<string>;
+  postToRoom(
+    roomId: string,
+    content: unknown,
+    opts?: MatrixPostOpts,
+  ): Promise<string>;
   /**
    * Post a timeline event with a caller-chosen event type. `postToRoom` is
    * the `m.room.message` shorthand; this is the general form. Returns the
@@ -70,6 +75,7 @@ export interface MatrixAdapter {
     roomId: string,
     eventType: string,
     content: object,
+    opts?: MatrixPostOpts,
   ): Promise<string>;
   getRoomState(roomId: string): Promise<RoomStateSnapshot>;
   getEventById(roomId: string, eventId: string): Promise<MatrixEvent>;
@@ -403,11 +409,11 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.blobStore.isValidBlobId(value),
     },
     matrix: {
-      postToRoom: (roomId, content) =>
-        ambient.matrix.postToRoom(roomId, content),
+      postToRoom: (roomId, content, opts) =>
+        ambient.matrix.postToRoom(roomId, content, opts),
       botCredentials: () => ambient.matrix.botCredentials(),
-      postEvent: (roomId, eventType, content) =>
-        ambient.matrix.postEvent(roomId, eventType, content),
+      postEvent: (roomId, eventType, content, opts) =>
+        ambient.matrix.postEvent(roomId, eventType, content, opts),
       getRoomState: (roomId) => ambient.matrix.getRoomState(roomId),
       getEventById: (roomId, eventId) =>
         ambient.matrix.getEventById(roomId, eventId),
