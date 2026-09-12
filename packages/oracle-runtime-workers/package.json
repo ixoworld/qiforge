@@ -1,6 +1,6 @@
 {
   "name": "@ixo/oracle-runtime-workers",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "QiForge oracle runtime for Cloudflare Workers — Durable Object per user (SQLite in WASM over DO storage), Matrix E2EE gateway Durable Object, Hono HTTP/SSE shell.",
   "private": false,
   "publishConfig": {
