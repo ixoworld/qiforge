@@ -56,6 +56,13 @@ The subclass adds only what is specific to the oracle:
 - inbound room messages → user-object turns (`src/matrix/ingest.ts` debounces
   per session for 500 ms and builds one turn per burst, with attachments and
   the thread or quote-reply chain resolved);
+- a durable turn inbox (`src/matrix/inbox-store.ts`): every accepted room
+  message is written to the gateway's SQLite before anything waits on the
+  network and deleted when its turn has ended, so a gateway reset during the
+  LLM turn re-dispatches the message on the next start instead of losing the
+  reply; replies carry a transaction id derived from the event id, and the
+  user object's turn ledger (`src/do/matrix-turn-ledger.ts`) guarantees a
+  turn never runs twice for one event;
 - user ↔ oracle room resolution from DIDs (alias on the user's own
   homeserver, see [operations](operations.md#rooms-and-aliases));
 - dedicated `[Task] <title>` rooms;

@@ -12,6 +12,7 @@ import {
   type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
+import { createDanglingToolCallRepairMiddleware } from './middlewares/dangling-tool-calls';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
@@ -269,7 +270,12 @@ export function createSubagentAsTool(
           model: spec.model,
           tools: innerTools,
           systemPrompt: spec.systemPrompt,
-          middleware: spec.middleware ?? [],
+          // Sub-agent threads are checkpointed too, so an interrupted tool
+          // call in one would poison its later invocations the same way.
+          middleware: [
+            createDanglingToolCallRepairMiddleware(),
+            ...(spec.middleware ?? []),
+          ],
           checkpointer,
         });
 

@@ -28,6 +28,7 @@ import {
   withRateLimitRetry,
   type BotMessage,
   type MatrixBotOptions,
+  type StartResult,
 } from '@ixo/matrix-bot-workers-sdk';
 import { createClient, MatrixError, Preset, Visibility } from 'matrix-js-sdk';
 import {
@@ -44,6 +45,7 @@ import {
   type UserOracleObject,
   type MediaStream,
   type SnapshotStream,
+  isInterruptedTurnError,
 } from '../do/contracts';
 import { decryptWithPin } from '../secrets/pin-cipher';
 import {
@@ -56,7 +58,21 @@ import {
   IngestPipeline,
   type InboundAttachment,
   type IngestTurn,
+  type InboundMessage,
 } from './ingest';
+import {
+  bumpInboxAttempts,
+  countInboxRows,
+  deleteInboxRows,
+  ensureInboxTable,
+  inboundOfRow,
+  insertInboxRow,
+  listInboxRows,
+  MAX_TURN_REPLAYS,
+  planInboxReplay,
+  replyTxnId,
+  updateInboxThread,
+} from './inbox-store';
 import {
   readRelatesTo,
   resolveReplyChainRoot,
@@ -194,6 +210,10 @@ function stateEventId(json: JsonString | null): string | undefined {
 // Durable Object
 // ---------------------------------------------------------------------------
 
+/** Posted when a room turn fails or is given up; the user resends. */
+const TURN_FAILED_NOTICE =
+  'Sorry — something went wrong while handling your message. Please try again.';
+
 export class MatrixGatewayDO
   extends MatrixBotDO<OracleWorkerEnv>
   implements MatrixGatewayObject
@@ -211,6 +231,10 @@ export class MatrixGatewayDO
   /** Memoised `getOracleSecretsKey` result (private JWK JSON). */
   private oracleSecretsKeyJson: string | null = null;
   private oracleSigningMnemonic: string | null = null;
+  private inboxTableReady = false;
+  /** Event ids of turns running in this instance (a graceful restart must not replay them). */
+  private readonly inFlightEvents = new Set<string>();
+  private inboxReplayRunning = false;
 
   // -------------------------------------------------------------------------
   // Configuration
@@ -300,26 +324,43 @@ export class MatrixGatewayDO
     const isText = message.msgtype === 'm.text';
     const isFile = FILE_MSGTYPES.has(message.msgtype);
     if (!isText && !isFile) return;
-    // Resolved before the offer so the pipeline's synchronous alias lookup
-    // (room alias → user DID) can answer from the memo.
-    await this.canonicalAliasOf(message.roomId);
-    const threadRootId = await this.threadRootFor(message, eventId);
-    const outcome = this.ingestPipeline().offer({
+    const inbound: InboundMessage = {
       eventId,
       roomId: message.roomId,
       sender: message.sender,
       ts: message.ts,
       body: isText ? message.body : '',
-      ...(threadRootId ? { threadRootId } : {}),
+      ...(message.threadRootId ? { threadRootId: message.threadRootId } : {}),
       ...(isFile
         ? { attachment: attachmentOf(content, eventId, message.body) }
         : {}),
-    });
-    if (outcome !== 'queued')
+    };
+    // Durable before anything waits on the network: the SDK has already
+    // marked the event processed, so from here on only this row brings the
+    // message back if the instance dies before its reply is in the outbox.
+    const sql = this.inboxSql();
+    insertInboxRow(sql, inbound, Date.now());
+    // Resolved before the offer so the pipeline's synchronous alias lookup
+    // (room alias → user DID) can answer from the memo.
+    await this.canonicalAliasOf(message.roomId);
+    const threadRootId = await this.threadRootFor(message, eventId);
+    if (threadRootId && threadRootId !== inbound.threadRootId) {
+      inbound.threadRootId = threadRootId;
+      updateInboxThread(sql, eventId, threadRootId);
+    }
+    this.offerInbound(inbound);
+  }
+
+  /** Feed a message into the ingest pipeline; a message it will not turn into a turn leaves the inbox at once. */
+  private offerInbound(inbound: InboundMessage): void {
+    const outcome = this.ingestPipeline().offer(inbound);
+    if (outcome !== 'queued') {
+      deleteInboxRows(this.inboxSql(), [inbound.eventId]);
       this.log(
         'debug',
-        `ingest dropped ${eventId} in ${message.roomId}: ${outcome}`,
+        `ingest dropped ${inbound.eventId} in ${inbound.roomId}: ${outcome}`,
       );
+    }
   }
 
   /**
@@ -380,6 +421,7 @@ export class MatrixGatewayDO
       'info',
       `turn ${requestId}: ${turn.userDid} in ${turn.roomId}${turn.threadId ? ` (thread ${turn.threadId})` : ''}`,
     );
+    for (const id of turn.eventIds) this.inFlightEvents.add(id);
     let typing: ReturnType<typeof setInterval> | null = null;
     try {
       await this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS);
@@ -389,29 +431,46 @@ export class MatrixGatewayDO
         );
       }, TYPING_REFRESH_MS);
       const result = await this.runTurn(turn, requestId);
-      if (result.text.trim()) {
-        await this.sendText(
-          turn.roomId,
-          result.text,
-          turn.threadId ? { threadId: turn.threadId } : undefined,
+      if (result.replayed)
+        this.log(
+          'info',
+          `turn ${requestId}: reply served from the user object's ledger (turn had already finished)`,
         );
+      if (result.text.trim()) {
+        // The transaction id is derived from the event id, so this reply is
+        // deduplicated by the homeserver if a previous incarnation already
+        // sent it before it died (see inbox-store.ts).
+        await this.sendText(turn.roomId, result.text, {
+          ...(turn.threadId ? { threadId: turn.threadId } : {}),
+          ...(turn.eventIds[0] ? { txnId: replyTxnId(turn.eventIds[0]) } : {}),
+        });
       } else {
         this.log('info', `turn ${requestId}: empty reply, nothing sent`);
       }
+      // The reply is in the durable outbox (or there is none): the turn
+      // has ended, the inbox row has done its job.
+      deleteInboxRows(this.inboxSql(), turn.eventIds);
     } catch (err) {
       // A turn aborted because a newer message on the same thread superseded
       // it is not a failure: the new turn answers, the old card says so.
       if (isAbortError(err)) {
         this.log('info', `turn ${requestId}: superseded by a newer message`);
+        deleteInboxRows(this.inboxSql(), turn.eventIds);
         return;
       }
-      this.log('error', `turn ${requestId} failed`, err);
-      try {
-        await this.sendNotice(
-          turn.roomId,
-          'Sorry — something went wrong while handling your message. Please try again.',
-          turn.threadId ? { threadId: turn.threadId } : undefined,
+      if (isInterruptedTurnError(err))
+        this.log(
+          'warn',
+          `turn ${requestId}: the user object lost this turn in a reset and will not re-run it; asking the user to retry`,
         );
+      else this.log('error', `turn ${requestId} failed`, err);
+      try {
+        await this.sendNotice(turn.roomId, TURN_FAILED_NOTICE, {
+          ...(turn.threadId ? { threadId: turn.threadId } : {}),
+          ...(turn.eventIds[0]
+            ? { txnId: `${replyTxnId(turn.eventIds[0])}-notice` }
+            : {}),
+        });
       } catch (noticeErr) {
         this.log(
           'error',
@@ -419,7 +478,10 @@ export class MatrixGatewayDO
           noticeErr,
         );
       }
+      // Told the user (or could not): either way this turn is over.
+      deleteInboxRows(this.inboxSql(), turn.eventIds);
     } finally {
+      for (const id of turn.eventIds) this.inFlightEvents.delete(id);
       if (typing) clearInterval(typing);
       await this.setTyping(turn.roomId, false).catch(() => undefined);
       // Close the card on every exit — reply posted, empty reply, thrown
@@ -460,6 +522,103 @@ export class MatrixGatewayDO
       ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
       requestId,
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Turn inbox: room messages whose reply is not in the outbox yet
+  // -------------------------------------------------------------------------
+
+  private inboxSql(): SqlStorage {
+    const sql = this.ctx.storage.sql;
+    if (!this.inboxTableReady) {
+      ensureInboxTable(sql);
+      this.inboxTableReady = true;
+    }
+    return sql;
+  }
+
+  /**
+   * Every start of this instance — first request, keep-alive alarm, RPC —
+   * goes through here. A start that actually brought the bot up is the
+   * moment to re-dispatch the turns a previous incarnation left unfinished.
+   */
+  override async ensureStarted(): Promise<StartResult> {
+    const result = await super.ensureStarted();
+    if (result.started) this.scheduleInboxReplay();
+    return result;
+  }
+
+  private scheduleInboxReplay(): void {
+    if (this.inboxReplayRunning) return;
+    this.inboxReplayRunning = true;
+    void this.replayInbox()
+      .catch((err: unknown) => this.log('error', 'inbox replay failed', err))
+      .finally(() => {
+        this.inboxReplayRunning = false;
+      });
+  }
+
+  /**
+   * Re-dispatch the messages whose turn never ended. Each replay is charged
+   * to the row; a row that has used its replays gets the "try again" notice
+   * instead, so a message that kills the instance cannot loop. The user
+   * object decides what a replay means for it (`matrix-turn-ledger.ts`):
+   * stored reply, attach to the running turn, or refuse — never a second run.
+   */
+  private async replayInbox(): Promise<void> {
+    const sql = this.inboxSql();
+    const rows = listInboxRows(sql);
+    if (rows.length === 0) return;
+    const plan = planInboxReplay(rows, {
+      inFlight: this.inFlightEvents,
+      maxReplays: MAX_TURN_REPLAYS,
+    });
+    for (const row of plan.exhausted) {
+      this.log(
+        'warn',
+        `inbox: giving up on ${row.eventId} in ${row.roomId} after ${row.attempts} replays; notifying the user`,
+      );
+      try {
+        await this.sendNotice(row.roomId, TURN_FAILED_NOTICE, {
+          ...(row.threadRootId ? { threadId: row.threadRootId } : {}),
+          txnId: `${replyTxnId(row.eventId)}-notice`,
+        });
+      } catch (err) {
+        this.log(
+          'error',
+          `inbox: could not post the notice for ${row.eventId}`,
+          err,
+        );
+      }
+      deleteInboxRows(sql, [row.eventId]);
+    }
+    if (plan.replay.length > 0)
+      bumpInboxAttempts(
+        sql,
+        plan.replay.map((row) => row.eventId),
+      );
+    for (const row of plan.replay) {
+      try {
+        await this.canonicalAliasOf(row.roomId);
+      } catch (err) {
+        this.log('warn', `inbox: alias lookup failed for ${row.roomId}`, err);
+      }
+      this.offerInbound(inboundOfRow(row));
+    }
+    this.log(
+      'info',
+      `inbox replay: ${plan.replay.length} turn(s) re-dispatched, ${plan.exhausted.length} given up, ${plan.skipped.length} already running`,
+    );
+  }
+
+  /**
+   * Operator / testing aid behind `ORACLE_DEBUG_ROUTES`: reset this object
+   * the way an unplanned platform reset does — in-flight turns and the sync
+   * loop die, committed storage (outbox, inbox, crypto snapshot) survives,
+   * the next request or alarm boots a fresh instance. The RPC rejects.
+   */
+  async debugAbortObject(): Promise<void> {
+    this.ctx.abort('debug reset requested');
   }
 
   override async stop(): Promise<void> {
@@ -1002,6 +1161,7 @@ export class MatrixGatewayDO
       ...(await super.status()),
       turns: { inFlight: this.turnGate.inUse, waiting: this.turnGate.queued },
       ingestPending: this.ingest?.pendingCount ?? 0,
+      inbox: countInboxRows(this.inboxSql()),
     };
   }
 }

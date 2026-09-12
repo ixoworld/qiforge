@@ -24,16 +24,18 @@ Public (UCAN-authenticated unless noted):
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
 
-| Route                                                                          | Purpose                                                                                                                                  |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload. |
-| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                                                         |
-| `GET /debug/tasks`                                                             | The caller's task records and the object's current alarm.                                                                                |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                    |
-| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                          |
-| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                  |
-| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                        |
-| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                       |
+| Route                                                                          | Purpose                                                                                                                                       |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload.      |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                                                              |
+| `GET /debug/tasks`                                                             | The caller's task records and the object's current alarm.                                                                                     |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                         |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                               |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                       |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                             |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                            |
+| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.            |
+| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests. |
 
 ## The gateway
 
@@ -96,6 +98,30 @@ markers are the exception — their event id becomes the session id, so they
 are not replayed; the user object retries the marker with the same
 transaction id for ~30 s (`src/do/gateway-retry.ts`) instead, and if every
 attempt fails the create fails.
+
+### Turns: the inbox
+
+The outbox only exists once a reply exists. Between the SDK marking a room
+message processed and the user object finishing the LLM turn there was
+nothing durable, so a gateway reset in that window (a platform host drain,
+observed nine times in 37 h on a 1,186-room gateway) lost the reply silently.
+The gateway now writes every accepted message to the SQLite `turn_inbox`
+table before anything waits on the network and deletes the row when the turn
+ends: reply written to the outbox, empty reply, superseded, or the "try
+again" notice posted. Every start that brings the bot up re-dispatches the
+surviving rows through the ingest pipeline (`inbox replay: …` log line);
+each replay is charged to the row and a row replayed `MAX_TURN_REPLAYS`
+times gets the notice instead, so a message that kills the instance cannot
+loop. `status.inbox` counts pending rows.
+
+A replay never runs a turn twice. Room replies are sent with the transaction
+id `reply-<event id>`, so a reply the dead incarnation had already handed to
+the outbox or the homeserver is deduplicated server-side. The user object
+keeps a ledger per Matrix event (`matrix_turns` in the user's SQLite):
+an event it already answered returns the stored text without a model call,
+one whose turn is still running attaches to it, and one it lost in a reset
+of its own (tools may have run) is refused with a warning — the gateway posts
+the notice and the user resends, exactly as before this change.
 
 A send the crypto WASM cannot encrypt does not fail cleanly: the machine
 panics, later crypto calls throw `null pointer passed to rust`, and the

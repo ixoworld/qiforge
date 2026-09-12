@@ -26,8 +26,13 @@ implementation, and what is deliberately left out.
   and auth faults redacted before the wire.
 - **Request validation** on `POST /messages/:id` mirrors Node's
   `ValidationPipe` and body parser: malformed JSON → 400, unknown top-level
-  fields → 400, empty `message` → 400, bodies over 100 KiB → 413, unknown
-  session → 404, transcript of an unknown session → `{ messages: [] }`.
+  fields → 400, empty `message` → 400, oversized bodies → 413, unknown
+  session → 404, transcript of an unknown session → `{ messages: [] }`. The
+  body cap itself differs: 256 KiB here (`src/shell/turn-body-cap.ts`) against
+  Express body-parser's 100 kb on Node. A Portal turn carries the browser-tool
+  catalogue and the AG-UI action schemas (~92–98 KiB before the message
+  text), so Node's default refuses ordinary turns; the Workers cap exists to
+  bound memory per request, not to match Node.
 - **Request metadata → agent state**: `metadata.editorRoomId`, `spaceId`,
   `sessionRunId` and `currentEntityDid` update the thread's checkpointed
   state by the Node agent-builder's rules (`src/do/turn-metadata.ts`): a
@@ -108,6 +113,26 @@ implementation, and what is deliberately left out.
   for: `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`.
 - **Blob compression.** A file written by this runtime is not readable by
   the Node runtime; the reverse direction works.
+- **Per-turn step budget.** LangGraph `recursionLimit` is 600 here
+  (`TURN_RECURSION_LIMIT`), three times Node's hard-coded 200: a tool-call round
+  trip costs about 6 steps with the bundled middlewares, and long research
+  turns were dying at the smaller budget.
+- **Room turns survive a gateway reset.** Node keeps the inbound message in
+  process memory for the length of the turn; here the gateway keeps a durable
+  inbox row until the reply is in the outbox and re-dispatches survivors on
+  the next start, replies carry an event-derived transaction id, and the user
+  object's turn ledger makes a re-dispatch return the stored reply, attach to
+  the running turn, or refuse — a turn never runs twice for one event
+  ([operations](operations.md#turns-the-inbox)).
+- **Interrupted tool calls are answered.** A turn that dies between a
+  tool call and its result (the user's abort, an object reset) leaves the
+  checkpoint with an assistant message whose `tool_calls` have no
+  `ToolMessage`. OpenRouter chat completions tolerate that; the
+  ChatGPT-subscription lane (Responses API) rejects every later turn on the
+  session with `400 No tool output found for function call …`. The
+  `DanglingToolCallRepair` middleware (main agent and sub-agents) answers
+  each such call, for the model request only, with a result saying it was
+  interrupted; the checkpoint is untouched. Node has no equivalent.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
 

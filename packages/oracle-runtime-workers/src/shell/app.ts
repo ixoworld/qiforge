@@ -26,6 +26,7 @@ import {
   type AuthResult,
   type RouteExclusion,
 } from './auth';
+import { turnBodyTooLarge } from './turn-body-cap';
 
 export interface PluginRoute {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'ALL';
@@ -65,9 +66,6 @@ const BUILTIN_EXCLUSIONS: RouteExclusion[] = [
   { path: '/debug/matrix/restart', method: 'POST' },
   { path: '/debug/matrix/stop', method: 'POST' },
 ];
-
-/** Express body-parser default in the Node runtime: JSON bodies over 100 KiB are a 413. */
-const MAX_TURN_BODY_BYTES = 100 * 1024;
 
 export function createShell(
   opts: ShellOptions = {},
@@ -267,9 +265,9 @@ export function createShell(
     const identity = identityOf(c.get('auth'), c.req.raw.headers);
     const sessionId = c.req.param('sessionId');
     const body = await c.req.text();
-    // Node (express body-parser default) refuses JSON bodies over 100 KiB
-    // with a 413; attachments are references, so real turns never get near it.
-    if (new TextEncoder().encode(body).byteLength > MAX_TURN_BODY_BYTES) {
+    // Bounds the memory one request can pin (see turn-body-cap.ts); the
+    // status and message are the ones Node's body parser uses.
+    if (turnBodyTooLarge(body)) {
       return c.json(
         { statusCode: 413, message: 'request entity too large' },
         413,
@@ -454,6 +452,15 @@ export function createShell(
   app.post('/debug/storage/reset', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).resetWorkingCopy()),
   );
+  app.post('/debug/object/abort', async (c) => {
+    try {
+      await userStub(c.env, c.get('auth').userDid).debugAbortObject();
+    } catch {
+      // The abort tears the object down under the call: the rejection is the
+      // expected signal that it happened.
+    }
+    return c.json({ aborted: true });
+  });
   app.get('/debug/memory-schema', async (c) => {
     const userDid = c.get('auth').userDid;
     return c.json(await userStub(c.env, userDid).debugMemorySchema(userDid));
@@ -487,6 +494,15 @@ export function createShell(
   app.get('/debug/matrix/outbox', async (c) =>
     c.json({ rows: await gateway(c.env).listOutbox() }),
   );
+  app.post('/debug/matrix/abort', async (c) => {
+    try {
+      await gateway(c.env).debugAbortObject();
+    } catch {
+      // The abort tears the object down under the call: the rejection is the
+      // expected signal that it happened.
+    }
+    return c.json({ aborted: true });
+  });
   app.post('/debug/matrix/restart', async (c) =>
     c.json(await gateway(c.env).restart()),
   );
