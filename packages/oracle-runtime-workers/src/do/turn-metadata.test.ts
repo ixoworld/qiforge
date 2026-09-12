@@ -117,3 +117,13 @@ describe('metadata → state (Node agent-builder rules)', () => {
     ).toEqual([EDITOR_PLUGIN_NAME]);
   });
 });
+
+it('explicitly clears subject context while omission keeps the selected domain', () => {
+  const prior = { currentEntityDid: 'did:ixo:entity:previous' };
+  const cleared = parseTurnMetadata(JSON.stringify({ currentEntityDid: null }));
+  expect(metadataBuildState(cleared, prior).currentEntityDid).toBeNull();
+  expect(metadataGraphInput(cleared, prior).currentEntityDid).toBeNull();
+  expect(metadataBuildState({}, prior).currentEntityDid).toBe(
+    prior.currentEntityDid,
+  );
+});

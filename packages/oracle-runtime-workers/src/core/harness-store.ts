@@ -1,5 +1,10 @@
 /** Implemented by the user's SQLite working copy; never shared across users. */
 export interface HarnessStore {
+  recordDomainContext?(
+    requestId: string,
+    sessionId: string,
+    report: unknown,
+  ): Promise<void>;
   recordUsage?(
     requestId: string,
     sessionId: string,

@@ -35,7 +35,7 @@ export interface TurnBody {
     editorRoomId?: string;
     spaceId?: string;
     sessionRunId?: string;
-    currentEntityDid?: string;
+    currentEntityDid?: string | null;
   };
   tools?: Array<{
     name: string;

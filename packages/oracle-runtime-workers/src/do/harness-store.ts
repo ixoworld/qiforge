@@ -25,6 +25,20 @@ export class SqliteHarnessStore implements HarnessStore {
       'CREATE TABLE IF NOT EXISTS harness_results (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL)',
     );
   }
+  async recordDomainContext(
+    requestId: string,
+    sessionId: string,
+    report: unknown,
+  ): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      'CREATE TABLE IF NOT EXISTS domain_context_runs (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, report TEXT NOT NULL)',
+    );
+    await this.db.run(
+      'INSERT OR REPLACE INTO domain_context_runs VALUES (?, ?, ?)',
+      [requestId, sessionId, JSON.stringify(report)],
+    );
+  }
   async recordUsage(
     requestId: string,
     sessionId: string,
@@ -39,6 +53,12 @@ export class SqliteHarnessStore implements HarnessStore {
   }
   async deleteSessionResults(sessionId: string): Promise<void> {
     await this.setup();
+    await this.db.run(
+      'CREATE TABLE IF NOT EXISTS domain_context_runs (request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, report TEXT NOT NULL)',
+    );
+    await this.db.run('DELETE FROM domain_context_runs WHERE session_id = ?', [
+      sessionId,
+    ]);
     await this.db.run('DELETE FROM harness_results WHERE session_id = ?', [
       sessionId,
     ]);

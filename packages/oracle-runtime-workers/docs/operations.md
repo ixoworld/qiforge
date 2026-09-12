@@ -343,3 +343,9 @@ Operators can inspect `operation_id`, `session_id`, `fingerprint` and `started_a
 On abort, Workers terminates in-flight action frames and emits one `done` frame. Context/budget failures carry `retryable: false`. The SDK reports a connection ending without `done`; it must never retry a POST automatically. Reconcile session history and external action results before submitting another turn.
 
 Before deployment, run the existing gateway/user-object reset drills against the actual Companion instance, and test safe reads, uncertain writes, long research, cancelled compaction and each BYO provider lane. Local deterministic suites cannot establish deployed latency or provider billing improvements.
+
+## Domain-context rollout diagnostics
+
+Domain-context provenance is emitted on `router_update` and recorded in the user-owned `domain_context_runs` SQLite table by request and session. It contains selected DIDs, index/manifest CIDs, anchor source/time, stale status, stable findings and linked-document read references; it does not contain bodies, credentials or private reasoning. Session deletion removes these records. Failed diagnostic persistence is reported without blocking observe-mode turns.
+
+Before rollout, configure approved document origins/storage adapters and anchor a conforming index at the oracle IID's `#dom` resource. The configured Companion devnet IID had no `#dom` resource when inspected during implementation, so it will initially report a missing constitution. This implementation does not create or amend that resource. Keep capsule activation disabled. An observational integration is not proof of live authority, constitutional adoption, cross-provider behavior or capsule conformance.

@@ -1,3 +1,5 @@
+import type { DomainContextOptions } from './domain-context/types';
+import type { DomainContextResolver } from './domain-context/resolver';
 import type { ToolExecutionContext } from './tool-execution';
 import type { AgentMiddleware } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -79,6 +81,8 @@ export interface MainAgentHooks {
 }
 
 export interface MainAgentArgs {
+  domainContext?: DomainContextOptions;
+  domainResolver?: DomainContextResolver;
   execution?: ToolExecutionContext;
   registries: MainAgentRegistries;
   identity: OracleIdentity;

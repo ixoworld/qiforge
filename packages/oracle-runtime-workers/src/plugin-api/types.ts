@@ -1,3 +1,4 @@
+import type { DomainContextOptions } from '../core/domain-context/types';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -366,6 +367,7 @@ export interface OraclePromptConfig {
  * combines this with bundled defaults to build the internal `OracleIdentity`.
  */
 export interface OracleConfig {
+  domainContext?: DomainContextOptions;
   /** Oracle display name. Required. */
   name: string;
   /** Sponsoring organization. Optional — composer falls back gracefully. */
