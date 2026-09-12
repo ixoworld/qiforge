@@ -47,7 +47,13 @@ import {
   validateSchedule,
 } from './schedule';
 import { newTaskId } from './spec';
-import { TasksStore, type TaskRecord } from './store';
+import {
+  TasksStore,
+  type OpenTaskRun,
+  type TaskRecord,
+  type TaskRunState,
+} from './store';
+import { retryGateway } from '../do/gateway-retry';
 
 /** Session-id prefix for the synthetic sessions task runs execute on. */
 export const TASK_SESSION_PREFIX = 'task:';
@@ -65,11 +71,19 @@ export interface TaskGateway {
     invite: string[];
     userDid: string;
   }): Promise<{ roomId: string }>;
-  /** Send a text message to a room; resolves to the new event id. */
+  /**
+   * Send a text message to a room; resolves to the new event id. `txnId`
+   * makes a repeated send of the same message idempotent on the homeserver.
+   */
   sendText(
     roomId: string,
     body: string,
-    opts?: { threadId?: string; formattedBody?: string },
+    opts?: {
+      threadId?: string;
+      formattedBody?: string;
+      txnId?: string;
+      priority?: 'interactive' | 'background';
+    },
   ): Promise<string>;
   /** Resolve the canonical user↔oracle room for a user DID. */
   resolveUserRoom(
@@ -94,6 +108,10 @@ export interface TaskSchedulerHost {
   maxTasksPerUser?: number;
   /** Minimum seconds between recurring runs (`TASKS_MIN_CRON_INTERVAL_SEC`). Default 300. */
   minCronIntervalSec?: number;
+  /** Delays between the send attempts of one delivery round (tests shorten them). */
+  deliveryRetryDelaysMs?: readonly number[];
+  /** Delays between delivery rounds, indexed by rounds already spent (tests shorten them). */
+  deliveryRoundBackoffMs?: readonly number[];
 }
 
 export interface TaskScheduler {
@@ -103,12 +121,26 @@ export interface TaskScheduler {
   nextWakeAt(): Promise<number | null>;
   /** Run everything that is due. Must be safe to call spuriously. */
   onAlarm(now: number): Promise<void>;
+  /** Runs no incarnation has finished (operator/debug). */
+  openRuns(): Promise<OpenTaskRun[]>;
 }
 
 /** How much of a run's output is kept as `lastResult.summary`. */
 const RESULT_SUMMARY_MAX = 500;
 /** How much of an error message is kept in bookkeeping / notices. */
 const ERROR_MAX = 1024;
+/**
+ * A finished run's result is delivered in rounds: one retried send sequence
+ * per round (`deliveryRetryDelaysMs`), the next round on the object's alarm
+ * after a growing pause. Past the last round the run is failed.
+ */
+const MAX_DELIVERY_ROUNDS = 5;
+const DEFAULT_DELIVERY_ROUND_BACKOFF_MS: readonly number[] = [
+  60_000, 120_000, 240_000, 480_000,
+];
+/** Shown to the user instead of the technical reason (which goes to the log and the run row). */
+const FAILED_RESULT_SUMMARY = 'The run could not be completed.';
+const UNDELIVERED_RESULT_SUMMARY = 'The result could not be delivered.';
 
 /** The instruction message a scheduled run enters the agent with. */
 function buildRunMessage(task: TaskRecord, approvalNote?: string): string {
@@ -185,6 +217,22 @@ class AlarmTaskScheduler implements TaskScheduler {
   readonly surface: OracleTasksSurface;
   private readonly maxTasksPerUser: number;
   private readonly minCronIntervalSec: number;
+  private readonly deliveryRetryDelaysMs: readonly number[] | undefined;
+  private readonly deliveryRoundBackoffMs: readonly number[];
+  /**
+   * Runs executing in THIS instance (run id → task id). A ledger row in
+   * `running` or `delivering` whose id is not here belongs to an incarnation
+   * that is gone: memory is per instance and empty after any reset, and the
+   * object is single-threaded, so nothing else can own it. That, not a
+   * timeout, is how a long live run is told apart from a dead one.
+   */
+  private readonly activeRuns = new Map<string, string>();
+
+  private hasActiveRun(taskId: string): boolean {
+    for (const owner of this.activeRuns.values())
+      if (owner === taskId) return true;
+    return false;
+  }
 
   constructor(
     private readonly host: TaskSchedulerHost,
@@ -193,6 +241,9 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.maxTasksPerUser = host.maxTasksPerUser ?? DEFAULT_MAX_TASKS_PER_USER;
     this.minCronIntervalSec =
       host.minCronIntervalSec ?? DEFAULT_MIN_CRON_INTERVAL_SEC;
+    this.deliveryRetryDelaysMs = host.deliveryRetryDelaysMs;
+    this.deliveryRoundBackoffMs =
+      host.deliveryRoundBackoffMs ?? DEFAULT_DELIVERY_ROUND_BACKOFF_MS;
     this.surface = {
       preview: (input) => this.preview(input),
       create: (input) => this.create(input),
@@ -210,10 +261,23 @@ class AlarmTaskScheduler implements TaskScheduler {
   // ── alarm client ─────────────────────────────────────────────────────────
 
   async nextWakeAt(): Promise<number | null> {
-    return this.store.minNextRunAt();
+    const [nextRun, nextRetry] = await Promise.all([
+      this.store.minNextRunAt(),
+      this.store.minRetryAt(),
+    ]);
+    if (nextRun === null) return nextRetry;
+    if (nextRetry === null) return nextRun;
+    return Math.min(nextRun, nextRetry);
+  }
+
+  async openRuns(): Promise<OpenTaskRun[]> {
+    return this.store.openRuns();
   }
 
   async onAlarm(now: number): Promise<void> {
+    // Unfinished runs first: what a previous incarnation left behind decides
+    // the fate of its task before the due scan can fire the task again.
+    await this.reconcileOpenRuns(now);
     const due = await this.store.due(now);
     for (const stale of due) {
       // Re-load: a tool call awaited between iterations may have paused,
@@ -223,6 +287,10 @@ class AlarmTaskScheduler implements TaskScheduler {
         continue;
       }
       if (Date.parse(task.nextRunAt) > now) continue;
+      // A run of this task is executing in this instance right now (a long
+      // turn while the object's alarm fires for something else): its
+      // schedule advances when the turn ends, never start a second one.
+      if (this.hasActiveRun(task.id)) continue;
       try {
         if (task.approval === 'before-action') {
           await this.requestApproval(task, now);
@@ -238,8 +306,61 @@ class AlarmTaskScheduler implements TaskScheduler {
         );
       }
     }
-    const next = await this.store.minNextRunAt();
+    const next = await this.nextWakeAt();
     if (next !== null) this.host.requestAlarm(Math.max(next, now + 1000));
+  }
+
+  /**
+   * Close or continue the runs no live owner holds. `delivering` rows have a
+   * stored result: re-send it under the run's fixed transaction id (a copy
+   * the dead incarnation already got out is deduplicated by the homeserver).
+   * `running` rows have no result and may have executed tools: never re-run;
+   * close as interrupted and tell the user the task did not complete.
+   */
+  private async reconcileOpenRuns(now: number): Promise<void> {
+    const open = await this.store.openRuns();
+    for (const run of open) {
+      if (this.activeRuns.has(run.runId)) continue; // alive in this instance
+      const task = await this.store.get(run.taskId);
+      if (run.state === 'delivering') {
+        if (run.retryAt !== undefined && run.retryAt > now) continue;
+        if (!task || task.status === 'cancelled') {
+          await this.store.updateRun(run.runId, {
+            state: 'failed',
+            ok: false,
+            finishedAt: new Date().toISOString(),
+            detail: 'result dropped: the task no longer exists',
+          });
+          continue;
+        }
+        this.host.log.log(
+          `[tasks] run ${run.runId} of ${task.id}: re-delivering the stored result (round ${run.attempts + 1})`,
+        );
+        await this.deliverOrDefer(task, run, now);
+      } else {
+        this.host.log.warn(
+          `[tasks] run ${run.runId} of ${run.taskId} started ${run.startedAt} never finished (the object was reset while it ran); closing it as interrupted, not re-running`,
+        );
+        if (!task) {
+          await this.store.updateRun(run.runId, {
+            state: 'interrupted',
+            ok: false,
+            finishedAt: new Date().toISOString(),
+            detail: 'interrupted: object reset mid-run; task no longer exists',
+          });
+          continue;
+        }
+        await this.recordFailure(
+          task,
+          now,
+          run.startedAt,
+          new Error(
+            'interrupted: the object was reset while the run was in progress',
+          ),
+          { runId: run.runId, state: 'interrupted' },
+        );
+      }
+    }
   }
 
   // ── surface: preview / create ────────────────────────────────────────────
@@ -583,22 +704,36 @@ class AlarmTaskScheduler implements TaskScheduler {
   }
 
   /**
-   * The hot path: run the agent turn on the task's synthetic session, deliver
-   * the output to the user's room, then advance the schedule. Any throw —
-   * turn, empty output, delivery — lands in `recordFailure`.
+   * The hot path, written to the run ledger as it goes so a reset at any
+   * instant is recoverable (see `reconcileOpenRuns`), in three row writes:
+   *
+   *   1. `running` before anything else — the turn is now owned;
+   *   2. the result stored and the schedule advanced, `delivering`, in one
+   *      transaction — from here the turn is never re-run, only re-sent;
+   *   3. `delivered` with the task's last-run bookkeeping, one transaction.
+   *
+   * Two extra single-row writes per run against the dozens of checkpoint
+   * writes the turn itself makes; task runs are rare next to chat turns.
    *
    * `opts.approvalNote` marks an approval-triggered run: the schedule was
    * already advanced when the request was posted, so only a one-shot's
    * completion is recorded here.
    */
   private async executeRun(
-    task: TaskRecord,
+    taskAtFire: TaskRecord,
     nowMs: number,
     opts: { approvalNote?: string } = {},
   ): Promise<void> {
+    let task = taskAtFire;
     const approvalRun = task.approval === 'before-action';
     const startedAt = new Date(nowMs).toISOString();
+    const runId = crypto.randomUUID();
+    const txnId = `task-${runId}`;
+    const ledger = { runId, state: 'failed' as const };
+    let open: OpenTaskRun | undefined;
     try {
+      await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
+      this.activeRuns.set(runId, task.id);
       const roomId = await this.resolveDeliveryRoom(task);
       if (!roomId) throw new Error('Could not resolve a delivery room');
       const result = await this.host.runTurn({
@@ -616,23 +751,30 @@ class AlarmTaskScheduler implements TaskScheduler {
       });
       const text = result.text.trim();
       if (text.length === 0) throw new Error('Agent returned no output');
-      // A delivery failure IS a run failure — a silent log-and-continue would
-      // mean "task succeeded" while the user never saw the result.
-      await this.host.gateway.sendText(
-        roomId,
-        `🕒 **${task.title}**\n\n${text}`,
-      );
 
-      const finishedAt = new Date().toISOString();
-      task.lastRunAt = startedAt;
-      task.lastResult = {
-        ok: true,
-        summary: text.slice(0, RESULT_SUMMARY_MAX),
-        at: finishedAt,
-      };
-      task.consecutiveFailures = 0;
+      // The turn took a while: the user may have paused or cancelled the
+      // task meanwhile. Re-read it so nothing below resurrects the stale
+      // copy, and drop the result if the task is no longer active.
+      const current = await this.store.get(task.id);
+      if (!current || current.status !== 'active') {
+        await this.store.updateRun(runId, {
+          state: 'failed',
+          ok: false,
+          finishedAt: new Date().toISOString(),
+          detail: `result dropped: task ${current?.status ?? 'deleted'} during the run`,
+        });
+        this.host.log.log(
+          `[tasks] run ${runId} of ${task.id}: task ${current?.status ?? 'deleted'} during the run; result dropped`,
+        );
+        return;
+      }
+      task = current;
+
+      // The turn is over and its result exists: advance the schedule NOW so
+      // no later alarm can fire this occurrence again, whatever happens to
+      // the delivery. A one-shot keeps `active` until delivered; without a
+      // next run it can no longer come due.
       if (task.schedule.kind === 'once') {
-        task.status = 'completed';
         delete task.nextRunAt;
       } else if (!approvalRun) {
         // Advance from real time (a long run must not produce a next fire in
@@ -644,24 +786,131 @@ class AlarmTaskScheduler implements TaskScheduler {
         if (nextMs !== null) task.nextRunAt = new Date(nextMs).toISOString();
         else delete task.nextRunAt;
       }
-      task.updatedAt = finishedAt;
+      task.updatedAt = new Date().toISOString();
       await this.host.db.transaction(async () => {
         await this.store.save(task);
-        await this.store.recordRun({
-          runId: crypto.randomUUID(),
-          taskId: task.id,
-          startedAt,
-          finishedAt,
-          ok: true,
-          detail: task.lastResult?.summary,
+        await this.store.updateRun(runId, {
+          state: 'delivering',
+          roomId,
+          resultText: text,
         });
       });
-      this.host.log.log(
-        `[tasks] run delivered for ${task.id} (${text.length} chars)`,
+      open = {
+        runId,
+        taskId: task.id,
+        startedAt,
+        state: 'delivering',
+        txnId,
+        roomId,
+        resultText: text,
+        attempts: 0,
+      };
+    } catch (err) {
+      this.activeRuns.delete(runId);
+      await this.recordFailure(task, nowMs, startedAt, err, ledger);
+      return;
+    }
+    try {
+      await this.deliverOrDefer(task, open, nowMs);
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
+  /** The room message a run's result is delivered as. */
+  private deliveryBody(task: TaskRecord, text: string): string {
+    return `🕒 **${task.title}**\n\n${text}`;
+  }
+
+  /**
+   * One delivery round for a run whose result is stored: the send is retried
+   * across a gateway restart under the run's fixed transaction id, so a
+   * response lost on the way never turns a delivered result into a failure
+   * and never produces a second copy. A round that still fails parks the
+   * run for the next round on the alarm; the last round fails the task.
+   */
+  private async deliverOrDefer(
+    task: TaskRecord,
+    run: OpenTaskRun,
+    nowMs: number,
+  ): Promise<void> {
+    const roomId = run.roomId ?? (await this.resolveDeliveryRoom(task));
+    const text = run.resultText ?? '';
+    try {
+      if (!roomId) throw new Error('Could not resolve a delivery room');
+      await retryGateway(
+        () =>
+          this.host.gateway.sendText(roomId, this.deliveryBody(task, text), {
+            txnId: run.txnId,
+            priority: 'interactive',
+          }),
+        {
+          ...(this.deliveryRetryDelaysMs
+            ? { delaysMs: this.deliveryRetryDelaysMs }
+            : {}),
+          onRetry: (err, attempt, delayMs) =>
+            this.host.log.warn(
+              `[tasks] delivery of run ${run.runId} (${task.id}) failed on attempt ${attempt}, retrying in ${delayMs} ms: ${errorMessage(err)}`,
+            ),
+        },
       );
     } catch (err) {
-      await this.recordFailure(task, nowMs, startedAt, err);
+      const attempts = run.attempts + 1;
+      if (attempts >= MAX_DELIVERY_ROUNDS) {
+        this.host.log.error(
+          `[tasks] run ${run.runId} of ${task.id}: giving up delivery after ${attempts} rounds: ${errorMessage(err)}`,
+        );
+        await this.recordFailure(
+          task,
+          nowMs,
+          run.startedAt,
+          new Error(
+            `undeliverable after ${attempts} rounds: ${errorMessage(err)}`,
+          ),
+          { runId: run.runId, state: 'failed', undelivered: true },
+        );
+        return;
+      }
+      const pause =
+        this.deliveryRoundBackoffMs[
+          Math.min(attempts - 1, this.deliveryRoundBackoffMs.length - 1)
+        ] ?? 60_000;
+      const retryAt = Math.max(nowMs, Date.now()) + pause;
+      await this.store.updateRun(run.runId, { attempts, retryAt });
+      this.host.requestAlarm(retryAt);
+      this.host.log.warn(
+        `[tasks] run ${run.runId} of ${task.id}: delivery round ${attempts} failed (${errorMessage(err)}); next round at ${new Date(retryAt).toISOString()}`,
+      );
+      return;
     }
+
+    const finishedAt = new Date().toISOString();
+    // Delivered. Bookkeeping goes onto the task as it is NOW (a pause or
+    // cancel during the send must stand); only an active one-shot completes.
+    const current = (await this.store.get(task.id)) ?? task;
+    current.lastRunAt = run.startedAt;
+    current.lastResult = {
+      ok: true,
+      summary: text.slice(0, RESULT_SUMMARY_MAX),
+      at: finishedAt,
+    };
+    current.consecutiveFailures = 0;
+    if (current.schedule.kind === 'once' && current.status === 'active')
+      current.status = 'completed';
+    current.updatedAt = finishedAt;
+    await this.host.db.transaction(async () => {
+      await this.store.save(current);
+      await this.store.updateRun(run.runId, {
+        state: 'delivered',
+        ok: true,
+        finishedAt,
+        detail: task.lastResult?.summary,
+        retryAt: null,
+      });
+    });
+    this.host.log.log(
+      `[tasks] run delivered for ${task.id} (${text.length} chars${run.attempts > 0 ? `, round ${run.attempts + 1}` : ''})`,
+    );
   }
 
   /**
@@ -669,18 +918,47 @@ class AlarmTaskScheduler implements TaskScheduler {
    * any failure stops it as `failed` — loudly. A recurring task retries at
    * the LATER of its own next fire and the exponential backoff, and stops as
    * `failed` at the consecutive-failure threshold.
+   *
+   * The technical reason goes to the log and the run row; what the user
+   * sees — the notice and `lastResult.summary` the task tools relay — is
+   * plain language with no runtime internals.
    */
   private async recordFailure(
-    task: TaskRecord,
+    taskAtFire: TaskRecord,
     nowMs: number,
     startedAt: string,
     err: unknown,
+    ledger?: { runId: string; state: TaskRunState; undelivered?: boolean },
   ): Promise<void> {
     const message = errorMessage(err);
     const finishedAt = new Date().toISOString();
+    // Bookkeeping on the task as it is NOW: a pause or cancel that happened
+    // during the run stands, and a stale copy never resurrects a task.
+    const task = (await this.store.get(taskAtFire.id)) ?? taskAtFire;
+    if (task.status !== 'active') {
+      if (ledger) {
+        await this.store.updateRun(ledger.runId, {
+          state: ledger.state,
+          ok: false,
+          finishedAt,
+          detail: `${message} (task ${task.status} meanwhile)`,
+          retryAt: null,
+        });
+      }
+      this.host.log.warn(
+        `[tasks] run failed for ${task.id} while the task is ${task.status}: ${message}`,
+      );
+      return;
+    }
     task.consecutiveFailures += 1;
     task.lastRunAt = startedAt;
-    task.lastResult = { ok: false, summary: message, at: finishedAt };
+    task.lastResult = {
+      ok: false,
+      summary: ledger?.undelivered
+        ? UNDELIVERED_RESULT_SUMMARY
+        : FAILED_RESULT_SUMMARY,
+      at: finishedAt,
+    };
     task.updatedAt = finishedAt;
 
     const oneShot = task.schedule.kind === 'once';
@@ -713,32 +991,51 @@ class AlarmTaskScheduler implements TaskScheduler {
     }
     await this.host.db.transaction(async () => {
       await this.store.save(task);
-      await this.store.recordRun({
-        runId: crypto.randomUUID(),
-        taskId: task.id,
-        startedAt,
-        finishedAt,
-        ok: false,
-        detail: message,
-      });
+      if (ledger) {
+        await this.store.updateRun(ledger.runId, {
+          state: ledger.state,
+          ok: false,
+          finishedAt,
+          detail: message,
+          retryAt: null,
+        });
+      } else {
+        await this.store.recordRun({
+          runId: crypto.randomUUID(),
+          taskId: task.id,
+          startedAt,
+          finishedAt,
+          ok: false,
+          detail: message,
+          state: 'failed',
+        });
+      }
     });
     this.host.log.warn(
       `[tasks] run failed for ${task.id} (${task.consecutiveFailures} consecutive${stopped ? ', stopped' : ''}): ${message}`,
     );
     if (stopped) {
       // Best-effort notice — the failure bookkeeping above is already saved.
+      // Retried across a gateway restart under a fixed id: never two copies.
       const roomId = await this.resolveDeliveryRoom(task);
       if (roomId) {
         const text = oneShot
-          ? `🛑 Your scheduled task \`${task.id}\` failed and is stopped: ${message.slice(0, 200)}\n\nAsk me to **suggest a fix** when you're ready.`
-          : `🛑 Task \`${task.id}\` failed ${task.consecutiveFailures} times in a row and is stopped. Ask me to **suggest a fix** when you're ready.`;
-        await this.host.gateway
-          .sendText(roomId, text)
-          .catch((postErr: unknown) => {
-            this.host.log.warn(
-              `[tasks] failure notice for ${task.id} could not be posted: ${errorMessage(postErr)}`,
-            );
-          });
+          ? `🛑 **${task.title}** could not be completed. Ask me to run it again or to reschedule it.`
+          : `🛑 **${task.title}** has been stopped after ${task.consecutiveFailures} unsuccessful runs in a row. Ask me to look into it or to reschedule it when you're ready.`;
+        await retryGateway(
+          () =>
+            this.host.gateway.sendText(roomId, text, {
+              txnId: `task-${ledger?.runId ?? crypto.randomUUID()}-notice`,
+              priority: 'interactive',
+            }),
+          this.deliveryRetryDelaysMs
+            ? { delaysMs: this.deliveryRetryDelaysMs }
+            : {},
+        ).catch((postErr: unknown) => {
+          this.host.log.warn(
+            `[tasks] failure notice for ${task.id} could not be posted: ${errorMessage(postErr)}`,
+          );
+        });
       }
     }
   }

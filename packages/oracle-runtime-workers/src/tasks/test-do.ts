@@ -15,12 +15,25 @@ import type { OracleTaskInput, OracleTaskRecord } from '../plugin-api/types';
 import type { TurnRequest } from '../do/contracts';
 import { DoSqliteDatabase } from '../sqlite/database';
 import { createTaskScheduler, type TaskScheduler } from './scheduler';
-import { TasksStore, type TaskRunEntry } from './store';
+import {
+  TasksStore,
+  type OpenTaskRun,
+  type TaskRunEntry,
+  type TaskRunState,
+} from './store';
 
 export interface SentMessage {
   roomId: string;
   body: string;
+  txnId?: string;
 }
+
+/**
+ * How the fake gateway answers `sendText`: `fail-transient` looks like a
+ * gateway restart (retried by the scheduler), `fail-transient-once` only for
+ * the next call, `fail` is a hard error (never retried).
+ */
+export type SendMode = 'ok' | 'fail-transient' | 'fail-transient-once' | 'fail';
 
 export interface CreatedRoom {
   roomId: string;
@@ -31,6 +44,9 @@ export interface CreatedRoom {
 export interface TasksTestInit {
   maxTasksPerUser?: number;
   minCronIntervalSec?: number;
+  /** Delivery retry delays; tests keep them at a few ms. */
+  deliveryRetryDelaysMs?: number[];
+  deliveryRoundBackoffMs?: number[];
 }
 
 export const TEST_USER_DID = 'did:ixo:taskstestuser';
@@ -48,16 +64,38 @@ export class TasksTestDO extends DurableObject {
   private roomCreation: 'ok' | 'fail' = 'ok';
   private turns: TurnRequest[] = [];
   private alarms: number[] = [];
-  private turnMode: 'ok' | 'fail' | 'empty' = 'ok';
+  private turnMode: 'ok' | 'fail' | 'empty' | 'hang' = 'ok';
   private turnText = 'task run output';
   private roomAvailable = true;
   private eventSeq = 0;
+  private sendMode: SendMode = 'ok';
+  private sendFailures = 0;
+  /** Resolvers of hanging turns (`turnMode = 'hang'`), released by `releaseTurns()`. */
+  private hanging: Array<() => void> = [];
+  private initOpts: TasksTestInit = {};
 
   async init(opts: TasksTestInit = {}): Promise<void> {
     if (this.scheduler) return;
+    this.initOpts = opts;
     this.db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
     this.store = new TasksStore(this.db);
-    this.scheduler = await createTaskScheduler({
+    this.scheduler = await this.buildScheduler(opts);
+  }
+
+  /**
+   * A platform reset, as far as the scheduler can tell: a fresh scheduler
+   * over the SAME database, with nothing in memory. In-flight fakes are
+   * abandoned exactly like the real object's in-flight turns.
+   */
+  async simulateReset(): Promise<void> {
+    if (!this.db) throw new Error('call init() first');
+    this.hanging = [];
+    this.scheduler = await this.buildScheduler(this.initOpts);
+  }
+
+  private buildScheduler(opts: TasksTestInit): Promise<TaskScheduler> {
+    if (!this.db) throw new Error('call init() first');
+    return createTaskScheduler({
       db: this.db,
       userDid: TEST_USER_DID,
       oracleDid: 'did:ixo:tasksoracle',
@@ -74,8 +112,25 @@ export class TasksTestDO extends DurableObject {
           this.rooms.push({ roomId, name: opts.name, invite: opts.invite });
           return Promise.resolve({ roomId });
         },
-        sendText: (roomId: string, body: string) => {
-          this.sent.push({ roomId, body });
+        sendText: (roomId: string, body: string, opts?: { txnId?: string }) => {
+          if (this.sendMode === 'fail') {
+            return Promise.reject(
+              new Error('boom: simulated hard send failure'),
+            );
+          }
+          if (
+            this.sendMode === 'fail-transient' ||
+            this.sendMode === 'fail-transient-once'
+          ) {
+            if (this.sendMode === 'fail-transient-once') this.sendMode = 'ok';
+            this.sendFailures += 1;
+            return Promise.reject(new Error('Network connection lost'));
+          }
+          this.sent.push({
+            roomId,
+            body,
+            ...(opts?.txnId ? { txnId: opts.txnId } : {}),
+          });
           return Promise.resolve(`$evt-${++this.eventSeq}`);
         },
         resolveUserRoom: () =>
@@ -90,12 +145,18 @@ export class TasksTestDO extends DurableObject {
         if (this.turnMode === 'fail') {
           return Promise.reject(new Error('boom: simulated turn failure'));
         }
-        return Promise.resolve({
+        const result = {
           sessionId: req.sessionId,
           requestId: req.requestId,
           text: this.turnMode === 'empty' ? '' : this.turnText,
           toolCalls: [],
-        });
+        };
+        if (this.turnMode === 'hang') {
+          return new Promise((resolve) => {
+            this.hanging.push(() => resolve(result));
+          });
+        }
+        return Promise.resolve(result);
       },
       requestAlarm: (at: number) => {
         this.alarms.push(at);
@@ -107,6 +168,8 @@ export class TasksTestDO extends DurableObject {
       ...(opts.minCronIntervalSec !== undefined
         ? { minCronIntervalSec: opts.minCronIntervalSec }
         : {}),
+      deliveryRetryDelaysMs: opts.deliveryRetryDelaysMs ?? [5, 5],
+      deliveryRoundBackoffMs: opts.deliveryRoundBackoffMs ?? [1_000, 2_000],
     });
   }
 
@@ -214,11 +277,64 @@ export class TasksTestDO extends DurableObject {
   // ── fakes: scripting + inspection ────────────────────────────────────────
 
   async setTurnBehavior(
-    mode: 'ok' | 'fail' | 'empty',
+    mode: 'ok' | 'fail' | 'empty' | 'hang',
     text?: string,
   ): Promise<void> {
     this.turnMode = mode;
     if (text !== undefined) this.turnText = text;
+  }
+
+  /** Let every hanging turn finish (in order). Returns how many were released. */
+  async releaseTurns(): Promise<number> {
+    const n = this.hanging.length;
+    for (const release of this.hanging.splice(0)) release();
+    return n;
+  }
+
+  async setSendBehavior(mode: SendMode): Promise<void> {
+    this.sendMode = mode;
+  }
+
+  async sendFailureCount(): Promise<number> {
+    return this.sendFailures;
+  }
+
+  async openRuns(): Promise<OpenTaskRun[]> {
+    return this.ready().openRuns();
+  }
+
+  /**
+   * Plant a ledger row the way a dead incarnation would have left it: a
+   * `running` row (turn owned, no result) or a `delivering` row (result
+   * stored, schedule already advanced by the caller as needed).
+   */
+  async injectOpenRun(run: {
+    taskId: string;
+    state: Extract<TaskRunState, 'running' | 'delivering'>;
+    resultText?: string;
+    roomId?: string;
+    attempts?: number;
+    retryAt?: number;
+    startedAt?: string;
+  }): Promise<string> {
+    if (!this.store) throw new Error('call init() first');
+    const runId = crypto.randomUUID();
+    await this.store.startRun({
+      runId,
+      taskId: run.taskId,
+      startedAt: run.startedAt ?? new Date().toISOString(),
+      txnId: `task-${runId}`,
+    });
+    if (run.state === 'delivering') {
+      await this.store.updateRun(runId, {
+        state: 'delivering',
+        roomId: run.roomId ?? TEST_ROOM_ID,
+        resultText: run.resultText ?? 'stored result',
+        attempts: run.attempts ?? 0,
+        ...(run.retryAt !== undefined ? { retryAt: run.retryAt } : {}),
+      });
+    }
+    return runId;
   }
 
   async setRoomAvailable(available: boolean): Promise<void> {

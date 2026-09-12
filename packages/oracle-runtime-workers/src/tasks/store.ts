@@ -55,6 +55,23 @@ export function pendingApprovalOf(
   return undefined;
 }
 
+/**
+ * Where a fired run is in its life. Written before the agent turn starts
+ * (`running`), when the result is stored and the schedule advanced
+ * (`delivering`), and when the room has acknowledged the message
+ * (`delivered`). A row a later alarm finds in `running` or `delivering`
+ * without a live owner belongs to an incarnation of the object that died:
+ * `delivering` is re-sent from the stored result, `running` is closed as
+ * `interrupted` and never re-run (its tools may have executed). Approval
+ * bookkeeping rows carry no state.
+ */
+export type TaskRunState =
+  | 'running'
+  | 'delivering'
+  | 'delivered'
+  | 'failed'
+  | 'interrupted';
+
 /** One audit row per fired run / approval decision. */
 export interface TaskRunEntry {
   runId: string;
@@ -63,7 +80,29 @@ export interface TaskRunEntry {
   finishedAt?: string;
   /** true = delivered, false = failed, undefined = no run happened (approval bookkeeping). */
   ok?: boolean;
+  /** Technical reason / summary — for operators and the run history, never shown to the user as-is. */
   detail?: string;
+  state?: TaskRunState;
+  /** Delivery rounds attempted so far (a round is one retried send sequence). */
+  attempts?: number;
+  /** Earliest time the next delivery round may start (ms epoch). */
+  retryAt?: number;
+}
+
+/** A run a previous or current incarnation has not finished: what re-delivery or closure needs. */
+export interface OpenTaskRun {
+  runId: string;
+  taskId: string;
+  startedAt: string;
+  state: 'running' | 'delivering';
+  /** Transaction id every send of this run's result uses (server-side dedupe). */
+  txnId: string;
+  /** Where the result goes; resolved before the turn, so a re-delivery needs no gateway lookup. */
+  roomId?: string;
+  /** The finished result, once the run reached `delivering`. */
+  resultText?: string;
+  attempts: number;
+  retryAt?: number;
 }
 
 type TaskRow = {
@@ -90,7 +129,32 @@ type RunRow = {
   finished_at: string | null;
   ok: number | null;
   detail: string | null;
+  state: string | null;
+  attempts: number | null;
+  retry_at: number | bigint | null;
 };
+
+type OpenRunRow = {
+  run_id: string;
+  task_id: string;
+  started_at: string;
+  state: string;
+  txn_id: string | null;
+  room_id: string | null;
+  result_text: string | null;
+  attempts: number | null;
+  retry_at: number | bigint | null;
+};
+
+/** Columns added after the first release; added to existing files on setup. */
+const RUN_COLUMN_UPGRADES: ReadonlyArray<readonly [string, string]> = [
+  ['state', 'TEXT'],
+  ['txn_id', 'TEXT'],
+  ['room_id', 'TEXT'],
+  ['result_text', 'TEXT'],
+  ['attempts', 'INTEGER NOT NULL DEFAULT 0'],
+  ['retry_at', 'INTEGER'],
+];
 
 const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_at,
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
@@ -237,6 +301,23 @@ export class TasksStore {
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, started_at)`,
     );
+    // Files written before the run ledger existed lack these columns. One
+    // metadata read per object boot; the ALTERs run once per file, ever.
+    const present = new Set(
+      (
+        await this.db.exec<{ name: string }>(`PRAGMA table_info(task_runs)`)
+      ).map((row) => row.name),
+    );
+    for (const [name, ddl] of RUN_COLUMN_UPGRADES) {
+      if (!present.has(name))
+        await this.db.run(`ALTER TABLE task_runs ADD COLUMN ${name} ${ddl}`);
+    }
+    // The open-run scan on every alarm touches only the (normally empty)
+    // set of unfinished rows, never the whole audit trail.
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS idx_task_runs_open ON task_runs(state)
+       WHERE state IN ('running', 'delivering')`,
+    );
   }
 
   async insert(record: TaskRecord): Promise<void> {
@@ -315,8 +396,8 @@ export class TasksStore {
   async recordRun(entry: TaskRunEntry): Promise<void> {
     await this.setup();
     await this.db.run(
-      `INSERT INTO task_runs (run_id, task_id, started_at, finished_at, ok, detail)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO task_runs (run_id, task_id, started_at, finished_at, ok, detail, state, attempts, retry_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         entry.runId,
         entry.taskId,
@@ -324,15 +405,126 @@ export class TasksStore {
         entry.finishedAt ?? null,
         entry.ok === undefined ? null : entry.ok,
         entry.detail ?? null,
+        entry.state ?? null,
+        entry.attempts ?? 0,
+        entry.retryAt ?? null,
       ],
     );
+  }
+
+  /**
+   * Open a run's ledger row before its agent turn starts — one row write.
+   * `txnId` is fixed here so every later send of the result, by this or a
+   * later incarnation, carries the same id.
+   */
+  async startRun(run: {
+    runId: string;
+    taskId: string;
+    startedAt: string;
+    txnId: string;
+  }): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      `INSERT INTO task_runs (run_id, task_id, started_at, state, txn_id, attempts)
+       VALUES (?, ?, ?, 'running', ?, 0)`,
+      [run.runId, run.taskId, run.startedAt, run.txnId],
+    );
+  }
+
+  /** Move a run's row along its life (one row write; only the given fields change). */
+  async updateRun(
+    runId: string,
+    patch: {
+      state?: TaskRunState;
+      roomId?: string;
+      resultText?: string;
+      finishedAt?: string;
+      ok?: boolean;
+      detail?: string;
+      attempts?: number;
+      retryAt?: number | null;
+    },
+  ): Promise<void> {
+    await this.setup();
+    const sets: string[] = [];
+    const params: Array<string | number | null> = [];
+    if (patch.state !== undefined) {
+      sets.push('state = ?');
+      params.push(patch.state);
+    }
+    if (patch.roomId !== undefined) {
+      sets.push('room_id = ?');
+      params.push(patch.roomId);
+    }
+    if (patch.resultText !== undefined) {
+      sets.push('result_text = ?');
+      params.push(patch.resultText);
+    }
+    if (patch.finishedAt !== undefined) {
+      sets.push('finished_at = ?');
+      params.push(patch.finishedAt);
+    }
+    if (patch.ok !== undefined) {
+      sets.push('ok = ?');
+      params.push(patch.ok ? 1 : 0);
+    }
+    if (patch.detail !== undefined) {
+      sets.push('detail = ?');
+      params.push(patch.detail);
+    }
+    if (patch.attempts !== undefined) {
+      sets.push('attempts = ?');
+      params.push(patch.attempts);
+    }
+    if (patch.retryAt !== undefined) {
+      sets.push('retry_at = ?');
+      params.push(patch.retryAt);
+    }
+    if (sets.length === 0) return;
+    params.push(runId);
+    await this.db.run(
+      `UPDATE task_runs SET ${sets.join(', ')} WHERE run_id = ?`,
+      params,
+    );
+  }
+
+  /** Runs no incarnation has finished, oldest first (normally none — an indexed read). */
+  async openRuns(): Promise<OpenTaskRun[]> {
+    await this.setup();
+    const rows = await this.db.exec<OpenRunRow>(
+      `SELECT run_id, task_id, started_at, state, txn_id, room_id, result_text, attempts, retry_at
+       FROM task_runs WHERE state IN ('running', 'delivering')
+       ORDER BY started_at, run_id`,
+    );
+    return rows.map((row) => ({
+      runId: row.run_id,
+      taskId: row.task_id,
+      startedAt: row.started_at,
+      state: row.state === 'delivering' ? 'delivering' : 'running',
+      txnId: row.txn_id ?? `task-${row.run_id}`,
+      ...(row.room_id ? { roomId: row.room_id } : {}),
+      ...(row.result_text !== null ? { resultText: row.result_text } : {}),
+      attempts: Number(row.attempts ?? 0),
+      ...(row.retry_at !== null ? { retryAt: Number(row.retry_at) } : {}),
+    }));
+  }
+
+  /** Earliest pending delivery retry (ms epoch) over open runs, or null. */
+  async minRetryAt(): Promise<number | null> {
+    await this.setup();
+    const row = await this.db.get<{ next: number | bigint | null }>(
+      `SELECT MIN(retry_at) AS next FROM task_runs
+       WHERE state = 'delivering' AND retry_at IS NOT NULL`,
+    );
+    if (row === undefined || row.next === null) return null;
+    return Number(row.next);
   }
 
   /** Audit trail for one task, newest first. */
   async listRuns(taskId: string, limit = 20): Promise<TaskRunEntry[]> {
     await this.setup();
     const rows = await this.db.exec<RunRow>(
-      `SELECT run_id, task_id, started_at, finished_at, ok, detail
+      `SELECT run_id, task_id, started_at, finished_at, ok, detail, state, attempts, retry_at
        FROM task_runs WHERE task_id = ? ORDER BY started_at DESC, run_id DESC LIMIT ?`,
       [taskId, limit],
     );
@@ -345,6 +537,9 @@ export class TasksStore {
       if (row.finished_at !== null) entry.finishedAt = row.finished_at;
       if (row.ok !== null) entry.ok = row.ok !== 0;
       if (row.detail !== null) entry.detail = row.detail;
+      if (row.state !== null) entry.state = row.state as TaskRunState;
+      if (row.attempts !== null) entry.attempts = Number(row.attempts);
+      if (row.retry_at !== null) entry.retryAt = Number(row.retry_at);
       return entry;
     });
   }

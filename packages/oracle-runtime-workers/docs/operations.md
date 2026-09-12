@@ -28,7 +28,7 @@ the calling user:
 | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload.      |
 | `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included).                                                                                              |
-| `GET /debug/tasks`                                                             | The caller's task records and the object's current alarm.                                                                                     |
+| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                         |
 | `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                         |
 | `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                               |
 | `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                       |
@@ -122,6 +122,45 @@ an event it already answered returns the stored text without a model call,
 one whose turn is still running attaches to it, and one it lost in a reset
 of its own (tools may have run) is refused with a warning — the gateway posts
 the notice and the user resends, exactly as before this change.
+
+### Tasks: the run ledger
+
+A scheduled run used to be invisible to storage until it was over: the
+schedule advanced only after the result was delivered. Durable Object alarms
+are at-least-once, so a user-object reset anywhere inside a run made the
+retried alarm find the task still due and run it again, tools included; and
+a delivery whose RPC response was lost (a gateway reset in the second the
+send takes, or a dropped connection) marked a delivered one-shot `failed`
+with a failure notice next to its result.
+
+Every run now has a row in `task_runs` that moves `running` → `delivering`
+→ `delivered` (three single-row writes per run; the turn's own checkpoints
+cost far more). `running` is written before the turn starts; `delivering`
+stores the result text and advances the schedule in one transaction, before
+the send; `delivered` closes it. The scheduler keeps the run ids it is
+executing in memory, which is what tells a long live run from a dead one —
+memory is per instance and empty after any reset, so a row in `running` or
+`delivering` whose id is not in memory belongs to an incarnation that died.
+On every alarm, before the due scan:
+
+- `delivering` rows are re-sent from the stored result under the run's fixed
+  transaction id `task-<runId>` (server-side dedupe, so a copy the dead
+  incarnation got out is not repeated), with no model call;
+- `running` rows are closed as `interrupted` and never re-run: a one-shot
+  task fails with the notice, a recurring task skips the occurrence and
+  counts one failure toward the stop threshold.
+
+Delivery itself is retried across a gateway restart (`retryGateway`, same
+transaction id). A round that still fails parks the run with `retry_at` and
+re-arms the alarm (1, 2, 4, 8 minutes between rounds); after five rounds the
+task fails. `GET /debug/tasks` lists the open runs; the log lines are
+`[tasks] run … re-delivering`, `… never finished … closing it as
+interrupted`, `… delivery round N failed`.
+
+What the user sees is plain language only — "could not be completed",
+"has been stopped after N unsuccessful runs" — and `lastResult.summary`
+(what the task tools relay) says the same; the technical reason is in the
+log line and the run row's `detail`.
 
 A send the crypto WASM cannot encrypt does not fail cleanly: the machine
 panics, later crypto calls throw `null pointer passed to rust`, and the

@@ -2231,7 +2231,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
-    async tasksStatus(): Promise<{
+    async tasksStatus(userDid?: string): Promise<{
       now: number;
       alarm: number | null;
       schedulerActive: boolean;
@@ -2243,14 +2243,41 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         lastResult: { ok: boolean; summary: string; at: string } | null;
         consecutiveFailures: number;
       }>;
+      openRuns: Array<{
+        runId: string;
+        taskId: string;
+        startedAt: string;
+        state: 'running' | 'delivering';
+        attempts: number;
+        retryAt: number | null;
+      }>;
     }> {
+      // A cold (evicted or reset) object has no scheduler until it boots;
+      // reporting "no tasks" for it would be wrong, so boot like the alarm
+      // does when the caller — or the stored identity — says whose object.
+      if (!this.taskScheduler) {
+        const did =
+          userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+        if (did) await this.ready({ userDid: did });
+      }
       const records = this.taskScheduler
         ? await this.taskScheduler.surface.list()
+        : [];
+      const openRuns = this.taskScheduler
+        ? await this.taskScheduler.openRuns()
         : [];
       return {
         now: Date.now(),
         alarm: await this.ctx.storage.getAlarm(),
         schedulerActive: this.taskScheduler !== null,
+        openRuns: openRuns.map((r) => ({
+          runId: r.runId,
+          taskId: r.taskId,
+          startedAt: r.startedAt,
+          state: r.state,
+          attempts: r.attempts,
+          retryAt: r.retryAt ?? null,
+        })),
         tasks: records.map((t) => ({
           id: t.id,
           title: t.title,

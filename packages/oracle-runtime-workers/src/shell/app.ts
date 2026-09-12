@@ -55,6 +55,17 @@ export interface ShellOptions {
 
 type Variables = { auth: AuthResult };
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The rejection an in-flight RPC gets when `ctx.abort()` resets its object. */
+function isAbortRejection(err: unknown): boolean {
+  return /debug reset requested|durable object reset|no longer active|aborted/i.test(
+    errorText(err),
+  );
+}
+
 const BUILTIN_EXCLUSIONS: RouteExclusion[] = [
   { path: '/', method: 'GET' },
   { path: '/health', method: 'ALL' },
@@ -455,9 +466,12 @@ export function createShell(
   app.post('/debug/object/abort', async (c) => {
     try {
       await userStub(c.env, c.get('auth').userDid).debugAbortObject();
-    } catch {
-      // The abort tears the object down under the call: the rejection is the
-      // expected signal that it happened.
+    } catch (err) {
+      // The abort tears the object down under the call: that rejection is
+      // the expected signal. Anything else (an older build without the
+      // method, a transport error) is a real failure.
+      if (!isAbortRejection(err))
+        return c.json({ aborted: false, error: errorText(err) }, 500);
     }
     return c.json({ aborted: true });
   });
@@ -476,7 +490,11 @@ export function createShell(
       : c.json({ statusCode: 404, message: 'Session not found' }, 404);
   });
   app.get('/debug/tasks', async (c) =>
-    c.json(await userStub(c.env, c.get('auth').userDid).tasksStatus()),
+    c.json(
+      await userStub(c.env, c.get('auth').userDid).tasksStatus(
+        c.get('auth').userDid,
+      ),
+    ),
   );
   app.get('/debug/realtime', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).realtimeStatus()),
@@ -497,9 +515,9 @@ export function createShell(
   app.post('/debug/matrix/abort', async (c) => {
     try {
       await gateway(c.env).debugAbortObject();
-    } catch {
-      // The abort tears the object down under the call: the rejection is the
-      // expected signal that it happened.
+    } catch (err) {
+      if (!isAbortRejection(err))
+        return c.json({ aborted: false, error: errorText(err) }, 500);
     }
     return c.json({ aborted: true });
   });
