@@ -52,15 +52,20 @@ export function validateUrlTarget(targetUrl: string): void {
  * Durable Object in the user object; tests pass an in-memory fake.
  */
 export interface MatrixMediaSource {
-  /** Raw bytes behind an `mxc://` URI (authenticated media download). */
-  downloadMxc(mxc: string): Promise<Uint8Array>;
+  /**
+   * Raw bytes behind an `mxc://` URI (authenticated media download), the
+   * transfer cut off once it passes `maxBytes`.
+   */
+  downloadMxc(mxc: string, maxBytes?: number): Promise<Uint8Array>;
   /**
    * Bytes of the media event `eventId` in `roomId`, decrypted when the event
-   * carries an encrypted `file`. Null when the event does not exist.
+   * carries an encrypted `file`, the transfer cut off once it passes
+   * `maxBytes`. Null when the event does not exist.
    */
   downloadEvent(
     roomId: string,
     eventId: string,
+    maxBytes?: number,
   ): Promise<{
     bytes: Uint8Array;
     mimetype?: string;
@@ -102,6 +107,33 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
     offset += chunk.length;
   }
   return out;
+}
+
+/**
+ * Collect a stream into bytes with a running size check: the moment the
+ * total passes `maxBytes` the stream is cancelled and an error thrown, so an
+ * oversized file never lands in memory whole.
+ */
+export async function readBytesCapped(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      void reader.cancel();
+      throw new Error(
+        `File exceeds maximum size (${Math.round(maxBytes / 1024 / 1024)} MB) — download aborted`,
+      );
+    }
+    chunks.push(value);
+  }
+  return concat(chunks, total);
 }
 
 /**
@@ -150,24 +182,9 @@ export async function downloadFromUrl(
         `File too large: server reports ${Math.round(parseInt(contentLength, 10) / 1024 / 1024)} MB (limit: ${Math.round(maxBytes / 1024 / 1024)} MB)`,
       );
     }
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('Response body is not readable');
-    const chunks: Uint8Array[] = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        void reader.cancel();
-        throw new Error(
-          `File exceeds maximum size (${Math.round(maxBytes / 1024 / 1024)} MB) — download aborted`,
-        );
-      }
-      chunks.push(value);
-    }
+    if (!response.body) throw new Error('Response body is not readable');
     return {
-      data: concat(chunks, total),
+      data: await readBytesCapped(response.body, maxBytes),
       contentType,
       ...(currentUrl !== url ? { finalUrl: currentUrl } : {}),
     };
@@ -206,12 +223,16 @@ export async function loadAttachmentBytes(
       throw new Error(
         `Cannot fetch event ${attachment.eventId}: no Matrix room for this turn`,
       );
-    const media = await source.downloadEvent(roomId, attachment.eventId);
+    const media = await source.downloadEvent(
+      roomId,
+      attachment.eventId,
+      maxBytes,
+    );
     if (!media) throw new Error(`Matrix event ${attachment.eventId} not found`);
     bytes = media.bytes;
     httpType = media.mimetype;
   } else if (attachment.mxcUri!.startsWith('mxc://')) {
-    bytes = await source.downloadMxc(attachment.mxcUri!);
+    bytes = await source.downloadMxc(attachment.mxcUri!, maxBytes);
   } else {
     const result = await downloadFromUrl(attachment.mxcUri!, {
       ...opts,

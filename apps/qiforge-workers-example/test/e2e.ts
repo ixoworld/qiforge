@@ -194,7 +194,13 @@ async function main(): Promise<void> {
     await step('non-streaming turn returns JSON', async () => {
       const r = await client.send(sessionId, 'Say the single word: pong');
       assert.equal(r.status, 200, JSON.stringify(r.body));
-      assert.match(String(r.body.message ?? ''), /pong/i);
+      // Node's `SendMessageResponse.message` is `{ type, content, id }`.
+      const message = r.body.message;
+      const content =
+        typeof message === 'object' && message !== null && 'content' in message
+          ? message.content
+          : message;
+      assert.match(String(content ?? ''), /pong/i, JSON.stringify(r.body));
     });
 
     // ------------------------------------------------------------------ matrix room for alice
