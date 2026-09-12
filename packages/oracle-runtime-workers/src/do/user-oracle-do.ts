@@ -1,3 +1,5 @@
+import { DomainContextResolver } from '../core/domain-context/resolver';
+import type { DomainContextOptions } from '../core/domain-context/types';
 import { budgetedLlm } from '../core/budgeted-llm';
 import { SqliteHarnessStore } from './harness-store';
 import { TurnBudget, HarnessLimitError } from '../core/turn-budget';
@@ -280,6 +282,7 @@ export interface OracleWorkerHooks {
 }
 
 export interface UserOracleDOOptions {
+  domainContext?: DomainContextOptions;
   core: (env: OracleWorkerEnv) => RuntimeCore;
   hooks?: OracleWorkerHooks;
 }
@@ -383,6 +386,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
   return class UserOracleDO extends DurableObject<OracleWorkerEnv> {
     private db: DoSqliteDatabase | null = null;
     private readonly toolScheduler = new ToolScheduler();
+    private readonly domainResolver = new DomainContextResolver();
     private saver: SqliteSaver | null = null;
     private sessions: SessionsStore | null = null;
     private ownerStore: OwnerStore | null = null;
@@ -2891,6 +2895,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         console.log('[harness] turn usage', budget.snapshot());
       });
       const { agent, context } = await createMainAgent({
+        domainContext: opts.domainContext,
+        domainResolver: this.domainResolver,
         execution: {
           budget,
           scheduler: this.toolScheduler,

@@ -69,7 +69,7 @@ export const MainAgentGraphState = Annotation.Root({
     default: () => undefined,
     reducer: (_, curr) => curr,
   }),
-  currentEntityDid: Annotation<string | undefined>({
+  currentEntityDid: Annotation<string | null | undefined>({
     default: () => undefined,
     reducer: (_, curr) => curr,
   }),

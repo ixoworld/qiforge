@@ -226,6 +226,7 @@ export function createOracleWorker(
 
   const UserOracleDO = createUserOracleDO({
     core: coreFor,
+    domainContext: opts.config.domainContext,
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
   });
 
@@ -250,3 +251,8 @@ export function createOracleWorker(
     },
   };
 }
+
+export type {
+  DomainContextOptions,
+  DocumentRequest,
+} from './core/domain-context/types';

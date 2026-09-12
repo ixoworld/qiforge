@@ -22,7 +22,7 @@ export interface TurnMetadata {
   editorRoomId?: string;
   spaceId?: string;
   sessionRunId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
 }
 
 const KEYS = [
@@ -48,6 +48,7 @@ export function parseTurnMetadata(json: string | undefined): TurnMetadata {
     const value = record[key];
     if (typeof value === 'string' && value.length > 0) out[key] = value;
   }
+  if (record.currentEntityDid === null) out.currentEntityDid = null;
   return out;
 }
 
@@ -56,7 +57,7 @@ export interface PriorMetadataState {
   editorRoomId?: string;
   spaceId?: string;
   sessionRunId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
   loadedPlugins?: string[];
 }
 
@@ -101,7 +102,7 @@ export function metadataBuildState(
   editorRoomId?: string;
   sessionRunId?: string;
   spaceId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
   loadedPlugins: string[];
 } {
   const loaded = prior.loadedPlugins ?? [];
@@ -110,7 +111,10 @@ export function metadataBuildState(
     sessionRunId:
       meta.editorRoomId !== undefined ? meta.sessionRunId : prior.sessionRunId,
     spaceId: meta.spaceId ?? prior.spaceId,
-    currentEntityDid: meta.currentEntityDid ?? prior.currentEntityDid,
+    currentEntityDid:
+      meta.currentEntityDid !== undefined
+        ? meta.currentEntityDid
+        : prior.currentEntityDid,
     loadedPlugins: editorContextActive(meta, prior)
       ? Array.from(new Set([...loaded, EDITOR_PLUGIN_NAME]))
       : loaded,
@@ -125,7 +129,7 @@ export function metadataGraphInput(
   editorRoomId?: string;
   sessionRunId?: string;
   spaceId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
   loadedPlugins?: string[];
 } {
   return {

@@ -18,6 +18,7 @@ import { wrapPluginTool } from './wrap-plugin-tool';
 
 /** Inputs for collecting and wrapping sub-agents. */
 export interface CollectSubAgentsInput {
+  contextPrompt?: string;
   registry: SubAgentRegistry;
   execution?: ToolExecutionContext;
   buildCtx: PluginContext;
@@ -172,9 +173,15 @@ export async function collectSubAgentsWithFallback(
               fallbackContext,
               input.execution,
             );
-        const withPassthrough: AgentSpec = passthroughTools?.length
-          ? { ...spec, passthroughTools }
+        const scopedSpec = input.contextPrompt
+          ? {
+              ...spec,
+              systemPrompt: `${spec.systemPrompt}\n\n${input.contextPrompt}`,
+            }
           : spec;
+        const withPassthrough: AgentSpec = passthroughTools?.length
+          ? { ...scopedSpec, passthroughTools }
+          : scopedSpec;
         return createSubagentAsTool(
           withPassthrough,
           withPassthrough.forwardTools

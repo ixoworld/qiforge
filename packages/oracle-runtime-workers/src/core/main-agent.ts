@@ -1,3 +1,5 @@
+import { DomainContextResolver } from './domain-context/resolver';
+import { prepareDomainContext } from './domain-context/turn-context';
 import { createResultTool } from './result-tool';
 import { createRequestBudgetMiddleware } from './middlewares/request-budget';
 import { createAgent, type StructuredTool } from 'langchain';
@@ -170,6 +172,18 @@ export async function createMainAgent(
     sharedFactory,
   );
 
+  const domain =
+    args.domainContext?.mode === 'observe'
+      ? await prepareDomainContext({
+          options: args.domainContext,
+          resolver: args.domainResolver ?? new DomainContextResolver(),
+          ctx: rtCtx,
+          oracleDid: identity.entityDid,
+          subjectDid: state.currentEntityDid,
+          execution: args.execution,
+        })
+      : undefined;
+
   // ── 3. Resolve registries (boot-time + request-time contributions) ──────
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
@@ -240,6 +254,8 @@ export async function createMainAgent(
     fallbackContext,
     subAgents: subAgentEntries,
     execution: args.execution,
+    contextPrompt: domain?.prompt,
+    passthroughTools: domain?.tools,
   });
 
   ambient.logger.debug?.(
@@ -249,6 +265,7 @@ export async function createMainAgent(
   );
 
   const tools: StructuredTool[] = [
+    ...(domain?.tools ?? []),
     ...metaTools.map((t) =>
       wrapPluginTool(t, {
         ambient,
@@ -370,7 +387,7 @@ export async function createMainAgent(
 
   const customInstructions = identity.prompt?.customInstructions?.trim() ?? '';
 
-  const systemPrompt = await composePrompt({
+  const basePrompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
     customInstructions,
@@ -385,6 +402,10 @@ export async function createMainAgent(
     oracleNameOverride: state.userPreferences?.agentName,
     degradedServicesBlock: hooks?.degradedServicesBlock,
   });
+
+  const systemPrompt = [basePrompt, domain?.prompt]
+    .filter(Boolean)
+    .join('\n\n');
 
   // ── 8. Model ────────────────────────────────────────────────────────────
   // A per-request model (already allow-list-validated by the caller) wins

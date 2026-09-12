@@ -271,3 +271,30 @@ Tools default to serialized, non-retrying writes. Plugin authors may set `effect
 Large string tool results are stored before entering history, with a reference readable through `read_harness_result` in 4000-character chunks. Legacy oversized tool messages can also be offloaded at the final request boundary, after capability gating. Tool-call IDs and message IDs survive; original checkpoints are not rewritten by the reactive guard. System text and actual bound schemas count toward the context limit. A provider overflow gets at most one strictly smaller request, never an unchanged retry.
 
 Use the `@ixo/oracle-runtime-workers/prompt` export to render a consuming instance's actual composed prompt in contract tests without importing the Worker bootstrap.
+
+## Domain context (observe-only rollout)
+
+Set `config.domainContext` on `createOracleWorker`:
+
+```ts
+{
+  mode: 'observe',
+  anchorTtlMs: 300_000,
+  ipfsGateway: 'https://ipfs.io',
+  allowedOrigins: ['https://your-approved-document-host.example'],
+}
+```
+
+The default is off. The oracle domain comes from `ORACLE_ENTITY_DID`; the subject comes from the turn's `metadata.currentEntityDid`. Explicit `null` clears the subject, while omission preserves the selected domain. These selectors never establish authority.
+
+The resolver reads the IID through the configured Blocksync projection, selecting `<did>#dom` (including the IID's `{id}#dom` shorthand). The linked resource's `proof` must be a CIDv1 raw SHA-256 commitment to the exact UTF-8 document bytes. Both expanded and shorthand records together are ambiguous and rejected. Static validation reuses the pinned `@ixo/domain.md/workers` export; no dynamic schema compilation or filesystem resolver runs inside Workers. A static/integrity pass does not establish live constitutional effectiveness or authorization.
+
+Anchors have a five-minute in-memory cache per user Durable Object, shared across its sessions. Concurrent lookups deduplicate; cache size is bounded to 32 domains and public verified content to 8 MiB. Refresh failures may reuse the previous verified content with a stale marker. Confirmed removals or replacements do not reuse superseded documents. `refresh_domain_context` invalidates an active anchor for the next turn; the current turn and its subagents retain their starting revision. Object eviction simply causes fresh resolution.
+
+The Pass-1 brief is injected separately for oracle and subject. Up to four Pass-1 linked documents per domain are automatically read, with an aggregate 6,000-estimated-token disclosure limit. Excess or unavailable context is explicitly flagged and remains discoverable through the bounded `read_domain_document` tool. Each brief is also limited to 6,000 estimated tokens; an oversized essential brief is omitted with a diagnostic, not silently truncated. Other documents load progressively by indexed ID. Reads retain CID provenance, cite/summarize permissions and freshness requirements.
+
+Public retrieval permits HTTPS only to approved origins, plus the configured VFS, Matrix and IPFS gateway origins; redirects and credential-bearing URLs are rejected. Configured Matrix media uses the oracle's authenticated media endpoint without forwarding credentials to other origins. Authenticated VFS `/api/fs/files/:id/content` reads use existing user-to-oracle UCAN delegations. Other private transports, including encrypted Matrix documents, require the host's `readPrivateDocument(request, context, signal)` adapter: it must enforce the current user's/domain's read grant, perform supported decryption, and return exact plaintext bytes. Missing adapters or grants produce unavailable context, never a public fallback. Private content is not cached between reads. No Cellnode fallback exists.
+
+Document bodies are limited to 1 MiB for the index and 2 MiB for linked text. Model pages contain at most 4,000 characters. `read:false` entries are not fetched; private access and freshness are checked on reads. Observe mode leaves existing tool authorization unchanged on every domain validation failure and excludes invalid bytes. It is not a constitutional enforcement mode.
+
+Optional `x-oracle-capsule` manifests are dual-verified and statically inspected. Reports contain the release CID, compatibility summary, Master reference and outstanding external checks. They are explicitly `inspected-not-activated`; no components, skills, tools or permissions are activated. A differing pinned oracle revision is reported, never silently substituted.

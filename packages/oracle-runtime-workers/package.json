@@ -61,7 +61,9 @@
     "superjson": "1.13.3",
     "wa-sqlite": "1.0.0",
     "yjs": "13.6.32",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@ixo/domain.md": "github:ixoworld/domain.md#cf8a575ed254ae3fced7f91535ac04391b90e816&path:packages/cli",
+    "multiformats": "14.0.4"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
