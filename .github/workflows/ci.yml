@@ -35,6 +35,10 @@ jobs:
         run: pnpm build
 
       - name: Lint
+        # One ESLint process per package (scripts/lint.mjs); the largest
+        # package's typed program still needs a few GB, so give Node room.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: pnpm lint
 
       - name: Format check

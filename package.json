@@ -10,7 +10,7 @@
     "build": "turbo build",
     "test": "turbo test",
     "test:e2e": "turbo test:e2e",
-    "lint": "eslint packages && eslint apps/qiforge-example",
+    "lint": "node scripts/lint.mjs",
     "lint:fix": "eslint packages --fix && eslint apps/qiforge-example --fix",
     "format": "prettier --write \"**/*.{ts,tsx,md,json}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,md,json}\"",
