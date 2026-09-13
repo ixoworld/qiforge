@@ -1,6 +1,7 @@
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
+import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 /**
  * Cross-object contracts for the Workers runtime.
  *
@@ -82,6 +83,20 @@ export interface OracleWorkerEnv {
    * for the hit/miss counters that show what a budget buys.
    */
   CHUNK_CACHE_BYTES?: string;
+  /**
+   * R2 page tier for the users' working copies (see `sqlite/page-tier.ts`):
+   * chunks no turn touched for `TIER_EVICT_AFTER_PERIODS` periods move
+   * from DO SQLite ($0.20/GB-month, 10 GB cap per object) into 1 MiB R2
+   * segment objects ($0.015/GB-month, no cap) under a per-object prefix.
+   * Absent = every chunk stays in DO storage (the pre-tier behaviour).
+   */
+  TIER_BUCKET?: R2Bucket;
+  /** Soft target for hot bytes per user object (bytes or `16m`; default 16 MiB). */
+  TIER_HOT_BUDGET_BYTES?: string;
+  /** Periods (of `TIER_PERIOD_MS`) a chunk must go untouched before eviction (default 2). */
+  TIER_EVICT_AFTER_PERIODS?: string;
+  /** Length of one access-tracking period in ms (default one day; tests shorten it). */
+  TIER_PERIOD_MS?: string;
   /** IXO VFS worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */
   VFS_BASE_URL?: string;
   /** UCAN store worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */
@@ -284,6 +299,8 @@ export interface StorageStatus {
   freelistCount?: number;
   /** SQLite's own page cache (`PRAGMA cache_size`; negative = KiB). */
   sqliteCacheSize?: number;
+  /** The R2 page tier of this object's working copy (see sqlite/page-tier.ts). */
+  tier?: TierStatus & { lastPassAt?: number };
   /** The DO VFS clean-chunk cache and its storage counters (isolate lifetime). */
   chunkCache?: {
     budgetBytes: number;
@@ -356,6 +373,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
    * the "user deleted their file upstream" path.
    */
   resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }>;
+  /** Run one R2 page-tier eviction pass now (debug routes; `force` ignores recency). */
+  tierFlush(opts?: {
+    force?: boolean;
+    maxSegments?: number;
+  }): Promise<TierFlushResult>;
   /** Raw upstream schema of the memory search tool as fetched right now. */
   debugMemorySchema(userDid: string): Promise<MemorySchemaDebug>;
   /** Forcibly reset the object like a platform host drain (debug routes only). The call itself rejects. */

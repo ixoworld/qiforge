@@ -20,7 +20,13 @@
  *            Matrix copy so no second copy of the user's history lingers.
  */
 import { VfsNoDelegationError } from './ixo-vfs-store';
-import type { FileSnapshot, OwnerCopy, OwnerStore, SaveResult } from './types';
+import type {
+  FileSnapshot,
+  OwnerCopy,
+  OwnerStore,
+  SaveHints,
+  SaveResult,
+} from './types';
 
 export interface MigratingOwnerStoreOptions {
   /** System of record (IXO VFS). */
@@ -104,8 +110,8 @@ export class MigratingOwnerStore implements OwnerStore {
    * "not on VFS yet" (no delegation) — so the object keeps the copy dirty
    * and retries; Matrix media is never written.
    */
-  async save(snapshot: FileSnapshot): Promise<SaveResult> {
-    return this.primary.save(snapshot);
+  async save(snapshot: FileSnapshot, hints?: SaveHints): Promise<SaveResult> {
+    return this.primary.save(snapshot, hints);
   }
 
   /**

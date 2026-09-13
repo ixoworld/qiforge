@@ -18,6 +18,7 @@ import {
   VfsNoDelegationError,
   VfsRequestError,
 } from './ixo-vfs-store';
+import { measureForSave } from './measure';
 import { bytesOfStream, gunzip, snapshotOfBytes } from './types';
 
 const ORACLE = 'did:ixo:oracle';
@@ -434,6 +435,40 @@ describe('IxoVfsOwnerStore.save', () => {
     expect(vfs.files.size).toBe(1);
     // head() sees the new file.
     expect((await store.head())?.etag).toBe(files[0]!.contentHash);
+  });
+
+  it('reads the snapshot once more when the caller measured the gzipped length, twice without', async () => {
+    const counting = (data: Uint8Array) => {
+      const opens = { n: 0 };
+      const snapshot = {
+        size: data.byteLength,
+        open: () => {
+          opens.n += 1;
+          return snapshotOfBytes(data).open();
+        },
+      };
+      return { snapshot, opens };
+    };
+    const small = sqliteBytes(50_000);
+    const measured = await measureForSave(snapshotOfBytes(small).open());
+    const withHint = counting(small);
+    await makeStore(fakeVfs().fetchImpl).save(withHint.snapshot, {
+      gzippedLength: measured.gzippedLength,
+    });
+    expect(withHint.opens.n).toBe(1);
+    const withoutHint = counting(small);
+    await makeStore(fakeVfs().fetchImpl).save(withoutHint.snapshot);
+    expect(withoutHint.opens.n).toBe(2);
+    // The same holds for the resumable (tus) path.
+    const large = sqliteBytes(SINGLE_SHOT_MAX_BYTES * 2 + 123_456, 7);
+    const largeMeasured = await measureForSave(snapshotOfBytes(large).open());
+    const largeHint = counting(large);
+    const { bytes } = await makeStore(fakeVfs().fetchImpl).save(
+      largeHint.snapshot,
+      { gzippedLength: largeMeasured.gzippedLength },
+    );
+    expect(largeHint.opens.n).toBe(1);
+    expect(bytes).toBe(largeMeasured.gzippedLength);
   });
 
   it('streams a large file through tus parts (≥ 5 MiB each) and resumes a lost part response', async () => {

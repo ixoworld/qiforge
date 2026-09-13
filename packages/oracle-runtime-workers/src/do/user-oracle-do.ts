@@ -83,12 +83,17 @@ import {
   finishCompaction,
   type CompactCursors,
 } from '../sqlite/blob-compactor';
-import { createHash } from 'node:crypto';
 import {
   cachePagesForBytes,
+  parseByteSize,
   parseChunkCacheBytes,
 } from '../sqlite/cache-config';
-import { DoSqliteDatabase } from '../sqlite/database';
+import { DoSqliteDatabase, type DoSqliteOpenOptions } from '../sqlite/database';
+import type { TierFlushResult } from '../sqlite/do-vfs';
+import {
+  DEFAULT_TIER_HOT_BUDGET_BYTES,
+  type PageTierOptions,
+} from '../sqlite/page-tier';
 import {
   shouldVacuum,
   vacuumWanted,
@@ -107,6 +112,7 @@ import {
 } from '../sqlite/sessions-store';
 import { createAttachmentDecryptor } from '@ixo/matrix-bot-workers-sdk';
 import { MatrixMediaOwnerStore } from '../owner-store/matrix-media-store';
+import { measureForSave } from '../owner-store/measure';
 import { MigratingOwnerStore } from '../owner-store/migrating-store';
 import type { OwnerCopy } from '../owner-store/types';
 import {
@@ -224,6 +230,14 @@ interface MatrixUserIdCache {
 /** Consecutive flush failures (cleared on success). */
 const META_FLUSH_FAILURES = 'meta:flushFailures';
 const META_LAST_VACUUM = 'meta:lastVacuumAt';
+/** When the last R2 page-tier eviction pass ran (see `tierTick`). */
+const META_LAST_TIER_PASS = 'meta:lastTierPassAt';
+/**
+ * Eviction passes at most this often per object. The horizon is two daily
+ * periods, so four checks a day catch chunks the moment they age out
+ * without re-reading the hot set more than that.
+ */
+const TIER_PASS_INTERVAL_MS = 6 * 60 * 60_000;
 /**
  * Persisted twin of the in-memory `dirty` flag. The flag alone dies with an
  * eviction, and evictions are routine — without the marker an alarm waking a
@@ -314,22 +328,6 @@ interface FlushResult {
 }
 
 /** Hex SHA-256 of a byte stream, hashed as it flows. */
-async function sha256OfStream(
-  stream: ReadableStream<Uint8Array>,
-): Promise<string> {
-  const hash = createHash('sha256');
-  const reader = stream.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      hash.update(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return hash.digest('hex');
-}
 
 /** Does this adapter expose provider config + role resolution (platform adapters do)? */
 function isProviderAdapter(llm: LlmAdapter): llm is OpenRouterLlmAdapter {
@@ -1131,7 +1129,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (db) {
         await db.close().catch(() => undefined);
       }
-      await DoSqliteDatabase.wipe(this.ctx, DB_FILE);
+      const tier = this.tierOptions();
+      await DoSqliteDatabase.wipe(this.ctx, DB_FILE, tier ? { tier } : {});
       await this.ctx.storage.delete([
         META_OWNER_ETAG,
         META_LAST_CHECKSUM,
@@ -1142,12 +1141,40 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ]);
     }
 
-    /** `CHUNK_CACHE_BYTES` → the VFS clean-chunk budget for this object. */
-    private sqliteOpenOptions(): { cachePages: number } {
+    /**
+     * `CHUNK_CACHE_BYTES` → the VFS clean-chunk budget for this object, and
+     * the R2 page tier when the script binds `TIER_BUCKET` (the object's id
+     * is its key prefix; the knobs are documented in `contracts.ts`).
+     */
+    private sqliteOpenOptions(): DoSqliteOpenOptions {
       const bytes = parseChunkCacheBytes(this.env.CHUNK_CACHE_BYTES, (m) =>
         console.warn(`[user-do] ${m}`),
       );
-      return { cachePages: cachePagesForBytes(bytes) };
+      const tier = this.tierOptions();
+      return { cachePages: cachePagesForBytes(bytes), ...(tier && { tier }) };
+    }
+
+    private tierOptions(): PageTierOptions | undefined {
+      const bucket = this.env.TIER_BUCKET;
+      if (!bucket) return undefined;
+      const warn = (m: string): void => console.warn(`[user-do] ${m}`);
+      const hotBudgetBytes = parseByteSize(this.env.TIER_HOT_BUDGET_BYTES, {
+        name: 'TIER_HOT_BUDGET_BYTES',
+        fallback: DEFAULT_TIER_HOT_BUDGET_BYTES,
+        min: 1024 * 1024,
+        max: 1024 * 1024 * 1024,
+        warn,
+      });
+      const periods = Number(this.env.TIER_EVICT_AFTER_PERIODS);
+      const periodMs = Number(this.env.TIER_PERIOD_MS);
+      return {
+        bucket,
+        prefix: this.ctx.id.toString(),
+        hotBudgetBytes,
+        ...(Number.isInteger(periods) &&
+          periods >= 1 && { evictAfterPeriods: periods }),
+        ...(Number.isFinite(periodMs) && periodMs >= 1000 && { periodMs }),
+      };
     }
 
     /**
@@ -1333,6 +1360,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (next !== null) deadlines.push(next);
       }
 
+      // R2 page tier: move chunks no turn touched for a couple of days out
+      // of DO storage (see sqlite/page-tier.ts). After the flush above (the
+      // upload reads hot rows, not R2) and never over an in-flight one (it
+      // holds a snapshot). A pass is capped; more work re-arms soon.
+      if (this.db?.tierEnabled && !this.flushInFlight) {
+        const next = await this.tierTick(this.db, now);
+        if (next !== null) deadlines.push(next);
+      }
+
       // Idle housekeeping: a user silent for a day loses the cached pages —
       // their file is safe upstream, and we stop paying to store a copy. Never
       // evict while tasks are scheduled: their runs ARE activity. The flush
@@ -1359,6 +1395,71 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.ctx.storage.setAlarm(
         nextPingAt === null ? housekeeping : Math.min(housekeeping, nextPingAt),
       );
+    }
+
+    /**
+     * One page-tier eviction pass, at most once per `TIER_PASS_INTERVAL_MS`
+     * (a pass that hit its segment cap re-arms in a minute). Returns the next
+     * time a pass is due, or null when nothing is pending.
+     */
+    private async tierTick(
+      db: DoSqliteDatabase,
+      now: number,
+    ): Promise<number | null> {
+      const last =
+        (await this.ctx.storage.get<number>(META_LAST_TIER_PASS)) ?? 0;
+      if (now - last < TIER_PASS_INTERVAL_MS)
+        return last + TIER_PASS_INTERVAL_MS;
+      try {
+        const pass = await db.tierFlush();
+        await this.ctx.storage.put(META_LAST_TIER_PASS, now);
+        if (pass.skipped) {
+          if (pass.skipped !== 'no-tier')
+            console.log(
+              `[user-do] tier pass skipped for ${this.userDid}: ${pass.skipped}`,
+            );
+          return now + 60_000;
+        }
+        if (pass.evictedChunks > 0 || pass.remaining > 0) {
+          console.log(
+            `[user-do] tier pass for ${this.userDid}: ${pass.evictedChunks} chunks → R2 in ${pass.segmentsRewritten} segment(s), ${pass.hotRows} hot rows (${Math.round(pass.hotBytes / 1024 / 1024)} MB) kept, ${pass.remaining} segment(s) pending`,
+          );
+        }
+        const budget = this.tierOptions()?.hotBudgetBytes;
+        if (
+          budget !== undefined &&
+          pass.remaining === 0 &&
+          pass.hotBytes > budget
+        ) {
+          // Everything left is recent: the user's real working set exceeds
+          // the target — a sizing signal, not a failure.
+          console.warn(
+            `[user-do] tier hot set of ${this.userDid} is ${Math.round(pass.hotBytes / 1024 / 1024)} MB, over the ${Math.round(budget / 1024 / 1024)} MB target (all of it touched within the eviction horizon)`,
+          );
+        }
+        return pass.remaining > 0 ? now + 60_000 : now + TIER_PASS_INTERVAL_MS;
+      } catch (err) {
+        console.error(
+          `[user-do] tier pass failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return now + FLUSH_RETRY_DELAY_MS;
+      }
+    }
+
+    /** Operator/test entry: run an eviction pass now (debug routes). */
+    async tierFlush(
+      opts: { force?: boolean; maxSegments?: number } = {},
+    ): Promise<TierFlushResult> {
+      if (!this.db) {
+        const userDid =
+          this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+        if (userDid) await this.ready({ userDid });
+      }
+      if (!this.db) throw new Error('no working copy');
+      if (this.flushInFlight) await this.flushInFlight.catch(() => undefined);
+      const pass = await this.db.tierFlush(opts);
+      await this.ctx.storage.put(META_LAST_TIER_PASS, Date.now());
+      return pass;
     }
 
     /**
@@ -2015,7 +2116,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const snapshot = await db.snapshot();
       try {
-        const checksum = await sha256OfStream(snapshot.open());
+        // One pass yields the change gate (hash) AND the length the store
+        // needs to upload; the upload is the only other read of the file.
+        const { sha256Hex: checksum, gzippedLength } = await measureForSave(
+          snapshot.open(),
+        );
         const last = await this.ctx.storage.get<string>(META_LAST_CHECKSUM);
         if (last === checksum) {
           await this.ctx.storage.put(META_UPLOADED_GEN, snapshot.generation);
@@ -2030,7 +2135,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
         let saved: { etag: string; bytes: number };
         try {
-          saved = await store.save(snapshot);
+          saved = await store.save(snapshot, { gzippedLength });
         } catch (err) {
           // Never diverted anywhere else: the working copy in Durable Object
           // storage is durable, stays dirty, and is retried. Loud from the
@@ -2293,6 +2398,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               rowsRead: vfs.rowsRead,
               storageWrites: vfs.storageWrites,
               rowsWritten: vfs.rowsWritten,
+            }
+          : undefined,
+        tier: db
+          ? {
+              ...db.tierStatus(),
+              lastPassAt:
+                await this.ctx.storage.get<number>(META_LAST_TIER_PASS),
             }
           : undefined,
       };
@@ -3235,6 +3347,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           await sessions.setTitle(sessionId, title, { onlyIfUntitled: true });
       }
       this.markDirty();
+      // Which chunks this turn touched, for the page tier's eviction policy
+      // (one row write; a no-op without a tier).
+      try {
+        this.db?.recordAccess();
+      } catch (err) {
+        console.warn(
+          `[user-do] tier access record failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     private async generateTitle(

@@ -31,6 +31,9 @@
       "simple": { "limit": 100, "period": 60 },
     },
   ],
+  // R2 page tier for the users' working copies (local: miniflare emulates
+  // the bucket under .wrangler/state). See docs/architecture.md.
+  "r2_buckets": [{ "binding": "TIER_BUCKET", "bucket_name": "oracle-tier" }],
   "durable_objects": {
     "bindings": [
       // One instance per (user DID, oracle): the user's SQLite working copy +

@@ -63,6 +63,15 @@
  * INTO`) and need no crash atomicity, so their dirty chunks are flushed to
  * storage every `SPILL_CHUNKS` instead of being held until commit. That is
  * what keeps a full VACUUM of a multi-hundred-MB file at constant memory.
+ *
+ * R2 page tier (optional, `DoVfsOptions.tier` — see `page-tier.ts`): chunk
+ * rows are the HOT set; chunks nobody touched for a couple of periods are
+ * moved into 1 MiB R2 segment objects and their rows deleted. Rows may then
+ * be PARTIAL (`vfs2_chunks.mask` names the pages a write landed over a cold
+ * base). A read of a cold page records a miss and fails the statement with
+ * `SQLITE_IOERR_READ`; `DoSqliteDatabase` fetches the segment(s) into the
+ * clean cache and retries. Writes never miss. Without a tier every row is
+ * full and nothing below changes.
  */
 import { createHash } from 'node:crypto';
 import {
@@ -87,15 +96,22 @@ import {
   SQLITE_OPEN_DELETEONCLOSE,
   SQLITE_OPEN_MAIN_DB,
 } from 'wa-sqlite';
+import { CHUNK_SIZE, PAGES_PER_CHUNK, VFS_PAGE_SIZE } from './chunk-layout';
+import {
+  bitmapHas,
+  FULL_MASK,
+  PageTier,
+  resolvePageTierOptions,
+  SEGMENT_BYTES,
+  SEGMENT_CHUNKS,
+  segmentOf,
+  slotOf,
+  type PageTierOptions,
+  type PageTierStats,
+  type SegmentEntry,
+} from './page-tier';
 
-/** Bytes per SQLite page. Matches `PRAGMA page_size=4096`. */
-export const VFS_PAGE_SIZE = 4096;
-
-/** SQLite pages packed into one stored row (billing grain). */
-export const PAGES_PER_CHUNK = 16;
-
-/** Bytes per stored chunk row (64 KiB — well under the 2 MB DO value cap). */
-export const CHUNK_SIZE = VFS_PAGE_SIZE * PAGES_PER_CHUNK;
+export { CHUNK_SIZE, PAGES_PER_CHUNK, VFS_PAGE_SIZE } from './chunk-layout';
 
 /**
  * Default number of clean pages worth of chunk cache kept in memory (4 MiB).
@@ -133,6 +149,34 @@ export interface DoVfsOptions {
    * VFS is resized to the new budget (excess clean chunks are dropped).
    */
   cachePages?: number;
+  /**
+   * R2 page tier for the main database (see `page-tier.ts`). Fixed for the
+   * life of the VFS registration: the first `open()` of an object decides.
+   */
+  tier?: PageTierOptions;
+}
+
+/** What `tierFlush` did in one pass. */
+export interface TierFlushResult {
+  /** Chunk rows moved to R2 and deleted from storage. */
+  evictedChunks: number;
+  segmentsRewritten: number;
+  /** Evictable chunks left for the next pass (the per-pass cap was hit). */
+  remaining: number;
+  /** Hot rows / bytes after the pass. */
+  hotRows: number;
+  hotBytes: number;
+  skipped?: 'no-tier' | 'snapshot-open' | 'write-transaction' | 'in-progress';
+}
+
+export interface TierStatus extends PageTierStats {
+  enabled: boolean;
+  hotRows: number;
+  hotBytes: number;
+  /** Cold chunks (R2 slots) of the file as a byte count. */
+  coldBytes: number;
+  /** Statement/transaction retries the database wrapper ran for cold misses. */
+  retries: number;
 }
 
 export interface DoVfsStats {
@@ -169,12 +213,30 @@ export interface VfsSnapshot {
   close(): void;
 }
 
+/**
+ * A chunk's bytes plus the pages of it that are actually known: `mask` bit
+ * `p` set = page `p` of `data` is valid. `FULL_MASK` = a whole chunk. The
+ * pages outside the mask belong to the R2 slot (or are zeros when there is
+ * none) — see `page-tier.ts`.
+ */
+interface MaskedChunk {
+  data: Uint8Array;
+  mask: number;
+}
+
 interface SnapshotState {
   name: string;
   size: number;
   totalChunks: number;
-  /** Chunk pre-images captured because a later flush overwrote/deleted them. */
-  shadow: Map<number, Uint8Array>;
+  /**
+   * Pre-images of chunks a later flush overwrote/deleted. A partial image's
+   * remaining pages come from the R2 slot as mapped at snapshot time
+   * (`segments`), which stays readable: tier passes and object deletes wait
+   * while a snapshot is open.
+   */
+  shadow: Map<number, MaskedChunk>;
+  /** The tier map of the file as of snapshot time (empty without a tier). */
+  segments: Map<number, SegmentEntry>;
   open: boolean;
 }
 
@@ -188,11 +250,45 @@ interface PersistentFile {
   lock: number;
   /** Chunks written since the last flush, keyed by chunk number (full 64 KiB buffers). */
   dirty: Map<number, Uint8Array>;
+  /**
+   * Pages of each dirty chunk that hold real bytes (`FULL_MASK` when the
+   * chunk's base was known). Only ever partial with a tier, when a write
+   * landed on a cold chunk: the unknown pages are still in R2.
+   */
+  dirtyMask: Map<number, number>;
+  /**
+   * The clean state each dirty chunk was created from — the snapshot
+   * pre-image, captured without a storage read: the clean buffer (full or a
+   * partial row), `'sparse'` (never existed: zeros) or `'cold'` (only in
+   * R2). Cleared by `flush()`.
+   */
+  base: Map<number, MaskedChunk | 'sparse' | 'cold'>;
+  /** Chunks read or written since the last `recordAccess` (tier only). */
+  touched: Set<number>;
+  /** The access period `touched` belongs to; a touch in a later period persists the set first. */
+  touchedPeriod: number;
+  /** While a tier pass is in flight: chunks a flush wrote meanwhile (never evicted by that pass). */
+  tierWrittenSince: Set<number> | null;
   /** Lowest page count the file was truncated to since the last flush (chunks past it are deleted on flush). */
   truncateToPages: number | null;
   sizeDirty: boolean;
   /** Flush dirty chunks early (no crash atomicity needed — see file header). */
   spill: boolean;
+}
+
+/**
+ * Thrown inside the synchronous read path when a page lives only in R2: the
+ * VFS records the chunk and answers SQLite with `SQLITE_IOERR_READ`; the
+ * database wrapper resolves the misses and retries.
+ */
+class ColdChunkMiss extends Error {
+  constructor(
+    readonly file: string,
+    readonly chunkno: number,
+  ) {
+    super(`cold chunk ${chunkno} of '${file}'`);
+    this.name = 'ColdChunkMiss';
+  }
 }
 
 interface MemoryFile {
@@ -208,6 +304,12 @@ type OpenFile = PersistentFile | MemoryFile;
 interface ChunkRow extends Record<string, SqlStorageValue> {
   chunkno: number;
   data: ArrayBuffer;
+  mask: number;
+}
+
+interface ChunkMaskRow extends Record<string, SqlStorageValue> {
+  chunkno: number;
+  mask: number;
 }
 
 interface FileMetaRow extends Record<string, SqlStorageValue> {
@@ -274,6 +376,10 @@ class ChunkCache {
     this.dropFrom(file, 0);
   }
 
+  dropChunk(file: string, chunkno: number): void {
+    this.map.delete(ChunkCache.key(file, chunkno));
+  }
+
   clear(): void {
     this.map.clear();
   }
@@ -325,6 +431,23 @@ export class DoVfs implements SQLiteVFS {
   /** Last error thrown by a flush that SQLite could not be told about (see file header). */
   lastFlushError: unknown = undefined;
 
+  /** The R2 page tier, when configured (see `page-tier.ts`). */
+  private tier: PageTier | null = null;
+  /** Cold chunks the synchronous read path could not serve, per file (see `resolveMisses`). */
+  private readonly misses = new Map<string, Set<number>>();
+  /**
+   * Chunks fetched for the statement/transaction being retried, per file.
+   * Kept OUTSIDE the LRU until `releasePins()`: a statement whose working
+   * set exceeds the clean cache would otherwise evict what its last resolve
+   * fetched and miss again on every retry. Bounded by `missPinBytes`.
+   */
+  private readonly pinned = new Map<string, Map<number, Uint8Array>>();
+  private pinnedBytes = 0;
+  /** Statement/transaction retries the wrapper ran for cold misses (reported in `tierStatus`). */
+  missRetries = 0;
+  /** A tier pass in flight (one at a time per VFS). */
+  private tierPassInFlight = false;
+
   constructor(
     readonly name: string,
     storage: DurableObjectStorage,
@@ -332,6 +455,23 @@ export class DoVfs implements SQLiteVFS {
   ) {
     this.storage = storage;
     this.cache = new ChunkCache(DoVfs.chunksForPages(options.cachePages));
+    if (options.tier !== undefined) {
+      this.tier = new PageTier(storage, resolvePageTierOptions(options.tier));
+    }
+  }
+
+  get tierEnabled(): boolean {
+    return this.tier !== null;
+  }
+
+  /**
+   * Attach a tier to a VFS created without one (an object whose first open
+   * predates the binding). A tier, once set, is never swapped or removed —
+   * its map lives in this object's storage.
+   */
+  configureTier(options: PageTierOptions | undefined): void {
+    if (options === undefined || this.tier !== null) return;
+    this.tier = new PageTier(this.storage, resolvePageTierOptions(options));
   }
 
   private static chunksForPages(cachePages: number | undefined): number {
@@ -366,7 +506,12 @@ export class DoVfs implements SQLiteVFS {
     this.persistentByName.clear();
     this.openFiles.clear();
     this.snapshots.clear();
+    this.misses.clear();
+    this.pinned.clear();
+    this.pinnedBytes = 0;
+    this.tierPassInFlight = false;
     this.lastFlushError = undefined;
+    this.tier?.attach(storage);
   }
 
   /** SQLite connection handles opened through this VFS (tracked by `DoSqliteDatabase`). */
@@ -390,6 +535,10 @@ export class DoVfs implements SQLiteVFS {
     this.connections.clear();
     for (const file of this.persistentByName.values()) {
       file.dirty.clear();
+      file.dirtyMask.clear();
+      file.base.clear();
+      file.touched.clear();
+      file.tierWrittenSince = null;
       file.truncateToPages = null;
       file.sizeDirty = false;
       file.flags &= ~SQLITE_OPEN_DELETEONCLOSE;
@@ -418,6 +567,22 @@ export class DoVfs implements SQLiteVFS {
   private fail(codeName: string, error: unknown, code: number): number {
     this.lastFlushError = error;
     console.error(`[do-vfs ${this.name}] ${codeName}:`, error);
+    return code;
+  }
+
+  /**
+   * A cold page: remember the chunk so `resolveMisses` can fetch it and
+   * answer SQLite with `code` — quietly (no log, no `lastFlushError`): the
+   * wrapper retries, it is not a failure.
+   */
+  private miss(miss: ColdChunkMiss, code: number): number {
+    let set = this.misses.get(miss.file);
+    if (set === undefined) {
+      set = new Set();
+      this.misses.set(miss.file, set);
+    }
+    set.add(miss.chunkno);
+    if (this.tier) this.tier.stats.coldMisses++;
     return code;
   }
 
@@ -455,6 +620,11 @@ export class DoVfs implements SQLiteVFS {
             gen: meta?.gen ?? 0,
             lock: SQLITE_LOCK_NONE,
             dirty: new Map(),
+            dirtyMask: new Map(),
+            base: new Map(),
+            touched: new Set(),
+            touchedPeriod: -1,
+            tierWrittenSince: null,
             truncateToPages: null,
             sizeDirty: false,
             spill: name.endsWith(VACUUM_FILE_SUFFIX),
@@ -519,6 +689,8 @@ export class DoVfs implements SQLiteVFS {
       if (file.kind === 'memory') return readMemory(file, pData, iOffset);
       return this.readPersistent(file, pData, iOffset);
     } catch (error) {
+      if (error instanceof ColdChunkMiss)
+        return this.miss(error, SQLITE_IOERR_READ);
       return this.fail('SQLITE_IOERR_READ', error, SQLITE_IOERR_READ);
     }
   }
@@ -531,6 +703,8 @@ export class DoVfs implements SQLiteVFS {
       this.writePersistent(file, pData, iOffset);
       return SQLITE_OK;
     } catch (error) {
+      if (error instanceof ColdChunkMiss)
+        return this.miss(error, SQLITE_IOERR_WRITE);
       return this.fail('SQLITE_IOERR_WRITE', error, SQLITE_IOERR_WRITE);
     }
   }
@@ -546,6 +720,8 @@ export class DoVfs implements SQLiteVFS {
       this.truncatePersistent(file, iSize);
       return SQLITE_OK;
     } catch (error) {
+      if (error instanceof ColdChunkMiss)
+        return this.miss(error, SQLITE_IOERR_TRUNCATE);
       return this.fail('SQLITE_IOERR_TRUNCATE', error, SQLITE_IOERR_TRUNCATE);
     }
   }
@@ -680,9 +856,10 @@ export class DoVfs implements SQLiteVFS {
    * Concatenate the stored pages of `name` in order: the result is the SQLite
    * file exactly as a filesystem VFS would hold it. Pending (unflushed) pages
    * are flushed first, so this must not be called from inside a SQLite
-   * transaction on that file. Materializes the whole file in memory.
+   * transaction on that file. Materializes the whole file in memory; cold
+   * windows come from R2.
    */
-  exportFile(name: string): Uint8Array {
+  async exportFile(name: string): Promise<Uint8Array> {
     const open = this.persistentByName.get(name);
     if (open !== undefined) {
       if (open.lock >= SQLITE_LOCK_EXCLUSIVE) {
@@ -698,26 +875,13 @@ export class DoVfs implements SQLiteVFS {
       throw new DoVfsError(`file '${name}' does not exist`);
     const out = new Uint8Array(size);
     const totalChunks = Math.ceil(size / CHUNK_SIZE);
-    // Read in windows so a large file doesn't need a single giant result set
-    // (64 chunks = 4 MiB per query).
-    const window = 64;
-    for (let start = 0; start < totalChunks; start += window) {
-      const rows = this.storage.sql
-        .exec<ChunkRow>(
-          'SELECT chunkno, data FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno < ? ORDER BY chunkno',
-          name,
-          start,
-          start + window,
-        )
-        .toArray();
-      this.stats.storageReads++;
-      this.stats.rowsRead += rows.length;
-      for (const row of rows) {
-        const offset = row.chunkno * CHUNK_SIZE;
-        const bytes = new Uint8Array(row.data);
-        const n = Math.min(bytes.byteLength, size - offset);
-        if (n > 0) out.set(bytes.subarray(0, n), offset);
-      }
+    const segments = this.tier ? this.tier.segmentsOf(name) : new Map();
+    for (let start = 0; start < totalChunks; start += SNAPSHOT_WINDOW_CHUNKS) {
+      const end = Math.min(totalChunks, start + SNAPSHOT_WINDOW_CHUNKS);
+      out.set(
+        await this.readWindow(name, size, start, end, undefined, segments),
+        start * CHUNK_SIZE,
+      );
     }
     return out;
   }
@@ -742,8 +906,10 @@ export class DoVfs implements SQLiteVFS {
     const normalized = normalizeJournalModeHeader(bytes);
     this.ensureSchema();
     this.cache.dropFile(name);
+    this.dropPins(name);
     this.storage.transactionSync(() => {
       this.storage.sql.exec('DELETE FROM vfs2_chunks WHERE file = ?', name);
+      this.tier?.dropFile(name);
       this.storage.sql.exec(
         'INSERT INTO vfs2_files (file, size, gen) VALUES (?, ?, 1) ON CONFLICT(file) DO UPDATE SET size = excluded.size, gen = vfs2_files.gen + 1',
         name,
@@ -803,9 +969,12 @@ export class DoVfs implements SQLiteVFS {
       throw new DoVfsError(`file '${name}' does not exist`);
     const hash = createHash('sha256');
     const totalChunks = Math.ceil(size / CHUNK_SIZE);
+    const segments = this.tier ? this.tier.segmentsOf(name) : new Map();
     for (let start = 0; start < totalChunks; start += SNAPSHOT_WINDOW_CHUNKS) {
       const end = Math.min(totalChunks, start + SNAPSHOT_WINDOW_CHUNKS);
-      hash.update(this.readWindow(name, size, start, end, undefined));
+      hash.update(
+        await this.readWindow(name, size, start, end, undefined, segments),
+      );
     }
     return hash.digest('hex');
   }
@@ -838,6 +1007,14 @@ export class DoVfs implements SQLiteVFS {
       size: meta.size,
       totalChunks: Math.ceil(meta.size / CHUNK_SIZE),
       shadow: new Map(),
+      segments: this.tier
+        ? new Map(
+            Array.from(this.tier.segmentsOf(name), ([segno, entry]) => [
+              segno,
+              { ...entry },
+            ]),
+          )
+        : new Map(),
       open: true,
     };
     this.snapshots.set(name, state);
@@ -859,7 +1036,7 @@ export class DoVfs implements SQLiteVFS {
     let cursor = 0;
     return new ReadableStream<Uint8Array>(
       {
-        pull: (controller) => {
+        pull: async (controller) => {
           if (!state.open) {
             controller.error(
               new DoVfsError(`snapshot of '${state.name}' was closed`),
@@ -875,7 +1052,14 @@ export class DoVfs implements SQLiteVFS {
             cursor + SNAPSHOT_WINDOW_CHUNKS,
           );
           controller.enqueue(
-            this.readWindow(state.name, state.size, cursor, end, state.shadow),
+            await this.readWindow(
+              state.name,
+              state.size,
+              cursor,
+              end,
+              state.shadow,
+              state.segments,
+            ),
           );
           cursor = end;
         },
@@ -888,22 +1072,25 @@ export class DoVfs implements SQLiteVFS {
 
   /**
    * Bytes of chunks `[start, end)` of `name` exactly as stored, capped at
-   * `size`. Pre-images in `shadow` win over storage. Windows bypass the clean
-   * cache so a whole-file read never evicts the working set.
+   * `size`. Per chunk, page by page: a pre-image in `shadow` wins, then the
+   * hot row, then the R2 slot as mapped in `segments`, else zeros. Windows
+   * bypass the clean cache so a whole-file read never evicts the working
+   * set; a window is one segment, so a cold window is one R2 GET.
    */
-  private readWindow(
+  private async readWindow(
     name: string,
     size: number,
     start: number,
     end: number,
-    shadow: Map<number, Uint8Array> | undefined,
-  ): Uint8Array {
+    shadow: Map<number, MaskedChunk> | undefined,
+    segments: Map<number, SegmentEntry>,
+  ): Promise<Uint8Array> {
     const from = start * CHUNK_SIZE;
     const to = Math.min(size, end * CHUNK_SIZE);
     const out = new Uint8Array(Math.max(0, to - from));
     const rows = this.storage.sql
       .exec<ChunkRow>(
-        'SELECT chunkno, data FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno < ? ORDER BY chunkno',
+        'SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno < ? ORDER BY chunkno',
         name,
         start,
         end,
@@ -911,20 +1098,48 @@ export class DoVfs implements SQLiteVFS {
       .toArray();
     this.stats.storageReads++;
     this.stats.rowsRead += rows.length;
-    const place = (chunkno: number, bytes: Uint8Array): void => {
-      const offset = chunkno * CHUNK_SIZE - from;
-      const n = Math.min(bytes.byteLength, out.byteLength - offset);
-      if (n > 0) out.set(bytes.subarray(0, n), offset);
-    };
-    for (const row of rows) {
-      if (shadow?.has(row.chunkno)) continue;
-      place(row.chunkno, new Uint8Array(row.data));
-    }
-    if (shadow) {
-      for (let chunkno = start; chunkno < end; chunkno++) {
-        const pre = shadow.get(chunkno);
-        if (pre !== undefined) place(chunkno, pre);
+    const byChunk = new Map<number, MaskedChunk>();
+    for (const row of rows)
+      byChunk.set(row.chunkno, {
+        data: new Uint8Array(row.data),
+        mask: row.mask,
+      });
+    // Which slots still need R2 after shadow + rows? Fetch each segment once.
+    const segmentBytes = new Map<number, Uint8Array | null>();
+    const slotBytes = async (chunkno: number): Promise<Uint8Array | null> => {
+      const segno = segmentOf(chunkno);
+      const entry = segments.get(segno);
+      if (entry === undefined || (entry.mask & (1 << slotOf(chunkno))) === 0)
+        return null;
+      if (!segmentBytes.has(segno)) {
+        segmentBytes.set(
+          segno,
+          this.tier ? await this.tier.getSegmentAt(name, segno, entry) : null,
+        );
       }
+      const seg = segmentBytes.get(segno) ?? null;
+      if (seg === null) return null;
+      const at = slotOf(chunkno) * CHUNK_SIZE;
+      return seg.subarray(at, at + CHUNK_SIZE);
+    };
+    for (let chunkno = start; chunkno < end; chunkno++) {
+      const offset = chunkno * CHUNK_SIZE - from;
+      const n = Math.min(CHUNK_SIZE, out.byteLength - offset);
+      if (n <= 0) break;
+      const pre = shadow?.get(chunkno);
+      const image = pre ?? byChunk.get(chunkno);
+      let mask = image?.mask ?? 0;
+      if (image !== undefined) {
+        placeMasked(out, offset, n, image.data, image.mask);
+      }
+      if (mask !== FULL_MASK) {
+        const cold = await slotBytes(chunkno);
+        if (cold !== null) {
+          placeMasked(out, offset, n, cold, FULL_MASK & ~mask);
+          mask = FULL_MASK;
+        }
+      }
+      // Remaining pages: sparse → already zero.
     }
     return out;
   }
@@ -1001,8 +1216,10 @@ export class DoVfs implements SQLiteVFS {
       }
       flushRows();
       this.cache.dropFile(name);
+      this.dropPins(name);
       this.storage.transactionSync(() => {
         this.storage.sql.exec('DELETE FROM vfs2_chunks WHERE file = ?', name);
+        this.tier?.dropFile(name);
         this.storage.sql.exec(
           'UPDATE vfs2_chunks SET file = ? WHERE file = ?',
           name,
@@ -1045,8 +1262,11 @@ export class DoVfs implements SQLiteVFS {
       throw new DoVfsError(`file '${from}' does not exist`);
     this.cache.dropFile(from);
     this.cache.dropFile(to);
+    this.dropPins(from);
+    this.dropPins(to);
     this.storage.transactionSync(() => {
       this.storage.sql.exec('DELETE FROM vfs2_chunks WHERE file = ?', to);
+      this.tier?.dropFile(to);
       this.storage.sql.exec(
         'UPDATE vfs2_chunks SET file = ? WHERE file = ?',
         to,
@@ -1104,6 +1324,17 @@ export class DoVfs implements SQLiteVFS {
         'ALTER TABLE vfs2_files ADD COLUMN gen INTEGER NOT NULL DEFAULT 0',
       );
     }
+    // Page mask (added with the R2 tier): rows written before it are full.
+    const chunkColumns = this.storage.sql
+      .exec<{ name: string }>('PRAGMA table_info(vfs2_chunks)')
+      .toArray()
+      .map((row) => row.name);
+    if (!chunkColumns.includes('mask')) {
+      this.storage.sql.exec(
+        `ALTER TABLE vfs2_chunks ADD COLUMN mask INTEGER NOT NULL DEFAULT ${FULL_MASK}`,
+      );
+    }
+    this.tier?.ensureSchema();
     // v1 (one page per row) never shipped; drop dev-environment leftovers so
     // a stale un-chunked working copy can't shadow the re-import path.
     this.storage.sql.exec('DROP TABLE IF EXISTS vfs_pages');
@@ -1140,20 +1371,53 @@ export class DoVfs implements SQLiteVFS {
   }
 
   /**
-   * The chunk holding `chunkno`, from (in order) the dirty set, the clean
-   * cache, then storage. Returns a buffer that must be treated as read-only
-   * unless it came from `dirty` — writers copy before mutating.
+   * Note a read or write of `chunkno` for the tier's eviction policy. The
+   * set belongs to the period the touches happened in: crossing a period
+   * boundary while loaded persists the old set under its own period first
+   * (one row write), so a chunk last used yesterday ages correctly.
    */
-  private loadChunk(
+  private touch(file: PersistentFile, chunkno: number): void {
+    const tier = this.tier;
+    if (tier === null) return;
+    const period = tier.currentPeriod();
+    if (file.touchedPeriod !== period) {
+      if (file.touched.size > 0) this.persistTouches(file, tier);
+      file.touchedPeriod = period;
+    }
+    file.touched.add(chunkno);
+  }
+
+  private persistTouches(file: PersistentFile, tier: PageTier): void {
+    if (file.touched.size === 0) return;
+    tier.recordAccess(
+      file.name,
+      file.touchedPeriod,
+      file.touched,
+      Math.ceil(file.size / CHUNK_SIZE),
+    );
+    file.touched.clear();
+    this.stats.storageWrites++;
+    this.stats.rowsWritten++;
+  }
+
+  /**
+   * What storage holds for `chunkno` without touching R2: the clean cache
+   * (always a full, effective chunk) or the hot row (full or partial).
+   * `undefined` = no local bytes at all.
+   */
+  private lookupLocal(
     file: PersistentFile,
     chunkno: number,
-  ): Uint8Array | undefined {
-    const dirty = file.dirty.get(chunkno);
-    if (dirty !== undefined) return dirty;
+  ): MaskedChunk | undefined {
+    const pin = this.pinned.get(file.name)?.get(chunkno);
+    if (pin !== undefined) {
+      this.stats.cacheHits++;
+      return { data: pin, mask: FULL_MASK };
+    }
     const cached = this.cache.get(file.name, chunkno);
     if (cached !== undefined) {
       this.stats.cacheHits++;
-      return cached;
+      return { data: cached, mask: FULL_MASK };
     }
     if (
       file.truncateToPages !== null &&
@@ -1163,7 +1427,7 @@ export class DoVfs implements SQLiteVFS {
     this.stats.cacheMisses++;
     const rows = this.storage.sql
       .exec<ChunkRow>(
-        'SELECT chunkno, data FROM vfs2_chunks WHERE file = ? AND chunkno = ?',
+        'SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno = ?',
         file.name,
         chunkno,
       )
@@ -1178,17 +1442,78 @@ export class DoVfs implements SQLiteVFS {
       full.set(chunk.subarray(0, Math.min(chunk.byteLength, CHUNK_SIZE)));
       chunk = full;
     }
-    this.cache.set(file.name, chunkno, chunk);
-    return chunk;
+    const mask = this.tier === null ? FULL_MASK : row.mask;
+    if (mask === FULL_MASK) this.cache.set(file.name, chunkno, chunk);
+    return { data: chunk, mask };
   }
 
-  /** A dirty (mutable) buffer for `chunkno`, copied from clean state if needed. */
+  /**
+   * The chunk holding `chunkno`, from (in order) the dirty set, the clean
+   * cache, then storage. Returns a buffer that must be treated as read-only
+   * unless it came from `dirty` — writers copy before mutating. Throws
+   * `ColdChunkMiss` when pages of it live only in R2 (see the file header).
+   */
+  private loadChunk(
+    file: PersistentFile,
+    chunkno: number,
+  ): Uint8Array | undefined {
+    this.touch(file, chunkno);
+    const dirty = file.dirty.get(chunkno);
+    if (dirty !== undefined) {
+      const mask = file.dirtyMask.get(chunkno) ?? FULL_MASK;
+      if (mask === FULL_MASK) return dirty;
+      // A partial dirty chunk: complete it from the fetched slot if a
+      // resolve has pinned or cached it since.
+      const cold =
+        this.pinned.get(file.name)?.get(chunkno) ??
+        this.cache.get(file.name, chunkno);
+      if (cold !== undefined) {
+        placeMasked(dirty, 0, CHUNK_SIZE, cold, FULL_MASK & ~mask);
+        file.dirtyMask.set(chunkno, FULL_MASK);
+        return dirty;
+      }
+      if (this.tier === null || !this.tier.slotInR2(file.name, chunkno)) {
+        // No cold base: the unknown pages are zeros.
+        file.dirtyMask.set(chunkno, FULL_MASK);
+        return dirty;
+      }
+      throw new ColdChunkMiss(file.name, chunkno);
+    }
+    const local = this.lookupLocal(file, chunkno);
+    if (local !== undefined && local.mask === FULL_MASK) return local.data;
+    if (this.tier !== null && this.tier.slotInR2(file.name, chunkno))
+      throw new ColdChunkMiss(file.name, chunkno);
+    if (local === undefined) return undefined; // sparse
+    // A partial row whose R2 slot is gone (truncated away): the rest is zeros.
+    this.cache.set(file.name, chunkno, local.data);
+    return local.data;
+  }
+
+  /**
+   * A dirty (mutable) buffer for `chunkno`, copied from clean state if
+   * needed. Never misses: over a cold base the buffer starts as zeros with
+   * an empty mask, and `writePersistent` marks the pages it fills — a
+   * partial row when flushed. The clean state is remembered in `file.base`
+   * as the snapshot pre-image.
+   */
   private dirtyChunk(file: PersistentFile, chunkno: number): Uint8Array {
     let chunk = file.dirty.get(chunkno);
     if (chunk !== undefined) return chunk;
-    const clean = this.loadChunk(file, chunkno);
-    chunk = clean !== undefined ? clean.slice() : new Uint8Array(CHUNK_SIZE);
+    this.touch(file, chunkno);
+    const local = this.lookupLocal(file, chunkno);
+    let mask: number;
+    if (local !== undefined) {
+      chunk = local.data.slice();
+      mask = local.mask;
+      file.base.set(chunkno, local);
+    } else {
+      chunk = new Uint8Array(CHUNK_SIZE);
+      const cold = this.tier !== null && this.tier.slotInR2(file.name, chunkno);
+      mask = cold ? 0 : FULL_MASK;
+      file.base.set(chunkno, cold ? 'cold' : 'sparse');
+    }
     file.dirty.set(chunkno, chunk);
+    file.dirtyMask.set(chunkno, mask);
     return chunk;
   }
 
@@ -1236,6 +1561,24 @@ export class DoVfs implements SQLiteVFS {
       // copied implicitly by `set` (it aliases the wasm heap).
       const chunk = this.dirtyChunk(file, chunkno);
       chunk.set(pData.subarray(done, done + n), inChunk);
+      const mask = file.dirtyMask.get(chunkno) ?? FULL_MASK;
+      if (mask !== FULL_MASK) {
+        // Over a cold base only whole pages can be claimed: SQLite writes
+        // its main database in whole pages, so anything else is a bug.
+        if (inChunk % VFS_PAGE_SIZE !== 0 || n % VFS_PAGE_SIZE !== 0) {
+          throw new DoVfsError(
+            `unaligned write (${n} bytes at ${pos}) over a cold chunk of '${file.name}'`,
+          );
+        }
+        let updated = mask;
+        for (
+          let page = inChunk / VFS_PAGE_SIZE;
+          page < (inChunk + n) / VFS_PAGE_SIZE;
+          page++
+        )
+          updated |= 1 << page;
+        file.dirtyMask.set(chunkno, updated);
+      }
       done += n;
     }
     const end = iOffset + pData.byteLength;
@@ -1251,9 +1594,22 @@ export class DoVfs implements SQLiteVFS {
     const keepPages = Math.ceil(iSize / VFS_PAGE_SIZE);
     const keepChunks = Math.ceil(keepPages / PAGES_PER_CHUNK);
     for (const chunkno of Array.from(file.dirty.keys())) {
-      if (chunkno >= keepChunks) file.dirty.delete(chunkno);
+      if (chunkno >= keepChunks) {
+        file.dirty.delete(chunkno);
+        file.dirtyMask.delete(chunkno);
+        file.base.delete(chunkno);
+      }
     }
     this.cache.dropFrom(file.name, keepChunks);
+    const pins = this.pinned.get(file.name);
+    if (pins !== undefined) {
+      for (const chunkno of Array.from(pins.keys())) {
+        if (chunkno >= keepChunks) {
+          pins.delete(chunkno);
+          this.pinnedBytes -= CHUNK_SIZE;
+        }
+      }
+    }
     file.truncateToPages =
       file.truncateToPages === null
         ? keepPages
@@ -1261,16 +1617,25 @@ export class DoVfs implements SQLiteVFS {
     file.size = iSize;
     file.sizeDirty = true;
     // Zero the bytes past the new end inside the last surviving chunk, so a
-    // later grow-then-read never resurrects stale bytes.
+    // later grow-then-read never resurrects stale bytes. Over a cold base
+    // the zeroed pages are claimed in the mask (SQLite truncates on page
+    // boundaries, so no page is half-known).
     if (keepChunks > 0) {
       const tail = iSize - (keepChunks - 1) * CHUNK_SIZE;
       if (tail < CHUNK_SIZE) {
-        const last = this.loadChunk(file, keepChunks - 1);
-        if (last !== undefined) {
-          const copy =
-            file.dirty.get(keepChunks - 1) === last ? last : last.slice();
-          copy.fill(0, tail);
-          file.dirty.set(keepChunks - 1, copy);
+        const last = this.dirtyChunk(file, keepChunks - 1);
+        last.fill(0, tail);
+        const mask = file.dirtyMask.get(keepChunks - 1) ?? FULL_MASK;
+        if (mask !== FULL_MASK) {
+          if (tail % VFS_PAGE_SIZE !== 0) {
+            throw new DoVfsError(
+              `truncate of '${file.name}' to ${iSize} is not page-aligned over a cold chunk`,
+            );
+          }
+          let updated = mask;
+          for (let page = tail / VFS_PAGE_SIZE; page < PAGES_PER_CHUNK; page++)
+            updated |= 1 << page;
+          file.dirtyMask.set(keepChunks - 1, updated);
         }
       }
     }
@@ -1295,27 +1660,38 @@ export class DoVfs implements SQLiteVFS {
     const snapshot = this.snapshots.get(file.name);
     if (snapshot !== undefined) {
       // Pin the pre-image of everything this flush overwrites or deletes.
-      const touched = dirty.map(([chunkno]) => chunkno);
+      this.shadowDirtyPreImages(
+        file,
+        snapshot,
+        dirty.map(([chunkno]) => chunkno),
+      );
       if (truncateTo !== null) {
+        const deleted: number[] = [];
         for (
           let chunkno = DoVfs.chunkFloor(truncateTo);
           chunkno < snapshot.totalChunks;
           chunkno++
         )
-          touched.push(chunkno);
+          deleted.push(chunkno);
+        this.shadowStoredPreImages(file, snapshot, deleted);
       }
-      this.shadowPreImages(file, snapshot, touched);
     }
+    const rows = dirty.map(
+      ([chunkno, chunk]) =>
+        [chunkno, chunk, file.dirtyMask.get(chunkno) ?? FULL_MASK] as const,
+    );
     this.storage.transactionSync(() => {
       if (truncateTo !== null) {
+        const keepChunks = DoVfs.chunkFloor(truncateTo);
         this.storage.sql.exec(
           'DELETE FROM vfs2_chunks WHERE file = ? AND chunkno >= ?',
           file.name,
-          DoVfs.chunkFloor(truncateTo),
+          keepChunks,
         );
+        this.tier?.truncate(file.name, keepChunks);
       }
-      for (let i = 0; i < dirty.length; i += FLUSH_BATCH_ROWS) {
-        this.upsertChunks(file.name, dirty.slice(i, i + FLUSH_BATCH_ROWS));
+      for (let i = 0; i < rows.length; i += FLUSH_BATCH_ROWS) {
+        this.upsertChunks(file.name, rows.slice(i, i + FLUSH_BATCH_ROWS));
       }
       this.storage.sql.exec(
         'UPDATE vfs2_files SET size = ?, gen = gen + 1 WHERE file = ?',
@@ -1327,20 +1703,63 @@ export class DoVfs implements SQLiteVFS {
     file.gen += 1;
     this.stats.storageWrites++;
     this.stats.flushes++;
-    for (const [chunkno, chunk] of dirty)
-      this.cache.set(file.name, chunkno, chunk);
+    const pins = this.pinned.get(file.name);
+    for (const [chunkno, chunk, mask] of rows) {
+      if (mask === FULL_MASK) this.cache.set(file.name, chunkno, chunk);
+      else this.cache.dropChunk(file.name, chunkno);
+      // A chunk pinned for the running retry now has newer bytes in storage:
+      // refresh the pin (or drop a partial one) so neither the retry nor
+      // the release into the LRU can resurrect the pre-write content.
+      if (pins?.has(chunkno)) {
+        if (mask === FULL_MASK) pins.set(chunkno, chunk);
+        else {
+          pins.delete(chunkno);
+          this.pinnedBytes -= CHUNK_SIZE;
+        }
+      }
+      file.tierWrittenSince?.add(chunkno);
+    }
     file.dirty.clear();
+    file.dirtyMask.clear();
+    file.base.clear();
     file.truncateToPages = null;
     file.sizeDirty = false;
   }
 
   /**
-   * Capture, for an open snapshot of `file`, the stored content of every
-   * chunk in `chunknos` that lies inside the snapshot and is not shadowed
-   * yet. The clean cache usually still holds the pre-image (a write copies
-   * the clean chunk through it); otherwise one storage read per chunk.
+   * Pin, for an open snapshot of `file`, the pre-image of every dirty chunk
+   * about to be flushed: the clean state `dirtyChunk` started from
+   * (`file.base`) — no storage read. A cold base pins an empty image whose
+   * pages the snapshot reader takes from the R2 slot it mapped at open time.
    */
-  private shadowPreImages(
+  private shadowDirtyPreImages(
+    file: PersistentFile,
+    snapshot: SnapshotState,
+    chunknos: number[],
+  ): void {
+    for (const chunkno of chunknos) {
+      if (chunkno >= snapshot.totalChunks || snapshot.shadow.has(chunkno))
+        continue;
+      const base = file.base.get(chunkno);
+      if (base === undefined || base === 'sparse') {
+        snapshot.shadow.set(chunkno, {
+          data: new Uint8Array(CHUNK_SIZE),
+          mask: FULL_MASK,
+        });
+      } else if (base === 'cold') {
+        snapshot.shadow.set(chunkno, { data: new Uint8Array(0), mask: 0 });
+      } else {
+        snapshot.shadow.set(chunkno, base);
+      }
+    }
+  }
+
+  /**
+   * Pin the STORED content of chunks a truncation is about to delete (they
+   * were never dirtied, so `file.base` knows nothing about them): the clean
+   * cache when it still holds them, else one batched storage read.
+   */
+  private shadowStoredPreImages(
     file: PersistentFile,
     snapshot: SnapshotState,
     chunknos: number[],
@@ -1350,14 +1769,15 @@ export class DoVfs implements SQLiteVFS {
       if (chunkno >= snapshot.totalChunks || snapshot.shadow.has(chunkno))
         continue;
       const cached = this.cache.get(file.name, chunkno);
-      if (cached !== undefined) snapshot.shadow.set(chunkno, cached);
+      if (cached !== undefined)
+        snapshot.shadow.set(chunkno, { data: cached, mask: FULL_MASK });
       else missing.push(chunkno);
     }
     for (let i = 0; i < missing.length; i += SNAPSHOT_WINDOW_CHUNKS) {
       const batch = missing.slice(i, i + SNAPSHOT_WINDOW_CHUNKS);
       const rows = this.storage.sql
         .exec<ChunkRow>(
-          `SELECT chunkno, data FROM vfs2_chunks WHERE file = ? AND chunkno IN (${batch.map(() => '?').join(', ')})`,
+          `SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno IN (${batch.map(() => '?').join(', ')})`,
           file.name,
           ...batch,
         )
@@ -1365,27 +1785,30 @@ export class DoVfs implements SQLiteVFS {
       this.stats.storageReads++;
       this.stats.rowsRead += rows.length;
       for (const row of rows)
-        snapshot.shadow.set(row.chunkno, new Uint8Array(row.data));
-      // A chunk with no stored row was sparse at snapshot time: zeros.
+        snapshot.shadow.set(row.chunkno, {
+          data: new Uint8Array(row.data),
+          mask: this.tier === null ? FULL_MASK : row.mask,
+        });
+      // No stored row: cold (the reader fills from R2) or sparse (zeros).
       for (const chunkno of batch) {
         if (!snapshot.shadow.has(chunkno))
-          snapshot.shadow.set(chunkno, new Uint8Array(CHUNK_SIZE));
+          snapshot.shadow.set(chunkno, { data: new Uint8Array(0), mask: 0 });
       }
     }
   }
 
   private upsertChunks(
     name: string,
-    rows: ReadonlyArray<readonly [number, Uint8Array]>,
+    rows: ReadonlyArray<readonly [number, Uint8Array, number?]>,
   ): void {
     if (rows.length === 0) return;
-    const placeholders = rows.map(() => '(?, ?, ?)').join(', ');
+    const placeholders = rows.map(() => '(?, ?, ?, ?)').join(', ');
     const bindings: Array<string | number | ArrayBuffer> = [];
-    for (const [chunkno, chunk] of rows) {
-      bindings.push(name, chunkno, toArrayBuffer(chunk));
+    for (const [chunkno, chunk, mask] of rows) {
+      bindings.push(name, chunkno, toArrayBuffer(chunk), mask ?? FULL_MASK);
     }
     this.storage.sql.exec(
-      `INSERT OR REPLACE INTO vfs2_chunks (file, chunkno, data) VALUES ${placeholders}`,
+      `INSERT OR REPLACE INTO vfs2_chunks (file, chunkno, data, mask) VALUES ${placeholders}`,
       ...bindings,
     );
     this.stats.rowsWritten += rows.length;
@@ -1394,11 +1817,452 @@ export class DoVfs implements SQLiteVFS {
   private deletePersistent(name: string): void {
     this.assertNoSnapshot(name, 'delete');
     this.cache.dropFile(name);
+    this.misses.delete(name);
+    this.dropPins(name);
     this.storage.transactionSync(() => {
       this.storage.sql.exec('DELETE FROM vfs2_chunks WHERE file = ?', name);
       this.storage.sql.exec('DELETE FROM vfs2_files WHERE file = ?', name);
+      this.tier?.dropFile(name);
     });
     this.stats.storageWrites++;
+  }
+
+  // ---------------------------------------------------------------------------
+  // R2 page tier (see page-tier.ts)
+  // ---------------------------------------------------------------------------
+
+  /** Whether the synchronous read path recorded cold misses since the last resolve. */
+  hasMisses(): boolean {
+    for (const set of this.misses.values()) if (set.size > 0) return true;
+    return false;
+  }
+
+  /** Forget recorded misses (a transaction committed past a statement that swallowed one). */
+  clearMisses(): void {
+    this.misses.clear();
+  }
+
+  /**
+   * Fetch every segment the recorded misses fall in (plus one segment of
+   * read-ahead for sequential scans), pin the effective content of each of
+   * their chunks (hot row pages over the R2 slot) for the statement or
+   * transaction being retried, and clear the misses. The caller re-runs
+   * the failed statement/transaction and calls `releasePins()` once it is
+   * done. Returns the number of segments fetched.
+   */
+  async resolveMisses(): Promise<number> {
+    const tier = this.tier;
+    if (tier === null) {
+      this.misses.clear();
+      return 0;
+    }
+    let fetched = 0;
+    for (const [name, chunks] of Array.from(this.misses.entries())) {
+      this.misses.delete(name);
+      const file = this.persistentByName.get(name);
+      const size = file?.size ?? this.readStoredMeta(name)?.size ?? 0;
+      const totalChunks = Math.ceil(size / CHUNK_SIZE);
+      const lastSegment = segmentOf(Math.max(0, totalChunks - 1));
+      const segnos = new Set<number>();
+      for (const chunkno of chunks) {
+        const segno = segmentOf(chunkno);
+        segnos.add(segno);
+        if (segno + 1 <= lastSegment) segnos.add(segno + 1);
+      }
+      let pins = this.pinned.get(name);
+      if (pins === undefined) {
+        pins = new Map();
+        this.pinned.set(name, pins);
+      }
+      for (const segno of segnos) {
+        const first = segno * SEGMENT_CHUNKS;
+        const last = Math.min(totalChunks, first + SEGMENT_CHUNKS) - 1;
+        if (last < first) continue;
+        // Read-ahead only when the segment is cold and not pinned already.
+        let wanted = false;
+        for (let chunkno = first; chunkno <= last && !wanted; chunkno++)
+          wanted = !pins.has(chunkno) && tier.slotInR2(name, chunkno);
+        if (!wanted) continue;
+        const seg = await tier.getSegment(name, segno);
+        fetched++;
+        const rows = this.storage.sql
+          .exec<ChunkRow>(
+            'SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno <= ?',
+            name,
+            first,
+            last,
+          )
+          .toArray();
+        this.stats.storageReads++;
+        this.stats.rowsRead += rows.length;
+        const byChunk = new Map<number, ChunkRow>();
+        for (const row of rows) byChunk.set(row.chunkno, row);
+        for (let chunkno = first; chunkno <= last; chunkno++) {
+          if (pins.has(chunkno)) continue;
+          const row = byChunk.get(chunkno);
+          if (row !== undefined && row.mask === FULL_MASK) {
+            // Hot and complete: the miss was for a neighbour; nothing to add.
+            continue;
+          }
+          const inR2 = tier.slotInR2(name, chunkno);
+          if (row === undefined && !inR2) continue; // sparse: reads return zeros
+          const full = new Uint8Array(CHUNK_SIZE);
+          if (inR2 && seg !== null) {
+            const at = slotOf(chunkno) * CHUNK_SIZE;
+            full.set(seg.subarray(at, at + CHUNK_SIZE));
+          }
+          if (row !== undefined)
+            placeMasked(
+              full,
+              0,
+              CHUNK_SIZE,
+              new Uint8Array(row.data),
+              row.mask,
+            );
+          if (this.pinnedBytes + CHUNK_SIZE > tier.options.missPinBytes) {
+            throw new DoVfsError(
+              `cold-read working set of '${name}' exceeds the ${Math.round(tier.options.missPinBytes / 1024 / 1024)} MiB pin budget — the statement touches more cold data than one pass may hold in memory`,
+            );
+          }
+          pins.set(chunkno, full);
+          this.pinnedBytes += CHUNK_SIZE;
+        }
+      }
+    }
+    tier.stats.missResolutions++;
+    return fetched;
+  }
+
+  /**
+   * The retried statement/transaction is done: hand the pinned chunks to
+   * the LRU (the most recently used survive) and free the pin budget.
+   */
+  releasePins(): void {
+    for (const [name, pins] of this.pinned) {
+      for (const [chunkno, chunk] of pins) this.cache.set(name, chunkno, chunk);
+      pins.clear();
+    }
+    this.pinned.clear();
+    this.pinnedBytes = 0;
+  }
+
+  private dropPins(name: string): void {
+    const pins = this.pinned.get(name);
+    if (pins === undefined) return;
+    this.pinnedBytes -= pins.size * CHUNK_SIZE;
+    this.pinned.delete(name);
+  }
+
+  /** Persist which chunks were touched since the last call (one row write). No-op without a tier. */
+  recordAccess(name: string): void {
+    const tier = this.tier;
+    const file = this.persistentByName.get(name);
+    if (tier === null || file === undefined) return;
+    this.persistTouches(file, tier);
+  }
+
+  /** Hot/cold accounting of `name` plus the tier's counters. */
+  tierStatus(name: string): TierStatus {
+    const tier = this.tier;
+    const base: TierStatus = {
+      enabled: tier !== null,
+      hotRows: 0,
+      hotBytes: 0,
+      coldBytes: 0,
+      retries: this.missRetries,
+      coldSegments: 0,
+      coldChunks: 0,
+      r2Gets: 0,
+      r2Puts: 0,
+      r2Deletes: 0,
+      r2Lists: 0,
+      coldMisses: 0,
+      missResolutions: 0,
+      evictedChunks: 0,
+      evictionPasses: 0,
+      pendingDeletes: 0,
+    };
+    if (tier === null) return base;
+    this.ensureSchema();
+    const row = this.storage.sql
+      .exec<{
+        n: number;
+      }>('SELECT count(*) AS n FROM vfs2_chunks WHERE file = ?', name)
+      .toArray()[0];
+    const hotRows = row?.n ?? 0;
+    // Make sure the file's map is loaded so the counters are current.
+    tier.segmentsOf(name);
+    return {
+      ...base,
+      ...tier.stats,
+      hotRows,
+      hotBytes: hotRows * CHUNK_SIZE,
+      coldBytes: tier.stats.coldChunks * CHUNK_SIZE,
+    };
+  }
+
+  /**
+   * One eviction pass over `name` (see page-tier.ts): rows nobody touched
+   * for `evictAfterPeriods` periods are written into their R2 segments and
+   * deleted. Must run outside a write transaction; skips while a snapshot is
+   * open. `force` evicts every clean row regardless of recency (tests, ops).
+   */
+  async tierFlush(
+    name: string,
+    opts: { force?: boolean; maxSegments?: number } = {},
+  ): Promise<TierFlushResult> {
+    const tier = this.tier;
+    const none = (skipped: TierFlushResult['skipped']): TierFlushResult => ({
+      evictedChunks: 0,
+      segmentsRewritten: 0,
+      remaining: 0,
+      hotRows: 0,
+      hotBytes: 0,
+      skipped,
+    });
+    if (tier === null) return none('no-tier');
+    if (this.tierPassInFlight) return none('in-progress');
+    if (this.snapshots.has(name)) return none('snapshot-open');
+    const file = this.persistentByName.get(name);
+    if (file !== undefined && file.lock >= SQLITE_LOCK_EXCLUSIVE)
+      return none('write-transaction');
+    this.ensureSchema();
+    if (file !== undefined) this.flush(file);
+    const size = file?.size ?? this.readStoredMeta(name)?.size;
+    if (size === undefined) return none('no-tier');
+    const totalChunks = Math.ceil(size / CHUNK_SIZE);
+    if (file !== undefined) this.persistTouches(file, tier);
+    const recent = tier.recentBitmap(
+      name,
+      tier.options.evictAfterPeriods,
+      [],
+      totalChunks,
+    );
+    const hot = this.storage.sql
+      .exec<ChunkMaskRow>(
+        'SELECT chunkno, mask FROM vfs2_chunks WHERE file = ? ORDER BY chunkno',
+        name,
+      )
+      .toArray();
+    this.stats.storageReads++;
+    this.stats.rowsRead += hot.length;
+    const bySegment = new Map<number, number[]>();
+    for (const row of hot) {
+      if (row.chunkno >= totalChunks) continue;
+      // Chunk 0 holds the file header: `sqlite3_open_v2` reads it before any
+      // statement could retry a miss, so it stays hot forever (64 KiB).
+      if (row.chunkno === 0) continue;
+      if (!opts.force && bitmapHas(recent, row.chunkno)) continue;
+      const segno = segmentOf(row.chunkno);
+      const list = bySegment.get(segno);
+      if (list) list.push(row.chunkno);
+      else bySegment.set(segno, [row.chunkno]);
+    }
+    const plan = Array.from(bySegment.keys()).sort((a, b) => a - b);
+    const cap = opts.maxSegments ?? tier.options.maxSegmentsPerPass;
+    const todo = plan.slice(0, cap);
+    let evicted = 0;
+    this.tierPassInFlight = true;
+    if (file !== undefined) file.tierWrittenSince = new Set();
+    try {
+      for (const segno of todo) {
+        const candidates = bySegment.get(segno) ?? [];
+        const entry = tier.segmentsOf(name).get(segno);
+        const first = segno * SEGMENT_CHUNKS;
+        const last = Math.min(totalChunks, first + SEGMENT_CHUNKS) - 1;
+        const rows = this.storage.sql
+          .exec<ChunkRow>(
+            'SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno <= ?',
+            name,
+            first,
+            last,
+          )
+          .toArray();
+        this.stats.storageReads++;
+        this.stats.rowsRead += rows.length;
+        const byChunk = new Map<number, ChunkRow>();
+        for (const row of rows) byChunk.set(row.chunkno, row);
+        // The old object is needed for every slot a full hot row does not cover.
+        let needOld = false;
+        if (entry !== undefined && entry.mask !== 0) {
+          for (let chunkno = first; chunkno <= last; chunkno++) {
+            const row = byChunk.get(chunkno);
+            const inR2 = (entry.mask & (1 << slotOf(chunkno))) !== 0;
+            if (inR2 && (row === undefined || row.mask !== FULL_MASK)) {
+              needOld = true;
+              break;
+            }
+          }
+        }
+        const old =
+          needOld && entry !== undefined
+            ? await tier.getSegmentAt(name, segno, entry)
+            : null;
+        const seg = new Uint8Array(SEGMENT_BYTES);
+        let mask = 0;
+        for (let chunkno = first; chunkno <= last; chunkno++) {
+          const slot = slotOf(chunkno);
+          const at = slot * CHUNK_SIZE;
+          const row = byChunk.get(chunkno);
+          const inR2 = entry !== undefined && (entry.mask & (1 << slot)) !== 0;
+          if (inR2 && old !== null)
+            seg.set(old.subarray(at, at + CHUNK_SIZE), at);
+          if (row !== undefined) {
+            placeMasked(
+              seg,
+              at,
+              CHUNK_SIZE,
+              new Uint8Array(row.data),
+              row.mask,
+            );
+            mask |= 1 << slot;
+          } else if (inR2) {
+            mask |= 1 << slot;
+          }
+        }
+        const gen = tier.allocateGen(name);
+        const newKey = await tier.putSegment(name, segno, gen, seg);
+        // Rows a flush wrote while the object was in flight are newer than
+        // what we uploaded: keep them hot.
+        const written = file?.tierWrittenSince;
+        const evict = candidates.filter(
+          (chunkno) =>
+            written === null || written === undefined || !written.has(chunkno),
+        );
+        this.storage.transactionSync(() => {
+          tier.setSegment(name, segno, { gen, mask });
+          if (evict.length > 0) {
+            this.storage.sql.exec(
+              `DELETE FROM vfs2_chunks WHERE file = ? AND chunkno IN (${evict.map(() => '?').join(', ')})`,
+              name,
+              ...evict,
+            );
+            this.stats.rowsWritten += evict.length;
+          }
+        });
+        this.stats.storageWrites++;
+        if (entry !== undefined) {
+          const oldKey = tier.key(name, segno, entry.gen);
+          if (oldKey !== newKey) tier.queueDelete(oldKey);
+        }
+        evicted += evict.length;
+      }
+    } finally {
+      this.tierPassInFlight = false;
+      if (file !== undefined) file.tierWrittenSince = null;
+    }
+    tier.stats.evictedChunks += evicted;
+    tier.stats.evictionPasses++;
+    if (this.snapshots.size === 0) await tier.maintenance();
+    const hotRows = Math.max(0, hot.length - evicted);
+    return {
+      evictedChunks: evicted,
+      segmentsRewritten: todo.length,
+      remaining: plan.length - todo.length,
+      hotRows,
+      hotBytes: hotRows * CHUNK_SIZE,
+    };
+  }
+
+  /**
+   * Bring every cold chunk of `name` back into storage as full rows and
+   * forget the segments (their objects are deleted by maintenance). Used
+   * before `VACUUM INTO`, which reads the whole file through the synchronous
+   * path.
+   */
+  async materialize(name: string): Promise<{ chunks: number }> {
+    const tier = this.tier;
+    if (tier === null) return { chunks: 0 };
+    if (this.snapshots.has(name))
+      throw new DoVfsError(
+        `cannot materialize '${name}' while a snapshot is open`,
+      );
+    const file = this.persistentByName.get(name);
+    if (file !== undefined) this.flush(file);
+    const size = file?.size ?? this.readStoredMeta(name)?.size ?? 0;
+    const totalChunks = Math.ceil(size / CHUNK_SIZE);
+    let chunks = 0;
+    for (const [segno, entry] of Array.from(tier.segmentsOf(name).entries())) {
+      if (entry.mask === 0) continue;
+      const seg = await tier.getSegmentAt(name, segno, entry);
+      const first = segno * SEGMENT_CHUNKS;
+      const last = Math.min(totalChunks, first + SEGMENT_CHUNKS) - 1;
+      if (last < first) continue;
+      const rows = this.storage.sql
+        .exec<ChunkRow>(
+          'SELECT chunkno, data, mask FROM vfs2_chunks WHERE file = ? AND chunkno >= ? AND chunkno <= ?',
+          name,
+          first,
+          last,
+        )
+        .toArray();
+      this.stats.storageReads++;
+      this.stats.rowsRead += rows.length;
+      const byChunk = new Map<number, ChunkRow>();
+      for (const row of rows) byChunk.set(row.chunkno, row);
+      const upserts: Array<[number, Uint8Array]> = [];
+      for (let chunkno = first; chunkno <= last; chunkno++) {
+        const row = byChunk.get(chunkno);
+        if (row !== undefined && row.mask === FULL_MASK) continue;
+        const inR2 = (entry.mask & (1 << slotOf(chunkno))) !== 0;
+        if (!inR2 && row === undefined) continue;
+        const full = new Uint8Array(CHUNK_SIZE);
+        if (inR2 && seg !== null) {
+          const at = slotOf(chunkno) * CHUNK_SIZE;
+          full.set(seg.subarray(at, at + CHUNK_SIZE));
+        }
+        if (row !== undefined)
+          placeMasked(full, 0, CHUNK_SIZE, new Uint8Array(row.data), row.mask);
+        upserts.push([chunkno, full]);
+      }
+      this.storage.transactionSync(() => {
+        for (let i = 0; i < upserts.length; i += FLUSH_BATCH_ROWS)
+          this.upsertChunks(name, upserts.slice(i, i + FLUSH_BATCH_ROWS));
+      });
+      this.stats.storageWrites++;
+      chunks += upserts.length;
+    }
+    this.storage.transactionSync(() => tier.dropFile(name));
+    this.cache.dropFile(name);
+    if (this.snapshots.size === 0) await tier.maintenance();
+    return { chunks };
+  }
+
+  /** Delete queued/orphaned R2 objects (never while a snapshot reads them). */
+  async tierMaintenance(
+    opts: { sweep?: boolean } = {},
+  ): Promise<{ deleted: number }> {
+    if (this.tier === null || this.snapshots.size > 0) return { deleted: 0 };
+    return this.tier.maintenance(opts);
+  }
+
+  /** Delete every R2 object of this VFS (the working copy is being wiped). */
+  async deleteTierObjects(): Promise<number> {
+    if (this.tier === null) return 0;
+    for (const map of [this.misses]) map.clear();
+    return this.tier.deleteAll();
+  }
+}
+
+/** Copy the pages of `mask` from `src` into `dst[offset..offset+n)` (page-aligned buffers). */
+function placeMasked(
+  dst: Uint8Array,
+  offset: number,
+  n: number,
+  src: Uint8Array,
+  mask: number,
+): void {
+  if (mask === FULL_MASK) {
+    const len = Math.min(n, src.byteLength);
+    if (len > 0) dst.set(src.subarray(0, len), offset);
+    return;
+  }
+  for (let page = 0; page < PAGES_PER_CHUNK; page++) {
+    if ((mask & (1 << page)) === 0) continue;
+    const at = page * VFS_PAGE_SIZE;
+    if (at >= n) break;
+    const len = Math.min(VFS_PAGE_SIZE, n - at, src.byteLength - at);
+    if (len > 0) dst.set(src.subarray(at, at + len), offset + at);
   }
 }
 

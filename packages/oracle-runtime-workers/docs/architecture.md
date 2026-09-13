@@ -145,6 +145,77 @@ system of record.
   pruned or summarised. A Node-written `.db` loads here; a compressed file
   is no longer readable by the Node runtime.
 
+### R2 page tier
+
+With an R2 bucket bound as `TIER_BUCKET`, the working copy is split in two
+(`src/sqlite/page-tier.ts`): the **hot set** stays as 64 KiB chunk rows in
+the object's SQLite exactly as before, and chunks no turn touched for two
+daily periods are moved into immutable **1 MiB segment objects** in R2
+(`<object id>/<file>/<segno>.<gen>`, 16 chunks each) and their rows
+deleted. A small map in the object (`vfs2_tier_segments`: segment → object
+generation + a 16-bit slot mask) says where every chunk lives; a hot row is
+always the truth for the pages it holds. The user's VFS file stays the
+system of record — an export reads hot rows and cold segments alike — so
+the tier changes cost, not ownership, and needs no data migration.
+
+**Opt-in, per script.** The tier exists only when the script binds an R2
+bucket as `TIER_BUCKET`. Without the binding nothing below runs: every
+chunk stays a row in the object's SQLite, no tier table is touched, no R2
+call is made, and the working copy is bounded by Durable Objects' **10 GB
+cap per user**. With it, the object keeps only the hot set and a user's
+history is bounded by R2 (5 TiB per object, no account cap). The switch
+can be flipped later on a live oracle: existing rows are treated as full
+hot chunks and the first pass moves the cold ones out.
+
+What makes it cheap and fast:
+
+- **No R2 call on the hot path.** A turn's working set is hot by
+  definition (it was touched today). Eviction runs from the housekeeping
+  alarm at most every six hours, rewrites whole segments (one PUT, plus one
+  GET when the segment already existed), and deletes the evicted rows in
+  the same storage transaction as the map update — a crash leaves at worst
+  an orphan object, swept later, never a hole.
+- **Cold reads cannot block, so they retry.** The VFS is synchronous. A
+  read of a cold page records a miss and fails the statement with
+  `SQLITE_IOERR`; `DoSqliteDatabase` fetches the missed segments (plus one
+  of read-ahead), pins them in memory for the retry, and re-runs the
+  statement — or rolls back and re-runs the whole transaction, which is
+  why the checkpointer's and stores' callbacks only issue statements. Pins
+  are released into the LRU when the statement or transaction ends; a
+  statement needing more than `TIER_MISS_PIN_BYTES` worth of cold data
+  (32 MiB) fails with a clear error rather than thrashing.
+- **Writes never miss.** SQLite writes reused free-list pages without
+  reading them, so a page written over a cold chunk becomes a **partial
+  row** (`vfs2_chunks.mask` names its valid pages); the missing pages come
+  from the R2 slot when read, and the next eviction merges the row into
+  its segment.
+- **Chunk 0 never moves.** `sqlite3_open_v2` reads the file header before
+  any statement could retry.
+- **Snapshots stay consistent.** The flush pins a snapshot-time copy of the
+  map; a pre-image of a cold chunk is completed from the segment it mapped
+  then, and no object referenced by an open snapshot is deleted.
+- **Truncation, import, VACUUM.** A truncate narrows or drops the affected
+  segments in the same transaction (a regrown file never reads stale
+  bytes); an import or wipe drops the file's map and objects; `VACUUM`
+  pulls every cold chunk home first (`materialize`) because it reads the
+  whole file synchronously.
+
+`GET /debug/storage` reports the tier (`hotRows`, `coldSegments`, R2 op
+counters, misses, retries, `lastPassAt`); `POST /debug/storage/tier-flush`
+runs a pass now (`{ "force": true }` ignores recency). The cost effect is in
+[Running cost at scale](#running-cost-at-scale).
+
+Measured on devnet (2026-09-13, `test/load/tier-devnet.mts`, same build
+with and without the binding): a 49 MB user went from 785 hot rows to 16
+(1 MB) in one forced pass of 11.7 s (50 segment PUTs); after a hard reset
+of the object, small turns took 1.3–3.4 s cold against 1.3–4.0 s hot, the
+transcript read 171 ms against 212 ms, and a recall turn on an old session
+2.4 s against 1.5 s — the whole cold phase needed 3 misses and 3 retries.
+The daily export of a fully cold file reads every segment twice (hash and
+length in one pass, the upload in the second): 98 GETs and 14.8 s for the
+50 segments, against 15.1 s for the same file before the tier. A 2 MB user
+went from 32 rows to 1 in 2 s with no measurable turn difference.
+
 ### What fills a user's file
 
 Measured on a devnet user after ~350 sessions / 2,500 messages (26 MB
@@ -199,13 +270,12 @@ blob compression the same history is realistically 100–300 MB, ≈
 $200–600/month. Evicting task users between runs does not help — re-import
 costs more in row writes than the storage it saves.
 
-The structural fix is an **R2 page tier**: hot pages in the DO as a cache,
-the file backed by R2 ($0.015/GB-month, ~13× cheaper; the example drops to
-≈ $150/month; the 10 GB per-user cap disappears). It is a swap of the
-wa-sqlite page-storage layer only — the user's VFS file stays the system of
-record — so it can ship later with no data migration. The Slack watermark
-alerts (`SLACK_ALERT_WEBHOOK_URL`, one alert per whole GB from 1 GB) are the
-tripwire to build it with runway.
+The structural fix is the **R2 page tier** above: hot chunks in the DO,
+the rest in R2 ($0.015/GB-month, ~13× cheaper per byte; the example drops
+to ≈ $150/month plus a hot set of a few MB per user; the 10 GB per-user cap
+disappears). Bind `TIER_BUCKET` to turn it on; nothing migrates. The Slack
+watermark alerts (`SLACK_ALERT_WEBHOOK_URL`, one alert per whole GB from
+1 GB) now watch the hot set only.
 
 ### Running cost at scale
 
@@ -222,19 +292,23 @@ Assumptions per daily user: 10 turns a day; an object loaded ~40 s per turn
 turn; ~15 shell requests and ~40 console lines per turn; a 100 MB average
 resident working copy.
 
-| Monthly cost line            | What it pays for                                    | 100 users | 1,000    | 10,000    | 100,000     |
-| ---------------------------- | --------------------------------------------------- | --------- | -------- | --------- | ----------- |
-| Workers Paid base            | the account plan                                    | $5        | $5       | $5        | $5          |
-| DO loaded time, gateway      | one bot object resident around the clock (fixed)    | $0        | $4       | $4        | $4          |
-| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work | $1        | $14      | $187      | $1,915      |
-| DO requests                  | shell→object calls, gateway RPCs, alarms, pings     | $0        | $0.4     | $5        | $54         |
-| SQLite rows written          | checkpoints, sessions, tasks, meta                  | $0        | $0       | $0        | $310        |
-| SQLite rows read             | object boots and turn reads                         | $0        | $0       | $0        | $0          |
-| SQLite storage               | resident working copies (100 MB average)            | $1        | $19      | $199      | $1,999      |
-| Worker requests + CPU        | the HTTP shell, auth, rate limiting                 | $0        | $0       | $13       | $158        |
-| Workers Logs                 | observability events from console output            | $0        | $0       | $60       | $708        |
-| **Total**                    |                                                     | **~$7**   | **~$42** | **~$470** | **~$5,150** |
-| Per user per month           |                                                     | $0.07     | $0.04    | $0.05     | $0.05       |
+| Monthly cost line            | What it pays for                                                                                                | 100 users     | 1,000         | 10,000        | 100,000       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- | ------------- | ------------- | ------------- |
+| Workers Paid base            | the account plan                                                                                                | $5            | $5            | $5            | $5            |
+| DO loaded time, gateway      | one bot object resident around the clock (fixed)                                                                | $0            | $4            | $4            | $4            |
+| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work                                                             | $1            | $14           | $187          | $1,915        |
+| DO requests                  | shell→object calls, gateway RPCs, alarms, pings                                                                 | $0            | $0.4          | $5            | $54           |
+| SQLite rows written          | checkpoints, sessions, tasks, meta                                                                              | $0            | $0            | $0            | $310          |
+| SQLite rows read             | object boots and turn reads                                                                                     | $0            | $0            | $0            | $0            |
+| SQLite storage, tier OFF     | resident working copies, all in the object (100 MB average)                                                     | $1            | $19           | $199          | $1,999        |
+| SQLite storage, tier ON      | the hot set only (~5 MB per user)                                                                               | $0.10         | $1            | $10           | $100          |
+| R2 storage, tier ON          | the cold ~95 MB per user at $0.015/GB-month                                                                     | $0.14         | $1.43         | $14           | $143          |
+| R2 operations, tier ON       | the two-pass daily export (2 GETs per cold segment) + the eviction pass (a GET and a PUT per rewritten segment) | $0.35         | $3.5          | $35           | $351          |
+| Worker requests + CPU        | the HTTP shell, auth, rate limiting                                                                             | $0            | $0            | $13           | $158          |
+| Workers Logs                 | observability events from console output                                                                        | $0            | $0            | $60           | $708          |
+| **Total, tier OFF**          |                                                                                                                 | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
+| **Total, tier ON**           |                                                                                                                 | **~$7**       | **~$29**      | **~$330**     | **~$3,750**   |
+| Per user per month, OFF / ON |                                                                                                                 | $0.07 / $0.07 | $0.04 / $0.03 | $0.05 / $0.03 | $0.05 / $0.04 |
 
 How to read it:
 
@@ -254,9 +328,11 @@ Future improvements, in the order they pay off:
 1. **Log volume.** Lower the default `LOG_LEVEL`, keep per-turn diagnostics
    behind `debug`, and set a `head_sampling_rate` in the observability
    config. Removes most of the Workers Logs line with no runtime change.
-2. **R2 page tier** (above). Cuts the storage line ~13× and lifts the 10 GB
-   per-user cap; the user's VFS file stays the system of record, so no data
-   migration.
+2. **R2 page tier** — shipped (above). With the hot set in the object and
+   the rest in R2 the storage-related lines fall from $1,999 to ~$594 at
+   100,000 users (the two-pass daily export is now the larger part of it)
+   and the 10 GB per-user cap is gone; bind `TIER_BUCKET` to turn it on.
+   The user's VFS file stays the system of record, so no data migration.
 3. **Gateway sharding.** Split the always-loaded gateway per user cohort (or
    raise `MATRIX_SEND_RATE_PER_SECOND` with the homeserver's consent) before
    the mirror traffic of ~10,000 daily users saturates one object.
@@ -294,8 +370,9 @@ services are excluded on both sides.
 | **Vultr total**                                  | **~$150**     | **~$315**     | **~$1,290**   | **~$7,700**   |
 | Per user per month (Cloudflare / Vultr)          | $0.07 / $1.50 | $0.04 / $0.32 | $0.05 / $0.13 | $0.05 / $0.08 |
 
-Cloudflare is cheaper at every scale, and the gap is widest where it
-matters most for a new oracle:
+Cloudflare is cheaper at every scale (these figures keep the R2 page tier
+off; with it on the 100,000-user total is about $3,750), and the gap is
+widest where it matters most for a new oracle:
 
 - **Small scale.** Workers meter per second and per GB, so 100 users cost
   pocket change. A Node deployment pays for two nodes, a balancer and Redis

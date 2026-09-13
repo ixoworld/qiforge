@@ -471,6 +471,18 @@ export function createShell(
   app.post('/debug/storage/flush', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).flushToOwnerStore()),
   );
+  app.post('/debug/storage/tier-flush', async (c) => {
+    const body: unknown = await c.req.json().catch(() => ({}));
+    const rec = typeof body === 'object' && body !== null ? body : {};
+    const force = Reflect.get(rec, 'force') === true;
+    const max = Number(Reflect.get(rec, 'maxSegments'));
+    return c.json(
+      await userStub(c.env, c.get('auth').userDid).tierFlush({
+        force,
+        ...(Number.isInteger(max) && max > 0 && { maxSegments: max }),
+      }),
+    );
+  });
   app.post('/debug/storage/reset', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).resetWorkingCopy()),
   );
