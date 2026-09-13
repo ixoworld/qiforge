@@ -24,20 +24,21 @@ Public (UCAN-authenticated unless noted):
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
 
-| Route                                                                          | Purpose                                                                                                                                                        |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache; force a flush (an evicted object boots first); wipe and reload.                       |
-| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed. |
-| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                          |
-| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                          |
-| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                |
-| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                        |
-| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                              |
-| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                             |
-| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                      |
-| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                             |
-| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                          |
-| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                  |
+| Route                                                                          | Purpose                                                                                                                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache, the R2 page tier (`tier`); force a flush (an evicted object boots first); wipe and reload. |
+| `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.              |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.      |
+| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                               |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                               |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                     |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                             |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                                   |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                                  |
+| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                           |
+| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                                  |
+| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                               |
+| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                       |
 
 ## The gateway
 
@@ -325,10 +326,13 @@ catch-up, but it stalls sends for ~30 s.
   it is re-uploaded on the next flush. Only a zero-turn copy is dropped; a
   genuine "forget me" goes through the explicit `remove()` path.
 - **Flush.** A write arms the alarm for 24 h later (`FLUSH_DEBOUNCE_MS`). The
-  export pins a snapshot of the chunk VFS, hashes it in one streamed pass
-  and, when the bytes changed, streams gzip → tus upload in 5 MiB parts
-  (files ≤ 5 MiB in one `POST`) → temp path → `batch/delete` of the old file
-  → `batch/move` into place. Every request is retried 3× (2 s / 5 s / 15 s;
+  export pins a snapshot of the chunk VFS and reads it exactly twice: one
+  streamed pass computes the hash (the change gate) and the gzipped length
+  the upload needs (`owner-store/measure.ts`), and, only when the bytes
+  changed, a second pass streams gzip → tus upload in 5 MiB parts (files
+  ≤ 5 MiB in one `POST`) → temp path → `batch/delete` of the old file →
+  `batch/move` into place. Two passes, not three, because with the R2 page
+  tier every pass over a cold file is one R2 GET per 1 MiB segment. Every request is retried 3× (2 s / 5 s / 15 s;
   parts resume from `HEAD`); a flush that still fails leaves the copy dirty
   and retries after 10 min, logged at error from the third consecutive
   failure. Stale `.uploading-` temps are cleaned at the next flush. Nothing
@@ -344,6 +348,19 @@ catch-up, but it stalls sends for ~30 s.
   2× the file below the 10 GB cap; `src/sqlite/vacuum-policy.ts`) through
   `VACUUM INTO` a spill file swapped in atomically, so a rebuild of a
   multi-hundred-MB file needs constant memory.
+- **R2 page tier** (`TIER_BUCKET` bound; [architecture](architecture.md#r2-page-tier)).
+  The housekeeping alarm runs an eviction pass at most every six hours
+  (after the owner-store flush, never over one in flight): chunks untouched
+  for `TIER_EVICT_AFTER_PERIODS` days go to R2 in rewritten 1 MiB segments,
+  at most 64 segments per pass (the rest re-arms in a minute). The log line
+  reads `tier pass for <did>: N chunks → R2 in S segment(s), H hot rows
+(M MB) kept, P segment(s) pending`. `GET /debug/storage` → `tier` shows
+  `hotRows`/`hotBytes`, `coldSegments`/`coldBytes`, the R2 op counters,
+  `coldMisses` / `missResolutions` / `retries` (how often a turn had to
+  fetch), `pendingDeletes` and `lastPassAt`. A `tier segment … missing in
+R2` error means the bucket lost an object the map references — the
+  user's VFS file is intact; `POST /debug/storage/reset` reloads from it.
+  The idle wipe deletes the object's R2 prefix along with the working copy.
 - **Chunk cache.** `CHUNK_CACHE_BYTES` (default 4 MiB) sizes the per-object
   LRU of clean chunks. Measured on devnet with a 28 MB file, 8 MiB was
   indistinguishable in turn latency (the LLM round-trip dominates), so the

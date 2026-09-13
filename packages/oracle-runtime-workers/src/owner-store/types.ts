@@ -15,9 +15,13 @@
  * Both directions STREAM: `load()` hands back the raw (already gunzipped)
  * SQLite bytes as a `ReadableStream` the object writes into its VFS chunk by
  * chunk, and `save()` takes a `FileSnapshot` — a re-openable, consistent
- * view of the working copy — that the store reads as many times as it needs
- * (the VFS store measures the gzipped length in one pass and uploads in a
- * second). Nothing on this path ever holds the whole file in memory — the
+ * view of the working copy — that the store reads as many times as it needs.
+ * The object measures the hash and the gzipped length in ONE pass
+ * (`measureForSave`) and hands the length in as a `SaveHints`, so a store
+ * only reads the snapshot once more, for the upload itself; a store called
+ * without the hint counts the gzip in a pass of its own. That matters with
+ * the R2 page tier, where every pass over a cold file is one R2 GET per
+ * segment. Nothing on this path ever holds the whole file in memory — the
  * legacy Matrix media path included: the gateway hands the media over as a
  * stream and decryption, gunzip and the SQLite header check run chunk by
  * chunk in the object. Compression is the store's concern. `etag` lets the object skip a reload
@@ -26,7 +30,7 @@
 export interface OwnerStore {
   readonly kind: 'matrix' | 'vfs';
   load(): Promise<OwnerCopy | null>;
-  save(snapshot: FileSnapshot): Promise<SaveResult>;
+  save(snapshot: FileSnapshot, hints?: SaveHints): Promise<SaveResult>;
   /** Cheap upstream freshness probe — null when unsupported/unknown. */
   head(): Promise<{ etag: string } | null>;
   /** Remove the durable copy (user asked to be forgotten). */
@@ -58,6 +62,12 @@ export interface OwnerCopy {
    * its working copy — the one-time migration, streamed both ways.
    */
   fromLegacy?: true;
+}
+
+/** What the caller already measured about the snapshot (see `measureForSave`). */
+export interface SaveHints {
+  /** Byte length of `gzipStream(snapshot.open())`; spares the store its counting pass. */
+  gzippedLength?: number;
 }
 
 export interface SaveResult {

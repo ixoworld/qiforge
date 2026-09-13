@@ -50,6 +50,7 @@ import {
   type OwnerCopy,
   type OwnerStore,
   type SaveResult,
+  type SaveHints,
 } from './types';
 
 const VFS_RESOURCE = 'ixo:filesystem';
@@ -233,9 +234,11 @@ export class IxoVfsOwnerStore implements OwnerStore {
    * Atomic replace, always delete + re-create, never a new version:
    *
    *   1. drop stale `.uploading-*` temp files a crashed flush left behind;
-   *   2. measure the gzipped length in a counting pass (the VFS needs
-   *      `Upload-Length` at session creation — `Upload-Defer-Length` is not
-   *      supported — and gzip output is deterministic for identical input);
+   *   2. take the gzipped length from `hints` (the object measured it in the
+   *      same pass as its checksum) or, without a hint, count it in a pass
+   *      of its own (the VFS needs `Upload-Length` at session creation —
+   *      `Upload-Defer-Length` is not supported — and gzip output is
+   *      deterministic for identical input);
    *   3. upload gzip → a TEMP path next to the real one: one `POST /files`
    *      when it fits in a single part, else a tus session in 5 MiB parts
    *      (`tusUpload`, resumable per part);
@@ -247,7 +250,10 @@ export class IxoVfsOwnerStore implements OwnerStore {
    * file is cleaned up then). Peak memory is one part (5 MiB) plus fixed
    * overhead, whatever the file size.
    */
-  async save(snapshot: FileSnapshot): Promise<SaveResult> {
+  async save(
+    snapshot: FileSnapshot,
+    hints: SaveHints = {},
+  ): Promise<SaveResult> {
     const listing = await this.listOracleFiles();
     const existing = listing.filter((f) => f.path === this.path);
     const stale = listing.filter((f) =>
@@ -261,7 +267,8 @@ export class IxoVfsOwnerStore implements OwnerStore {
       });
     }
 
-    const gzLength = await countStream(gzipStream(snapshot.open()));
+    const gzLength =
+      hints.gzippedLength ?? (await countStream(gzipStream(snapshot.open())));
     const tempPath = `${this.path}${TEMP_PATH_INFIX}${Date.now().toString(36)}`;
     const uploaded =
       gzLength <= SINGLE_SHOT_MAX_BYTES

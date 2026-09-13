@@ -76,6 +76,15 @@ export const baseEnvSchema = z.object({
   /** UCAN store worker base URL (defaults per NETWORK). */
   UCAN_STORE_URL: z.string().url().optional(),
 
+  /**
+   * R2 page tier knobs (the bucket itself is a binding, `TIER_BUCKET`, not
+   * a var). Hot-set target in bytes (or `16m`), periods of inactivity before
+   * a chunk is evicted, and the period length in ms (a day; tests shorten it).
+   */
+  TIER_HOT_BUDGET_BYTES: z.string().min(1).optional(),
+  TIER_EVICT_AFTER_PERIODS: z.coerce.number().int().min(1).optional(),
+  TIER_PERIOD_MS: z.coerce.number().int().min(1000).optional(),
+
   // --- llm ----------------------------------------------------------------
   OPEN_ROUTER_API_KEY: z.string().min(1),
   /**

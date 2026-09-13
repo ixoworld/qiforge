@@ -31,13 +31,27 @@ import {
   VFS_PAGE_SIZE,
   type DoVfsOptions,
   type DoVfsStats,
+  type TierFlushResult,
+  type TierStatus,
   type VfsSnapshot,
 } from './do-vfs';
+import type { PageTierOptions } from './page-tier';
 import {
   getOrRegisterVfs,
   loadSqlite,
   type SqliteRuntime,
 } from './wa-sqlite-loader';
+
+/**
+ * Cold-miss retries. A statement outside a transaction re-runs after each
+ * resolve; a transaction rolls back, resolves, and re-runs its callback.
+ * Every resolve fetches whole 1 MiB segments (plus one of read-ahead) and
+ * pins them for the retry, so even a scan across a cold file converges in
+ * a handful of rounds; the caps only guard against a bug that keeps
+ * recording misses.
+ */
+const MAX_STATEMENT_MISS_RETRIES = 64;
+const MAX_TRANSACTION_MISS_RETRIES = 32;
 
 export type SqlValue = null | number | bigint | string | Uint8Array;
 export type SqlParam = SqlValue | boolean | undefined;
@@ -136,7 +150,10 @@ export class DoSqliteDatabase {
       }
       vfs.attach(ctx.storage);
     }
-    if (!created) vfs.configureCache(options.cachePages);
+    if (!created) {
+      vfs.configureCache(options.cachePages);
+      vfs.configureTier(options.tier);
+    }
     const pragmas = options.pragmas ?? DEFAULT_PRAGMAS;
     const db = await DoSqliteDatabase.openConnection(
       runtime,
@@ -148,6 +165,38 @@ export class DoSqliteDatabase {
   }
 
   private static async openConnection(
+    runtime: SqliteRuntime,
+    vfs: DoVfs,
+    fileName: string,
+    pragmas: readonly string[],
+  ): Promise<number> {
+    // Opening reads the file header and the pragmas read page 1 — before
+    // any statement of ours could retry a cold miss. Chunk 0 is never
+    // evicted, but a pin-less retry here keeps a reopen robust regardless.
+    let pinned = false;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await DoSqliteDatabase.openConnectionOnce(
+            runtime,
+            vfs,
+            fileName,
+            pragmas,
+          );
+        } catch (error) {
+          if (!vfs.hasMisses() || attempt >= MAX_STATEMENT_MISS_RETRIES)
+            throw error;
+          await vfs.resolveMisses();
+          pinned = true;
+          vfs.missRetries++;
+        }
+      }
+    } finally {
+      if (pinned) vfs.releasePins();
+    }
+  }
+
+  private static async openConnectionOnce(
     runtime: SqliteRuntime,
     vfs: DoVfs,
     fileName: string,
@@ -203,12 +252,54 @@ export class DoSqliteDatabase {
     sql: string,
     params?: SqlParams,
   ): Promise<T[]> {
-    return this.serialized(() => this.execUnlocked<T>(sql, params));
+    return this.serialized(() =>
+      this.retryingColdMisses(() => this.execUnlocked<T>(sql, params)),
+    );
   }
 
   /** Run a statement that produces no rows of interest; returns the change count. */
   async run(sql: string, params?: SqlParams): Promise<RunResult> {
-    return this.serialized(() => this.runUnlocked(sql, params));
+    return this.serialized(() =>
+      this.retryingColdMisses(() => this.runUnlocked(sql, params)),
+    );
+  }
+
+  /**
+   * Run one statement, re-running it after a cold-miss resolve. Only
+   * outside a transaction: inside one, SQLite may have put the pager into
+   * its error state, so the transaction as a whole is rolled back and
+   * retried by `transaction()` instead.
+   */
+  private async retryingColdMisses<T>(op: () => Promise<T>): Promise<T> {
+    if (this.txContext.getStore() !== undefined || this.txDepth > 0)
+      return op();
+    let pinned = false;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const result = await op();
+          // A few statements swallow an I/O error into their result instead
+          // of failing (`PRAGMA integrity_check` reports it as corruption):
+          // misses left behind by a "successful" statement mean exactly
+          // that, so resolve and run it again.
+          if (this.vfs.hasMisses() && attempt < MAX_STATEMENT_MISS_RETRIES) {
+            await this.vfs.resolveMisses();
+            pinned = true;
+            this.vfs.missRetries++;
+            continue;
+          }
+          return result;
+        } catch (error) {
+          if (!this.vfs.hasMisses() || attempt >= MAX_STATEMENT_MISS_RETRIES)
+            throw error;
+          await this.vfs.resolveMisses();
+          pinned = true;
+          this.vfs.missRetries++;
+        }
+      }
+    } finally {
+      if (pinned) this.vfs.releasePins();
+    }
   }
 
   /**
@@ -329,24 +420,50 @@ export class DoSqliteDatabase {
     });
     await previous;
     try {
-      return await this.txContext.run({ depth: 1 }, async () => {
-        await this.run('BEGIN IMMEDIATE');
-        this.txDepth++;
-        try {
-          const result = await fn();
-          this.txDepth--;
-          await this.run('COMMIT');
-          return result;
-        } catch (error) {
-          this.txDepth--;
+      // A cold page inside `fn` fails a statement with SQLITE_IOERR; the
+      // transaction is rolled back, the segment(s) fetched and pinned, and
+      // `fn` re-run from the top (it must be re-runnable: the checkpointer's
+      // and stores' callbacks only issue statements). The pins are released
+      // to the LRU once the transaction ends either way.
+      let pinned = false;
+      try {
+        for (let attempt = 0; ; attempt++) {
           try {
-            await this.run('ROLLBACK');
-          } catch {
-            // The original error is more useful than a rollback failure.
+            return await this.txContext.run({ depth: 1 }, async () => {
+              await this.run('BEGIN IMMEDIATE');
+              this.txDepth++;
+              try {
+                const result = await fn();
+                this.txDepth--;
+                await this.run('COMMIT');
+                // Misses a statement swallowed (see `retryingColdMisses`)
+                // must not trigger a retry of some later, unrelated error.
+                this.vfs.clearMisses();
+                return result;
+              } catch (error) {
+                this.txDepth--;
+                try {
+                  await this.run('ROLLBACK');
+                } catch {
+                  // The original error is more useful than a rollback failure.
+                }
+                throw error;
+              }
+            });
+          } catch (error) {
+            if (
+              !this.vfs.hasMisses() ||
+              attempt >= MAX_TRANSACTION_MISS_RETRIES
+            )
+              throw error;
+            await this.vfs.resolveMisses();
+            pinned = true;
+            this.vfs.missRetries++;
           }
-          throw error;
         }
-      });
+      } finally {
+        if (pinned) this.vfs.releasePins();
+      }
     } finally {
       release();
     }
@@ -387,15 +504,17 @@ export class DoSqliteDatabase {
   static async wipe(
     ctx: DoSqliteContext,
     fileName = 'oracle.db',
+    options: { tier?: PageTierOptions } = {},
   ): Promise<void> {
     const runtime = await loadSqlite();
     const vfsName = vfsNameForObject(ctx);
     const vfs = getOrRegisterVfs(
       runtime,
       vfsName,
-      () => new DoVfs(vfsName, ctx.storage),
+      () => new DoVfs(vfsName, ctx.storage, { tier: options.tier }),
       isDoVfs,
     );
+    vfs.configureTier(options.tier);
     for (const handle of vfs.takeConnections()) {
       try {
         await runtime.sqlite3.close(handle);
@@ -410,6 +529,53 @@ export class DoSqliteDatabase {
     // leaked xOpen handle cannot block the delete.
     vfs.attach(ctx.storage);
     vfs.deleteFile(fileName);
+    // The R2 side of the working copy goes with it (nothing references it
+    // any more; the owner's file upstream is untouched).
+    await vfs.deleteTierObjects();
+  }
+
+  // ---------------------------------------------------------------------------
+  // R2 page tier controls (see do-vfs.ts / page-tier.ts)
+  // ---------------------------------------------------------------------------
+
+  get tierEnabled(): boolean {
+    return this.vfs.tierEnabled;
+  }
+
+  /** One eviction pass; holds the transaction mutex so no write interleaves. */
+  async tierFlush(
+    opts: { force?: boolean; maxSegments?: number } = {},
+  ): Promise<TierFlushResult> {
+    if (this.txDepth > 0)
+      throw new DoVfsError('tierFlush() is not allowed inside a transaction');
+    return this.withoutTransactions(() =>
+      this.vfs.tierFlush(this.fileName, opts),
+    );
+  }
+
+  /** Persist the chunks touched since the last call (call at the end of a turn). */
+  recordAccess(): void {
+    this.vfs.recordAccess(this.fileName);
+  }
+
+  tierStatus(): TierStatus {
+    return this.vfs.tierStatus(this.fileName);
+  }
+
+  /** Delete queued/orphaned R2 objects. */
+  async tierMaintenance(
+    opts: { sweep?: boolean } = {},
+  ): Promise<{ deleted: number }> {
+    return this.vfs.tierMaintenance(opts);
+  }
+
+  /** Pull every cold chunk back into storage (the file is then fully hot). */
+  async materializeTier(): Promise<{ chunks: number }> {
+    if (this.txDepth > 0)
+      throw new DoVfsError(
+        'materializeTier() is not allowed inside a transaction',
+      );
+    return this.withoutTransactions(() => this.vfs.materialize(this.fileName));
   }
 
   /** Close the connection. Buffered pages are flushed by the VFS on close. */
@@ -535,6 +701,9 @@ export class DoSqliteDatabase {
     return this.withoutTransactions(async () => {
       const beforeBytes = this.fileSize;
       if (this.vfs.fileExists(target)) this.vfs.deleteFile(target);
+      // VACUUM reads the whole file through the synchronous path; a cold
+      // chunk would fail and restart it. Bring everything home first.
+      if (this.vfs.tierEnabled) await this.vfs.materialize(this.fileName);
       // `fileName` is a constant of the runtime, never user input.
       await this.run(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
       await this.close();

@@ -22,6 +22,7 @@ import {
   type OwnerCopy,
   type OwnerStore,
   type SaveResult,
+  type SaveHints,
 } from './types';
 
 /**
@@ -89,19 +90,23 @@ export class MatrixMediaOwnerStore implements OwnerStore {
   }
 
   /**
-   * Streamed as well: the snapshot is opened three times — a header peek, a
-   * gzip pass that only counts (the homeserver needs the exact ciphertext
-   * length up front; gzip output is deterministic for identical input, the
-   * VFS store relies on the same property) and the gzip pass that is
-   * uploaded — and never held whole.
+   * Streamed as well: the snapshot is opened for a header peek, for a gzip
+   * pass that only counts unless the caller measured the length already
+   * (`hints`; the homeserver needs the exact ciphertext length up front and
+   * gzip output is deterministic for identical input) and for the gzip pass
+   * that is uploaded — and never held whole.
    */
-  async save(snapshot: FileSnapshot): Promise<SaveResult> {
+  async save(
+    snapshot: FileSnapshot,
+    hints: SaveHints = {},
+  ): Promise<SaveResult> {
     const checked = await assertSqliteStream(
       snapshot.open(),
       `MatrixMediaOwnerStore: refusing to save — the working copy (${snapshot.size} bytes)`,
     );
     await checked.cancel().catch(() => undefined);
-    const gzLength = await countStream(gzipStream(snapshot.open()));
+    const gzLength =
+      hints.gzippedLength ?? (await countStream(gzipStream(snapshot.open())));
     const { eventId } = await this.gateway.uploadUserSnapshotStream(
       this.userDid,
       this.storageKey,

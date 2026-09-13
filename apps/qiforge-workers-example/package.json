@@ -19,6 +19,7 @@
     "test:e2e:vfs": "tsx test/e2e-vfs.ts",
     "test:e2e:legacy-large": "tsx test/e2e-legacy-large.ts",
     "test:e2e:mcp": "tsx test/e2e-mcp.ts",
+    "test:e2e:tier": "tsx test/e2e-tier.ts",
     "test:stress": "tsx test/stress.ts"
   },
   "dependencies": {

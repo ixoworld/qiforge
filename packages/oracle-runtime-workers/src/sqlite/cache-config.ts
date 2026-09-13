@@ -19,22 +19,43 @@ export function parseChunkCacheBytes(
   raw: string | undefined,
   warn: (message: string) => void = () => undefined,
 ): number {
-  if (raw === undefined || raw.trim() === '') return DEFAULT_CHUNK_CACHE_BYTES;
+  return parseByteSize(raw, {
+    name: 'CHUNK_CACHE_BYTES',
+    fallback: DEFAULT_CHUNK_CACHE_BYTES,
+    min: MIN_CHUNK_CACHE_BYTES,
+    max: MAX_CHUNK_CACHE_BYTES,
+    warn,
+  });
+}
+
+/** Same grammar for any byte-sized env knob (`TIER_HOT_BUDGET_BYTES`, ...). */
+export function parseByteSize(
+  raw: string | undefined,
+  options: {
+    name: string;
+    fallback: number;
+    min: number;
+    max: number;
+    warn?: (message: string) => void;
+  },
+): number {
+  const warn = options.warn ?? (() => undefined);
+  if (raw === undefined || raw.trim() === '') return options.fallback;
   const match = /^\s*(\d+)\s*([kKmM]?)\s*$/.exec(raw);
   if (!match) {
     warn(
-      `CHUNK_CACHE_BYTES=${JSON.stringify(raw)} is not a byte count — using the default ${DEFAULT_CHUNK_CACHE_BYTES}`,
+      `${options.name}=${JSON.stringify(raw)} is not a byte count — using the default ${options.fallback}`,
     );
-    return DEFAULT_CHUNK_CACHE_BYTES;
+    return options.fallback;
   }
   const unit = match[2]?.toLowerCase();
   const multiplier = unit === 'k' ? 1024 : unit === 'm' ? 1024 * 1024 : 1;
   const bytes = Number(match[1]) * multiplier;
-  if (bytes < MIN_CHUNK_CACHE_BYTES || bytes > MAX_CHUNK_CACHE_BYTES) {
+  if (bytes < options.min || bytes > options.max) {
     warn(
-      `CHUNK_CACHE_BYTES=${raw} is outside ${MIN_CHUNK_CACHE_BYTES}..${MAX_CHUNK_CACHE_BYTES} — using the default ${DEFAULT_CHUNK_CACHE_BYTES}`,
+      `${options.name}=${raw} is outside ${options.min}..${options.max} — using the default ${options.fallback}`,
     );
-    return DEFAULT_CHUNK_CACHE_BYTES;
+    return options.fallback;
   }
   return bytes;
 }

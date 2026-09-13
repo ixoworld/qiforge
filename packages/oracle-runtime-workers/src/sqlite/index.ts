@@ -12,8 +12,21 @@ export {
   DEFAULT_CACHE_PAGES,
   type DoVfsOptions,
   type DoVfsStats,
+  type TierFlushResult,
+  type TierStatus,
   type VfsSnapshot,
 } from './do-vfs';
+export {
+  PageTier,
+  PageTierError,
+  DEFAULT_TIER_HOT_BUDGET_BYTES,
+  DEFAULT_TIER_PERIOD_MS,
+  DEFAULT_TIER_EVICT_AFTER_PERIODS,
+  SEGMENT_CHUNKS,
+  SEGMENT_BYTES,
+  type PageTierOptions,
+  type PageTierStats,
+} from './page-tier';
 export {
   parseChunkCacheBytes,
   cachePagesForBytes,
