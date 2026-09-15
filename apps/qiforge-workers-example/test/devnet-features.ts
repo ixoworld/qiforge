@@ -1744,6 +1744,9 @@ async function main(): Promise<void> {
         dirty: boolean;
         writeGeneration?: number;
         uploadedGeneration?: number;
+        lastFlushAt?: number;
+        nextFlushAt?: number;
+        alarmAt?: number | null;
       };
     };
     const botEventsSince = async (after: number, type: string) => {
@@ -1879,6 +1882,75 @@ async function main(): Promise<void> {
           after.writeGeneration,
           after.uploadedGeneration,
           JSON.stringify(after),
+        );
+      },
+    );
+
+    await step(
+      'flush cadence: a completed turn arms the daily deadline and the keep-alive wake does not upload',
+      async () => {
+        const c = await client();
+        const s = await c.createSession();
+        const flushed = await authed(user, 'POST', '/debug/storage/flush');
+        assert.equal(flushed.status, 200, flushed.text.slice(0, 200));
+        const clean = await storageStatus();
+        assert.equal(clean.dirty, false, JSON.stringify(clean));
+        assert.equal(clean.nextFlushAt, undefined, JSON.stringify(clean));
+        const baseline = clean.lastFlushAt;
+        assert.ok(baseline, `no upload recorded: ${JSON.stringify(clean)}`);
+
+        const started = Date.now();
+        const r = await c.stream(s, 'Reply with exactly: CADENCE');
+        assert.equal(r.status, 200, r.text);
+        const dirty = await storageStatus();
+        assert.equal(dirty.dirty, true, JSON.stringify(dirty));
+        assert.ok(
+          (dirty.writeGeneration ?? 0) > (dirty.uploadedGeneration ?? 0),
+          `the turn committed nothing: ${JSON.stringify(dirty)}`,
+        );
+        const day = 24 * 60 * 60_000;
+        assert.ok(
+          typeof dirty.nextFlushAt === 'number' &&
+            dirty.nextFlushAt >= started + day - 60_000 &&
+            dirty.nextFlushAt <= Date.now() + day + 60_000,
+          `deadline is not ~24 h out: ${JSON.stringify(dirty)}`,
+        );
+        assert.equal(
+          dirty.lastFlushAt,
+          baseline,
+          `the turn itself uploaded: ${JSON.stringify(dirty)}`,
+        );
+
+        // The run keep-alive armed the alarm during the turn; it fires within
+        // the keep-alive horizon and, before this fix, uploaded the whole file
+        // on that wake.
+        await pauseMs(30_000);
+        const later = await storageStatus();
+        assert.equal(
+          later.lastFlushAt,
+          baseline,
+          `a wake before the deadline uploaded: ${JSON.stringify(later)}`,
+        );
+        assert.equal(later.dirty, true, JSON.stringify(later));
+        assert.equal(
+          later.nextFlushAt,
+          dirty.nextFlushAt,
+          `the deadline moved: ${JSON.stringify(later)}`,
+        );
+        assert.ok(
+          typeof later.alarmAt === 'number' &&
+            later.alarmAt <= (later.nextFlushAt ?? 0),
+          `the alarm is not armed for the deadline: ${JSON.stringify(later)}`,
+        );
+
+        const flushed2 = await authed(user, 'POST', '/debug/storage/flush');
+        assert.equal(flushed2.status, 200, flushed2.text.slice(0, 200));
+        const after = await storageStatus();
+        assert.equal(after.dirty, false, JSON.stringify(after));
+        assert.equal(after.nextFlushAt, undefined, JSON.stringify(after));
+        assert.ok(
+          (after.lastFlushAt ?? 0) > (baseline ?? 0),
+          `explicit flush did not upload: ${JSON.stringify(after)}`,
         );
       },
     );

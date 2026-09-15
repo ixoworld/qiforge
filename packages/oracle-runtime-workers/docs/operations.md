@@ -566,7 +566,19 @@ becomes a turn (`src/matrix/group-chat.ts`):
   proven upstream absence never auto-wipes a working copy that holds turns;
   it is re-uploaded on the next flush. Only a zero-turn copy is dropped; a
   genuine "forget me" goes through the explicit `remove()` path.
-- **Flush.** A write arms the alarm for 24 h later (`FLUSH_DEBOUNCE_MS`). The
+- **Flush.** The first write after an upload records a deadline 24 h out
+  (`meta:flushAt`, `FLUSH_DEBOUNCE_MS`) and arms the alarm for it; later
+  writes never push it back. The alarm is shared with the realtime
+  heartbeat, the durable-run keep-alive, task runs, compaction and the R2
+  tier, so a wake alone never uploads: the tick consults the deadline
+  (`do/flush-schedule.ts`) and a dirty copy waits until it is due. The only
+  early uploads are the explicit ones (`POST /debug/storage/flush`, a fresh
+  delegation after a "no file-storage grant" failure, the legacy
+  migration, a reset) and the one before an idle eviction. A copy dirtied
+  by an older build with no deadline on disk uploads once, then the
+  debounce applies. A failed upload replaces the deadline with the
+  10-minute retry, so a failing store is retried on that clock and not on
+  every wake. The
   export pins a snapshot of the chunk VFS and reads it exactly twice: one
   streamed pass computes the hash (the change gate) and the gzipped length
   the upload needs (`owner-store/measure.ts`), and, only when the bytes
@@ -582,7 +594,8 @@ becomes a turn (`src/matrix/group-chat.ts`):
   working copy is wiped — only after a flush and a check that the upstream
   copy is current (generation + hash); otherwise it stays and the check
   repeats. `GET /debug/storage` shows `writeGeneration` /
-  `uploadedGeneration`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
+  `uploadedGeneration`, `dirty`, `nextFlushAt` (the deadline, absent when
+  clean), `lastFlushAt`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
   `indexingInFlight`, `flushInFlight` and the alarm.
 - **VACUUM** runs on a quiet object (no turn for 10 min, not dirty, no flush
   in progress, file ≥ 4 MB with > 20 % free pages, at most once per 6 h,

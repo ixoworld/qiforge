@@ -439,6 +439,8 @@ export interface StorageStatus {
   pages: number;
   ownerEtag?: string;
   lastFlushAt?: number;
+  /** When the dirty copy is due to be uploaded (absent when clean). */
+  nextFlushAt?: number;
   dirty: boolean;
   flushInFlight: boolean;
   /** VFS write generation now vs. at the last successful upload. */
