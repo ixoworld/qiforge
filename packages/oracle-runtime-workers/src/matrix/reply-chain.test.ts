@@ -34,16 +34,19 @@ describe('resolveReplyChainRoot', () => {
     expect(cache.get('$e')).toBe('$root');
   });
 
-  it('a bare message (no relation) is the main timeline', async () => {
-    const { fetchRelatesTo } = graph({});
+  it('a bare message (no relation) roots its own thread — Node keys the session on it', async () => {
+    const { fetchRelatesTo, fetched } = graph({});
+    const cache = new ThreadRootCache();
     await expect(
       resolveReplyChainRoot({
         eventId: '$e',
         relatesTo: undefined,
         fetchRelatesTo,
-        cache: new ThreadRootCache(),
+        cache,
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe('$e');
+    expect(fetched).toEqual([]);
+    expect(cache.get('$e')).toBe('$e');
   });
 
   it('walks a quote-reply chain up to the threaded ancestor and memoises the path', async () => {
@@ -77,21 +80,27 @@ describe('resolveReplyChainRoot', () => {
     expect(again.fetched).toEqual([]);
   });
 
-  it('a quote-reply chain that ends on a bare main-timeline message stays in the main timeline', async () => {
+  it('a quote-reply chain that ends on a bare message is rooted on that message', async () => {
     const { fetchRelatesTo } = graph({
-      $bot: undefined, // bare reply from the bot in the main timeline
+      $q: { 'm.in_reply_to': { event_id: '$root' } }, // a quote-reply of the root
+      $root: undefined, // the bare message that opened the conversation
     });
+    const cache = new ThreadRootCache();
     await expect(
       resolveReplyChainRoot({
         eventId: '$e',
-        relatesTo: { 'm.in_reply_to': { event_id: '$bot' } },
+        relatesTo: { 'm.in_reply_to': { event_id: '$q' } },
         fetchRelatesTo,
-        cache: new ThreadRootCache(),
+        cache,
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe('$root');
+    // The whole path is memoised on the root.
+    expect(cache.get('$e')).toBe('$root');
+    expect(cache.get('$q')).toBe('$root');
+    expect(cache.get('$root')).toBe('$root');
   });
 
-  it('terminates on cycles, missing events and fetch failures', async () => {
+  it('terminates on cycles, missing events and fetch failures at the last event reached', async () => {
     const cyc = graph({
       $a: { 'm.in_reply_to': { event_id: '$b' } },
       $b: { 'm.in_reply_to': { event_id: '$a' } },
@@ -103,7 +112,9 @@ describe('resolveReplyChainRoot', () => {
         fetchRelatesTo: cyc.fetchRelatesTo,
         cache: new ThreadRootCache(),
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe('$b');
+    // The quoted event cannot be fetched (redacted, before the bot joined):
+    // it is still the best root there is.
     await expect(
       resolveReplyChainRoot({
         eventId: '$e',
@@ -111,7 +122,7 @@ describe('resolveReplyChainRoot', () => {
         fetchRelatesTo: async () => null,
         cache: new ThreadRootCache(),
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe('$missing');
     await expect(
       resolveReplyChainRoot({
         eventId: '$e',
@@ -121,7 +132,16 @@ describe('resolveReplyChainRoot', () => {
         },
         cache: new ThreadRootCache(),
       }),
-    ).resolves.toBeNull();
+    ).resolves.toBe('$boom');
+    await expect(
+      resolveReplyChainRoot({
+        eventId: '$e',
+        relatesTo: { 'm.in_reply_to': { event_id: '$a' } },
+        fetchRelatesTo: cyc.fetchRelatesTo,
+        cache: new ThreadRootCache(),
+        maxHops: 1,
+      }),
+    ).resolves.toBe('$a');
   });
 
   it('readRelatesTo tolerates non-object content', () => {

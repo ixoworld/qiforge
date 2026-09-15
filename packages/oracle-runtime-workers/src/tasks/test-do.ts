@@ -49,6 +49,9 @@ export interface TasksTestInit {
   deliveryRoundBackoffMs?: number[];
 }
 
+/** Task run ids whose durable turn run the fake object reports as live. */
+const liveTurnRuns = new Set<string>();
+
 export const TEST_USER_DID = 'did:ixo:taskstestuser';
 export const TEST_USER_MATRIX_ID = '@did-ixo-taskstestuser:example.org';
 export const TEST_ROOM_ID = '!tasks-test-room:example.org';
@@ -161,6 +164,7 @@ export class TasksTestDO extends DurableObject {
       requestAlarm: (at: number) => {
         this.alarms.push(at);
       },
+      turnRunLive: (taskRunId: string) => liveTurnRuns.has(taskRunId),
       log: console,
       ...(opts.maxTasksPerUser !== undefined
         ? { maxTasksPerUser: opts.maxTasksPerUser }
@@ -301,6 +305,22 @@ export class TasksTestDO extends DurableObject {
 
   async openRuns(): Promise<OpenTaskRun[]> {
     return this.ready().openRuns();
+  }
+
+  // ── durable-run recovery (the object's side, faked) ──────────────────────
+
+  /** Mark a task run's turn run as live in the (fake) run coordinator. */
+  async setTurnRunLive(taskRunId: string, live: boolean): Promise<void> {
+    if (live) liveTurnRuns.add(taskRunId);
+    else liveTurnRuns.delete(taskRunId);
+  }
+
+  async completeRecoveredRun(runId: string, text: string): Promise<void> {
+    await this.ready().completeRecoveredRun(runId, text);
+  }
+
+  async failRecoveredRun(runId: string, detail: string): Promise<void> {
+    await this.ready().failRecoveredRun(runId, detail);
   }
 
   /**

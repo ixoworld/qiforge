@@ -18,6 +18,11 @@ export interface ToolHelperOptions {
    */
   visibility?: PluginTool['visibility'];
   /**
+   * `'read'` for a tool with no external effect (safe to run again when a
+   * turn resumes after a reset); omitted or `'write'` otherwise.
+   */
+  effect?: PluginTool['effect'];
+  /**
    * Billing gate marker, kept for source compatibility with the Node
    * runtime's plugin contract. The Workers runtime has no commerce lane, so
    * the marker is carried on the `PluginTool` but never gates binding.
@@ -49,7 +54,7 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility, billing } = options;
+  const { name, description, schema, visibility, billing, effect } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -77,6 +82,9 @@ export function tool(
   }
   if (billing !== undefined) {
     pluginTool.billing = billing;
+  }
+  if (effect !== undefined) {
+    pluginTool.effect = effect;
   }
   return pluginTool;
 }

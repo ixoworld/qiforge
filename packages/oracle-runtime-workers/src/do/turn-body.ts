@@ -19,11 +19,14 @@ export const TURN_BODY_KEYS: ReadonlySet<string> = new Set([
   'mcpInvocations',
   'attachments',
   'requestId',
+  'multitask',
 ]);
 
 export interface TurnBody {
   message: string;
   stream?: boolean;
+  /** `interrupt` (default) or `enqueue` — see `TurnRequest.multitask`. */
+  multitask?: 'interrupt' | 'enqueue';
   returnAllMessages?: boolean;
   timezone?: string;
   model?: string;
@@ -79,6 +82,13 @@ export function parseTurnBody(raw: string): ParsedTurnBody {
   }
   if (typeof record.message !== 'string' || record.message.length === 0) {
     return reject('message is required');
+  }
+  if (
+    record.multitask !== undefined &&
+    record.multitask !== 'interrupt' &&
+    record.multitask !== 'enqueue'
+  ) {
+    return reject('multitask must be one of: interrupt, enqueue');
   }
   return { ok: true, body: record as unknown as TurnBody };
 }

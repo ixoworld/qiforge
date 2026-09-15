@@ -1,15 +1,18 @@
 /**
- * Quote-reply → thread resolution — the port of the Node listener bridge's
- * `getThreadRoot`. A client that quote-replies (`m.in_reply_to`) to a
- * message that lives in a thread, without adding the `m.thread` relation
- * itself, still means "continue that thread": walk the reply chain upward
- * until an event that carries `m.thread` (→ its root) or a bare event.
+ * Thread root of an inbound message — the port of the Node listener bridge's
+ * `getThreadRoot`, and with it Node's rule for room conversations: EVERY
+ * message has a thread root, and that root is the session.
  *
- * Unlike Node — where every bare room message opens its own thread-session —
- * this runtime keeps the main timeline as ONE session (`matrix:<roomId>`), so
- * a chain that ends on a bare event resolves to "no thread" (main timeline)
- * rather than to that event. Results are memoised per event id with a
- * bounded cache; cycles and missing events terminate the walk.
+ *  - a message inside a thread (`m.thread`) → the thread's root;
+ *  - a bare message (no relation) → the message itself: the reply opens a
+ *    thread on it, and later replies in that thread continue the session;
+ *  - a quote-reply (`m.in_reply_to` without `m.thread`, from a client that
+ *    does not thread natively) → walk the reply chain upward until an event
+ *    that carries `m.thread` (→ its root) or a bare event (→ that event).
+ *
+ * The walk ends where Node's does: on a cycle, on an event that cannot be
+ * fetched, or past the hop bound, the last event reached is the root.
+ * Results are memoised per event id with a bounded cache.
  */
 
 export interface MatrixRelatesTo {
@@ -35,7 +38,7 @@ export function inReplyToOf(rel: MatrixRelatesTo | undefined): string | null {
   return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
-/** Bounded event-id → thread-root ('' = main timeline) memo. */
+/** Bounded event-id → thread-root memo. */
 export class ThreadRootCache {
   private readonly map = new Map<string, string>();
 
@@ -56,7 +59,7 @@ export class ThreadRootCache {
 
 export interface ResolveReplyChainInput {
   eventId: string;
-  /** The event's own relation (from the clear or wire content). */
+  /** The event's own relation (from the clear or wire content); undefined for a bare message. */
   relatesTo: MatrixRelatesTo | undefined;
   /** Fetches a room event's `m.relates_to` (null when the event is unavailable). */
   fetchRelatesTo: (eventId: string) => Promise<MatrixRelatesTo | null>;
@@ -66,44 +69,50 @@ export interface ResolveReplyChainInput {
 }
 
 /**
- * Thread root for the event, or `null` for the main timeline. Never throws:
- * a fetch failure ends the walk at the last known event (→ main timeline).
+ * The thread root of the event (see the module comment). Never throws: a
+ * fetch failure ends the walk at the event that could not be fetched.
  */
 export async function resolveReplyChainRoot(
   input: ResolveReplyChainInput,
-): Promise<string | null> {
+): Promise<string> {
   const { eventId, relatesTo, fetchRelatesTo, cache } = input;
   const maxHops = input.maxHops ?? 25;
-  const remember = (ids: string[], root: string | null): string | null => {
-    for (const id of ids) cache.set(id, root ?? '');
+  const remember = (ids: string[], root: string): string => {
+    for (const id of ids) cache.set(id, root);
     return root;
   };
 
   const own = threadRootOf(relatesTo);
   if (own) return remember([eventId], own);
   const firstParent = inReplyToOf(relatesTo);
-  if (!firstParent) return remember([eventId], null);
+  // A bare message roots its own thread.
+  if (!firstParent) return remember([eventId], eventId);
 
   const path = [eventId];
   const visited = new Set<string>([eventId]);
-  let cursor: string | null = firstParent;
+  let cursor: string = firstParent;
   let hops = 0;
-  while (cursor && !visited.has(cursor) && hops < maxHops) {
-    hops += 1;
+  for (;;) {
     visited.add(cursor);
     path.push(cursor);
     const known = cache.get(cursor);
-    if (known !== undefined) return remember(path, known === '' ? null : known);
+    if (known !== undefined) return remember(path, known);
     let parentRel: MatrixRelatesTo | null;
     try {
       parentRel = await fetchRelatesTo(cursor);
     } catch {
       parentRel = null;
     }
-    if (parentRel === null) return remember(path, null);
+    // Unavailable: the quoted event is the best root there is (Node's
+    // fallback is the last cursor as well).
+    if (parentRel === null) return remember(path, cursor);
     const parentRoot = threadRootOf(parentRel);
     if (parentRoot) return remember(path, parentRoot);
-    cursor = inReplyToOf(parentRel);
+    const next = inReplyToOf(parentRel);
+    // A bare ancestor is the root of the chain.
+    if (!next) return remember(path, cursor);
+    hops += 1;
+    if (visited.has(next) || hops >= maxHops) return remember(path, cursor);
+    cursor = next;
   }
-  return remember(path, null);
 }

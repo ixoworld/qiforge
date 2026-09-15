@@ -117,5 +117,8 @@ lifetime are in [operations](docs/operations.md).
 - Open: the memory engine's recall ranking on accounts with a long history;
   the storage cost of task-holding users at scale (R2 page tier, see
   [architecture](docs/architecture.md#storage-cost-planning)).
-- Not ported on purpose: the Slack transport, the commerce lane and Matrix
-  group chats — see [node-parity](docs/node-parity.md#not-ported).
+- Not ported on purpose: the Slack transport and the commerce lane — see
+  [node-parity](docs/node-parity.md#not-ported). Matrix group chats were
+  ported in September 2026 behind `MATRIX_GROUP_ROOMS=gate` (the gate and
+  channel memory run in the gateway; by default the bot stays silent in
+  group rooms, see [operations](docs/operations.md#rooms-group-chats)).

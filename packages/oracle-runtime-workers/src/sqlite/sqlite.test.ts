@@ -351,6 +351,110 @@ describe('SqliteSaver (LangGraph checkpointer) inside a Durable Object', () => {
     });
   });
 
+  it('pages transcript rows around an anchor in the listing order', async () => {
+    await runInDurableObject(stub('saver-rows'), async (_instance, state) => {
+      const db = await DoSqliteDatabase.open(state, 'rows.db');
+      const saver = new SqliteSaver(db, undefined, {
+        maxCheckpointsPerThread: 2,
+        oracleName: 'Test Oracle',
+      });
+      // Six rows; two pairs share a timestamp so the rowid tie-break matters.
+      const stamps = ['00', '01', '01', '02', '03', '03'];
+      const history = stamps.map((sec, j) =>
+        message(
+          j % 2 === 0 ? 'human' : 'ai',
+          `row-${j}`,
+          `turn ${j}`,
+          `2024-04-19T17:19:${sec}.000Z`,
+        ),
+      );
+      await saver.put(
+        { configurable: { thread_id: 'thread-rows' } },
+        checkpointWithMessages(1, history),
+        { source: 'loop', step: 1, parents: {} },
+      );
+      // A second checkpoint rewrites every row (new rowids, same order).
+      await saver.put(
+        { configurable: { thread_id: 'thread-rows' } },
+        checkpointWithMessages(2, history),
+        { source: 'loop', step: 2, parents: {} },
+      );
+
+      expect(
+        await saver.findThreadMessageAnchor('thread-rows', 'nope'),
+      ).toBeNull();
+      const anchor = await saver.findThreadMessageAnchor(
+        'thread-rows',
+        'row-2',
+      );
+      expect(anchor?.createdAt).toBe('2024-04-19T17:19:01.000Z');
+
+      const ids = (rows: Array<{ messageId: string }>) =>
+        rows.map((r) => r.messageId);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'older',
+            limit: 10,
+          }),
+        ),
+      ).toEqual(['row-5', 'row-4', 'row-3', 'row-2', 'row-1', 'row-0']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'newer',
+            limit: 2,
+          }),
+        ),
+      ).toEqual(['row-0', 'row-1']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'older',
+            anchor,
+            limit: 10,
+          }),
+        ),
+      ).toEqual(['row-1', 'row-0']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'older',
+            anchor,
+            inclusive: true,
+            limit: 2,
+          }),
+        ),
+      ).toEqual(['row-2', 'row-1']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'newer',
+            anchor,
+            limit: 10,
+          }),
+        ),
+      ).toEqual(['row-3', 'row-4', 'row-5']);
+      expect(
+        ids(
+          await saver.listThreadMessageRows('thread-rows', {
+            direction: 'newer',
+            anchor,
+            inclusive: true,
+            limit: 1,
+          }),
+        ),
+      ).toEqual(['row-2']);
+      const [first] = await saver.listThreadMessageRows('thread-rows', {
+        direction: 'newer',
+        limit: 1,
+      });
+      expect(first?.message).toBeInstanceOf(HumanMessage);
+      expect(first?.message.content).toBe('turn 0');
+      await db.close();
+    });
+  });
+
   it('extracts messages into the messages table and lists the full transcript', async () => {
     await runInDurableObject(
       stub('saver-messages'),

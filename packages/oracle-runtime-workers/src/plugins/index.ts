@@ -21,6 +21,7 @@ import { UserPreferencesPlugin } from './user-preferences';
 import { PortalPlugin } from './portal';
 import { AGUIPlugin } from './agui';
 import { AttachmentsPlugin } from './attachments';
+import { MatrixGroupChatsPlugin } from './matrix-group-chats';
 
 export * from './composio';
 export * from './editor';
@@ -46,6 +47,7 @@ export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const portalPlugin = new PortalPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const attachmentsPlugin = new AttachmentsPlugin();
+export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -67,4 +69,5 @@ export const BUNDLED_WORKERS_PLUGINS = [
   portalPlugin,
   aguiPlugin,
   attachmentsPlugin,
+  matrixGroupChatsPlugin,
 ] as const satisfies readonly OraclePlugin[];

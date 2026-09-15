@@ -7,6 +7,8 @@ import { fetchWithRetry } from './harness';
 export interface SSEEvent {
   event: string;
   data: Record<string, unknown>;
+  /** The frame's sequence number (SSE `id:`), when the runtime sent one. */
+  id?: number;
 }
 
 export interface StreamResult {
@@ -14,6 +16,8 @@ export interface StreamResult {
   text: string;
   durationMs: number;
   requestId: string | null;
+  /** The durable run id (`x-run-id` header), when the runtime sent one. */
+  runId: string | null;
   status: number;
 }
 
@@ -120,6 +124,7 @@ export class ChatClient {
       },
     );
     const requestId = res.headers.get('x-request-id');
+    const runId = res.headers.get('x-run-id');
     const events: SSEEvent[] = [];
     let text = '';
     if (!res.ok || !res.body) {
@@ -128,6 +133,7 @@ export class ChatClient {
         text: await res.text(),
         durationMs: Date.now() - start,
         requestId,
+        runId,
         status: res.status,
       };
     }
@@ -142,8 +148,65 @@ export class ChatClient {
       text,
       durationMs: Date.now() - start,
       requestId,
+      runId,
       status: res.status,
     };
+  }
+
+  /**
+   * Re-join a durable run after a cursor (`GET /runs/:id?after=<seq>`):
+   * replays the frames after it and stays attached until `done`.
+   */
+  async join(
+    runId: string,
+    after = 0,
+    opts: { signal?: AbortSignal; onEvent?: (e: SSEEvent) => void } = {},
+  ): Promise<StreamResult> {
+    const start = Date.now();
+    const res = await fetch(
+      `${this.baseUrl}/runs/${encodeURIComponent(runId)}?after=${after}`,
+      {
+        headers: this.headers({ accept: 'text/event-stream' }),
+        signal: opts.signal,
+      },
+    );
+    const events: SSEEvent[] = [];
+    let text = '';
+    if (!res.ok || !res.body) {
+      return {
+        events,
+        text: await res.text(),
+        durationMs: Date.now() - start,
+        requestId: res.headers.get('x-request-id'),
+        runId: res.headers.get('x-run-id'),
+        status: res.status,
+      };
+    }
+    for await (const evt of parseSSE(res.body)) {
+      events.push(evt);
+      opts.onEvent?.(evt);
+      if (evt.event === 'message' && typeof evt.data.content === 'string')
+        text += evt.data.content;
+    }
+    return {
+      events,
+      text,
+      durationMs: Date.now() - start,
+      requestId: res.headers.get('x-request-id'),
+      runId: res.headers.get('x-run-id'),
+      status: res.status,
+    };
+  }
+
+  /** `GET /sessions/:id/run` — the session's active run, or null. */
+  async sessionRun(sessionId: string): Promise<Record<string, unknown> | null> {
+    const res = await fetch(
+      `${this.baseUrl}/sessions/${encodeURIComponent(sessionId)}/run`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) throw new Error(`GET /sessions/:id/run → ${res.status}`);
+    const body = (await res.json()) as { run: Record<string, unknown> | null };
+    return body.run;
   }
 
   async abort(sessionId: string): Promise<unknown> {
@@ -164,21 +227,29 @@ export async function* parseSSE(
   let buffer = '';
   let event = '';
   let data = '';
+  let id: number | undefined;
   const flush = (): SSEEvent | null => {
     if (!event || !data) {
       event = '';
       data = '';
+      id = undefined;
       return null;
     }
     try {
       const parsed = JSON.parse(data) as Record<string, unknown>;
-      const out = { event, data: parsed };
+      const out: SSEEvent = {
+        event,
+        data: parsed,
+        ...(id !== undefined ? { id } : {}),
+      };
       event = '';
       data = '';
+      id = undefined;
       return out;
     } catch {
       event = '';
       data = '';
+      id = undefined;
       return null;
     }
   };
@@ -197,6 +268,10 @@ export async function* parseSSE(
       }
       if (line.startsWith('event:')) event = line.slice(6).trim();
       else if (line.startsWith('data:')) data = line.slice(5).trim();
+      else if (line.startsWith('id:')) {
+        const n = Number(line.slice(3).trim());
+        if (Number.isFinite(n)) id = n;
+      }
     }
   }
   const last = flush();

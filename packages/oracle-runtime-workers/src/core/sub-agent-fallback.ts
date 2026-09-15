@@ -1,4 +1,4 @@
-import type { StructuredTool } from 'langchain';
+import type { AgentMiddleware, StructuredTool } from 'langchain';
 import type {
   PluginContext,
   PluginSubAgent,
@@ -14,6 +14,7 @@ import type {
 } from './runtime-context';
 import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool';
 import { wrapPluginTool } from './wrap-plugin-tool';
+import type { ResultCapConfig } from './middlewares/result-cap';
 
 /** Inputs for collecting and wrapping sub-agents. */
 export interface CollectSubAgentsInput {
@@ -54,6 +55,10 @@ export interface CollectSubAgentsInput {
    * in name collisions.
    */
   passthroughTools?: StructuredTool[];
+  /** Middlewares every sub-agent's inner graph gets in addition to its own (the durable-run tool marks). */
+  extraMiddleware?: AgentMiddleware[];
+  /** The turn's result cap, applied to every wrapped sub-agent tool (see `wrapPluginTool`). */
+  resultCap?: ResultCapConfig;
   /**
    * Optional pre-collected sub-agent list. When provided, the registry is not
    * queried — callers that need to filter the entries collect from the
@@ -78,6 +83,8 @@ function defaultToAgentSpec(
   sessionId: string,
   sharedFactory: ((ctx: RuntimeContext) => SharedAccessors) | undefined,
   fallbackContext: RunConfigContext | undefined,
+  extraMiddleware?: AgentMiddleware[],
+  resultCap?: ResultCapConfig,
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -89,7 +96,13 @@ function defaultToAgentSpec(
     : subAgent.tools(buildCtx);
 
   const tools: StructuredTool[] = pluginTools.map((t) =>
-    wrapPluginTool(t, { ambient, state, sharedFactory, fallbackContext }),
+    wrapPluginTool(t, {
+      ambient,
+      state,
+      sharedFactory,
+      fallbackContext,
+      ...(resultCap ? { resultCap } : {}),
+    }),
   );
 
   const model = ambient.llm.get(subAgent.model ?? 'subagent');
@@ -112,7 +125,7 @@ function defaultToAgentSpec(
     systemPrompt,
     tools,
     model,
-    middleware: subAgent.middlewares,
+    middleware: [...(extraMiddleware ?? []), ...(subAgent.middlewares ?? [])],
     userDid,
     sessionId,
     logger: ambient.logger,
@@ -142,6 +155,8 @@ export async function collectSubAgentsWithFallback(
     toAgentSpec,
     passthroughTools,
     subAgents,
+    extraMiddleware,
+    resultCap,
   } = input;
 
   const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
@@ -160,6 +175,8 @@ export async function collectSubAgentsWithFallback(
               sessionId,
               sharedFactory,
               fallbackContext,
+              extraMiddleware,
+              resultCap,
             );
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }

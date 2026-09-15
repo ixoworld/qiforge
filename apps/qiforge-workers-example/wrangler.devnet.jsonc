@@ -86,6 +86,13 @@
     // Auth-gated operator routes (/debug/storage, /debug/tasks, ...) — handy
     // while testing devnet; drop for a production oracle.
     "ORACLE_DEBUG_ROUTES": "true",
+    // The durable-runs drill tools (slow read/write; `test/e2e-durable.ts`).
+    "DRILL_TOOLS": "true",
+    // Context-budget drill (`test/e2e-context.ts`): pin one cheap model to a
+    // 32k window so pruning and summarization are reachable in a few turns
+    // — only turns that pick this model as their main model are affected.
+    // Drop for a production oracle.
+    "MODEL_CONTEXT_OVERRIDES": "google/gemini-3.1-flash-lite=32000",
     // Optional: per-user-object clean-chunk cache (default 4 MiB; 8 MiB was
     // measured indistinguishable on devnet — see docs/operations.md).
     // "CHUNK_CACHE_BYTES": "8m",

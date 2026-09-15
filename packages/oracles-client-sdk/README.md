@@ -151,6 +151,18 @@ const { messages } = useChat({
 });
 ```
 
+### History paging and render throttling
+
+`useChat` loads a session's history one page of turns at a time (newest
+first) and exposes `hasEarlier`, `loadEarlier()` and `isLoadingEarlier` for
+a "load earlier messages" affordance; after a turn only what the turn added
+is fetched. Against a runtime without the paged route the whole transcript
+loads as one page, so nothing changes for older oracles. Pass
+`streamingMode: 'throttled'` (window `streamingThrottleMs`, default 50 ms)
+to render at most a few times a second while a reply streams — the default
+`immediate` renders on every chunk. `historyPageSize` (default 20) sets the
+page.
+
 ### Real-time Streaming
 
 Messages stream in real-time with optimized performance:

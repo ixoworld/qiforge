@@ -115,6 +115,35 @@ export const baseEnvSchema = z.object({
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
 
+  // --- durable runs (docs/plans/durable-runs.md) ---------------------------
+  // Parsed by `runDurabilityConfig` (src/do/run-store.ts) with defaults:
+  // keep-alive 20 s, segment pack every 2 s / 16 KiB, 4 recovery attempts at
+  // 5/15/30/60 s, `interrupt` as the multitask rule.
+  RUN_KEEPALIVE_MS: z.string().optional(),
+  RUN_SEGMENT_FLUSH_MS: z.string().optional(),
+  RUN_SEGMENT_BYTES: z.string().optional(),
+  RUN_RECOVERY_ATTEMPTS: z.string().optional(),
+  RUN_RECOVERY_DELAYS_MS: z.string().optional(),
+  TURN_MULTITASK_DEFAULT: z.enum(['interrupt', 'enqueue']).optional(),
+
+  // --- context budgets (docs/plans/context-budgets.md) ---------------------
+  // Parsed by `contextWindowConfig` / `contextKnobs` / `resultStoreKnobs`.
+  // The model's context window is resolved per model (override → OpenRouter
+  // catalog → MODEL_CONTEXT_TOKENS default, lowered by provider errors); the
+  // fractions derive every limit from it.
+  MODEL_CONTEXT_TOKENS: z.string().optional(),
+  MODEL_CONTEXT_OVERRIDES: z.string().optional(),
+  CONTEXT_SUMMARIZE_FRACTION: z.string().optional(),
+  CONTEXT_PRUNE_FRACTION: z.string().optional(),
+  CONTEXT_RESULT_CAP_FRACTION: z.string().optional(),
+  CONTEXT_RESULT_CAP_MAX_CHARS: z.string().optional(),
+  CONTEXT_REQUEST_FRACTION: z.string().optional(),
+  CONTEXT_OUTPUT_RESERVE_TOKENS: z.string().optional(),
+  CONTEXT_SUMMARIZE_MESSAGES: z.string().optional(),
+  CONTEXT_KEEP_MESSAGES: z.string().optional(),
+  TOOL_RESULT_TTL_HOURS: z.string().optional(),
+  TOOL_RESULT_R2_MIN_BYTES: z.string().optional(),
+
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
   CORS_ORIGIN: z.string().default('*'),

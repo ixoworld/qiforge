@@ -1,3 +1,5 @@
+import { Command } from '@langchain/langgraph';
+import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
 import type {
@@ -35,6 +37,13 @@ export interface WrapPluginToolOptions {
    * `invoke`/`stream` (the Node runtime does) overrides it.
    */
   fallbackContext?: RunConfigContext;
+  /**
+   * The turn's result cap (result-cap.ts). Applied to the handler's return
+   * value HERE, before LangChain turns it into a ToolMessage, so the SSE
+   * `tool_call` frame, the model and the transcript all carry the same
+   * capped text. Graph commands (`load_capability`) pass through.
+   */
+  resultCap?: ResultCapConfig;
 }
 
 /**
@@ -72,8 +81,14 @@ export function wrapPluginTool(
   pluginTool: PluginTool,
   options: WrapPluginToolOptions,
 ): StructuredTool {
-  const { ambient, state, pluginTitle, sharedFactory, fallbackContext } =
-    options;
+  const {
+    ambient,
+    state,
+    pluginTitle,
+    sharedFactory,
+    fallbackContext,
+    resultCap,
+  } = options;
   const description = pluginTitle
     ? `[${pluginTitle}] ${pluginTool.description}`
     : pluginTool.description;
@@ -89,7 +104,13 @@ export function wrapPluginTool(
         state,
         sharedFactory,
       );
-      return pluginTool.handler(args, ctx);
+      const output = await pluginTool.handler(args, ctx);
+      if (!resultCap || output instanceof Command || output == null)
+        return output;
+      const text = typeof output === 'string' ? output : JSON.stringify(output);
+      if (typeof text !== 'string' || text.length <= resultCap.capChars)
+        return output;
+      return (await capToolResult(text, pluginTool.name, resultCap)).text;
     },
     {
       name: pluginTool.name,

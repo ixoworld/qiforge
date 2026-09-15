@@ -94,6 +94,19 @@ type MessageRow = {
   message: Uint8Array | string;
 };
 
+/** A transcript row's position in the listing order. */
+export interface ThreadMessageAnchor {
+  createdAt: string;
+  rowid: number;
+}
+
+/** A transcript row with what a pager needs to continue from it. */
+export interface ThreadMessageRow {
+  message: BaseMessage;
+  messageId: string;
+  anchor: ThreadMessageAnchor;
+}
+
 interface PendingWriteColumn {
   task_id: string;
   channel: string;
@@ -358,6 +371,74 @@ export class SqliteSaver extends BaseCheckpointSaver {
       [threadId],
     );
     return Promise.all(rows.map((row) => this.loadMessage(row.message)));
+  }
+
+  /**
+   * Where a transcript row sits in the listing order (`created_at`, then
+   * `rowid`), or null when the thread has no row with that message id. A
+   * paging cursor names a message id and is resolved through this at query
+   * time: rowids move when a checkpoint rewrites the thread's rows, message
+   * ids never do.
+   */
+  async findThreadMessageAnchor(
+    threadId: string,
+    messageId: string,
+  ): Promise<ThreadMessageAnchor | null> {
+    await this.setup();
+    const row = await this.db.get<{ created_at: string; rowid: number }>(
+      'SELECT created_at, rowid FROM messages WHERE thread_id = ? AND message_id = ?',
+      [threadId, messageId],
+    );
+    return row ? { createdAt: row.created_at, rowid: row.rowid } : null;
+  }
+
+  /**
+   * A slice of the transcript next to an anchor: `older` walks back from it
+   * (newest first, so a caller can stop once it holds enough turns), `newer`
+   * walks forward (oldest first). Without an anchor `older` starts at the
+   * newest row and `newer` at the oldest. The anchor row itself is left out
+   * unless `inclusive`.
+   */
+  async listThreadMessageRows(
+    threadId: string,
+    opts: {
+      direction: 'older' | 'newer';
+      anchor?: ThreadMessageAnchor | null;
+      /** Include the anchor row itself. */
+      inclusive?: boolean;
+      limit: number;
+    },
+  ): Promise<ThreadMessageRow[]> {
+    await this.setup();
+    const older = opts.direction === 'older';
+    const cmp = older ? '<' : '>';
+    const rowCmp = opts.inclusive ? `${cmp}=` : cmp;
+    const order = older ? 'DESC' : 'ASC';
+    const anchored = opts.anchor
+      ? ` AND (created_at ${cmp} ? OR (created_at = ? AND rowid ${rowCmp} ?))`
+      : '';
+    const rows = await this.db.exec<{
+      message: Uint8Array | string;
+      message_id: string;
+      created_at: string;
+      rowid: number;
+    }>(
+      `SELECT message, message_id, created_at, rowid FROM messages WHERE thread_id = ?${anchored} ORDER BY created_at ${order}, rowid ${order} LIMIT ?`,
+      [
+        threadId,
+        ...(opts.anchor
+          ? [opts.anchor.createdAt, opts.anchor.createdAt, opts.anchor.rowid]
+          : []),
+        opts.limit,
+      ],
+    );
+    return Promise.all(
+      rows.map(async (row) => ({
+        message: await this.loadMessage(row.message),
+        messageId: row.message_id,
+        anchor: { createdAt: row.created_at, rowid: row.rowid },
+      })),
+    );
   }
 
   /**

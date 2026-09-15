@@ -8,6 +8,12 @@
 export interface BaseSSEEvent<TEvent extends string, TData> {
   event: TEvent;
   data: TData;
+  /**
+   * The frame's sequence number (the SSE `id:` field) on runtimes with
+   * durable runs. A client that reconnects asks `GET /runs/:runId?after=<id>`
+   * for everything after the last id it saw.
+   */
+  id?: number;
 }
 
 // Individual event data types
@@ -21,18 +27,63 @@ export interface SSEToolCallEventData {
   requestId: string;
   toolName: string;
   args: Record<string, unknown>;
-  status: 'isRunning' | 'done';
+  status: 'isRunning' | 'done' | 'error';
   output?: string;
+  error?: string;
   eventId?: string;
 }
 
 export interface SSEErrorEventData {
   error: string;
   timestamp: string;
+  kind?: string;
+  retryable?: boolean;
+  detail?: string;
+  runId?: string;
 }
 
+/**
+ * The last frame of a turn. On runtimes with durable runs it names the run
+ * and the final message, and says how the run ended when it did not finish
+ * normally (`aborted` by the user or a newer message, `interrupted` after
+ * the recovery cap, `failed`); `partialText` is the reply so far in those
+ * cases. A `done` produced for a re-join of a run that already ended
+ * carries `replayed: true` and its `status`.
+ */
 export interface SSEDoneEventData {
   timestamp?: string;
+  runId?: string;
+  messageId?: string;
+  aborted?: boolean;
+  interrupted?: boolean;
+  failed?: boolean;
+  status?:
+    | 'queued'
+    | 'running'
+    | 'recovering'
+    | 'finished'
+    | 'aborted'
+    | 'interrupted'
+    | 'failed';
+  partialText?: string;
+  replayed?: boolean;
+}
+
+/** First frame of a durable run: the id a client re-joins with. */
+export interface SSERunEventData {
+  runId: string;
+  sessionId: string;
+  requestId: string;
+  /** Set when this attempt resumed a run cut off by a runtime restart. */
+  resumed?: boolean;
+  attempt?: number;
+  /**
+   * With `resumed`: the length of the reply text the runtime kept and
+   * continues from. A client that displayed more than that (the last frames
+   * before the restart were never persisted) cuts its text back to this
+   * length before appending the frames that follow.
+   */
+  partialLength?: number;
 }
 
 export interface SSERouterUpdateEventData {
@@ -40,6 +91,9 @@ export interface SSERouterUpdateEventData {
   sessionId: string;
   requestId: string;
   eventId?: string;
+  runId?: string;
+  /** The message waits behind the session's running turn (`multitask: 'enqueue'`). */
+  queued?: boolean;
 }
 
 export interface SSERenderComponentEventData {
@@ -108,6 +162,7 @@ export type SSEEvent =
   | BaseSSEEvent<'action_call', SSEActionCallEventData>
   | BaseSSEEvent<'error', SSEErrorEventData>
   | BaseSSEEvent<'done', SSEDoneEventData>
+  | BaseSSEEvent<'run', SSERunEventData>
   | BaseSSEEvent<'router.update', SSERouterUpdateEventData>
   | BaseSSEEvent<'render_component', SSERenderComponentEventData>
   | BaseSSEEvent<'browser_tool_call', SSEBrowserToolCallEventData>
@@ -132,6 +187,7 @@ function isValidSSEEventType(
     'action_call',
     'error',
     'done',
+    'run',
     'router.update',
     'render_component',
     'browser_tool_call',
@@ -153,6 +209,9 @@ export async function* parseSSEStream(
 ): AsyncGenerator<SSEEvent> {
   const decoder = new TextDecoder();
   let buffer = '';
+  let event = '';
+  let data = '';
+  let id: number | undefined;
 
   try {
     while (true) {
@@ -184,10 +243,8 @@ export async function* parseSSEStream(
       // Keep last incomplete line in buffer
       buffer = lines.pop() || '';
 
-      let event = '';
-      let data = '';
-
-      // Process complete lines
+      // Process complete lines. `event`/`data`/`id` persist across chunks:
+      // a frame's lines can arrive split over two network reads.
       for (const line of lines) {
         const trimmedLine = line.trim();
 
@@ -199,15 +256,18 @@ export async function* parseSSEStream(
               const parsedData = JSON.parse(data);
               // Type-safe event creation with fallback for unknown events
               if (isValidSSEEventType(event)) {
-                yield { event, data: parsedData };
-              } else {
-                continue;
+                yield {
+                  event,
+                  data: parsedData,
+                  ...(id !== undefined ? { id } : {}),
+                };
               }
             } catch (parseError) {
               console.warn('Failed to parse SSE data:', data, parseError);
             }
             event = '';
             data = '';
+            id = undefined;
           }
           continue;
         }
@@ -216,6 +276,9 @@ export async function* parseSSEStream(
           event = trimmedLine.slice(6).trim();
         } else if (trimmedLine.startsWith('data:')) {
           data = trimmedLine.slice(5).trim();
+        } else if (trimmedLine.startsWith('id:')) {
+          const n = Number(trimmedLine.slice(3).trim());
+          if (Number.isFinite(n)) id = n;
         }
       }
     }

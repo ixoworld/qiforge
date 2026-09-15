@@ -6,6 +6,7 @@
  * work unchanged. Every authenticated route resolves the caller's
  * `UserOracleDO` and forwards to it; streaming turns are proxied byte-for-byte.
  */
+import { parseTranscriptPageQuery } from '../do/transcript';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
@@ -283,6 +284,54 @@ export function createShell(
       headers: { 'content-type': 'application/json' },
     });
   });
+  // One turn-aligned page of the transcript (docs/plans/transcript-paging.md):
+  // the newest `limit` turns, the turns `before=` a cursor, or what came
+  // `after=` one. The legacy listing above stays the whole transcript.
+  app.get('/sessions/:sessionId/messages', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const parsed = parseTranscriptPageQuery(c.req.query());
+    if (!parsed.ok)
+      return c.json({ statusCode: 400, message: parsed.message }, 400);
+    const page = await userStub(c.env, identity.userDid).listMessagesPage(
+      identity,
+      c.req.param('sessionId'),
+      parsed.options,
+    );
+    if (!page.ok)
+      return c.json({ statusCode: page.status, message: page.message }, 400);
+    return new Response(page.json, {
+      headers: { 'content-type': 'application/json' },
+    });
+  });
+
+  // --- durable runs (docs/plans/durable-runs.md) -------------------------------
+  // The session's active run, if any: a client that reloads asks this first,
+  // then re-joins the run's stream.
+  app.get('/sessions/:sessionId/run', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const run = await userStub(c.env, identity.userDid).sessionRun(
+      identity,
+      c.req.param('sessionId'),
+    );
+    return c.json({ run });
+  });
+  // Re-join a run's SSE stream after a cursor (`?after=<seq>`, the `id:` of
+  // the last frame the client saw). Frames after it are replayed, then the
+  // live tail until `done`. A run that ended replays and closes at once.
+  app.get('/runs/:runId', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const after = c.req.query('after') ?? '0';
+    const res = await userStub(c.env, identity.userDid).fetch(
+      `https://user-oracle/runs/${encodeURIComponent(c.req.param('runId'))}?after=${encodeURIComponent(after)}`,
+      { headers: { 'x-identity': JSON.stringify(identity) } },
+    );
+    const headers = new Headers(res.headers);
+    headers.set(
+      'access-control-expose-headers',
+      'x-request-id, x-run-id, x-run-status',
+    );
+    return new Response(res.body, { status: res.status, headers });
+  });
   app.post('/messages/:sessionId', async (c) => {
     const identity = identityOf(c.get('auth'), c.req.raw.headers);
     const sessionId = c.req.param('sessionId');
@@ -522,6 +571,23 @@ export function createShell(
   app.get('/debug/realtime', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).realtimeStatus()),
   );
+  app.get('/debug/runs', async (c) =>
+    c.json(await userStub(c.env, c.get('auth').userDid).runsStatus()),
+  );
+  // The context budget a model gets on this user's object (window origin,
+  // thresholds, saved-result store stats). `?model=` defaults to the
+  // deployment's main model; `?byoProvider=` resolves a BYO-native id.
+  app.get('/debug/context', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    return c.json(
+      await userStub(c.env, identity.userDid).contextStatus(
+        identity,
+        c.req.query('model') || undefined,
+        c.req.query('byoProvider') || undefined,
+        c.req.query('session') || undefined,
+      ),
+    );
+  });
   app.post('/debug/reauth-prompt/reset', async (c) => {
     await userStub(c.env, c.get('auth').userDid).debugResetReauthThrottle();
     return c.json({ reset: true });

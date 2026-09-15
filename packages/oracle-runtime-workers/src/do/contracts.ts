@@ -1,3 +1,4 @@
+import type { TranscriptPageOptions } from './transcript';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
@@ -61,6 +62,11 @@ export interface OracleWorkerEnv {
   MATRIX_SEND_CONCURRENCY?: string;
   /** Room turns in flight at once in the gateway (each ends in an encrypted reply; default 4). */
   MATRIX_TURN_CONCURRENCY?: string;
+  /** Group rooms (gateway): `silent` (default) never speaks there, `gate` runs the Node lane, `answer` replies to everything. */
+  MATRIX_GROUP_ROOMS?: string;
+  GROUP_CHAT_ACTIVE_THREAD_TTL_MS?: string;
+  GROUP_CHAT_REQUIRE_POWER_LEVEL?: string;
+  GROUP_CHAT_ROOM_INFO_TTL_MS?: string;
   /** Idle recycle of the gateway object after this many sends (default 300; 0 disables). */
   MATRIX_RECYCLE_AFTER_SENDS?: string;
   /** Rooms kept fully built in memory (SDK default 64; idle rooms are released). */
@@ -124,6 +130,26 @@ export interface OracleWorkerEnv {
   MAIN_REASONING_EFFORT?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
+  /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
+  RUN_KEEPALIVE_MS?: string;
+  RUN_SEGMENT_FLUSH_MS?: string;
+  RUN_SEGMENT_BYTES?: string;
+  RUN_RECOVERY_ATTEMPTS?: string;
+  RUN_RECOVERY_DELAYS_MS?: string;
+  TURN_MULTITASK_DEFAULT?: string;
+  /** Context-budget knobs (docs/plans/context-budgets.md). */
+  MODEL_CONTEXT_TOKENS?: string;
+  MODEL_CONTEXT_OVERRIDES?: string;
+  CONTEXT_SUMMARIZE_FRACTION?: string;
+  CONTEXT_PRUNE_FRACTION?: string;
+  CONTEXT_RESULT_CAP_FRACTION?: string;
+  CONTEXT_RESULT_CAP_MAX_CHARS?: string;
+  CONTEXT_REQUEST_FRACTION?: string;
+  CONTEXT_OUTPUT_RESERVE_TOKENS?: string;
+  CONTEXT_SUMMARIZE_MESSAGES?: string;
+  CONTEXT_KEEP_MESSAGES?: string;
+  TOOL_RESULT_TTL_HOURS?: string;
+  TOOL_RESULT_R2_MIN_BYTES?: string;
   /** Platform model provider. Default `openrouter`; `nebius` for self-hosted. */
   LLM_PROVIDER?: 'openrouter' | 'nebius';
   /** Nebius Token Factory API key — required when `LLM_PROVIDER=nebius`. */
@@ -203,6 +229,14 @@ export interface TurnRequest {
   threadId?: string;
   /** The user's message event this turn answers (Matrix turns): anchors the `work_status` card. */
   eventId?: string;
+  /**
+   * Matrix turns: whether the room is a direct room or a group room (more
+   * than two members) as the gateway's group-chat gate saw it. A group turn's
+   * message is prefixed `[DisplayName]: ` and gets the channel-memory tools.
+   */
+  roomKind?: 'direct' | 'group';
+  /** The speaker's display name in the room (Matrix turns). */
+  senderDisplayName?: string;
   requestId: string;
   /** Per-request model override (validated against the catalog). */
   model?: string;
@@ -210,6 +244,134 @@ export interface TurnRequest {
   metadata?: JsonString;
   /** Files attached to the message (validated `AttachmentDto` shape). */
   attachments?: AttachmentInput[];
+  /**
+   * What this message does to a run already active on the same session:
+   * `interrupt` (default; the running turn is aborted, Node parity) or
+   * `enqueue` (it waits its turn). See docs/plans/durable-runs.md.
+   */
+  multitask?: 'interrupt' | 'enqueue';
+  /** The scheduler's run id when this turn executes a scheduled task. */
+  taskRunId?: string;
+}
+
+/** A run as the shell reports it (`GET /sessions/:id/run`, `GET /debug/runs`). */
+/** `GET /debug/context` — the context budget a model gets on this object. */
+/**
+ * Per-session context counters (`GET /debug/context?session=`): what the
+ * guard did across the session's turns plus the thread as stored, so a test
+ * or an operator can see pruning and summarization without the logs.
+ */
+export interface SessionContextStatus {
+  id: string;
+  /** Every row of the stored transcript (never condensed; what the user sees). */
+  threadMessages: number;
+  /**
+   * The working context: the messages the latest checkpoint carries into
+   * the next request — after a summary, one summary message plus the kept
+   * tail, however long the transcript is.
+   */
+  contextMessages: number;
+  /** Summary messages in the working context (1 once the history was condensed). */
+  contextSummaries: number;
+  contextToolMessages: number;
+  /** chars/4 estimate of the working context. */
+  contextTokens: number;
+  /** Requests the guard pruned before sending (soft or hard). */
+  prunes: number;
+  hardPrunes: number;
+  /** Tool results demoted or de-duplicated in total. */
+  prunedResults: number;
+  overflowRetries: number;
+  refusals: number;
+  lastEventAt?: string;
+}
+
+export interface ContextStatus {
+  model: string;
+  byoProvider?: string;
+  window: { tokens: number; origin: string; catalogId?: string };
+  budget: {
+    summarizeAtTokens: number;
+    pruneAtTokens: number;
+    resultCapChars: number;
+    requestCapTokens: number;
+    outputReserveTokens: number;
+    keepMessages: number;
+    summarizeTriggerMessages?: number;
+  };
+  results: {
+    rows: number;
+    sqliteBytes: number;
+    r2Rows: number;
+    r2Bytes: number;
+    tier: 'sqlite+r2' | 'sqlite';
+  };
+  /** Present when a session was asked for; null when that session is unknown. */
+  session?: SessionContextStatus | null;
+}
+
+export interface RunSummary {
+  runId: string;
+  sessionId: string;
+  requestId: string;
+  client: 'portal' | 'matrix';
+  status:
+    | 'queued'
+    | 'running'
+    | 'recovering'
+    | 'finished'
+    | 'aborted'
+    | 'interrupted'
+    | 'failed';
+  startedAt: string;
+  updatedAt: string;
+  /** Highest frame sequence a re-join can ask `after`. */
+  lastSeq: number;
+  messageId?: string;
+  /** The reply so far, for a run that ended without a committed reply. */
+  partialText?: string;
+}
+
+/** `GET /debug/runs`: the durable-run configuration, live runs and recent rows. */
+export interface RunsStatus {
+  config: {
+    keepAliveMs: number;
+    segmentFlushMs: number;
+    segmentBytes: number;
+    recoveryAttempts: number;
+    recoveryDelaysMs: readonly number[];
+    multitaskDefault: 'interrupt' | 'enqueue';
+  };
+  live: Array<{
+    runId: string;
+    sessionId: string;
+    status: string;
+    attemptInFlight: boolean;
+    generation: number;
+    lastSeq: number;
+    /** Highest frame sequence packed into a segment so far. */
+    packedSeq: number;
+    subscribers: number;
+    nextAttemptAt: number | null;
+  }>;
+  runs: Array<
+    RunSummary & {
+      marks: Array<{
+        toolCallId: string;
+        toolName: string;
+        effect: 'read' | 'write';
+        startedAt: string;
+        doneAt: string | null;
+        outcome: string | null;
+        attempts: number;
+      }>;
+      segments: number;
+      attempts: number;
+      nextAttemptAt: number | null;
+      error: string | null;
+      taskRunId: string | null;
+    }
+  >;
 }
 
 /** Non-streaming turn result. */
@@ -323,6 +485,13 @@ export interface StorageStatus {
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
+  /**
+   * Compact a batch of group-room messages (JSON `ObservedMessage[]`) into
+   * one channel-memory summary with the platform model, for the gateway's
+   * per-room memory (`src/matrix/group-chat.ts`). `null` when the model
+   * answered nothing — the gateway keeps the batch buffered.
+   */
+  summarizeGroupMessages(messages: JsonString): Promise<string | null>;
   createSession(
     identity: TurnIdentity,
     opts?: { roomId?: string; sessionId?: string },
@@ -334,7 +503,33 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   deleteSession(identity: TurnIdentity, sessionId: string): Promise<boolean>;
   /** JSON-encoded `MessageDto[]` for `GET /messages/:sessionId`. */
   listMessages(identity: TurnIdentity, sessionId: string): Promise<JsonString>;
+  /**
+   * `GET /sessions/:id/messages` — one turn-aligned page of the transcript
+   * (docs/plans/transcript-paging.md); the JSON of a `TranscriptPage`, or
+   * the 400 to answer with when the cursor names no row.
+   */
+  listMessagesPage(
+    identity: TurnIdentity,
+    sessionId: string,
+    options: TranscriptPageOptions,
+  ): Promise<
+    { ok: true; json: JsonString } | { ok: false; status: 400; message: string }
+  >;
   abortTurn(sessionId: string): Promise<boolean>;
+  /** The session's active (queued/running/recovering) run, if any. */
+  sessionRun(
+    identity: TurnIdentity,
+    sessionId: string,
+  ): Promise<RunSummary | null>;
+  /** Diagnostics: recent runs with their tool marks and live state. */
+  runsStatus(): Promise<RunsStatus>;
+  /** `GET /debug/context` — the context budget a model gets on this object. */
+  contextStatus(
+    identity: TurnIdentity,
+    model?: string,
+    byoProvider?: string,
+    sessionId?: string,
+  ): Promise<ContextStatus>;
   /** Adopt a freshly deposited delegation for header-less turns (no boot). */
   setDelegation(
     userDid: string,
@@ -567,6 +762,28 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   /** One timeline event (decrypted when E2EE) as JSON `{ event_id, type, content, sender, origin_server_ts }`, or null. */
   getEvent(roomId: string, eventId: string): Promise<JsonString | null>;
   /**
+   * Group rooms (`src/matrix/group-chat.ts`): whether a room is direct or a
+   * group room, and the room's channel memory — what the user object's
+   * `matrix-group-chats` tools read and write. Payloads are JSON strings.
+   */
+  groupChatRoomInfo(roomId: string): Promise<GroupRoomInfo>;
+  /** `{ chunks, pinnedFacts, members }` — the newest `limit` summary chunks (1..30, default 10). */
+  channelMemoryRecall(roomId: string, limit?: number): Promise<JsonString>;
+  /** Matching summary chunks for the keywords. */
+  channelMemorySearch(
+    roomId: string,
+    query: string,
+    limit?: number,
+  ): Promise<JsonString>;
+  /** The pinned fact as stored. */
+  channelMemoryPin(
+    roomId: string,
+    fact: string,
+    pinnedByDid: string,
+    sourceEventId?: string,
+  ): Promise<JsonString>;
+  channelMemoryUnpin(roomId: string, factId: string): Promise<boolean>;
+  /**
    * The oracle's P-256 secrets key, JSON-encoded private JWK. Read from the
    * oracle's Matrix *account* room (`MATRIX_ACCOUNT_ROOM_ID`) — the published
    * `ixo.room.encryption_key.index` state names the timeline event carrying
@@ -626,8 +843,18 @@ export interface SnapshotStream extends MediaStream {
   eventId: string;
 }
 
+export interface GroupRoomInfo {
+  isDirect: boolean;
+  memberCount: number;
+  joinedMemberIds: string[];
+  /** Whether this deployment runs the group-chat lane (`MATRIX_GROUP_ROOMS=gate`); the channel-memory tools exist only then. */
+  groupLane: boolean;
+}
+
 export interface GatewayStatus extends BotStatus {
   turns: { inFlight: number; waiting: number };
+  /** Channel memory of group rooms: messages awaiting compaction, summary chunks, pinned facts. */
+  groupChat: { buffered: number; chunks: number; facts: number };
   /** Debounce buffers waiting to become turns. */
   ingestPending: number;
   /** Room messages whose turn has not ended yet (durable; replayed after a reset). */

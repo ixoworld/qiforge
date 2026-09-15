@@ -17,6 +17,38 @@ implementation, and what is deliberately left out.
   shallow-merged over a loaded plugin's manifest at boot (e.g.
   `{ portal: { visibility: 'always' } }`), unknown names are logged and
   ignored, the merged manifest is validated like an authored one.
+- **Room threads are sessions**: a bare room message roots a thread, the
+  reply is posted inside it, and the thread root's event id IS the session
+  id (`src/matrix/ingest.ts`, `src/matrix/reply-chain.ts`) — Node's
+  listener bridge rule. Messages inside the thread and quote-replies to it
+  (resolved up the reply chain) continue that session; a reply typed inside
+  a Portal session's thread continues the Portal session, whose id is its
+  marker event. The main timeline of a room never carries a reply and is
+  never a session, so a shared room stays readable and every conversation
+  has its own transcript. `GET /sessions` lists the user's main oracle room
+  only (Portal sessions and the threads opened there), as Node's
+  `SessionsService.listSessions` does; threads in dedicated task rooms and
+  task runs stay out of it. Files from the build that keyed room sessions as
+  `matrix:<roomId>` / `thread:<root>` are renamed on boot
+  (`src/do/session-id-migration.ts`).
+- **Matrix group rooms** (`matrix-group-chats`, opt-in with
+  `MATRIX_GROUP_ROOMS=gate` on the gateway — the default `silent` keeps the
+  bot out of group rooms entirely): in a room with more than
+  two members the oracle answers only when it is mentioned
+  (`m.mentions`), quote-replied, or already in a thread it answered in
+  within the last 30 minutes, and only when its power level lets it post;
+  every message is still captured into the room's channel memory, which
+  is compacted with the Node summarizer prompt into searchable chunks
+  (FTS5, porter stemming, LIKE fallback) alongside pinned facts and the
+  member roster; the four tools (`recall_channel_memory`,
+  `search_channel_memory`, `pin_room_fact`, `unpin_room_fact`) are offered
+  only in such rooms; a group message reaches the model as
+  `[DisplayName]: …`. Node ran the gate as an agent middleware and kept
+  the memory in a per-room SQLite file synced as room media; here the gate
+  and the memory live in the gateway — see the divergences below, the
+  plugin's own status and parity table
+  (`src/plugins/matrix-group-chats/README.md`) and
+  [operations](operations.md#rooms-group-chats).
 - **Wire protocol**: `POST/GET /sessions`, `POST /messages/:id` (SSE events
   `message` / `reasoning` / `tool_call` / `action_call` / `error` / `done`),
   `GET /messages/:id`, `/messages/abort`, `/delegation`, `/health`,
@@ -165,6 +197,32 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   instead of as a finished call.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
+- **A user↔oracle room is always direct.** Node classified a room by the
+  `is_direct` flag and the joined-member count alone; a user↔oracle room on
+  an ixo homeserver also holds the rooms appservice bot and the
+  memory-engine bot, so that rule would gate the oracle's own conversation
+  with its user. Here a room whose canonical alias is a user↔oracle alias
+  of this oracle is direct whatever its member count; the two Node rules
+  apply to every other room.
+- **Group rooms are gated in the gateway, not in a middleware.** Node
+  dispatched every group-room message as a turn and let the plugin's
+  `beforeAgent` middleware end it silently; here the gateway decides before
+  a turn exists, so an ignored message never wakes the speaker's user
+  object (and never fails a turn for a member who has no delegation). Two
+  consequences: an ignored message is not appended to the speaker's own
+  thread state (Node's per-user checkpoint kept it; cross-user context came
+  from channel memory on both runtimes), and the "bot spoke in this thread"
+  fallback after a restart reads the gateway's durable `group_bot_threads`
+  table instead of scanning the room's last 100 messages. Channel memory is
+  the gateway's SQLite (Durable Object storage survives deploys) rather
+  than a per-room database uploaded to the room as media, so a Node-era
+  `qiforge.channel_memory.v1` snapshot is not imported; the schema is
+  Node's, so an importer is a small addition. Compaction runs at the 20-
+  message threshold and just in time before an answer (3 s cap), as on
+  Node; Node's 5-minute idle compaction has no equivalent — the buffer is
+  durable, so a quiet room's messages are compacted at its next engagement.
+  Node's weekly/monthly tier rollups were never scheduled on Node either
+  and are not ported (the `tier` column stays at 1).
 
 ## Not ported
 
@@ -172,10 +230,8 @@ Measured against the Node runtime's `BUNDLED_PLUGINS` (Sep 2026):
 
 - **Slack transport** (retired internally) and the **commerce lane**
   (oracle-payments).
-- **Matrix group chats** (`matrix-group-chats`): the gated multi-user room
-  lane with its own channel-memory store, summariser and power-level guard
-  (~2.3k lines). The gateway ingests user ↔ oracle rooms and dedicated task
-  rooms only.
+- (Matrix group chats were ported in September 2026 — see
+  [Identical](#identical).)
 
 Everything else in the bundled set is here and exercised live against the
 deployed devnet worker by the feature matrix described in

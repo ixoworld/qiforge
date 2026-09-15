@@ -854,3 +854,95 @@ describe('run ledger: the task changes while a run is in flight', () => {
     expect(await s.openRuns()).toEqual([]);
   });
 });
+
+describe('durable runs: a task run recovered by the object', () => {
+  it('a running row whose turn run is live is left alone at reconciliation, then delivered once by completeRecoveredRun', async () => {
+    const s = stub('recovered-run-delivered');
+    await s.init();
+    const at = inOneMinute();
+    const created = await s.create({
+      title: 'Recovered Run',
+      intent: 'Do it.',
+      schedule: { kind: 'once', at },
+      dedicatedRoom: 'no',
+    });
+    const runId = await s.injectOpenRun({
+      taskId: created.id,
+      state: 'running',
+    });
+    await s.setTurnRunLive(runId, true);
+    await s.simulateReset();
+    // The due scan would fire the task again if the row were closed as
+    // interrupted; with the turn run live, the row stays and nothing runs.
+    await s.tick(Date.parse(at) + 1);
+    expect(await s.turnRequests()).toHaveLength(0);
+    expect((await s.openRuns()).map((r) => r.runId)).toEqual([runId]);
+    expect((await s.get(created.id))?.status).toBe('active');
+
+    // The object's recovery finished the turn: the result is delivered
+    // under the run's fixed txn id and the one-shot completes.
+    await s.setTurnRunLive(runId, false);
+    await s.completeRecoveredRun(runId, 'the recovered answer');
+    const sent = await s.sentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body).toMatch(/the recovered answer/);
+    expect(sent[0]?.txnId).toBe(`task-${runId}`);
+    expect(await s.openRuns()).toEqual([]);
+    const task = await s.get(created.id);
+    expect(task?.lastResult?.ok).toBe(true);
+    expect(task?.nextRunAt).toBeUndefined();
+    const runs = await s.runsFor(created.id);
+    expect(runs[0]?.state).toBe('delivered');
+    // A second completion for the same run is a no-op (the row is closed).
+    await s.completeRecoveredRun(runId, 'again');
+    expect(await s.sentMessages()).toHaveLength(1);
+  });
+
+  it('a recovered run that ended without a result is recorded as interrupted with the friendly notice', async () => {
+    const s = stub('recovered-run-failed');
+    await s.init();
+    const created = await s.create({
+      title: 'Recovered Run Failed',
+      intent: 'Do it.',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    const runId = await s.injectOpenRun({
+      taskId: created.id,
+      state: 'running',
+    });
+    await s.failRecoveredRun(runId, 'interrupted: recovery did not complete');
+    expect(await s.openRuns()).toEqual([]);
+    const runs = await s.runsFor(created.id);
+    expect(runs[0]?.state).toBe('interrupted');
+    expect(runs[0]?.ok).toBe(false);
+    const task = await s.get(created.id);
+    expect(task?.status).toBe('failed');
+    expect(task?.lastResult?.summary).not.toMatch(/interrupt|reset|runtime/i);
+    const sent = await s.sentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.txnId).toBe(`task-${runId}-notice`);
+  });
+
+  it('a recovered recurring run advances the schedule from now and keeps the task active', async () => {
+    const s = stub('recovered-run-cron');
+    await s.init();
+    const created = await s.create({
+      title: 'Recovered Cron',
+      intent: 'Do it.',
+      schedule: { kind: 'cron', cron: '0 * * * *', timezone: 'UTC' },
+      dedicatedRoom: 'no',
+    });
+    const before = Date.parse(created.nextRunAt!);
+    const runId = await s.injectOpenRun({
+      taskId: created.id,
+      state: 'running',
+    });
+    await s.completeRecoveredRun(runId, 'hourly result');
+    const task = await s.get(created.id);
+    expect(task?.status).toBe('active');
+    expect(task?.consecutiveFailures).toBe(0);
+    expect(Date.parse(task!.nextRunAt!)).toBeGreaterThanOrEqual(before);
+    expect((await s.sentMessages())[0]?.body).toMatch(/hourly result/);
+  });
+});
