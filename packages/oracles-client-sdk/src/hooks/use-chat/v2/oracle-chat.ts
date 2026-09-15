@@ -1,6 +1,12 @@
 import { JobExecutor } from './job-executor.js';
 import { OracleChatState } from './oracle-chat-state.js';
-import { type ChatStatus, type IChatOptions, type IMessage } from './types.js';
+import { mergeHistory } from '../../../utils/transcript-pages.js';
+import {
+  type ChatRunState,
+  type ChatStatus,
+  type IChatOptions,
+  type IMessage,
+} from './types.js';
 
 export class OracleChat {
   readonly id: string;
@@ -9,7 +15,11 @@ export class OracleChat {
 
   constructor(options: IChatOptions) {
     this.id = options.sessionId;
-    this.#state = new OracleChatState([], options.streamingMode ?? 'immediate');
+    this.#state = new OracleChatState(
+      [],
+      options.streamingMode ?? 'immediate',
+      options.streamingThrottleMs,
+    );
   }
 
   get status() {
@@ -18,6 +28,15 @@ export class OracleChat {
 
   get error() {
     return this.#state.error;
+  }
+
+  get run(): ChatRunState {
+    return this.#state.run;
+  }
+
+  /** Update the durable-run view of the current turn (merged over the last). */
+  setRun(patch: Partial<ChatRunState>) {
+    this.#state.run = { ...this.#state.run, ...patch };
   }
 
   get messages(): IMessage[] {
@@ -90,6 +109,32 @@ export class OracleChat {
             content: chunk,
           });
         }
+      }
+    });
+  };
+
+  /**
+   * Set the streamed AI message's text outright — a resumed attempt cut the
+   * text back to what the runtime kept, or an ended run replayed the text it
+   * kept. Creates the message when it is not there yet (a re-join after a
+   * reload).
+   */
+  setAIMessageContent = async (
+    requestId: string,
+    content: string,
+  ): Promise<void> => {
+    return this.#jobExecutor.run(async () => {
+      const existingIndex = this.#state.messages.findIndex(
+        (m) => m.id === requestId,
+      );
+      if (existingIndex >= 0) {
+        const message = this.#state.messages[existingIndex];
+        if (!message) {
+          throw new Error('Message not found');
+        }
+        this.#state.replaceMessage(existingIndex, { ...message, content });
+      } else {
+        this.#state.pushMessage({ id: requestId, type: 'ai', content });
       }
     });
   };
@@ -170,6 +215,24 @@ export class OracleChat {
   setInitialMessages = async (messages: IMessage[]): Promise<void> => {
     return this.#jobExecutor.run(async () => {
       this.#state.messages = messages;
+    });
+  };
+
+  /**
+   * The loaded history (every page the hook holds, oldest first) replaces
+   * what is shown — except while a reply streams, when the turn in flight is
+   * kept on top of it (an older page can arrive mid-stream).
+   */
+  setHistory = async (history: IMessage[]): Promise<void> => {
+    return this.#jobExecutor.run(async () => {
+      const streaming =
+        this.#state.status === 'streaming' ||
+        this.#state.status === 'submitted';
+      this.#state.messages = mergeHistory(
+        history,
+        this.#state.messages,
+        streaming,
+      );
     });
   };
 

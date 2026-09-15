@@ -1,20 +1,57 @@
-import { type ChatStatus, type IChatState, type IMessage } from './types.js';
+import {
+  type ChatRunState,
+  type ChatStatus,
+  type IChatState,
+  type IMessage,
+  type StreamingMode,
+  IDLE_RUN_STATE,
+} from './types.js';
+
+export const DEFAULT_STREAMING_THROTTLE_MS = 50;
 
 export class OracleChatState implements IChatState {
   #messages: IMessage[];
   #status: ChatStatus = 'ready';
   #error: Error | undefined = undefined;
+  #run: ChatRunState = IDLE_RUN_STATE;
   #callbacks = new Set<() => void>();
   #rafId: number | null = null;
-  #streamingMode: 'batched' | 'immediate';
+  #streamingMode: StreamingMode;
+  #throttleMs: number;
+  #throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  #throttlePending = false;
+  #onVisible: (() => void) | null = null;
 
   constructor(
     initialMessages: IMessage[] = [],
-    streamingMode: 'batched' | 'immediate' = 'immediate',
+    streamingMode: StreamingMode = 'immediate',
+    throttleMs: number = DEFAULT_STREAMING_THROTTLE_MS,
   ) {
     this.#messages = initialMessages;
     this.#streamingMode = streamingMode;
+    this.#throttleMs = Math.max(0, throttleMs);
+    // Browsers slow timers right down in a background tab, so a trailing
+    // render held by the throttle could wait until the tab is shown again —
+    // flush it the moment that happens.
+    if (streamingMode === 'throttled' && typeof document !== 'undefined') {
+      this.#onVisible = () => {
+        if (document.visibilityState === 'visible') this.#flushThrottle();
+      };
+      document.addEventListener('visibilitychange', this.#onVisible);
+    }
   }
+
+  /** Deliver anything the throttle is holding, now. */
+  #flushThrottle = (): void => {
+    if (this.#throttleTimer !== null) {
+      clearTimeout(this.#throttleTimer);
+      this.#throttleTimer = null;
+    }
+    if (this.#throttlePending) {
+      this.#throttlePending = false;
+      this.#notify();
+    }
+  };
 
   get status(): ChatStatus {
     return this.#status;
@@ -22,7 +59,7 @@ export class OracleChatState implements IChatState {
 
   set status(newStatus: ChatStatus) {
     this.#status = newStatus;
-    this.#callCallbacks();
+    this.#callCallbacks('state');
   }
 
   get error(): Error | undefined {
@@ -31,32 +68,31 @@ export class OracleChatState implements IChatState {
 
   set error(newError: Error | undefined) {
     this.#error = newError;
-    this.#callCallbacks();
+    this.#callCallbacks('state');
+  }
+
+  get run(): ChatRunState {
+    return this.#run;
+  }
+
+  set run(next: ChatRunState) {
+    this.#run = next;
+    this.#callCallbacks('state');
   }
 
   get messages(): IMessage[] {
     return this.#messages;
   }
 
+  // The history is paged by the hook (older turns load on demand), so the
+  // store holds exactly what was loaded — no cap on its own.
   set messages(newMessages: IMessage[]) {
     this.#messages = [...newMessages];
-
-    // Keep only last 100 messages to prevent memory leaks
-    if (this.#messages.length > 100) {
-      this.#messages = this.#messages.slice(-100);
-    }
-
     this.#callCallbacks();
   }
 
   pushMessage = (message: IMessage): void => {
     this.#messages = [...this.#messages, message];
-
-    // Keep only last 100 messages to prevent memory leaks
-    if (this.#messages.length > 100) {
-      this.#messages = this.#messages.slice(-100);
-    }
-
     this.#callCallbacks();
   };
 
@@ -115,10 +151,56 @@ export class OracleChatState implements IChatState {
     };
   };
 
-  #callCallbacks = (): void => {
+  #notify = (): void => {
+    this.#callbacks.forEach((callback) => callback());
+  };
+
+  /**
+   * Hand a change to the subscribers. Message changes follow the streaming
+   * mode; a `state` change (status, error, run) is always delivered at once,
+   * flushing anything the throttle was holding.
+   */
+  #callCallbacks = (kind: 'message' | 'state' = 'message'): void => {
+    if (this.#streamingMode === 'throttled') {
+      if (kind === 'state') {
+        if (this.#throttleTimer !== null) {
+          clearTimeout(this.#throttleTimer);
+          this.#throttleTimer = null;
+        }
+        this.#throttlePending = false;
+        this.#notify();
+        return;
+      }
+      // A hidden tab has no frame to save and its timers are throttled:
+      // deliver at once so nothing waits for the tab to come back.
+      if (
+        typeof document !== 'undefined' &&
+        document.visibilityState === 'hidden'
+      ) {
+        this.#flushThrottle();
+        this.#notify();
+        return;
+      }
+      // Leading edge renders the first chunk at once; later chunks inside
+      // the window are folded into one trailing render.
+      if (this.#throttleTimer !== null) {
+        this.#throttlePending = true;
+        return;
+      }
+      this.#notify();
+      this.#throttleTimer = setTimeout(() => {
+        this.#throttleTimer = null;
+        if (this.#throttlePending) {
+          this.#throttlePending = false;
+          this.#notify();
+        }
+      }, this.#throttleMs);
+      return;
+    }
+
     if (this.#streamingMode === 'immediate') {
       // Immediate mode: call callbacks synchronously
-      this.#callbacks.forEach((callback) => callback());
+      this.#notify();
       return;
     }
 
@@ -144,9 +226,19 @@ export class OracleChatState implements IChatState {
       cancelAnimationFrame(this.#rafId);
       this.#rafId = null;
     }
+    if (this.#throttleTimer !== null) {
+      clearTimeout(this.#throttleTimer);
+      this.#throttleTimer = null;
+    }
+    this.#throttlePending = false;
+    if (this.#onVisible) {
+      document.removeEventListener('visibilitychange', this.#onVisible);
+      this.#onVisible = null;
+    }
     this.#callbacks.clear(); // Critical: Clear all callbacks to prevent leaks
     this.#messages = [];
     this.#error = undefined;
     this.#status = 'ready';
+    this.#run = IDLE_RUN_STATE;
   };
 }

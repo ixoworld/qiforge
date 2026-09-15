@@ -1,5 +1,4 @@
 /* eslint-disable no-console */
-import { type AllEvents } from '@ixo/oracles-events/types';
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
@@ -122,16 +121,9 @@ export function useWebSocketEvents(
         setLastActivity(new Date().toISOString());
       });
 
-      const handleEvent = (event: AllEvents) => {
-        props.handleNewEvent?.(event);
-      };
-
-      newSocket.on(evNames.ToolCall, handleEvent);
-      newSocket.on(evNames.RenderComponent, handleEvent);
-      newSocket.on(
-        evNames.MessageCacheInvalidation,
-        handleInvalidateCacheRef.current ?? (() => {}),
-      );
+      // Every server event is forwarded once, by the `onAny` listener below
+      // (a dedicated `on(...)` per event name on top of it delivered
+      // tool_call / render_component / cache invalidation twice).
 
       if (
         browserToolsRef.current &&

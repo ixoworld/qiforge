@@ -6,15 +6,26 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import { useOraclesContext } from '../../../providers/oracles-provider/oracles-context.js';
 import { RequestError } from '../../../utils/request.js';
 import {
-  parseSSEStream,
+  streamRun,
+  StreamRunStartError,
+  withRequestId,
+  type RunStreamState,
+  type StreamRunInput,
+  type StreamRunResult,
+} from '../../../utils/run-stream.js';
+import {
   type SSEActionCallEventData,
+  type SSEDoneEventData,
   type SSEErrorEventData,
   type SSEReasoningEventData,
+  type SSERunEventData,
   type SSEToolCallEventData,
 } from '../../../utils/sse-parser.js';
 import { useOraclesConfig } from '../../use-oracles-config.js';
+import type { OracleChat } from './oracle-chat.js';
 import {
   type Attachment,
+  type ChatRunState,
   type IMessage,
   type ISendMessageOptions,
 } from './types.js';
@@ -39,6 +50,18 @@ interface IUseSendMessageReturn {
     attachments?: Attachment[],
   ) => Promise<void>;
   abortStream: () => Promise<void>;
+  /**
+   * Attach to a turn that is already running for this session (the page
+   * was reloaded, or another tab sent it): replays what the runtime kept
+   * and streams the rest, exactly like the turn's own stream.
+   */
+  resumeRun: (runId: string) => Promise<void>;
+  /**
+   * Stop following the stream this hook is consuming WITHOUT stopping the
+   * turn on the runtime (the chat moved to another session; the run keeps
+   * going and is re-joined when the user comes back).
+   */
+  detachStream: () => void;
   isSending: boolean;
   error?: Error | null;
   isConfigReady: boolean;
@@ -68,6 +91,23 @@ export function useSendMessage({
 
   // Abort controller for canceling requests
   const abortControllerRef = useRef<AbortController | null>(null);
+  // The run being consumed (a turn's own stream or a resumed one) and a
+  // counter so a stream that was superseded never touches the status.
+  const activeRunRef = useRef<string | null>(null);
+  const streamSeqRef = useRef(0);
+  // The session the in-flight turn belongs to: `isSending` is per session,
+  // so a turn started in one session never shows as "thinking" in another.
+  const sendingSessionRef = useRef<string | null>(null);
+
+  const detachStream = useCallback(() => {
+    const controller = abortControllerRef.current;
+    if (!controller) return;
+    streamSeqRef.current += 1; // the stream's settle is now stale
+    abortControllerRef.current = null;
+    activeRunRef.current = null;
+    sendingSessionRef.current = null;
+    controller.abort();
+  }, []);
 
   // Abort function to cancel ongoing stream
   const abortStream = useCallback(async () => {
@@ -94,6 +134,173 @@ export function useSendMessage({
     }
   }, [sessionId, chatRef, apiUrl]);
 
+  // Frames go to the chat instance the turn started in — never to whatever
+  // `chatRef` points at later (the user may have switched sessions).
+  const frameCallbacks = useCallback(
+    (chat: OracleChat | undefined): RunFrameCallbacks => ({
+      onMessage: async ({ chunk, requestId }) => {
+        await chat?.upsertAIMessage(requestId, chunk);
+      },
+      onToolCall: onToolCall
+        ? async ({ toolCallData, requestId }) => {
+            await onToolCall({ toolCallData, requestId });
+          }
+        : undefined,
+      onActionCall: onActionCall
+        ? async ({ actionCallData, requestId }) => {
+            await onActionCall({ actionCallData, requestId });
+          }
+        : undefined,
+      onError: onError
+        ? async ({ error, requestId }) => {
+            await onError({ error, requestId });
+          }
+        : undefined,
+      onReasoning: onReasoning
+        ? async ({ reasoningData, requestId }) => {
+            await onReasoning({ reasoningData, requestId });
+          }
+        : undefined,
+      onRun: async ({ run, frame }) => {
+        if (frame.resumed && run.requestId) {
+          // The runtime restarted and picked the turn up: show exactly the
+          // text it kept (the frames it lost may have been displayed).
+          await chat?.setAIMessageContent(run.requestId, run.text);
+        }
+        chat?.setRun({
+          runId: run.runId,
+          requestId: run.requestId,
+          reconnecting: false,
+          resumed: run.resumed,
+        });
+      },
+      onFrame: () => {
+        if (chat?.run.reconnecting) chat.setRun({ reconnecting: false });
+      },
+      onDone: async ({ data, run }) => {
+        if (
+          run.requestId &&
+          typeof data.partialText === 'string' &&
+          data.status !== 'finished'
+        ) {
+          // The run ended without a committed reply: the runtime's kept
+          // text is the truth, whatever this client had displayed.
+          await chat?.setAIMessageContent(run.requestId, run.text);
+        }
+      },
+      onDisconnect: () => {
+        chat?.setRun({ reconnecting: true });
+      },
+    }),
+    [onToolCall, onActionCall, onError, onReasoning],
+  );
+
+  /** Close the books on a stream that ended, unless a newer one took over. */
+  const settleStream = useCallback(
+    (seq: number, result: StreamRunResult, chat: OracleChat | undefined) => {
+      if (seq !== streamSeqRef.current) return;
+      chat?.setRun({
+        runId: result.runId,
+        requestId: result.requestId,
+        reconnecting: false,
+        resumed: result.resumed,
+        ended: endedOf(result),
+      });
+      chat?.setStatus('ready');
+      abortControllerRef.current = null;
+      activeRunRef.current = null;
+      sendingSessionRef.current = null;
+    },
+    [],
+  );
+
+  /**
+   * The delegation is minted lazily and may not be there yet in the first
+   * moments after a reload; a resume waits for it briefly instead of giving
+   * up (a turn that is still running deserves the wait).
+   */
+  const delegationWithRetry = useCallback(
+    async (did: string): Promise<string | null> => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const delegation = await getDelegation(did);
+        if (delegation) return delegation;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return null;
+    },
+    [getDelegation],
+  );
+
+  const resumeRun = useCallback(
+    async (runId: string) => {
+      if (!apiUrl || !oracleDid) return;
+      if (activeRunRef.current === runId) return;
+      const chat = chatRef?.current;
+      const delegation = await delegationWithRetry(oracleDid);
+      if (!delegation) {
+        console.warn(
+          '[useSendMessage] a turn is still running but no UCAN delegation is available to re-join it',
+        );
+        return;
+      }
+      if (activeRunRef.current === runId) return; // attached meanwhile
+      if (chatRef?.current !== chat) return; // the session changed meanwhile
+      const invocation = await getInvocation(oracleDid);
+      const seq = ++streamSeqRef.current;
+      abortControllerRef.current?.abort();
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      activeRunRef.current = runId;
+      sendingSessionRef.current = sessionId;
+      chat?.setStatus('streaming');
+      chat?.setRun({
+        runId,
+        requestId: null,
+        reconnecting: false,
+        resumed: 0,
+        ended: null,
+      });
+      try {
+        const result = await joinOracleRun({
+          apiURL: apiUrl,
+          runId,
+          delegation,
+          invocation,
+          abortSignal: controller.signal,
+          callbacks: frameCallbacks(chat),
+        });
+        settleStream(seq, result, chat);
+      } catch (err) {
+        if (seq === streamSeqRef.current) {
+          activeRunRef.current = null;
+          sendingSessionRef.current = null;
+          if (abortControllerRef.current === controller)
+            abortControllerRef.current = null;
+          chat?.setStatus('ready');
+        }
+        console.warn(
+          '[useSendMessage] could not resume the running turn:',
+          err,
+        );
+      } finally {
+        if (refetchQueries) {
+          await refetchQueries();
+        }
+      }
+    },
+    [
+      apiUrl,
+      oracleDid,
+      sessionId,
+      chatRef,
+      delegationWithRetry,
+      getInvocation,
+      frameCallbacks,
+      settleStream,
+      refetchQueries,
+    ],
+  );
+
   const { mutateAsync, isPending, error } = useMutation({
     retry: false, // Prevent retries on abort/errors
     mutationFn: async ({
@@ -112,8 +319,16 @@ export function useSendMessage({
         throw new Error('DID is required');
       }
 
+      // The chat this turn belongs to. Everything below writes to it, not
+      // to `chatRef`, which follows the user to other sessions.
+      const chat = chatRef?.current;
+      sendingSessionRef.current = sessionId;
+      // A new message starts clean: an error banner from the previous turn
+      // must not outlive the retry it prompted.
+      chat?.clearError();
       // Set status to streaming
-      chatRef?.current?.setStatus('submitted');
+      chat?.setStatus('submitted');
+      let controller: AbortController | null = null;
 
       try {
         // 1. Add optimistic user message immediately
@@ -122,7 +337,7 @@ export function useSendMessage({
           content: message,
           type: 'human',
         };
-        await chatRef?.current?.addUserMessage(userMessage);
+        await chat?.addUserMessage(userMessage);
 
         // Add optimistic file messages (one per attachment)
         if (attachments?.length) {
@@ -139,12 +354,12 @@ export function useSendMessage({
                 eventId: attachment.eventId,
               },
             };
-            await chatRef?.current?.addUserMessage(fileMessage);
+            await chat?.addUserMessage(fileMessage);
           }
         }
 
         // 2. Stream AI response
-        chatRef?.current?.setStatus('streaming');
+        chat?.setStatus('streaming');
 
         // Get UCAN delegation for this oracle (cached or freshly created)
         const delegation = oracleDid ? await getDelegation(oracleDid) : null;
@@ -160,8 +375,19 @@ export function useSendMessage({
         // proceed with delegation only.
         const invocation = oracleDid ? await getInvocation(oracleDid) : null;
 
-        // Create abort controller for this request
-        abortControllerRef.current = new AbortController();
+        // Create abort controller for this request (a resumed stream that
+        // is still attached is dropped: this message supersedes its turn)
+        const seq = ++streamSeqRef.current;
+        abortControllerRef.current?.abort();
+        controller = new AbortController();
+        abortControllerRef.current = controller;
+        chat?.setRun({
+          runId: null,
+          requestId: null,
+          reconnecting: false,
+          resumed: 0,
+          ended: null,
+        });
 
         const results = await askOracleStream({
           apiURL: apiUrl,
@@ -191,49 +417,25 @@ export function useSendMessage({
                   hasRender: action.hasRender,
                 }))
               : undefined,
-          abortSignal: abortControllerRef.current?.signal,
-
-          // Message chunks (existing pattern)
-          onMessage: async ({ chunk, requestId }) => {
-            await chatRef?.current?.upsertAIMessage(requestId, chunk);
+          abortSignal: controller.signal,
+          onRequestStarted: (requestId) => {
+            chat?.setRun({ requestId });
           },
-
-          onToolCall: onToolCall
-            ? async ({ toolCallData, requestId }) => {
-                await onToolCall({ toolCallData, requestId });
-              }
-            : undefined,
-
-          onActionCall: onActionCall
-            ? async ({ actionCallData, requestId }) => {
-                await onActionCall({ actionCallData, requestId });
-              }
-            : undefined,
-
-          onError: onError
-            ? async ({ error, requestId }) => {
-                await onError({ error, requestId });
-              }
-            : undefined,
-
-          onReasoning: onReasoning
-            ? async ({ reasoningData, requestId }) => {
-                await onReasoning({ reasoningData, requestId });
-              }
-            : undefined,
-
-          onDone: () => {
-            chatRef?.current?.setStatus('ready');
-            abortControllerRef.current = null;
+          onRunStarted: (runId) => {
+            activeRunRef.current = runId;
           },
+          callbacks: frameCallbacks(chat),
         });
 
-        chatRef?.current?.setStatus('ready');
+        settleStream(seq, results, chat);
 
         return { requestId: results.requestId };
       } catch (err) {
-        // Clear abort controller on error
-        abortControllerRef.current = null;
+        // Clear abort controller on error (only if it is still ours)
+        if (abortControllerRef.current === controller)
+          abortControllerRef.current = null;
+        if (sendingSessionRef.current === sessionId)
+          sendingSessionRef.current = null;
 
         // Handle abort errors gracefully - user intentionally cancelled
         if (
@@ -241,23 +443,24 @@ export function useSendMessage({
           (err.name === 'AbortError' ||
             (err instanceof DOMException && err.name === 'AbortError'))
         ) {
-          chatRef?.current?.setStatus('ready');
+          chat?.setStatus('ready');
           return;
         }
 
         if (RequestError.isRequestError(err) && err.claims) {
           onPaymentRequiredError(err.claims as string[]);
-          chatRef?.current?.setStatus('ready');
+          chat?.setStatus('ready');
           return;
         }
-        chatRef?.current?.setStatus(
+        chat?.setStatus(
           'error',
           err instanceof Error ? err : new Error('Unknown error'),
         );
         throw err;
       } finally {
-        // Clear abort controller when done
-        abortControllerRef.current = null;
+        // Clear abort controller when done (only if it is still ours)
+        if (abortControllerRef.current === controller)
+          abortControllerRef.current = null;
 
         // Refetch queries regardless of success/error/early return
         if (refetchQueries) {
@@ -281,11 +484,189 @@ export function useSendMessage({
   return {
     sendMessage,
     abortStream,
-    isSending: isPending,
+    resumeRun,
+    detachStream,
+    isSending: isPending && sendingSessionRef.current === sessionId,
     error,
     isConfigReady,
   };
 }
+
+/** Map how a stream ended (and its `done` frame) to the chat's run state. */
+function endedOf(result: StreamRunResult): NonNullable<ChatRunState['ended']> {
+  if (result.ended === 'aborted') return 'aborted';
+  if (result.ended === 'disconnected' || result.ended === 'error')
+    return 'disconnected';
+  const done = result.done as SSEDoneEventData | undefined;
+  if (!done) return 'done';
+  if (done.interrupted || done.status === 'interrupted') return 'interrupted';
+  if (done.aborted || done.status === 'aborted') return 'aborted';
+  if (done.failed || done.status === 'failed') return 'failed';
+  return 'done';
+}
+
+interface RunFrameCallbacks {
+  onMessage: (args: {
+    chunk: string;
+    requestId: string;
+  }) => void | Promise<void>;
+  onToolCall?: (args: {
+    toolCallData: SSEToolCallEventData;
+    requestId: string;
+  }) => void | Promise<void>;
+  onActionCall?: (args: {
+    actionCallData: SSEActionCallEventData;
+    requestId: string;
+  }) => void | Promise<void>;
+  onError?: (args: {
+    error: SSEErrorEventData;
+    requestId: string;
+  }) => void | Promise<void>;
+  onReasoning?: (args: {
+    reasoningData: SSEReasoningEventData;
+    requestId: string;
+  }) => void | Promise<void>;
+  /** The `run` frame: the turn's durable run id, or a resumed attempt. */
+  onRun?: (args: {
+    run: Readonly<RunStreamState>;
+    frame: SSERunEventData;
+  }) => void | Promise<void>;
+  /** Any frame (clears a "reconnecting" state on the first one after a drop). */
+  onFrame?: () => void;
+  onDone?: (args: {
+    data: SSEDoneEventData;
+    run: Readonly<RunStreamState>;
+  }) => void | Promise<void>;
+  onDisconnect?: StreamRunInput['onDisconnect'];
+}
+
+const authHeaders = (
+  delegation: string,
+  invocation?: string | null,
+): Record<string, string> => ({
+  'x-ucan-delegation': delegation,
+  ...(invocation && {
+    Authorization: `Bearer ${invocation}`,
+    'X-Auth-Type': 'ucan',
+  }),
+});
+
+/** `GET /runs/:runId?after=<seq>` — re-join a durable run after a cursor. */
+const joinRunRequest =
+  (
+    apiURL: string,
+    headers: Record<string, string>,
+    signal?: AbortSignal,
+  ): StreamRunInput['join'] =>
+  (runId, after) =>
+    fetch(`${apiURL}/runs/${encodeURIComponent(runId)}?after=${after}`, {
+      headers,
+      method: 'GET',
+      signal,
+    });
+
+/** Dispatch one SSE frame of a run to the typed callbacks. */
+const frameHandler =
+  (callbacks: RunFrameCallbacks): StreamRunInput['onEvent'] =>
+  async (sseEvent, run) => {
+    callbacks.onFrame?.();
+    const requestId = run.requestId ?? '';
+    // Type-safe event handling using discriminated unions
+    switch (sseEvent.event) {
+      case 'message':
+        await callbacks.onMessage({ chunk: sseEvent.data.content, requestId });
+        break;
+
+      case 'tool_call':
+        if (callbacks.onToolCall) {
+          await callbacks.onToolCall({
+            toolCallData: sseEvent.data,
+            requestId,
+          });
+        }
+        break;
+
+      case 'action_call':
+        if (callbacks.onActionCall) {
+          await callbacks.onActionCall({
+            actionCallData: sseEvent.data,
+            requestId,
+          });
+        } else {
+          console.warn(
+            '[useSendMessage] action_call received but onActionCall handler is missing',
+          );
+        }
+        break;
+
+      case 'error':
+        if (callbacks.onError) {
+          await callbacks.onError({ error: sseEvent.data, requestId });
+        }
+        break;
+
+      case 'run':
+        await callbacks.onRun?.({ run, frame: sseEvent.data });
+        break;
+
+      case 'done':
+        await callbacks.onDone?.({ data: sseEvent.data, run });
+        break;
+
+      case 'router.update':
+        // Ignore for now - future enhancement
+        break;
+
+      case 'render_component':
+        // Ignore for now - future enhancement
+        break;
+
+      case 'browser_tool_call':
+        // Ignore for now - future enhancement
+        break;
+
+      case 'message_cache_invalidation':
+        // Ignore for now - future enhancement
+        break;
+
+      case 'reasoning':
+        if (callbacks.onReasoning) {
+          await callbacks.onReasoning({
+            reasoningData: sseEvent.data,
+            requestId,
+          });
+        }
+        break;
+
+      default:
+        // This should never happen with proper typing, but handle gracefully
+        console.debug(
+          'Unknown SSE event:',
+          (sseEvent as unknown as { event: string }).event,
+        );
+        break;
+    }
+  };
+
+/** Attach to a run that is already executing: replay from the start, then live. */
+const joinOracleRun = async (props: {
+  apiURL: string;
+  runId: string;
+  delegation: string;
+  invocation?: string | null;
+  abortSignal?: AbortSignal;
+  callbacks: RunFrameCallbacks;
+}): Promise<StreamRunResult> => {
+  const headers = authHeaders(props.delegation, props.invocation);
+  return streamRun({
+    resume: { runId: props.runId, after: 0 },
+    start: () => Promise.reject(new Error('a resumed run is never started')),
+    join: joinRunRequest(props.apiURL, headers, props.abortSignal),
+    onEvent: frameHandler(props.callbacks),
+    onDisconnect: props.callbacks.onDisconnect,
+    signal: props.abortSignal,
+  });
+};
 
 // Stream AI responses from the oracle
 const askOracleStream = async (props: {
@@ -310,166 +691,72 @@ const askOracleStream = async (props: {
     hasRender: boolean;
   }[];
   abortSignal?: AbortSignal;
-
-  // Callbacks for different event types
-  onMessage: (args: {
-    chunk: string;
-    requestId: string;
-  }) => void | Promise<void>;
-  onToolCall?: (args: {
-    toolCallData: SSEToolCallEventData;
-    requestId: string;
-  }) => void | Promise<void>;
-  onActionCall?: (args: {
-    actionCallData: SSEActionCallEventData;
-    requestId: string;
-  }) => void | Promise<void>;
-  onError?: (args: {
-    error: SSEErrorEventData;
-    requestId: string;
-  }) => void | Promise<void>;
-  onReasoning?: (args: {
-    reasoningData: SSEReasoningEventData;
-    requestId: string;
-  }) => void | Promise<void>;
-  onDone?: () => void;
-}): Promise<{ text: string; requestId: string }> => {
-  const response = await fetch(`${props.apiURL}/messages/${props.sessionId}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      'x-ucan-delegation': props.delegation,
-      ...(props.invocation && {
-        Authorization: `Bearer ${props.invocation}`,
-        'X-Auth-Type': 'ucan',
-      }),
-    },
-    body: JSON.stringify({
-      message: props.message,
-      stream: true,
-      ...(props.model && { model: props.model }),
-      ...(props.metadata && { metadata: props.metadata }),
-      ...(props.attachments?.length && { attachments: props.attachments }),
-      ...(props.browserTools && { tools: props.browserTools }),
-      ...(props.agActions && { agActions: props.agActions }),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    }),
-    method: 'POST',
-    signal: props.abortSignal,
-  });
-
-  if (!response.ok) {
-    const err = (await response.json()) as { message: string };
-    throw new RequestError(err.message, err);
-  }
-
-  const requestId = response.headers.get('X-Request-Id');
-
-  if (!requestId) {
-    throw new Error('Did not receive a request ID');
-  }
-
-  // Check if ReadableStream is supported
-  if (!response.body) {
-    throw new Error('ReadableStream not supported in this browser');
-  }
-
-  const reader = response.body.getReader();
-  let accumulatedText = '';
-
+  /** The turn's request id, as soon as the runtime accepted the turn. */
+  onRequestStarted?: (requestId: string) => void;
+  /** The turn's durable run id, as soon as the runtime announced it. */
+  onRunStarted?: (runId: string) => void;
+  callbacks: RunFrameCallbacks;
+}): Promise<StreamRunResult & { requestId: string }> => {
+  const headers = authHeaders(props.delegation, props.invocation);
+  let requestId: string | null = null;
+  let result: StreamRunResult;
   try {
-    // Parse SSE events from the stream
-    for await (const sseEvent of parseSSEStream(reader)) {
-      // Type-safe event handling using discriminated unions
-      switch (sseEvent.event) {
-        case 'message':
-          await props.onMessage({ chunk: sseEvent.data.content, requestId });
-          accumulatedText += sseEvent.data.content;
-          break;
-
-        case 'tool_call':
-          if (props.onToolCall) {
-            await props.onToolCall({ toolCallData: sseEvent.data, requestId });
+    result = await streamRun({
+      start: async () => {
+        const response = await fetch(
+          `${props.apiURL}/messages/${props.sessionId}`,
+          {
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({
+              message: props.message,
+              stream: true,
+              ...(props.model && { model: props.model }),
+              ...(props.metadata && { metadata: props.metadata }),
+              ...(props.attachments?.length && {
+                attachments: props.attachments,
+              }),
+              ...(props.browserTools && { tools: props.browserTools }),
+              ...(props.agActions && { agActions: props.agActions }),
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            }),
+            method: 'POST',
+            signal: props.abortSignal,
+          },
+        );
+        requestId = response.headers.get('X-Request-Id');
+        if (response.ok) {
+          if (!requestId) {
+            throw new Error('Did not receive a request ID');
           }
-          break;
-
-        case 'action_call':
-          if (props.onActionCall) {
-            await props.onActionCall({
-              actionCallData: sseEvent.data,
-              requestId,
-            });
-          } else {
-            console.warn(
-              '[useSendMessage] action_call received but onActionCall handler is missing',
-            );
+          props.onRequestStarted?.(requestId);
+          // Check if ReadableStream is supported
+          if (!response.body) {
+            throw new Error('ReadableStream not supported in this browser');
           }
-          break;
-
-        case 'error':
-          if (props.onError) {
-            await props.onError({ error: sseEvent.data, requestId });
-          }
-          break;
-
-        case 'done':
-          props.onDone?.();
-          break;
-
-        case 'router.update':
-          // Ignore for now - future enhancement
-          break;
-
-        case 'render_component':
-          // Ignore for now - future enhancement
-          break;
-
-        case 'browser_tool_call':
-          // Ignore for now - future enhancement
-          break;
-
-        case 'message_cache_invalidation':
-          // Ignore for now - future enhancement
-          break;
-
-        case 'reasoning':
-          if (props.onReasoning) {
-            await props.onReasoning({
-              reasoningData: sseEvent.data,
-              requestId,
-            });
-          }
-          break;
-
-        default:
-          // This should never happen with proper typing, but handle gracefully
-          console.debug(
-            'Unknown SSE event:',
-            (sseEvent as unknown as { event: string }).event,
-          );
-          break;
-      }
-    }
-
-    return {
-      text: accumulatedText,
-      requestId,
-    };
+          const runId = response.headers.get('x-run-id');
+          if (runId) props.onRunStarted?.(runId);
+        }
+        return response;
+      },
+      join: joinRunRequest(props.apiURL, headers, props.abortSignal),
+      onEvent: frameHandler(props.callbacks),
+      onDisconnect: props.callbacks.onDisconnect,
+      signal: props.abortSignal,
+    });
   } catch (error) {
-    void reader.cancel();
-
-    // Handle abort errors gracefully
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' ||
-        (error instanceof DOMException && error.name === 'AbortError'))
-    ) {
-      // Don't throw abort errors - they're expected when user cancels
-      return {
-        text: accumulatedText,
+    if (error instanceof StreamRunStartError) {
+      let parsed: { message?: string } = {};
+      try {
+        parsed = JSON.parse(error.body) as { message?: string };
+      } catch {
+        parsed = { message: error.body || error.message };
+      }
+      throw withRequestId(
+        new RequestError(parsed.message ?? error.message, parsed),
         requestId,
-      };
+      );
     }
-
-    throw error;
+    throw withRequestId(error, requestId);
   }
+  return { ...result, requestId: result.requestId ?? requestId ?? '' };
 };
