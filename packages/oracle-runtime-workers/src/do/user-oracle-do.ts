@@ -156,6 +156,7 @@ import {
 import { turnRecursionLimit } from './turn-config';
 import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
 import { decideBootDirty } from './boot-dirty';
+import { decideFlush } from './flush-schedule';
 import { mirrorTxnId, RoomMirror } from './room-mirror';
 import { prefixSpeaker } from './speaker-prefix';
 import {
@@ -320,6 +321,15 @@ const TIER_PASS_INTERVAL_MS = 6 * 60 * 60_000;
  * silently stale.
  */
 const META_DIRTY = 'meta:dirty';
+/**
+ * When the dirty working copy is due to be uploaded. Armed by the first
+ * write after an upload (`FLUSH_DEBOUNCE_MS` later), replaced by the retry
+ * delay after a failed upload, cleared with the dirty mark. The alarm is
+ * shared with the realtime heartbeat, the durable-run keep-alive, task runs
+ * and compaction, so a wake alone never means "upload now" — the tick
+ * consults this deadline (`do/flush-schedule.ts`).
+ */
+const META_FLUSH_AT = 'meta:flushAt';
 const META_OWNER_ETAG = 'meta:ownerEtag';
 const META_LAST_FLUSH = 'meta:lastFlushAt';
 const META_LAST_CHECKSUM = 'meta:lastChecksum';
@@ -1083,9 +1093,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           console.warn(
             `[user-do] VFS migration write failed for ${userDid} — serving the legacy Matrix copy for now: ${err instanceof Error ? err.message : String(err)}`,
           );
-          // Sooner than the 24 h debounce `markDirty` armed: the system of
-          // record is still empty for this user.
-          this.requestAlarm(Date.now() + FLUSH_RETRY_DELAY_MS);
+          // The failed upload armed the 10-minute retry (`flushOnce`), well
+          // before the 24 h debounce `markDirty` set: the system of record
+          // is still empty for this user.
         }
       }
       await this.reconcileDirtyOnBoot(liveDb, userDid);
@@ -1278,6 +1288,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         META_OWNER_ETAG,
         META_LAST_CHECKSUM,
         META_LAST_FLUSH,
+        META_FLUSH_AT,
         META_UPLOADED_GEN,
         META_FLUSH_FAILURES,
         META_LAST_VACUUM,
@@ -1383,7 +1394,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private markDirty(): void {
       this.dirty = true;
       void this.ctx.storage.put(META_DIRTY, true);
-      this.requestAlarm(Date.now() + FLUSH_DEBOUNCE_MS);
+      void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
+    }
+
+    /**
+     * Record the flush deadline and arm the alarm for it. An earlier
+     * deadline already on disk wins, so a burst of writes uploads once,
+     * `FLUSH_DEBOUNCE_MS` after the first of them, never later.
+     */
+    private async armFlush(at: number): Promise<void> {
+      const existing = await this.ctx.storage.get<number>(META_FLUSH_AT);
+      const deadline =
+        typeof existing === 'number' && existing <= at ? existing : at;
+      if (deadline !== existing)
+        await this.ctx.storage.put(META_FLUSH_AT, deadline);
+      this.requestAlarm(deadline);
+    }
+
+    /**
+     * After a failed upload: the next attempt is `at`, replacing the deadline
+     * that just came due (which would otherwise make every wake retry).
+     */
+    private async scheduleFlushRetry(at: number): Promise<void> {
+      await this.ctx.storage.put(META_FLUSH_AT, at);
+      this.requestAlarm(at);
     }
 
     /** Arm the object's single alarm no later than `at` (multiplexed). */
@@ -1481,15 +1515,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           deadlines.push(Math.max(nextRecovery, now + 1000));
       }
 
-      if (this.dirty && this.db) {
+      const lastAccess =
+        (await this.ctx.storage.get<number>(META_LAST_ACCESS)) ?? now;
+      const idle = now - lastAccess > IDLE_EVICT_MS;
+
+      // Owner-store flush: only when its own deadline is due, or the copy
+      // is about to be evicted below. A wake for anything else (a run's
+      // keep-alive, a heartbeat round that fell through, a compaction or
+      // tier re-arm) leaves a dirty copy alone — the upload is a full-file
+      // transfer and is meant to happen once a day, not once a turn.
+      const flush = decideFlush({
+        dirty: this.dirty && this.db !== null,
+        flushAt: await this.ctx.storage.get<number>(META_FLUSH_AT),
+        now,
+        idle,
+      });
+      if (flush.action === 'flush') {
         try {
           await this.flushToOwnerStore();
         } catch (err) {
           console.error(
             `[user-do] flush failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
+          // `flushOnce` arms the retry on an upload failure; anything that
+          // failed before the upload gets the same retry window here.
+          await this.scheduleFlushRetry(now + FLUSH_RETRY_DELAY_MS);
           deadlines.push(now + FLUSH_RETRY_DELAY_MS);
         }
+      } else if (flush.action === 'wait') {
+        deadlines.push(Math.max(flush.at, now + 1000));
       }
 
       if (this.taskScheduler) {
@@ -1522,9 +1576,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
-      const lastAccess =
-        (await this.ctx.storage.get<number>(META_LAST_ACCESS)) ?? now;
-
       // Free-page reclaim on a quiet object (policy in sqlite/vacuum-policy.ts):
       // runs after the flush above so the upload holds the pre-rebuild file,
       // and marks dirty so the smaller file goes up on the next tick.
@@ -1551,7 +1602,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // evict while tasks are scheduled: their runs ARE activity. The flush
       // above ran first; the wipe additionally verifies the upstream copy
       // matches the working copy, else the copy stays until it does.
-      const idle = now - lastAccess > IDLE_EVICT_MS;
       if (
         idle &&
         !this.dirty &&
@@ -2052,9 +2102,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         writeGeneration: db.writeGeneration,
       });
       if (decision === 'flagged') {
-        // The mark is on disk already (its flush alarm too); just adopt it.
+        // The mark is on disk already (its deadline too); adopt it and make
+        // sure the alarm is armed for that deadline.
         this.dirty = true;
-        this.requestAlarm(Date.now() + FLUSH_DEBOUNCE_MS);
+        void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
       } else if (decision === 'behind-upload') {
         console.log(
           `[user-do] working copy of ${userDid} is at generation ${db.writeGeneration}, last upload at ${String(got.get(META_UPLOADED_GEN))} — a turn ended without marking it; flushing`,
@@ -2431,6 +2482,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const line = `[user-do] owner-store flush failed (${failures} in a row) for ${this.userDid} — working copy kept dirty, retrying in ${FLUSH_RETRY_DELAY_MS / 60_000} min: ${detail}`;
           if (failures >= FLUSH_FAILURES_ERROR_THRESHOLD) console.error(line);
           else console.warn(line);
+          await this.scheduleFlushRetry(Date.now() + FLUSH_RETRY_DELAY_MS);
           throw err;
         }
         await this.ctx.storage.put(META_OWNER_ETAG, saved.etag);
@@ -2510,18 +2562,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     private async clearDirty(): Promise<void> {
-      // A write that landed while the snapshot was being uploaded already
-      // re-armed the alarm through `markDirty`; only clear when the file's
-      // generation still matches what was just recorded.
+      // A write that landed while the snapshot was being uploaded keeps the
+      // copy dirty; its upload is a full debounce away (the deadline the
+      // write found on disk was the one that just ran).
       const uploadedGen = await this.ctx.storage.get<number>(META_UPLOADED_GEN);
       if (
         this.db &&
         uploadedGen !== undefined &&
         uploadedGen !== this.db.writeGeneration
-      )
+      ) {
+        const at = Date.now() + FLUSH_DEBOUNCE_MS;
+        await this.ctx.storage.put(META_FLUSH_AT, at);
+        this.requestAlarm(at);
         return;
+      }
       this.dirty = false;
-      await this.ctx.storage.delete(META_DIRTY);
+      await this.ctx.storage.delete([META_DIRTY, META_FLUSH_AT]);
     }
 
     async resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }> {
@@ -2650,6 +2706,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         pages: Math.ceil(fileBytes / 4096),
         ownerEtag: await this.ctx.storage.get<string>(META_OWNER_ETAG),
         lastFlushAt: await this.ctx.storage.get<number>(META_LAST_FLUSH),
+        nextFlushAt: await this.ctx.storage.get<number>(META_FLUSH_AT),
         dirty: this.dirty,
         flushInFlight: this.flushInFlight !== null,
         writeGeneration: db?.writeGeneration,
