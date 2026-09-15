@@ -90,5 +90,8 @@
     "MATRIX_SEND_CONCURRENCY": "6",
     // Room turns in flight at once (each ends in an encrypted reply).
     "MATRIX_TURN_CONCURRENCY": "4",
+    // Group rooms (more than two members): the bot stays silent there. `gate`
+    // enables the Node group-chat lane once it has been reviewed.
+    "MATRIX_GROUP_ROOMS": "silent",
   },
 }

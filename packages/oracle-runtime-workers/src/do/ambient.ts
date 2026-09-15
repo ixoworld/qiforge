@@ -141,6 +141,23 @@ export function createMatrixAdapter(
     postEvent: (roomId, eventType, content, opts) =>
       gateway.sendEvent(roomId, eventType, JSON.stringify(content), opts ?? {}),
     botCredentials: () => gateway.botCredentials(),
+    roomInfo: (roomId) => gateway.groupChatRoomInfo(roomId),
+    channelMemory: {
+      recall: async (roomId, limit) =>
+        JSON.parse(await gateway.channelMemoryRecall(roomId, limit)),
+      search: async (roomId, query, limit) =>
+        JSON.parse(await gateway.channelMemorySearch(roomId, query, limit)),
+      pin: async (args) =>
+        JSON.parse(
+          await gateway.channelMemoryPin(
+            args.roomId,
+            args.fact,
+            args.pinnedByDid,
+            args.sourceEventId,
+          ),
+        ),
+      unpin: (roomId, factId) => gateway.channelMemoryUnpin(roomId, factId),
+    },
     getRoomState: async (roomId): Promise<RoomStateSnapshot> => {
       const raw = await gateway.getRoomState(roomId);
       return { roomId, state: JSON.parse(raw) as unknown[] };

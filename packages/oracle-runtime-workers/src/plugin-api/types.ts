@@ -78,6 +78,56 @@ export interface MatrixEvent {
   readonly originServerTs?: number;
 }
 
+export interface MatrixRoomInfo {
+  isDirect: boolean;
+  memberCount: number;
+  joinedMemberIds: string[];
+  /**
+   * Whether the deployment runs the group-chat lane in group rooms
+   * (`MATRIX_GROUP_ROOMS=gate` on the gateway). False by default: the bot
+   * then never speaks in a group room and the channel-memory tools are not
+   * offered.
+   */
+  groupLane: boolean;
+}
+
+/** One compacted batch of a group room's messages (the Node `ChannelMemoryChunk`). */
+export interface ChannelMemoryChunk {
+  id: string;
+  roomId: string;
+  summary: string;
+  fromEventId: string;
+  toEventId: string;
+  fromTimestamp: number;
+  toTimestamp: number;
+  messageCount: number;
+  participants: string[];
+  threadIds: string[];
+  tier: number;
+  createdAt: number;
+}
+
+export interface PinnedRoomFact {
+  id: string;
+  roomId: string;
+  fact: string;
+  pinnedByDid: string;
+  sourceEventId?: string;
+  createdAt: number;
+}
+
+export interface ChannelRoomMember {
+  matrixUserId: string;
+  displayName: string;
+  did?: string;
+}
+
+export interface ChannelMemoryRecall {
+  chunks: ChannelMemoryChunk[];
+  pinnedFacts: PinnedRoomFact[];
+  members: ChannelRoomMember[];
+}
+
 /** Memory-enriched user context (mirrors `state.userContext`). */
 export type UserContextData = Record<string, unknown>;
 
@@ -522,6 +572,34 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     getRoomState: (roomId: string) => Promise<RoomStateSnapshot>;
     getEventById: (roomId: string, eventId: string) => Promise<MatrixEvent>;
     /**
+     * Whether a room is a direct room or a group room — the Node
+     * `MatrixManager.getRoomInfo` (`is_direct` on the create event, else
+     * ≤ 2 joined members), cached by the gateway. Absent on hosts without a
+     * Matrix gateway.
+     */
+    roomInfo?: (roomId: string) => Promise<MatrixRoomInfo>;
+    /**
+     * A group room's channel memory (the `matrix-group-chats` plugin's
+     * tools read and write it): compacted summary chunks, pinned facts and
+     * the member roster, kept by the gateway per room. Absent on hosts
+     * without a Matrix gateway.
+     */
+    channelMemory?: {
+      recall: (roomId: string, limit?: number) => Promise<ChannelMemoryRecall>;
+      search: (
+        roomId: string,
+        query: string,
+        limit?: number,
+      ) => Promise<ChannelMemoryChunk[]>;
+      pin: (args: {
+        roomId: string;
+        fact: string;
+        pinnedByDid: string;
+        sourceEventId?: string;
+      }) => Promise<PinnedRoomFact>;
+      unpin: (roomId: string, factId: string) => Promise<boolean>;
+    };
+    /**
      * Credentials of the oracle's own crypto-less device for plugins that run
      * their own Matrix client (editor, flows). Minted and kept by the gateway.
      */
@@ -790,6 +868,14 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Whether calling the tool changes anything outside the conversation.
+   * `'read'` tools may be executed again when a turn is resumed after a
+   * runtime reset; a `'write'` (the default for undeclared tools) call that
+   * was cut off mid-execution is never repeated — the model is told its
+   * outcome is unknown. See `core/middlewares/tool-marks.ts`.
+   */
+  effect?: 'read' | 'write';
   /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work

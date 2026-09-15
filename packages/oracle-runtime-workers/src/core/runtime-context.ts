@@ -81,6 +81,9 @@ export interface MatrixAdapter {
   getEventById(roomId: string, eventId: string): Promise<MatrixEvent>;
   /** See `MatrixGatewayObject.botCredentials`. */
   botCredentials(): Promise<BotCredentials>;
+  /** Group rooms: room kind and channel memory (see `plugin-api/types.ts`). Hosts without a gateway omit them. */
+  roomInfo?: RuntimeContext['matrix']['roomInfo'];
+  channelMemory?: RuntimeContext['matrix']['channelMemory'];
 }
 
 /** LLM adapter — turns role tags into chat models. */
@@ -417,6 +420,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       getRoomState: (roomId) => ambient.matrix.getRoomState(roomId),
       getEventById: (roomId, eventId) =>
         ambient.matrix.getEventById(roomId, eventId),
+      ...(ambient.matrix.roomInfo ? { roomInfo: ambient.matrix.roomInfo } : {}),
+      ...(ambient.matrix.channelMemory
+        ? { channelMemory: ambient.matrix.channelMemory }
+        : {}),
     },
     ucan: {
       hasCapability: (resource, action) =>

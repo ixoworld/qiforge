@@ -1,16 +1,20 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
-  type AIMessage,
+  AIMessage,
   HumanMessage,
-  type ToolMessage,
+  ToolMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
+import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { MemorySaver } from '@langchain/langgraph';
 import { FakeToolCallingModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ModelRole } from '../plugin-api/types';
 import { createRuntimeCore, type RuntimeCore } from './index';
+import { contextBudgetFor } from './context-budget';
 import { createMainAgent } from './main-agent';
+import type { ContextGuardEvent } from './middlewares/context-guard';
+import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
 import { WeatherPlugin } from './plugins/weather';
 import { createNoopAmbient, type AmbientServices } from './runtime-context';
@@ -487,5 +491,145 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('get_current_weather');
     expect(boundToolNames).not.toContain('call_weather_planner_agent');
     expect(String(error.mock.calls[0]?.[0])).toContain('sub-agent init failed');
+  });
+
+  // ── Context budget wiring ─────────────────────────────────────────────────
+
+  /** A past turn: question, tool call, a `chars`-long result, answer. */
+  const pastTurn = (i: number, chars: number): BaseMessage[] => [
+    new HumanMessage({ id: `h${i}`, content: `question ${i}` }),
+    new AIMessage({
+      id: `a${i}`,
+      content: '',
+      tool_calls: [
+        { id: `c${i}`, name: 'get_current_weather', args: { city: `c${i}` } },
+      ],
+    }),
+    new ToolMessage({
+      id: `t${i}`,
+      tool_call_id: `c${i}`,
+      name: 'get_current_weather',
+      content: `${i}:${'w'.repeat(chars)}`,
+    }),
+    new AIMessage({ id: `r${i}`, content: `answer ${i}` }),
+  ];
+  // 32k window: summarizeAt 16,000 tokens, pruneAt 11,200, cap 15,360 chars.
+  const budget = contextBudgetFor({
+    model: 'm',
+    tokens: 32_000,
+    origin: 'override',
+  });
+
+  it('a context budget binds read_result, logs the budget, and has the guard prune old results under pressure', async () => {
+    const core = bootCore([new WeatherPlugin()]);
+    const log = vi.fn();
+    const ambient = createNoopAmbient({
+      config: core.validatedEnv,
+      identity: core.identity,
+      availablePlugins: core.availablePlugins,
+      llm: scriptedLlm({}),
+      logger: { log, warn: vi.fn(), error: vi.fn() },
+    });
+    const events: ContextGuardEvent[] = [];
+    const readResult = vi.fn();
+    const { agent, boundToolNames } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient,
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+      hooks: { readResult, onContextEvent: (e) => events.push(e) },
+    });
+    expect(boundToolNames).toContain('read_result');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[context] model=m window=32000 (override) summarizeAt=16000 pruneAt=11200 resultCap=15360c',
+      ),
+    );
+
+    // 6 past turns × 8k-char results ≈ 12k tokens: over pruneAt, under
+    // summarizeAt — the request is pruned, the history is not condensed.
+    // The 10-message tail keeps the last two results and the new question;
+    // the four older results are demoted.
+    const history = Array.from({ length: 6 }, (_, i) =>
+      pastTurn(i, 8_000),
+    ).flat();
+    const result = (await agent.invoke(
+      { messages: [...history, new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'budget-1' } },
+    )) as { messages: BaseMessage[] };
+    expect(events).toEqual([
+      expect.objectContaining({ kind: 'prune', stage: 'soft', pruned: 4 }),
+    ]);
+    const prune = events[0] as Extract<ContextGuardEvent, { kind: 'prune' }>;
+    expect(prune.beforeTokens).toBeGreaterThan(budget.pruneAtTokens);
+    expect(prune.afterTokens).toBeLessThan(budget.pruneAtTokens);
+    // Pruning is request-only: the state still holds every result whole.
+    const kept = toolMessages(result.messages);
+    expect(kept).toHaveLength(6);
+    expect(kept.every((m) => String(m.content).length > 8_000)).toBe(true);
+    expect(result.messages.some(isSummarizationMessage)).toBe(false);
+  });
+
+  it('a context budget summarizes the history at the window fraction with no message-count trigger', async () => {
+    const core = bootCore([new WeatherPlugin()]);
+    const summarizer = new FakeListChatModel({ responses: ['the gist'] });
+    const log = vi.fn();
+    const ambient = createNoopAmbient({
+      config: core.validatedEnv,
+      identity: core.identity,
+      availablePlugins: core.availablePlugins,
+      llm: {
+        get: (role) =>
+          (role === 'routing'
+            ? summarizer
+            : new FakeToolCallingModel({
+                toolCalls: [],
+              })) as unknown as BaseChatModel,
+      },
+      logger: { log, warn: vi.fn(), error: vi.fn() },
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient,
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+    });
+
+    // 6 past turns × 12k-char results ≈ 18k tokens > summarizeAt (16k) with
+    // only 25 messages — the legacy 20-message trigger would have fired at
+    // 8k chars; here the token trigger is what fires.
+    const history = Array.from({ length: 6 }, (_, i) =>
+      pastTurn(i, 12_000),
+    ).flat();
+    const result = (await agent.invoke(
+      { messages: [...history, new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'budget-2' } },
+    )) as { messages: BaseMessage[] };
+    const summaries = result.messages.filter(isSummarizationMessage);
+    expect(summaries).toHaveLength(1);
+    expect(String(summaries[0]!.content)).toContain('the gist');
+    expect(result.messages.length).toBeLessThan(history.length);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /\[summarization\] condensed the history: 25 messages/,
+      ),
+    );
+
+    // Under the threshold nothing is condensed, however many messages there are.
+    const small = Array.from({ length: 12 }, (_, i) => pastTurn(i, 100)).flat();
+    const untouched = (await agent.invoke(
+      { messages: [...small, new HumanMessage('still here?')] },
+      { configurable: { thread_id: 'budget-3' } },
+    )) as { messages: BaseMessage[] };
+    expect(untouched.messages.some(isSummarizationMessage)).toBe(false);
+    expect(toolMessages(untouched.messages)).toHaveLength(12);
   });
 });

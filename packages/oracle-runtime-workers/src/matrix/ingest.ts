@@ -7,6 +7,12 @@
  * so the sender must resolve to a user DID before anything else happens.
  * Own-message, stale and duplicate gating happens upstream, in the bot SDK's
  * pipeline; `gateway-do.ts` adapts its `BotMessage`s into `InboundMessage`s.
+ *
+ * Threads are sessions, exactly as on Node: the thread root of a message is
+ * its session id (`reply-chain.ts` resolves it; a bare message is its own
+ * root), the reply is posted into that thread, and a Portal session — whose
+ * id is its marker event — is continued by replying inside its thread. The
+ * main timeline of a room never carries a reply and is never a session.
  */
 
 import { didToAliasPart } from '../do/contracts';
@@ -28,23 +34,40 @@ export interface InboundMessage {
   ts: number;
   /** Text body; empty for a media-only message. */
   body: string;
-  /** Thread root when the message was sent inside a thread. */
+  /**
+   * The message's thread root: the `m.thread` root, the root of a quote-reply
+   * chain (`gateway-do.ts` resolves it before the offer), or — for a bare
+   * message — nothing: the message roots its own thread (`threadRootIdOf`).
+   */
   threadRootId?: string;
   /** Present for media messages — fetched and decrypted at turn time. */
   attachment?: InboundAttachment;
+  /** The bot is in the message's `m.mentions` (the group-chat gate answers a mention). */
+  mentionsBot?: boolean;
+  /** The event a quote-reply answers (`m.in_reply_to`); a reply to the bot's own message is answered too. */
+  inReplyTo?: string;
 }
 
 export interface IngestTurn {
   userDid: string;
   matrixUserId: string;
   roomId: string;
-  /** Present when the user wrote inside a thread; replies go there too. */
-  threadId?: string;
-  /** `matrix:<roomId>` (main timeline) or `thread:<threadRootId>`. */
+  /** The thread the reply goes to: the message's root, or the message itself. */
+  threadId: string;
+  /** The thread root event id — the session is the thread (Node parity). */
   sessionId: string;
   /** Debounced messages joined with newlines, oldest first. */
   message: string;
   eventIds: string[];
+  /**
+   * The message the turn's metadata comes from — the latest text message of
+   * the burst, else its first (Node's `sourceEvent`): its mentions and reply
+   * target drive the group-chat gate, its timestamp dates the turn.
+   */
+  sourceEventId: string;
+  ts: number;
+  mentionsBot: boolean;
+  inReplyTo?: string;
   /** Media shared in the same debounce window, oldest first. */
   attachments?: InboundAttachment[];
 }
@@ -52,6 +75,12 @@ export interface IngestTurn {
 export interface IngestDeps {
   /** The DID that forms the oracle half of the user↔oracle room alias. */
   oracleDid: string;
+  /**
+   * The bot's Matrix user id. Its first occurrence in a message is rewritten
+   * to `(USER MENTIONED YOU @AI_AGENT)` before the agent sees it, as the Node
+   * bridge does; omit to leave messages as sent.
+   */
+  botUserId?: string;
   debounceMs?: number;
   /** `m.room.canonical_alias` of the room, when known. */
   canonicalAlias(roomId: string): string | null;
@@ -66,6 +95,8 @@ interface Pending {
 }
 
 export const DEFAULT_DEBOUNCE_MS = 500;
+/** What the bot's own user id becomes in a message body (the Node bridge's wording). */
+export const MENTIONED_BOT_MARKER = '(USER MENTIONED YOU @AI_AGENT)';
 
 /** `did-ixo-ixo1abc` → `did:ixo:ixo1abc`. Only the first two dashes are separators. */
 export function aliasPartToDid(part: string): string | null {
@@ -119,8 +150,11 @@ export function resolveUserDid(opts: {
   return fromAlias ?? fromSender;
 }
 
-export function sessionIdFor(roomId: string, threadRootId?: string): string {
-  return threadRootId ? `thread:${threadRootId}` : `matrix:${roomId}`;
+/** The thread a message belongs to: its resolved root, else the message itself. */
+export function threadRootIdOf(
+  msg: Pick<InboundMessage, 'eventId' | 'threadRootId'>,
+): string {
+  return msg.threadRootId ?? msg.eventId;
 }
 
 export class IngestPipeline {
@@ -144,7 +178,7 @@ export class IngestPipeline {
     });
     if (!userDid) return 'unmapped';
 
-    const key = `${msg.roomId}|${sessionIdFor(msg.roomId, msg.threadRootId)}`;
+    const key = `${msg.roomId}|${threadRootIdOf(msg)}`;
     const existing = this.pending.get(key);
     if (existing) {
       clearTimeout(existing.timer);
@@ -177,27 +211,36 @@ export class IngestPipeline {
     this.pending.delete(key);
     const first = entry.messages[0];
     if (!first) return;
-    const threadId = first.threadRootId;
+    const threadId = threadRootIdOf(first);
     const texts = entry.messages.map((m) => m.body).filter((b) => b.trim());
+    const source =
+      [...entry.messages].reverse().find((m) => m.body.trim()) ?? first;
     const attachments = entry.messages.flatMap((m) =>
       m.attachment ? [m.attachment] : [],
     );
     // A file-only send still needs a user message the agent can act on —
     // the Node bridge's wording.
-    const message =
+    const raw =
       texts.length > 0
         ? texts.join('\n')
         : attachments.length === 1
           ? `User shared a file: ${attachments[0]?.filename ?? 'file'}`
           : `User shared ${attachments.length} file(s): ${attachments.map((a) => a.filename).join(', ')}`;
+    const message = this.deps.botUserId
+      ? raw.replace(this.deps.botUserId, MENTIONED_BOT_MARKER)
+      : raw;
     const turn: IngestTurn = {
       userDid: entry.userDid,
       matrixUserId: first.sender,
       roomId: first.roomId,
-      sessionId: sessionIdFor(first.roomId, threadId),
+      threadId,
+      sessionId: threadId,
       message,
       eventIds: entry.messages.map((m) => m.eventId),
-      ...(threadId ? { threadId } : {}),
+      sourceEventId: source.eventId,
+      ts: source.ts,
+      mentionsBot: source.mentionsBot === true,
+      ...(source.inReplyTo ? { inReplyTo: source.inReplyTo } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
     };
     try {

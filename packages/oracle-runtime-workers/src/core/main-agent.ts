@@ -14,6 +14,9 @@ import type {
 import type { MainAgentArgs, MainAgentBuildResult } from './main-agent-types';
 import { renderTier1, type Tier1Entry } from './manifest';
 import { buildMetaTools } from './meta-tools';
+import { buildReadResultTool } from './read-result-tool';
+import { describeBudget } from './context-budget';
+import { createContextGuardMiddleware } from './middlewares/context-guard';
 import {
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
@@ -52,6 +55,7 @@ import {
   type RuntimeStateInput,
 } from './runtime-context';
 import { MainAgentGraphState } from './state';
+import { toolEffectOf } from './middlewares/tool-marks';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName } from './subagent-as-tool';
 import { wrapPluginTool } from './wrap-plugin-tool';
@@ -119,6 +123,7 @@ export async function createMainAgent(
     checkpointer,
     abortSignal,
     byoProvider,
+    contextBudget,
     hooks,
   } = args;
 
@@ -227,12 +232,31 @@ export async function createMainAgent(
   const silentTools = selectByVisibility(allTools, manifestViz, 'silent');
 
   // ── 4. Wrap tools (meta + plugin) so handlers receive a RuntimeContext ──
-  const metaTools = buildMetaTools({
-    manifestRegistry: registries.manifests,
-    toolRegistry: registries.tools,
-  });
+  const metaTools = [
+    ...buildMetaTools({
+      manifestRegistry: registries.manifests,
+      toolRegistry: registries.tools,
+    }),
+    // Pages through tool results the result cap saved whole (result-cap.ts);
+    // its chunks stay well under the cap so a page is never capped itself.
+    ...(hooks?.readResult
+      ? [
+          buildReadResultTool({
+            read: hooks.readResult,
+            maxChars: Math.min(
+              16_000,
+              Math.max(
+                512,
+                Math.floor((contextBudget?.resultCapChars ?? 32_000) / 2),
+              ),
+            ),
+          }),
+        ]
+      : []),
+  ];
 
   const fallbackContext = runConfig.context;
+  const resultCap = hooks?.resultCap;
   const wrap = (entry: CollectedTool) =>
     wrapPluginTool(entry.tool, {
       ambient,
@@ -240,6 +264,7 @@ export async function createMainAgent(
       pluginTitle: titleByPlugin.get(entry.pluginName),
       sharedFactory,
       fallbackContext,
+      ...(resultCap ? { resultCap } : {}),
     });
 
   // ── 5. Sub-agents — bind all at compile time; gating happens at runtime ─
@@ -256,7 +281,20 @@ export async function createMainAgent(
     sharedFactory,
     fallbackContext,
     subAgents: subAgentEntries,
+    ...(hooks?.toolMiddlewares
+      ? { extraMiddleware: hooks.toolMiddlewares }
+      : {}),
+    ...(resultCap ? { resultCap } : {}),
   });
+
+  // Effect of every tool the model can call (durable runs: what may run
+  // again after a reset). Meta-tools only touch graph state; a sub-agent
+  // is opaque, hence a write.
+  const toolEffects = new Map<string, 'read' | 'write'>();
+  for (const t of metaTools) toolEffects.set(t.name, 'read');
+  for (const { tool } of allTools)
+    toolEffects.set(tool.name, toolEffectOf(tool));
+  for (const t of subAgentTools) toolEffects.set(t.name, 'write');
 
   ambient.logger.debug?.(
     `[main-agent] binding summary (all bound; gated at runtime): ` +
@@ -271,6 +309,7 @@ export async function createMainAgent(
         state: wrapState,
         sharedFactory,
         fallbackContext,
+        ...(resultCap ? { resultCap } : {}),
       }),
     ),
     ...eagerTools.map(wrap),
@@ -312,8 +351,12 @@ export async function createMainAgent(
   const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
 
   const middleware = [
-    // Outermost: a turn that died between a tool call and its result (abort,
-    // object reset) must not poison every later model request on the thread.
+    // Outermost of all: the durable-run tool marks (write-ahead record per
+    // tool call, resume policy, continuation note) must see every call
+    // before validation and retries do.
+    ...(hooks?.toolMiddlewares ?? []),
+    // A turn that died between a tool call and its result (abort, object
+    // reset) must not poison every later model request on the thread.
     createDanglingToolCallRepairMiddleware({ logger: ambient.logger }),
     // Then, as on Node: rewrite cross-provider reasoning residue before the
     // summarizer condenses (a well-formed) history.
@@ -322,10 +365,26 @@ export async function createMainAgent(
     // Without this, thread state — reloaded, re-serialized, and re-uploaded to
     // the owner store on every turn — grows without bound.
     // The summarizer's own model call is internal: it must never stream its
-    // tokens into the user's reply (belt: no streaming here; braces: the SSE
-    // stream drops `lc_source: 'summarization'` events).
+    // tokens into the user's reply. That is guaranteed by the SSE producer,
+    // which drops every model event tagged `lc_source: 'summarization'`
+    // (the middleware tags its call). The model itself keeps whatever
+    // transport its provider needs — forcing it non-streaming broke the
+    // ChatGPT backend, which accepts streamed requests only.
     createSummarizationMiddleware({
-      model: resolveModel('routing', { disableStreaming: true }),
+      model: resolveModel('routing'),
+      logger: ambient.logger,
+      // Window-derived thresholds when the host resolved a budget: summarize
+      // at a fraction of the model's window (tokens only, unless the
+      // operator asked for a message trigger), the summarizer reading at
+      // most what fits the window.
+      ...(contextBudget
+        ? {
+            triggerTokens: contextBudget.summarizeAtTokens,
+            triggerMessages: contextBudget.summarizeTriggerMessages ?? null,
+            keepMessages: contextBudget.keepMessages,
+            summaryInputTokens: contextBudget.summaryInputTokens,
+          }
+        : {}),
     }),
     createCapabilityGateMiddleware({
       pluginByToolName,
@@ -385,7 +444,24 @@ export async function createMainAgent(
       : []),
     ...pluginMiddlewares,
     ...(hooks?.middlewares ?? []),
+    // Innermost: sees the request exactly as it goes to the provider. Prunes
+    // old tool results under pressure, refuses what cannot fit, and learns
+    // the window from a provider overflow (context-guard.ts).
+    ...(contextBudget
+      ? [
+          createContextGuardMiddleware({
+            budget: contextBudget,
+            ...(hooks?.onContextOverflow
+              ? { onOverflow: hooks.onContextOverflow }
+              : {}),
+            ...(hooks?.onContextEvent ? { onEvent: hooks.onContextEvent } : {}),
+            logger: ambient.logger,
+          }),
+        ]
+      : []),
   ];
+  if (contextBudget)
+    ambient.logger.log(`[context] ${describeBudget(contextBudget)}`);
 
   // ── 7. Prompt composition ───────────────────────────────────────────────
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
@@ -435,6 +511,7 @@ export async function createMainAgent(
     agent,
     systemPrompt,
     boundToolNames: tools.map((t) => t.name),
+    toolEffects,
     context: runConfig.context,
   };
 }

@@ -20,7 +20,12 @@
     "test:e2e:legacy-large": "tsx test/e2e-legacy-large.ts",
     "test:e2e:mcp": "tsx test/e2e-mcp.ts",
     "test:e2e:tier": "tsx test/e2e-tier.ts",
-    "test:stress": "tsx test/stress.ts"
+    "test:e2e:durable": "tsx test/e2e-durable.ts",
+    "test:stress": "tsx test/stress.ts",
+    "test:e2e:context": "tsx test/e2e-context.ts",
+    "test:e2e:transcript": "tsx test/e2e-transcript.ts",
+    "test:e2e:threads": "tsx test/e2e-threads.ts",
+    "test:e2e:group": "tsx test/e2e-group.ts"
   },
   "dependencies": {
     "@ixo/matrix-bot-workers-sdk": "0.4.0",

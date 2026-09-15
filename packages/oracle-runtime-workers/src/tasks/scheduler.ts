@@ -103,6 +103,14 @@ export interface TaskSchedulerHost {
   runTurn: (req: TurnRequest) => Promise<TurnResult>;
   /** Ask the object to re-arm its alarm no later than `at` (ms epoch). */
   requestAlarm: (at: number) => void;
+  /**
+   * Whether the durable turn run of a task run (`TurnRequest.taskRunId`) is
+   * still live in the object — recovering or executing — so an open
+   * `running` row is left alone at reconciliation instead of being closed
+   * as interrupted; the object hands the outcome over through
+   * `completeRecoveredRun` / `failRecoveredRun` when the run ends.
+   */
+  turnRunLive?: (taskRunId: string) => boolean;
   log: Logger;
   /** Live-task cap (`TASKS_MAX_PER_USER`). Default 50. */
   maxTasksPerUser?: number;
@@ -123,6 +131,16 @@ export interface TaskScheduler {
   onAlarm(now: number): Promise<void>;
   /** Runs no incarnation has finished (operator/debug). */
   openRuns(): Promise<OpenTaskRun[]>;
+  /** A run this instance is executing or delivering right now. */
+  isRunActive(runId: string): boolean;
+  /**
+   * The turn of a `running` task run finished in a recovered durable run
+   * (no `executeRun` continuation is waiting): advance the schedule, store
+   * the result and deliver it, exactly as `executeRun` would have.
+   */
+  completeRecoveredRun(runId: string, text: string): Promise<void>;
+  /** The recovered turn of a `running` task run ended without a result. */
+  failRecoveredRun(runId: string, detail: string): Promise<void>;
 }
 
 /** How much of a run's output is kept as `lastResult.summary`. */
@@ -228,6 +246,9 @@ class AlarmTaskScheduler implements TaskScheduler {
    */
   private readonly activeRuns = new Map<string, string>();
 
+  /** Tasks whose open run is being recovered by the object (rebuilt per alarm). */
+  private readonly recoveringTasks = new Set<string>();
+
   private hasActiveRun(taskId: string): boolean {
     for (const owner of this.activeRuns.values())
       if (owner === taskId) return true;
@@ -274,6 +295,102 @@ class AlarmTaskScheduler implements TaskScheduler {
     return this.store.openRuns();
   }
 
+  isRunActive(runId: string): boolean {
+    return this.activeRuns.has(runId);
+  }
+
+  async completeRecoveredRun(runId: string, text: string): Promise<void> {
+    const run = await this.store.getOpenRun(runId);
+    if (!run || run.state !== 'running') return;
+    const nowMs = Date.now();
+    const loaded = await this.store.get(run.taskId);
+    if (!loaded || loaded.status !== 'active') {
+      await this.store.updateRun(runId, {
+        state: 'failed',
+        ok: false,
+        finishedAt: new Date().toISOString(),
+        detail: `result dropped: task ${loaded?.status ?? 'deleted'} during the run`,
+      });
+      return;
+    }
+    const task: TaskRecord = loaded;
+    const trimmed = text.trim();
+    if (trimmed.length === 0) {
+      await this.recordFailure(
+        task,
+        nowMs,
+        run.startedAt,
+        new Error('Agent returned no output'),
+        { runId, state: 'failed' },
+      );
+      return;
+    }
+    this.host.log.log(
+      `[tasks] run ${runId} of ${task.id}: turn recovered after a reset; delivering its result`,
+    );
+    // Same bookkeeping as `executeRun` after the turn: advance the schedule
+    // now so no later alarm fires this occurrence again, then deliver.
+    if (task.schedule.kind === 'once') {
+      delete task.nextRunAt;
+    } else if (task.approval !== 'before-action') {
+      const nextMs = computeNextRunAtMs(task.schedule, nowMs);
+      if (nextMs !== null) task.nextRunAt = new Date(nextMs).toISOString();
+      else delete task.nextRunAt;
+    }
+    task.updatedAt = new Date().toISOString();
+    const roomId = run.roomId ?? (await this.resolveDeliveryRoom(task));
+    await this.host.db.transaction(async () => {
+      await this.store.save(task);
+      await this.store.updateRun(runId, {
+        state: 'delivering',
+        ...(roomId ? { roomId } : {}),
+        resultText: trimmed,
+      });
+    });
+    const refreshed = (await this.store.get(task.id)) ?? task;
+    const open: OpenTaskRun = {
+      runId,
+      taskId: refreshed.id,
+      startedAt: run.startedAt,
+      state: 'delivering',
+      txnId: run.txnId,
+      ...(roomId ? { roomId } : {}),
+      resultText: trimmed,
+      attempts: 0,
+    };
+    this.activeRuns.set(runId, refreshed.id);
+    try {
+      await this.deliverOrDefer(refreshed, open, nowMs);
+    } finally {
+      this.activeRuns.delete(runId);
+    }
+  }
+
+  async failRecoveredRun(runId: string, detail: string): Promise<void> {
+    const run = await this.store.getOpenRun(runId);
+    if (!run || run.state !== 'running') return;
+    const task = await this.store.get(run.taskId);
+    if (!task) {
+      await this.store.updateRun(runId, {
+        state: 'interrupted',
+        ok: false,
+        finishedAt: new Date().toISOString(),
+        detail,
+      });
+      return;
+    }
+    await this.recordFailure(
+      task,
+      Date.now(),
+      run.startedAt,
+      new Error(detail),
+      {
+        runId,
+        state: 'interrupted',
+      },
+    );
+  }
+
   async onAlarm(now: number): Promise<void> {
     // Unfinished runs first: what a previous incarnation left behind decides
     // the fate of its task before the due scan can fire the task again.
@@ -288,9 +405,11 @@ class AlarmTaskScheduler implements TaskScheduler {
       }
       if (Date.parse(task.nextRunAt) > now) continue;
       // A run of this task is executing in this instance right now (a long
-      // turn while the object's alarm fires for something else): its
-      // schedule advances when the turn ends, never start a second one.
-      if (this.hasActiveRun(task.id)) continue;
+      // turn while the object's alarm fires for something else), or its
+      // turn is being recovered by the object after a reset: its schedule
+      // advances when the turn ends, never start a second one.
+      if (this.hasActiveRun(task.id) || this.recoveringTasks.has(task.id))
+        continue;
       try {
         if (task.approval === 'before-action') {
           await this.requestApproval(task, now);
@@ -319,6 +438,7 @@ class AlarmTaskScheduler implements TaskScheduler {
    */
   private async reconcileOpenRuns(now: number): Promise<void> {
     const open = await this.store.openRuns();
+    this.recoveringTasks.clear();
     for (const run of open) {
       if (this.activeRuns.has(run.runId)) continue; // alive in this instance
       const task = await this.store.get(run.taskId);
@@ -338,6 +458,14 @@ class AlarmTaskScheduler implements TaskScheduler {
         );
         await this.deliverOrDefer(task, run, now);
       } else {
+        // A durable turn run that is recovering (or executing) owns this
+        // row: it reports back through `completeRecoveredRun` /
+        // `failRecoveredRun` when it ends. Until then the task must not
+        // fire again (its schedule only advances after the turn).
+        if (this.host.turnRunLive?.(run.runId)) {
+          this.recoveringTasks.add(run.taskId);
+          continue;
+        }
         this.host.log.warn(
           `[tasks] run ${run.runId} of ${run.taskId} started ${run.startedAt} never finished (the object was reset while it ran); closing it as interrupted, not re-running`,
         );
@@ -748,6 +876,9 @@ class AlarmTaskScheduler implements TaskScheduler {
         client: 'matrix',
         roomId,
         requestId: crypto.randomUUID(),
+        // Links the durable turn run to this task run: a reset mid-turn is
+        // recovered and delivered by the object instead of closed.
+        taskRunId: runId,
       });
       const text = result.text.trim();
       if (text.length === 0) throw new Error('Agent returned no output');

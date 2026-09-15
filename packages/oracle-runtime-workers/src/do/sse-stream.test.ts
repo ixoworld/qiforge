@@ -1,6 +1,6 @@
 import { ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
-import { createSseTurnStream } from './sse-stream';
+import { createSseTurnStream, isImmediateFrame } from './sse-stream';
 
 async function* fakeEvents(): AsyncGenerator<unknown> {
   yield {
@@ -311,7 +311,7 @@ describe('createSseTurnStream calls rejected before the tool starts', () => {
     expect(frames[0]?.eventId).toBe('call-1');
   });
 
-  it('does not duplicate a call the tool events already reported', async () => {
+  it('does not duplicate a call the tool events already reported, and keys both frames by the call id', async () => {
     const stream = createSseTurnStream({
       events: startedThenHandledEvents(),
       sessionId: 's1',
@@ -320,5 +320,167 @@ describe('createSseTurnStream calls rejected before the tool starts', () => {
     });
     const frames = toolCallFrames(await new Response(stream).text());
     expect(frames.map((f) => f.status)).toEqual(['isRunning', 'done']);
+    expect(frames.map((f) => f.eventId)).toEqual(['call-2', 'call-2']);
+  });
+
+  it('matches a started call to its model call even when the schema filled defaults into the arguments', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'run-m',
+        data: {
+          output: {
+            tool_calls: [{ id: 'call-3', name: 'list_my_tasks', args: {} }],
+          },
+        },
+      };
+      yield {
+        event: 'on_tool_start',
+        run_id: 'run-3',
+        name: 'list_my_tasks',
+        data: { input: { input: { status: 'all', limit: 20 } } },
+      };
+      yield {
+        event: 'on_tool_end',
+        run_id: 'run-3',
+        name: 'list_my_tasks',
+        data: {
+          output: new ToolMessage({
+            content: '[]',
+            tool_call_id: 'call-3',
+            name: 'list_my_tasks',
+          }),
+        },
+      };
+      yield {
+        event: 'on_chain_end',
+        run_id: 'run-t',
+        name: 'tools',
+        data: {
+          output: {
+            messages: [
+              new ToolMessage({
+                content: '[]',
+                tool_call_id: 'call-3',
+                name: 'list_my_tasks',
+              }),
+            ],
+          },
+        },
+      };
+    }
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController: new AbortController(),
+    });
+    const frames = toolCallFrames(await new Response(stream).text());
+    expect(frames.map((f) => [f.status, f.eventId])).toEqual([
+      ['isRunning', 'call-3'],
+      ['done', 'call-3'],
+    ]);
+  });
+
+  it('keeps two calls of the same tool in one turn apart, in the order the model made them', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'run-m',
+        data: {
+          output: {
+            tool_calls: [
+              { id: 'call-a', name: 'get_task', args: { id: 'A' } },
+              { id: 'call-b', name: 'get_task', args: { id: 'B' } },
+            ],
+          },
+        },
+      };
+      yield {
+        event: 'on_tool_start',
+        run_id: 'run-a',
+        name: 'get_task',
+        data: { input: { id: 'A' } },
+      };
+      yield {
+        event: 'on_tool_start',
+        run_id: 'run-b',
+        name: 'get_task',
+        data: { input: { id: 'B' } },
+      };
+      yield {
+        event: 'on_tool_end',
+        run_id: 'run-b',
+        name: 'get_task',
+        data: {
+          output: new ToolMessage({
+            content: 'B!',
+            tool_call_id: 'call-b',
+            name: 'get_task',
+          }),
+        },
+      };
+      yield {
+        event: 'on_tool_error',
+        run_id: 'run-a',
+        name: 'get_task',
+        data: { error: new Error('not found') },
+      };
+      yield {
+        event: 'on_chain_end',
+        run_id: 'run-t',
+        name: 'tools',
+        data: {
+          output: {
+            messages: [
+              new ToolMessage({
+                content: 'not found',
+                tool_call_id: 'call-a',
+                name: 'get_task',
+                status: 'error',
+              }),
+              new ToolMessage({
+                content: 'B!',
+                tool_call_id: 'call-b',
+                name: 'get_task',
+              }),
+            ],
+          },
+        },
+      };
+    }
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController: new AbortController(),
+    });
+    const frames = toolCallFrames(await new Response(stream).text());
+    // (a thrown tool error is reported as a finished call with a warning
+    // output — the existing contract; the call id is what matters here)
+    expect(frames.map((f) => [f.eventId, f.status])).toEqual([
+      ['call-a', 'isRunning'],
+      ['call-b', 'isRunning'],
+      ['call-b', 'done'],
+      ['call-a', 'done'],
+    ]);
+    expect(String(frames[3]?.output)).toContain('not found');
+  });
+});
+
+describe('isImmediateFrame', () => {
+  it('packs settled tool results and done at once; everything else rides the timer', () => {
+    expect(isImmediateFrame('tool_call', { status: 'done' })).toBe(true);
+    expect(isImmediateFrame('tool_call', { status: 'error' })).toBe(true);
+    expect(isImmediateFrame('action_call', { status: 'done' })).toBe(true);
+    expect(isImmediateFrame('done', { runId: 'r' })).toBe(true);
+    expect(isImmediateFrame('tool_call', { status: 'isRunning' })).toBe(false);
+    expect(isImmediateFrame('action_call', { status: 'isRunning' })).toBe(
+      false,
+    );
+    expect(isImmediateFrame('run', { runId: 'r' })).toBe(false);
+    expect(isImmediateFrame('message', { content: 'x' })).toBe(false);
+    expect(isImmediateFrame('error', { error: 'x' })).toBe(false);
+    expect(isImmediateFrame('router.update', { step: 'x' })).toBe(false);
   });
 });

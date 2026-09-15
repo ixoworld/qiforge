@@ -1,6 +1,7 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
+import type { Logger } from '../../plugin-api/types';
 
 /**
  * IXO-flavoured prompt instructing the summarizer to preserve identifiers
@@ -56,15 +57,41 @@ const DEFAULT_KEEP_MESSAGES = 10;
 export interface SummarizationMiddlewareOptions {
   /** Model used to generate the summary (typically a small/cheap router model). */
   model: BaseChatModel;
-  /** Override the trigger threshold for messages (default: 20). */
-  triggerMessages?: number;
   /**
-   * Also trigger on approximate token count (default: 40k). Message-count
-   * triggers alone miss threads whose few messages carry huge tool outputs.
+   * Trigger threshold in messages. Default 20 when no `triggerTokens` is
+   * given (the legacy pair); `null` disables the message trigger, which is
+   * what a window-derived `triggerTokens` wants (a tool turn is ~4 messages,
+   * so 20 fires after five turns whatever the model's window).
+   */
+  triggerMessages?: number | null;
+  /**
+   * Trigger on approximate token count (chars/4). Default 40k; the main
+   * agent passes a fraction of the model's context window.
    */
   triggerTokens?: number;
   /** Override the number of recent messages to keep (default: 10). */
   keepMessages?: number;
+  /** What the summarizer itself may read (tokens); default LangChain's. */
+  summaryInputTokens?: number;
+  logger?: Pick<Logger, 'warn' | 'log'>;
+}
+
+/**
+ * LangChain's summarizer swallows a failed summary call and returns
+ * `Error generating summary: …` as the summary text — which would then
+ * REPLACE the conversation history with an error string (the model's next
+ * reply reads "I only received an error in the conversation summary").
+ */
+const FAILED_SUMMARY = /^Error generating summary:/;
+
+export function isFailedSummary(message: BaseMessage): boolean {
+  if (!isSummarizationMessage(message)) return false;
+  const { content } = message;
+  if (typeof content !== 'string') return false;
+  const body = content.startsWith(SUMMARY_PREFIX)
+    ? content.slice(SUMMARY_PREFIX.length).trimStart()
+    : content;
+  return FAILED_SUMMARY.test(body);
 }
 
 /**
@@ -86,14 +113,68 @@ export function isSummarizationMessage(message: BaseMessage): boolean {
 export const createSummarizationMiddleware = (
   options: SummarizationMiddlewareOptions,
 ): AgentMiddleware => {
-  return summarizationMiddleware({
+  const triggerMessages =
+    options.triggerMessages === null
+      ? null
+      : (options.triggerMessages ??
+        (options.triggerTokens === undefined
+          ? DEFAULT_TRIGGER_MESSAGES
+          : null));
+  const inner = summarizationMiddleware({
     model: options.model,
     summaryPrompt: SUMMARY_PROMPT,
     summaryPrefix: SUMMARY_PREFIX,
     trigger: [
-      { messages: options.triggerMessages ?? DEFAULT_TRIGGER_MESSAGES },
+      ...(triggerMessages !== null ? [{ messages: triggerMessages }] : []),
       { tokens: options.triggerTokens ?? DEFAULT_TRIGGER_TOKENS },
     ],
     keep: { messages: options.keepMessages ?? DEFAULT_KEEP_MESSAGES },
+    ...(options.summaryInputTokens !== undefined
+      ? { trimTokensToSummarize: options.summaryInputTokens }
+      : {}),
   });
+  const beforeModel = inner.beforeModel;
+  if (!beforeModel) return inner;
+  // The hook is either a bare handler or `{ hook, canJumpTo }`; keep the shape.
+  const handler =
+    typeof beforeModel === 'function' ? beforeModel : beforeModel.hook;
+  // A summary that failed keeps the history exactly as it was: the turn
+  // runs on the full context and the next turn tries again.
+  const guarded: typeof handler = async (state, runtime) => {
+    const update = await handler(state, runtime);
+    const messages =
+      update && typeof update === 'object' && 'messages' in update
+        ? (update as { messages?: unknown }).messages
+        : undefined;
+    const failed = Array.isArray(messages)
+      ? messages.find((m) => isBaseMessageLike(m) && isFailedSummary(m))
+      : undefined;
+    if (failed) {
+      options.logger?.warn(
+        `[summarization] summary failed; keeping the full history this turn: ${String(failed.content).slice(0, 300)}`,
+      );
+      return undefined;
+    }
+    if (Array.isArray(messages) && messages.length > 0)
+      options.logger?.log(
+        `[summarization] condensed the history: ${state.messages.length} messages → a summary + ${messages.length - 2} kept`,
+      );
+    return update;
+  };
+  return {
+    ...inner,
+    beforeModel:
+      typeof beforeModel === 'function'
+        ? guarded
+        : { ...beforeModel, hook: guarded },
+  };
 };
+
+function isBaseMessageLike(value: unknown): value is BaseMessage {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'content' in value &&
+    'additional_kwargs' in value
+  );
+}

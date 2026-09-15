@@ -145,6 +145,7 @@ function previewTask(): PluginTool {
     },
     {
       name: 'preview_task',
+      effect: 'read',
       description:
         'Validate a candidate task spec and return its next run times WITHOUT creating anything. ALWAYS call this before create_task and show the user the result. IMPORTANT: scheduled runs are fresh background sessions with NO memory of this conversation — put every ID, URL, and name the run needs into the intent text.',
       schema: previewInput,
@@ -214,6 +215,7 @@ function listMyTasks(): PluginTool {
     },
     {
       name: 'list_my_tasks',
+      effect: 'read',
       description:
         "List the user's scheduled tasks — id, title, status, schedule, next run. A task with `awaitingApprovalSince` has an approval request waiting for the user in their room — tell them and point them there. Optionally filter by status.",
       schema: listInput,
@@ -246,6 +248,7 @@ function getTask(): PluginTool {
     },
     {
       name: 'get_task',
+      effect: 'read',
       description:
         'Fetch one task: full intent body, status, schedule, last run result, and the consecutive-failure count if it has been failing.',
       schema: taskIdSchema,
@@ -406,6 +409,7 @@ function suggestSpecFix(): PluginTool {
     },
     {
       name: 'suggest_spec_fix',
+      effect: 'read',
       description:
         'For a failing task: returns the current intent plus the last error so you can propose a revised intent to the user. Apply the fix with update_task ONLY after the user agrees — never auto-apply.',
       schema: taskIdSchema,

@@ -54,8 +54,10 @@ an E2EE Matrix bot on Workers:
 The subclass adds only what is specific to the oracle:
 
 - inbound room messages → user-object turns (`src/matrix/ingest.ts` debounces
-  per session for 500 ms and builds one turn per burst, with attachments and
-  the thread or quote-reply chain resolved);
+  per thread for 500 ms and builds one turn per burst, with attachments and
+  the thread or quote-reply chain resolved; the thread root is the session
+  id and the reply goes into the thread, as on Node — see
+  [operations](operations.md#turns-threads-are-sessions));
 - a durable turn inbox (`src/matrix/inbox-store.ts`): every accepted room
   message is written to the gateway's SQLite before anything waits on the
   network and deleted when its turn has ended, so a gateway reset during the

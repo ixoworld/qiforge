@@ -10,6 +10,8 @@
 export { SqliteTestDO } from '../src/sqlite/test-do';
 export { TasksTestDO } from '../src/tasks/test-do';
 export { RealtimeTestDO } from '../src/realtime/test-do';
+export { RunStoreTestDO } from '../src/do/run-store-test-do';
+export { ResultStoreTestDO } from '../src/do/result-store-test-do';
 
 export default {
   async fetch(): Promise<Response> {

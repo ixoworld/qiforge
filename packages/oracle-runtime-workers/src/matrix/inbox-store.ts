@@ -46,6 +46,20 @@ export function ensureInboxTable(sql: SqlStorage): void {
       attempts INTEGER NOT NULL DEFAULT 0
     ) WITHOUT ROWID`,
   );
+  // Columns added after the table first shipped (the group-chat gate reads
+  // them on replay): CREATE TABLE IF NOT EXISTS leaves an existing table alone.
+  const columns = new Set(
+    sql
+      .exec<{ name: string }>(`PRAGMA table_info(turn_inbox)`)
+      .toArray()
+      .map((row) => row.name),
+  );
+  if (!columns.has('mentions_bot'))
+    sql.exec(
+      `ALTER TABLE turn_inbox ADD COLUMN mentions_bot INTEGER NOT NULL DEFAULT 0`,
+    );
+  if (!columns.has('in_reply_to'))
+    sql.exec(`ALTER TABLE turn_inbox ADD COLUMN in_reply_to TEXT`);
 }
 
 /** Record a message before its turn starts. A repeat of the same event id is a no-op. */
@@ -56,8 +70,8 @@ export function insertInboxRow(
 ): void {
   sql.exec(
     `INSERT OR IGNORE INTO turn_inbox
-      (event_id, room_id, sender, ts, body, thread_root_id, attachment, received_at, attempts)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      (event_id, room_id, sender, ts, body, thread_root_id, attachment, received_at, attempts, mentions_bot, in_reply_to)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     msg.eventId,
     msg.roomId,
     msg.sender,
@@ -66,6 +80,8 @@ export function insertInboxRow(
     msg.threadRootId ?? null,
     msg.attachment ? JSON.stringify(msg.attachment) : null,
     receivedAt,
+    msg.mentionsBot ? 1 : 0,
+    msg.inReplyTo ?? null,
   );
 }
 
@@ -112,13 +128,15 @@ type InboxSqlRow = {
   attachment: string | null;
   received_at: number;
   attempts: number;
+  mentions_bot: number;
+  in_reply_to: string | null;
 } & Record<string, SqlStorageValue>;
 
 /** Every pending row, oldest first (the order the messages arrived in). */
 export function listInboxRows(sql: SqlStorage): InboxRow[] {
   return sql
     .exec<InboxSqlRow>(
-      `SELECT event_id, room_id, sender, ts, body, thread_root_id, attachment, received_at, attempts
+      `SELECT event_id, room_id, sender, ts, body, thread_root_id, attachment, received_at, attempts, mentions_bot, in_reply_to
        FROM turn_inbox ORDER BY ts ASC, event_id ASC`,
     )
     .toArray()
@@ -132,6 +150,8 @@ export function listInboxRows(sql: SqlStorage): InboxRow[] {
       ...(row.attachment
         ? { attachment: parseAttachment(row.attachment) }
         : {}),
+      ...(Number(row.mentions_bot) ? { mentionsBot: true } : {}),
+      ...(row.in_reply_to ? { inReplyTo: row.in_reply_to } : {}),
       receivedAt: Number(row.received_at),
       attempts: Number(row.attempts),
     }));

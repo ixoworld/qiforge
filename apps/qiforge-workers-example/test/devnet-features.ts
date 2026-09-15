@@ -1018,6 +1018,11 @@ async function main(): Promise<void> {
       mx.on(sdk.RoomEvent.Timeline, listener);
     });
 
+  // Threads are sessions (Node parity): a follow-up that must see the
+  // previous turn goes inside its thread; a bare message opens a new one.
+  const sendInThread = (rootId: string, body: string) =>
+    mx.sendMessage(roomId, rootId, { msgtype: sdk.MsgType.Text, body });
+
   const waitForBotReply = (
     after: number,
     pattern: RegExp,
@@ -1103,14 +1108,14 @@ async function main(): Promise<void> {
         // gateway is mid-restart (create_task resolves the delivery room).
         const at = new Date(Date.now() + 240_000).toISOString();
         let since = Date.now();
-        await mx.sendTextMessage(
+        const preview = await mx.sendTextMessage(
           roomId,
           `Preview a background task for me (preview_task): title "Ping check ${tag}", schedule kind "once" at exactly "${at}", intent: 'Reply with exactly the word TASKPONG-${tag} and nothing else.' Show me the preview.`,
         );
         await waitForBotReply(since, /./s);
         since = Date.now();
-        await mx.sendTextMessage(
-          roomId,
+        await sendInThread(
+          preview.event_id,
           'Yes, that looks right — call create_task now with exactly the previewed title/intent/schedule, then reply with the task id the tool returned (it starts with "task_").',
         );
         const confirmation = await waitForBotReply(since, /./s);
@@ -1314,14 +1319,15 @@ async function main(): Promise<void> {
           file: { url: up.content_uri, ...enc.file },
         };
         const sent = await mx.sendMessage(roomId, content);
-        // A caption sent right after the file lands in the same debounce
-        // window and becomes one turn with the attachment (Node bridge
-        // behaviour), so the reply has to come from the image content itself
-        // rather than from a spontaneous description of a bare file share.
-        await mx.sendMessage(roomId, {
-          msgtype: sdk.MsgType.Text,
-          body: 'What colour is the image I just shared? Answer with the colour name only.',
-        });
+        // A caption sent right after the file, in the file's thread, lands
+        // in the same debounce window and becomes one turn with the
+        // attachment (Node bridge behaviour), so the reply has to come from
+        // the image content itself rather than from a spontaneous
+        // description of a bare file share.
+        await sendInThread(
+          sent.event_id,
+          'What colour is the image I just shared? Answer with the colour name only.',
+        );
         const reply = await waitForBotReply(since, /blue/i, 180_000);
         assert.match(reply, /blue/i);
 
@@ -1538,14 +1544,14 @@ async function main(): Promise<void> {
       intent: string,
     ): Promise<string> => {
       let since = Date.now();
-      await mx.sendTextMessage(
+      const preview = await mx.sendTextMessage(
         roomId,
         `Preview a background task for me (preview_task): title "${title}", ${schedule}, dedicatedRoom "no", intent: '${intent}' Show me the preview.`,
       );
       await waitForBotReply(since, /./s);
       since = Date.now();
-      await mx.sendTextMessage(
-        roomId,
+      await sendInThread(
+        preview.event_id,
         'Yes, that looks right — call create_task now with exactly the previewed title/intent/schedule/dedicatedRoom, then reply with the task id the tool returned (it starts with "task_").',
       );
       const confirmation = await waitForBotReply(since, /./s);

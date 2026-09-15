@@ -14,6 +14,7 @@ import {
   BUNDLED_WORKERS_PLUGINS,
 } from '@ixo/oracle-runtime-workers';
 import { config } from './config';
+import { DrillPlugin } from './drill-plugin';
 
 const oracle = createOracleWorker({
   config,
@@ -21,10 +22,12 @@ const oracle = createOracleWorker({
   // composio/vfs/tasks/editor) each self-gate on their env keys; those without
   // config quietly exclude themselves. Weather + Skills are the demo extras;
   // FlowsPlugin is opt-in by design, so the example constructs it explicitly.
+  // DrillPlugin only exists with DRILL_TOOLS=true (the durable-run tests).
   plugins: [
     new WeatherPlugin(),
     new SkillsPlugin(),
     new FlowsPlugin(),
+    new DrillPlugin(),
     ...BUNDLED_WORKERS_PLUGINS,
   ],
   routes: [

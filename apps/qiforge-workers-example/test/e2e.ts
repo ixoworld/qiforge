@@ -16,11 +16,8 @@
 import assert from 'node:assert/strict';
 import { ChatClient } from './lib/chat-client';
 import {
-  APPSERVICE_BOT,
   MATRIX_BASE_URL,
-  MATRIX_SERVER_NAME,
   STATIC_ACCOUNTS,
-  appserviceRequest,
   matrixLogin,
   matrixRequest,
   mintAuthInvocation,
@@ -28,6 +25,7 @@ import {
   waitFor,
   type HarnessAccount,
 } from './lib/harness';
+import { ensureUserOracleRoom } from './lib/matrix-room';
 import {
   BOT_USER_ID,
   ORACLE_DID,
@@ -60,10 +58,6 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
     console.log(`FAILED (${Date.now() - start} ms)`);
     throw err;
   }
-}
-
-function didToAliasPart(did: string): string {
-  return did.replace(/:/g, '-');
 }
 
 async function main(): Promise<void> {
@@ -208,64 +202,16 @@ async function main(): Promise<void> {
       alice.matrixUserId,
       alice.matrixPassword,
     );
-    const aliasLocal = `${didToAliasPart(alice.did)}_${didToAliasPart(ORACLE_DID)}`;
     const roomId = await step(
       'alice creates an E2EE user↔oracle room and invites the bot',
-      async () => {
-        const existing = await fetch(
-          `${MATRIX_BASE_URL}/_matrix/client/v3/directory/room/${encodeURIComponent(`#${aliasLocal}:ixo.test`)}`,
-        );
-        if (existing.ok) {
-          const body = (await existing.json()) as { room_id: string };
-          // make sure the bot is (re)invited if it left
-          await matrixRequest(
-            aliceSession,
-            'POST',
-            `/_matrix/client/v3/rooms/${encodeURIComponent(body.room_id)}/invite`,
-            { user_id: BOT_USER_ID },
-          ).catch(() => undefined);
-          return body.room_id;
-        }
-        // `#did-ixo-*` aliases are an exclusive appservice namespace on ixo
-        // homeservers — in production the rooms appservice creates user↔oracle
-        // rooms. Mirror that: alice creates the room, the appservice bot joins
-        // and publishes the alias, alice pins it as the canonical alias.
-        const created = await matrixRequest<{ room_id: string }>(
-          aliceSession,
-          'POST',
-          '/_matrix/client/v3/createRoom',
-          {
-            preset: 'private_chat',
-            name: 'alice ↔ QiForge Workers',
-            invite: [BOT_USER_ID, APPSERVICE_BOT],
-            initial_state: [
-              {
-                type: 'm.room.encryption',
-                state_key: '',
-                content: { algorithm: 'm.megolm.v1.aes-sha2' },
-              },
-            ],
-          },
-        );
-        const alias = `#${aliasLocal}:${MATRIX_SERVER_NAME}`;
-        await appserviceRequest(
-          'POST',
-          `/_matrix/client/v3/join/${encodeURIComponent(created.room_id)}`,
-          {},
-        );
-        await appserviceRequest(
-          'PUT',
-          `/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
-          { room_id: created.room_id },
-        );
-        await matrixRequest(
-          aliceSession,
-          'PUT',
-          `/_matrix/client/v3/rooms/${encodeURIComponent(created.room_id)}/state/m.room.canonical_alias`,
-          { alias },
-        );
-        return created.room_id;
-      },
+      () =>
+        ensureUserOracleRoom({
+          session: aliceSession,
+          userDid: alice.did,
+          oracleDid: ORACLE_DID,
+          botUserId: BOT_USER_ID,
+          roomName: 'alice ↔ QiForge Workers',
+        }),
     );
     await waitForMatrixGateway(oracle.url);
     await step('bot auto-joins the room', async () => {
@@ -409,6 +355,18 @@ async function main(): Promise<void> {
         };
         mx.on(sdk.RoomEvent.Timeline, onTimeline);
       });
+    let multiplyThread = '';
+    const sendInThread = async (rootId: string, body: string) =>
+      (
+        await mx.sendEvent(roomId, sdk.EventType.RoomMessage, {
+          msgtype: sdk.MsgType.Text,
+          body,
+          'm.relates_to': {
+            rel_type: sdk.RelationType.Thread,
+            event_id: rootId,
+          },
+        })
+      ).event_id;
     try {
       await step(
         'alice sends an ENCRYPTED message; bot decrypts and replies encrypted',
@@ -417,10 +375,11 @@ async function main(): Promise<void> {
           const room = mx.getRoom(roomId);
           assert.ok(room, 'alice sees the room');
           assert.ok(mx.isRoomEncrypted(roomId), 'room is encrypted');
-          await mx.sendTextMessage(
+          const sent = await mx.sendTextMessage(
             roomId,
             'What is 8 times 9? Reply with only the number.',
           );
+          multiplyThread = sent.event_id;
           const reply = await waitForBotReply(since, /72/);
           assert.match(reply, /72/);
           // The reply must have arrived encrypted on the wire.
@@ -430,6 +389,13 @@ async function main(): Promise<void> {
             .filter((e) => e.getSender() === BOT_USER_ID)
             .at(-1);
           assert.ok(last?.isEncrypted(), 'bot reply event is E2EE');
+          // Node parity: the reply opens a thread on the message; that
+          // thread is the session (`test/e2e-threads.ts` drills the rest).
+          assert.equal(
+            last?.threadRootId,
+            multiplyThread,
+            'the reply is not threaded on the message that opened the conversation',
+          );
         },
       );
 
@@ -643,15 +609,33 @@ async function main(): Promise<void> {
         },
       );
       await step(
-        'matrix conversation keeps memory (room-default session)',
+        'a reply inside the thread continues its session; a bare message opens a new one',
         async () => {
+          assert.ok(multiplyThread, 'no thread from the first room turn');
           const since = Date.now();
-          await mx.sendTextMessage(
-            roomId,
+          await sendInThread(
+            multiplyThread,
             'And what did I just ask you to multiply? Reply with only the two numbers.',
           );
           const reply = await waitForBotReply(since, /8.*9|9.*8/);
           assert.match(reply, /8/);
+          const threaded = await client.listMessages(multiplyThread);
+          assert.ok(
+            threaded.messages.length >= 4,
+            `the thread's session holds two turns, got ${threaded.messages.length}`,
+          );
+          const since2 = Date.now();
+          const fresh = await mx.sendTextMessage(
+            roomId,
+            'Reply with exactly the word SEPARATE.',
+          );
+          await waitForBotReply(since2, /SEPARATE/);
+          const own = await client.listMessages(fresh.event_id);
+          assert.equal(
+            own.messages.length,
+            2,
+            `a bare message is its own session with one turn, got ${own.messages.length}`,
+          );
         },
       );
       await step(
@@ -692,7 +676,7 @@ async function main(): Promise<void> {
           // one-shot time is rejected at creation), near enough to observe.
           const at = new Date(Date.now() + 100_000).toISOString();
           let since = Date.now();
-          await mx.sendTextMessage(
+          const preview = await mx.sendTextMessage(
             roomId,
             `Preview a background task for me (preview_task): title "Ping check", ` +
               `schedule kind "once" at exactly "${at}", intent: ` +
@@ -701,8 +685,9 @@ async function main(): Promise<void> {
           );
           await waitForBotReply(since, /./s);
           since = Date.now();
-          await mx.sendTextMessage(
-            roomId,
+          // The confirmation continues the preview's thread — its session.
+          await sendInThread(
+            preview.event_id,
             'Yes, that looks right — call create_task now with exactly the ' +
               'previewed title/intent/schedule, then reply with the task id ' +
               'the tool returned (it starts with "task_").',

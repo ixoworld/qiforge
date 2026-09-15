@@ -20,6 +20,7 @@ import { DurableObject } from 'cloudflare:workers';
 import {
   AIMessage,
   HumanMessage,
+  isBaseMessage,
   type BaseMessage,
 } from '@langchain/core/messages';
 import {
@@ -50,6 +51,7 @@ import {
   llmEnvFromWorkerEnv,
   resolveLangsmithTracing,
   type OpenRouterLlmAdapter,
+  DEFAULT_MODEL_ID,
 } from '../core/llm';
 import { createMainAgent } from '../core/main-agent';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -140,16 +142,27 @@ import {
   type OracleWorkerEnv,
   type SessionSummary,
   type StorageStatus,
+  type RunsStatus,
+  type ContextStatus,
+  type SessionContextStatus,
+  type RunSummary,
   type TurnIdentity,
   type TurnRequest,
   type TurnResult,
   type MemorySchemaDebug,
   TURN_INTERRUPTED_MARKER,
+  type JsonString,
 } from './contracts';
 import { turnRecursionLimit } from './turn-config';
 import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
 import { decideBootDirty } from './boot-dirty';
 import { mirrorTxnId, RoomMirror } from './room-mirror';
+import { prefixSpeaker } from './speaker-prefix';
+import {
+  type ObservedMessage,
+  summarizeObservedMessages,
+} from '../matrix/group-chat-summarizer';
+import { migrateThreadSessionIds } from './session-id-migration';
 import { ReauthPrompter } from './reauth-prompt';
 import {
   createTaskScheduler,
@@ -167,8 +180,46 @@ import {
   type HistoryMessage,
   type IndexableSession,
 } from '../memory/session-history-indexer';
-import { createSseTurnStream, formatSSE, SSE_HEADERS } from './sse-stream';
+import {
+  createSseSubscriberStream,
+  runTurnFrames,
+  SSE_HEADERS,
+} from './sse-stream';
 import { parseTurnBody, type TurnBody } from './turn-body';
+import {
+  RunCoordinator,
+  type LiveRun,
+  type RunOutcome,
+} from './run-coordinator';
+import {
+  RunStore,
+  runDurabilityConfig,
+  type RunDurabilityConfig,
+  type RunRecord,
+} from './run-store';
+import {
+  runSummaryOf,
+  storedRunRequest,
+  type StoredRunRequest,
+} from './run-request';
+import {
+  createToolMarksMiddleware,
+  toolEffectOf,
+  type ToolEffect,
+} from '../core/middlewares/tool-marks';
+import { createResultCapMiddleware } from '../core/middlewares/result-cap';
+import { READ_RESULT_TOOL_NAME } from '../core/read-result-tool';
+import {
+  ContextWindowResolver,
+  contextWindowConfig,
+} from '../core/context-window';
+import { contextBudgetFor, contextKnobs } from '../core/context-budget';
+import {
+  estimateRequestTokens,
+  type ContextGuardEvent,
+} from '../core/middlewares/context-guard';
+import { fetchOpenRouterContextLengths } from '../core/openrouter-pricing';
+import { ResultStore, resultStoreKnobs } from './result-store';
 import { formatReplay } from '../matrix/replay-format';
 import { retryGateway } from './gateway-retry';
 import {
@@ -178,7 +229,10 @@ import {
 import {
   contentToText,
   isSummarizationMessage,
+  pageThreadTranscript,
+  TranscriptCursorError,
   transformTranscript,
+  type TranscriptPageOptions,
 } from './transcript';
 import { WorkersUcanService } from './ucan-service';
 
@@ -208,6 +262,27 @@ const IDLE_EVICT_MS = 5 * 24 * 60 * 60 * 1000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
 const META_LEGACY_CLEARED = 'meta:legacyCleared';
 const META_USER_DID = 'meta:userDid';
+
+/** KV key of a session's context-guard counters (`GET /debug/context?session=`). */
+const contextStatsKey = (sessionId: string): string => `ctxstats:${sessionId}`;
+
+type SessionContextCounters = Pick<
+  SessionContextStatus,
+  | 'prunes'
+  | 'hardPrunes'
+  | 'prunedResults'
+  | 'overflowRetries'
+  | 'refusals'
+  | 'lastEventAt'
+>;
+
+const EMPTY_CONTEXT_COUNTERS: SessionContextCounters = {
+  prunes: 0,
+  hardPrunes: 0,
+  prunedResults: 0,
+  overflowRetries: 0,
+  refusals: 0,
+};
 /** VFS write generation of the file at the last successful upload (see `DoVfs.writeGeneration`). */
 const META_UPLOADED_GEN = 'meta:uploadedGen';
 /**
@@ -424,6 +499,38 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (this.ctx.getWebSockets().length > 0) this.realtime.nextPingAt();
     }
     private readonly aborts = new Map<string, AbortController>();
+    /** Durable runs (docs/plans/durable-runs.md): the rows, and the live side. */
+    private runStore: RunStore | null = null;
+    private runs: RunCoordinator | null = null;
+    private readonly runConfig: RunDurabilityConfig = runDurabilityConfig(
+      this.env,
+    );
+    /** Whole tool results the result cap saved (docs/plans/context-budgets.md). */
+    private resultStore: ResultStore | null = null;
+    /**
+     * Per-model context windows; learned limits persist in this object's KV
+     * storage (`ctxwin:<model>`), so a provider's rejection is remembered
+     * across boots.
+     */
+    private readonly contextWindows = new ContextWindowResolver({
+      config: contextWindowConfig(this.env, console),
+      catalog: () =>
+        fetchOpenRouterContextLengths({
+          apiKey: this.env.OPEN_ROUTER_API_KEY,
+          logger: console,
+        }),
+      learned: {
+        get: (model) => this.ctx.storage.get<number>(`ctxwin:${model}`),
+        set: (model, tokens) => this.ctx.storage.put(`ctxwin:${model}`, tokens),
+      },
+      logger: console,
+    });
+    /**
+     * Per-session context-guard counters (`ctxstats:<session>` in KV
+     * storage; `GET /debug/context?session=`). Writes are chained so two
+     * events of one request (a soft then a hard prune) never race.
+     */
+    private contextStatsWrites: Promise<void> = Promise.resolve();
     private readonly delegations = new Map<string, { raw: string }>();
     /** Epoch-ms until which a room-state delegation lookup is not retried. */
     private delegationMissUntil = 0;
@@ -456,6 +563,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private mirror: RoomMirror | null = null;
     /** The oracle room of each session this instance resolved: spares the mirrors a row read per send. */
     private readonly sessionRooms = new Map<string, string>();
+    /** The user's main oracle room, once resolved (the session list is scoped to it). */
+    private mainRoomId: string | null = null;
     /** The throttled `delegation_required` prompt (see reauth-prompt.ts). */
     private reauthPrompter: ReauthPrompter | null = null;
     /** Room turns running right now, by Matrix event id: a gateway that asks again attaches instead of re-running. */
@@ -1015,6 +1124,29 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
       await this.matrixLedger.setup();
+      this.runStore = new RunStore(liveDb);
+      await this.runStore.setup();
+      this.resultStore = new ResultStore(liveDb, {
+        ...(this.env.TIER_BUCKET ? { bucket: this.env.TIER_BUCKET } : {}),
+        prefix: this.ctx.id.toString(),
+        ...resultStoreKnobs(this.env),
+        logger: console,
+      });
+      await this.resultStore.setup();
+      // Threads opened before the runtime adopted Node's session rule
+      // (session id = thread root event id) are renamed to it, once.
+      const renamed = await migrateThreadSessionIds(liveDb, console);
+      if (renamed.renamed > 0) this.markDirty();
+      this.runs = new RunCoordinator({
+        store: this.runStore,
+        config: this.runConfig,
+        instanceId: this.instanceId,
+        log: console,
+        requestAlarm: (at) => this.requestAlarm(at),
+        runAttempt: (live, resumed) => this.runAttempt(live, resumed),
+        checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
+        onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
+      });
 
       const core = this.core;
       // Boot-time plugin hooks + collision checks, once per object (memoised).
@@ -1031,6 +1163,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         gateway: this.gateway,
         runTurn: (req) => this.runTurn(req),
         requestAlarm: (at) => this.requestAlarm(at),
+        turnRunLive: (taskRunId) => Boolean(this.runs?.byTaskRunId(taskRunId)),
         log: console,
         ...(Number.isFinite(maxTasks) ? { maxTasksPerUser: maxTasks } : {}),
         ...(Number.isFinite(minCron) ? { minCronIntervalSec: minCron } : {}),
@@ -1038,6 +1171,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (this.taskScheduler) {
         const next = await this.taskScheduler.nextWakeAt().catch(() => null);
         if (next !== null) this.requestAlarm(Math.max(next, Date.now() + 1000));
+      }
+
+      // Runs a previous incarnation left in flight: schedule their recovery
+      // (attempts run from the alarm, never inside this boot).
+      try {
+        await this.runs.recoverOrphans();
+      } catch (err) {
+        console.error(
+          `[user-do] run recovery scan failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       // Resume (or start) legacy-blob compaction in the background: files
@@ -1268,12 +1411,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.ctx.getWebSockets().length > 0 ? this.realtime.pingTick() : null;
       const housekeepingAt =
         await this.ctx.storage.get<number>(META_HOUSEKEEPING_AT);
+      // Runs in flight in THIS instance need the keep-alive re-armed; a
+      // recovery attempt that came due needs starting. Both are cheap and
+      // do not open the database on a bare object (the coordinator only
+      // exists once the object booted).
+      const keepAliveAt = this.runs?.keepAliveDeadline(wakeAt) ?? null;
+      const recoveryAt = this.runs?.nextRecoveryAt() ?? null;
+      if (this.runs && recoveryAt !== null && recoveryAt <= wakeAt + 1000)
+        await this.runs.resumeDue(wakeAt);
       if (
         nextPingAt !== null &&
         housekeepingAt !== undefined &&
-        housekeepingAt > wakeAt + 1000
+        housekeepingAt > wakeAt + 1000 &&
+        keepAliveAt === null &&
+        (recoveryAt === null || recoveryAt > wakeAt + 1000)
       ) {
-        await this.ctx.storage.setAlarm(Math.min(nextPingAt, housekeepingAt));
+        await this.ctx.storage.setAlarm(
+          Math.min(nextPingAt, housekeepingAt, recoveryAt ?? Infinity),
+        );
         return;
       }
 
@@ -1307,6 +1462,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const now = Date.now();
       const deadlines: number[] = [];
+
+      // Durable runs: start the recovery attempts that are due (the boot
+      // above may have just scheduled them), then keep the alarm inside the
+      // keep-alive horizon while anything executes.
+      if (this.runs) {
+        try {
+          await this.runs.resumeDue(now);
+        } catch (err) {
+          console.error(
+            `[user-do] run recovery tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        const keepAlive = this.runs.keepAliveDeadline(now);
+        if (keepAlive !== null) deadlines.push(keepAlive);
+        const nextRecovery = this.runs.nextRecoveryAt();
+        if (nextRecovery !== null)
+          deadlines.push(Math.max(nextRecovery, now + 1000));
+      }
 
       if (this.dirty && this.db) {
         try {
@@ -1364,7 +1537,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // of DO storage (see sqlite/page-tier.ts). After the flush above (the
       // upload reads hot rows, not R2) and never over an in-flight one (it
       // holds a snapshot). A pass is capped; more work re-arms soon.
-      if (this.db?.tierEnabled && !this.flushInFlight) {
+      if (
+        this.db?.tierEnabled &&
+        !this.flushInFlight &&
+        (this.runs?.activeCount ?? 0) === 0
+      ) {
         const next = await this.tierTick(this.db, now);
         if (next !== null) deadlines.push(next);
       }
@@ -1375,7 +1552,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // above ran first; the wipe additionally verifies the upstream copy
       // matches the working copy, else the copy stays until it does.
       const idle = now - lastAccess > IDLE_EVICT_MS;
-      if (idle && !this.dirty && this.db && deadlines.length === 0) {
+      if (
+        idle &&
+        !this.dirty &&
+        this.db &&
+        deadlines.length === 0 &&
+        (this.runs?.size ?? 0) === 0
+      ) {
         if (await this.ownerCopyIsCurrent(this.db)) {
           await this.wipeWorkingCopy(this.db);
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
@@ -1541,6 +1724,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
         if (room) {
           roomId = room.roomId;
+          if (!o.roomId) this.mainRoomId = room.roomId;
           // The marker is a waited, non-durable send: it must never be
           // replayed after a gateway restart (its event id IS the session id,
           // an orphan marker would be a ghost session). Instead it retries
@@ -1583,16 +1767,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       o: { limit?: number; offset?: number } = {},
     ): Promise<{ sessions: SessionSummary[]; total: number }> {
       await this.ready(identity);
-      // Task runs re-enter the agent as `task:<id>` sessions; like the Node
-      // runtime (which lists only the user's main room) keep them out of
-      // the user's session list.
+      // Node parity (`SessionsService.listSessions`): the list is the user's
+      // MAIN oracle room only — Portal sessions and the threads opened by
+      // room messages there. Threads in dedicated task rooms (or any other
+      // room) stay out of it, and task runs (`task:<id>`) are hidden
+      // whichever room they deliver to. A user without an oracle room sees
+      // every session, as on Node.
+      const mainRoomId = await this.resolveMainRoomId(identity.userDid);
       const { sessions, total } = await this.sessions!.listSessions(
-        undefined,
+        mainRoomId ?? undefined,
         o.limit ?? 20,
         o.offset ?? 0,
         TASK_SESSION_PREFIX,
       );
       return { sessions: sessions.map(toSummary), total };
+    }
+
+    /**
+     * The user↔oracle room, resolved once per instance. `null` is the
+     * definitive "no oracle room"; a transient gateway failure retries and
+     * then fails the request rather than answering with the wrong list.
+     */
+    private async resolveMainRoomId(userDid: string): Promise<string | null> {
+      if (this.mainRoomId) return this.mainRoomId;
+      const room = await retryGateway(() =>
+        this.gateway.resolveUserRoom(userDid),
+      );
+      if (room) this.mainRoomId = room.roomId;
+      return room?.roomId ?? null;
     }
 
     async deleteSession(
@@ -1615,6 +1817,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const deleted = await this.sessions!.deleteSession(sessionId);
       if (deleted) {
         await this.saver!.deleteThread(sessionId);
+        await this.resultStore
+          ?.deleteForSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the saved tool results of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        await this.ctx.storage.delete(contextStatsKey(sessionId));
         this.markDirty();
       }
       return deleted;
@@ -1721,6 +1931,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       const { messages: dtos } = await transformTranscript(messages);
       return JSON.stringify(dtos);
+    }
+
+    async listMessagesPage(
+      identity: TurnIdentity,
+      sessionId: string,
+      options: TranscriptPageOptions,
+    ): Promise<
+      { ok: true; json: string } | { ok: false; status: 400; message: string }
+    > {
+      await this.ready(identity);
+      try {
+        const page = await pageThreadTranscript(
+          this.saver!,
+          sessionId,
+          options,
+        );
+        return { ok: true, json: JSON.stringify(page) };
+      } catch (err) {
+        if (err instanceof TranscriptCursorError)
+          return { ok: false, status: 400, message: err.message };
+        throw err;
+      }
     }
 
     /**
@@ -1861,7 +2093,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return { present: false, source: 'none' };
     }
 
+    /**
+     * `POST /messages/abort`: stop the session's active run. The run is
+     * closed as `aborted` with the text streamed so far kept on its row;
+     * a queued run is dropped. (A client that merely disconnects does NOT
+     * reach here — runs outlive their connections.)
+     */
     async abortTurn(sessionId: string): Promise<boolean> {
+      if (this.runs?.abortSession(sessionId)) return true;
       const controller = this.aborts.get(sessionId);
       if (!controller) return false;
       controller.abort();
@@ -1904,8 +2143,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             toolCalls: [],
             replayed: true,
           };
-        case 'interrupted':
+        case 'interrupted': {
+          // The object reset mid-turn. The run may be recovering (durable
+          // runs): attach to it and answer with its reply; only a run that
+          // is over without a reply is refused.
+          const attached = existing?.requestId
+            ? await this.attachToRun(existing.requestId, req)
+            : null;
+          if (attached) return attached;
           throw new Error(`${TURN_INTERRUPTED_MARKER} (${eventId})`);
+        }
         case 'run':
           break;
       }
@@ -1952,43 +2199,78 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         });
         card.emit(req.requestId, 'routing');
       }
-      const { agent, stateInput, config, abortController, turnDisposables } =
-        await this.prepareTurn(req, {
-          message: req.message,
-          timezone: req.identity.timezone,
-          model: req.model,
-          attachments: req.attachments,
-        });
-      try {
-        const result = (await agent.invoke(stateInput, config)) as {
-          messages?: BaseMessage[];
-        };
-        const messages = result.messages ?? [];
-        const text = lastAiText(messages);
-        await this.afterTurn(req.sessionId, messages);
-        await this.runTurnDisposables(turnDisposables);
-        card?.emit(req.requestId, 'delivering');
-        const toolCalls = messages
-          .filter((m): m is AIMessage => m.type === 'ai')
-          .flatMap((m) =>
-            (m.tool_calls ?? []).map((t) => ({
-              name: t.name,
-              status: 'done' as const,
-            })),
-          );
+      // Every turn is a durable run (docs/plans/durable-runs.md): recorded
+      // before the first model call, kept alive by the alarm, resumed after
+      // a reset. Headless turns (Matrix, tasks) simply await the outcome.
+      const { live } = await this.runs!.begin({
+        runId: crypto.randomUUID(),
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        client: req.client,
+        request: JSON.stringify(
+          storedRunRequest(req, { timezone: req.identity.timezone }),
+        ),
+        multitask: req.multitask ?? this.runConfig.multitaskDefault,
+        ...(req.taskRunId ? { taskRunId: req.taskRunId } : {}),
+      });
+      const outcome = await live.done;
+      if (outcome.status !== 'finished') {
+        const reason =
+          outcome.error instanceof Error
+            ? outcome.error.message
+            : outcome.error !== undefined
+              ? String(outcome.error)
+              : `turn ${outcome.status}`;
+        throw new Error(reason);
+      }
+      card?.emit(req.requestId, 'delivering');
+      return {
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        text: outcome.text,
+        ...(outcome.messageId !== undefined
+          ? { messageId: outcome.messageId }
+          : {}),
+        toolCalls: outcome.toolCalls ?? [],
+      };
+    }
+
+    /**
+     * A Matrix turn asked about again after this object reset: hand back the
+     * reply of its (recovering or finished) run instead of refusing it.
+     */
+    private async attachToRun(
+      requestId: string,
+      req: TurnRequest,
+    ): Promise<TurnResult | null> {
+      const live = this.runs?.byRequestId(requestId);
+      if (live) {
+        console.log(
+          `[user-do] turn ${requestId} for ${req.eventId} is being recovered; the gateway attaches to it`,
+        );
+        const outcome = await live.done;
+        if (outcome.status !== 'finished') return null;
         return {
           sessionId: req.sessionId,
           requestId: req.requestId,
-          text,
-          ...(lastAiMessageId(messages) !== undefined
-            ? { messageId: lastAiMessageId(messages) }
-            : {}),
-          toolCalls,
+          text: outcome.text,
+          ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
+          toolCalls: outcome.toolCalls ?? [],
+          replayed: true,
         };
-      } finally {
-        if (this.aborts.get(req.sessionId) === abortController)
-          this.aborts.delete(req.sessionId);
       }
+      const record = await this.runStore?.getByRequestId(requestId);
+      if (record?.status === 'finished') {
+        return {
+          sessionId: req.sessionId,
+          requestId: req.requestId,
+          text: record.partialText ?? '',
+          ...(record.messageId ? { messageId: record.messageId } : {}),
+          toolCalls: [],
+          replayed: true,
+        };
+      }
+      return null;
     }
 
     /**
@@ -2261,7 +2543,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.saver = null;
       this.sessions = null;
       this.matrixLedger = null;
+      this.runStore = null;
+      this.runs = null;
+      this.resultStore = null;
       this.sessionRooms.clear();
+      this.mainRoomId = null;
       this.ambient = null;
       this.secretsService = null;
       this.byo = null;
@@ -2574,6 +2860,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           console,
         );
       }
+      const joinMatch = /^\/runs\/([^/]+)$/.exec(url.pathname);
+      if (joinMatch && request.method === 'GET')
+        return this.joinRun(request, decodeURIComponent(joinMatch[1]!), url);
       const match = /^\/turn\/([^/]+)$/.exec(url.pathname);
       if (!match || request.method !== 'POST')
         return new Response('Not found', { status: 404 });
@@ -2661,75 +2950,428 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
 
+      // A streamed turn is a durable run: recorded, kept alive and resumable
+      // (docs/plans/durable-runs.md). The response is one subscriber of the
+      // run's buffer; the run itself outlives it.
+      this.replayToRoom(req, body.message, 'user');
+      const agActionNames = (body.agActions ?? []).map((a) => a.name);
+      const { live, queued } = await this.runs!.begin({
+        runId: crypto.randomUUID(),
+        sessionId,
+        requestId,
+        client: 'portal',
+        request: JSON.stringify(
+          storedRunRequest(req, {
+            timezone: body.timezone,
+            agActionNames,
+            stream: true,
+          }),
+        ),
+        multitask: body.multitask ?? this.runConfig.multitaskDefault,
+      });
+      if (queued)
+        live.buffer.push('router.update', {
+          step: 'Queued…',
+          sessionId,
+          requestId,
+          runId: live.runId,
+          queued: true,
+        });
+      const responseStream = createSseSubscriberStream({
+        replay: live.buffer.tailAfter(0),
+        buffer: live.buffer,
+        onCancel: () =>
+          console.log(
+            `[user-do] client left run ${live.runId} (${sessionId}); the run continues`,
+          ),
+      });
+      return new Response(responseStream, {
+        headers: {
+          ...SSE_HEADERS,
+          'x-request-id': requestId,
+          'x-run-id': live.runId,
+        },
+      });
+    }
+
+    /**
+     * `GET /runs/:id?after=<seq>` — re-join a run: replay the frames after
+     * the cursor (packed segments, then the live tail) and stay attached
+     * until its `done` frame. A run that already ended replays what is left
+     * and closes with a synthetic `done` carrying its final state.
+     */
+    private async joinRun(
+      request: Request,
+      runId: string,
+      url: URL,
+    ): Promise<Response> {
+      const identity = JSON.parse(
+        request.headers.get('x-identity') ?? '{}',
+      ) as TurnIdentity;
+      try {
+        await this.ready(identity);
+      } catch (err) {
+        return readyFailureResponse(err);
+      }
+      const afterRaw = Number(url.searchParams.get('after') ?? '0');
+      const after =
+        Number.isFinite(afterRaw) && afterRaw > 0 ? Math.floor(afterRaw) : 0;
+      const joined = await this.runs!.join(runId, after);
+      if (!joined)
+        return Response.json(
+          { statusCode: 404, message: `Run ${runId} not found` },
+          { status: 404 },
+        );
+      const { record, replay, buffer } = joined;
+      const ended = !buffer || buffer.isClosed;
+      const stream = createSseSubscriberStream({
+        replay,
+        ...(buffer && !buffer.isClosed ? { buffer } : {}),
+        ...(ended
+          ? {
+              trailer: {
+                event: 'done',
+                data: {
+                  runId,
+                  status: record.status,
+                  ...(record.messageId ? { messageId: record.messageId } : {}),
+                  ...(record.partialText && record.status !== 'finished'
+                    ? { partialText: record.partialText }
+                    : {}),
+                  replayed: true,
+                },
+              },
+            }
+          : {}),
+      });
+      return new Response(stream, {
+        headers: {
+          ...SSE_HEADERS,
+          'x-request-id': record.requestId,
+          'x-run-id': runId,
+          'x-run-status': record.status,
+        },
+      });
+    }
+
+    /**
+     * One attempt of a run (the coordinator's `runAttempt` host hook): build
+     * the agent for the stored request, stream the turn's frames into the
+     * run's buffer, and report the outcome. `resumed` attempts hand the
+     * graph no new input, so LangGraph continues from the checkpoint's
+     * pending node; the tool-mark middleware keeps that safe.
+     */
+    private async runAttempt(
+      live: LiveRun,
+      resumed: boolean,
+    ): Promise<RunOutcome> {
+      const stored = JSON.parse(live.record.request) as StoredRunRequest;
+      const req = stored.turn;
       const {
         agent,
         stateInput,
         config,
-        abortController,
+        turnDisposables,
         byoNotice,
         byoProvider,
-        turnDisposables,
-      } = await this.prepareTurn(req, body);
-      this.replayToRoom(req, body.message, 'user');
-      const agActionNames = new Set((body.agActions ?? []).map((a) => a.name));
+        toolOutputCapChars,
+      } = await this.prepareTurn(
+        req,
+        {
+          message: req.message,
+          timezone: stored.timezone ?? req.identity.timezone,
+          model: req.model,
+          ...(resumed ? {} : { attachments: req.attachments }),
+        },
+        {
+          runId: live.runId,
+          abortController: live.abort,
+          resumed,
+          continuation: resumed ? live.continuation : null,
+        },
+      );
+      const sessionId = req.sessionId;
       const sink = {
         emit: (eventName: string, payload: Record<string, unknown>) => {
-          void payload;
-          void eventName;
+          if (live.buffer.isClosed) return;
+          live.buffer.push(eventName, payload);
         },
       };
-      let write: ((name: string, payload: unknown) => void) | null = null;
-      sink.emit = (eventName, payload) => write?.(eventName, payload);
       this.events.register(sessionId, sink);
-      const events = agent.streamEvents(stateInput, {
+      if (byoNotice)
+        sink.emit('error', {
+          ...byoNotice,
+          sessionId,
+          requestId: req.requestId,
+        });
+      const events = agent.streamEvents(resumed ? null : stateInput, {
         ...config,
         version: 'v2',
       });
       const capture: BaseMessage[] = [];
-      const sse = createSseTurnStream({
-        events: tapMessages(events, capture),
-        sessionId,
-        requestId,
-        abortController,
-        mirror: (eventName, payload) =>
-          this.events.emitToTaps(eventName, payload),
-        agActionNames,
-        byoProvider,
-        onComplete: async () => {
-          this.replayToRoom(req, lastAiText(capture), 'oracle');
-          await this.afterTurn(sessionId, capture);
-          await this.runTurnDisposables(turnDisposables);
-        },
-        onError: (err) => {
-          console.error(`[user-do] turn ${requestId} failed:`, err);
-          void this.runTurnDisposables(turnDisposables);
-        },
-        log: (m) => console.log(`[user-do] ${m}`),
-      });
-      // Let plugin-emitted events (ctx.emit.*) ride the same SSE stream.
-      const [clientBranch, emitterBranch] = sse.tee();
-      void emitterBranch.cancel();
-      write = null;
-      const merged = mergeWithEmitter(clientBranch, (register) => {
-        write = register;
-      });
-      // A BYO turn that degraded to the platform model tells the user so —
-      // the Node runtime emits the same notice on the SSE `error` channel.
-      if (byoNotice) sink.emit('error', { ...byoNotice, sessionId, requestId });
-      const cleanup = () => {
+      let completed = false;
+      try {
+        const outcome = await runTurnFrames({
+          events: tapMessages(events, capture),
+          sink: live.buffer,
+          sessionId,
+          requestId: req.requestId,
+          runId: live.runId,
+          resumed,
+          abortController: live.abort,
+          mirror: (eventName, payload) =>
+            this.events.emitToTaps(eventName, payload),
+          agActionNames: new Set(stored.agActionNames ?? []),
+          byoProvider,
+          toolOutputCapChars,
+          messageIdOf: () => lastAiMessageId(capture),
+          onFrame: () => this.runs?.touchKeepAlive(),
+          onComplete: async () => {
+            completed = true;
+            this.replayToRoom(req, lastAiText(capture), 'oracle');
+            await this.afterTurn(sessionId, capture);
+          },
+          onError: (err) => {
+            console.error(`[user-do] turn ${req.requestId} failed:`, err);
+          },
+          log: (m) => console.log(`[user-do] ${m}`),
+        });
+        const toolCalls = capture
+          .filter((m): m is AIMessage => m.type === 'ai')
+          .flatMap((m) =>
+            (m.tool_calls ?? []).map((t) => ({
+              name: t.name,
+              status: 'done' as const,
+            })),
+          );
+        const text = completed ? lastAiText(capture) : outcome.fullText;
+        const messageId = completed ? lastAiMessageId(capture) : undefined;
+        return {
+          status:
+            outcome.status === 'completed'
+              ? 'finished'
+              : outcome.status === 'aborted'
+                ? 'aborted'
+                : 'failed',
+          text: (live.continuation ?? '') + text,
+          ...(messageId ? { messageId } : {}),
+          toolCalls,
+          ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
+        };
+      } finally {
         this.events.unregister(sessionId, sink);
-        if (this.aborts.get(sessionId) === abortController)
+        await this.runTurnDisposables(turnDisposables);
+        if (this.aborts.get(sessionId) === live.abort)
           this.aborts.delete(sessionId);
-      };
-      const finalStream = merged.pipeThrough(
-        new TransformStream<Uint8Array, Uint8Array>({
-          transform: (chunk, controller) => controller.enqueue(chunk),
-          flush: cleanup,
-        }),
-      );
-      return new Response(finalStream, {
-        headers: { ...SSE_HEADERS, 'x-request-id': requestId },
+      }
+    }
+
+    /** Latest checkpoint id of a session — recovery's progress marker. */
+    private async checkpointIdOf(sessionId: string): Promise<string | null> {
+      const tuple = await this.saver
+        ?.getTupleWithoutMessages({ configurable: { thread_id: sessionId } })
+        .catch(() => undefined);
+      return tuple?.checkpoint.id ?? null;
+    }
+
+    /**
+     * A run reached a terminal state. A recovered task run has no scheduler
+     * continuation waiting on it any more: hand the result (or the failure)
+     * to the scheduler so it is delivered / recorded as it would have been.
+     */
+    private async onRunEnded(
+      record: RunRecord,
+      outcome: RunOutcome,
+    ): Promise<void> {
+      if (!record.taskRunId || !this.taskScheduler) return;
+      if (this.taskScheduler.isRunActive(record.taskRunId)) return;
+      if (outcome.status === 'finished')
+        await this.taskScheduler.completeRecoveredRun(
+          record.taskRunId,
+          outcome.text,
+        );
+      else
+        await this.taskScheduler.failRecoveredRun(
+          record.taskRunId,
+          outcome.status === 'interrupted'
+            ? 'interrupted: the object was reset while the run was in progress and recovery did not complete'
+            : `${outcome.status}: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error ?? outcome.status)}`,
+        );
+    }
+
+    /** `GET /sessions/:id/run` — the session's active run, if any. */
+    async sessionRun(
+      identity: TurnIdentity,
+      sessionId: string,
+    ): Promise<RunSummary | null> {
+      await this.ready(identity);
+      const live = this.runs?.activeForSession(sessionId);
+      const record =
+        live?.record ?? (await this.runStore?.activeForSession(sessionId));
+      return record ? runSummaryOf(record) : null;
+    }
+
+    /** `GET /debug/context?model=` — the context budget a model gets here. */
+    async contextStatus(
+      identity: TurnIdentity,
+      model?: string,
+      byoProvider?: string,
+      sessionId?: string,
+    ): Promise<ContextStatus> {
+      await this.ready(identity);
+      const llm = this.ambient?.llm;
+      const modelId =
+        model ??
+        (llm && isProviderAdapter(llm)
+          ? llm.modelForRole('main')
+          : DEFAULT_MODEL_ID);
+      const window = await this.contextWindows.resolve(modelId, {
+        ...(byoProvider ? { byoProvider } : {}),
       });
+      const budget = contextBudgetFor(window, contextKnobs(this.env, console));
+      const stats = (await this.resultStore?.stats()) ?? {
+        rows: 0,
+        sqliteBytes: 0,
+        r2Rows: 0,
+        r2Bytes: 0,
+      };
+      return {
+        model: modelId,
+        ...(byoProvider ? { byoProvider } : {}),
+        window: {
+          tokens: window.tokens,
+          origin: window.origin,
+          ...(window.catalogId ? { catalogId: window.catalogId } : {}),
+        },
+        budget: {
+          summarizeAtTokens: budget.summarizeAtTokens,
+          pruneAtTokens: budget.pruneAtTokens,
+          resultCapChars: budget.resultCapChars,
+          requestCapTokens: budget.requestCapTokens,
+          outputReserveTokens: budget.outputReserveTokens,
+          keepMessages: budget.keepMessages,
+          ...(budget.summarizeTriggerMessages !== undefined
+            ? { summarizeTriggerMessages: budget.summarizeTriggerMessages }
+            : {}),
+        },
+        results: {
+          ...stats,
+          tier: this.env.TIER_BUCKET ? 'sqlite+r2' : 'sqlite',
+        },
+        ...(sessionId
+          ? { session: await this.sessionContextStatus(sessionId) }
+          : {}),
+      };
+    }
+
+    /**
+     * One session's working context plus the guard's counters: what the
+     * next request starts from (the messages the latest checkpoint carries,
+     * a summary plus the kept tail once the history was condensed — the
+     * transcript rows are never condensed and are listed separately) and
+     * what earlier requests needed (pruning, a provider overflow, a
+     * refusal).
+     */
+    private async sessionContextStatus(
+      sessionId: string,
+    ): Promise<SessionContextStatus | null> {
+      if (!(await this.sessions!.getSession(sessionId))) return null;
+      const tuple = await this.saver!.getTuple({
+        configurable: { thread_id: sessionId },
+      });
+      const channel: unknown = tuple?.checkpoint.channel_values.messages;
+      const context: BaseMessage[] = Array.isArray(channel)
+        ? channel.filter(isBaseMessage)
+        : [];
+      const thread = await this.saver!.listThreadMessages(sessionId);
+      const stats = await this.ctx.storage.get<SessionContextCounters>(
+        contextStatsKey(sessionId),
+      );
+      return {
+        id: sessionId,
+        threadMessages: thread.length,
+        contextMessages: context.length,
+        contextSummaries: context.filter(isSummarizationMessage).length,
+        contextToolMessages: context.filter((m) => m.type === 'tool').length,
+        contextTokens: estimateRequestTokens({
+          systemTokens: 0,
+          schemaTokens: 0,
+          messages: context,
+        }),
+        ...(stats ?? EMPTY_CONTEXT_COUNTERS),
+      };
+    }
+
+    /** Fold a guard event into the session's stored counters (ordered, never throws). */
+    private recordContextEvent(
+      sessionId: string,
+      event: ContextGuardEvent,
+    ): void {
+      const key = contextStatsKey(sessionId);
+      this.contextStatsWrites = this.contextStatsWrites
+        .then(async () => {
+          const prev =
+            (await this.ctx.storage.get<SessionContextCounters>(key)) ??
+            EMPTY_CONTEXT_COUNTERS;
+          const next: SessionContextCounters = {
+            ...prev,
+            lastEventAt: new Date().toISOString(),
+          };
+          switch (event.kind) {
+            case 'prune':
+              next.prunes += 1;
+              if (event.stage !== 'soft') next.hardPrunes += 1;
+              next.prunedResults += event.pruned;
+              break;
+            case 'overflow-retry':
+              next.overflowRetries += 1;
+              break;
+            case 'refused':
+              next.refusals += 1;
+              break;
+          }
+          await this.ctx.storage.put(key, next);
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[context] could not record a ${event.kind} event for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }
+
+    /** `GET /debug/runs` — recent runs with their marks and live state. */
+    async runsStatus(): Promise<RunsStatus> {
+      const userDid =
+        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+      if (!this.db && userDid) await this.ready({ userDid });
+      const store = this.runStore;
+      const records = store ? await store.listRecent(50) : [];
+      const runs: RunsStatus['runs'] = [];
+      for (const record of records) {
+        const marks = store ? await store.listMarks(record.runId) : [];
+        runs.push({
+          ...runSummaryOf(record),
+          marks: marks.map((m) => ({
+            toolCallId: m.toolCallId,
+            toolName: m.toolName,
+            effect: m.effect,
+            startedAt: m.startedAt,
+            doneAt: m.doneAt,
+            outcome: m.outcome,
+            attempts: m.attempts,
+          })),
+          segments: store ? await store.countSegments(record.runId) : 0,
+          attempts: record.attempts,
+          nextAttemptAt: record.nextAttemptAt,
+          error: record.error,
+          taskRunId: record.taskRunId,
+        });
+      }
+      return {
+        config: { ...this.runConfig },
+        live: this.runs?.snapshot() ?? [],
+        runs,
+      };
     }
 
     // ── turn plumbing ──────────────────────────────────────────────────────
@@ -2930,6 +3572,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         TurnBody,
         'message' | 'timezone' | 'model' | 'tools' | 'agActions' | 'attachments'
       >,
+      run: {
+        runId: string;
+        abortController: AbortController;
+        /** A recovery attempt: no new input, the graph continues from the checkpoint. */
+        resumed: boolean;
+        /** The reply text the user already received (resumed attempts). */
+        continuation: string | null;
+      },
     ) {
       const core = this.core;
       const baseAmbient = this.ambient!;
@@ -3004,6 +3654,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }
         : baseAmbient;
       const effectiveModel = byoTurn ? byoTurn.byoModelId : requestedModel;
+      // The turn's context budget, from the main model's window: the model
+      // id the turn will actually run on (platform default, a per-request
+      // choice, or the BYO credential's model) — see docs/plans/context-budgets.md.
+      const mainModelId = byoTurn
+        ? byoTurn.mainModelId
+        : (requestedModel ??
+          (isProviderAdapter(baseAmbient.llm)
+            ? baseAmbient.llm.modelForRole('main')
+            : DEFAULT_MODEL_ID));
+      const windowResolution = await this.contextWindows.resolve(mainModelId, {
+        ...(byoTurn ? { byoProvider: byoTurn.provider } : {}),
+      });
+      const contextBudget = contextBudgetFor(
+        windowResolution,
+        contextKnobs(this.env, console),
+      );
       if (
         req.client === 'matrix' &&
         !(await sessions.getSession(req.sessionId))
@@ -3016,8 +3682,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           oracleEntityDid: core.identity.entityDid,
         });
       }
-      this.aborts.get(req.sessionId)?.abort();
-      const abortController = new AbortController();
+      // The run coordinator already applied the session's multitask rule
+      // (aborted or queued behind the previous run); this attempt's signal
+      // is the run's own.
+      const abortController = run.abortController;
       this.aborts.set(req.sessionId, abortController);
 
       // Every turn runs inside the user's oracle room, like the Node
@@ -3133,12 +3801,55 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const hostRoomTitle = opts.hooks?.getRoomTitle;
       const hostSafetyModel = opts.hooks?.safetyModel;
 
-      const { agent, context } = await createMainAgent({
+      // A resumed attempt reads the client's tool surface back from the
+      // checkpointed state (the run row does not store the catalogue).
+      const priorSurface = priorState as {
+        browserTools?: TurnBody['tools'];
+        agActions?: TurnBody['agActions'];
+      };
+      const browserTools =
+        body.tools ??
+        (run.resumed ? priorSurface.browserTools : undefined) ??
+        [];
+      const agActions =
+        body.agActions ??
+        (run.resumed ? priorSurface.agActions : undefined) ??
+        [];
+
+      // Write-ahead tool marks + the resume policy (tool-marks.ts). The
+      // effect map is filled from the build below; the closure reads it at
+      // call time, so the middleware can be created before the agent.
+      const toolEffects = new Map<string, ToolEffect>();
+      const marksMiddleware = createToolMarksMiddleware({
+        runId: run.runId,
+        store: this.runStore!,
+        effectOf: (name) => toolEffects.get(name) ?? toolEffectOf({ name }),
+        continuation: run.continuation,
+        logger: console,
+      });
+      // Every tool result above the budget's cap is saved whole and handed
+      // to the model as head + tail + handle (result-cap.ts); applied to
+      // sub-agents too through `toolMiddlewares`.
+      const resultStore = this.resultStore;
+      const resultCap = {
+        capChars: contextBudget.resultCapChars,
+        sessionId: req.sessionId,
+        ...(resultStore ? { store: resultStore } : {}),
+        exempt: new Set([READ_RESULT_TOOL_NAME]),
+        logger: console,
+      };
+      // The middleware covers what the wrapper cannot: a sub-agent's reply,
+      // which is a tool result to the main agent. Wrapped tools are capped
+      // inside the wrapper (already under the cap by the time it runs).
+      const capMiddleware = createResultCapMiddleware(resultCap);
+
+      const built = await createMainAgent({
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
         availablePlugins: core.availablePlugins,
         byoProvider: byoTurn?.provider,
+        contextBudget,
         ambient: {
           ...ambient,
           attachments: attachmentAccess,
@@ -3150,6 +3861,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           middlewares: this.workStatus
             ? [createWorkStatusMiddleware({ producer: this.workStatus })]
             : [],
+          // Applied to the main agent AND every sub-agent: a sub-agent's
+          // own tool calls are marked and capped too.
+          toolMiddlewares: [marksMiddleware, capMiddleware],
+          resultCap,
+          onContextOverflow: (error) =>
+            this.contextWindows.learnFromError(mainModelId, error, {
+              ...(byoTurn ? { byoProvider: byoTurn.provider } : {}),
+            }),
+          onContextEvent: (event) =>
+            this.recordContextEvent(req.sessionId, event),
+          ...(resultStore
+            ? {
+                readResult: (id: string, offset: number, length: number) =>
+                  resultStore.read(id, offset, length),
+              }
+            : {}),
           ...(hostRoomTitle
             ? {
                 getRoomTitle: (roomId: string) =>
@@ -3185,25 +3912,53 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // AG-UI plugins turn these into tools at build time
           // (`getRequestTools` reads `history.state`), so they must be here
           // and not only in the graph input.
-          browserTools: body.tools ?? [],
-          agActions: body.agActions ?? [],
+          browserTools,
+          agActions,
         },
         checkpointer: saver,
         abortSignal: abortController.signal,
       });
+      const { agent, context } = built;
+      for (const [name, effect] of built.toolEffects)
+        toolEffects.set(name, effect);
 
       const attachmentKwargs =
         prepared && prepared.metas.length > 0
           ? { attachment: prepared.metas[0], attachments: prepared.metas }
           : {};
+      // Node's `MessagesService` metadata for room messages: who spoke
+      // (the group-chat tools and prompts read it), and in a group room the
+      // `[DisplayName]: ` prefix on the message itself.
+      const speakerName =
+        req.senderDisplayName ??
+        req.identity.matrixUserId ??
+        req.identity.userDid;
+      const speakerKwargs =
+        req.client === 'matrix'
+          ? {
+              senderDid: req.identity.userDid,
+              ...(req.identity.matrixUserId
+                ? { senderMatrixUserId: req.identity.matrixUserId }
+                : {}),
+              senderDisplayName: speakerName,
+              threadId: req.sessionId,
+              ...(req.eventId ? { eventId: req.eventId } : {}),
+            }
+          : {};
+      const rawContent = prepared ? prepared.content : body.message;
+      const content =
+        req.client === 'matrix' && req.roomKind === 'group'
+          ? prefixSpeaker(rawContent, speakerName)
+          : rawContent;
       const stateInput = {
         messages: [
           new HumanMessage({
-            content: prepared ? prepared.content : body.message,
+            content,
             additional_kwargs: {
               timestamp: new Date().toISOString(),
               oracleName: core.identity.name,
               msgFromMatrixRoom: req.client === 'matrix',
+              ...speakerKwargs,
               ...attachmentKwargs,
             },
           }),
@@ -3224,8 +3979,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         config: { did: req.identity.userDid },
         client: req.client,
         ...metadataGraphInput(meta, priorMeta),
-        browserTools: body.tools ?? [],
-        agActions: body.agActions ?? [],
+        browserTools,
+        agActions,
       };
       // LangSmith: metadata is attached unconditionally (inert without a
       // tracer); the explicit tracer only when this turn is traced (global
@@ -3252,6 +4007,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoNotice,
         byoProvider: byoTurn?.provider,
         turnDisposables,
+        toolOutputCapChars: contextBudget.resultCapChars,
       };
     }
 
@@ -3358,6 +4114,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
     }
 
+    /**
+     * Channel-memory compaction for the gateway's group rooms
+     * (`src/matrix/group-chat.ts`): the platform's small model distils a
+     * batch of room messages with the Node summarizer's prompt. Needs no
+     * user file — only this object's model adapter.
+     */
+    async summarizeGroupMessages(messages: JsonString): Promise<string | null> {
+      const parsed: unknown = JSON.parse(messages);
+      if (!Array.isArray(parsed) || parsed.length === 0) return null;
+      const model = (this.ambient?.llm ?? this.core.llm).get('session-title', {
+        temperature: 0.2,
+        maxTokens: 800,
+      });
+      return summarizeObservedMessages(
+        model,
+        parsed as ObservedMessage[],
+        console,
+      );
+    }
+
     private async generateTitle(
       messages: BaseMessage[],
     ): Promise<string | null> {
@@ -3427,51 +4203,4 @@ async function* tapMessages(
     }
     yield evt;
   }
-}
-
-/**
- * Merge the turn's SSE stream with plugin-emitted events. Plugin events are
- * written straight into the same byte stream as they happen.
- */
-function mergeWithEmitter(
-  base: ReadableStream<Uint8Array>,
-  onRegister: (write: (eventName: string, payload: unknown) => void) => void,
-): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  let closed = false;
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      onRegister((eventName, payload) => {
-        if (closed) return;
-        try {
-          controller.enqueue(encoder.encode(formatSSE(eventName, payload)));
-        } catch {
-          closed = true;
-        }
-      });
-      const reader = base.getReader();
-      void (async () => {
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (!closed) controller.enqueue(value);
-          }
-        } catch (err) {
-          if (!closed) controller.error(err);
-        } finally {
-          closed = true;
-          try {
-            controller.close();
-          } catch {
-            /* already closed */
-          }
-        }
-      })();
-    },
-    cancel() {
-      closed = true;
-      void base.cancel();
-    },
-  });
 }

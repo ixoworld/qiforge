@@ -159,6 +159,37 @@ context, every earlier message still lists (Node parity) and only the
 summary message itself is hidden. `GET /debug/sessions/:id` reports the
 counts.
 
+### Turns: threads are sessions
+
+A room message is answered inside a thread, never in the main timeline, and
+the thread is the session — the Node runtime's rule, kept exactly:
+
+- A bare message roots a thread at itself; the reply opens the thread and
+  the session id is the message's event id. The next bare message is a new
+  thread and a new session.
+- A message inside a thread continues the thread's session. A quote-reply
+  from a client without native threads (`m.in_reply_to` only) is resolved up
+  the reply chain to its thread root (`src/matrix/reply-chain.ts`; an
+  unreachable ancestor ends the walk at the last event reached, as on Node).
+- A Portal session's id is its marker event, its turns are mirrored into the
+  marker's thread, and a reply typed inside that thread continues the Portal
+  session. An HTTP turn on a room-born session is mirrored into its thread
+  the same way. Nothing is mirrored into the main timeline.
+- `GET /sessions` is scoped to the user's main oracle room (the room the
+  alias names, resolved once per object instance): Portal sessions and the
+  threads opened there. Threads in dedicated task rooms and in any other
+  room the bot answers in stay out of the list, and task runs (`task:<id>`)
+  are hidden wherever they deliver. A user without an oracle room sees every
+  session.
+- An earlier build of this runtime kept a room's main timeline as one
+  session (`matrix:<roomId>`) and keyed threads as `thread:<root>`. On every
+  boot the user object renames `thread:<root>` rows to `<root>` across the
+  session-keyed tables (`src/do/session-id-migration.ts`, `[session-ids] …`
+  log line; a root that already names a session — the Portal session the
+  thread was mirrored from — keeps the old row as it is). `matrix:<roomId>`
+  rows are left alone: their transcript stays readable, new room messages no
+  longer continue them.
+
 ### Turns: the inbox
 
 The outbox only exists once a reply exists. Between the SDK marking a room
@@ -182,6 +213,156 @@ an event it already answered returns the stored text without a model call,
 one whose turn is still running attaches to it, and one it lost in a reset
 of its own (tools may have run) is refused with a warning — the gateway posts
 the notice and the user resends, exactly as before this change.
+
+### Turns: durable runs
+
+Every turn — HTTP, Matrix room, scheduled task — is a **run** the user
+object records in its own SQLite before the first model call
+(`turn_runs`), keeps notes on while it executes, and can pick up again
+after a platform reset. The design is in `docs/plans/durable-runs.md`; what
+an operator sees:
+
+- **A run outlives its connection.** A browser that closes the tab does not
+  stop the turn; only `POST /messages/abort` or a superseding message on
+  the same session does (`multitask: 'interrupt'`, the default; with
+  `multitask: 'enqueue'` the new message waits its turn). The reply lands
+  in the transcript either way.
+- **Re-join.** Every SSE frame carries its sequence number as the `id:`
+  field and the first frame is `run` `{ runId }` (also the `x-run-id`
+  response header). `GET /runs/:runId?after=<seq>` replays the frames after
+  the cursor from the packed segments (`turn_run_segments`, one row per
+  ~2 s of output, deleted when the run ends) and stays attached until
+  `done`. `GET /sessions/:id/run` tells a reloading client whether a run is
+  active. The `done` frame carries `runId`, `messageId` and, for a run that
+  ended early, `aborted` / `interrupted` / `failed` and `partialText` — the
+  reply text the runtime kept, which a client shows in place of whatever it
+  had streamed.
+- **What a client does with a resumed attempt.** A recovered attempt is
+  announced with `run` `{ resumed: true, attempt, partialLength }`. The
+  frames of each attempt live in their own sequence space (attempt _n_
+  numbers from _n_ × 2³², `turn_runs.generation`), so a cursor from before
+  the reset — even one pointing at frames that were streamed but never
+  packed — is below everything the new attempt emits and a re-join misses
+  nothing. Those unpacked frames are the one thing a reset loses (at most
+  `RUN_SEGMENT_FLUSH_MS` of text): the model continues from what was
+  packed, so the client cuts the text it shows back to `partialLength`
+  characters before appending the continuation. `@ixo/oracles-client-sdk`
+  does this (`streamRun`, `useChat().run`); a plain SSE consumer that
+  ignores `partialLength` may show a repeated fragment after a restart.
+- **Reset mid-turn.** A reset leaves the row `running`. The next boot — the
+  next request, or the keep-alive alarm the run re-arms every ~15 s —
+  schedules a recovery attempt (5 s, then 15 s, 30 s, 60 s), restores the
+  partial output, and resumes the graph from the last checkpoint with no new
+  input. A checkpoint newer than the one seen at the previous attempt counts
+  as progress and resets the counter; four attempts without progress close
+  the run as `interrupted` with the friendly "try again" notice and the
+  partial text kept on the row. The tail shows `[runs] <id> attempt N in
+S s`, `resuming`, and the terminal `finished|aborted|interrupted|failed`.
+- **Side effects run at most once.** `turn_tool_marks` records every tool
+  call before it executes (`started`) and when it returns (`done`). On a
+  resumed attempt a started, unfinished **write** call is not executed
+  again: the model gets "outcome unknown, verify before repeating".
+  **Read** calls (declared `effect: 'read'` by the plugin, MCP
+  `readOnlyHint`, or the `list_/get_/search_/read_/preview_/…` naming
+  convention) run again. Undeclared tools are writes. A sub-agent's inner
+  tool calls are marked too; the sub-agent call itself is a write.
+- **Task runs.** A scheduled run cut off by a reset is resumed like any
+  other and its result delivered once by the scheduler
+  (`completeRecoveredRun`); it is closed as interrupted only after the
+  recovery cap.
+- **Ordering.** A message sent with `multitask: 'enqueue'` waits behind
+  the session's running turn _and_ behind one that is waiting for its
+  recovery attempt; the session's turns never interleave.
+- **Diagnostics.** `GET /debug/runs` lists recent runs with their marks,
+  segment counts, attempts and the live state — per live run its
+  `generation`, `lastSeq`, `packedSeq` (what a reset would keep) and
+  subscriber count (`ORACLE_DEBUG_ROUTES=true`). `POST /debug/object/abort`
+  resets the object mid-turn; it is what the durable-runs drill uses.
+- **Cost.** Rows written per turn: the run row and one update when it
+  ends; one segment per `RUN_SEGMENT_FLUSH_MS` (2 s) of output plus one per
+  settled tool result (a tool's start frame, the `run`, `router.update` and
+  `error` frames and the text all ride the timer; `done` closes the last
+  pack), each deleted at cutover; one mark and one update per tool call
+  (a re-run read adds an update). A 10 s reply with four tool calls is
+  ~25 rows. Alarms: the keep-alive re-arms the object's single alarm once
+  per ~15 s of active turn (coalesced across runs and multiplexed with the
+  scheduler, tier and idle alarms); the segment timer is in-memory. No
+  loaded-time change: the model wait still happens inside the object.
+
+### Transcript: paging
+
+`GET /sessions/:id/messages?limit=20&before=<cursor>&after=<cursor>` reads a
+session's transcript one turn-aligned page at a time
+(`docs/plans/transcript-paging.md`); `GET /messages/:id` still returns the
+whole transcript for older clients. A turn is a user message with everything
+the agent did until the next one, so a tool result never lands in a different
+page from the reply that called it. Cursors are message ids resolved to their
+row position at query time (rowids move when a checkpoint rewrites the
+thread's rows); an unknown cursor is a 400, an unknown session an empty page,
+`limit` is clamped to 100. `after=` re-sends the turn the cursor split so a
+client can fold the page in by message id. Cost: one indexed range read per
+80 rows plus one lookup per cursor; nothing is written.
+
+### Turns: context budgets
+
+Every context limit of a turn is a fraction of the model's own context
+window, resolved per model (`docs/plans/context-budgets.md`). What an
+operator sees:
+
+- **The window.** `[context] model=… window=N (origin) …` on every turn.
+  `origin` is `override` (`MODEL_CONTEXT_OVERRIDES`), `catalog` (the
+  OpenRouter `/models` listing, BYO-native ids under their vendor prefix),
+  `learned` (a provider's "too long" error named a smaller limit; kept in
+  the object's KV as `ctxwin:<model>`), or `default`
+  (`MODEL_CONTEXT_TOKENS`, 100k). `GET /debug/context?model=<id>` shows the
+  resolution and every derived threshold.
+- **New models.** Nothing to add here: a model listed by OpenRouter gets its
+  window from the catalog at the next refresh (once per isolate-hour). The
+  only manual step for a new selectable model is the runtime's allow-list,
+  `MODEL_CATALOG` in `src/core/llm.ts`; check `origin` on `/debug/context`
+  afterwards, and pin the id in `MODEL_CONTEXT_OVERRIDES` only when it
+  shows `default` (a model OpenRouter does not list).
+- **Summarization** fires at 50% of the window (tokens, chars/4), keeps the
+  last 10 messages, and no longer counts messages (set
+  `CONTEXT_SUMMARIZE_MESSAGES` to add that trigger back). A failed summary
+  keeps the history (`[summarization] summary failed; keeping the full
+history this turn`); it never replaces the conversation with an error.
+- **Capped tool results.** A result above 12% of the window (×4 chars, at
+  most 200,000 chars — `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
+  the model sees the first 40% and last 60% of the visible budget with a
+  footer naming the saved id; `read_result` pages it back by
+  byte range. `[result-cap] <tool>: N chars > cap …; saved as … (sqlite|r2)`.
+  Results under 1 MB live in `tool_results` in the object's SQLite; larger
+  ones in the tier bucket as `<object id>/results/<id>`. Rows expire after
+  24 h (swept at boot), go with their session, and identical results share
+  one row. Optionally add an R2 lifecycle rule on the `results/` prefix as
+  a belt on top of the sweep.
+- **Pruning under pressure.** Above 35% of the window, tool results outside
+  the kept tail become one-line placeholders (a capped one keeps its
+  handle) and results identical to a later one become back-references —
+  on the request only, never in the checkpoint or the transcript.
+  `[context] over the prune threshold: pruned N tool result(s), ~A → ~B tokens`.
+- **Refusal and recovery.** A request still above 95% of the window (minus
+  the reply reserve) after a hard prune fails with "The conversation no
+  longer fits the model's context window …". A provider overflow lowers the
+  window when the error names a limit (`[context] <model>: window lowered
+A → B`), prunes hard and retries once.
+- **Per-session counters.** `GET /debug/context?session=<id>` adds a
+  `session` block: the working context the latest checkpoint carries into
+  the next request (`contextMessages`, `contextSummaries`,
+  `contextToolMessages`, `contextTokens` — one summary plus the kept tail
+  once the history was condensed, while `threadMessages` counts the
+  transcript rows, which are never condensed) and what the guard did across
+  the session's turns (`prunes`, `hardPrunes`,
+  `prunedResults`, `overflowRetries`, `refusals`, `lastEventAt`; kept in the
+  object's KV as `ctxstats:<session>`, dropped with the session). This is
+  what the context drill asserts on; a deployed oracle has no harness log to
+  read, and `wrangler dev` does not forward the worker's `console.log` lines
+  to a parent process (only `warn`/`error`/`debug`), so never gate a test on
+  a `[context]` or `[summarization]` line.
+- **Cost.** One `/models` fetch per isolate-hour (shared with prices); a KV
+  read per model per boot; one row (or one R2 put plus an index row) per
+  capped result, one delete at expiry. Pruning and guarding write nothing.
 
 ### Tasks: the run ledger
 
@@ -285,6 +466,64 @@ catch-up, but it stalls sends for ~30 s.
 - `/login` answers 429 with `retry_after_ms` when many objects log in through
   the Worker's shared egress addresses; both logins retry three times.
 
+### Rooms: group chats
+
+The bot joins every room it is invited to (the SDK's autojoin, as on Node).
+A room is direct when its canonical alias is a user↔oracle alias of this
+oracle, when its `m.room.create` event carries `is_direct`, or when it has
+≤ 2 joined members; every other room is a group room. The alias rule is
+this runtime's addition to Node's two: a real user↔oracle room holds the
+rooms appservice bot and the memory-engine bot as well (four members on
+devnet), and counting them would have silenced the oracle in the one room
+it must always answer in.
+
+What happens in a group room is the gateway's `MATRIX_GROUP_ROOMS` policy:
+
+- `silent` — **the default**: the bot never speaks in a group room and
+  captures nothing there; no typing indicator, no turn, no user object woken,
+  one `not answered (group-rooms-off)` log line per message. The bot only
+  ever talks in direct rooms: the user↔oracle room and the task rooms it
+  creates. Pick this unless the Node group-chat lane below has been
+  reviewed for the deployment.
+- `gate` — the Node group-chat lane, described next.
+- `answer` — every room is treated as direct (Node without the plugin).
+
+With `gate` the gateway runs the Node group-chat gate before a message
+becomes a turn (`src/matrix/group-chat.ts`):
+
+- It answers a message that mentions the bot (`m.mentions.user_ids`), one
+  that quote-replies a message the bot sent, or one inside a thread the bot
+  answered in within `GROUP_CHAT_ACTIVE_THREAD_TTL_MS` (30 min; the map is
+  in memory and mirrored in the durable `group_bot_threads` table, so a
+  restart forgets nothing). Everything else is ignored: no typing, no turn,
+  no user object woken, one `not answered (ignored)` log line.
+- An answer is skipped (`power-level` in the log) when the bot's power
+  level is below the room's `m.room.message` threshold or
+  `GROUP_CHAT_REQUIRE_POWER_LEVEL`.
+- Every group message, answered or not, is captured into the room's
+  channel memory: a durable per-room buffer (`group_message_buffer`) that is
+  compacted at 20 messages, and just in time before an answer when ≥ 5 are
+  waiting (bounded to 3 s so the reply is not held up), into a summary chunk
+  (`group_memory_chunks`, FTS5-indexed). The summary is produced by the
+  speaker's user object with the platform's small model and the Node
+  prompt (`summarizeGroupMessages`) — the gateway script holds no model
+  keys. A failed summary leaves the batch buffered for the next attempt.
+- The turn the gate lets through carries `roomKind: 'group'` and the
+  speaker's display name (the room's member event, else the profile, else
+  the user id; cached `GROUP_CHAT_ROOM_INFO_TTL_MS`): the user object
+  stores the message as `[DisplayName]: …` with `senderDid` /
+  `senderMatrixUserId` / `senderDisplayName` / `threadId` / `eventId` in
+  the message's `additional_kwargs`, and the `matrix-group-chats` plugin
+  offers `recall_channel_memory`, `search_channel_memory`, `pin_room_fact`
+  and `unpin_room_fact` (all backed by the gateway's tables) — in group
+  rooms only. A room message that names the bot's user id reaches the
+  model as `(USER MENTIONED YOU @AI_AGENT)`, the Node bridge's rewrite.
+- `status.groupChat` counts buffered messages, chunks and facts.
+- A member whose messages the gate lets through still needs a user object
+  that can boot; on a VFS-backed deployment that means a delegation to this
+  oracle. A member without one is answered with the "try again" notice
+  (the turn fails to load an owner copy), exactly as their 1:1 room would.
+
 ### Rooms and aliases
 
 - The user ↔ oracle room alias is
@@ -306,6 +545,8 @@ catch-up, but it stalls sends for ~30 s.
 - The memory engine needs `x-room-id` (a generic `invalid_token` otherwise);
   every turn therefore runs inside the user's oracle room — Matrix turns
   bring it, HTTP turns take it from the session row or resolve the alias.
+- Replies go into threads, one session per thread
+  ([above](#turns-threads-are-sessions)).
 
 ## User objects and the owner copy
 

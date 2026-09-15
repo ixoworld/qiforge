@@ -27,6 +27,7 @@ import {
   Semaphore,
   withRateLimitRetry,
   type BotMessage,
+  type BotTimelineEvent,
   type MatrixBotOptions,
   type StartResult,
 } from '@ixo/matrix-bot-workers-sdk';
@@ -37,6 +38,7 @@ import {
   type BotCredentials,
   type CreateRoomOptions,
   type GatewayStatus,
+  type GroupRoomInfo,
   type JsonString,
   type MatrixGatewayObject,
   type OracleWorkerEnv,
@@ -56,6 +58,7 @@ import {
 } from '../secrets/signing-mnemonic';
 import {
   IngestPipeline,
+  userDidFromRoomAlias,
   type InboundAttachment,
   type IngestTurn,
   type InboundMessage,
@@ -66,6 +69,7 @@ import {
   deleteInboxRows,
   ensureInboxTable,
   inboundOfRow,
+  type InboxRow,
   insertInboxRow,
   listInboxRows,
   MAX_TURN_REPLAYS,
@@ -74,6 +78,14 @@ import {
   updateInboxThread,
 } from './inbox-store';
 import {
+  type GateDecision,
+  GroupChatService,
+  groupChatOptionsFromEnv,
+  isBotMentioned,
+} from './group-chat';
+import {
+  inReplyToOf,
+  type MatrixRelatesTo,
   readRelatesTo,
   resolveReplyChainRoot,
   ThreadRootCache,
@@ -194,6 +206,14 @@ function readMediaInfo(content: Record<string, unknown>): {
 }
 
 /** The `eventId` a `m.ixo.media_state` event points at, when set. */
+/** `content` of a room event fetched as JSON (undefined when the shape is off). */
+function eventContentOf(json: JsonString): unknown {
+  const parsed: unknown = JSON.parse(json);
+  return typeof parsed === 'object' && parsed !== null && 'content' in parsed
+    ? parsed.content
+    : undefined;
+}
+
 function stateEventId(json: JsonString | null): string | undefined {
   if (!json) return undefined;
   const parsed: unknown = JSON.parse(json);
@@ -235,6 +255,8 @@ export class MatrixGatewayDO
   /** Event ids of turns running in this instance (a graceful restart must not replay them). */
   private readonly inFlightEvents = new Set<string>();
   private inboxReplayRunning = false;
+  /** Group rooms: the gate and the per-room channel memory (see group-chat.ts). */
+  private groupChatService: GroupChatService | null = null;
 
   // -------------------------------------------------------------------------
   // Configuration
@@ -307,6 +329,7 @@ export class MatrixGatewayDO
     const cfg = this.cfg();
     this.ingest = new IngestPipeline({
       oracleDid: cfg.oracleRoomDid,
+      botUserId: cfg.userId,
       canonicalAlias: (roomId) => this.roomAliases.get(roomId) ?? null,
       dispatch: (turn) => this.dispatchTurn(turn),
       onError: (err, context) =>
@@ -334,6 +357,13 @@ export class MatrixGatewayDO
       ...(isFile
         ? { attachment: attachmentOf(content, eventId, message.body) }
         : {}),
+      ...(isBotMentioned(content, this.cfg().userId)
+        ? { mentionsBot: true }
+        : {}),
+      ...(() => {
+        const target = inReplyToOf(readRelatesTo(content));
+        return target ? { inReplyTo: target } : {};
+      })(),
     };
     // Durable before anything waits on the network: the SDK has already
     // marked the event processed, so from here on only this row brings the
@@ -343,8 +373,13 @@ export class MatrixGatewayDO
     // Resolved before the offer so the pipeline's synchronous alias lookup
     // (room alias → user DID) can answer from the memo.
     await this.canonicalAliasOf(message.roomId);
-    const threadRootId = await this.threadRootFor(message, eventId);
-    if (threadRootId && threadRootId !== inbound.threadRootId) {
+    const threadRootId = await this.threadRootFor(
+      eventId,
+      message.roomId,
+      readRelatesTo(message.content),
+      message.threadRootId,
+    );
+    if (threadRootId !== inbound.threadRootId) {
       inbound.threadRootId = threadRootId;
       updateInboxThread(sql, eventId, threadRootId);
     }
@@ -363,34 +398,104 @@ export class MatrixGatewayDO
     }
   }
 
+  /** A membership change invalidates what the group-chat gate knows about the room. */
+  protected override async onEvent(event: BotTimelineEvent): Promise<void> {
+    await super.onEvent(event);
+    if (event.type === 'm.room.member')
+      this.groupChat().invalidateRoom(event.roomId);
+  }
+
   /**
-   * Thread for an inbound message: the SDK's `threadRootId` (an explicit
-   * `m.thread` relation) or, for a quote-reply, the thread of the message
-   * chain it replies to (see `reply-chain.ts`).
+   * The group-room gate and channel memory, built once per instance on the
+   * gateway's own SQLite. Summaries are produced by the speaker's user
+   * object (the platform model's keys live there, not in this script).
+   */
+  private groupChat(): GroupChatService {
+    if (this.groupChatService) return this.groupChatService;
+    const cfg = this.cfg();
+    this.groupChatService = new GroupChatService(
+      this.ctx.storage.sql,
+      {
+        botUserId: cfg.userId,
+        isOracleRoom: async (roomId) => {
+          const alias = await this.canonicalAliasOf(roomId);
+          return (
+            alias !== null &&
+            userDidFromRoomAlias(alias, cfg.oracleRoomDid) !== null
+          );
+        },
+        getRoomStateEvent: (roomId, type, stateKey) =>
+          this.getRoomStateEvent(roomId, type, stateKey),
+        getJoinedRoomMembers: (roomId) => this.getJoinedRoomMembers(roomId),
+        getEvent: (roomId, eventId) => this.getEvent(roomId, eventId),
+        getUserProfile: (userId) => this.getUserProfile(userId),
+        summarize: (messages) => {
+          const last = messages[messages.length - 1];
+          if (!last) return Promise.resolve(null);
+          return this.userStub(last.senderDid).summarizeGroupMessages(
+            JSON.stringify(messages),
+          );
+        },
+        keepAlive: (work) => this.ctx.waitUntil(work),
+        log: (level, msg, extra) => this.log(level, msg, extra),
+      },
+      groupChatOptionsFromEnv(this.env),
+    );
+    return this.groupChatService;
+  }
+
+  /**
+   * The thread of an inbound message — its session (`reply-chain.ts`): the
+   * SDK's `threadRootId` (an explicit `m.thread` relation), the root of the
+   * chain a quote-reply answers, or the message itself when it is bare.
    */
   private async threadRootFor(
-    message: BotMessage,
     eventId: string,
-  ): Promise<string | undefined> {
-    if (message.threadRootId) return message.threadRootId;
-    const relatesTo = readRelatesTo(message.content);
-    if (!relatesTo) return undefined;
-    const root = await resolveReplyChainRoot({
+    roomId: string,
+    relatesTo: MatrixRelatesTo | undefined,
+    sdkThreadRootId?: string,
+  ): Promise<string> {
+    if (sdkThreadRootId) return sdkThreadRootId;
+    return resolveReplyChainRoot({
       eventId,
       relatesTo,
       cache: this.threadRoots,
-      fetchRelatesTo: async (id) => {
-        const json = await this.getEvent(message.roomId, id);
-        if (!json) return null;
-        const parsed: unknown = JSON.parse(json);
-        const content =
-          typeof parsed === 'object' && parsed !== null && 'content' in parsed
-            ? parsed.content
-            : undefined;
-        return readRelatesTo(content) ?? {};
-      },
+      fetchRelatesTo: async (id) => this.relatesToOf(roomId, id),
     });
-    return root ?? undefined;
+  }
+
+  /** `m.relates_to` of a room event from the homeserver; null when the event is unavailable. */
+  private async relatesToOf(
+    roomId: string,
+    eventId: string,
+  ): Promise<MatrixRelatesTo | null> {
+    const json = await this.getEvent(roomId, eventId);
+    if (!json) return null;
+    return readRelatesTo(eventContentOf(json)) ?? {};
+  }
+
+  /**
+   * The thread of an inbox row on replay. A row whose turn was resolved
+   * before the reset carries it; one interrupted between the insert and the
+   * resolution has to read its own event back (relations travel in the
+   * clear, so an encrypted event answers too). Unreadable → the message is
+   * treated as bare, which is right for every message without a relation.
+   */
+  private async threadRootForRow(row: InboxRow): Promise<string> {
+    if (row.threadRootId) return row.threadRootId;
+    let relatesTo: MatrixRelatesTo | undefined;
+    try {
+      relatesTo =
+        (await this.relatesToOf(row.roomId, row.eventId)) ?? undefined;
+    } catch (err) {
+      this.log(
+        'warn',
+        `inbox: could not read ${row.eventId} back to resolve its thread; treating it as a bare message`,
+        err,
+      );
+      relatesTo = undefined;
+    }
+    return this.threadRootFor(row.eventId, row.roomId, relatesTo);
   }
 
   /** `m.room.canonical_alias` of a room, memoised per instance (null = none). */
@@ -417,9 +522,46 @@ export class MatrixGatewayDO
 
   private async dispatchTurnNow(turn: IngestTurn): Promise<void> {
     const requestId = crypto.randomUUID();
+    // Group rooms: the Node gate — answer a mention, a reply to the bot, or
+    // a thread the bot is in; stay silent otherwise (the message is still
+    // captured into channel memory). Direct rooms always pass.
+    const decision = await this.groupChat()
+      .gate({
+        roomId: turn.roomId,
+        threadId: turn.threadId,
+        eventId: turn.sourceEventId,
+        sender: turn.matrixUserId,
+        senderDid: turn.userDid,
+        body: turn.message,
+        ts: turn.ts,
+        mentionsBot: turn.mentionsBot,
+        ...(turn.inReplyTo ? { inReplyTo: turn.inReplyTo } : {}),
+      })
+      .catch((err: unknown): GateDecision => {
+        this.log(
+          'warn',
+          `turn ${requestId}: group-chat gate failed; answering`,
+          err,
+        );
+        return {
+          respond: true,
+          reason: 'dm',
+          roomKind: 'direct',
+          memberCount: 0,
+          displayName: turn.matrixUserId,
+        };
+      });
+    if (!decision.respond) {
+      this.log(
+        'info',
+        `turn ${requestId}: ${turn.userDid} in ${turn.roomId} (thread ${turn.threadId}) not answered (${decision.reason})`,
+      );
+      deleteInboxRows(this.inboxSql(), turn.eventIds);
+      return;
+    }
     this.log(
       'info',
-      `turn ${requestId}: ${turn.userDid} in ${turn.roomId}${turn.threadId ? ` (thread ${turn.threadId})` : ''}`,
+      `turn ${requestId}: ${turn.userDid} in ${turn.roomId} (thread ${turn.threadId}${decision.roomKind === 'group' ? `, group room: ${decision.reason}` : ''})`,
     );
     for (const id of turn.eventIds) this.inFlightEvents.add(id);
     let typing: ReturnType<typeof setInterval> | null = null;
@@ -430,7 +572,7 @@ export class MatrixGatewayDO
           () => undefined,
         );
       }, TYPING_REFRESH_MS);
-      const result = await this.runTurn(turn, requestId);
+      const result = await this.runTurn(turn, requestId, decision);
       if (result.replayed)
         this.log(
           'info',
@@ -440,8 +582,10 @@ export class MatrixGatewayDO
         // The transaction id is derived from the event id, so this reply is
         // deduplicated by the homeserver if a previous incarnation already
         // sent it before it died (see inbox-store.ts).
+        // Always inside the thread: the reply to a bare message opens the
+        // thread on it (Node's listener bridge does the same).
         await this.sendText(turn.roomId, result.text, {
-          ...(turn.threadId ? { threadId: turn.threadId } : {}),
+          threadId: turn.threadId,
           ...(turn.eventIds[0] ? { txnId: replyTxnId(turn.eventIds[0]) } : {}),
         });
       } else {
@@ -466,7 +610,7 @@ export class MatrixGatewayDO
       else this.log('error', `turn ${requestId} failed`, err);
       try {
         await this.sendNotice(turn.roomId, TURN_FAILED_NOTICE, {
-          ...(turn.threadId ? { threadId: turn.threadId } : {}),
+          threadId: turn.threadId,
           ...(turn.eventIds[0]
             ? { txnId: `${replyTxnId(turn.eventIds[0])}-notice` }
             : {}),
@@ -510,6 +654,7 @@ export class MatrixGatewayDO
   protected async runTurn(
     turn: IngestTurn,
     requestId: string,
+    decision: GateDecision,
   ): Promise<TurnResult> {
     return this.userStub(turn.userDid).runTurn({
       identity: { userDid: turn.userDid, matrixUserId: turn.matrixUserId },
@@ -517,7 +662,9 @@ export class MatrixGatewayDO
       message: turn.message,
       client: 'matrix',
       roomId: turn.roomId,
-      ...(turn.threadId ? { threadId: turn.threadId } : {}),
+      threadId: turn.threadId,
+      roomKind: decision.roomKind,
+      senderDisplayName: decision.displayName,
       ...(turn.eventIds[0] ? { eventId: turn.eventIds[0] } : {}),
       ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
       requestId,
@@ -580,7 +727,7 @@ export class MatrixGatewayDO
       );
       try {
         await this.sendNotice(row.roomId, TURN_FAILED_NOTICE, {
-          ...(row.threadRootId ? { threadId: row.threadRootId } : {}),
+          threadId: row.threadRootId ?? row.eventId,
           txnId: `${replyTxnId(row.eventId)}-notice`,
         });
       } catch (err) {
@@ -603,7 +750,13 @@ export class MatrixGatewayDO
       } catch (err) {
         this.log('warn', `inbox: alias lookup failed for ${row.roomId}`, err);
       }
-      this.offerInbound(inboundOfRow(row));
+      const inbound = inboundOfRow(row);
+      const threadRootId = await this.threadRootForRow(row);
+      if (threadRootId !== inbound.threadRootId) {
+        inbound.threadRootId = threadRootId;
+        updateInboxThread(sql, row.eventId, threadRootId);
+      }
+      this.offerInbound(inbound);
     }
     this.log(
       'info',
@@ -1158,10 +1311,58 @@ export class MatrixGatewayDO
     }));
   }
 
+  // -------------------------------------------------------------------------
+  // Group rooms: room kind + channel memory for the user objects' tools
+  // -------------------------------------------------------------------------
+
+  async groupChatRoomInfo(roomId: string): Promise<GroupRoomInfo> {
+    const service = this.groupChat();
+    return {
+      ...(await service.roomInfo(roomId)),
+      groupLane: service.options.groupRooms === 'gate',
+    };
+  }
+
+  async channelMemoryRecall(
+    roomId: string,
+    limit?: number,
+  ): Promise<JsonString> {
+    return JSON.stringify(this.groupChat().recall(roomId, limit));
+  }
+
+  async channelMemorySearch(
+    roomId: string,
+    query: string,
+    limit?: number,
+  ): Promise<JsonString> {
+    return JSON.stringify(this.groupChat().search(roomId, query, limit));
+  }
+
+  async channelMemoryPin(
+    roomId: string,
+    fact: string,
+    pinnedByDid: string,
+    sourceEventId?: string,
+  ): Promise<JsonString> {
+    return JSON.stringify(
+      this.groupChat().pinFact({
+        roomId,
+        fact,
+        pinnedByDid,
+        ...(sourceEventId ? { sourceEventId } : {}),
+      }),
+    );
+  }
+
+  async channelMemoryUnpin(roomId: string, factId: string): Promise<boolean> {
+    return this.groupChat().unpinFact(roomId, factId);
+  }
+
   override async status(): Promise<GatewayStatus> {
     return {
       ...(await super.status()),
       turns: { inFlight: this.turnGate.inUse, waiting: this.turnGate.queued },
+      groupChat: this.groupChat().stats(),
       ingestPending: this.ingest?.pendingCount ?? 0,
       inbox: countInboxRows(this.inboxSql()),
     };

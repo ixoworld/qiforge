@@ -6,7 +6,7 @@ import {
   type InboundMessage,
   matrixUserIdToDid,
   resolveUserDid,
-  sessionIdFor,
+  threadRootIdOf,
   userDidFromRoomAlias,
 } from './ingest';
 
@@ -22,6 +22,7 @@ function harness(opts: { alias?: string | null } = {}) {
   const turns: IngestTurn[] = [];
   const pipeline = new IngestPipeline({
     oracleDid: ORACLE_DID,
+    botUserId: BOT,
     debounceMs: 40,
     canonicalAlias: () => (opts.alias === undefined ? ALIAS : opts.alias),
     dispatch: async (turn) => {
@@ -100,9 +101,11 @@ describe('DID mapping', () => {
     ).toBeNull();
   });
 
-  it('derives session ids per room / per thread', () => {
-    expect(sessionIdFor(ROOM)).toBe(`matrix:${ROOM}`);
-    expect(sessionIdFor(ROOM, '$root')).toBe('thread:$root');
+  it('the thread root is the session: a threaded message keys on its root, a bare one on itself', () => {
+    expect(threadRootIdOf({ eventId: '$e', threadRootId: '$root' })).toBe(
+      '$root',
+    );
+    expect(threadRootIdOf({ eventId: '$e' })).toBe('$e');
   });
 });
 
@@ -121,35 +124,97 @@ describe('IngestPipeline', () => {
 
   it('debounces per thread and dispatches one turn with the joined text', async () => {
     const { pipeline, turns } = harness();
-    pipeline.offer(msg({ body: 'one' }));
-    pipeline.offer(msg({ body: 'two' }));
+    // A bare message and a follow-up threaded on it: one thread, one turn.
+    pipeline.offer(msg({ eventId: '$one', body: 'one' }));
+    pipeline.offer(msg({ eventId: '$two', body: 'two', threadRootId: '$one' }));
     pipeline.offer(msg({ body: 'in-thread', threadRootId: '$root' }));
     expect(pipeline.pendingCount).toBe(2);
     await sleep(120);
     expect(pipeline.pendingCount).toBe(0);
     expect(turns).toHaveLength(2);
-    const main = turns.find((t) => !t.threadId);
-    const thread = turns.find((t) => t.threadId);
-    expect(main).toMatchObject({
+    const opened = turns.find((t) => t.threadId === '$one');
+    const thread = turns.find((t) => t.threadId === '$root');
+    expect(opened).toMatchObject({
       userDid: 'did:ixo:ixo1user',
       matrixUserId: USER,
       roomId: ROOM,
-      sessionId: `matrix:${ROOM}`,
+      threadId: '$one',
+      sessionId: '$one',
       message: 'one\ntwo',
     });
-    expect(main?.eventIds).toHaveLength(2);
+    expect(opened?.eventIds).toEqual(['$one', '$two']);
     expect(thread).toMatchObject({
       threadId: '$root',
-      sessionId: 'thread:$root',
+      sessionId: '$root',
       message: 'in-thread',
     });
   });
 
+  it('carries the gate metadata of the latest text message and rewrites the bot id like the Node bridge', async () => {
+    const { pipeline, turns } = harness();
+    pipeline.offer(
+      msg({
+        eventId: '$q',
+        body: `hey ${BOT} look`,
+        ts: 1000,
+        inReplyTo: '$bot',
+      }),
+    );
+    pipeline.offer(
+      msg({
+        eventId: '$m',
+        body: 'and this',
+        ts: 2000,
+        threadRootId: '$q',
+        mentionsBot: true,
+      }),
+    );
+    await sleep(80);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      sourceEventId: '$m',
+      ts: 2000,
+      mentionsBot: true,
+      message: 'hey (USER MENTIONED YOU @AI_AGENT) look\nand this',
+    });
+    expect(turns[0]?.inReplyTo).toBeUndefined();
+    // A file-only burst takes its metadata from the file message.
+    const fileOnly = harness();
+    fileOnly.pipeline.offer(
+      msg({
+        eventId: '$f',
+        body: '',
+        ts: 3000,
+        attachment: { eventId: '$f', filename: 'a.png', mimetype: 'image/png' },
+        inReplyTo: '$bot',
+      }),
+    );
+    await sleep(80);
+    expect(fileOnly.turns[0]).toMatchObject({
+      sourceEventId: '$f',
+      ts: 3000,
+      mentionsBot: false,
+      inReplyTo: '$bot',
+    });
+  });
+
+  it('two bare messages are two threads, two sessions — Node parity', async () => {
+    const { pipeline, turns } = harness();
+    pipeline.offer(msg({ eventId: '$a', body: 'first' }));
+    pipeline.offer(msg({ eventId: '$b', body: 'second' }));
+    expect(pipeline.pendingCount).toBe(2);
+    await sleep(120);
+    expect(turns.map((t) => [t.threadId, t.sessionId, t.message])).toEqual([
+      ['$a', '$a', 'first'],
+      ['$b', '$b', 'second'],
+    ]);
+  });
+
   it('extends the debounce window while messages keep arriving', async () => {
     const { pipeline, turns } = harness();
-    pipeline.offer(msg({ body: 'a' }));
+    pipeline.offer(msg({ eventId: '$a', body: 'a' }));
     await sleep(25);
-    pipeline.offer(msg({ body: 'b' }));
+    pipeline.offer(msg({ body: 'b', threadRootId: '$a' }));
     await sleep(25);
     expect(turns).toHaveLength(0);
     await sleep(60);
@@ -170,12 +235,13 @@ describe('IngestPipeline', () => {
       },
       onError: (err, ctx) => errors.push(`${ctx}: ${(err as Error).message}`),
     });
-    pipeline.offer(msg());
+    const first = msg();
+    pipeline.offer(first);
     await sleep(40);
     pipeline.offer(msg());
     await sleep(40);
     expect(calls).toBe(2);
-    expect(errors).toEqual([`dispatch matrix:${ROOM}: boom`]);
+    expect(errors).toEqual([`dispatch ${first.eventId}: boom`]);
   });
 });
 
@@ -198,7 +264,7 @@ describe('media messages', () => {
     expect(turns[0]?.eventIds).toEqual(['$img']);
   });
 
-  it('pairs a caption with its file in one turn and still drops truly empty sends', async () => {
+  it("pairs a caption sent in the file's thread with the file in one turn and still drops truly empty sends", async () => {
     const { pipeline, turns } = harness();
     const attachment = {
       eventId: '$doc',
@@ -208,14 +274,33 @@ describe('media messages', () => {
     expect(pipeline.offer(msg({ eventId: '$doc', body: '', attachment }))).toBe(
       'queued',
     );
-    expect(pipeline.offer(msg({ body: 'please summarise this' }))).toBe(
-      'queued',
-    );
+    expect(
+      pipeline.offer(
+        msg({ body: 'please summarise this', threadRootId: '$doc' }),
+      ),
+    ).toBe('queued');
     expect(pipeline.offer(msg({ body: '   ' }))).toBe('empty');
     await sleep(80);
     expect(turns).toHaveLength(1);
     expect(turns[0]?.message).toBe('please summarise this');
     expect(turns[0]?.attachments).toEqual([attachment]);
     expect(turns[0]?.eventIds).toHaveLength(2);
+    expect(turns[0]?.threadId).toBe('$doc');
+  });
+
+  it('a bare caption after a bare file is its own thread — the file turn carries the Node wording', async () => {
+    const { pipeline, turns } = harness();
+    const attachment = {
+      eventId: '$pic',
+      filename: 'pic.png',
+      mimetype: 'image/png',
+    };
+    pipeline.offer(msg({ eventId: '$pic', body: '', attachment }));
+    pipeline.offer(msg({ eventId: '$cap', body: 'nice?' }));
+    await sleep(80);
+    expect(turns.map((t) => [t.threadId, t.message])).toEqual([
+      ['$pic', 'User shared a file: pic.png'],
+      ['$cap', 'nice?'],
+    ]);
   });
 });

@@ -33,6 +33,14 @@ const openRouterModelsSchema = z.object({
           completion: z.string().optional(),
         })
         .optional(),
+      // The model's context window in tokens; `top_provider.context_length`
+      // is the window of the provider OpenRouter routes to by default and
+      // can be smaller than the model's nominal one — the smaller wins.
+      context_length: z.number().nullable().optional(),
+      top_provider: z
+        .object({ context_length: z.number().nullable().optional() })
+        .nullable()
+        .optional(),
     }),
   ),
 });
@@ -40,9 +48,25 @@ const openRouterModelsSchema = z.object({
 interface PriceCache {
   fetchedAt: number;
   prices: Map<string, ModelPrice>;
+  contextLengths: Map<string, number>;
 }
 
 let cache: PriceCache | null = null;
+
+function parseContextLengths(
+  data: z.infer<typeof openRouterModelsSchema>['data'],
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const model of data) {
+    const candidates = [
+      model.context_length,
+      model.top_provider?.context_length,
+    ].filter((n): n is number => typeof n === 'number' && n > 0);
+    if (candidates.length === 0) continue;
+    out.set(model.id, Math.floor(Math.min(...candidates)));
+  }
+  return out;
+}
 
 /** Convert an OpenRouter `$/token` string to `$/million tokens`, or `null`. */
 function perMillion(pricePerToken: string | undefined): number | null {
@@ -106,7 +130,11 @@ export async function fetchOpenRouterPrices(
     if (prices.size === 0) {
       throw new Error('OpenRouter /models returned no usable pricing');
     }
-    cache = { fetchedAt: now(), prices };
+    cache = {
+      fetchedAt: now(),
+      prices,
+      contextLengths: parseContextLengths(parsed.data.data),
+    };
     return prices;
   } catch (error) {
     logger.warn(
@@ -116,6 +144,19 @@ export async function fetchOpenRouterPrices(
     );
     return cache?.prices ?? new Map<string, ModelPrice>();
   }
+}
+
+/**
+ * Context windows (tokens) by OpenRouter model id, from the same cached
+ * `/models` fetch as the prices (one request serves both). Empty when the
+ * listing is unavailable — the resolver then falls back (see
+ * `context-window.ts`).
+ */
+export async function fetchOpenRouterContextLengths(
+  opts: FetchOpenRouterPricesOptions = {},
+): Promise<ReadonlyMap<string, number>> {
+  await fetchOpenRouterPrices(opts);
+  return cache?.contextLengths ?? new Map<string, number>();
 }
 
 /** Test seam: clear the in-memory price cache between cases. */

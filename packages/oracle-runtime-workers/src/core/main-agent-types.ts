@@ -1,3 +1,7 @@
+import type { ContextBudget } from './context-budget';
+import type { ContextGuardEvent } from './middlewares/context-guard';
+import type { ResultCapConfig } from './middlewares/result-cap';
+import type { ReadResultOutcome } from '../do/result-store';
 import type { AgentMiddleware } from 'langchain';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
@@ -75,6 +79,37 @@ export interface MainAgentHooks {
    * producer the core cannot construct).
    */
   middlewares?: AgentMiddleware[];
+  /**
+   * Middlewares applied to the main agent AND to every sub-agent's inner
+   * graph (a sub-agent's own tool calls go through them too): the
+   * write-ahead tool marks of durable runs and the result cap live here.
+   */
+  toolMiddlewares?: AgentMiddleware[];
+  /**
+   * The turn's result cap (result-cap.ts), applied inside every wrapped
+   * tool — plugin, meta and sub-agent inner tools — so a large result is
+   * truncated and saved before it becomes a ToolMessage or an SSE frame.
+   */
+  resultCap?: ResultCapConfig;
+  /**
+   * The provider rejected a request as too long (context-guard.ts): learn
+   * the limit it named. Resolves to the new window when there is one.
+   */
+  onContextOverflow?: (error: unknown) => Promise<number | undefined>;
+  /**
+   * What the context guard did to a request (a prune, an overflow retry, a
+   * refusal): the host keeps per-session counters for diagnostics.
+   */
+  onContextEvent?: (event: ContextGuardEvent) => void;
+  /**
+   * Pages through a tool result the result cap saved whole; when present
+   * the model gets the `read_result` tool.
+   */
+  readResult?: (
+    id: string,
+    offset: number,
+    length: number,
+  ) => Promise<ReadResultOutcome>;
 }
 
 export interface MainAgentArgs {
@@ -100,6 +135,12 @@ export interface MainAgentArgs {
   abortSignal?: AbortSignal;
   /** Provider of a BYO turn (`runtime.context.byo`); absent on platform turns. */
   byoProvider?: string;
+  /**
+   * The turn's context budget (context-budget.ts): drives when the history
+   * is summarized, how large a request may be, and the `read_result` chunk
+   * size. Omitted → the legacy fixed thresholds (tests, stateless builds).
+   */
+  contextBudget?: ContextBudget;
   hooks?: MainAgentHooks;
 }
 
@@ -114,6 +155,11 @@ export interface MainAgentBuildResult {
   systemPrompt: string;
   /** Names of every tool bound to the agent, in binding order. */
   boundToolNames: string[];
+  /**
+   * The effect of every bound tool (`read` may run again on a resumed
+   * turn, `write` never does). Declared by the plugin, else by name.
+   */
+  toolEffects: Map<string, 'read' | 'write'>;
   /**
    * The request's `{ user, session }` channel. Tools already fall back to it,
    * but pass it as `context` in the `invoke` / `stream` config so LangChain

@@ -509,6 +509,28 @@ export class TasksStore {
     }));
   }
 
+  /** One open run by id (`running` or `delivering`), or undefined. */
+  async getOpenRun(runId: string): Promise<OpenTaskRun | undefined> {
+    await this.setup();
+    const row = await this.db.get<OpenRunRow>(
+      `SELECT run_id, task_id, started_at, state, txn_id, room_id, result_text, attempts, retry_at
+       FROM task_runs WHERE run_id = ? AND state IN ('running', 'delivering')`,
+      [runId],
+    );
+    if (!row) return undefined;
+    return {
+      runId: row.run_id,
+      taskId: row.task_id,
+      startedAt: row.started_at,
+      state: row.state === 'delivering' ? 'delivering' : 'running',
+      txnId: row.txn_id ?? `task-${row.run_id}`,
+      ...(row.room_id ? { roomId: row.room_id } : {}),
+      ...(row.result_text !== null ? { resultText: row.result_text } : {}),
+      attempts: Number(row.attempts ?? 0),
+      ...(row.retry_at !== null ? { retryAt: Number(row.retry_at) } : {}),
+    };
+  }
+
   /** Earliest pending delivery retry (ms epoch) over open runs, or null. */
   async minRetryAt(): Promise<number | null> {
     await this.setup();
