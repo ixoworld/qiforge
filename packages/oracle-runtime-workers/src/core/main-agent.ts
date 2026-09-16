@@ -46,6 +46,7 @@ import {
   composePrompt,
   formatTimeContext,
   formatUserPreferences,
+  PORTAL_CAPABILITY,
 } from './prompt-composer';
 import { formatByPlugin, type ManifestRegistry } from './registries';
 import {
@@ -54,7 +55,7 @@ import {
   type RunConfig,
   type RuntimeStateInput,
 } from './runtime-context';
-import { MainAgentGraphState } from './state';
+import { MainAgentGraphState, type BrowserToolCall } from './state';
 import { toolEffectOf } from './middlewares/tool-marks';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName } from './subagent-as-tool';
@@ -95,6 +96,21 @@ function selectByVisibility(
       tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
     return effective === visibility;
   });
+}
+
+/**
+ * Names of the browser tools the client declared on this request. The array
+ * comes straight off the wire, so an entry without a usable name is skipped
+ * rather than rendered as "undefined".
+ */
+function browserToolNames(
+  browserTools: BrowserToolCall[] | undefined,
+): string[] {
+  return (browserTools ?? []).flatMap((entry) =>
+    typeof entry?.name === 'string' && entry.name.length > 0
+      ? [entry.name]
+      : [],
+  );
 }
 
 /**
@@ -472,9 +488,20 @@ export async function createMainAgent(
 
   const customInstructions = identity.prompt?.customInstructions?.trim() ?? '';
 
+  // Browser tools never surface through `search_skills` / `list_capabilities`,
+  // so the prompt names them per turn and says whether the capability gate
+  // still hides them (portal is on-demand by default).
+  const browserTools = {
+    names: browserToolNames(state.browserTools),
+    bound:
+      manifestViz.get(PORTAL_CAPABILITY) === 'always' ||
+      loadedSet.has(PORTAL_CAPABILITY),
+  };
+
   const systemPrompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
+    browserTools,
     customInstructions,
     operationalMode: hooks?.operationalMode ?? DEFAULT_OPERATIONAL_MODE,
     userPreferencesContext: formatUserPreferences(state.userPreferences),

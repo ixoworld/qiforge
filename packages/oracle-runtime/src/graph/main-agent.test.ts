@@ -585,6 +585,67 @@ describe('createMainAgent', () => {
     expect(prompt).toContain('General conversation mode');
   });
 
+  it('renders the "Browser tools this turn" block from state.browserTools, with the load line while portal is on-demand and unloaded', async () => {
+    const browserTools = [
+      { name: 'open_url', description: 'Open a URL', schema: {} },
+      { name: 'create_page_room', description: 'Create a page', schema: {} },
+    ];
+    const withPortal = (visibility: 'on-demand' | 'always') => {
+      const registries = emptyRegistries();
+      registries.manifests.register(
+        makePlugin({
+          name: 'portal',
+          manifest: makeManifest({ title: 'Portal', visibility }),
+        }),
+      );
+      return registries;
+    };
+    const promptFor = async (args: MainAgentArgs) => {
+      createAgentCalls.length = 0;
+      await createMainAgent(args);
+      const params = createAgentCalls[0];
+      if (!params) throw new Error('createAgent was not called');
+      return String(params.systemPrompt);
+    };
+    const LOAD_LINE =
+      "They are bound behind the `portal` capability — call `load_capability({ names: ['portal'] })` once before using them.";
+
+    // On-demand + not loaded: the block names the tools and says how to bind them.
+    const gated = await promptFor(
+      baseArgs({
+        registries: withPortal('on-demand'),
+        state: { browserTools },
+      }),
+    );
+    expect(gated).toContain(
+      "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url, create_page_room",
+    );
+    expect(gated).toContain(LOAD_LINE);
+
+    // Already loaded this thread: no load line.
+    const loaded = await promptFor(
+      baseArgs({
+        registries: withPortal('on-demand'),
+        state: { browserTools, loadedPlugins: ['portal'] },
+      }),
+    );
+    expect(loaded).toContain('## Browser tools this turn');
+    expect(loaded).not.toContain(LOAD_LINE);
+
+    // Fork made portal always-on: no load line either.
+    const eager = await promptFor(
+      baseArgs({ registries: withPortal('always'), state: { browserTools } }),
+    );
+    expect(eager).toContain('## Browser tools this turn');
+    expect(eager).not.toContain(LOAD_LINE);
+
+    // No browser tools on the request: the block costs nothing.
+    const none = await promptFor(
+      baseArgs({ registries: withPortal('on-demand') }),
+    );
+    expect(none).not.toContain('## Browser tools this turn');
+  });
+
   it('injects the Flow Builder guide under Custom Instructions when flows is loaded', async () => {
     await createMainAgent(baseArgs({ state: { loadedPlugins: ['flows'] } }));
 

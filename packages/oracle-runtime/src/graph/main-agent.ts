@@ -51,9 +51,10 @@ import {
   composePrompt,
   formatTimeContext,
   formatUserPreferences,
+  PORTAL_CAPABILITY,
   SLACK_FORMATTING_CONSTRAINTS_CONTENT,
 } from './prompt-composer.js';
-import { MainAgentGraphState } from './state.js';
+import { MainAgentGraphState, type BrowserToolCall } from './state.js';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback.js';
 import { computeSubAgentToolName } from './subagent-as-tool.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
@@ -114,6 +115,21 @@ function selectByVisibility(
       tool.visibility ?? manifestViz.get(pluginName) ?? 'on-demand';
     return effective === visibility;
   });
+}
+
+/**
+ * Names of the browser tools the client declared on this request. The array
+ * comes straight off the wire, so an entry without a usable name is skipped
+ * rather than rendered as "undefined".
+ */
+function browserToolNames(
+  browserTools: BrowserToolCall[] | undefined,
+): string[] {
+  return (browserTools ?? []).flatMap((entry) =>
+    typeof entry?.name === 'string' && entry.name.length > 0
+      ? [entry.name]
+      : [],
+  );
 }
 
 /**
@@ -532,9 +548,20 @@ export async function createMainAgent(
   // can never disagree.
   const commerceOverlay = commerce ? buildCommerceOverlay(commerce) : '';
 
+  // Browser tools never surface through `search_skills` / `list_capabilities`,
+  // so the prompt names them per turn and says whether the capability gate
+  // still hides them (portal is on-demand by default).
+  const browserTools = {
+    names: browserToolNames(state.browserTools),
+    bound:
+      manifestViz.get(PORTAL_CAPABILITY) === 'always' ||
+      loadedSet.has(PORTAL_CAPABILITY),
+  };
+
   const prompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
+    browserTools,
     customInstructions,
     commerceOverlay,
     // Support mode binds no meta-tools, so the "scan capabilities, then load

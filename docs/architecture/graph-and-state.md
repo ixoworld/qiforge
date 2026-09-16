@@ -91,6 +91,9 @@ The tool's `description` is auto-prefixed with the plugin's `manifest.title` (e.
 
 - **Tier-1 capability block** — alphabetical list of `always` plugins with their `manifest.summary`. Rendered by `ManifestRegistry.renderTier1(eagerPluginNames)`. ~80 tokens per plugin.
 - **Loaded section** — listing of plugins the agent has `load_capability`'d so far in this thread.
+- **Browser tools this turn** — rendered only when the client declared `state.browserTools` (Portal turns). Names the browser-side tools by name and, while the `portal` plugin is still `on-demand` and not in `loadedPlugins`, adds one line telling the model to `load_capability({ names: ['portal'] })` first. Empty on every other turn, so it costs nothing outside the Portal.
+
+The discovery mandate in **Operating principles** is written as three lanes with an explicit division of labour: `search_skills` for packaged skills, `list_capabilities` + one `load_capability` call for server-side plugins and integrations, and the `[Portal]`-prefixed browser tools already in the tool list for anything that happens on the user's screen. Browser tools never appear in the first two lanes' results, which is why the per-turn block above exists.
 
 Other sections (identity, operating mode, user context, time context, user preferences, editor context, Slack formatting, secrets context, Composio context) are framework-owned. Plugins shouldn't try to add free-form prompt content — their interface to the LLM is the manifest plus tool/sub-agent descriptions.
 

@@ -127,6 +127,15 @@ describe('composePrompt', () => {
     ).toBe(true);
     expect(prompt).toContain('## Operating principles');
     expect(prompt).toContain('**Search first, build second.**');
+    // Three lanes: packaged skills, server-side plugins, browser tools.
+    expect(prompt).toContain(
+      '`[Portal]`-prefixed tools already in your tool list',
+    );
+    expect(prompt).toContain(
+      'NEVER appear in `search_skills` or `list_capabilities` results',
+    );
+    expect(prompt).toContain('"Browser tools this turn" section');
+    expect(prompt).not.toContain('## Browser tools this turn');
     expect(prompt).not.toContain('## Custom Instructions');
     expect(prompt).not.toContain('## What you know about the user');
     expect(prompt).not.toContain('**Current entity:**');
@@ -180,5 +189,61 @@ describe('composePrompt', () => {
       'user asked to schedule UE5 builds every two weeks',
     );
     expect(prompt).toContain('wants to chart the key trends');
+  });
+});
+
+describe('composePrompt — browser tools this turn', () => {
+  const capabilityBlock = '## Available Capabilities\n\n- **memory** — Recall.';
+
+  it('lists the exposed tools and the load line when the portal capability is not bound', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        capabilityBlock,
+        browserTools: {
+          names: ['open_url', 'create_page_room'],
+          bound: false,
+        },
+      }),
+    );
+
+    expect(prompt).toContain('## Browser tools this turn');
+    expect(prompt).toContain(
+      "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url, create_page_room",
+    );
+    expect(prompt).toContain(
+      "They are bound behind the `portal` capability — call `load_capability({ names: ['portal'] })` once before using them.",
+    );
+    // Placed after the capability block and before the operating principles.
+    expect(prompt.indexOf('- **memory** — Recall.')).toBeLessThan(
+      prompt.indexOf('## Browser tools this turn'),
+    );
+    expect(prompt.indexOf('## Browser tools this turn')).toBeLessThan(
+      prompt.indexOf('## Operating principles'),
+    );
+  });
+
+  it('omits the load line when the portal capability is already bound', async () => {
+    const prompt = await composePrompt(
+      baseInput({
+        browserTools: { names: ['open_url'], bound: true },
+      }),
+    );
+
+    expect(prompt).toContain('## Browser tools this turn');
+    expect(prompt).toContain("(they act on the user's screen): open_url\n");
+    expect(prompt).not.toContain('bound behind the `portal` capability');
+  });
+
+  it('renders nothing when no browser tools were exposed', async () => {
+    const absent = await composePrompt(baseInput());
+    const empty = await composePrompt(
+      baseInput({ browserTools: { names: [], bound: false } }),
+    );
+
+    for (const prompt of [absent, empty]) {
+      expect(prompt).not.toContain('## Browser tools this turn');
+      expect(prompt).not.toContain('bound behind the `portal` capability');
+    }
+    expect(empty).toBe(absent);
   });
 });
