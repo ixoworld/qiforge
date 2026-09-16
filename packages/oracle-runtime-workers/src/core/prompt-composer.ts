@@ -76,6 +76,13 @@ export interface ComposePromptInput {
    * mandate a discovery flow the model cannot run.
    */
   capabilityDiscovery?: boolean;
+  /**
+   * Browser tools the client declared for this turn (`state.browserTools`),
+   * by name, plus whether they are already callable: `bound` is true when the
+   * portal plugin is `always` visible or has been loaded on this thread.
+   * Omit (or pass empty `names`) on non-Portal turns — nothing renders.
+   */
+  browserTools?: { names: string[]; bound: boolean };
   /** User preferences rendered as bullets. Empty when not set. */
   userPreferencesContext: string;
   /** Memory-engine context blocks. */
@@ -331,13 +338,40 @@ export function buildOracleSection(input: {
   return `You are ${oracleName}, an AI agent built on QiForge.`;
 }
 
+/** The plugin that binds the client-declared browser tools. */
+export const PORTAL_CAPABILITY = 'portal';
+
+/**
+ * Render the per-turn "Browser tools this turn" section. Empty string when the
+ * client declared no browser tools, so non-Portal turns pay nothing for it.
+ * The load line appears only while the tools sit behind the capability gate
+ * (portal is `on-demand` and not yet in `loadedPlugins`).
+ */
+function buildBrowserToolsBlock(
+  browserTools: ComposePromptInput['browserTools'],
+): string {
+  if (!browserTools || browserTools.names.length === 0) return '';
+  const lines = [
+    '## Browser tools this turn',
+    '',
+    `The Portal exposed these browser-side tools for this turn (they act on the user's screen): ${browserTools.names.join(', ')}`,
+  ];
+  if (!browserTools.bound) {
+    lines.push(
+      `They are bound behind the \`${PORTAL_CAPABILITY}\` capability — call \`load_capability({ names: ['${PORTAL_CAPABILITY}'] })\` once before using them.`,
+    );
+  }
+  return lines.join('\n');
+}
+
 /**
  * The discovery mandate. Rendered on every turn whose surface can actually
  * grow — i.e. wherever the meta-tools are bound.
  */
-const DISCOVERY_PRINCIPLE = `- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. That means:
-  1. Call \`search_skills\` against the user's request whenever a packaged skill could plausibly do the job (anything that involves generating a file, document, report, page, integration, calculation, lookup, or multi-step workflow).
-  2. Call \`list_capabilities\` to scan loaded + on-demand plugins when the task could be served by a plugin you haven't loaded yet. Then call \`load_capability({ names: [...] })\` with ALL the capabilities you need in a single call — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
+const DISCOVERY_PRINCIPLE = `- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. Capabilities live in three lanes, each found differently:
+  1. **Packaged skills** — call \`search_skills\` against the user's request whenever a skill could plausibly do the job (generating a file, document, report, or page; calculations; lookups; multi-step workflows).
+  2. **Server-side plugins and third-party integrations** (memory, sandbox, email, calendar, web, files, external services) — call \`list_capabilities\` to scan loaded + on-demand plugins, then call \`load_capability({ names: [...] })\` ONCE with everything you need — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
+  3. **Browser tools** — the \`[Portal]\`-prefixed tools already in your tool list. They run on the user's screen inside the Portal: navigate, open a URL or page, create pages/rooms, fill forms, grant access, change what the user sees. Use them for anything that happens on the user's side. They NEVER appear in \`search_skills\` or \`list_capabilities\` results — check your tool list (and the "Browser tools this turn" section when present) directly.
   Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.`;
 
 /**
@@ -357,6 +391,10 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 {{{CAPABILITY_BLOCK}}}
 
 {{/CAPABILITY_BLOCK}}
+{{#BROWSER_TOOLS_BLOCK}}
+{{{BROWSER_TOOLS_BLOCK}}}
+
+{{/BROWSER_TOOLS_BLOCK}}
 ## Operating principles
 
 - The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
@@ -436,6 +474,7 @@ export async function composePrompt(
     ORACLE_SECTION: oracleSection,
     CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
+    BROWSER_TOOLS_BLOCK: buildBrowserToolsBlock(input.browserTools),
     DISCOVERY_PRINCIPLE:
       input.capabilityDiscovery === false ? '' : DISCOVERY_PRINCIPLE,
     CUSTOM_INSTRUCTIONS: input.customInstructions,

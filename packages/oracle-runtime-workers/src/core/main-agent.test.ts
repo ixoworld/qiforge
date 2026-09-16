@@ -9,6 +9,7 @@ import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { MemorySaver } from '@langchain/langgraph';
 import { FakeToolCallingModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { ModelRole } from '../plugin-api/types';
 import { createRuntimeCore, type RuntimeCore } from './index';
 import { contextBudgetFor } from './context-budget';
@@ -16,6 +17,7 @@ import { createMainAgent } from './main-agent';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
+import { PortalPlugin } from '../plugins/portal';
 import { WeatherPlugin } from './plugins/weather';
 import { createNoopAmbient, type AmbientServices } from './runtime-context';
 import { makeEnv } from './test-fixtures';
@@ -106,7 +108,7 @@ function scriptedLlm(
 }
 
 function bootCore(
-  plugins = [new WeatherPlugin(), new SkillsPlugin()],
+  plugins: OraclePlugin[] = [new WeatherPlugin(), new SkillsPlugin()],
 ): RuntimeCore {
   return createRuntimeCore({
     config: {
@@ -323,6 +325,48 @@ describe('createMainAgent', () => {
       values: { loadedPlugins: string[] };
     };
     expect(snapshot.values.loadedPlugins).toEqual(['weather']);
+  });
+
+  it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {
+    const core = bootCore([new PortalPlugin(), new SkillsPlugin()]);
+    await core.warm();
+    const ambient = ambientFor(core, scriptedLlm({}));
+    const browserTools = [
+      { name: 'open_url', description: 'Open a URL', schema: {} },
+      { name: 'create_page_room', description: 'Create a page', schema: {} },
+    ];
+    const promptFor = async (state: {
+      browserTools?: typeof browserTools;
+      loadedPlugins?: string[];
+    }) =>
+      (
+        await createMainAgent({
+          registries: core.registries,
+          identity: core.identity,
+          config: core.validatedEnv,
+          availablePlugins: core.availablePlugins,
+          ambient,
+          requestCtx,
+          state,
+        })
+      ).systemPrompt;
+    const LOAD_LINE =
+      "They are bound behind the `portal` capability — call `load_capability({ names: ['portal'] })` once before using them.";
+
+    // Portal is on-demand by default and not loaded yet: block + load line.
+    const gated = await promptFor({ browserTools });
+    expect(gated).toContain(
+      "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url, create_page_room",
+    );
+    expect(gated).toContain(LOAD_LINE);
+
+    // Loaded this thread: the block stays, the load line goes.
+    const loaded = await promptFor({ browserTools, loadedPlugins: ['portal'] });
+    expect(loaded).toContain('## Browser tools this turn');
+    expect(loaded).not.toContain(LOAD_LINE);
+
+    // No browser tools on the request: the block costs nothing.
+    expect(await promptFor({})).not.toContain('## Browser tools this turn');
   });
 
   it('runs a sub-agent as a tool and forwards its tool calls into the parent history', async () => {

@@ -200,6 +200,7 @@ import {
 } from './run-store';
 import {
   runSummaryOf,
+  clientSurfaceFor,
   storedRunRequest,
   type StoredRunRequest,
 } from './run-request';
@@ -3011,7 +3012,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // (docs/plans/durable-runs.md). The response is one subscriber of the
       // run's buffer; the run itself outlives it.
       this.replayToRoom(req, body.message, 'user');
-      const agActionNames = (body.agActions ?? []).map((a) => a.name);
       const { live, queued } = await this.runs!.begin({
         runId: crypto.randomUUID(),
         sessionId,
@@ -3020,7 +3020,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         request: JSON.stringify(
           storedRunRequest(req, {
             timezone: body.timezone,
-            agActionNames,
+            tools: body.tools,
+            agActions: body.agActions,
             stream: true,
           }),
         ),
@@ -3138,6 +3139,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           message: req.message,
           timezone: stored.timezone ?? req.identity.timezone,
           model: req.model,
+          tools: stored.tools,
+          agActions: stored.agActions,
           ...(resumed ? {} : { attachments: req.attachments }),
         },
         {
@@ -3178,7 +3181,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           abortController: live.abort,
           mirror: (eventName, payload) =>
             this.events.emitToTaps(eventName, payload),
-          agActionNames: new Set(stored.agActionNames ?? []),
+          agActionNames: new Set((stored.agActions ?? []).map((a) => a.name)),
           byoProvider,
           toolOutputCapChars,
           messageIdOf: () => lastAiMessageId(capture),
@@ -3858,20 +3861,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const hostRoomTitle = opts.hooks?.getRoomTitle;
       const hostSafetyModel = opts.hooks?.safetyModel;
 
-      // A resumed attempt reads the client's tool surface back from the
-      // checkpointed state (the run row does not store the catalogue).
-      const priorSurface = priorState as {
-        browserTools?: TurnBody['tools'];
-        agActions?: TurnBody['agActions'];
-      };
-      const browserTools =
-        body.tools ??
-        (run.resumed ? priorSurface.browserTools : undefined) ??
-        [];
-      const agActions =
-        body.agActions ??
-        (run.resumed ? priorSurface.agActions : undefined) ??
-        [];
+      // The client-declared tool surface: this body's, else the thread's
+      // checkpointed one (run-request.ts).
+      const surface = clientSurfaceFor(body, priorState);
 
       // Write-ahead tool marks + the resume policy (tool-marks.ts). The
       // effect map is filled from the build below; the closure reads it at
@@ -3965,12 +3957,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...priorState,
           userPreferences,
           ...metadataBuildState(meta, priorMeta),
-          // The client-declared surface of THIS request: the portal and
-          // AG-UI plugins turn these into tools at build time
-          // (`getRequestTools` reads `history.state`), so they must be here
-          // and not only in the graph input.
-          browserTools,
-          agActions,
+          // The client-declared surface: the portal and AG-UI plugins turn
+          // these into tools at build time (`getRequestTools` reads
+          // `history.state`), so they must be here and not only in the
+          // graph input.
+          ...surface.state,
         },
         checkpointer: saver,
         abortSignal: abortController.signal,
@@ -4036,8 +4027,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         config: { did: req.identity.userDid },
         client: req.client,
         ...metadataGraphInput(meta, priorMeta),
-        browserTools,
-        agActions,
+        ...surface.input,
       };
       // LangSmith: metadata is attached unconditionally (inert without a
       // tracer); the explicit tracer only when this turn is traced (global
