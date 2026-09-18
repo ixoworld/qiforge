@@ -46,7 +46,9 @@ export class DecisionRegistry {
 
   assertNoCollisions(): void {
     if (this.bootCache === null) {
-      throw new Error('DecisionRegistry.assertNoCollisions called before collect');
+      throw new Error(
+        'DecisionRegistry.assertNoCollisions called before collect',
+      );
     }
 
     const seen = new Map<string, string>();
