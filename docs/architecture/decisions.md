@@ -42,8 +42,8 @@ QiForge exposes provider-neutral names:
 | QiForge kind | Meaning                              | Jev mapping |
 | ------------ | ------------------------------------ | ----------- |
 | `boolean`    | Probability that a condition is true | Noul        |
-| `choice`     | Select one option from a finite set   | Choice      |
-| `ordinal`    | Place the input on an ordered rubric  | Score       |
+| `choice`     | Select one option from a finite set  | Choice      |
+| `ordinal`    | Place the input on an ordered rubric | Score       |
 
 Jev is only one possible adapter. Plugin code depends on the QiForge contract,
 not on provider-specific request or response shapes.
