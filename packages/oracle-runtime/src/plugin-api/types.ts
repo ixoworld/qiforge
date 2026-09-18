@@ -566,9 +566,9 @@ export interface RuntimeContext<TConfig = MergedConfig> {
    * policy, authority checks, and side effects remain outside this primitive.
    */
   decisions: {
-    evaluate<TInput>(
-      definition: DecisionDefinition<TInput>,
-      input: TInput,
+    evaluate<TSchema extends z.ZodType>(
+      definition: DecisionDefinition<TSchema>,
+      input: z.input<TSchema>,
       options?: DecisionEvaluateOptions,
     ): Promise<DecisionEvaluation>;
     evaluateByName(
