@@ -9,14 +9,15 @@ import {
   type DecisionRequest,
 } from '@ixo/common';
 import type { Logger } from '../plugin-api/types.js';
+import type { z } from 'zod';
 import type { DecisionRegistry } from '../registries/decision-registry.js';
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
 export interface DecisionEvaluator {
-  evaluate<TInput>(
-    definition: DecisionDefinition<TInput>,
-    input: TInput,
+  evaluate<TSchema extends z.ZodType>(
+    definition: DecisionDefinition<TSchema>,
+    input: z.input<TSchema>,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation>;
   evaluateByName(
@@ -42,9 +43,9 @@ export class DecisionRuntime implements DecisionEvaluator {
     private readonly logger?: Pick<Logger, 'debug' | 'warn'>,
   ) {}
 
-  evaluate<TInput>(
-    definition: DecisionDefinition<TInput>,
-    input: TInput,
+  evaluate<TSchema extends z.ZodType>(
+    definition: DecisionDefinition<TSchema>,
+    input: z.input<TSchema>,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
     return this.evaluatePrepared(
