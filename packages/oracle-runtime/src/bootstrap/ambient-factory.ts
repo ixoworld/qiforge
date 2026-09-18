@@ -39,7 +39,7 @@ export interface BuildAmbientOptions {
   /** Boot-time logger; reused across adapters that don't get their own. */
   logger: PluginLogger;
   /** Boot-collected bounded semantic decisions. */
-  decisionRegistry: DecisionRegistry;
+  decisionRegistry?: DecisionRegistry;
   /** Optional host/provider adapter. Until configured, decisions fail closed. */
   decisionAdapter?: DecisionAdapter;
 }
