@@ -8,6 +8,7 @@ The runtime ships as `@ixo/oracle-runtime`. Forks consume it via `createOracleAp
 packages/oracle-runtime/src/
 ├── bootstrap/            # createOracleApp, loader, composer, inspect, graceful shutdown
 ├── config/               # base env schema, LLM provider config, model-for-role
+├── decisions/            # bounded semantic decision runtime
 ├── events/               # scoped emitter
 ├── graph/                # createMainAgent, agent builder, prompt composer, 4 always-on middlewares
 ├── llm/                  # provider abstractions
@@ -17,7 +18,7 @@ packages/oracle-runtime/src/
 ├── modules/              # always-on NestJS modules (Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Health)
 ├── plugin-api/           # OraclePlugin, defineOraclePlugin, tool(), types
 ├── plugins/              # 14 bundled plugins
-├── registries/           # 6 internal registries
+├── registries/           # 7 internal registries
 ├── runtime-context/      # buildPluginContext, buildRuntimeContext, ambient services
 ├── testing/              # createTestRuntime + mocks + integration harness
 └── utils/
@@ -32,7 +33,7 @@ graph TD
     Topo --> ManifestVal[Manifest validation]
     ManifestVal --> Compose[Schema composer<br/>merge configSchemas]
     Compose --> EnvVal[Env validation against merged schema]
-    EnvVal --> Registries[Populate 6 registries]
+    EnvVal --> Registries[Populate 7 registries]
     Registries --> NestMods[Collect plugin getNestModules]
     NestMods --> AppModule[Build dynamic RuntimeAppModule]
     AppModule --> NestBoot[NestFactory.create]
@@ -56,7 +57,7 @@ graph TD
 
 ## The three lines that make the runtime
 
-1. **Plugins contribute to registries.** Every hook on every plugin populates one of six registries (`tools`, `subAgents`, `middlewares`, `manifests`, `configSchema`, `sharedState`).
+1. **Plugins contribute to registries.** Plugin hooks populate seven registries (`tools`, `subAgents`, `middlewares`, `decisions`, `manifests`, `configSchema`, `sharedState`).
 2. **`createMainAgent` reads registries and composes an agent per request.** Tools, sub-agents, middlewares, the prompt — all assembled fresh per turn from the cached boot snapshot plus any request-time hooks.
 3. **The graph state is unchanged from the legacy runtime, except for one field.** The plugin runtime added `loadedPlugins` (for dynamic capability loading). Every other state field is identical — same reducers, same lifetime, same checkpointer.
 
@@ -76,6 +77,7 @@ graph TD
 - [Plugin lifecycle](plugin-lifecycle.md) — when each plugin hook fires and what context it sees.
 - [Modules](modules.md) — the always-on NestJS modules and their dependency graph.
 - [Graph and state](graph-and-state.md) — `MainAgentGraphState`, reducers, and how plugin contributions reach the agent.
+- [Bounded semantic decisions](decisions.md) — finite semantic judgments, provider adapters, and `ctx.decisions`.
 - [Meta-tools and discovery](meta-tools-and-discovery.md) — `list_capabilities` and `load_capability`.
 - [Matrix and checkpointer](matrix-and-checkpointer.md) — the persistence layer.
 - [Matrix commerce](matrix-commerce.md) — the core seam behind the `oracle-payments` plugin: the commerce router port, `ctx.commerce`, the in-flight turn registry, `work_status`.
