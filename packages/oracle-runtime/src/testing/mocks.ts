@@ -189,7 +189,6 @@ export function mockUcan(): UcanAdapter {
   };
 }
 
-
 /** Options accepted by `mockDecisionAdapter`. */
 export interface MockDecisionOptions {
   respondWith: DecisionProviderResult | DecisionProviderResult[];
