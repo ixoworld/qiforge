@@ -1,3 +1,8 @@
+import type {
+  DecisionDefinition,
+  DecisionEvaluateOptions,
+  DecisionEvaluation,
+} from '@ixo/common';
 import type { RequestMethod } from '@nestjs/common';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
@@ -554,6 +559,23 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       | { token: string; with: string }
       | { error: 'no-delegation' | 'store-error'; detail?: string }
     >;
+  };
+
+  /**
+   * Bounded semantic decisions. A decision only returns structured judgment;
+   * policy, authority checks, and side effects remain outside this primitive.
+   */
+  decisions: {
+    evaluate<TInput>(
+      definition: DecisionDefinition<TInput>,
+      input: TInput,
+      options?: DecisionEvaluateOptions,
+    ): Promise<DecisionEvaluation>;
+    evaluateByName(
+      name: string,
+      input: unknown,
+      options?: DecisionEvaluateOptions,
+    ): Promise<DecisionEvaluation>;
   };
 
   /** LLM provider. */
