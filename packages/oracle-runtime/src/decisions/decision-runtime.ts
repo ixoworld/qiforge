@@ -37,7 +37,7 @@ export class DecisionProviderUnavailableError extends Error {
 
 export class DecisionRuntime implements DecisionEvaluator {
   constructor(
-    private readonly registry: DecisionRegistry,
+    private readonly registry?: DecisionRegistry,
     private readonly adapter?: DecisionAdapter,
     private readonly logger?: Pick<Logger, 'debug' | 'warn'>,
   ) {}
@@ -59,6 +59,9 @@ export class DecisionRuntime implements DecisionEvaluator {
     input: unknown,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
+    if (!this.registry) {
+      throw new Error('No DecisionRegistry is configured.');
+    }
     const entry = this.registry.get(name);
     if (!entry) {
       throw new Error(`Decision "${name}" is not registered.`);
