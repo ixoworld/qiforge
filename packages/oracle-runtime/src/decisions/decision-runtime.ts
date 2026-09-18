@@ -125,9 +125,7 @@ export class DecisionRuntime implements DecisionEvaluator {
         },
         provider: this.adapter.provider,
         model: this.adapter.model,
-        ...(result.modelVersion
-          ? { modelVersion: result.modelVersion }
-          : {}),
+        ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
