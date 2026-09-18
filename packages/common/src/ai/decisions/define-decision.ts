@@ -1,8 +1,5 @@
-import { z } from 'zod';
-import type {
-  DecisionDefinition,
-  DecisionRequest,
-} from './types.js';
+import type { z } from 'zod';
+import type { DecisionDefinition, DecisionRequest } from './types.js';
 import { validateDecisionRequest } from './validation.js';
 
 export interface DefineDecisionOptions<TSchema extends z.ZodType> {
@@ -32,7 +29,9 @@ export function defineDecision<TSchema extends z.ZodType>(
     version: options.version,
     description: options.description,
     inputSchema: options.inputSchema,
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.timeoutMs === undefined
+      ? {}
+      : { timeoutMs: options.timeoutMs }),
     project: options.project,
     prepare(input: unknown) {
       const parsed = options.inputSchema.parse(input);
