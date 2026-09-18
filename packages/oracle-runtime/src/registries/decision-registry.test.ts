@@ -57,8 +57,6 @@ describe('DecisionRegistry', () => {
     );
     registry.collect(makeBuildCtx());
 
-    expect(() => registry.assertNoCollisions()).toThrow(
-      /shared\.route.*a.*b/,
-    );
+    expect(() => registry.assertNoCollisions()).toThrow(/shared\.route.*a.*b/);
   });
 });
