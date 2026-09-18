@@ -53,13 +53,14 @@ Hard violations are collected; if non-empty, boot throws `Plugin manifest valida
 
 ### 8. Registry population
 
-Six registries are constructed and populated:
+Seven registries are constructed and populated:
 
 ```ts
 const registries = {
   tools: new ToolRegistry(),
   subAgents: new SubAgentRegistry(),
   middlewares: new MiddlewareRegistry(),
+  decisions: new DecisionRegistry(),
   manifests: new ManifestRegistry(),
   configSchema: new ConfigSchemaRegistry(),
   sharedState: new SharedStateRegistry(),
@@ -120,7 +121,7 @@ CORS enabled (configurable origin, fixed allowed headers/methods). Swagger UI mo
 
 ### 14. AmbientServices
 
-`buildAmbientServices({ nestApp, config, identity, availablePlugins, logger })` resolves every Tier-0 service via `nestApp.get(...)` and packs them into an `AmbientServices` bag that `MessagesController` reads on every request to build a `RuntimeContext`.
+`buildAmbientServices({ nestApp, config, identity, availablePlugins, logger, decisionRegistry, decisionAdapter })` resolves every Tier-0 service via `nestApp.get(...)` and packs them into an `AmbientServices` bag that `MessagesController` reads on every request to build a `RuntimeContext`.
 
 ### 15. Warm boot caches
 
@@ -128,9 +129,10 @@ CORS enabled (configurable origin, fixed allowed headers/methods). Swagger UI mo
 await registries.tools.collectBoot(warmBuildCtx);
 registries.subAgents.collectBoot(warmBuildCtx);
 registries.middlewares.collect(warmBuildCtx);
+registries.decisions.collect(warmBuildCtx);
 ```
 
-Each registry calls every plugin's boot-time hook (`getTools`, `getSubAgents`, `getMiddlewares`) once and caches the result. Per-request agent builds reuse the cache; only `getRequestTools` / `getRequestSubAgents` re-run per turn.
+Each registry calls every plugin's boot-time hook (`getTools`, `getSubAgents`, `getMiddlewares`, `getDecisions`) once and caches the result. Per-request agent builds reuse the cache; only `getRequestTools` / `getRequestSubAgents` re-run per turn.
 
 ### 16. Merge MainAgentHooks
 
