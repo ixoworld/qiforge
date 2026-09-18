@@ -6,8 +6,8 @@ export interface BooleanDecisionQuestion {
   kind: 'boolean';
   instructions: string;
   criteria?: {
-    true?: string;
-    false?: string;
+    'true'?: string;
+    'false'?: string;
   };
 }
 
