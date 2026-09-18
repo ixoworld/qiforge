@@ -89,8 +89,9 @@ export interface DecisionRegistration {
   prepare(input: unknown): DecisionRequest;
 }
 
-export interface DecisionDefinition<TSchema extends z.ZodType = z.ZodType>
-  extends DecisionRegistration {
+export interface DecisionDefinition<
+  TSchema extends z.ZodType = z.ZodType,
+> extends DecisionRegistration {
   readonly inputSchema: TSchema;
   project(input: z.output<TSchema>): DecisionRequest;
 }
