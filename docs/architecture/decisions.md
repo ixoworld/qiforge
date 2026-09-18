@@ -39,11 +39,11 @@ A Decision never grants authority and never executes a side effect.
 
 QiForge exposes provider-neutral names:
 
-| QiForge kind | Meaning | Jev mapping |
-| --- | --- | --- |
-| `boolean` | Probability that a condition is true | Noul |
-| `choice` | Select one option from a finite set | Choice |
-| `ordinal` | Place the input on an ordered rubric | Score |
+| QiForge kind | Meaning                              | Jev mapping |
+| ------------ | ------------------------------------ | ----------- |
+| `boolean`    | Probability that a condition is true | Noul        |
+| `choice`     | Select one option from a finite set   | Choice      |
+| `ordinal`    | Place the input on an ordered rubric  | Score       |
 
 Jev is only one possible adapter. Plugin code depends on the QiForge contract,
 not on provider-specific request or response shapes.
