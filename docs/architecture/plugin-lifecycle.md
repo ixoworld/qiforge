@@ -21,7 +21,7 @@ These run during the warm pass (boot phase 15) once with a synthetic `pluginName
 | `getTools(ctx)`                    | The tool list — re-used on every request build        |
 | `getSubAgents(ctx)`                | The sub-agent list — re-used on every request build   |
 | `getMiddlewares(ctx)`              | The middleware list — re-used on every request build  |
-| `getDecisions(ctx)`                  | Bounded Decision definitions — process-wide registry  |
+| `getDecisions(ctx)`                | Bounded Decision definitions — process-wide registry  |
 | `getSharedState()`                 | The accessor map — wired into the SharedStateRegistry |
 | `configSchema` (field, not a hook) | Merged into the env schema at boot phase 5            |
 
