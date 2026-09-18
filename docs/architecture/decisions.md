@@ -51,7 +51,8 @@ not on provider-specific request or response shapes.
 ## Define a Decision
 
 ```ts
-import { defineDecision, z } from '@ixo/oracle-runtime';
+import { defineDecision } from '@ixo/oracle-runtime';
+import { z } from 'zod';
 
 export const routeMessage = defineDecision({
   name: 'oracle-payments.route-message',
@@ -240,5 +241,7 @@ agent behavior.
 ## Read next
 
 - [Plugin lifecycle](plugin-lifecycle.md) — when Decisions are registered.
-- [Runtime context](runtime-context.md) — how `ctx.decisions` is scoped to a turn.
-- [Matrix commerce](matrix-commerce.md) — the first planned production consumer.
+- [Runtime context](runtime-context.md) — how `ctx.decisions` is scoped to a
+  turn.
+- [Matrix commerce](matrix-commerce.md) — the first planned production
+  consumer.
