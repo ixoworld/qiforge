@@ -87,8 +87,8 @@ describe('DecisionRuntime', () => {
     };
     const runtime = new DecisionRuntime(registry(), adapter);
 
-    await expect(
-      runtime.evaluate(decision, { text: 'yes' }),
-    ).rejects.toThrow(/0 to 1/);
+    await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+      /0 to 1/,
+    );
   });
 });
