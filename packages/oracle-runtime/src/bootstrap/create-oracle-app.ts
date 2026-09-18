@@ -1,3 +1,4 @@
+import type { DecisionAdapter } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import {
   loadEncryptionKey,
@@ -46,6 +47,7 @@ import {
   ConfigSchemaRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
+  DecisionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -127,6 +129,11 @@ export interface CreateOracleAppOptions {
    * swap it for an alternate implementation.
    */
   hooks?: MainAgentHooks;
+  /**
+   * Provider adapter for bounded semantic decisions. Decisions remain
+   * registered without one, but evaluation throws until an adapter is supplied.
+   */
+  decisionAdapter?: DecisionAdapter;
 }
 
 export interface PluginStatusReport {
@@ -313,6 +320,7 @@ export async function createOracleApp(
     tools: new ToolRegistry(),
     subAgents: new SubAgentRegistry(),
     middlewares: new MiddlewareRegistry(),
+    decisions: new DecisionRegistry(),
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
@@ -321,6 +329,7 @@ export async function createOracleApp(
     registries.tools.register(plugin);
     registries.subAgents.register(plugin);
     registries.middlewares.register(plugin);
+    registries.decisions.register(plugin);
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
@@ -460,6 +469,8 @@ export async function createOracleApp(
     identity,
     availablePlugins: loadedPluginNames,
     logger,
+    decisionRegistry: registries.decisions,
+    decisionAdapter: opts.decisionAdapter,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent
@@ -476,6 +487,7 @@ export async function createOracleApp(
   await registries.tools.collectBoot(warmBuildCtx);
   registries.subAgents.collectBoot(warmBuildCtx);
   registries.middlewares.collect(warmBuildCtx);
+  registries.decisions.collect(warmBuildCtx);
 
   // Fail the boot if two plugins contribute the same tool name, sub-agent
   // name, or shared-state key. Without this, a collision is silently
@@ -486,6 +498,7 @@ export async function createOracleApp(
   // assertion can't cover them.
   registries.tools.assertNoCollisions();
   registries.subAgents.assertNoCollisions();
+  registries.decisions.assertNoCollisions();
   registries.sharedState.assertNoCollisions();
 
   // 10. Build the merged hooks the agent build will use:
