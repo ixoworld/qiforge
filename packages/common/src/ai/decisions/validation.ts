@@ -47,7 +47,11 @@ export function validateDecisionRequest(
 
   let serialized: string;
   try {
-    serialized = JSON.stringify(request.state);
+    const json = JSON.stringify(request.state);
+    if (json === undefined) {
+      throw new Error('Decision state must be JSON-serializable.');
+    }
+    serialized = json;
   } catch {
     throw new Error('Decision state must be JSON-serializable.');
   }
