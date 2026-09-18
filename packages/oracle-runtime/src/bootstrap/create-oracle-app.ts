@@ -45,9 +45,9 @@ import type { AmbientServices } from '../runtime-context/ambient.js';
 import { buildAmbientServices } from './ambient-factory.js';
 import {
   ConfigSchemaRegistry,
+  DecisionRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
-  DecisionRegistry,
   SharedStateRegistry,
   SubAgentRegistry,
   ToolRegistry,
@@ -490,7 +490,7 @@ export async function createOracleApp(
   registries.decisions.collect(warmBuildCtx);
 
   // Fail the boot if two plugins contribute the same tool name, sub-agent
-  // name, or shared-state key. Without this, a collision is silently
+  // name, decision name, or shared-state key. Without this, a collision is silently
   // resolved last-write-wins: the agent binds duplicate tools and the
   // capability gate mis-attributes one of them, leaving it unreachable.
   // Only the boot-time contributions are checked here — request-time tools
