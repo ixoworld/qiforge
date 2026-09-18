@@ -11,12 +11,12 @@ export interface DefineDecisionOptions<TSchema extends z.ZodType> {
   description: string;
   inputSchema: TSchema;
   timeoutMs?: number;
-  project(input: z.infer<TSchema>): DecisionRequest;
+  project(input: z.output<TSchema>): DecisionRequest;
 }
 
 export function defineDecision<TSchema extends z.ZodType>(
   options: DefineDecisionOptions<TSchema>,
-): DecisionDefinition<z.infer<TSchema>> {
+): DecisionDefinition<TSchema> {
   if (!options.name.trim()) {
     throw new Error('Decision name must be non-empty.');
   }
