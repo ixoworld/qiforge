@@ -1,3 +1,4 @@
+import type { DecisionAdapter, DecisionProviderResult } from '@ixo/common';
 import { vi } from 'vitest';
 import { AIMessage } from '@langchain/core/messages';
 import { fakeModel } from 'langchain';
@@ -185,6 +186,38 @@ export function mockUcan(): UcanAdapter {
     getServiceDelegation: vi.fn(async () => ({
       error: 'no-delegation' as const,
     })),
+  };
+}
+
+
+/** Options accepted by `mockDecisionAdapter`. */
+export interface MockDecisionOptions {
+  respondWith: DecisionProviderResult | DecisionProviderResult[];
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * Build a deterministic DecisionAdapter for tests. Responses are consumed in
+ * order; exhausting the queue is a test error rather than an invented result.
+ */
+export function mockDecisionAdapter(
+  opts: MockDecisionOptions,
+): DecisionAdapter {
+  const responses = Array.isArray(opts.respondWith)
+    ? [...opts.respondWith]
+    : [opts.respondWith];
+
+  return {
+    provider: opts.provider ?? 'mock',
+    model: opts.model ?? 'mock-decision-model',
+    evaluate: vi.fn(async () => {
+      const next = responses.shift();
+      if (!next) {
+        throw new Error('mockDecisionAdapter response queue exhausted');
+      }
+      return next;
+    }),
   };
 }
 
