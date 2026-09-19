@@ -36,11 +36,17 @@ import { UserContextFetcher } from './user-context-fetcher.js';
     PostMessageSyncer,
     MatrixListenerBridge,
     {
-      // Plain construction: the router's collaborators (the commerce port
-      // holder, the routing-model factory, the status producer) are
-      // module-scope singletons, not Nest providers.
+      // The router runs before RuntimeContext exists, but bounded Decisions
+      // live on the boot-populated ambient runtime. Resolve them lazily through
+      // the holder so module construction still works before createOracleApp
+      // has populated the bundle.
       provide: MessageRouterService,
-      useFactory: () => new MessageRouterService(),
+      useFactory: (holder: OracleRuntimeBundleHolder) =>
+        new MessageRouterService({
+          getDecisionEvaluator: () =>
+            holder.isReady() ? holder.get().ambient.decisions : undefined,
+        }),
+      inject: [OracleRuntimeBundleHolder],
     },
     {
       // `MemoryEngineService` is OPTIONAL. `UserContextFetcher` reads it
