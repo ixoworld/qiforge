@@ -164,12 +164,13 @@ The core validation layer enforces:
 1. At least one and at most 16 questions per evaluation.
 2. A finite answer space: choice questions have 2–32 options; ordinal
    questions have 2–16 levels.
-3. Projected state is JSON-serializable and at most 64 KiB by default.
+3. Projected state may be scalar, array, or object; it must be JSON-serializable and at most 64 KiB by default.
 4. Provider answer keys exactly match requested question keys.
 5. Choice answers can only select declared options.
 6. Probabilities and confidence values are finite numbers in `[0, 1]`.
 7. Choice probability maps match the declared option set and sum
-   approximately to one.
+   approximately to one; ordinal scores may be fractional but must remain
+   inside `0..N-1`, and ordinal probability maps use the declared level indices.
 8. Provider failure, timeout, or malformed output throws; the runtime never
    invents a semantic answer.
 9. Decision timeout defaults to five seconds unless a definition or caller
