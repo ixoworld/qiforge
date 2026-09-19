@@ -130,7 +130,7 @@ describe('CloudflareJevDecisionAdapter', () => {
           kind: 'ordinal',
           score: 1.4,
           confidence: 0.82,
-          probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
+          probabilities: { 0: 0.1, 1: 0.4, 2: 0.5 },
         },
       },
       usage: { inputTokens: 100, outputTokens: 20 },
