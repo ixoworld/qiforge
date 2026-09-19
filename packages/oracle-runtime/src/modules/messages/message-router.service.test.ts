@@ -439,7 +439,10 @@ describe('MessageRouterService', () => {
         evaluator,
       );
 
-      const result = await router.route(turn('how much is a tax report?'));
+      const result = await router.route({
+        ...turn('how much is a tax report?'),
+        requestId: 'req-shadow-1',
+      });
 
       expect(result).toEqual({ mode: 'support' });
       expect(spies.checkContractGate).not.toHaveBeenCalled();
@@ -472,6 +475,7 @@ describe('MessageRouterService', () => {
         logger.log.mock.calls
           .map(([line]) => String(line))
           .find((line) => line.includes('[commerce-router-shadow]')) ?? '';
+      expect(shadowLine).toContain('request=req-shadow-1');
       expect(shadowLine).toContain('legacyIntent=support');
       expect(shadowLine).toContain('decisionIntentAt50=work');
       expect(shadowLine).toContain('intentAgree=false');
