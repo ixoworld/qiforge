@@ -1,3 +1,4 @@
+import type { DecisionRegistration } from '@ixo/common';
 import { z } from 'zod';
 import { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
@@ -99,6 +100,7 @@ export interface TestPluginInit {
   autoDetectHint?: string;
   getTools?: (ctx: PluginContext) => PluginTool[] | Promise<PluginTool[]>;
   getSubAgents?: (ctx: PluginContext) => PluginSubAgent[];
+  getDecisions?: (ctx: PluginContext) => DecisionRegistration[];
   getMiddlewares?: (ctx: PluginContext) => AgentMiddleware[];
   getRequestTools?: (
     rtCtx: RuntimeContext,
@@ -174,6 +176,14 @@ export function makeRuntimeContext(
       mintSelfSignedInvocation: async () => ({ invocation: 'invocation-car' }),
       getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
     },
+    decisions: {
+      evaluate: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
+      evaluateByName: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
+    },
     llm: {
       get: () =>
         ({}) as unknown as RuntimeContext['llm'] extends {
@@ -226,6 +236,10 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
 
     override getSubAgents(ctx: PluginContext): PluginSubAgent[] {
       return init.getSubAgents ? init.getSubAgents(ctx) : [];
+    }
+
+    override getDecisions(ctx: PluginContext): DecisionRegistration[] {
+      return init.getDecisions ? init.getDecisions(ctx) : [];
     }
 
     override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {

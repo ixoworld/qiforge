@@ -9,6 +9,7 @@ export {
   mockResponse,
   mockMatrix,
   mockLlm,
+  mockDecisionAdapter,
   mockSecrets,
   mockBlobStore,
   mockEmit,
@@ -18,6 +19,7 @@ export {
   type MockResponseInit,
   type MockMatrixOverrides,
   type MockLlmOptions,
+  type MockDecisionOptions,
   type FetchHandler,
 } from './mocks.js';
 

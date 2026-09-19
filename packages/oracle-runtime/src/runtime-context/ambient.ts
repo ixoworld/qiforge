@@ -1,4 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DecisionEvaluator } from '../decisions/decision-runtime.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -157,6 +158,8 @@ export interface AmbientServices {
   blobStore: BlobStoreAdapter;
   matrix: MatrixAdapter;
   llm: LlmAdapter;
+  /** Bounded semantic decision runtime. Optional only for legacy/test ambients. */
+  decisions?: DecisionEvaluator;
   emit: EmitAdapter;
   ucan: UcanAdapter;
   logger: Logger;

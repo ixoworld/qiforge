@@ -9,10 +9,23 @@ import type {
   UserContextData,
 } from '../plugin-api/types.js';
 import { createScopedEmitter } from '../events/scoped-emitter.js';
+import {
+  DecisionProviderUnavailableError,
+  type DecisionEvaluator,
+} from '../decisions/decision-runtime.js';
 import type { AmbientServices } from './ambient.js';
 
 /** Fixed empty `shared` accessors — frozen so callers can't mutate. */
 const EMPTY_SHARED: SharedAccessors = Object.freeze({});
+
+const UNAVAILABLE_DECISIONS: DecisionEvaluator = {
+  async evaluate() {
+    throw new DecisionProviderUnavailableError();
+  },
+  async evaluateByName() {
+    throw new DecisionProviderUnavailableError();
+  },
+};
 
 /**
  * The user channel passed in via LangGraph's per-run context. Mirrors today's
@@ -113,6 +126,19 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   );
 
   const abortSignal = runConfig.signal ?? new AbortController().signal;
+  const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISIONS;
+  const decisions: RuntimeContext['decisions'] = {
+    evaluate: (definition, input, options) =>
+      decisionEvaluator.evaluate(definition, input, {
+        ...options,
+        signal: options?.signal ?? abortSignal,
+      }),
+    evaluateByName: (name, input, options) =>
+      decisionEvaluator.evaluateByName(name, input, {
+        ...options,
+        signal: options?.signal ?? abortSignal,
+      }),
+  };
 
   const delegation = user.ucanDelegation;
 
@@ -180,6 +206,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
+    decisions,
     llm: {
       get: (role, params) => ambient.llm.get(role, params),
     },

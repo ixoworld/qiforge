@@ -1,3 +1,4 @@
+import { defineDecision } from '@ixo/common';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
@@ -31,6 +32,58 @@ describe('createTestRuntime', () => {
     const elapsed = performance.now() - start;
     expect(elapsed).toBeLessThan(500);
     expect(rt.listTools().map((t) => t.name)).toEqual(['get_emissions']);
+    await rt.close();
+  });
+
+  it('registers and evaluates a bounded decision without invoking an LLM', async () => {
+    const routeDecision = defineDecision({
+      name: 'commerce.route',
+      version: '1.0.0',
+      description: 'Classify bounded commerce intent.',
+      inputSchema: z.object({ text: z.string() }),
+      project: ({ text }) => ({
+        state: { text },
+        questions: {
+          work: {
+            kind: 'boolean',
+            instructions: 'Is the user explicitly requesting paid work now?',
+          },
+        },
+      }),
+    });
+
+    const rt = await createTestRuntime({
+      plugins: [
+        makePlugin({
+          name: 'commerce',
+          getDecisions: () => [routeDecision],
+        }),
+      ],
+      mocks: {
+        decision: {
+          respondWith: {
+            answers: {
+              work: { kind: 'boolean', probabilityTrue: 0.96 },
+            },
+          },
+        },
+      },
+    });
+
+    const result = await rt.invokeDecision('commerce.route', {
+      text: 'file my taxes',
+    });
+
+    expect(result.provider).toBe('mock');
+    expect(result.model).toBe('mock-decision-model');
+    expect(result.decision).toEqual({
+      name: 'commerce.route',
+      version: '1.0.0',
+    });
+    expect(result.answers.work).toEqual({
+      kind: 'boolean',
+      probabilityTrue: 0.96,
+    });
     await rt.close();
   });
 
