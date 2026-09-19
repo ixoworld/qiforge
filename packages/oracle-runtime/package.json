@@ -40,6 +40,11 @@
       "types": "./dist/testing/integration/index.d.ts",
       "import": "./dist/testing/integration/index.js",
       "default": "./dist/testing/integration/index.js"
+    },
+    "./testing/memory-conformance": {
+      "types": "./dist/testing/memory-conformance/index.d.ts",
+      "import": "./dist/testing/memory-conformance/index.js",
+      "default": "./dist/testing/memory-conformance/index.js"
     }
   },
   "files": [
