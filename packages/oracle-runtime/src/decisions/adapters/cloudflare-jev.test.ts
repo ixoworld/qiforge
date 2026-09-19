@@ -248,9 +248,7 @@ describe('CloudflareJevDecisionAdapter', () => {
     expect((error as CloudflareJevDecisionError).status).toBe(401);
   });
 
-  it(
-    'surfaces only the provider error code for success=false envelopes',
-    async () => {
+  it('keeps provider errors free of echoed state', async () => {
       const sensitive = 'provider echoed private state';
       const adapter = new CloudflareJevDecisionAdapter({
         accountId: 'account-1',
@@ -278,8 +276,7 @@ describe('CloudflareJevDecisionAdapter', () => {
         name: 'CloudflareJevDecisionError',
         code: 9001,
       });
-    },
-  );
+  });
 
   it('rejects unknown Jev answer types', async () => {
     const adapter = new CloudflareJevDecisionAdapter({
@@ -308,9 +305,7 @@ describe('CloudflareJevDecisionAdapter', () => {
     ).rejects.toBeInstanceOf(CloudflareJevDecisionError);
   });
 
-  it(
-    'propagates an abort rather than wrapping it as a provider error',
-    async () => {
+  it('propagates abort errors', async () => {
       const controller = new AbortController();
       const aborted = new DOMException('Aborted', 'AbortError');
       const fetchMock = vi.fn(async () => {
@@ -337,6 +332,5 @@ describe('CloudflareJevDecisionAdapter', () => {
           { signal: controller.signal },
         ),
       ).rejects.toBe(aborted);
-    },
-  );
+  });
 });
