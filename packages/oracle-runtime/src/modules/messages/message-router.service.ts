@@ -102,6 +102,8 @@ interface RoutingDecisionFields {
 /** One coalesced Matrix turn, as the bridge hands it over pre-delivery. */
 export interface RouteTurnInput {
   roomId: string;
+  /** Per-turn request id, when available, for joining async shadow telemetry. */
+  requestId?: string;
   /** Thread root event id — session id and engagement key. */
   threadId: string;
   senderDid: string;
@@ -391,7 +393,7 @@ export class MessageRouterService {
     if (port.routerEngine !== 'decision-shadow') return null;
     if (!port.routerDecisionName) {
       this.logger.warn(
-        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=unavailable reason=missing-decision-name`,
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=unavailable reason=missing-decision-name`,
       );
       return null;
     }
@@ -399,7 +401,7 @@ export class MessageRouterService {
     const evaluator = this.getDecisionEvaluator();
     if (!evaluator) {
       this.logger.warn(
-        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=unavailable reason=missing-evaluator`,
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=unavailable reason=missing-evaluator`,
       );
       return null;
     }
@@ -457,7 +459,7 @@ export class MessageRouterService {
         const errorType =
           error instanceof Error ? error.name || 'Error' : typeof error;
         this.logger.warn(
-          `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=failed errorType=${errorType}`,
+          `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=failed errorType=${errorType}`,
         );
       });
   }
@@ -474,7 +476,7 @@ export class MessageRouterService {
     const service = evaluation.answers.service;
     if (work?.kind !== 'boolean' || service?.kind !== 'choice') {
       this.logger.warn(
-        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=invalid-normalized-answer`,
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=invalid-normalized-answer`,
       );
       return;
     }
@@ -494,6 +496,7 @@ export class MessageRouterService {
     this.logger.log(
       [
         `${SHADOW_LOG_PREFIX} thread=${input.threadId}`,
+        ...(input.requestId ? [`request=${input.requestId}`] : []),
         'status=ok',
         `legacyIntent=${legacy?.intent ?? 'unavailable'}`,
         `legacyConfidence=${legacy?.confidence ?? 'unavailable'}`,
@@ -531,6 +534,7 @@ export class MessageRouterService {
     this.logger.log(
       [
         `${LOG_PREFIX} thread=${input.threadId}`,
+        ...(input.requestId ? [`request=${input.requestId}`] : []),
         `mode=${fields.mode}`,
         `decision=${fields.decision}`,
         ...(fields.serviceId ? [`service=${fields.serviceId}`] : []),
