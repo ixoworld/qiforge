@@ -20,6 +20,10 @@ import {
   validateLangsmithTracing,
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
+import {
+  createDecisionAdapterFromConfig,
+  validateDecisionProviderConfig,
+} from '../decisions/index.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
 import {
@@ -281,6 +285,26 @@ export async function createOracleApp(
     );
   }
 
+  // Cross-field check for the optional bounded Decision provider. An explicit
+  // host adapter wins over env configuration, so its presence deliberately
+  // bypasses auto-provider credential validation.
+  if (!opts.decisionAdapter) {
+    const decisionProviderErrors = validateDecisionProviderConfig(
+      validated.config,
+    );
+    if (decisionProviderErrors.length > 0) {
+      for (const issue of decisionProviderErrors) {
+        reportBootError(
+          logger,
+          `Decision provider env validation failed for '${issue.field}': ${issue.message}`,
+        );
+      }
+      throw new Error(
+        `Env validation failed (${decisionProviderErrors.length} issue${decisionProviderErrors.length === 1 ? '' : 's'}).`,
+      );
+    }
+  }
+
   // Cross-field check for the LangSmith selective-tracing allowlist —
   // `LANGSMITH_TRACED_DIDS` requires an API key and must not be combined
   // with the global `LANGSMITH_TRACING=true` switch. Failing here beats
@@ -460,6 +484,9 @@ export async function createOracleApp(
     );
   }
 
+  const decisionAdapter =
+    opts.decisionAdapter ?? createDecisionAdapterFromConfig(validated.config);
+
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
   // the messages controller on a per-request basis.
@@ -470,7 +497,7 @@ export async function createOracleApp(
     availablePlugins: loadedPluginNames,
     logger,
     decisionRegistry: registries.decisions,
-    decisionAdapter: opts.decisionAdapter,
+    decisionAdapter,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent

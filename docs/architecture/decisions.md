@@ -209,8 +209,24 @@ PR 1 introduces no production provider. Without an adapter,
 `ctx.decisions.evaluate(...)` throws `DecisionProviderUnavailableError`.
 The test runtime provides a deterministic mock adapter.
 
-The first production adapter is expected to map the provider-neutral question
-kinds to TypeSafe Jev, without changing plugin Decision definitions.
+The first production adapter maps the provider-neutral question kinds to
+TypeSafe Jev through Cloudflare's AI REST API. Enable it with:
+
+```text
+DECISION_PROVIDER=cloudflare-jev
+CLOUDFLARE_ACCOUNT_ID=<account id>
+CLOUDFLARE_API_TOKEN=<token>
+CLOUDFLARE_AI_GATEWAY_ID=<optional gateway id>
+```
+
+When the provider is selected, the account id and token are required at boot.
+An explicit `createOracleApp({ decisionAdapter })` override wins over env
+configuration. The optional gateway id is forwarded as
+`cf-aig-gateway-id`; third-party Jev requests otherwise use Cloudflare's
+default gateway behavior.
+
+The adapter maps `boolean → Noul`, `choice → Choice`, and
+`ordinal → Score` without changing plugin Decision definitions.
 
 ## Testing
 

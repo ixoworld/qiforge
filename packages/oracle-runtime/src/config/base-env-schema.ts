@@ -76,6 +76,13 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
+  // Bounded semantic Decision provider. Optional so deployments that do not
+  // use Decisions preserve their existing behavior.
+  DECISION_PROVIDER: z.enum(['cloudflare-jev']).optional(),
+  CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
+  CLOUDFLARE_API_TOKEN: z.string().optional(),
+  CLOUDFLARE_AI_GATEWAY_ID: z.string().optional(),
+
   /**
    * Default model for new chats — an OpenRouter slug (e.g.
    * `openai/gpt-5.6-luna`), ideally one returned by `GET /models`. When unset

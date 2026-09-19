@@ -20,6 +20,15 @@ export {
   DEFAULT_DECISION_TIMEOUT_MS,
   DecisionProviderUnavailableError,
   DecisionRuntime,
+  CloudflareJevDecisionAdapter,
+  CloudflareJevDecisionError,
+  createDecisionAdapterFromConfig,
+  validateDecisionProviderConfig,
+} from './decisions/index.js';
+export type {
+  CloudflareJevAdapterOptions,
+  DecisionProviderConfigIssue,
+  DecisionProviderName,
 } from './decisions/index.js';
 export type {
   OracleApp,
