@@ -93,9 +93,7 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
       );
     }
     if (!options.apiToken.trim()) {
-      throw new TypeError(
-        'CloudflareJevDecisionAdapter apiToken is required.',
-      );
+      throw new TypeError('CloudflareJevDecisionAdapter apiToken is required.');
     }
 
     this.accountId = options.accountId;
