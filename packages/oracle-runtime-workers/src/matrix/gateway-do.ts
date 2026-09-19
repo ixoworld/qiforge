@@ -310,6 +310,23 @@ export class MatrixGatewayDO
         env.MATRIX_RECYCLE_AFTER_SENDS ?? String(DEFAULT_RECYCLE_AFTER_SENDS),
       MATRIX_HOT_ROOMS: env.MATRIX_HOT_ROOMS,
       MATRIX_BACKFILL_MAX_EVENTS: env.MATRIX_BACKFILL_MAX_EVENTS,
+      // Memory guards (SDK 0.5+): byte-capped /sync and catch-up pages and
+      // an optional ciphertext cap on decryption. Unset = the SDK defaults.
+      MATRIX_SYNC_TIMELINE_LIMIT: env.MATRIX_SYNC_TIMELINE_LIMIT,
+      MATRIX_SYNC_BYTES_CAP: env.MATRIX_SYNC_BYTES_CAP,
+      MATRIX_CATCHUP_PAGE_SIZE: env.MATRIX_CATCHUP_PAGE_SIZE,
+      MATRIX_PAGE_BYTES_CAP: env.MATRIX_PAGE_BYTES_CAP,
+      MATRIX_MAX_DECRYPT_BYTES: env.MATRIX_MAX_DECRYPT_BYTES,
+      // Opt-in bulk restore of the key backup on a device's first start
+      // (SDK 0.6+); off by default — the gateway fetches room keys from the
+      // backup on demand, one session at a time.
+      MATRIX_BACKUP_BULK_RESTORE: env.MATRIX_BACKUP_BULK_RESTORE,
+      MATRIX_BACKUP_BULK_RESTORE_MAX_KEYS:
+        env.MATRIX_BACKUP_BULK_RESTORE_MAX_KEYS,
+      // Keep-alive fuse (SDK 0.7+): the alarm is re-armed a few seconds
+      // ahead while the object works, so a host drain brings it back within
+      // the fuse instead of at the next cycle.
+      MATRIX_KEEPALIVE_FUSE_MS: env.MATRIX_KEEPALIVE_FUSE_MS,
       LOG_LEVEL: env.LOG_LEVEL,
     });
     return {
@@ -685,14 +702,13 @@ export class MatrixGatewayDO
   }
 
   /**
-   * Every start of this instance — first request, keep-alive alarm, RPC —
-   * goes through here. A start that actually brought the bot up is the
+   * After every successful start of this instance — a request, the
+   * keep-alive alarm bringing it back after a reset, a device rotation
+   * (the SDK's `onStarted` hook, detached from the caller). That is the
    * moment to re-dispatch the turns a previous incarnation left unfinished.
    */
-  override async ensureStarted(): Promise<StartResult> {
-    const result = await super.ensureStarted();
-    if (result.started) this.scheduleInboxReplay();
-    return result;
+  protected override async onStarted(_result: StartResult): Promise<void> {
+    this.scheduleInboxReplay();
   }
 
   private scheduleInboxReplay(): void {
