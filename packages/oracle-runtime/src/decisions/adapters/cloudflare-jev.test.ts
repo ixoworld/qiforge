@@ -141,19 +141,18 @@ describe('CloudflareJevDecisionAdapter', () => {
     const adapter = new CloudflareJevDecisionAdapter({
       accountId: 'account-1',
       apiToken: 'token',
-      fetch: vi.fn(
-        async () =>
-          successResponse({
-            success: true,
-            errors: [],
-            messages: [],
-            result: {
-              model: 'jev-1.13.0',
-              answers: {
-                work: { type: 'noul', noul: 0.75 },
-              },
+      fetch: vi.fn(async () =>
+        successResponse({
+          success: true,
+          errors: [],
+          messages: [],
+          result: {
+            model: 'jev-1.13.0',
+            answers: {
+              work: { type: 'noul', noul: 0.75 },
             },
-          }),
+          },
+        }),
       ) as typeof fetch,
     });
 
@@ -253,12 +252,11 @@ describe('CloudflareJevDecisionAdapter', () => {
     const adapter = new CloudflareJevDecisionAdapter({
       accountId: 'account-1',
       apiToken: 'token',
-      fetch: vi.fn(
-        async () =>
-          successResponse({
-            success: false,
-            errors: [{ code: 9001, message: sensitive }],
-          }),
+      fetch: vi.fn(async () =>
+        successResponse({
+          success: false,
+          errors: [{ code: 9001, message: sensitive }],
+        }),
       ) as typeof fetch,
     });
 
@@ -282,13 +280,12 @@ describe('CloudflareJevDecisionAdapter', () => {
     const adapter = new CloudflareJevDecisionAdapter({
       accountId: 'account-1',
       apiToken: 'token',
-      fetch: vi.fn(
-        async () =>
-          successResponse({
-            answers: {
-              work: { type: 'freeform', text: 'yes' },
-            },
-          }),
+      fetch: vi.fn(async () =>
+        successResponse({
+          answers: {
+            work: { type: 'freeform', text: 'yes' },
+          },
+        }),
       ) as typeof fetch,
     });
 
