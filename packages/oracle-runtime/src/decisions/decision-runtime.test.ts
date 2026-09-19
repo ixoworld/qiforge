@@ -65,6 +65,25 @@ describe('DecisionRuntime', () => {
     });
   });
 
+  it('returns input preparation failures as promise rejections', async () => {
+    const runtime = new DecisionRuntime(registry(), {
+      provider: 'test-provider',
+      model: 'test-model',
+      async evaluate() {
+        return {
+          answers: {
+            yes: { kind: 'boolean', probabilityTrue: 0.8 },
+          },
+        };
+      },
+    });
+
+    const rejection = runtime.evaluateByName('test.boolean', { text: 123 });
+
+    expect(rejection).toBeInstanceOf(Promise);
+    await expect(rejection).rejects.toThrow();
+  });
+
   it('fails when no decision adapter is configured', async () => {
     const runtime = new DecisionRuntime(registry());
 
