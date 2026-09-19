@@ -1,6 +1,12 @@
 import type { z } from 'zod';
 
-export type DecisionState = Record<string, unknown>;
+export type DecisionState =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly unknown[]
+  | Readonly<Record<string, unknown>>;
 
 export interface BooleanDecisionQuestion {
   kind: 'boolean';
@@ -47,7 +53,11 @@ export interface ChoiceDecisionAnswer {
 
 export interface OrdinalDecisionAnswer {
   kind: 'ordinal';
-  level: number;
+  /**
+   * Continuous position on the declared ordinal scale. For N levels the
+   * valid range is 0..N-1; providers such as Jev may return fractional values.
+   */
+  score: number;
   confidence: number;
   probabilities?: Record<string, number>;
 }
