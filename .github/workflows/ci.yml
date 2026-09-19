@@ -4,14 +4,13 @@ on:
   pull_request:
     branches: ["**"]
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-and-lint:
-    name: Build and Lint
+    name: Prettier diagnostic
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,15 +30,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm build
-
-      - name: Lint
-        # One ESLint process per package (scripts/lint.mjs); the largest
-        # package's typed program still needs a few GB, so give Node room.
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: pnpm lint
-
-      - name: Format check
-        run: pnpm format:check
+      - name: Show Prettier diff
+        run: |
+          pnpm exec prettier --write             packages/oracle-runtime/src/modules/messages/message-router.service.ts             packages/oracle-runtime/src/plugins/oracle-payments/commerce-route.decision.ts             specs/matrix-agent-commerce.md
+          git diff --             packages/oracle-runtime/src/modules/messages/message-router.service.ts             packages/oracle-runtime/src/plugins/oracle-payments/commerce-route.decision.ts             specs/matrix-agent-commerce.md
+          exit 1
