@@ -72,7 +72,8 @@ timeout, malformed result, or provider error can therefore affect telemetry
 only.
 
 The shadow line is `[commerce-router-shadow]` and contains routing metadata
-only: legacy intent/confidence/service/latency, Decision work probability,
+only: the per-turn request id (for joining it to the live router decision),
+legacy intent/confidence/service/latency, Decision work probability,
 service/confidence/latency, provider/model, and intent/service agreement. It
 never contains the user message or projected Decision state. The
 `decisionIntentAt50` field uses 0.5 only as a comparison boundary for
