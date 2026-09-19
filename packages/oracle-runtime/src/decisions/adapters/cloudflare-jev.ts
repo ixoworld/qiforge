@@ -66,7 +66,10 @@ export class CloudflareJevDecisionError extends Error {
     message: string,
     opts: { status?: number; code?: string | number; cause?: unknown } = {},
   ) {
-    super(message, opts.cause === undefined ? undefined : { cause: opts.cause });
+    super(
+      message,
+      opts.cause === undefined ? undefined : { cause: opts.cause },
+    );
     this.name = 'CloudflareJevDecisionError';
     this.status = opts.status;
     this.code = opts.code;
@@ -282,7 +285,9 @@ function normalizeJevResult(result: JevResult): DecisionProviderResult {
   };
 }
 
-function firstCloudflareErrorCode(errors: unknown): string | number | undefined {
+function firstCloudflareErrorCode(
+  errors: unknown,
+): string | number | undefined {
   if (!Array.isArray(errors)) return undefined;
   const first = errors[0];
   if (!isRecord(first)) return undefined;
