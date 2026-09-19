@@ -88,16 +88,23 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
 
   constructor(options: CloudflareJevAdapterOptions) {
     if (!options.accountId.trim()) {
-      throw new TypeError('CloudflareJevDecisionAdapter accountId is required.');
+      throw new TypeError(
+        'CloudflareJevDecisionAdapter accountId is required.',
+      );
     }
     if (!options.apiToken.trim()) {
-      throw new TypeError('CloudflareJevDecisionAdapter apiToken is required.');
+      throw new TypeError(
+        'CloudflareJevDecisionAdapter apiToken is required.',
+      );
     }
 
     this.accountId = options.accountId;
     this.apiToken = options.apiToken;
     this.gatewayId = options.gatewayId?.trim() || undefined;
-    this.baseUrl = (options.baseUrl ?? CLOUDFLARE_API_BASE).replace(/\/$/, '');
+    this.baseUrl = (options.baseUrl ?? CLOUDFLARE_API_BASE).replace(
+      /\/$/,
+      '',
+    );
     this.fetchImpl = options.fetch ?? globalThis.fetch;
   }
 
