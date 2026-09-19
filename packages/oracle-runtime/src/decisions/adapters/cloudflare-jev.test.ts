@@ -248,8 +248,10 @@ describe('CloudflareJevDecisionAdapter', () => {
     expect((error as CloudflareJevDecisionError).status).toBe(401);
   });
 
-  it('surfaces only the provider error code for success=false envelopes', async () => {
-    const sensitive = 'provider echoed private state';
+  it(
+    'surfaces only the provider error code for success=false envelopes',
+    async () => {
+      const sensitive = 'provider echoed private state';
     const adapter = new CloudflareJevDecisionAdapter({
       accountId: 'account-1',
       apiToken: 'token',
@@ -262,21 +264,22 @@ describe('CloudflareJevDecisionAdapter', () => {
       ) as typeof fetch,
     });
 
-    await expect(
-      adapter.evaluate({
-        state: sensitive,
-        questions: {
-          work: {
-            kind: 'boolean',
-            instructions: 'Is this work?',
+      await expect(
+        adapter.evaluate({
+          state: sensitive,
+          questions: {
+            work: {
+              kind: 'boolean',
+              instructions: 'Is this work?',
+            },
           },
-        },
-      }),
-    ).rejects.toMatchObject({
-      name: 'CloudflareJevDecisionError',
-      code: 9001,
-    });
-  });
+        }),
+      ).rejects.toMatchObject({
+        name: 'CloudflareJevDecisionError',
+        code: 9001,
+      });
+    },
+  );
 
   it('rejects unknown Jev answer types', async () => {
     const adapter = new CloudflareJevDecisionAdapter({
@@ -305,8 +308,10 @@ describe('CloudflareJevDecisionAdapter', () => {
     ).rejects.toBeInstanceOf(CloudflareJevDecisionError);
   });
 
-  it('propagates an abort rather than wrapping it as a provider error', async () => {
-    const controller = new AbortController();
+  it(
+    'propagates an abort rather than wrapping it as a provider error',
+    async () => {
+      const controller = new AbortController();
     const aborted = new DOMException('Aborted', 'AbortError');
     const fetchMock = vi.fn(async () => {
       controller.abort();
@@ -318,19 +323,20 @@ describe('CloudflareJevDecisionAdapter', () => {
       fetch: fetchMock as typeof fetch,
     });
 
-    await expect(
-      adapter.evaluate(
-        {
-          state: 'message',
-          questions: {
-            work: {
-              kind: 'boolean',
-              instructions: 'Is this work?',
+      await expect(
+        adapter.evaluate(
+          {
+            state: 'message',
+            questions: {
+              work: {
+                kind: 'boolean',
+                instructions: 'Is this work?',
+              },
             },
           },
-        },
-        { signal: controller.signal },
-      ),
-    ).rejects.toBe(aborted);
-  });
+          { signal: controller.signal },
+        ),
+      ).rejects.toBe(aborted);
+    },
+  );
 });
