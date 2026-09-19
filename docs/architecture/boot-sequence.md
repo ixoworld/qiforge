@@ -47,6 +47,14 @@ Hard violations are collected; if non-empty, boot throws `Plugin manifest valida
 
 `validateLlmProviderKey(validated.config)` — Zod can't express "the API key for the selected provider is required". This step does it: when `LLM_PROVIDER='openrouter'`, `OPEN_ROUTER_API_KEY` must be present; when `'nebius'`, `NEBIUS_API_KEY` must be present.
 
+### 6a. Decision provider cross-check
+
+When no explicit host `decisionAdapter` is supplied,
+`validateDecisionProviderConfig(validated.config)` validates the optional
+bounded Decision provider. `DECISION_PROVIDER='cloudflare-jev'` requires
+`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`; the AI Gateway id is
+optional. An explicit adapter bypasses this env-specific credential check.
+
 ### 7. Build OracleIdentity
 
 `identity = { name, org, description, entityDid, prompt }` — built from `opts.config` plus the validated `ORACLE_ENTITY_DID` env. A missing/empty `ORACLE_ENTITY_DID` after validation throws explicitly.
