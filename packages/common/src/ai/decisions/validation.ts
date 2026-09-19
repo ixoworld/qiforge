@@ -175,7 +175,7 @@ function validateChoiceAnswer(
   options: Record<string, string>,
   answer: ChoiceDecisionAnswer,
 ): void {
-  if (!(answer.value in options)) {
+  if (!Object.prototype.hasOwnProperty.call(options, answer.value)) {
     throw new Error(
       `Decision choice answer "${key}" selected unknown option "${answer.value}".`,
     );
