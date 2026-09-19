@@ -446,6 +446,7 @@ describe('MessageRouterService', () => {
 
       expect(result).toEqual({ mode: 'support' });
       expect(spies.checkContractGate).not.toHaveBeenCalled();
+      expect(decisionLine(logger)).toContain('request=req-shadow-1');
 
       await vi.waitFor(() => expect(evaluateByName).toHaveBeenCalledTimes(1));
       expect(evaluateByName).toHaveBeenCalledWith(
