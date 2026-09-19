@@ -1,5 +1,7 @@
+import type { DecisionEvaluation } from '@ixo/common';
 import type { BaseMessage } from '@langchain/core/messages';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { DecisionEvaluator } from '../../decisions/decision-runtime.js';
 import type { CommerceEngagement } from '../../plugin-api/types.js';
 import {
   clearCommerceRouterPort,
@@ -121,7 +123,10 @@ interface LoggerSpies {
   debug: ReturnType<typeof vi.fn>;
 }
 
-function makeRouter(verdicts: Array<unknown | Error> = []): {
+function makeRouter(
+  verdicts: Array<unknown | Error> = [],
+  decisionEvaluator?: DecisionEvaluator,
+): {
   router: MessageRouterService;
   invocations: BaseMessage[][];
   modelParams: Array<{ model?: string } | undefined>;
@@ -129,7 +134,13 @@ function makeRouter(verdicts: Array<unknown | Error> = []): {
 } {
   const { factory, invocations, modelParams } = makeModelFactory(verdicts);
   const logger: LoggerSpies = { log: vi.fn(), warn: vi.fn(), debug: vi.fn() };
-  const router = new MessageRouterService({ getModel: factory, logger });
+  const router = new MessageRouterService({
+    getModel: factory,
+    ...(decisionEvaluator
+      ? { getDecisionEvaluator: () => decisionEvaluator }
+      : {}),
+    logger,
+  });
   return { router, invocations, modelParams, logger };
 }
 
@@ -368,6 +379,229 @@ describe('MessageRouterService', () => {
     await router.route(turn('what do you offer?'));
 
     expect(modelParams[0]).toEqual({ model: 'openai/custom-router' });
+  });
+
+  describe('bounded Decision shadow routing', () => {
+    const shadowEvaluation: DecisionEvaluation = {
+      decision: {
+        name: 'oracle-payments.route-message',
+        version: '1.0.0',
+      },
+      provider: 'cloudflare',
+      model: 'typesafe/jev',
+      modelVersion: 'jev-test',
+      answers: {
+        workRequestedNow: {
+          kind: 'boolean',
+          probabilityTrue: 0.97,
+        },
+        service: {
+          kind: 'choice',
+          value: 'tax-report',
+          confidence: 0.94,
+          probabilities: {
+            'tax-report': 0.94,
+            __no_matching_service__: 0.06,
+          },
+        },
+      },
+      latencyMs: 12,
+      evaluatedAt: '2026-09-19T00:00:00.000Z',
+    };
+
+    function evaluatorFor(
+      outcome: DecisionEvaluation | Error = shadowEvaluation,
+    ): {
+      evaluator: DecisionEvaluator;
+      evaluateByName: ReturnType<typeof vi.fn>;
+    } {
+      const evaluateByName = vi.fn(async () => {
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      });
+      return {
+        evaluator: {
+          evaluate: vi.fn(),
+          evaluateByName,
+        } as unknown as DecisionEvaluator,
+        evaluateByName,
+      };
+    }
+
+    it('observes Jev without changing the legacy routing outcome', async () => {
+      const { spies } = makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router, logger } = makeRouter(
+        [{ intent: 'support', confidence: 0.91 }],
+        evaluator,
+      );
+
+      const result = await router.route({
+        ...turn('how much is a tax report?'),
+        requestId: 'req-shadow-1',
+      });
+
+      expect(result).toEqual({ mode: 'support' });
+      expect(spies.checkContractGate).not.toHaveBeenCalled();
+      expect(decisionLine(logger)).toContain('request=req-shadow-1');
+
+      await vi.waitFor(() => expect(evaluateByName).toHaveBeenCalledTimes(1));
+      expect(evaluateByName).toHaveBeenCalledWith(
+        'oracle-payments.route-message',
+        {
+          text: 'how much is a tax report?',
+          services: [
+            {
+              id: TAX_SERVICE.id,
+              name: TAX_SERVICE.name,
+              description: TAX_SERVICE.description,
+              tags: TAX_SERVICE.tags,
+              examples: TAX_SERVICE.examples,
+            },
+          ],
+        },
+      );
+
+      await vi.waitFor(() =>
+        expect(
+          logger.log.mock.calls.some(([line]) =>
+            String(line).includes('[commerce-router-shadow]'),
+          ),
+        ).toBe(true),
+      );
+      const shadowLine =
+        logger.log.mock.calls
+          .map(([line]) => String(line))
+          .find((line) => line.includes('[commerce-router-shadow]')) ?? '';
+      expect(shadowLine).toContain('request=req-shadow-1');
+      expect(shadowLine).toContain('legacyIntent=support');
+      expect(shadowLine).toContain('decisionIntentAt50=work');
+      expect(shadowLine).toContain('intentAgree=false');
+      expect(shadowLine).toContain('provider=cloudflare');
+      expect(shadowLine).toContain('model=typesafe/jev');
+    });
+
+    it('does not wait for the shadow Decision before returning the legacy route', async () => {
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const evaluateByName = vi.fn(
+        () => new Promise<DecisionEvaluation>(() => undefined),
+      );
+      const evaluator = {
+        evaluate: vi.fn(),
+        evaluateByName,
+      } as unknown as DecisionEvaluator;
+      const { router } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      await expect(router.route(turn('what do you offer?'))).resolves.toEqual({
+        mode: 'support',
+      });
+      expect(evaluateByName).toHaveBeenCalledTimes(1);
+    });
+
+    it('forwards the owning turn abort signal to the shadow Decision', async () => {
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const controller = new AbortController();
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      await router.route({
+        ...turn('what do you offer?'),
+        abortSignal: controller.signal,
+      });
+
+      await vi.waitFor(() => expect(evaluateByName).toHaveBeenCalledTimes(1));
+      expect(evaluateByName.mock.calls[0]?.[2]).toEqual({
+        signal: controller.signal,
+      });
+    });
+
+    it('does not evaluate a Decision in the default llm engine', async () => {
+      makePort({
+        routerEngine: 'llm',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      await router.route(turn('what do you offer?'));
+
+      expect(evaluateByName).not.toHaveBeenCalled();
+    });
+
+    it('skips Decision evaluation for sticky work and for an empty catalog', async () => {
+      const { evaluator, evaluateByName } = evaluatorFor();
+
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+        findActiveEngagement: vi.fn(async () => STICKY_HERE),
+      });
+      const sticky = makeRouter([], evaluator);
+      await sticky.router.route(turn('keep going'));
+      expect(evaluateByName).not.toHaveBeenCalled();
+
+      clearCommerceRouterPort();
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+        getServices: vi.fn(async () => null),
+      });
+      const noServices = makeRouter([], evaluator);
+      await noServices.router.route(turn('hello'));
+      expect(evaluateByName).not.toHaveBeenCalled();
+    });
+
+    it('keeps shadow failures out of routing and never logs message content', async () => {
+      const secret = 'private tax identifier 12345';
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const { evaluator } = evaluatorFor(new Error(secret));
+      const { router, logger } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      await expect(router.route(turn(secret))).resolves.toEqual({
+        mode: 'support',
+      });
+
+      await vi.waitFor(() =>
+        expect(
+          logger.warn.mock.calls.some(([line]) =>
+            String(line).includes('[commerce-router-shadow]'),
+          ),
+        ).toBe(true),
+      );
+      const allLogs = [
+        ...logger.log.mock.calls,
+        ...logger.warn.mock.calls,
+        ...logger.debug.mock.calls,
+      ]
+        .map((args) => args.map(String).join(' '))
+        .join('\n');
+      expect(allLogs).not.toContain(secret);
+      expect(allLogs).toContain('status=failed');
+    });
   });
 
   describe('routing decision logs', () => {
