@@ -86,6 +86,13 @@ describe('OraclePaymentsPlugin — registration', () => {
     expect(plugin.manifest.category).toBe('ui');
   });
 
+  it('registers the bounded commerce routing Decision', () => {
+    const plugin = new OraclePaymentsPlugin();
+    expect(plugin.getDecisions().map((decision) => decision.name)).toEqual([
+      'oracle-payments.route-message',
+    ]);
+  });
+
   it('manifest passes validateManifest', () => {
     const plugin = new OraclePaymentsPlugin();
     const result = validateManifest(plugin.manifest, plugin.name);
