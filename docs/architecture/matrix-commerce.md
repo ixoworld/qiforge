@@ -71,6 +71,13 @@ input to the contract gate and engagement start. A missing Decision provider,
 timeout, malformed result, or provider error can therefore affect telemetry
 only.
 
+Shadow mode is an explicit operator opt-in because the Decision provider receives
+the projected semantic state: the current coalesced Matrix turn and the
+published service descriptors. It does not receive the sender DID, room id,
+thread id, contract state, UCANs, prices, escrow state, or prior conversation.
+Enable it only where the configured Decision provider's data-handling policy is
+acceptable for the oracle's traffic.
+
 The shadow line is `[commerce-router-shadow]` and contains routing metadata
 only: the per-turn request id (for joining it to the live router decision),
 legacy intent/confidence/service/latency, Decision work probability,
