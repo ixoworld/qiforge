@@ -44,8 +44,9 @@ function successResponse(result: unknown): Response {
 
 describe('CloudflareJevDecisionAdapter', () => {
   it('maps boolean, choice, and ordinal questions to Jev', async () => {
-    const fetchMock = vi.fn(async () =>
-      successResponse({
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        successResponse({
         model: 'jev-1.13.0',
         answers: {
           work: { type: 'noul', noul: 0.98 },
@@ -63,8 +64,8 @@ describe('CloudflareJevDecisionAdapter', () => {
             probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
           },
         },
-        usage: { input_tokens: 100, output_tokens: 20 },
-      }),
+          usage: { input_tokens: 100, output_tokens: 20 },
+        }),
     );
 
     const adapter = new CloudflareJevDecisionAdapter({
@@ -174,12 +175,13 @@ describe('CloudflareJevDecisionAdapter', () => {
 
   it('forwards AbortSignal and an optional AI Gateway id', async () => {
     const controller = new AbortController();
-    const fetchMock = vi.fn(async () =>
-      successResponse({
-        answers: {
-          work: { type: 'noul', noul: 0.5 },
-        },
-      }),
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        successResponse({
+          answers: {
+            work: { type: 'noul', noul: 0.5 },
+          },
+        }),
     );
     const adapter = new CloudflareJevDecisionAdapter({
       accountId: 'account-1',
