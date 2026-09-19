@@ -120,7 +120,9 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
     let response: Response;
     try {
       response = await this.fetchImpl(
-        `${this.baseUrl}/client/v4/accounts/${encodeURIComponent(\n          this.accountId,\n        )}/ai/run`,
+        `${this.baseUrl}/client/v4/accounts/${encodeURIComponent(
+          this.accountId,
+        )}/ai/run`,
         {
           method: 'POST',
           headers,
