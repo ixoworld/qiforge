@@ -10,6 +10,7 @@ import {
   setCommerceRouterPort,
 } from '../../modules/messages/commerce-router-port.js';
 import { AgentCardService } from './agent-card.service.js';
+import { COMMERCE_ROUTE_DECISION_NAME } from './commerce-route.decision.js';
 import { ContractGateService } from './contract-gate.service.js';
 import { EngagementService } from './engagement.service.js';
 import { toRoutedService } from './util.js';
@@ -49,6 +50,7 @@ export class CommerceRouterPortRegistrar
     setCommerceRouterPort({
       ...(routerModel ? { routerModel } : {}),
       routerEngine,
+      routerDecisionName: COMMERCE_ROUTE_DECISION_NAME,
       getServices: async () => {
         if (!entityDid) return null;
         const services = await this.agentCard.getServices(entityDid);
