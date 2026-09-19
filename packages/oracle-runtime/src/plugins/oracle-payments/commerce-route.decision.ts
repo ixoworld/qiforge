@@ -40,8 +40,7 @@ export const commerceRouteDecision = defineDecision({
           instructions:
             'Is the user clearly asking the agent to perform one of the listed paid services now?',
           criteria: {
-            true:
-              'The user is requesting execution of a listed service now.',
+            true: 'The user is requesting execution of a listed service now.',
             false:
               'The user is asking about capabilities, pricing, contracting, status, making conversation, or otherwise not clearly requesting execution now.',
           },
