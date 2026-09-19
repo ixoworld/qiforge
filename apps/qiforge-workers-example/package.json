@@ -28,7 +28,7 @@
     "test:e2e:group": "tsx test/e2e-group.ts"
   },
   "dependencies": {
-    "@ixo/matrix-bot-workers-sdk": "0.4.0",
+    "@ixo/matrix-bot-workers-sdk": "0.7.0",
     "@ixo/oracle-runtime-workers": "workspace:*",
     "hono": "^4.13.4",
     "zod": "^4.4.3"
