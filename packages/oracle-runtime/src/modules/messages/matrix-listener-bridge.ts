@@ -452,6 +452,7 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
       commerce = await this.router.route({
         roomId: first.roomId,
         requestId,
+        abortSignal: abortController.signal,
         threadId,
         senderDid: did,
         text: turnMessage,
