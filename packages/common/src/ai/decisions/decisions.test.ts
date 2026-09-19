@@ -115,6 +115,24 @@ describe('bounded decisions', () => {
     ).toThrow(/outside 0\.\.2/);
   });
 
+  it('rejects inherited object-property names as undeclared choices', () => {
+    const request = routeDecision.prepare({ text: 'file my taxes' });
+
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers: {
+          work: { kind: 'boolean', probabilityTrue: 0.95 },
+          service: {
+            kind: 'choice',
+            value: 'constructor',
+            confidence: 0.9,
+            probabilities: { tax: 0.9, none: 0.1 },
+          },
+        },
+      }),
+    ).toThrow(/unknown option/);
+  });
+
   it('validates provider answers against the declared question space', () => {
     const request = routeDecision.prepare({ text: 'file my taxes' });
 
