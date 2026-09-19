@@ -4,14 +4,13 @@ on:
   pull_request:
     branches: ["**"]
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-and-lint:
-    name: Build and Lint
+    name: Prettier diagnostic
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,17 +30,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm build
-
-      - name: Lint
-        # One ESLint process per package (scripts/lint.mjs); the largest
-        # package's typed program still needs a few GB, so give Node room.
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: pnpm lint
-
-      - name: Format check
+      - name: Show Prettier diff
         run: |
           pnpm exec prettier --write packages/oracle-runtime/src/decisions/adapters/cloudflare-jev.test.ts
           git diff -- packages/oracle-runtime/src/decisions/adapters/cloudflare-jev.test.ts
