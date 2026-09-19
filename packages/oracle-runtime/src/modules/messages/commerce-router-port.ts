@@ -88,6 +88,9 @@ export interface CommerceRouterPort {
    */
   routerEngine?: CommerceRouterEngine;
 
+  /** Boot-registered bounded Decision to evaluate in shadow mode. */
+  routerDecisionName?: string;
+
   /** The oracle's published services, or `null` when no agent card resolves. */
   getServices(): Promise<CommerceRoutedService[] | null>;
 
