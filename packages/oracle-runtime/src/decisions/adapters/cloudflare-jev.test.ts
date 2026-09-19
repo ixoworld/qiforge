@@ -249,33 +249,33 @@ describe('CloudflareJevDecisionAdapter', () => {
   });
 
   it('keeps provider errors free of echoed state', async () => {
-      const sensitive = 'provider echoed private state';
-      const adapter = new CloudflareJevDecisionAdapter({
-        accountId: 'account-1',
-        apiToken: 'token',
-        fetch: vi.fn(
-          async () =>
-            successResponse({
-              success: false,
-              errors: [{ code: 9001, message: sensitive }],
-            }),
-        ) as typeof fetch,
-      });
+    const sensitive = 'provider echoed private state';
+    const adapter = new CloudflareJevDecisionAdapter({
+      accountId: 'account-1',
+      apiToken: 'token',
+      fetch: vi.fn(
+        async () =>
+          successResponse({
+            success: false,
+            errors: [{ code: 9001, message: sensitive }],
+          }),
+      ) as typeof fetch,
+    });
 
-      await expect(
-        adapter.evaluate({
-          state: sensitive,
-          questions: {
-            work: {
-              kind: 'boolean',
-              instructions: 'Is this work?',
-            },
+    await expect(
+      adapter.evaluate({
+        state: sensitive,
+        questions: {
+          work: {
+            kind: 'boolean',
+            instructions: 'Is this work?',
           },
-        }),
-      ).rejects.toMatchObject({
-        name: 'CloudflareJevDecisionError',
-        code: 9001,
-      });
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: 'CloudflareJevDecisionError',
+      code: 9001,
+    });
   });
 
   it('rejects unknown Jev answer types', async () => {
@@ -306,31 +306,31 @@ describe('CloudflareJevDecisionAdapter', () => {
   });
 
   it('propagates abort errors', async () => {
-      const controller = new AbortController();
-      const aborted = new DOMException('Aborted', 'AbortError');
-      const fetchMock = vi.fn(async () => {
-        controller.abort();
-        throw aborted;
-      });
-      const adapter = new CloudflareJevDecisionAdapter({
-        accountId: 'account-1',
-        apiToken: 'token',
-        fetch: fetchMock as typeof fetch,
-      });
+    const controller = new AbortController();
+    const aborted = new DOMException('Aborted', 'AbortError');
+    const fetchMock = vi.fn(async () => {
+      controller.abort();
+      throw aborted;
+    });
+    const adapter = new CloudflareJevDecisionAdapter({
+      accountId: 'account-1',
+      apiToken: 'token',
+      fetch: fetchMock as typeof fetch,
+    });
 
-      await expect(
-        adapter.evaluate(
-          {
-            state: 'message',
-            questions: {
-              work: {
-                kind: 'boolean',
-                instructions: 'Is this work?',
-              },
+    await expect(
+      adapter.evaluate(
+        {
+          state: 'message',
+          questions: {
+            work: {
+              kind: 'boolean',
+              instructions: 'Is this work?',
             },
           },
-          { signal: controller.signal },
-        ),
-      ).rejects.toBe(aborted);
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toBe(aborted);
   });
 });
