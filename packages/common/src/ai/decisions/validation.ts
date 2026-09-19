@@ -199,15 +199,26 @@ function validateOrdinalAnswer(
   answer: OrdinalDecisionAnswer,
 ): void {
   if (
-    !Number.isInteger(answer.level) ||
-    answer.level < 0 ||
-    answer.level >= levelCount
+    !Number.isFinite(answer.score) ||
+    answer.score < 0 ||
+    answer.score > levelCount - 1
   ) {
     throw new Error(
-      `Decision ordinal answer "${key}" level ${answer.level} is outside 0..${levelCount - 1}.`,
+      `Decision ordinal answer "${key}" score ${answer.score} is outside 0..${levelCount - 1}.`,
     );
   }
   if (answer.probabilities) {
+    const expected = Array.from({ length: levelCount }, (_, index) =>
+      String(index),
+    );
+    const returned = Object.keys(answer.probabilities);
+    const missing = expected.filter((level) => !returned.includes(level));
+    const extra = returned.filter((level) => !expected.includes(level));
+    if (missing.length > 0 || extra.length > 0) {
+      throw new Error(
+        `Decision ordinal answer "${key}" probabilities do not match levels.`,
+      );
+    }
     validateProbabilityMap(`${key}.probabilities`, answer.probabilities);
   }
 }
