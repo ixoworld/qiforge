@@ -507,6 +507,29 @@ describe('MessageRouterService', () => {
       expect(evaluateByName).toHaveBeenCalledTimes(1);
     });
 
+    it('forwards the owning turn abort signal to the shadow Decision', async () => {
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const controller = new AbortController();
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      await router.route({
+        ...turn('what do you offer?'),
+        abortSignal: controller.signal,
+      });
+
+      await vi.waitFor(() => expect(evaluateByName).toHaveBeenCalledTimes(1));
+      expect(evaluateByName.mock.calls[0]?.[2]).toEqual({
+        signal: controller.signal,
+      });
+    });
+
     it('does not evaluate a Decision in the default llm engine', async () => {
       makePort({
         routerEngine: 'llm',
