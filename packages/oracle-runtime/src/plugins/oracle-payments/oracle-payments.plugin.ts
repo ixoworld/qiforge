@@ -9,6 +9,7 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types.js';
 import { AgentCardService } from './agent-card.service.js';
+import { commerceRouteDecision } from './commerce-route.decision.js';
 import { ContractGateService } from './contract-gate.service.js';
 import { ContractRecordService } from './contract-record.service.js';
 import { EngagementService } from './engagement.service.js';
@@ -44,8 +45,12 @@ const configSchema = z.object({
    */
   EVAL_ENGINE_URL: z.url().optional(),
   AGENT_CARD_PATH: z.string().optional(),
-  /** Classifier model override for the commerce message router. */
+  /** Classifier model override for the legacy commerce message router. */
   ORACLE_PAYMENTS_ROUTER_MODEL: z.string().optional(),
+  /** Routing engine. Shadow mode never changes the legacy routing outcome. */
+  ORACLE_PAYMENTS_ROUTER_ENGINE: z
+    .enum(['llm', 'decision-shadow'])
+    .default('llm'),
   /** Size ceiling for a single delivered file. */
   ORACLE_PAYMENTS_MAX_DELIVERABLE_MB: z.coerce
     .number()
@@ -243,6 +248,10 @@ export class OraclePaymentsPlugin extends OraclePlugin {
 
   override autoDetect(env: NodeJS.ProcessEnv): boolean {
     return env.ORACLE_PAYMENTS_DISABLED !== 'true';
+  }
+
+  override getDecisions() {
+    return [commerceRouteDecision];
   }
 
   override getRequestTools(rtCtx: RuntimeContext): PluginTool[] {
