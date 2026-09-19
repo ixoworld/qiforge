@@ -58,6 +58,7 @@ describe('CommerceRouterPortRegistrar', () => {
     expect(port).not.toBeNull();
     expect(port?.routerModel).toBe('openai/custom-router');
     expect(port?.routerEngine).toBe('decision-shadow');
+    expect(port?.routerDecisionName).toBe('oracle-payments.route-message');
 
     // Services are reduced from the card views to the routed shape.
     const services = await port!.getServices();
