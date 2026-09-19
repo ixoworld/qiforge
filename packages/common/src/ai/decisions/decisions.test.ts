@@ -40,6 +40,20 @@ describe('bounded decisions', () => {
     });
   });
 
+  it('accepts scalar state as well as structured state', () => {
+    expect(() =>
+      validateDecisionRequest({
+        state: 'A short support message',
+        questions: {
+          urgent: {
+            kind: 'boolean',
+            instructions: 'Is the message urgent?',
+          },
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it('rejects unbounded or malformed requests', () => {
     expect(() =>
       validateDecisionRequest({
@@ -60,6 +74,45 @@ describe('bounded decisions', () => {
         },
       }),
     ).toThrow(/at least two options/);
+  });
+
+  it('accepts continuous ordinal scores inside the declared scale', () => {
+    const request = {
+      state: { text: 'moderately risky' },
+      questions: {
+        risk: {
+          kind: 'ordinal' as const,
+          instructions: 'How risky is this?',
+          levels: ['low', 'moderate', 'high'],
+        },
+      },
+    };
+
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers: {
+          risk: {
+            kind: 'ordinal',
+            score: 1.4,
+            confidence: 0.8,
+            probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
+          },
+        },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers: {
+          risk: {
+            kind: 'ordinal',
+            score: 3,
+            confidence: 0.8,
+            probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
+          },
+        },
+      }),
+    ).toThrow(/outside 0\.\.2/);
   });
 
   it('validates provider answers against the declared question space', () => {
