@@ -104,6 +104,8 @@ export interface RouteTurnInput {
   roomId: string;
   /** Per-turn request id, when available, for joining async shadow telemetry. */
   requestId?: string;
+  /** Abort the shadow Decision when the owning turn is superseded/cancelled. */
+  abortSignal?: AbortSignal;
   /** Thread root event id — session id and engagement key. */
   threadId: string;
   senderDid: string;
@@ -425,7 +427,11 @@ export class MessageRouterService {
     // failure into this shadow promise, keeping it out of the live route.
     return Promise.resolve()
       .then(() =>
-        evaluator.evaluateByName(decisionName, decisionInput),
+        input.abortSignal
+          ? evaluator.evaluateByName(decisionName, decisionInput, {
+              signal: input.abortSignal,
+            })
+          : evaluator.evaluateByName(decisionName, decisionInput),
       )
       .then((evaluation) => ({
         evaluation,
