@@ -47,23 +47,23 @@ describe('CloudflareJevDecisionAdapter', () => {
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         successResponse({
-        model: 'jev-1.13.0',
-        answers: {
-          work: { type: 'noul', noul: 0.98 },
-          service: {
-            type: 'choice',
-            choice: 'tax',
-            confidence: 0.95,
-            probabilities: { tax: 0.95, books: 0.03, none: 0.02 },
+          model: 'jev-1.13.0',
+          answers: {
+            work: { type: 'noul', noul: 0.98 },
+            service: {
+              type: 'choice',
+              choice: 'tax',
+              confidence: 0.95,
+              probabilities: { tax: 0.95, books: 0.03, none: 0.02 },
+            },
+            urgency: {
+              type: 'score',
+              score: 1.4,
+              confidence: 0.82,
+              legend: { '0': 'low', '1': 'medium', '2': 'high' },
+              probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
+            },
           },
-          urgency: {
-            type: 'score',
-            score: 1.4,
-            confidence: 0.82,
-            legend: { '0': 'low', '1': 'medium', '2': 'high' },
-            probabilities: { '0': 0.1, '1': 0.4, '2': 0.5 },
-          },
-        },
           usage: { input_tokens: 100, output_tokens: 20 },
         }),
     );
