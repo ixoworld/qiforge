@@ -415,9 +415,7 @@ export class MessageRouterService {
       services: services.map((service) => ({
         id: service.id,
         name: service.name,
-        ...(service.description
-          ? { description: service.description }
-          : {}),
+        ...(service.description ? { description: service.description } : {}),
         ...(service.tags?.length ? { tags: service.tags } : {}),
         ...(service.examples?.length ? { examples: service.examples } : {}),
       })),
