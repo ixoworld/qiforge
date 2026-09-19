@@ -391,7 +391,8 @@ export class MessageRouterService {
     services: CommerceRoutedService[],
   ): Promise<{ evaluation: DecisionEvaluation; latencyMs: number }> | null {
     if (port.routerEngine !== 'decision-shadow') return null;
-    if (!port.routerDecisionName) {
+    const decisionName = port.routerDecisionName;
+    if (!decisionName) {
       this.logger.warn(
         `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=unavailable reason=missing-decision-name`,
       );
@@ -424,7 +425,7 @@ export class MessageRouterService {
     // failure into this shadow promise, keeping it out of the live route.
     return Promise.resolve()
       .then(() =>
-        evaluator.evaluateByName(port.routerDecisionName!, decisionInput),
+        evaluator.evaluateByName(decisionName, decisionInput),
       )
       .then((evaluation) => ({
         evaluation,
