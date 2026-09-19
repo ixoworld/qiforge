@@ -519,7 +519,7 @@ One new bundled plugin — **`oracle-payments`** (`OraclePaymentsPlugin`) — pl
 | `ORACLE_PAYMENTS_DISABLED`           | `false`                 | Kill switch                                                                      |
 | `AGENT_CARD_PATH`                    | unset                   | Path to the local agent-card JSON — cache seed + manifest self-description (4.5) |
 | `ORACLE_PAYMENTS_ROUTER_MODEL`       | provider `routing` role | Legacy classifier override                                                       |
-| `ORACLE_PAYMENTS_ROUTER_ENGINE`      | `llm`                   | `llm` or non-blocking `decision-shadow`; shadow never changes routing           |
+| `ORACLE_PAYMENTS_ROUTER_ENGINE`      | `llm`                   | `llm` or non-blocking `decision-shadow`; shadow never changes routing            |
 | `ORACLE_PAYMENTS_MAX_DELIVERABLE_MB` | `25`                    | Deliverable size ceiling                                                         |
 
 Everything else (ORACLE_DID, ORACLE_ENTITY_DID, SECP_MNEMONIC, MATRIX_ACCOUNT_ROOM_ID, MATRIX_VALUE_PIN, NETWORK, BLOCKSYNC_GRAPHQL_URL) already exists in the base schema.
