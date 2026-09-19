@@ -101,10 +101,7 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
     this.accountId = options.accountId;
     this.apiToken = options.apiToken;
     this.gatewayId = options.gatewayId?.trim() || undefined;
-    this.baseUrl = (options.baseUrl ?? CLOUDFLARE_API_BASE).replace(
-      /\/$/,
-      '',
-    );
+    this.baseUrl = (options.baseUrl ?? CLOUDFLARE_API_BASE).replace(/\/$/, '');
     this.fetchImpl = options.fetch ?? globalThis.fetch;
   }
 
