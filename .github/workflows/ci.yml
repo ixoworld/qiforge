@@ -43,3 +43,12 @@ jobs:
 
       - name: Format check
         run: pnpm format:check
+
+      - name: PR312 targeted unit tests
+        run: >
+          pnpm --filter @ixo/oracle-runtime exec vitest run
+          src/decisions/adapters/cloudflare-jev.test.ts
+          src/modules/messages/message-router.service.test.ts
+          src/plugins/oracle-payments/commerce-route.decision.test.ts
+          src/plugins/oracle-payments/commerce-port.registrar.test.ts
+          src/plugins/oracle-payments/oracle-payments.plugin.test.ts
