@@ -43,7 +43,7 @@ export class DecisionRuntime implements DecisionEvaluator {
     private readonly logger?: Pick<Logger, 'debug' | 'warn'>,
   ) {}
 
-  evaluate<TSchema extends z.ZodType>(
+  async evaluate<TSchema extends z.ZodType>(
     definition: DecisionDefinition<TSchema>,
     input: z.input<TSchema>,
     options?: DecisionEvaluateOptions,
@@ -55,7 +55,7 @@ export class DecisionRuntime implements DecisionEvaluator {
     );
   }
 
-  evaluateByName(
+  async evaluateByName(
     name: string,
     input: unknown,
     options?: DecisionEvaluateOptions,
