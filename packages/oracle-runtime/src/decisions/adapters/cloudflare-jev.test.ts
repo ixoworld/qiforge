@@ -252,17 +252,17 @@ describe('CloudflareJevDecisionAdapter', () => {
     'surfaces only the provider error code for success=false envelopes',
     async () => {
       const sensitive = 'provider echoed private state';
-    const adapter = new CloudflareJevDecisionAdapter({
-      accountId: 'account-1',
-      apiToken: 'token',
-      fetch: vi.fn(
-        async () =>
-          successResponse({
-            success: false,
-            errors: [{ code: 9001, message: sensitive }],
-          }),
-      ) as typeof fetch,
-    });
+      const adapter = new CloudflareJevDecisionAdapter({
+        accountId: 'account-1',
+        apiToken: 'token',
+        fetch: vi.fn(
+          async () =>
+            successResponse({
+              success: false,
+              errors: [{ code: 9001, message: sensitive }],
+            }),
+        ) as typeof fetch,
+      });
 
       await expect(
         adapter.evaluate({
@@ -312,16 +312,16 @@ describe('CloudflareJevDecisionAdapter', () => {
     'propagates an abort rather than wrapping it as a provider error',
     async () => {
       const controller = new AbortController();
-    const aborted = new DOMException('Aborted', 'AbortError');
-    const fetchMock = vi.fn(async () => {
-      controller.abort();
-      throw aborted;
-    });
-    const adapter = new CloudflareJevDecisionAdapter({
-      accountId: 'account-1',
-      apiToken: 'token',
-      fetch: fetchMock as typeof fetch,
-    });
+      const aborted = new DOMException('Aborted', 'AbortError');
+      const fetchMock = vi.fn(async () => {
+        controller.abort();
+        throw aborted;
+      });
+      const adapter = new CloudflareJevDecisionAdapter({
+        accountId: 'account-1',
+        apiToken: 'token',
+        fetch: fetchMock as typeof fetch,
+      });
 
       await expect(
         adapter.evaluate(
