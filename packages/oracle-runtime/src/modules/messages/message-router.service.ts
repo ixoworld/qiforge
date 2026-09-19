@@ -1,7 +1,9 @@
+import type { DecisionEvaluation } from '@ixo/common';
 import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { Logger } from '@nestjs/common';
 import { z } from 'zod';
+import type { DecisionEvaluator } from '../../decisions/decision-runtime.js';
 import { getProviderChatModel } from '../../llm/llm-provider.js';
 import type { CommerceContext } from '../../plugin-api/types.js';
 import {
@@ -42,11 +44,19 @@ const defaultModelFactory: RoutingModelFactory = (params) => {
 
 export interface MessageRouterDeps {
   getModel?: RoutingModelFactory;
+  getDecisionEvaluator?: () => DecisionEvaluator | undefined;
   logger?: Pick<Logger, 'log' | 'warn' | 'debug'>;
 }
 
 /** Log prefix shared by every routing line, so one grep shows the whole lane. */
 const LOG_PREFIX = '[commerce-router]';
+const SHADOW_LOG_PREFIX = '[commerce-router-shadow]';
+/**
+ * Comparison-only boundary for shadow telemetry. This is NOT a production
+ * routing threshold; the raw probability is logged so calibration can choose
+ * that later.
+ */
+const SHADOW_INTENT_BOUNDARY = 0.5;
 
 /**
  * Why a turn ended up in the mode it did. One value per branch of `decide`,
@@ -136,12 +146,14 @@ export interface RouteTurnInput {
  */
 export class MessageRouterService {
   private readonly getModel: RoutingModelFactory;
+  private readonly getDecisionEvaluator: () => DecisionEvaluator | undefined;
   private readonly logger: Pick<Logger, 'log' | 'warn' | 'debug'>;
   /** One-shot guard for the "commerce is off" first-use notice. */
   private inactiveNoticeLogged = false;
 
   constructor(deps: MessageRouterDeps = {}) {
     this.getModel = deps.getModel ?? defaultModelFactory;
+    this.getDecisionEvaluator = deps.getDecisionEvaluator ?? (() => undefined);
     this.logger = deps.logger ?? new Logger(MessageRouterService.name);
   }
 
@@ -238,7 +250,20 @@ export class MessageRouterService {
       `${LOG_PREFIX} classifying thread ${input.threadId} against ${services.length} published service(s)`,
     );
 
+    const shadow = this.startDecisionShadow(port, input, services);
+    const legacyStartedAt = Date.now();
     const classification = await this.classify(port, input.text, services);
+    const legacyLatencyMs = Date.now() - legacyStartedAt;
+    if (shadow) {
+      this.observeDecisionShadow(
+        shadow,
+        input,
+        services,
+        classification,
+        legacyLatencyMs,
+      );
+    }
+
     if (!classification) {
       this.logDecision(input, {
         decision: 'classifier-unavailable',
@@ -351,6 +376,147 @@ export class MessageRouterService {
       engagementRoomId: input.roomId,
       engagementThreadId: input.threadId,
     };
+  }
+
+  /**
+   * Start the bounded Decision in parallel with the legacy classifier. The
+   * returned promise is NEVER awaited by the routing path: shadow mode cannot
+   * delay, authorize, start, or otherwise change the user's turn.
+   */
+  private startDecisionShadow(
+    port: CommerceRouterPort,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+  ): Promise<{ evaluation: DecisionEvaluation; latencyMs: number }> | null {
+    if (port.routerEngine !== 'decision-shadow') return null;
+    if (!port.routerDecisionName) {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=unavailable reason=missing-decision-name`,
+      );
+      return null;
+    }
+
+    const evaluator = this.getDecisionEvaluator();
+    if (!evaluator) {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=unavailable reason=missing-evaluator`,
+      );
+      return null;
+    }
+
+    const startedAt = Date.now();
+    const decisionInput = {
+      text: input.text,
+      services: services.map((service) => ({
+        id: service.id,
+        name: service.name,
+        ...(service.description
+          ? { description: service.description }
+          : {}),
+        ...(service.tags?.length ? { tags: service.tags } : {}),
+        ...(service.examples?.length ? { examples: service.examples } : {}),
+      })),
+    };
+
+    // Promise.resolve().then() also converts any synchronous preparation
+    // failure into this shadow promise, keeping it out of the live route.
+    return Promise.resolve()
+      .then(() =>
+        evaluator.evaluateByName(port.routerDecisionName!, decisionInput),
+      )
+      .then((evaluation) => ({
+        evaluation,
+        latencyMs: Date.now() - startedAt,
+      }));
+  }
+
+  /**
+   * Observe a shadow evaluation without blocking routing. Failures are reduced
+   * to safe metadata: never log the provider's message because a third-party
+   * error could echo Decision state.
+   */
+  private observeDecisionShadow(
+    shadow: Promise<{ evaluation: DecisionEvaluation; latencyMs: number }>,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+    legacy: z.infer<typeof classificationSchema> | null,
+    legacyLatencyMs: number,
+  ): void {
+    void shadow
+      .then(({ evaluation, latencyMs }) => {
+        this.logDecisionShadow(
+          evaluation,
+          input,
+          services,
+          legacy,
+          legacyLatencyMs,
+          latencyMs,
+        );
+      })
+      .catch((error: unknown) => {
+        const errorType =
+          error instanceof Error ? error.name || 'Error' : typeof error;
+        this.logger.warn(
+          `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=failed errorType=${errorType}`,
+        );
+      });
+  }
+
+  private logDecisionShadow(
+    evaluation: DecisionEvaluation,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+    legacy: z.infer<typeof classificationSchema> | null,
+    legacyLatencyMs: number,
+    decisionLatencyMs: number,
+  ): void {
+    const work = evaluation.answers.workRequestedNow;
+    const service = evaluation.answers.service;
+    if (work?.kind !== 'boolean' || service?.kind !== 'choice') {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId} status=invalid-normalized-answer`,
+      );
+      return;
+    }
+
+    const decisionIntent =
+      work.probabilityTrue >= SHADOW_INTENT_BOUNDARY ? 'work' : 'support';
+    const selectedService = services.find(
+      (candidate) => candidate.id === service.value,
+    )?.id;
+    const intentAgree =
+      legacy === null ? undefined : legacy.intent === decisionIntent;
+    const serviceAgree =
+      legacy?.intent === 'work' && decisionIntent === 'work'
+        ? legacy.serviceId === selectedService
+        : undefined;
+
+    this.logger.log(
+      [
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}`,
+        'status=ok',
+        `legacyIntent=${legacy?.intent ?? 'unavailable'}`,
+        `legacyConfidence=${legacy?.confidence ?? 'unavailable'}`,
+        `legacyService=${legacy?.serviceId ?? 'none'}`,
+        `legacyLatencyMs=${legacyLatencyMs}`,
+        `decisionIntentAt50=${decisionIntent}`,
+        `workProbability=${work.probabilityTrue}`,
+        `decisionService=${selectedService ?? 'none'}`,
+        `serviceConfidence=${service.confidence}`,
+        ...(intentAgree === undefined
+          ? []
+          : [`intentAgree=${String(intentAgree)}`]),
+        ...(serviceAgree === undefined
+          ? []
+          : [`serviceAgree=${String(serviceAgree)}`]),
+        `decisionLatencyMs=${decisionLatencyMs}`,
+        `provider=${evaluation.provider}`,
+        `model=${evaluation.model}`,
+        ...(evaluation.modelVersion
+          ? [`modelVersion=${evaluation.modelVersion}`]
+          : []),
+      ].join(' '),
+    );
   }
 
   /**
