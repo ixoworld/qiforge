@@ -1,3 +1,5 @@
+import { DecisionRuntime, defineDecision } from '@ixo/decisions';
+import { z } from 'zod';
 import { HumanMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { describe, expect, it, vi } from 'vitest';
@@ -247,6 +249,42 @@ describe('buildRuntimeContext', () => {
 
     const ctx = buildRuntimeContext(runConfig, ambient, { messages: [] });
     expect(ctx.abortSignal).toBe(controller.signal);
+  });
+
+  it('keeps the owning turn signal authoritative for Decisions', async () => {
+    const evaluate = vi.fn(async () => ({ answers: {} }));
+    const ambient = makeAmbient();
+    ambient.decisions = new DecisionRuntime(undefined, {
+      provider: 'test',
+      model: 'test',
+      evaluate,
+    });
+    const controller = new AbortController();
+    const runConfig = makeRunConfig();
+    runConfig.signal = controller.signal;
+    const ctx = buildRuntimeContext(runConfig, ambient, { messages: [] });
+    const definition = defineDecision({
+      name: 'test',
+      version: '1',
+      description: 'Test',
+      inputSchema: z.string(),
+      project: (text) => ({
+        state: text,
+        questions: {
+          help: {
+            kind: 'boolean',
+            instructions: 'Does the message ask for help?',
+          },
+        },
+      }),
+    });
+    controller.abort();
+    await expect(
+      ctx.decisions.evaluate(definition, 'Help', {
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(evaluate).not.toHaveBeenCalled();
   });
 
   it('copies runtime.context.commerce onto ctx.commerce; absent otherwise', () => {

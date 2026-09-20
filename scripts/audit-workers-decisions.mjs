@@ -134,6 +134,7 @@ if (live) {
     'run',
     'src/decisions',
     'src/registries/decision-registry.test.ts',
+    'src/runtime-context/build-runtime.test.ts',
     'src/modules/messages/message-router.service.test.ts',
     'src/modules/messages/matrix-listener-bridge.test.ts',
   ]);

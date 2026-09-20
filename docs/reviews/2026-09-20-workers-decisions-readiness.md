@@ -48,19 +48,19 @@ The default audit is wired into CI. `--release` adds root lint and formatting. L
 
 ## Verified local evidence
 
-| Lane                                                                                | Result                                            |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Workspace build and declarations                                                    | Passed, 12 build targets                          |
-| Shared provider / failure-boundary suite                                            | 39 passed                                         |
-| Existing provider-neutral contract suite                                            | 6 passed                                          |
-| Node compatibility, registry and commerce shadow suites                             | 89 passed                                         |
-| Workers typecheck                                                                   | Passed                                            |
-| Workers core suite                                                                  | 332 passed in 45 files                            |
-| Actual workerd boot / Decisions integration                                         | 9 passed in 2 files                               |
-| Reference Worker dry-run                                                            | Passed; compressed bundle approximately 5,557 KiB |
-| Companion #239 devnet, testnet and mainnet dry-runs with hardened workspace runtime | Passed; no deployment                             |
-| Root lint                                                                           | Passed; existing warnings remain                  |
-| Root format check and whitespace check                                              | Passed                                            |
+| Lane                                                                                | Result                                                     |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Workspace build and declarations                                                    | Passed, 12 build targets                                   |
+| Shared provider / failure-boundary suite                                            | 39 passed                                                  |
+| Existing provider-neutral contract suite                                            | 6 passed                                                   |
+| Node compatibility, registry and commerce shadow suites                             | 104 passed (including 15 turn-context compatibility tests) |
+| Workers typecheck                                                                   | Passed                                                     |
+| Workers core suite                                                                  | 332 passed in 45 files                                     |
+| Actual workerd boot / Decisions integration                                         | 9 passed in 2 files                                        |
+| Reference Worker dry-run                                                            | Passed; compressed bundle approximately 5,557 KiB          |
+| Companion #239 devnet, testnet and mainnet dry-runs with hardened workspace runtime | Passed; no deployment                                      |
+| Root lint                                                                           | Passed; existing warnings remain                           |
+| Root format check and whitespace check                                              | Passed                                                     |
 
 Counts are per lane, not unique coverage totals. Mocks establish provider wire conformance and failure behavior; they do not establish live model access, accuracy, privacy guarantees, rubric calibration or signed IXO decision conformance. No package release, deployment, chain execution or payment occurred during this audit.
 

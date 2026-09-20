@@ -1,3 +1,4 @@
+import { scopeDecisions } from '@ixo/decisions';
 import type { BaseMessage } from '@langchain/core/messages';
 import type {
   CommerceContext,
@@ -127,18 +128,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
 
   const abortSignal = runConfig.signal ?? new AbortController().signal;
   const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISIONS;
-  const decisions: RuntimeContext['decisions'] = {
-    evaluate: (definition, input, options) =>
-      decisionEvaluator.evaluate(definition, input, {
-        ...options,
-        signal: options?.signal ?? abortSignal,
-      }),
-    evaluateByName: (name, input, options) =>
-      decisionEvaluator.evaluateByName(name, input, {
-        ...options,
-        signal: options?.signal ?? abortSignal,
-      }),
-  };
+  const decisions = scopeDecisions(decisionEvaluator, abortSignal);
 
   const delegation = user.ucanDelegation;
 
