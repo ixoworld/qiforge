@@ -177,6 +177,7 @@ describe('CloudflareJevDecisionAdapter', () => {
     const fetchMock = vi.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         successResponse({
+          model: 'jev-1.13.0',
           answers: {
             work: { type: 'noul', noul: 0.5 },
           },
@@ -203,7 +204,8 @@ describe('CloudflareJevDecisionAdapter', () => {
     );
 
     const [, init] = fetchMock.mock.calls[0]!;
-    expect(init?.signal).toBe(controller.signal);
+    expect(init?.signal?.aborted).toBe(false);
+    expect(init?.redirect).toBe('error');
     expect(init?.headers).toMatchObject({
       'cf-aig-gateway-id': 'decisions',
       'Content-Type': 'application/json',
@@ -304,7 +306,10 @@ describe('CloudflareJevDecisionAdapter', () => {
 
   it('propagates abort errors', async () => {
     const controller = new AbortController();
-    const aborted = new DOMException('Aborted', 'AbortError');
+    const aborted = new DOMException(
+      'private upstream cancellation detail',
+      'AbortError',
+    );
     const fetchMock = vi.fn(async () => {
       controller.abort();
       throw aborted;
@@ -328,6 +333,9 @@ describe('CloudflareJevDecisionAdapter', () => {
         },
         { signal: controller.signal },
       ),
-    ).rejects.toBe(aborted);
+    ).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Decision cancelled or timed out.',
+    });
   });
 });

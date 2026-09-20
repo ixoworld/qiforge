@@ -100,7 +100,8 @@
     "node-emoji": "^2.2.0",
     "socket.io": "4.8.3",
     "yjs": "^13.6.27",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@ixo/decisions": "workspace:*"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0"

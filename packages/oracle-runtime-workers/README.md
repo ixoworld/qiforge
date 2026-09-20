@@ -122,3 +122,7 @@ lifetime are in [operations](docs/operations.md).
   ported in September 2026 behind `MATRIX_GROUP_ROOMS=gate` (the gate and
   channel memory run in the gateway; by default the bot stays silent in
   group rooms, see [operations](docs/operations.md#rooms-group-chats)).
+
+## Semantic Decisions
+
+Plugins can register finite semantic questions and evaluate them through `ctx.decisions` with Cloudflare Jev or OpenRouter Jev. See [Decisions](docs/decisions.md) for configuration, boundaries, and repeatable production-readiness checks.

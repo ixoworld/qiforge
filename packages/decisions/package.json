@@ -1,0 +1,65 @@
+{
+  "name": "@ixo/decisions",
+  "version": "0.1.0",
+  "description": "Bounded semantic decisions for QiForge runtimes.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "default": "./dist/types.js"
+    },
+    "./define-decision": {
+      "types": "./dist/define-decision.d.ts",
+      "import": "./dist/define-decision.js",
+      "default": "./dist/define-decision.js"
+    },
+    "./validation": {
+      "types": "./dist/validation.d.ts",
+      "import": "./dist/validation.js",
+      "default": "./dist/validation.js"
+    },
+    "./decision-runtime": {
+      "types": "./dist/decision-runtime.d.ts",
+      "import": "./dist/decision-runtime.js",
+      "default": "./dist/decision-runtime.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js",
+      "default": "./dist/config.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js",
+      "default": "./dist/providers/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@ixo/typescript-config": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

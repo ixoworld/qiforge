@@ -25,6 +25,11 @@ import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  DECISION_PROVIDER?: 'cloudflare-jev' | 'openrouter-jev';
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_AI_GATEWAY_ID?: string;
+  OPENROUTER_JEV_MODEL?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -73,6 +78,34 @@ export interface OracleWorkerEnv {
   MATRIX_HOT_ROOMS?: string;
   /** Cap on events replayed per room after a restart (SDK default 0 = unbounded). */
   MATRIX_BACKFILL_MAX_EVENTS?: string;
+  /**
+   * Gateway memory guards (`@ixo/matrix-bot-workers-sdk` 0.5+): events per
+   * room per `/sync` batch (default 30), the largest `/sync` response held
+   * in memory (default 16 MiB; over it the batch is re-requested at timeline
+   * limit 1 and the rooms catch up through `/messages`), events per catch-up
+   * page (default 100), the largest catch-up page (default 10 MiB; a bigger
+   * one is fetched again smaller) and the largest ciphertext the bot will
+   * decrypt (default 0 = no cap). A cap of `0` switches that guard off.
+   */
+  MATRIX_SYNC_TIMELINE_LIMIT?: string;
+  MATRIX_SYNC_BYTES_CAP?: string;
+  MATRIX_CATCHUP_PAGE_SIZE?: string;
+  MATRIX_PAGE_BYTES_CAP?: string;
+  MATRIX_MAX_DECRYPT_BYTES?: string;
+  /**
+   * `true` restores every room key the account's key backup holds on a
+   * device's first start (SDK 0.6+), capped at `..._MAX_KEYS` (default
+   * 5,000; a larger backup is skipped and keys stay on demand). Off by
+   * default: the gateway reads keys from the backup one session at a time.
+   */
+  MATRIX_BACKUP_BULK_RESTORE?: string;
+  MATRIX_BACKUP_BULK_RESTORE_MAX_KEYS?: string;
+  /**
+   * Keep-alive fuse (SDK 0.7+): while the gateway object works, its alarm is
+   * re-armed this far ahead so a host drain brings it back within the fuse
+   * (default 10 s, floor 2 s, `0` = off).
+   */
+  MATRIX_KEEPALIVE_FUSE_MS?: string;
 
   // --- storage ------------------------------------------------------------
   /**

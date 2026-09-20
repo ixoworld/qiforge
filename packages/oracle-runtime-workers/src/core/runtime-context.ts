@@ -1,3 +1,8 @@
+import {
+  DecisionRuntime,
+  scopeDecisions,
+  type DecisionEvaluator,
+} from '@ixo/decisions';
 import type { BotCredentials } from '../do/contracts';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -155,6 +160,7 @@ export interface EmitAdapter {
  * consumes them through these interfaces.
  */
 export interface AmbientServices {
+  decisions?: DecisionEvaluator;
   config: Record<string, unknown>;
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
@@ -448,6 +454,10 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
+    decisions: scopeDecisions(
+      ambient.decisions ?? new DecisionRuntime(),
+      abortSignal,
+    ),
     llm: {
       get: (role, params) => ambient.llm.get(role, params),
     },
@@ -627,6 +637,7 @@ export function createNoopAmbient(
     },
     blobStore: overrides.blobStore ?? createMemoryBlobStore(),
     matrix: overrides.matrix ?? createUnavailableMatrixAdapter(),
+    decisions: overrides.decisions,
     llm: overrides.llm ?? createUnavailableLlmAdapter(),
     emit: overrides.emit ?? { emit: () => undefined },
     ucan: overrides.ucan ?? createUnsignedUcanAdapter(),

@@ -1,3 +1,5 @@
+export * from '@ixo/decisions';
+export * from '@ixo/decisions/providers';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * @ixo/oracle-runtime-workers — QiForge oracles on Cloudflare Workers.
@@ -132,6 +134,7 @@ export {
 } from './llm/chatgpt-oauth';
 
 export interface CreateOracleWorkerOptions {
+  decisionAdapter?: RuntimeCoreOptions['decisionAdapter'];
   config: OracleConfig;
   plugins?: OraclePlugin[];
   features?: RuntimeCoreOptions['features'];
@@ -195,6 +198,7 @@ export function createOracleWorker(
         features: opts.features,
         manifestOverrides: opts.manifestOverrides,
         env,
+        decisionAdapter: opts.decisionAdapter,
         logger: console,
       });
       cores.set(env, core);

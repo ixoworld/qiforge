@@ -186,3 +186,9 @@ export * from './plugins/skills/index.js';
 export * from './plugins/slack/index.js';
 export * from './plugins/user-preferences/index.js';
 export * from './plugins/vfs/index.js';
+
+export {
+  OpenRouterJevDecisionAdapter,
+  OpenRouterJevDecisionError,
+  type OpenRouterJevAdapterOptions,
+} from './decisions/index.js';

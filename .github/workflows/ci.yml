@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: ["**"]
-
+    branches: ['**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,14 +24,19 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version-file: ".nvmrc"
-          cache: "pnpm"
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
+
+      - name: Workers Decisions readiness
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        run: node scripts/audit-workers-decisions.mjs
 
       - name: Lint
         # One ESLint process per package (scripts/lint.mjs); the largest

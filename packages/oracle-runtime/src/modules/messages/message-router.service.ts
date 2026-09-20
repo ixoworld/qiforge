@@ -207,6 +207,7 @@ export class MessageRouterService {
     port: CommerceRouterPort,
     input: RouteTurnInput,
   ): Promise<CommerceContext> {
+    input.abortSignal?.throwIfAborted();
     const active = await port.findActiveEngagement({
       senderDid: input.senderDid,
       roomId: input.roomId,
@@ -254,6 +255,7 @@ export class MessageRouterService {
       `${LOG_PREFIX} classifying thread ${input.threadId} against ${services.length} published service(s)`,
     );
 
+    input.abortSignal?.throwIfAborted();
     const shadow = this.startDecisionShadow(port, input, services);
     const legacyStartedAt = Date.now();
     const classification = await this.classify(port, input.text, services);
@@ -268,6 +270,7 @@ export class MessageRouterService {
       );
     }
 
+    input.abortSignal?.throwIfAborted();
     if (!classification) {
       this.logDecision(input, {
         decision: 'classifier-unavailable',
@@ -341,6 +344,7 @@ export class MessageRouterService {
       };
     }
 
+    input.abortSignal?.throwIfAborted();
     const started = await port.startEngagement(
       input.roomId,
       input.threadId,
@@ -391,7 +395,10 @@ export class MessageRouterService {
     port: CommerceRouterPort,
     input: RouteTurnInput,
     services: CommerceRoutedService[],
-  ): Promise<{ evaluation: DecisionEvaluation; latencyMs: number }> | null {
+  ): Promise<{
+    evaluation: DecisionEvaluation;
+    latencyMs: number;
+  } | null> | null {
     if (port.routerEngine !== 'decision-shadow') return null;
     const decisionName = port.routerDecisionName;
     if (!decisionName) {
@@ -434,7 +441,13 @@ export class MessageRouterService {
       .then((evaluation) => ({
         evaluation,
         latencyMs: Date.now() - startedAt,
-      }));
+      }))
+      .catch(() => {
+        this.logger.warn(
+          `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=failed errorType=DecisionError`,
+        );
+        return null;
+      });
   }
 
   /**
@@ -443,14 +456,19 @@ export class MessageRouterService {
    * error could echo Decision state.
    */
   private observeDecisionShadow(
-    shadow: Promise<{ evaluation: DecisionEvaluation; latencyMs: number }>,
+    shadow: Promise<{
+      evaluation: DecisionEvaluation;
+      latencyMs: number;
+    } | null>,
     input: RouteTurnInput,
     services: CommerceRoutedService[],
     legacy: z.infer<typeof classificationSchema> | null,
     legacyLatencyMs: number,
   ): void {
     void shadow
-      .then(({ evaluation, latencyMs }) => {
+      .then((result) => {
+        if (!result) return;
+        const { evaluation, latencyMs } = result;
         this.logDecisionShadow(
           evaluation,
           input,
@@ -460,9 +478,8 @@ export class MessageRouterService {
           latencyMs,
         );
       })
-      .catch((error: unknown) => {
-        const errorType =
-          error instanceof Error ? error.name || 'Error' : typeof error;
+      .catch(() => {
+        const errorType = 'DecisionError';
         this.logger.warn(
           `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=failed errorType=${errorType}`,
         );

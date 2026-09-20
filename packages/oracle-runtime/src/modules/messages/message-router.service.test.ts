@@ -428,6 +428,29 @@ describe('MessageRouterService', () => {
       };
     }
 
+    it('handles a rejected shadow before a slow classifier settles', async () => {
+      const { spies } = makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      let finish: (value: unknown) => void = () => undefined;
+      const classification = new Promise((resolve) => {
+        finish = resolve;
+      });
+      const { evaluator } = evaluatorFor(new Error('private provider detail'));
+      const { router, logger } = makeRouter([classification], evaluator);
+      const pending = router.route(turn('private customer text'));
+      await vi.waitFor(() =>
+        expect(logger.warn).toHaveBeenCalledWith(
+          expect.stringContaining('status=failed'),
+        ),
+      );
+      expect(spies.startEngagement).not.toHaveBeenCalled();
+      expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('private');
+      finish({ intent: 'support', confidence: 0.9 });
+      await expect(pending).resolves.toEqual({ mode: 'support' });
+    });
+
     it('observes Jev without changing the legacy routing outcome', async () => {
       const { spies } = makePort({
         routerEngine: 'decision-shadow',

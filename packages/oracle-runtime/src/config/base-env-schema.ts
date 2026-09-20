@@ -78,7 +78,8 @@ export const baseEnvSchema = z.object({
 
   // Bounded semantic Decision provider. Optional so deployments that do not
   // use Decisions preserve their existing behavior.
-  DECISION_PROVIDER: z.enum(['cloudflare-jev']).optional(),
+  OPENROUTER_JEV_MODEL: z.string().optional(),
+  DECISION_PROVIDER: z.enum(['cloudflare-jev', 'openrouter-jev']).optional(),
   CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
   CLOUDFLARE_API_TOKEN: z.string().optional(),
   CLOUDFLARE_AI_GATEWAY_ID: z.string().optional(),

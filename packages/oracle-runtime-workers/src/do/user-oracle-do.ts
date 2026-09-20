@@ -1226,6 +1226,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
         frontend: this.realtime.frontend,
+        decisions: core.decisions,
         config: core.validatedEnv,
         identity: core.identity,
         availablePlugins: core.availablePlugins,

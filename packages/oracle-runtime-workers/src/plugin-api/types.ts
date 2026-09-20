@@ -1,3 +1,4 @@
+import type { DecisionEvaluator } from '@ixo/decisions';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -477,6 +478,7 @@ export interface MatrixPostOpts {
 }
 
 export interface RuntimeContext<TConfig = MergedConfig> {
+  decisions: DecisionEvaluator;
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
     did: string;

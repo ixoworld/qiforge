@@ -55,7 +55,7 @@ export class DecisionRegistry {
     const collisions: string[] = [];
     for (const { pluginName, decision } of this.bootCache) {
       const previous = seen.get(decision.name);
-      if (previous && previous !== pluginName) {
+      if (previous) {
         collisions.push(
           `Decision "${decision.name}" registered by both "${previous}" and "${pluginName}"`,
         );

@@ -236,6 +236,7 @@ export function createUcanAdapter(
 }
 
 export interface CreateAmbientInput {
+  decisions?: AmbientServices['decisions'];
   /** Host task scheduler surface for this user, when tasks are enabled. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
@@ -276,6 +277,7 @@ export function createAmbientServices(
     identity: input.identity,
     availablePlugins: input.availablePlugins,
     llm: input.llm,
+    decisions: input.decisions,
     logger: input.logger,
     emit: input.events,
     blobStore: createBlobStore(input.storage),

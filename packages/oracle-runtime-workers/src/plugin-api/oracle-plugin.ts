@@ -1,3 +1,4 @@
+import type { DecisionRegistration } from '@ixo/decisions';
 import type { z } from 'zod';
 import type { PluginRoute } from '../shell/app';
 import type {
@@ -79,6 +80,9 @@ export abstract class OraclePlugin {
 
   /** Tools the main agent can call. Called once per isolate (boot-cached). */
   getTools?(ctx: PluginContext): PluginTool[] | Promise<PluginTool[]>;
+
+  /** Bounded semantic judgments; never automatically exposed as agent tools. */
+  getDecisions?(ctx: PluginContext): DecisionRegistration[];
 
   /** Sub-agents the runtime auto-wraps as tools. */
   getSubAgents?(ctx: PluginContext): PluginSubAgent[];

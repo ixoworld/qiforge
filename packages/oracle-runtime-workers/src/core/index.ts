@@ -1,3 +1,10 @@
+import {
+  DecisionRuntime,
+  type DecisionAdapter,
+  type DecisionRegistration,
+  type DecisionEvaluator,
+} from '@ixo/decisions';
+import { createDecisionAdapterFromConfig } from '@ixo/decisions/config';
 /**
  * The runtime core — everything between "a list of plugins + the Worker env"
  * and "a compiled LangChain agent for one turn". Nothing in here touches
@@ -234,6 +241,7 @@ export * from './plugins';
 // ── Boot ────────────────────────────────────────────────────────────────────
 
 export interface RuntimeCoreOptions {
+  decisionAdapter?: DecisionAdapter;
   /** Inline oracle config. `entityDid` comes from env — do not put it here. */
   config: OracleConfig;
   /**
@@ -262,6 +270,7 @@ export interface RuntimeCoreOptions {
  * `env` object) and hands to every Durable Object turn.
  */
 export interface RuntimeCore {
+  decisions: DecisionEvaluator;
   identity: OracleIdentity;
   registries: Registries;
   /** Names of the plugins that loaded, in dependency order. */
@@ -420,6 +429,21 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
       pluginName,
     });
 
+  const definitions = new Map<string, { decision: DecisionRegistration }>();
+  for (const plugin of resolved.loaded) {
+    for (const decision of plugin.getDecisions?.(buildCtx(plugin.name)) ?? []) {
+      if (definitions.has(decision.name))
+        throw new Error(`Duplicate Decision registration: ${decision.name}`);
+      definitions.set(decision.name, { decision });
+    }
+  }
+  // Provider credentials remain on the host env; do not copy them into plugin config.
+  const decisions = new DecisionRuntime(
+    definitions,
+    opts.decisionAdapter ?? createDecisionAdapterFromConfig(opts.env),
+    logger,
+  );
+
   // 6. Routes + auth exclusions (sync — plugins close over config here).
   const pluginRoutes: PluginRoute[] = resolved.loaded.flatMap(
     (p) => p.getRoutes?.(buildCtx(p.name)) ?? [],
@@ -497,6 +521,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
 
   return {
     identity,
+    decisions,
     registries,
     availablePlugins,
     plugins: resolved.loaded,

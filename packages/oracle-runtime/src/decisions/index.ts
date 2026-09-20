@@ -19,3 +19,9 @@ export type {
   DecisionProviderConfigIssue,
   DecisionProviderName,
 } from './config.js';
+
+export {
+  OpenRouterJevDecisionAdapter,
+  OpenRouterJevDecisionError,
+  type OpenRouterJevAdapterOptions,
+} from '@ixo/decisions/providers';

@@ -445,20 +445,6 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     });
     workStatusProducer.emit(requestId, 'routing');
 
-    // Commerce routing — Matrix-only, inert unless the oracle-payments
-    // plugin registered its port.
-    let commerce: CommerceContext | undefined;
-    if (this.router.isActive()) {
-      commerce = await this.router.route({
-        roomId: first.roomId,
-        requestId,
-        abortSignal: abortController.signal,
-        threadId,
-        senderDid: did,
-        text: turnMessage,
-      });
-    }
-
     let settle: () => void = () => undefined;
     const settled = new Promise<void>((resolve) => {
       settle = resolve;
@@ -473,6 +459,21 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     const typingClient = this.matrixManager.getClient()?.mxClient;
     let typingKeepalive: NodeJS.Timeout | undefined;
     try {
+      // Commerce routing — Matrix-only, inert unless the oracle-payments
+      // plugin registered its port.
+      let commerce: CommerceContext | undefined;
+      if (this.router.isActive()) {
+        commerce = await this.router.route({
+          roomId: first.roomId,
+          requestId,
+          abortSignal: abortController.signal,
+          threadId,
+          senderDid: did,
+          text: turnMessage,
+        });
+      }
+
+      abortController.signal.throwIfAborted();
       await typingClient?.setTyping(first.roomId, true);
       // Typing notifications expire server-side (~30s); a long turn needs
       // periodic refreshes or the indicator drops mid-run.

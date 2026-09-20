@@ -26,6 +26,7 @@ const workStatus = vi.hoisted(() => ({
   beginTurn: vi.fn(),
   emit: vi.fn(),
   finish: vi.fn(),
+  endTurn: vi.fn(),
 }));
 
 vi.mock('../../matrix/work-status-producer.js', () => ({
@@ -1143,6 +1144,68 @@ describe('MatrixListenerBridge', () => {
   });
 
   describe('double-text supersede', () => {
+    it('aborts and suppresses a turn superseded while routing is still pending', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const active = vi
+        .spyOn(MessageRouterService.prototype, 'isActive')
+        .mockReturnValue(true);
+      let firstSignal: AbortSignal | undefined;
+      let finishRoute: () => void = () => undefined;
+      const route = vi
+        .spyOn(MessageRouterService.prototype, 'route')
+        .mockImplementationOnce((input) => {
+          firstSignal = input.abortSignal;
+          return new Promise((resolve) => {
+            finishRoute = () => resolve({ mode: 'support' });
+          });
+        })
+        .mockResolvedValue({ mode: 'support' });
+      try {
+        const h = await build();
+        h.sessions.matrixManger.getEventById.mockResolvedValue({
+          content: { sessionId: 'lc-thread' },
+        });
+        h.sessions.getSession.mockResolvedValue({ sessionId: 'root' });
+        const handler = vi
+          .fn()
+          .mockResolvedValue({ message: { type: 'ai', content: 'reply' } });
+        h.bridge.setDeliverHandler(handler);
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'root',
+            content: { msgtype: 'm.text', body: 'first' },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        expect(route).toHaveBeenCalledTimes(1);
+        expect(handler).not.toHaveBeenCalled();
+        await deliver(
+          h,
+          makeEvent({
+            event_id: 'second',
+            content: {
+              msgtype: 'm.text',
+              body: 'second',
+              'm.relates_to': { 'm.in_reply_to': { event_id: 'root' } },
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(500);
+        expect(firstSignal?.aborted).toBe(true);
+        finishRoute();
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(handler.mock.calls[0]?.[0]).toMatchObject({
+          message: 'first\nsecond',
+        });
+      } finally {
+        route.mockRestore();
+        active.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
     it('aborts the in-flight turn and prepends its unanswered text to the new one', async () => {
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {

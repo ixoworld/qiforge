@@ -262,3 +262,7 @@ agent behavior.
   turn.
 - [Matrix commerce](matrix-commerce.md) — the first planned production
   consumer.
+
+## Workers and provider hardening
+
+Definitions, validation and provider adapters are shared through `@ixo/decisions`. Node entry points remain compatible; Workers exports the same primitive and supplies `RuntimeContext.decisions`. See the [Workers Decisions contract](../../packages/oracle-runtime-workers/docs/decisions.md) for Cloudflare/OpenRouter configuration, bounded transport, cancellation and deployment gates. The Matrix commerce shadow path remains Node-only.
