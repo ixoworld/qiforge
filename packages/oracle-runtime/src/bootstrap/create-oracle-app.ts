@@ -22,7 +22,11 @@ import {
 } from '../config/base-env-schema.js';
 import {
   createDecisionAdapterFromConfig,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   validateDecisionProviderConfig,
+  type DecisionProviderPolicy,
+  type DecisionProviderRegistration,
 } from '../decisions/index.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
 import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
@@ -134,10 +138,14 @@ export interface CreateOracleAppOptions {
    */
   hooks?: MainAgentHooks;
   /**
-   * Provider adapter for bounded semantic decisions. Decisions remain
-   * registered without one, but evaluation throws until an adapter is supplied.
+   * Legacy single-provider adapter. Mutually exclusive with
+   * `decisionProviders`; retained so existing hosts require no migration.
    */
   decisionAdapter?: DecisionAdapter;
+  /** Configured Decision provider instances. Overrides env auto-configuration. */
+  decisionProviders?: readonly DecisionProviderRegistration[];
+  /** Default and per-Decision provider routing policy. */
+  decisionProviderPolicy?: DecisionProviderPolicy;
 }
 
 export interface PluginStatusReport {
@@ -197,6 +205,11 @@ export async function createOracleApp(
   opts: CreateOracleAppOptions,
 ): Promise<OracleApp> {
   validateConfig(opts.config);
+  if (opts.decisionAdapter && opts.decisionProviders !== undefined) {
+    throw new Error(
+      'createOracleApp: decisionAdapter and decisionProviders are mutually exclusive.',
+    );
+  }
 
   const logger: PluginLogger = opts.logger ?? new Logger('createOracleApp');
   const env = opts.env ?? process.env;
@@ -285,10 +298,10 @@ export async function createOracleApp(
     );
   }
 
-  // Cross-field check for the optional bounded Decision provider. An explicit
-  // host adapter wins over env configuration, so its presence deliberately
-  // bypasses auto-provider credential validation.
-  if (!opts.decisionAdapter) {
+  // Cross-field check for the optional bounded Decision provider. Explicit
+  // host provider configuration wins over env configuration, so its presence
+  // deliberately bypasses auto-provider credential validation.
+  if (!opts.decisionAdapter && opts.decisionProviders === undefined) {
     const decisionProviderErrors = validateDecisionProviderConfig(
       validated.config,
     );
@@ -484,8 +497,25 @@ export async function createOracleApp(
     );
   }
 
-  const decisionAdapter =
-    opts.decisionAdapter ?? createDecisionAdapterFromConfig(validated.config);
+  const decisionProviders = new DecisionProviderRegistry();
+  if (opts.decisionProviders !== undefined) {
+    for (const provider of opts.decisionProviders) {
+      decisionProviders.register(provider);
+    }
+  } else {
+    const decisionAdapter =
+      opts.decisionAdapter ?? createDecisionAdapterFromConfig(validated.config);
+    if (decisionAdapter) {
+      const providerId = opts.decisionAdapter
+        ? 'host'
+        : String(validated.config.DECISION_PROVIDER ?? 'configured');
+      decisionProviders.register({ id: providerId, adapter: decisionAdapter });
+    }
+  }
+  const decisionProviderRouter = new DecisionProviderRouter(
+    decisionProviders,
+    opts.decisionProviderPolicy,
+  );
 
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by
@@ -497,7 +527,7 @@ export async function createOracleApp(
     availablePlugins: loadedPluginNames,
     logger,
     decisionRegistry: registries.decisions,
-    decisionAdapter,
+    decisionProviderRouter,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent

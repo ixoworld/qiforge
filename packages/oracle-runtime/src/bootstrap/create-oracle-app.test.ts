@@ -252,6 +252,51 @@ describe('createOracleApp — Decision provider', () => {
     ).resolves.toBeDefined();
   });
 
+  it('boots with explicit multi-provider configuration without env provider credentials', async () => {
+    const makeAdapter = (provider: string): DecisionAdapter => ({
+      provider,
+      model: `${provider}-model`,
+      evaluate: vi.fn(async () => ({ answers: {} })),
+    });
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'cloudflare-jev',
+        },
+        decisionProviders: [
+          { id: 'jev', adapter: makeAdapter('cloudflare') },
+          { id: 'semif', adapter: makeAdapter('semif') },
+        ],
+        decisionProviderPolicy: {
+          defaultProviderId: 'jev',
+          routes: { 'example.route': 'semif' },
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('rejects simultaneous legacy and multi-provider host configuration', async () => {
+    const decisionAdapter: DecisionAdapter = {
+      provider: 'custom',
+      model: 'custom-model',
+      evaluate: vi.fn(async () => ({ answers: {} })),
+    };
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: validBaseEnv,
+        decisionAdapter,
+        decisionProviders: [{ id: 'custom', adapter: decisionAdapter }],
+      }),
+    ).rejects.toThrow(/mutually exclusive/);
+  });
+
   it('lets an explicit decisionAdapter override incomplete env provider config', async () => {
     const decisionAdapter: DecisionAdapter = {
       provider: 'custom',

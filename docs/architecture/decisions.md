@@ -146,8 +146,10 @@ The result preserves provenance:
     name: 'oracle-payments.route-message',
     version: '1.0.0',
   },
-  provider: '...',
-  model: '...',
+  providerId: 'cloudflare-jev',
+  providerSelection: 'decision-route',
+  provider: 'cloudflare',
+  model: 'typesafe/jev',
   modelVersion: '...',
   answers: { ... },
   latencyMs: 183,
@@ -196,18 +198,37 @@ interface DecisionAdapter {
 }
 ```
 
-Hosts supply an adapter with:
+`DecisionAdapter` remains the engine translation boundary, while the runtime
+can register several configured provider instances and route Decisions between
+them:
 
 ```ts
 createOracleApp({
   config,
-  decisionAdapter,
+  decisionProviders: [
+    { id: 'cloudflare-jev', adapter: jev },
+    { id: 'semif-local', adapter: semif },
+  ],
+  decisionProviderPolicy: {
+    defaultProviderId: 'semif-local',
+    routes: {
+      'oracle-payments.route-message': 'cloudflare-jev',
+    },
+  },
 });
 ```
 
-PR 1 introduces no production provider. Without an adapter,
-`ctx.decisions.evaluate(...)` throws `DecisionProviderUnavailableError`.
-The test runtime provides a deterministic mock adapter.
+Selection is deterministic: an explicit per-evaluation `providerId` override,
+then an exact per-Decision route, then the configured default, then (for
+backward compatibility) the sole registered provider. If multiple providers
+exist and none of those rules resolves one, evaluation fails rather than
+selecting by registration order.
+
+The legacy `decisionAdapter` option remains supported and is wrapped as one
+provider with id `host`. It is mutually exclusive with `decisionProviders`.
+Without a resolvable provider, `ctx.decisions.evaluate(...)` throws
+`DecisionProviderUnavailableError`. Provider failure never triggers an
+implicit fallback to another engine.
 
 The first production adapter maps the provider-neutral question kinds to
 TypeSafe Jev through Cloudflare's AI REST API. Enable it with:
@@ -220,8 +241,9 @@ CLOUDFLARE_AI_GATEWAY_ID=<optional gateway id>
 ```
 
 When the provider is selected, the account id and token are required at boot.
-An explicit `createOracleApp({ decisionAdapter })` override wins over env
-configuration. The optional gateway id is forwarded as
+Explicit host `decisionProviders` or the legacy
+`createOracleApp({ decisionAdapter })` override env configuration. The
+optional gateway id is forwarded as
 `cf-aig-gateway-id`; third-party Jev requests otherwise use Cloudflare's
 default gateway behavior.
 

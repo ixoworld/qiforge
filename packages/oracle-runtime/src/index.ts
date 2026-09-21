@@ -12,6 +12,7 @@ export type {
   DecisionEvaluateOptions,
   DecisionEvaluation,
   DecisionProviderResult,
+  DecisionProviderSelection,
   DecisionQuestion,
   DecisionRegistration,
   DecisionRequest,
@@ -19,6 +20,9 @@ export type {
 export {
   DEFAULT_DECISION_TIMEOUT_MS,
   DecisionProviderUnavailableError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   DecisionRuntime,
   CloudflareJevDecisionAdapter,
   CloudflareJevDecisionError,
@@ -29,6 +33,9 @@ export type {
   CloudflareJevAdapterOptions,
   DecisionProviderConfigIssue,
   DecisionProviderName,
+  DecisionProviderPolicy,
+  DecisionProviderRegistration,
+  DecisionProviderResolution,
 } from './decisions/index.js';
 export type {
   OracleApp,

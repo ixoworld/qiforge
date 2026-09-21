@@ -3,6 +3,7 @@ import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
 import { DecisionRuntime } from '../decisions/decision-runtime.js';
+import type { DecisionProviderRouter } from '../decisions/provider-router.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
@@ -40,7 +41,9 @@ export interface BuildAmbientOptions {
   logger: PluginLogger;
   /** Boot-collected bounded semantic decisions. */
   decisionRegistry?: DecisionRegistry;
-  /** Optional host/provider adapter. Until configured, decisions fail closed. */
+  /** Provider router for multi-provider Decision execution. */
+  decisionProviderRouter?: DecisionProviderRouter;
+  /** Legacy single-adapter path retained for compatibility and tests. */
   decisionAdapter?: DecisionAdapter;
 }
 
@@ -67,7 +70,7 @@ export function buildAmbientServices(
   const secretsService = SecretsService.getInstance();
   const decisionRuntime = new DecisionRuntime(
     opts.decisionRegistry,
-    opts.decisionAdapter,
+    opts.decisionProviderRouter ?? opts.decisionAdapter,
     opts.logger,
   );
 
