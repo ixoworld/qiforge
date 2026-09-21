@@ -7,6 +7,8 @@ import {
   DecisionProviderUnavailableError,
   DecisionRuntime,
 } from './decision-runtime.js';
+import { DecisionProviderRegistry } from './provider-registry.js';
+import { DecisionProviderRouter } from './provider-router.js';
 
 const decision = defineDecision({
   name: 'test.boolean',
@@ -56,12 +58,61 @@ describe('DecisionRuntime', () => {
       text: 'yes',
     });
 
+    expect(result.providerId).toBe('legacy');
+    expect(result.providerSelection).toBe('default');
     expect(result.provider).toBe('test-provider');
     expect(result.model).toBe('test-model');
     expect(result.modelVersion).toBe('v1');
     expect(result.answers.yes).toEqual({
       kind: 'boolean',
       probabilityTrue: 0.8,
+    });
+  });
+
+  it('routes by Decision name and allows an explicit provider override', async () => {
+    const makeAdapter = (
+      provider: string,
+      probabilityTrue: number,
+    ): DecisionAdapter => ({
+      provider,
+      model: `${provider}-model`,
+      async evaluate() {
+        return {
+          answers: {
+            yes: { kind: 'boolean', probabilityTrue },
+          },
+        };
+      },
+    });
+    const providers = new DecisionProviderRegistry([
+      { id: 'default-provider', adapter: makeAdapter('default', 0.2) },
+      { id: 'routed-provider', adapter: makeAdapter('routed', 0.8) },
+      { id: 'override-provider', adapter: makeAdapter('override', 0.95) },
+    ]);
+    const runtime = new DecisionRuntime(
+      registry(),
+      new DecisionProviderRouter(providers, {
+        defaultProviderId: 'default-provider',
+        routes: { 'test.boolean': 'routed-provider' },
+      }),
+    );
+
+    const routed = await runtime.evaluateByName('test.boolean', {
+      text: 'yes',
+    });
+    expect(routed.providerId).toBe('routed-provider');
+    expect(routed.providerSelection).toBe('decision-route');
+
+    const overridden = await runtime.evaluateByName(
+      'test.boolean',
+      { text: 'yes' },
+      { providerId: 'override-provider' },
+    );
+    expect(overridden.providerId).toBe('override-provider');
+    expect(overridden.providerSelection).toBe('caller-override');
+    expect(overridden.answers.yes).toEqual({
+      kind: 'boolean',
+      probabilityTrue: 0.95,
     });
   });
 

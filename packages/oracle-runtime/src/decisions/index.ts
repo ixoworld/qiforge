@@ -19,3 +19,15 @@ export type {
   DecisionProviderConfigIssue,
   DecisionProviderName,
 } from './config.js';
+
+export {
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+} from './provider-registry.js';
+export type { DecisionProviderRegistration } from './provider-registry.js';
+
+export { DecisionProviderRouter } from './provider-router.js';
+export type {
+  DecisionProviderPolicy,
+  DecisionProviderResolution,
+} from './provider-router.js';

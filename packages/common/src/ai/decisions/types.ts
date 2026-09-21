@@ -106,9 +106,16 @@ export interface DecisionDefinition<
   project(input: z.output<TSchema>): DecisionRequest;
 }
 
+export type DecisionProviderSelection =
+  | 'caller-override'
+  | 'decision-route'
+  | 'default';
+
 export interface DecisionEvaluateOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Select a configured Decision provider for this evaluation only. */
+  providerId?: string;
 }
 
 export interface DecisionEvaluation {
@@ -116,6 +123,10 @@ export interface DecisionEvaluation {
     name: string;
     version: string;
   };
+  /** Configured provider instance. Present for provider-routed runtimes. */
+  providerId?: string;
+  /** How the runtime selected `providerId`. */
+  providerSelection?: DecisionProviderSelection;
   provider: string;
   model: string;
   modelVersion?: string;
