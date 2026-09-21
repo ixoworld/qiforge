@@ -11,6 +11,8 @@ import {
 import type { Logger } from '../plugin-api/types.js';
 import type { z } from 'zod';
 import type { DecisionRegistry } from '../registries/decision-registry.js';
+import { DecisionProviderRegistry } from './provider-registry.js';
+import { DecisionProviderRouter } from './provider-router.js';
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
@@ -30,18 +32,30 @@ export interface DecisionEvaluator {
 export class DecisionProviderUnavailableError extends Error {
   constructor() {
     super(
-      'No DecisionAdapter is configured. Supply createOracleApp({ decisionAdapter }) or configure a test decision mock.',
+      'No Decision provider is configured for this Decision. Supply createOracleApp({ decisionProviders, decisionProviderPolicy }), a legacy decisionAdapter, or configure a test decision mock.',
     );
     this.name = 'DecisionProviderUnavailableError';
   }
 }
 
 export class DecisionRuntime implements DecisionEvaluator {
+  private readonly providerRouter?: DecisionProviderRouter;
+
   constructor(
     private readonly registry?: DecisionRegistry,
-    private readonly adapter?: DecisionAdapter,
+    adapterOrRouter?: DecisionAdapter | DecisionProviderRouter,
     private readonly logger?: Pick<Logger, 'debug' | 'warn'>,
-  ) {}
+  ) {
+    if (adapterOrRouter instanceof DecisionProviderRouter) {
+      this.providerRouter = adapterOrRouter;
+    } else if (adapterOrRouter) {
+      this.providerRouter = new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: 'legacy', adapter: adapterOrRouter },
+        ]),
+      );
+    }
+  }
 
   async evaluate<TSchema extends z.ZodType>(
     definition: DecisionDefinition<TSchema>,
@@ -79,9 +93,14 @@ export class DecisionRuntime implements DecisionEvaluator {
     request: DecisionRequest,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
-    if (!this.adapter) throw new DecisionProviderUnavailableError();
-
     validateDecisionRequest(request);
+
+    const resolvedProvider = this.providerRouter?.resolve(
+      registration.name,
+      options?.providerId,
+    );
+    if (!resolvedProvider) throw new DecisionProviderUnavailableError();
+    const { adapter } = resolvedProvider.provider;
 
     const timeoutMs =
       options?.timeoutMs ??
@@ -100,7 +119,7 @@ export class DecisionRuntime implements DecisionEvaluator {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
-        this.adapter.evaluate(request, { signal: controller.signal }),
+        adapter.evaluate(request, { signal: controller.signal }),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
             controller.abort(
@@ -115,7 +134,7 @@ export class DecisionRuntime implements DecisionEvaluator {
 
       const latencyMs = Date.now() - started;
       this.logger?.debug?.(
-        `[decisions] name=${registration.name} provider=${this.adapter.provider} model=${this.adapter.model} latencyMs=${latencyMs}`,
+        `[decisions] name=${registration.name} providerId=${resolvedProvider.provider.id} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
       );
 
       return {
@@ -123,8 +142,10 @@ export class DecisionRuntime implements DecisionEvaluator {
           name: registration.name,
           version: registration.version,
         },
-        provider: this.adapter.provider,
-        model: this.adapter.model,
+        providerId: resolvedProvider.provider.id,
+        providerSelection: resolvedProvider.selectedBy,
+        provider: adapter.provider,
+        model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
         answers: result.answers,
         latencyMs,

@@ -20,6 +20,7 @@ export type {
   DecisionEvaluation,
   DecisionProviderOptions,
   DecisionProviderResult,
+  DecisionProviderSelection,
   DecisionQuestion,
   DecisionRegistration,
   DecisionRequest,
