@@ -35,13 +35,18 @@ graph TD
     P -->|yes| E{active engagement<br/>for this USER?}
     E -->|yes| W[work — sticky, no model call]
     E -->|no| C{card has services?}
-    C -->|no| S[support — classifier never runs]
-    C -->|yes| SH{decision-shadow?}
-    SH -->|yes| JEV[start bounded Decision in parallel<br/>telemetry only, never awaited]
-    SH -->|no| CLS[classify on the routing role]
+    C -->|no| S["support — no engine runs"]
+    C -->|yes| ENG{routerEngine?}
+    ENG -->|llm| CLS["LLM classify on the routing role"]
+    ENG -->|decision-shadow| JEV["start bounded Decision in parallel<br/>telemetry only, never awaited"]
     JEV --> CLS
-    CLS -->|support / low confidence / unknown id| S
-    CLS -->|work| G{contract gate}
+    ENG -->|decision| DEC["await bounded Decision<br/>map answers to the verdict shape"]
+    DEC -->|"no evaluator / error / malformed"| FB["warn status=fallback"]
+    FB --> CLS
+    CLS --> V["verdict: intent, serviceId, confidence"]
+    DEC --> V
+    V -->|"support / below floor / unknown id"| S
+    V -->|work| G{contract gate}
     G -->|fail| SG[support + gate context]
     G -->|pass| I[startEngagement — reserves escrow]
     I -->|fail| SG
@@ -51,42 +56,88 @@ graph TD
 Two rules the code enforces and reviews should protect:
 
 - **Fail open to support.** Every failure lane — a thrown classifier, a timeout, sub-threshold confidence, a serviceId the card doesn't have, a gate refusal, a failed chain write — resolves to support mode. Nothing routes into billable work by accident.
-- **No model call when there's nothing to classify against.** An oracle with no agent card never pays for a routing call.
+- **No model call when there's nothing to classify against.** An oracle with no agent card never pays for a routing call, whichever engine is selected.
 - **Failing open is not failing silent.** Every refusal carries a `detail` — the chain's rejection text, the engine's status, the numbers that did not add up — onto `ctx.commerce.gate` and into the overlay instruction. A reason alone is a code the agent can only read back at the user, so no lane may end with the cause in a log line and a bare enum on the wire. A lookup that never got an answer refuses as `contract_check_failed`, never as `not_contracted`: an unanswered check is not evidence of a missing contract.
 
 The classifier's timeout and confidence floor are constants at the top of the file. `routerModel` from the port overrides the `routing` role model.
 
-### Bounded Decision shadow mode
+### Routing engines
 
-`ORACLE_PAYMENTS_ROUTER_ENGINE=decision-shadow` runs the registered
-`oracle-payments.route-message` Decision alongside the legacy classifier for
-eligible turns. It starts only after the active-engagement and empty-catalog
-short circuits, so sticky work and oracles with no services incur no Decision
-call.
+`ORACLE_PAYMENTS_ROUTER_ENGINE` (plugin config, surfaced as `routerEngine` on
+the port; the accepted values are the `COMMERCE_ROUTER_ENGINES` tuple in
+`commerce-router-port.ts`) selects which model answers the support-vs-work
+question for a classifiable turn. Every engine runs only after the
+active-engagement and empty-catalog short circuits, so sticky work and oracles
+with no services never call any model. Every engine reduces to the same verdict
+shape — `{ intent, serviceId?, confidence }` — and from there the pipeline is
+identical: the confidence floor, the catalog check, the contract gate and the
+engagement start do not know which engine they are downstream of.
 
-Shadow mode is deliberately non-blocking: `MessageRouterService` starts the
-Decision, runs the legacy classifier exactly as before, and never awaits the
-Decision before returning the route. The Decision also receives the owning
-turn's abort signal, so a superseded/cancelled turn can stop any still-running
-shadow request. The legacy classifier remains the only input to the contract
-gate and engagement start. A missing Decision provider, timeout, malformed
-result, or provider error can therefore affect telemetry only.
+| Engine            | Who routes                 | Bounded Decision                      |
+| ----------------- | -------------------------- | ------------------------------------- |
+| `llm` (default)   | LLM structured-output call | never evaluated                       |
+| `decision-shadow` | LLM structured-output call | evaluated in parallel, logged only    |
+| `decision`        | Bounded Decision           | awaited; LLM is the per-turn fallback |
 
-Shadow mode is an explicit operator opt-in because the Decision provider receives
-the projected semantic state: the current coalesced Matrix turn and the
-published service descriptors. It does not receive the sender DID, room id,
+**`llm`.** One structured-output classification on the `routing` role
+(`routerModel` overrides the model). Timeout, thrown model, malformed verdict
+all mean `classifier-unavailable` → support.
+
+**`decision-shadow`.** Same routing as `llm`; additionally the registered
+`oracle-payments.route-message` Decision is started in parallel and NEVER
+awaited by the routing path — shadow mode cannot delay, authorize, start or
+otherwise change the turn. The Decision receives the owning turn's abort
+signal so a superseded turn stops any still-running shadow request. A missing
+provider, timeout, malformed result or provider error affects telemetry only.
+The shadow line is `[commerce-router-shadow]` and carries routing metadata
+only: the per-turn request id (to join it to the live decision line), legacy
+intent/confidence/service/latency, Decision work probability,
+service/confidence/latency, provider/model and intent/service agreement. The
+`decisionIntentAt50` field uses 0.5 purely as a comparison boundary for
+agreement reporting; it is not a routing threshold.
+
+**`decision`.** The Decision is awaited and routes INSTEAD of the LLM. Its two
+answers are mapped onto the verdict shape:
+
+- `intent = workRequestedNow.probabilityTrue >= MIN_WORK_CONFIDENCE ? 'work' : 'support'`
+  — the SAME floor the LLM's self-reported confidence is measured against, so
+  switching engines never moves the line between free and billable and the two
+  engines stay comparable in the logs. There is no separate Decision threshold.
+- work: `serviceId = service.value`,
+  `confidence = min(workRequestedNow.probabilityTrue, service.confidence)`. A
+  low choice confidence therefore still falls open in the `low-confidence`
+  lane, and the Decision's own no-match option is not a catalog id, so it lands
+  in the `unknown-service` lane exactly like an LLM hallucinated id would.
+- support: `confidence = 1 - workRequestedNow.probabilityTrue`, no serviceId.
+
+**Fallback rule (`decision` only).** When the Decision cannot answer — no
+evaluator on the ambient runtime, no `routerDecisionName` on the port, the
+evaluation throws (missing provider, timeout, provider error) or an answer is
+missing or of the wrong kind — the router logs ONE warn line,
+`[commerce-router] … engine=decision status=fallback reason=<…>`, and runs the
+LLM classifier for that turn. The reason is a safe token (`missing-evaluator`,
+`missing-decision-name`, `malformed-answer`, or the error's type name); it never
+carries the user's text or a provider message. Fallback is per turn: the next
+turn tries the Decision again. The two configuration reasons are said once per
+process (the `inactiveNoticeLogged` pattern) because they cannot change without
+a restart; evaluation failures warn on every turn they happen.
+
+**Operator visibility.** The per-turn decision line carries
+`engine=<llm|decision-shadow|decision>` naming the engine that actually
+produced the verdict — a `decision` turn that fell back reports `engine=llm`
+next to its `status=fallback` warn — and, for the decision engine, the raw
+`workProbability=` and `serviceConfidence=` so the mapping above can be read
+back from a production log.
+
+**Data handling.** Both Decision engines are explicit operator opt-ins because
+the Decision provider receives the projected semantic state: the current
+coalesced Matrix turn and the published service descriptors (id, name,
+description, tags, examples). It does not receive the sender DID, room id,
 thread id, contract state, UCANs, prices, escrow state, or prior conversation.
-Enable it only where the configured Decision provider's data-handling policy is
-acceptable for the oracle's traffic.
-
-The shadow line is `[commerce-router-shadow]` and contains routing metadata
-only: the per-turn request id (for joining it to the live router decision),
-legacy intent/confidence/service/latency, Decision work probability,
-service/confidence/latency, provider/model, and intent/service agreement. It
-never contains the user message or projected Decision state. The
-`decisionIntentAt50` field uses 0.5 only as a comparison boundary for
-agreement reporting; it is not a production routing threshold. Production
-thresholds are intentionally deferred until replay/shadow calibration.
+Enable either only where the configured Decision provider's data-handling
+policy is acceptable for the oracle's traffic. Shadow and live routing build
+that projection through one helper, so what shadow mode was calibrated on is
+exactly what the live engine routes on.
 
 ## How the decision reaches the agent
 

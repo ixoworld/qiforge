@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   clearCommerceRouterPort,
   setCommerceRouterPort,
+  type CommerceRouterEngine,
 } from '../../modules/messages/commerce-router-port.js';
 import { AgentCardService } from './agent-card.service.js';
 import { COMMERCE_ROUTE_DECISION_NAME } from './commerce-route.decision.js';
@@ -43,9 +44,8 @@ export class CommerceRouterPortRegistrar
     const entityDid = this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
     const routerModel = this.config.get<string>('ORACLE_PAYMENTS_ROUTER_MODEL');
     const routerEngine =
-      this.config.get<'llm' | 'decision-shadow'>(
-        'ORACLE_PAYMENTS_ROUTER_ENGINE',
-      ) ?? 'llm';
+      this.config.get<CommerceRouterEngine>('ORACLE_PAYMENTS_ROUTER_ENGINE') ??
+      'llm';
 
     setCommerceRouterPort({
       ...(routerModel ? { routerModel } : {}),

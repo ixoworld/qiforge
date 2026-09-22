@@ -67,13 +67,31 @@ export type CommerceEngagementStartResult =
   | { ok: false; reason: CommerceGateFailureReason; detail?: string };
 
 /**
+ * Which model decides support vs work for a classifiable turn. The plugin's
+ * env schema and the router both derive their literal type from this tuple so
+ * the accepted values live in exactly one place.
+ *
+ * - `llm`: one structured-output classification on the `routing` role; the
+ *   bounded Decision is never evaluated.
+ * - `decision-shadow`: the LLM still routes; the bounded Decision runs in
+ *   parallel for telemetry only and never changes the outcome.
+ * - `decision`: the bounded Decision routes INSTEAD of the LLM; the LLM is
+ *   consulted only as a per-turn fallback when the Decision cannot answer.
+ */
+export const COMMERCE_ROUTER_ENGINES = [
+  'llm',
+  'decision-shadow',
+  'decision',
+] as const;
+
+export type CommerceRouterEngine = (typeof COMMERCE_ROUTER_ENGINES)[number];
+
+/**
  * Commerce knowledge the message router consults, registered by the
  * oracle-payments plugin's Nest module at `onModuleInit`. The router (core)
  * never imports the plugin — with no port registered it is inert and Matrix
  * turns behave exactly as they do today.
  */
-export type CommerceRouterEngine = 'llm' | 'decision-shadow';
-
 export interface CommerceRouterPort {
   /**
    * Classifier model override (`ORACLE_PAYMENTS_ROUTER_MODEL`, validated
@@ -82,13 +100,16 @@ export interface CommerceRouterPort {
   routerModel?: string;
 
   /**
-   * Routing engine selected by the oracle-payments plugin. `decision-shadow`
-   * evaluates the bounded Decision in parallel but NEVER changes the legacy
-   * classifier's routing outcome.
+   * Routing engine selected by the oracle-payments plugin. Undefined reads as
+   * `llm`. See {@link COMMERCE_ROUTER_ENGINES} for what each value does.
    */
   routerEngine?: CommerceRouterEngine;
 
-  /** Boot-registered bounded Decision to evaluate in shadow mode. */
+  /**
+   * Boot-registered bounded Decision the `decision` and `decision-shadow`
+   * engines evaluate. Required for either to run; without it both fall back
+   * to the LLM classifier.
+   */
   routerDecisionName?: string;
 
   /** The oracle's published services, or `null` when no agent card resolves. */

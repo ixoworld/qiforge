@@ -381,58 +381,92 @@ describe('MessageRouterService', () => {
     expect(modelParams[0]).toEqual({ model: 'openai/custom-router' });
   });
 
-  describe('bounded Decision shadow routing', () => {
-    const shadowEvaluation: DecisionEvaluation = {
-      decision: {
-        name: 'oracle-payments.route-message',
-        version: '1.0.0',
+  /** A confident "do the tax report now" answer from the route Decision. */
+  const workEvaluation: DecisionEvaluation = {
+    decision: {
+      name: 'oracle-payments.route-message',
+      version: '1.0.0',
+    },
+    provider: 'cloudflare',
+    model: 'typesafe/jev',
+    modelVersion: 'jev-test',
+    answers: {
+      workRequestedNow: {
+        kind: 'boolean',
+        probabilityTrue: 0.97,
       },
-      provider: 'cloudflare',
-      model: 'typesafe/jev',
-      modelVersion: 'jev-test',
-      answers: {
-        workRequestedNow: {
-          kind: 'boolean',
-          probabilityTrue: 0.97,
+      service: {
+        kind: 'choice',
+        value: 'tax-report',
+        confidence: 0.94,
+        probabilities: {
+          'tax-report': 0.94,
+          __no_matching_service__: 0.06,
         },
+      },
+    },
+    latencyMs: 12,
+    evaluatedAt: '2026-09-19T00:00:00.000Z',
+  };
+
+  /** `workEvaluation` with the two answers replaced. */
+  function evaluationWith(
+    probabilityTrue: number,
+    service: { value: string; confidence: number },
+  ): DecisionEvaluation {
+    return {
+      ...workEvaluation,
+      answers: {
+        workRequestedNow: { kind: 'boolean', probabilityTrue },
         service: {
           kind: 'choice',
-          value: 'tax-report',
-          confidence: 0.94,
+          value: service.value,
+          confidence: service.confidence,
           probabilities: {
-            'tax-report': 0.94,
-            __no_matching_service__: 0.06,
+            [service.value]: service.confidence,
           },
         },
       },
-      latencyMs: 12,
-      evaluatedAt: '2026-09-19T00:00:00.000Z',
     };
+  }
 
-    type EvaluateByNameMock = Mock<DecisionEvaluator['evaluateByName']>;
+  type EvaluateByNameMock = Mock<DecisionEvaluator['evaluateByName']>;
 
-    /** A DecisionEvaluator whose only live surface is `evaluateByName`. */
-    function stubEvaluator(
-      evaluateByName: EvaluateByNameMock,
-    ): DecisionEvaluator {
-      return {
-        evaluate: vi.fn<DecisionEvaluator['evaluate']>(),
-        evaluateByName,
-      };
-    }
+  /** A DecisionEvaluator whose only live surface is `evaluateByName`. */
+  function stubEvaluator(
+    evaluateByName: EvaluateByNameMock,
+  ): DecisionEvaluator {
+    return {
+      evaluate: vi.fn<DecisionEvaluator['evaluate']>(),
+      evaluateByName,
+    };
+  }
 
-    function evaluatorFor(
-      outcome: DecisionEvaluation | Error = shadowEvaluation,
-    ): { evaluator: DecisionEvaluator; evaluateByName: EvaluateByNameMock } {
-      const evaluateByName = vi.fn<DecisionEvaluator['evaluateByName']>(
-        async () => {
-          if (outcome instanceof Error) throw outcome;
-          return outcome;
-        },
-      );
-      return { evaluator: stubEvaluator(evaluateByName), evaluateByName };
-    }
+  function evaluatorFor(outcome: DecisionEvaluation | Error = workEvaluation): {
+    evaluator: DecisionEvaluator;
+    evaluateByName: EvaluateByNameMock;
+  } {
+    const evaluateByName = vi.fn<DecisionEvaluator['evaluateByName']>(
+      async () => {
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      },
+    );
+    return { evaluator: stubEvaluator(evaluateByName), evaluateByName };
+  }
 
+  /** Everything the router logged, at every level, as one searchable string. */
+  function allLogs(logger: LoggerSpies): string {
+    return [
+      ...logger.log.mock.calls,
+      ...logger.warn.mock.calls,
+      ...logger.debug.mock.calls,
+    ]
+      .map((args) => args.map(String).join(' '))
+      .join('\n');
+  }
+
+  describe('bounded Decision shadow routing', () => {
     it('observes Jev without changing the legacy routing outcome', async () => {
       const { spies } = makePort({
         routerEngine: 'decision-shadow',
@@ -594,15 +628,247 @@ describe('MessageRouterService', () => {
           ),
         ).toBe(true),
       );
-      const allLogs = [
-        ...logger.log.mock.calls,
-        ...logger.warn.mock.calls,
-        ...logger.debug.mock.calls,
-      ]
-        .map((args) => args.map(String).join(' '))
-        .join('\n');
-      expect(allLogs).not.toContain(secret);
-      expect(allLogs).toContain('status=failed');
+      expect(allLogs(logger)).not.toContain(secret);
+      expect(allLogs(logger)).toContain('status=failed');
+    });
+  });
+
+  describe('bounded Decision live routing (engine=decision)', () => {
+    const DECISION_PORT = {
+      routerEngine: 'decision' as const,
+      routerDecisionName: 'oracle-payments.route-message',
+    };
+
+    it('routes to work on the Decision alone when probability and service confidence clear the floor', async () => {
+      const { spies } = makePort(DECISION_PORT);
+      const { evaluator, evaluateByName } = evaluatorFor();
+      // A queued LLM verdict that must never be consumed.
+      const { router, invocations, logger } = makeRouter(
+        [{ intent: 'support', confidence: 0.99 }],
+        evaluator,
+      );
+
+      const result = await router.route({
+        ...turn('file my 2025 taxes now'),
+        requestId: 'req-live-1',
+      });
+
+      expect(evaluateByName).toHaveBeenCalledTimes(1);
+      expect(evaluateByName).toHaveBeenCalledWith(
+        'oracle-payments.route-message',
+        {
+          text: 'file my 2025 taxes now',
+          services: [
+            {
+              id: TAX_SERVICE.id,
+              name: TAX_SERVICE.name,
+              description: TAX_SERVICE.description,
+              tags: TAX_SERVICE.tags,
+              examples: TAX_SERVICE.examples,
+            },
+          ],
+        },
+      );
+      expect(invocations).toHaveLength(0);
+      expect(spies.checkContractGate).toHaveBeenCalledWith({
+        roomId: ROOM_ID,
+        threadId: THREAD_ID,
+        senderDid: SENDER_DID,
+        service: TAX_SERVICE,
+      });
+      expect(result).toEqual({
+        mode: 'work',
+        engagement: ENGAGEMENT,
+        engagementRoomId: ROOM_ID,
+        engagementThreadId: THREAD_ID,
+      });
+      // confidence = min(workProbability 0.97, serviceConfidence 0.94).
+      expect(decisionLine(logger)).toBe(
+        `[commerce-router] thread=${THREAD_ID} request=req-live-1 mode=work decision=engagement-started service=tax-report engine=decision classifier=work/0.94 workProbability=0.97 serviceConfidence=0.94`,
+      );
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it('routes to support when the work probability is below the shared floor', async () => {
+      const { spies } = makePort(DECISION_PORT);
+      const { evaluator } = evaluatorFor(
+        evaluationWith(0.2, { value: 'tax-report', confidence: 0.9 }),
+      );
+      const { router, invocations, logger } = makeRouter([], evaluator);
+
+      const result = await router.route(turn('how much is a tax report?'));
+
+      expect(result).toEqual({ mode: 'support' });
+      expect(invocations).toHaveLength(0);
+      expect(spies.checkContractGate).not.toHaveBeenCalled();
+      // A support verdict's confidence is 1 - workProbability.
+      expect(decisionLine(logger)).toBe(
+        `[commerce-router] thread=${THREAD_ID} mode=support decision=classifier-support engine=decision classifier=support/0.8 workProbability=0.2 serviceConfidence=0.9`,
+      );
+    });
+
+    it('falls open to support when the work probability clears the floor but the service confidence does not', async () => {
+      const { spies } = makePort(DECISION_PORT);
+      const { evaluator } = evaluatorFor(
+        evaluationWith(0.9, { value: 'tax-report', confidence: 0.4 }),
+      );
+      const { router, logger } = makeRouter([], evaluator);
+
+      const result = await router.route(turn('maybe taxes?'));
+
+      expect(result).toEqual({ mode: 'support' });
+      expect(spies.checkContractGate).not.toHaveBeenCalled();
+      expect(decisionLine(logger)).toContain(
+        'decision=low-confidence service=tax-report engine=decision classifier=work/0.4',
+      );
+    });
+
+    it('routes to support when the Decision picks its no-match option', async () => {
+      const { spies } = makePort(DECISION_PORT);
+      const { evaluator } = evaluatorFor(
+        evaluationWith(0.9, {
+          value: '__no_matching_service__',
+          confidence: 0.85,
+        }),
+      );
+      const { router, invocations, logger } = makeRouter([], evaluator);
+
+      const result = await router.route(turn('do the thing'));
+
+      expect(result).toEqual({ mode: 'support' });
+      expect(invocations).toHaveLength(0);
+      expect(spies.checkContractGate).not.toHaveBeenCalled();
+      expect(decisionLine(logger)).toContain(
+        'decision=unknown-service service=__no_matching_service__ engine=decision',
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('decision engine picked unknown serviceId'),
+      );
+    });
+
+    it('falls back to the LLM classifier for the turn when the evaluation throws, without logging the message', async () => {
+      const secret = 'private tax identifier 12345';
+      const { spies } = makePort(DECISION_PORT);
+      const { evaluator, evaluateByName } = evaluatorFor(new Error(secret));
+      const { router, invocations, logger } = makeRouter(
+        [{ intent: 'work', serviceId: 'tax-report', confidence: 0.95 }],
+        evaluator,
+      );
+
+      const result = await router.route(turn(secret));
+
+      expect(evaluateByName).toHaveBeenCalledTimes(1);
+      expect(invocations).toHaveLength(1);
+      expect(spies.checkContractGate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ mode: 'work' });
+      const warnings = logger.warn.mock.calls.map(([line]) => String(line));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        'engine=decision status=fallback reason=Error',
+      );
+      expect(allLogs(logger)).not.toContain(secret);
+      // The verdict that routed came from the LLM, and the line says so.
+      expect(decisionLine(logger)).toContain('engine=llm classifier=work/0.95');
+    });
+
+    it('falls back to the LLM classifier when an answer is missing or of the wrong kind', async () => {
+      makePort(DECISION_PORT);
+      const { evaluator } = evaluatorFor({
+        ...workEvaluation,
+        answers: {
+          workRequestedNow: { kind: 'boolean', probabilityTrue: 0.97 },
+        },
+      });
+      const { router, invocations, logger } = makeRouter(
+        [{ intent: 'support', confidence: 0.9 }],
+        evaluator,
+      );
+
+      const result = await router.route(turn('file my taxes'));
+
+      expect(result).toEqual({ mode: 'support' });
+      expect(invocations).toHaveLength(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('status=fallback reason=malformed-answer'),
+      );
+    });
+
+    it('falls back to the LLM classifier when no evaluator is configured, warning once per process', async () => {
+      makePort(DECISION_PORT);
+      const { router, invocations, logger } = makeRouter([
+        { intent: 'support', confidence: 0.9 },
+        { intent: 'support', confidence: 0.9 },
+      ]);
+
+      await router.route(turn('what do you offer?'));
+      await router.route(turn('and how much?'));
+
+      expect(invocations).toHaveLength(2);
+      const fallbacks = logger.warn.mock.calls
+        .map(([line]) => String(line))
+        .filter((line) => line.includes('status=fallback'));
+      expect(fallbacks).toHaveLength(1);
+      expect(fallbacks[0]).toContain('reason=missing-evaluator');
+    });
+
+    it('warns on every turn the evaluation itself fails, not just the first', async () => {
+      makePort(DECISION_PORT);
+      const { evaluator } = evaluatorFor(new Error('provider down'));
+      const { router, logger } = makeRouter(
+        [
+          { intent: 'support', confidence: 0.9 },
+          { intent: 'support', confidence: 0.9 },
+        ],
+        evaluator,
+      );
+
+      await router.route(turn('what do you offer?'));
+      await router.route(turn('and how much?'));
+
+      const fallbacks = logger.warn.mock.calls
+        .map(([line]) => String(line))
+        .filter((line) => line.includes('status=fallback'));
+      expect(fallbacks).toHaveLength(2);
+    });
+
+    it('forwards the owning turn abort signal to the live Decision', async () => {
+      makePort(DECISION_PORT);
+      const controller = new AbortController();
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router } = makeRouter([], evaluator);
+
+      await router.route({
+        ...turn('file my taxes'),
+        abortSignal: controller.signal,
+      });
+
+      expect(evaluateByName.mock.calls[0]?.[2]).toEqual({
+        signal: controller.signal,
+      });
+    });
+
+    it('calls neither engine for sticky work or an empty catalog', async () => {
+      const { evaluator, evaluateByName } = evaluatorFor();
+
+      makePort({
+        ...DECISION_PORT,
+        findActiveEngagement: vi.fn(async () => STICKY_HERE),
+      });
+      const sticky = makeRouter([], evaluator);
+      expect(await sticky.router.route(turn('keep going'))).toMatchObject({
+        mode: 'work',
+      });
+      expect(evaluateByName).not.toHaveBeenCalled();
+      expect(sticky.invocations).toHaveLength(0);
+
+      clearCommerceRouterPort();
+      makePort({ ...DECISION_PORT, getServices: vi.fn(async () => null) });
+      const noServices = makeRouter([], evaluator);
+      expect(await noServices.router.route(turn('hello'))).toEqual({
+        mode: 'support',
+      });
+      expect(evaluateByName).not.toHaveBeenCalled();
+      expect(noServices.invocations).toHaveLength(0);
     });
   });
 
@@ -665,7 +931,7 @@ describe('MessageRouterService', () => {
       await router.route(turn('how much is a tax report?'));
 
       expect(decisionLine(logger)).toBe(
-        `[commerce-router] thread=${THREAD_ID} mode=support decision=classifier-support classifier=support/0.88`,
+        `[commerce-router] thread=${THREAD_ID} mode=support decision=classifier-support engine=llm classifier=support/0.88`,
       );
     });
 
@@ -680,7 +946,7 @@ describe('MessageRouterService', () => {
       // The pre-threshold verdict is what explains the downgrade — logging the
       // post-threshold value would just say "support" and hide the reason.
       expect(decisionLine(logger)).toBe(
-        `[commerce-router] thread=${THREAD_ID} mode=support decision=low-confidence service=tax-report classifier=work/0.5`,
+        `[commerce-router] thread=${THREAD_ID} mode=support decision=low-confidence service=tax-report engine=llm classifier=work/0.5`,
       );
     });
 
@@ -700,7 +966,7 @@ describe('MessageRouterService', () => {
       await router.route(turn('file my taxes'));
 
       expect(decisionLine(logger)).toBe(
-        `[commerce-router] thread=${THREAD_ID} mode=support decision=gate-failed service=tax-report reason=not_contracted classifier=work/0.9`,
+        `[commerce-router] thread=${THREAD_ID} mode=support decision=gate-failed service=tax-report reason=not_contracted engine=llm classifier=work/0.9`,
       );
     });
 
@@ -718,7 +984,7 @@ describe('MessageRouterService', () => {
       await router.route(turn('file my taxes'));
 
       expect(decisionLine(logger)).toBe(
-        `[commerce-router] thread=${THREAD_ID} mode=support decision=start-failed service=tax-report reason=intent_failed classifier=work/0.9`,
+        `[commerce-router] thread=${THREAD_ID} mode=support decision=start-failed service=tax-report reason=intent_failed engine=llm classifier=work/0.9`,
       );
     });
 
@@ -731,7 +997,7 @@ describe('MessageRouterService', () => {
       await router.route(turn('file my 2025 taxes now'));
 
       expect(decisionLine(logger)).toBe(
-        `[commerce-router] thread=${THREAD_ID} mode=work decision=engagement-started service=tax-report classifier=work/0.95`,
+        `[commerce-router] thread=${THREAD_ID} mode=work decision=engagement-started service=tax-report engine=llm classifier=work/0.95`,
       );
     });
 

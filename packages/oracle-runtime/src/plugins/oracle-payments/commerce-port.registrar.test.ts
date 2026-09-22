@@ -148,6 +148,21 @@ describe('CommerceRouterPortRegistrar', () => {
     expect(getCommerceRouterPort()).toBeNull();
   });
 
+  it('registers the decision engine when configured', () => {
+    const { registrar } = makeRegistrar({
+      ORACLE_ENTITY_DID,
+      ORACLE_PAYMENTS_ROUTER_ENGINE: 'decision',
+    });
+
+    registrar.onModuleInit();
+
+    expect(getCommerceRouterPort()).toMatchObject({
+      routerEngine: 'decision',
+      routerDecisionName: 'oracle-payments.route-message',
+    });
+    registrar.onModuleDestroy();
+  });
+
   it('persists work mode, so the next turn routes to work with no classifier call', async () => {
     // The sequence a live run wedged on: a contracted user starts a job, then
     // types again. The engagement IS the persisted mode, and the router reads

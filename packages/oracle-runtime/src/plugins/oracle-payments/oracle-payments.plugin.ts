@@ -1,5 +1,6 @@
 import type { DynamicModule, Type } from '@nestjs/common';
 import { z } from 'zod';
+import { COMMERCE_ROUTER_ENGINES } from '../../modules/messages/commerce-router-port.js';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin.js';
 import type {
   MergedConfig,
@@ -45,12 +46,13 @@ const configSchema = z.object({
    */
   EVAL_ENGINE_URL: z.url().optional(),
   AGENT_CARD_PATH: z.string().optional(),
-  /** Classifier model override for the legacy commerce message router. */
+  /** Classifier model override for the LLM commerce message router. */
   ORACLE_PAYMENTS_ROUTER_MODEL: z.string().optional(),
-  /** Routing engine. Shadow mode never changes the legacy routing outcome. */
-  ORACLE_PAYMENTS_ROUTER_ENGINE: z
-    .enum(['llm', 'decision-shadow'])
-    .default('llm'),
+  /**
+   * Routing engine: `llm` (default), `decision-shadow` (LLM routes, Decision
+   * logged), or `decision` (Decision routes, LLM is the per-turn fallback).
+   */
+  ORACLE_PAYMENTS_ROUTER_ENGINE: z.enum(COMMERCE_ROUTER_ENGINES).default('llm'),
   /** Size ceiling for a single delivered file. */
   ORACLE_PAYMENTS_MAX_DELIVERABLE_MB: z.coerce
     .number()
