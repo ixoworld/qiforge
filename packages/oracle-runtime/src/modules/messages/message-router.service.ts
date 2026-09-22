@@ -816,7 +816,12 @@ function toClassification(
       confidence: Math.min(work.probabilityTrue, service.confidence),
     };
   }
-  return { intent: 'support', confidence: 1 - work.probabilityTrue };
+  // Rounded so the routing log line prints 0.03, not the float residue of
+  // `1 - 0.97`; the value only feeds that line, never a threshold.
+  return {
+    intent: 'support',
+    confidence: Number((1 - work.probabilityTrue).toFixed(4)),
+  };
 }
 
 /**
