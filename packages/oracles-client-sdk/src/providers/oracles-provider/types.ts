@@ -44,6 +44,7 @@ export interface IOraclesContextProps {
   getInvocation: (oracleDid: string) => Promise<string | null>;
   // AG-UI action management
   agActions: AgAction[];
+  registeredAgActions: AgAction[];
   registerAgAction: (
     action: AgAction,
     handler: (args: unknown) => Promise<unknown> | unknown,

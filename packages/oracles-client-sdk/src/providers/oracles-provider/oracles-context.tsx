@@ -51,6 +51,9 @@ export const OraclesProvider = ({
 
   // AG-UI action state management
   const [agActions, setAgActions] = useState<AgAction[]>([]);
+  const [registeredAgActions, setRegisteredAgActions] = useState<AgAction[]>(
+    [],
+  );
   const agActionHandlers = useRef<
     Map<string, (args: unknown) => Promise<unknown> | unknown>
   >(new Map());
@@ -149,14 +152,22 @@ export const OraclesProvider = ({
       handler: (args: unknown) => Promise<unknown> | unknown,
       render?: (props: Record<string, unknown>) => React.ReactElement | null,
     ) => {
-      setAgActions((prev) => {
-        // Check if action already exists
+      setRegisteredAgActions((prev) => {
         const exists = prev.some((a) => a.name === action.name);
         if (exists) {
-          // Update existing action
           return prev.map((a) => (a.name === action.name ? action : a));
         }
-        // Add new action
+        return [...prev, action];
+      });
+
+      setAgActions((prev) => {
+        if (action.exposeToAgent === false) {
+          return prev.filter((a) => a.name !== action.name);
+        }
+        const exists = prev.some((a) => a.name === action.name);
+        if (exists) {
+          return prev.map((a) => (a.name === action.name ? action : a));
+        }
         return [...prev, action];
       });
 
@@ -170,6 +181,7 @@ export const OraclesProvider = ({
 
   const unregisterAgAction = useCallback((name: string) => {
     setAgActions((prev) => prev.filter((a) => a.name !== name));
+    setRegisteredAgActions((prev) => prev.filter((a) => a.name !== name));
     agActionHandlers.current.delete(name);
     agActionRenders.current.delete(name);
   }, []);
@@ -199,6 +211,7 @@ export const OraclesProvider = ({
       getDelegation,
       getInvocation,
       agActions,
+      registeredAgActions,
       registerAgAction,
       unregisterAgAction,
       executeAgAction,
@@ -211,6 +224,7 @@ export const OraclesProvider = ({
       getDelegation,
       getInvocation,
       agActions,
+      registeredAgActions,
       registerAgAction,
       unregisterAgAction,
       executeAgAction,
