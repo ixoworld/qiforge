@@ -6,6 +6,22 @@ export {
 export type { DecisionEvaluator } from './decision-runtime.js';
 
 export {
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
+  digestFinalDecisionSubject,
+  StaleDecisionSubjectError,
+} from './final-subject.js';
+export type {
+  DecisionAuthorityReceipt,
+  DecisionExecutionReceipt,
+  FinalDecisionSubject,
+  FinalDecisionSubjectBinding,
+  FinalDecisionSubjectValue,
+} from './final-subject.js';
+
+export {
   CloudflareJevDecisionAdapter,
   CloudflareJevDecisionError,
 } from './adapters/index.js';
