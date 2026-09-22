@@ -47,6 +47,22 @@ export type {
 } from './jev/index.js';
 
 export {
+  CAPABILITY_ROUTE_DECISION_NAME,
+  CAPABILITY_ROUTE_MIN_CONFIDENCE,
+  CAPABILITY_ROUTER_MODES,
+  capabilityRouteDecision,
+  capabilityRouterEnvShape,
+  decideCapabilityRoute,
+  noCapabilityOption,
+  toRoutableCapabilities,
+} from './capability-router.js';
+export type {
+  CapabilityRouteVerdict,
+  CapabilityRouterMode,
+  RoutableCapability,
+} from './capability-router.js';
+
+export {
   DECISION_PROVIDERS,
   decisionProviderEnvShape,
   resolveDecisionAdapter,
