@@ -1,6 +1,6 @@
 import type { DecisionEvaluation } from '@ixo/common';
 import type { BaseMessage } from '@langchain/core/messages';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { DecisionEvaluator } from '../../decisions/decision-runtime.js';
 import type { CommerceEngagement } from '../../plugin-api/types.js';
 import {
@@ -409,23 +409,28 @@ describe('MessageRouterService', () => {
       evaluatedAt: '2026-09-19T00:00:00.000Z',
     };
 
-    function evaluatorFor(
-      outcome: DecisionEvaluation | Error = shadowEvaluation,
-    ): {
-      evaluator: DecisionEvaluator;
-      evaluateByName: ReturnType<typeof vi.fn>;
-    } {
-      const evaluateByName = vi.fn(async () => {
-        if (outcome instanceof Error) throw outcome;
-        return outcome;
-      });
+    type EvaluateByNameMock = Mock<DecisionEvaluator['evaluateByName']>;
+
+    /** A DecisionEvaluator whose only live surface is `evaluateByName`. */
+    function stubEvaluator(
+      evaluateByName: EvaluateByNameMock,
+    ): DecisionEvaluator {
       return {
-        evaluator: {
-          evaluate: vi.fn(),
-          evaluateByName,
-        } as unknown as DecisionEvaluator,
+        evaluate: vi.fn<DecisionEvaluator['evaluate']>(),
         evaluateByName,
       };
+    }
+
+    function evaluatorFor(
+      outcome: DecisionEvaluation | Error = shadowEvaluation,
+    ): { evaluator: DecisionEvaluator; evaluateByName: EvaluateByNameMock } {
+      const evaluateByName = vi.fn<DecisionEvaluator['evaluateByName']>(
+        async () => {
+          if (outcome instanceof Error) throw outcome;
+          return outcome;
+        },
+      );
+      return { evaluator: stubEvaluator(evaluateByName), evaluateByName };
     }
 
     it('observes Jev without changing the legacy routing outcome', async () => {
@@ -489,13 +494,10 @@ describe('MessageRouterService', () => {
         routerEngine: 'decision-shadow',
         routerDecisionName: 'oracle-payments.route-message',
       });
-      const evaluateByName = vi.fn(
-        () => new Promise<DecisionEvaluation>(() => undefined),
+      const evaluateByName = vi.fn<DecisionEvaluator['evaluateByName']>(
+        () => new Promise(() => undefined),
       );
-      const evaluator = {
-        evaluate: vi.fn(),
-        evaluateByName,
-      } as unknown as DecisionEvaluator;
+      const evaluator = stubEvaluator(evaluateByName);
       const { router } = makeRouter(
         [{ intent: 'support', confidence: 0.9 }],
         evaluator,
