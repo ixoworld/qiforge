@@ -24,7 +24,8 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./gateway": "./src/gateway-worker.ts"
+    "./gateway": "./src/gateway-worker.ts",
+    "./prompt": "./src/core/prompt-composer.ts"
   },
   "files": [
     "src",

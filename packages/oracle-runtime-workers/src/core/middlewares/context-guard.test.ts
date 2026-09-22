@@ -253,6 +253,19 @@ describe('createContextGuardMiddleware', () => {
     await expect(run(mw, messages, other)).rejects.toThrow('rate limited');
     expect(other).toHaveBeenCalledTimes(1);
   });
+
+  it('never resends an unchanged request after a provider overflow', async () => {
+    const mw = createContextGuardMiddleware({ budget, logger: silent });
+    // Nothing a hard prune can shrink: small results, all in the tail.
+    const messages = [...turn(1, 20)];
+    const handler = vi
+      .fn()
+      .mockRejectedValue(new Error('prompt is too long: 900000 tokens'));
+    await expect(run(mw, messages, handler)).rejects.toThrow(
+      /nothing more could be trimmed/,
+    );
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('estimateRequestTokens', () => {

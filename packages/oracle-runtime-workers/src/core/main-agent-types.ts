@@ -3,6 +3,7 @@ import type { ContextGuardEvent } from './middlewares/context-guard';
 import type { ResultCapConfig } from './middlewares/result-cap';
 import type { ReadResultOutcome } from '../do/result-store';
 import type { AgentMiddleware } from 'langchain';
+import type { TurnBudget } from './turn-budget';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { ReactAgent } from 'langchain';
@@ -86,6 +87,14 @@ export interface MainAgentHooks {
    */
   toolMiddlewares?: AgentMiddleware[];
   /**
+   * The tool-execution middleware (budget, scheduling, write claims). It
+   * must see a tool's own thrown error, so on the main agent it is placed
+   * innermost — inside the retry middlewares, which turn a thrown error into
+   * an error ToolMessage — and each retry attempt passes through it. Every
+   * sub-agent gets it after `toolMiddlewares`.
+   */
+  toolExecution?: AgentMiddleware;
+  /**
    * The turn's result cap (result-cap.ts), applied inside every wrapped
    * tool — plugin, meta and sub-agent inner tools — so a large result is
    * truncated and saved before it becomes a ToolMessage or an SSE frame.
@@ -141,6 +150,13 @@ export interface MainAgentArgs {
    * size. Omitted → the legacy fixed thresholds (tests, stateless builds).
    */
   contextBudget?: ContextBudget;
+  /**
+   * The turn's resource budget (turn-budget.ts). Model calls are charged by
+   * the metered LLM adapter and tool calls by the host's tool-execution
+   * middleware; the build itself only uses it to skip a summary after the
+   * deadline. Omitted → unbudgeted (tests, stateless builds).
+   */
+  turnBudget?: TurnBudget;
   hooks?: MainAgentHooks;
 }
 
@@ -160,6 +176,8 @@ export interface MainAgentBuildResult {
    * turn, `write` never does). Declared by the plugin, else by name.
    */
   toolEffects: Map<string, 'read' | 'write'>;
+  /** Names of the sub-agent dispatch tools (`call_*_agent`): scheduled in their own lane. */
+  subAgentToolNames: ReadonlySet<string>;
   /**
    * The request's `{ user, session }` channel. Tools already fall back to it,
    * but pass it as `context` in the `invoke` / `stream` config so LangChain

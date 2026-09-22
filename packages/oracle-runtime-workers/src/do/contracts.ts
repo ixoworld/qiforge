@@ -1,4 +1,5 @@
 import type { TranscriptPageOptions } from './transcript';
+import type { TurnUsage } from '../core/turn-budget';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
@@ -158,6 +159,10 @@ export interface OracleWorkerEnv {
   MAIN_REASONING_EFFORT?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
+  /** Turn budget: cumulative model tokens (default 500000), tool attempts (120), deadline in ms (600000). */
+  TURN_MAX_TOKENS?: string;
+  TURN_MAX_TOOL_CALLS?: string;
+  TURN_TIMEOUT_MS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;
@@ -398,8 +403,19 @@ export interface RunsStatus {
       nextAttemptAt: number | null;
       error: string | null;
       taskRunId: string | null;
+      /** The turn's budget usage, once the run ended (`TurnUsage`). */
+      usage: TurnUsage | null;
     }
   >;
+  /** Writes whose outcome is still unknown (tool-execution.ts); never their arguments. */
+  claims: Array<{
+    fingerprint: string;
+    toolName: string;
+    runId: string;
+    sessionId: string;
+    startedAt: string;
+    state: 'pending' | 'warned';
+  }>;
 }
 
 /** Non-streaming turn result. */

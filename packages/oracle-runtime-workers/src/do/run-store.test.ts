@@ -242,6 +242,81 @@ describe('RunStore', () => {
     });
   });
 
+  it('claims a write until its outcome is known, warns once, and lets a later run repeat it', async () => {
+    const s = stub('runs-claims');
+    await s.setNow(T0);
+    const fp = 'a'.repeat(64);
+    expect(
+      await s.claimWrite({
+        fingerprint: fp,
+        toolName: 'send_message',
+        runId: 'r1',
+        sessionId: 's1',
+      }),
+    ).toEqual({ status: 'claimed' });
+    // A returned outcome releases it; the same write can then be claimed again.
+    await s.releaseWrite(fp, 'r1');
+    expect(await s.listClaims()).toEqual([]);
+    expect(
+      await s.claimWrite({
+        fingerprint: fp,
+        toolName: 'send_message',
+        runId: 'r1',
+        sessionId: 's1',
+      }),
+    ).toEqual({ status: 'claimed' });
+    // Outcome unknown (no release): another session of the user is blocked
+    // and the claim is now owned by the run that was warned.
+    const blocked = await s.claimWrite({
+      fingerprint: fp,
+      toolName: 'send_message',
+      runId: 'r2',
+      sessionId: 's2',
+    });
+    expect(blocked).toMatchObject({
+      status: 'blocked',
+      toolName: 'send_message',
+    });
+    expect((await s.listClaims())[0]).toMatchObject({
+      state: 'warned',
+      runId: 'r2',
+    });
+    // The warned run stays blocked; only its owner could release it.
+    expect(
+      (
+        await s.claimWrite({
+          fingerprint: fp,
+          toolName: 'send_message',
+          runId: 'r2',
+          sessionId: 's2',
+        })
+      ).status,
+    ).toBe('blocked');
+    await s.releaseWrite(fp, 'r1');
+    expect(await s.listClaims()).toHaveLength(1);
+    // A later run, after the warning, runs the write again.
+    expect(
+      (
+        await s.claimWrite({
+          fingerprint: fp,
+          toolName: 'send_message',
+          runId: 'r3',
+          sessionId: 's1',
+        })
+      ).status,
+    ).toBe('claimed');
+    expect((await s.listClaims())[0]).toMatchObject({
+      state: 'pending',
+      runId: 'r3',
+    });
+    // The claim survives a reopen and is dropped with the run retention.
+    await s.reopen();
+    expect(await s.listClaims()).toHaveLength(1);
+    await s.setNow(T0 + RUN_RETENTION_MS + 1);
+    await s.reopen();
+    expect(await s.listClaims()).toEqual([]);
+  });
+
   it('survives a reopen (state is in SQLite, not memory) and prunes ended runs past retention', async () => {
     const s = stub('runs-reopen');
     await s.setNow(T0);

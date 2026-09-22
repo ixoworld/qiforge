@@ -6,7 +6,12 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment } from './run-buffer';
-import { RunStore, type RunRecord, type ToolMark } from './run-store';
+import {
+  RunStore,
+  type RunRecord,
+  type ToolMark,
+  type WriteClaimRecord,
+} from './run-store';
 
 export class RunStoreTestDO extends DurableObject {
   private db: DoSqliteDatabase | undefined;
@@ -111,6 +116,20 @@ export class RunStoreTestDO extends DurableObject {
 
   async listMarks(runId: string): Promise<ToolMark[]> {
     return (await this.runStore()).listMarks(runId);
+  }
+
+  async claimWrite(
+    input: Parameters<RunStore['claimWrite']>[0],
+  ): Promise<Awaited<ReturnType<RunStore['claimWrite']>>> {
+    return (await this.runStore()).claimWrite(input);
+  }
+
+  async releaseWrite(fingerprint: string, runId: string): Promise<void> {
+    await (await this.runStore()).releaseWrite(fingerprint, runId);
+  }
+
+  async listClaims(): Promise<WriteClaimRecord[]> {
+    return (await this.runStore()).listClaims();
   }
 
   /** Close the database so the next call re-opens it (a fresh `RunStore`, setup again). */
