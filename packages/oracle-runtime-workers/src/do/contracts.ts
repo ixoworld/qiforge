@@ -1,4 +1,5 @@
 import type { TranscriptPageOptions } from './transcript';
+import type { TurnUsage } from '../core/turn-budget';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
@@ -402,8 +403,19 @@ export interface RunsStatus {
       nextAttemptAt: number | null;
       error: string | null;
       taskRunId: string | null;
+      /** The turn's budget usage, once the run ended (`TurnUsage`). */
+      usage: TurnUsage | null;
     }
   >;
+  /** Writes whose outcome is still unknown (tool-execution.ts); never their arguments. */
+  claims: Array<{
+    fingerprint: string;
+    toolName: string;
+    runId: string;
+    sessionId: string;
+    startedAt: string;
+    state: 'pending' | 'warned';
+  }>;
 }
 
 /** Non-streaming turn result. */

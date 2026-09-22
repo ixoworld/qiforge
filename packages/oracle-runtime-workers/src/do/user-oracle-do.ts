@@ -217,6 +217,7 @@ import {
   HarnessLimitError,
   TurnBudget,
   turnLimitsFromEnv,
+  type TurnUsage,
 } from '../core/turn-budget';
 import { READ_RESULT_TOOL_NAME } from '../core/read-result-tool';
 import {
@@ -474,6 +475,62 @@ function lastAiText(messages: BaseMessage[]): string {
 }
 
 /** Id of the final assistant message (what `POST /messages` reports as `message.id`). */
+/** `turn_runs.usage` for `/debug/runs`; a row written before the column existed, or an unreadable one, is null. */
+function parseUsage(raw: string | null): TurnUsage | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const num = (key: string): number | undefined => {
+      const value: unknown = Reflect.get(parsed, key);
+      return typeof value === 'number' ? value : undefined;
+    };
+    const limits: unknown = Reflect.get(parsed, 'limits');
+    const limit = (key: string): number | undefined => {
+      if (!limits || typeof limits !== 'object') return undefined;
+      const value: unknown = Reflect.get(limits, key);
+      return typeof value === 'number' ? value : undefined;
+    };
+    const usage = {
+      tokens: num('tokens'),
+      reportedTokens: num('reportedTokens'),
+      modelCalls: num('modelCalls'),
+      toolAttempts: num('toolAttempts'),
+      elapsedMs: num('elapsedMs'),
+      limits: {
+        tokens: limit('tokens'),
+        tools: limit('tools'),
+        durationMs: limit('durationMs'),
+      },
+    };
+    if (
+      usage.tokens === undefined ||
+      usage.reportedTokens === undefined ||
+      usage.modelCalls === undefined ||
+      usage.toolAttempts === undefined ||
+      usage.elapsedMs === undefined ||
+      usage.limits.tokens === undefined ||
+      usage.limits.tools === undefined ||
+      usage.limits.durationMs === undefined
+    )
+      return null;
+    return {
+      tokens: usage.tokens,
+      reportedTokens: usage.reportedTokens,
+      modelCalls: usage.modelCalls,
+      toolAttempts: usage.toolAttempts,
+      elapsedMs: usage.elapsedMs,
+      limits: {
+        tokens: usage.limits.tokens,
+        tools: usage.limits.tools,
+        durationMs: usage.limits.durationMs,
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 function lastAiMessageId(messages: BaseMessage[]): string | undefined {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -3439,12 +3496,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           nextAttemptAt: record.nextAttemptAt,
           error: record.error,
           taskRunId: record.taskRunId,
+          usage: parseUsage(record.usage),
         });
       }
       return {
         config: { ...this.runConfig },
         live: this.runs?.snapshot() ?? [],
         runs,
+        claims: store ? await store.listClaims() : [],
       };
     }
 
