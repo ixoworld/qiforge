@@ -27,6 +27,7 @@ const MAIN_ROOM_ID = '!main:home.server';
 
 function makeSessionManager() {
   return {
+    getSession: vi.fn(),
     createSession: vi.fn(),
     listSessions: vi.fn(),
     deleteSession: vi.fn(),
@@ -108,6 +109,38 @@ describe('SessionsService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('ownsSession', () => {
+    it('requires the authenticated user database and this oracle', async () => {
+      sessionManager.getSession.mockResolvedValue(makeSession());
+      expect(await svc.ownsSession('sess-1', USER_DID)).toBe(true);
+      expect(sessionManager.getSession).toHaveBeenCalledWith(
+        'sess-1',
+        USER_DID,
+        false,
+      );
+      sessionManager.getSession.mockResolvedValue(undefined);
+      expect(await svc.ownsSession('sess-1', 'did:ixo:other')).toBe(false);
+      sessionManager.getSession.mockResolvedValue(
+        makeSession({ oracleDid: 'did:ixo:other-oracle' }),
+      );
+      expect(await svc.ownsSession('sess-1', USER_DID)).toBe(false);
+      sessionManager.getSession.mockResolvedValue(
+        makeSession({ oracleEntityDid: 'did:ixo:other-entity' }),
+      );
+      expect(await svc.ownsSession('sess-1', USER_DID)).toBe(false);
+    });
+    it('fails closed on sync failure and balances the active-user guard', async () => {
+      sessionManager.getSession.mockRejectedValue(
+        new Error('sync unavailable'),
+      );
+      await expect(svc.ownsSession('sess-1', USER_DID)).rejects.toThrow(
+        'sync unavailable',
+      );
+      expect(syncService.markUserActive).toHaveBeenCalledWith(USER_DID);
+      expect(syncService.markUserInactive).toHaveBeenCalledWith(USER_DID);
+    });
   });
 
   describe('createSession', () => {

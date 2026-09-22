@@ -12,6 +12,7 @@ export interface IBrowserToolCallerParams {
   toolName: string;
   args: Record<string, unknown>;
   timeout?: number;
+  onInvocation?: (invocationId: string) => void;
 }
 
 /**
@@ -25,6 +26,7 @@ export async function callBrowserTool({
   toolName,
   args,
   timeout = 15000,
+  onInvocation,
 }: IBrowserToolCallerParams): Promise<unknown> {
   return callFrontendTool({
     sessionId,
@@ -33,5 +35,6 @@ export async function callBrowserTool({
     args,
     toolType: 'browser',
     timeout,
+    onInvocation,
   });
 }

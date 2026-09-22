@@ -28,6 +28,25 @@ export class SessionsService {
     @Optional() private readonly ucanService?: UcanService,
   ) {}
 
+  async ownsSession(sessionId: string, did: string): Promise<boolean> {
+    this.syncService.markUserActive(did);
+    try {
+      const session = await this.sessionManager.getSession(
+        sessionId,
+        did,
+        false,
+      );
+      return (
+        !!session &&
+        session.oracleDid === this.configService.getOrThrow('ORACLE_DID') &&
+        session.oracleEntityDid ===
+          this.configService.getOrThrow('ORACLE_ENTITY_DID')
+      );
+    } finally {
+      this.syncService.markUserInactive(did);
+    }
+  }
+
   async processPreviousSessionHistory(data: CreateSessionDto): Promise<void> {
     const oracleEntityDid = this.configService.getOrThrow('ORACLE_ENTITY_DID');
 
