@@ -24,7 +24,12 @@ implementation, and what is deliberately left out.
   `DECISION_MODEL` env (`openrouter-jev` reusing `OPEN_ROUTER_API_KEY`). The
   one Workers difference: `cloudflare-jev` runs through the Worker's `AI`
   binding when one is declared, so no Cloudflare account credentials are
-  needed there.
+  needed there. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
+  `src/core/capability-router.ts`) is the first runtime consumer of Decisions
+  on both runtimes, with identical semantics: the shared
+  `capabilityRouteDecision` predicts the on-demand plugin a message needs,
+  `on` preloads it for that turn only (never into `loadedPlugins`), `shadow`
+  logs what it would have preloaded, and every failure preloads nothing.
 - **Room threads are sessions**: a bare room message roots a thread, the
   reply is posted inside it, and the thread root's event id IS the session
   id (`src/matrix/ingest.ts`, `src/matrix/reply-chain.ts`) — Node's

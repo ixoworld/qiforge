@@ -121,6 +121,12 @@ export interface MainAgentArgs {
   state: Partial<TMainAgentGraphState>;
   availablePlugins: ReadonlySet<string>;
   /**
+   * Plugins the capability router chose for this turn. The gate admits their
+   * tools and tool handlers see them as loaded, but they are never written
+   * to the graph's `loadedPlugins` channel: the preload lasts one turn.
+   */
+  preloadedPlugins?: ReadonlySet<string>;
+  /**
    * Checkpointer for the user's thread state. On Workers the Durable Object
    * owns it (SQLite over DO storage) and passes it in per turn; omit for a
    * stateless build (tests).

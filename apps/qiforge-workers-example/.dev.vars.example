@@ -31,3 +31,6 @@ OPEN_ROUTER_API_KEY=
 # cloudflare-jev uses the AI binding from wrangler.jsonc instead of account credentials.
 # DECISION_PROVIDER=openrouter-jev
 # DECISION_MODEL=typesafe/jev-1.13
+# Capability router (needs DECISION_PROVIDER): shadow logs which on-demand plugin
+# it would preload per turn without acting; on preloads it for that turn.
+# CAPABILITY_ROUTER=shadow

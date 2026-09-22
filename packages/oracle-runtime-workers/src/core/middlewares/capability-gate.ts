@@ -18,6 +18,11 @@ export interface CapabilityGateMiddlewareOptions {
    * middleware does not need access to the registries at runtime.
    */
   visibilityByToolName: Map<string, Visibility>;
+  /**
+   * Plugins the capability router preloaded for this turn. Their on-demand
+   * tools pass the gate as if loaded, without touching `state.loadedPlugins`.
+   */
+  preloadedPlugins?: ReadonlySet<string>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -38,7 +43,7 @@ export interface CapabilityGateMiddlewareOptions {
 export const createCapabilityGateMiddleware = (
   options: CapabilityGateMiddlewareOptions,
 ): AgentMiddleware => {
-  const { pluginByToolName, visibilityByToolName } = options;
+  const { pluginByToolName, visibilityByToolName, preloadedPlugins } = options;
   const logger = options.logger ?? NOOP_LOGGER;
 
   return createMiddleware({
@@ -61,12 +66,15 @@ export const createCapabilityGateMiddleware = (
         if (!plugin) return true;
         const viz = visibilityByToolName.get(name) ?? 'on-demand';
         if (viz === 'always' || viz === 'silent') return true;
-        return loaded.has(plugin);
+        return loaded.has(plugin) || preloadedPlugins?.has(plugin) === true;
       });
 
       if (filtered.length !== request.tools.length) {
         logger.log(
-          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}`,
+          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}` +
+            (preloadedPlugins?.size
+              ? ` preloadedPlugins=${Array.from(preloadedPlugins).join(',')}`
+              : ''),
         );
       }
 

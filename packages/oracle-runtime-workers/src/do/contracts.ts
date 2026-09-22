@@ -1,3 +1,4 @@
+import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
@@ -198,6 +199,12 @@ export interface OracleWorkerEnv {
   CLOUDFLARE_ACCOUNT_ID?: string;
   /** Workers AI token for `cloudflare-jev` over the REST API; not needed when the `AI` binding is declared. */
   CLOUDFLARE_API_TOKEN?: string;
+  /**
+   * Capability router (needs a `DECISION_PROVIDER`). `off` (default) never
+   * evaluates; `shadow` evaluates and logs the verdict without preloading;
+   * `on` preloads the predicted on-demand plugin's tools for the turn.
+   */
+  CAPABILITY_ROUTER?: CapabilityRouterMode;
 
   // --- langsmith tracing ---------------------------------------------------
   /** `'true'` traces every turn (explicit tracer — Workers has no env auto-attach). */

@@ -53,6 +53,12 @@ import {
   type OpenRouterLlmAdapter,
   DEFAULT_MODEL_ID,
 } from '../core/llm';
+import {
+  capabilityRouterMode,
+  createCapabilityRouter,
+  shadowAgreement,
+  type CapabilityRouter,
+} from '../core/capability-router';
 import { createMainAgent } from '../core/main-agent';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
@@ -510,6 +516,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (this.ctx.getWebSockets().length > 0) this.realtime.nextPingAt();
     }
     private readonly aborts = new Map<string, AbortController>();
+    /** Capability router (core/capability-router.ts); built with the ambient services. */
+    private capabilityRouter: CapabilityRouter | null = null;
+    /**
+     * Shadow-mode predictions awaiting the turn's end, by session: what the
+     * router would have preloaded, against the plugins loaded before the turn.
+     */
+    private readonly shadowRoutes = new Map<
+      string,
+      {
+        requestId: string;
+        priorLoaded: ReadonlySet<string>;
+        wouldPreload: readonly string[];
+      }
+    >();
     /** Durable runs (docs/plans/durable-runs.md): the rows, and the live side. */
     private runStore: RunStore | null = null;
     private runs: RunCoordinator | null = null;
@@ -1238,6 +1258,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         delegationFor: (did) => this.delegations.get(did),
         events: this.events,
         secrets: createSecretsAdapter(secretsService),
+        background: (work) => this.ctx.waitUntil(work),
+      });
+      this.capabilityRouter = createCapabilityRouter({
+        evaluator: core.decisions,
+        logger: console,
         background: (work) => this.ctx.waitUntil(work),
       });
     }
@@ -3857,6 +3882,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const meta = parseTurnMetadata(req.metadata);
       const priorMeta = priorMetadataState(priorState);
 
+      // Capability router: predict the on-demand plugin this message needs
+      // and preload it for THIS turn only. `on` is awaited here, ahead of the
+      // first model call; `shadow` returns at once and logs its verdict when
+      // it lands. The preload never enters `stateInput` — the checkpointed
+      // `loadedPlugins` channel is written by `load_capability` alone.
+      const priorLoaded: ReadonlySet<string> = new Set(
+        priorMeta.loadedPlugins ?? [],
+      );
+      this.shadowRoutes.delete(req.sessionId);
+      const preloadedPlugins = this.capabilityRouter
+        ? await this.capabilityRouter({
+            mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
+            manifests: core.registries.manifests.collect(),
+            loaded: priorLoaded,
+            text: body.message,
+            requestId: req.requestId,
+            signal: abortController.signal,
+            onShadowVerdict: (wouldPreload) =>
+              this.shadowRoutes.set(req.sessionId, {
+                requestId: req.requestId,
+                priorLoaded,
+                wouldPreload,
+              }),
+          })
+        : undefined;
+
       // Host page-context / safety-guardrail hooks, resolved against this
       // object's ambient services (see `OracleWorkerHooks`).
       const hostRoomTitle = opts.hooks?.getRoomTitle;
@@ -3898,6 +3949,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         identity: core.identity,
         config: core.validatedEnv,
         availablePlugins: core.availablePlugins,
+        preloadedPlugins,
         byoProvider: byoTurn?.provider,
         contextBudget,
         ambient: {
@@ -4144,6 +4196,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         },
       );
+      await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);
       if (row && (!row.title || row.title === UNTITLED_SESSION)) {
         const title = await this.generateTitle(messages).catch(() => null);
@@ -4158,6 +4211,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       } catch (err) {
         console.warn(
           `[user-do] tier access record failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    /**
+     * Shadow-mode follow-up: once the turn has ended, compare what the router
+     * would have preloaded with what `load_capability` actually added to the
+     * thread. Best effort — one checkpoint read, and it never fails the turn.
+     * Nothing to compare when the shadow verdict has not landed yet.
+     */
+    private async compareShadowRoute(sessionId: string): Promise<void> {
+      const shadow = this.shadowRoutes.get(sessionId);
+      if (!shadow) return;
+      this.shadowRoutes.delete(sessionId);
+      try {
+        const tuple = await this.saver?.getTupleWithoutMessages({
+          configurable: { thread_id: sessionId },
+        });
+        const loadedAfter = new Set(
+          priorMetadataState(tuple?.checkpoint.channel_values ?? {})
+            .loadedPlugins ?? [],
+        );
+        const { loadedDuringTurn, agree } = shadowAgreement({
+          priorLoaded: shadow.priorLoaded,
+          loadedAfter,
+          wouldPreload: shadow.wouldPreload,
+        });
+        console.log(
+          `[capability-router-shadow] request=${shadow.requestId} loadedDuringTurn=[${loadedDuringTurn.join(', ')}] agree=${agree}`,
+        );
+      } catch (err: unknown) {
+        console.warn(
+          `[capability-router-shadow] request=${shadow.requestId} comparison failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

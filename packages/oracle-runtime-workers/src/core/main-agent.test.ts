@@ -20,7 +20,7 @@ import { SkillsPlugin } from './plugins/skills';
 import { PortalPlugin } from '../plugins/portal';
 import { WeatherPlugin } from './plugins/weather';
 import { createNoopAmbient, type AmbientServices } from './runtime-context';
-import { makeEnv } from './test-fixtures';
+import { makeEnv, makeManifest, makePlugin, makeTool } from './test-fixtures';
 
 // ── Open-Meteo / skills-registry fetch stub ─────────────────────────────────
 
@@ -147,6 +147,19 @@ const requestCtx = {
 
 function toolMessages(messages: BaseMessage[]): ToolMessage[] {
   return messages.filter((m): m is ToolMessage => m.type === 'tool');
+}
+
+/** `loadedPlugins` as persisted in a `getState` snapshot; `[]` when unset. */
+function checkpointedLoadedPlugins(snapshot: unknown): string[] {
+  if (!snapshot || typeof snapshot !== 'object' || !('values' in snapshot))
+    throw new Error('snapshot has no values');
+  const values: unknown = snapshot.values;
+  if (!values || typeof values !== 'object' || !('loadedPlugins' in values))
+    return [];
+  const loaded: unknown = values.loadedPlugins;
+  return Array.isArray(loaded)
+    ? loaded.filter((p): p is string => typeof p === 'string')
+    : [];
 }
 
 beforeEach(stubFetch);
@@ -325,6 +338,76 @@ describe('createMainAgent', () => {
       values: { loadedPlugins: string[] };
     };
     expect(snapshot.values.loadedPlugins).toEqual(['weather']);
+  });
+
+  it('preloadedPlugins reach the gate and ctx.loadedPlugins but never the graph state', async () => {
+    // An on-demand probe plugin whose tool reports what the RuntimeContext
+    // considers loaded at call time.
+    const probe = makePlugin({
+      name: 'probe',
+      manifest: makeManifest({
+        title: 'Probe',
+        summary: 'Reports the loaded plugins.',
+        visibility: 'on-demand',
+      }),
+      getTools: () => [
+        makeTool('probe_loaded', {
+          handler: async (_args, ctx) => Array.from(ctx.loadedPlugins),
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), probe]);
+    await core.warm();
+    const llm = scriptedLlm({
+      main: [[{ name: 'probe_loaded', args: {}, id: 'c1' }], []],
+    });
+    const gateLines: string[] = [];
+    const ambient = createNoopAmbient({
+      config: core.validatedEnv,
+      identity: core.identity,
+      availablePlugins: core.availablePlugins,
+      llm,
+      logger: {
+        log: (message: unknown) => {
+          if (String(message).startsWith('[CapabilityGateMiddleware]'))
+            gateLines.push(String(message));
+        },
+        warn: () => undefined,
+        error: () => undefined,
+      },
+    });
+    const checkpointer = new MemorySaver();
+
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      preloadedPlugins: new Set(['probe']),
+      ambient,
+      requestCtx,
+      state: {},
+      checkpointer,
+    });
+
+    const config = { configurable: { thread_id: 'sess-preload' } };
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('What is loaded?')] },
+      config,
+    )) as { messages: BaseMessage[]; loadedPlugins?: string[] };
+
+    // The gate admitted the probe tool (weather stayed hidden), so the
+    // model's first call ran without a `load_capability` round trip …
+    expect(gateLines).toHaveLength(2);
+    expect(gateLines[0]).toContain('preloadedPlugins=probe');
+    const tools = toolMessages(result.messages);
+    expect(tools.map((t) => t.tool_call_id)).toEqual(['c1']);
+    // … and the handler saw the preload as loaded …
+    expect(JSON.parse(String(tools[0]?.content))).toEqual(['probe']);
+    // … while the checkpointed channel never learned about it: the turn
+    // output and the checkpoint carry no `loadedPlugins` beyond the default.
+    expect(result.loadedPlugins ?? []).toEqual([]);
+    expect(checkpointedLoadedPlugins(await agent.getState(config))).toEqual([]);
   });
 
   it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {

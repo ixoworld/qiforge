@@ -16,8 +16,9 @@ import {
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
 describe('createCapabilityGateMiddleware', () => {
-  function setup(loadedPlugins: string[]) {
+  function setup(loadedPlugins: string[], preloadedPlugins?: Set<string>) {
     const mw = createCapabilityGateMiddleware({
+      preloadedPlugins,
       pluginByToolName: new Map([
         ['always_tool', 'always_plugin'],
         ['silent_tool', 'silent_plugin'],
@@ -67,6 +68,19 @@ describe('createCapabilityGateMiddleware', () => {
     await invoke();
     expect(passed()).toContain('on_demand_tool');
     expect(passed()).toContain('call_weather_planner_agent');
+  });
+
+  it('admits a preloaded plugin with an empty state.loadedPlugins, and keeps hiding the rest', async () => {
+    const { invoke, passed } = setup([], new Set(['on_demand_plugin']));
+    await invoke();
+    expect(passed()).toEqual([
+      'list_capabilities',
+      'load_capability',
+      'always_tool',
+      'silent_tool',
+      'on_demand_tool',
+    ]);
+    expect(passed()).not.toContain('call_weather_planner_agent');
   });
 });
 
