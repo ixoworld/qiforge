@@ -17,6 +17,14 @@ implementation, and what is deliberately left out.
   shallow-merged over a loaded plugin's manifest at boot (e.g.
   `{ portal: { visibility: 'always' } }`), unknown names are logged and
   ignored, the merged manifest is validated like an authored one.
+- **Decisions**: `getDecisions(ctx)`, `ctx.decisions.evaluate` /
+  `evaluateByName`, the seventh registry (`DecisionRegistry`, collision-checked
+  in `warm()`), `createOracleWorker({ decisionAdapter })` = Node's
+  `createOracleApp({ decisionAdapter })`, and the same `DECISION_PROVIDER` /
+  `DECISION_MODEL` env (`openrouter-jev` reusing `OPEN_ROUTER_API_KEY`). The
+  one Workers difference: `cloudflare-jev` runs through the Worker's `AI`
+  binding when one is declared, so no Cloudflare account credentials are
+  needed there.
 - **Room threads are sessions**: a bare room message roots a thread, the
   reply is posted inside it, and the thread root's event id IS the session
   id (`src/matrix/ingest.ts`, `src/matrix/reply-chain.ts`) — Node's

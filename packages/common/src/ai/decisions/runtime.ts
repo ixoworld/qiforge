@@ -44,7 +44,7 @@ export interface DecisionEvaluator {
 export class DecisionProviderUnavailableError extends Error {
   constructor() {
     super(
-      'No DecisionAdapter is configured. Supply createOracleApp({ decisionAdapter }) or configure a test decision mock.',
+      'No DecisionAdapter is configured. Set DECISION_PROVIDER (openrouter-jev or cloudflare-jev), pass a decisionAdapter to the runtime, or configure a test decision mock.',
     );
     this.name = 'DecisionProviderUnavailableError';
   }

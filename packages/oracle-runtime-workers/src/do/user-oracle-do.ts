@@ -1230,6 +1230,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         identity: core.identity,
         availablePlugins: core.availablePlugins,
         llm,
+        decisions: core.decisions,
         logger: console,
         storage: this.ctx.storage,
         gateway: this.gateway,

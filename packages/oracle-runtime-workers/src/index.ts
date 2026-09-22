@@ -16,6 +16,7 @@
 import {
   createRuntimeCore,
   listModels,
+  type DecisionAdapter,
   type RuntimeCoreOptions,
   type RuntimeCore,
 } from './core';
@@ -61,6 +62,34 @@ export {
   SkillsPlugin,
   type RuntimeCore,
   type RuntimeCoreOptions,
+} from './core';
+// --- bounded semantic decisions --------------------------------------------
+// `defineDecision` and the plugin-facing types come with `./plugin-api` above.
+export {
+  CloudflareJevDecisionAdapter,
+  DECISION_PROVIDERS,
+  DecisionProviderUnavailableError,
+  DecisionRegistry,
+  DecisionRuntime,
+  JevDecisionError,
+  OpenRouterJevDecisionAdapter,
+  UNAVAILABLE_DECISION_EVALUATOR,
+  WorkersAiJevDecisionAdapter,
+  decisionProviderEnvShape,
+  resolveDecisionAdapter,
+  type CloudflareJevAdapterOptions,
+  type DecisionEvaluator,
+  type DecisionLookup,
+  type DecisionProviderConfigIssue,
+  type DecisionProviderName,
+  type DecisionRuntimeLogger,
+  type JevProviderName,
+  type OpenRouterJevAdapterOptions,
+  type RegisteredDecision,
+  type ResolveDecisionAdapterOptions,
+  type ResolveDecisionAdapterResult,
+  type WorkersAiBinding,
+  type WorkersAiJevAdapterOptions,
 } from './core';
 export {
   NEBIUS_BASE_URL,
@@ -145,6 +174,12 @@ export interface CreateOracleWorkerOptions {
    * the merged manifest is validated like an authored one.
    */
   manifestOverrides?: RuntimeCoreOptions['manifestOverrides'];
+  /**
+   * Host-supplied bounded Decision adapter (Node's `createOracleApp` option
+   * of the same name). Wins over the `DECISION_PROVIDER` env configuration;
+   * without either, every `ctx.decisions` call rejects as unavailable.
+   */
+  decisionAdapter?: DecisionAdapter;
   /** Extra host routes mounted on the shell. */
   routes?: PluginRoute[];
   /** Host routes exempt from UCAN auth. */
@@ -195,6 +230,7 @@ export function createOracleWorker(
         features: opts.features,
         manifestOverrides: opts.manifestOverrides,
         env,
+        decisionAdapter: opts.decisionAdapter,
         logger: console,
       });
       cores.set(env, core);

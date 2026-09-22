@@ -121,6 +121,12 @@ export interface OracleWorkerEnv {
    * local harness and vitest pool, where the shell degrades to no limiting.
    */
   RATE_LIMIT?: RateLimit;
+  /**
+   * Workers AI binding. Optional: `DECISION_PROVIDER=cloudflare-jev` runs the
+   * Jev model through it instead of the account credentials. Declare it with
+   * `"ai": { "binding": "AI" }` in the wrangler config.
+   */
+  AI?: Ai;
 
   // --- llm ----------------------------------------------------------------
   OPEN_ROUTER_API_KEY: string;
@@ -154,6 +160,16 @@ export interface OracleWorkerEnv {
   LLM_PROVIDER?: 'openrouter' | 'nebius';
   /** Nebius Token Factory API key — required when `LLM_PROVIDER=nebius`. */
   NEBIUS_API_KEY?: string;
+
+  // --- decisions ----------------------------------------------------------
+  /** Bounded semantic Decision provider; unset leaves Decisions unconfigured. `openrouter-jev` reuses `OPEN_ROUTER_API_KEY`. */
+  DECISION_PROVIDER?: 'cloudflare-jev' | 'openrouter-jev';
+  /** Jev model id override (`typesafe/jev` on Workers AI, `typesafe/jev-1.13` on OpenRouter). */
+  DECISION_MODEL?: string;
+  /** Cloudflare account for `cloudflare-jev` over the REST API; not needed when the `AI` binding is declared. */
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  /** Workers AI token for `cloudflare-jev` over the REST API; not needed when the `AI` binding is declared. */
+  CLOUDFLARE_API_TOKEN?: string;
 
   // --- langsmith tracing ---------------------------------------------------
   /** `'true'` traces every turn (explicit tracer — Workers has no env auto-attach). */

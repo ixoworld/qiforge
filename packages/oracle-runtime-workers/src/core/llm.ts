@@ -446,6 +446,20 @@ export const OPENROUTER_MAIN_FALLBACKS: readonly string[] = [
 
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
+/**
+ * Attribution headers OpenRouter asks callers to send. Shared by the chat
+ * models and the `openrouter-jev` Decision adapter so every request the
+ * oracle makes is credited to the same app.
+ */
+export function openRouterAttributionHeaders(
+  oracleName?: string,
+): Record<string, string> {
+  return {
+    'HTTP-Referer': 'oracle-app.com',
+    'X-Title': oracleName ?? 'Oracle App',
+  };
+}
+
 // ── Nebius (self-hosted deployments) ────────────────────────────────────────
 
 export const NEBIUS_BASE_URL = 'https://api.tokenfactory.nebius.com/v1/';
@@ -561,10 +575,7 @@ export function createLlmAdapter(
   if (env.LLM_PROVIDER === 'nebius') return createNebiusAdapter(env, logger);
   const defaultModelId = getDefaultModelId(env);
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
-  const headers: Record<string, string> = {
-    'HTTP-Referer': 'oracle-app.com',
-    'X-Title': env.ORACLE_NAME ?? 'Oracle App',
-  };
+  const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
 
   const modelForRole = (role: ModelRole): string => {
     if (role === 'main') return defaultModelId;

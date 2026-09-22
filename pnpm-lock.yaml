@@ -620,6 +620,9 @@ importers:
       '@composio/langchain':
         specifier: 0.9.2
         version: 0.9.2(@composio/core@0.10.0(ws@8.18.2)(zod@4.4.3))(@langchain/core@1.1.48(@opentelemetry/api@1.9.1)(@opentelemetry/exporter-trace-otlp-proto@0.215.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.7.0(@opentelemetry/api@1.9.1))(openai@6.44.0(ws@8.18.2)(zod@4.4.3))(ws@8.18.2))
+      '@ixo/common':
+        specifier: workspace:*
+        version: link:../common
       '@ixo/editor':
         specifier: 6.0.1
         version: 6.0.1(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.2.5(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@42.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))

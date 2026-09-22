@@ -1,6 +1,7 @@
 /**
  * Shared fixtures for the core test suites. Not part of the public surface.
  */
+import type { DecisionRegistration } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 import { OraclePlugin, type PluginEnv } from '../plugin-api/oracle-plugin';
 import type {
@@ -102,6 +103,7 @@ export interface TestPluginInit {
   autoDetectHint?: string;
   getTools?: (ctx: PluginContext) => PluginTool[] | Promise<PluginTool[]>;
   getSubAgents?: (ctx: PluginContext) => PluginSubAgent[];
+  getDecisions?: (ctx: PluginContext) => DecisionRegistration[];
   getMiddlewares?: (ctx: PluginContext) => AgentMiddleware[];
   getRequestTools?: (
     rtCtx: RuntimeContext,
@@ -140,6 +142,10 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
 
     override getSubAgents(ctx: PluginContext): PluginSubAgent[] {
       return init.getSubAgents ? init.getSubAgents(ctx) : [];
+    }
+
+    override getDecisions(ctx: PluginContext): DecisionRegistration[] {
+      return init.getDecisions ? init.getDecisions(ctx) : [];
     }
 
     override getMiddlewares(ctx: PluginContext): AgentMiddleware[] {

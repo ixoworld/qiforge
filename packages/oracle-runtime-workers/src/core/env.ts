@@ -1,3 +1,4 @@
+import { decisionProviderEnvShape } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
@@ -114,6 +115,15 @@ export const baseEnvSchema = z.object({
     .int()
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
+
+  // --- decisions ----------------------------------------------------------
+  // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,
+  // Cloudflare credentials), shared with the Node runtime and optional so
+  // oracles without Decisions keep their behaviour. `openrouter-jev` reuses
+  // `OPEN_ROUTER_API_KEY` (required above). On Workers `cloudflare-jev`
+  // prefers the `AI` binding over the account credentials, which are only
+  // needed when the binding is not declared.
+  ...decisionProviderEnvShape,
 
   // --- durable runs (docs/plans/durable-runs.md) ---------------------------
   // Parsed by `runDurabilityConfig` (src/do/run-store.ts) with defaults:
