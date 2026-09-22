@@ -38,6 +38,6 @@
     "vitest": "^3.2.4"
   },
   "overrides": {
-    "@digitalbazaar/http-client": "4.2.0"
+    "@digitalbazaar/http-client": "4.4.0"
   }
 }
