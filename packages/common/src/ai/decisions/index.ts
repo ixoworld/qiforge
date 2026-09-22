@@ -8,6 +8,56 @@ export {
 } from './validation.js';
 export type { DecisionLimits } from './validation.js';
 
+export {
+  DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionProviderUnavailableError,
+  DecisionRuntime,
+  UNAVAILABLE_DECISION_EVALUATOR,
+} from './runtime.js';
+export type {
+  DecisionEvaluator,
+  DecisionLookup,
+  DecisionRuntimeLogger,
+} from './runtime.js';
+
+export {
+  CloudflareJevDecisionAdapter,
+  JEV_MODEL_CLOUDFLARE,
+  JEV_MODEL_OPENROUTER,
+  JevDecisionError,
+  OpenRouterJevDecisionAdapter,
+  WorkersAiJevDecisionAdapter,
+  jevResultSchema,
+  normalizeJevResult,
+  parseJevResult,
+  toJevQuestions,
+  unwrapCloudflareEnvelope,
+} from './jev/index.js';
+export type {
+  CloudflareJevAdapterOptions,
+  JevChoiceQuestion,
+  JevNoulQuestion,
+  JevProviderName,
+  JevQuestion,
+  JevResult,
+  JevScoreQuestion,
+  OpenRouterJevAdapterOptions,
+  WorkersAiBinding,
+  WorkersAiJevAdapterOptions,
+} from './jev/index.js';
+
+export {
+  DECISION_PROVIDERS,
+  decisionProviderEnvShape,
+  resolveDecisionAdapter,
+} from './providers.js';
+export type {
+  DecisionProviderConfigIssue,
+  DecisionProviderName,
+  ResolveDecisionAdapterOptions,
+  ResolveDecisionAdapterResult,
+} from './providers.js';
+
 export type {
   BooleanDecisionAnswer,
   BooleanDecisionQuestion,

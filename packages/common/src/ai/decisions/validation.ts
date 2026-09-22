@@ -17,7 +17,10 @@ export interface DecisionLimits {
 export const DEFAULT_DECISION_LIMITS: DecisionLimits = {
   maxQuestions: 16,
   maxChoiceOptions: 32,
-  maxOrdinalLevels: 16,
+  // The Jev Score question type accepts 2..10 levels; the default limit mirrors
+  // the lowest common denominator across supported providers so a decision
+  // that validates locally is accepted by every adapter.
+  maxOrdinalLevels: 10,
   maxStateBytes: 64 * 1024,
 };
 
@@ -64,10 +67,20 @@ export function validateDecisionRequest(
   }
 }
 
+/**
+ * Validates a provider result against the request it answers and returns a
+ * normalized copy. The input is never mutated.
+ *
+ * Normalization is limited to probability maps: declared options or levels
+ * the provider left out are filled with 0. A missing entry means the provider
+ * assigned no mass to that outcome, so filling it with 0 makes the omission
+ * explicit rather than inventing an answer. Keys that were never declared
+ * still fail validation.
+ */
 export function validateDecisionProviderResult(
   request: DecisionRequest,
   result: DecisionProviderResult,
-): void {
+): DecisionProviderResult {
   if (!result || typeof result !== 'object') {
     throw new Error('Decision provider result must be an object.');
   }
@@ -83,11 +96,17 @@ export function validateDecisionProviderResult(
     );
   }
 
+  const answers: Record<string, DecisionAnswer> = {};
   for (const key of expectedKeys) {
     const question = request.questions[key]!;
     const answer = result.answers[key]!;
-    validateAnswer(key, question, answer);
+    answers[key] = validateAnswer(key, question, answer);
   }
+
+  return {
+    ...result,
+    answers,
+  };
 }
 
 function validateQuestion(
@@ -146,58 +165,55 @@ function validateAnswer(
   key: string,
   question: DecisionQuestion,
   answer: DecisionAnswer,
-): void {
-  if (answer.kind !== question.kind) {
-    throw new Error(
-      `Decision answer "${key}" kind "${answer.kind}" does not match question kind "${question.kind}".`,
-    );
-  }
-
-  if (answer.kind === 'boolean') {
+): DecisionAnswer {
+  if (question.kind === 'boolean' && answer.kind === 'boolean') {
     assertProbability(answer.probabilityTrue, `${key}.probabilityTrue`);
-    return;
+    return { ...answer };
   }
 
-  assertProbability(answer.confidence, `${key}.confidence`);
-
-  if (answer.kind === 'choice' && question.kind === 'choice') {
-    validateChoiceAnswer(key, question.options, answer);
-    return;
+  if (question.kind === 'choice' && answer.kind === 'choice') {
+    assertProbability(answer.confidence, `${key}.confidence`);
+    return validateChoiceAnswer(key, question.options, answer);
   }
 
-  if (answer.kind === 'ordinal' && question.kind === 'ordinal') {
-    validateOrdinalAnswer(key, question.levels.length, answer);
+  if (question.kind === 'ordinal' && answer.kind === 'ordinal') {
+    assertProbability(answer.confidence, `${key}.confidence`);
+    return validateOrdinalAnswer(key, question.levels.length, answer);
   }
+
+  throw new Error(
+    `Decision answer "${key}" kind "${answer.kind}" does not match question kind "${question.kind}".`,
+  );
 }
 
 function validateChoiceAnswer(
   key: string,
   options: Record<string, string>,
   answer: ChoiceDecisionAnswer,
-): void {
+): ChoiceDecisionAnswer {
   if (!Object.prototype.hasOwnProperty.call(options, answer.value)) {
     throw new Error(
       `Decision choice answer "${key}" selected unknown option "${answer.value}".`,
     );
   }
 
-  const expected = Object.keys(options);
-  const returned = Object.keys(answer.probabilities);
-  const missing = expected.filter((option) => !returned.includes(option));
-  const extra = returned.filter((option) => !expected.includes(option));
-  if (missing.length > 0 || extra.length > 0) {
-    throw new Error(
-      `Decision choice answer "${key}" probabilities do not match options.`,
-    );
-  }
-  validateProbabilityMap(`${key}.probabilities`, answer.probabilities);
+  const probabilities = normalizeProbabilityMap(
+    Object.keys(options),
+    answer.probabilities,
+    () =>
+      new Error(
+        `Decision choice answer "${key}" probabilities do not match options.`,
+      ),
+  );
+  validateProbabilityMap(`${key}.probabilities`, probabilities);
+  return { ...answer, probabilities };
 }
 
 function validateOrdinalAnswer(
   key: string,
   levelCount: number,
   answer: OrdinalDecisionAnswer,
-): void {
+): OrdinalDecisionAnswer {
   if (
     !Number.isFinite(answer.score) ||
     answer.score < 0 ||
@@ -207,20 +223,46 @@ function validateOrdinalAnswer(
       `Decision ordinal answer "${key}" score ${answer.score} is outside 0..${levelCount - 1}.`,
     );
   }
-  if (answer.probabilities) {
-    const expected = Array.from({ length: levelCount }, (_, index) =>
-      String(index),
-    );
-    const returned = Object.keys(answer.probabilities);
-    const missing = expected.filter((level) => !returned.includes(level));
-    const extra = returned.filter((level) => !expected.includes(level));
-    if (missing.length > 0 || extra.length > 0) {
-      throw new Error(
-        `Decision ordinal answer "${key}" probabilities do not match levels.`,
-      );
-    }
-    validateProbabilityMap(`${key}.probabilities`, answer.probabilities);
+  if (!answer.probabilities) {
+    return { ...answer };
   }
+
+  const expected = Array.from({ length: levelCount }, (_, index) =>
+    String(index),
+  );
+  const probabilities = normalizeProbabilityMap(
+    expected,
+    answer.probabilities,
+    () =>
+      new Error(
+        `Decision ordinal answer "${key}" probabilities do not match levels.`,
+      ),
+  );
+  validateProbabilityMap(`${key}.probabilities`, probabilities);
+  return { ...answer, probabilities };
+}
+
+/**
+ * Returns a probability map keyed by exactly the declared keys: omitted keys
+ * become 0, undeclared keys are rejected via `onUnknownKey`.
+ */
+function normalizeProbabilityMap(
+  declaredKeys: string[],
+  probabilities: Record<string, number>,
+  onUnknownKey: () => Error,
+): Record<string, number> {
+  const returned = Object.keys(probabilities);
+  if (returned.some((entry) => !declaredKeys.includes(entry))) {
+    throw onUnknownKey();
+  }
+  return Object.fromEntries(
+    declaredKeys.map((entry) => [
+      entry,
+      Object.prototype.hasOwnProperty.call(probabilities, entry)
+        ? probabilities[entry]!
+        : 0,
+    ]),
+  );
 }
 
 function validateProbabilityMap(
