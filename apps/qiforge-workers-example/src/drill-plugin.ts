@@ -13,6 +13,11 @@
  *     (docs/plans/context-budgets.md): the result cap must truncate it, save
  *     it whole, and the model must find the marker with `read_result`.
  *
+ * `failFirst` on the slow tools makes the first call with a given token
+ * fail like a dropped connection (`fetch failed`), for the harness drills
+ * (docs/plans/workers-harness-hardening.md): a read is retried once and
+ * succeeds, a write is not retried and its claim stays in the run ledger.
+ *
  * Every execution reports `start` / `end` to `DRILL_RECORDER_URL` when set
  * (the harness runs a recorder), so a test can count executions without
  * trusting the runtime's own bookkeeping. Enabled only with
@@ -66,7 +71,16 @@ const inputSchema = z.object({
     .max(MAX_MS)
     .default(5000)
     .describe('How long the tool takes, in milliseconds.'),
+  failFirst: z
+    .boolean()
+    .optional()
+    .describe(
+      'Fail the first call with this token like a dropped connection; later calls succeed.',
+    ),
 });
+
+/** Tokens whose first call already failed (per isolate: a test aid only). */
+const failedOnce = new Set<string>();
 
 async function record(
   recorderUrl: string | undefined,
@@ -91,10 +105,15 @@ function buildDrillTool(
 ): PluginTool {
   return tool(
     async (rawArgs) => {
-      const { token, ms } = inputSchema.parse(rawArgs);
+      const { token, ms, failFirst } = inputSchema.parse(rawArgs);
       const receipt = `${name}:${token}:${crypto.randomUUID().slice(0, 8)}`;
       await record(recorderUrl, { token, phase: 'start', receipt });
       await new Promise((resolve) => setTimeout(resolve, ms));
+      const key = `${name}:${token}`;
+      if (failFirst && !failedOnce.has(key)) {
+        failedOnce.add(key);
+        throw new TypeError('fetch failed');
+      }
       await record(recorderUrl, { token, phase: 'end', receipt });
       return { ok: true, token, receipt, ranMs: ms };
     },

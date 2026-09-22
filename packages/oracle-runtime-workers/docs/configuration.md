@@ -288,3 +288,35 @@ curl -X POST https://<oracle>/matrix/start && curl https://<oracle>/matrix/statu
 
 `wrangler deploy --dry-run --outdir <dir>` builds both bundles without
 uploading and is the fastest check that the aliases resolve.
+
+## Turn budgets and tool execution
+
+Every turn runs under one budget shared by the main agent, its sub-agents
+and the helper models the turn's LLM adapter hands out (the summarizer,
+extraction). See [docs/plans/workers-harness-hardening.md](../../../docs/plans/workers-harness-hardening.md).
+
+| Variable              | Default  | Meaning                                                                                                 |
+| --------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `TURN_MAX_TOKENS`     | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
+| `TURN_MAX_TOOL_CALLS` | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
+| `TURN_TIMEOUT_MS`     | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
+
+Exhaustion ends the turn with an `error` frame (`kind: budget_exhausted`,
+`limit: tokens | tools | time`, `retryable: false`) followed by `done`
+(`failed: true`); work already done is kept. These are estimated resource
+limits, not billing. `TURN_RECURSION_LIMIT` remains the separate graph
+guard; raising it does not raise a budget. The context window and reply
+reserve come from the context budget (`MODEL_CONTEXT_TOKENS`, `CONTEXT_*`).
+
+Tool calls are scheduled per user object: writes one at a time across every
+session, reads up to four at a time, sub-agent dispatches up to four in
+their own lane. A tool is a read when it declares `effect: 'read'`, carries
+the MCP `readOnlyHint` annotation, or matches the read-name convention
+(`get_`, `list_`, `search_`, `read_` …); everything else is a write. Only
+reads are retried once after a transient failure. A write whose outcome is
+unknown (abort, deadline, dropped connection, 5xx) is claimed in the run
+ledger; see [operations](operations.md#write-claims-and-turn-usage).
+
+`@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
+consuming instance can render its actual system prompt in a contract test
+without importing the Worker bootstrap.

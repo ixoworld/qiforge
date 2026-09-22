@@ -197,9 +197,32 @@ function isValidSSEEventType(
   return validEventTypes.includes(eventType as SSEEvent['event']);
 }
 
+/** `true` for the abort of a cancelled fetch, in every runtime's spelling. */
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error.name === 'AbortError' ||
+      (typeof DOMException !== 'undefined' &&
+        error instanceof DOMException &&
+        error.name === 'AbortError'))
+  );
+}
+
 /**
- * Parse SSE stream from ReadableStream reader
- * Handles buffer management, event/data parsing, and JSON deserialization
+ * Parse an SSE stream (the server's frames: `id:`, `event:`, `data:` lines,
+ * a blank line ending each frame, `: heartbeat` comments in between) into
+ * typed events.
+ *
+ * Framing follows the SSE specification, so a frame is intact whatever the
+ * network did to it: a frame's lines may arrive across any number of reads
+ * (the field state persists between chunks, and a chunk may cut a UTF-8
+ * sequence in half), line ends may be `\n` or `\r\n`, several `data:` lines
+ * are joined with newlines, and a comment never ends a frame in progress. A
+ * last frame the server did not terminate is still delivered.
+ *
+ * A frame whose data is not JSON is logged and skipped; the stream goes on.
+ * Frames with an event name this client does not know are skipped. An
+ * aborted read (the user cancelled) ends the stream without an error.
  *
  * @param reader - ReadableStreamDefaultReader for the SSE stream
  * @returns AsyncGenerator yielding parsed SSE events
@@ -210,116 +233,66 @@ export async function* parseSSEStream(
   const decoder = new TextDecoder();
   let buffer = '';
   let event = '';
-  let data = '';
+  const data: string[] = [];
   let id: number | undefined;
+
+  const dispatch = (): SSEEvent | undefined => {
+    const eventName = event;
+    const payload = data.join('\n');
+    event = '';
+    data.length = 0;
+    const frameId = id;
+    id = undefined;
+    if (!eventName || payload === '') return undefined;
+    if (!isValidSSEEventType(eventName)) return undefined;
+    try {
+      // The event name decides the payload type; the server is the
+      // authority on the shape, as it always was.
+      const parsedData = JSON.parse(payload);
+      return {
+        event: eventName,
+        data: parsedData,
+        ...(frameId !== undefined ? { id: frameId } : {}),
+      };
+    } catch (parseError) {
+      console.warn('Failed to parse SSE data:', payload, parseError);
+      return undefined;
+    }
+  };
 
   try {
     while (true) {
-      let readResult;
-      try {
-        readResult = await reader.read();
-      } catch (readError) {
-        // Handle abort errors gracefully - this is expected when user cancels
-        if (
-          readError instanceof Error &&
-          (readError.name === 'AbortError' ||
-            (readError instanceof DOMException &&
-              readError.name === 'AbortError'))
-        ) {
-          // Stream was intentionally aborted, exit gracefully
-          break;
-        }
-        // Re-throw other errors
-        throw readError;
-      }
-
-      const { done, value } = readResult;
-      if (done) break;
-
-      // Decode chunk and add to buffer
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-
-      // Keep last incomplete line in buffer
-      buffer = lines.pop() || '';
-
-      // Process complete lines. `event`/`data`/`id` persist across chunks:
-      // a frame's lines can arrive split over two network reads.
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-
-        // Skip empty lines and comments
-        if (trimmedLine === '' || trimmedLine.startsWith(':')) {
-          // Empty line = event complete
-          if (event && data) {
-            try {
-              const parsedData = JSON.parse(data);
-              // Type-safe event creation with fallback for unknown events
-              if (isValidSSEEventType(event)) {
-                yield {
-                  event,
-                  data: parsedData,
-                  ...(id !== undefined ? { id } : {}),
-                };
-              }
-            } catch (parseError) {
-              console.warn('Failed to parse SSE data:', data, parseError);
-            }
-            event = '';
-            data = '';
-            id = undefined;
-          }
-          continue;
-        }
-
-        if (trimmedLine.startsWith('event:')) {
-          event = trimmedLine.slice(6).trim();
-        } else if (trimmedLine.startsWith('data:')) {
-          data = trimmedLine.slice(5).trim();
-        } else if (trimmedLine.startsWith('id:')) {
-          const n = Number(trimmedLine.slice(3).trim());
+      const { done, value } = await reader.read();
+      // The decoder is flushed at the end (a chunk may have ended inside a
+      // multi-byte character), and a final unterminated frame is closed.
+      buffer += done
+        ? `${decoder.decode()}\n\n`
+        : decoder.decode(value, { stream: true });
+      let lineEnd = buffer.indexOf('\n');
+      while (lineEnd !== -1) {
+        const rawLine = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 1);
+        lineEnd = buffer.indexOf('\n');
+        const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+        if (line === '') {
+          const frame = dispatch();
+          if (frame) yield frame;
+        } else if (line.startsWith(':')) {
+          // A comment (the heartbeat): not part of any frame.
+        } else if (line.startsWith('event:')) {
+          event = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          data.push(line.slice(5).replace(/^ /, ''));
+        } else if (line.startsWith('id:')) {
+          const n = Number(line.slice(3).trim());
           if (Number.isFinite(n)) id = n;
         }
       }
-    }
-
-    // Process any remaining data in buffer
-    if (buffer.trim()) {
-      const lines = buffer.split('\n');
-      let event = '';
-      let data = '';
-
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine.startsWith('event:')) {
-          event = trimmedLine.slice(6).trim();
-        } else if (trimmedLine.startsWith('data:')) {
-          data = trimmedLine.slice(5).trim();
-        }
-      }
-
-      if (event && data) {
-        try {
-          const parsedData = JSON.parse(data);
-          // Type-safe event creation with fallback for unknown events
-          if (isValidSSEEventType(event)) {
-            yield { event, data: parsedData };
-          }
-        } catch (parseError) {
-          console.warn('Failed to parse final SSE data:', data, parseError);
-        }
-      }
+      if (done) return;
     }
   } catch (error) {
-    // Handle abort errors gracefully - expected when stream is cancelled
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' ||
-        (error instanceof DOMException && error.name === 'AbortError'))
-    ) {
-      // Stream was aborted, exit gracefully without throwing
-      return;
-    }
+    // The user cancelled: the stream ends, nothing to report.
+    if (isAbortError(error)) return;
     console.error('Error parsing SSE stream:', error);
     throw error;
   }
