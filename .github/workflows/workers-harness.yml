@@ -22,7 +22,10 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @ixo/ucan build
+      # The Workers runtime resolves @ixo/ucan and @ixo/common/ai/decisions
+      # through their built `dist`, so both (and common's workspace deps) are
+      # built before the typecheck and the test runs.
+      - run: pnpm --filter @ixo/ucan --filter "@ixo/common..." build
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
       - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
