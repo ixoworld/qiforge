@@ -27,3 +27,10 @@ OPEN_ROUTER_API_KEY=
 # 600, three times the Node runtime's 200; a tool-call round trip costs ~6
 # steps with the bundled middlewares, so 600 is roughly 100 chained tool calls)
 # TURN_RECURSION_LIMIT=600
+# Turn budget (docs/plans/workers-harness-hardening.md): cumulative model
+# tokens, tool attempts and the wall-clock deadline of one turn, shared by the
+# main agent, its sub-agents and the helper models. Defaults 500000 / 120 /
+# 600000 (10 min); exhaustion ends the turn with a terminal error frame.
+# TURN_MAX_TOKENS=500000
+# TURN_MAX_TOOL_CALLS=120
+# TURN_TIMEOUT_MS=600000
