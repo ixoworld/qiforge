@@ -210,6 +210,14 @@ import {
   type ToolEffect,
 } from '../core/middlewares/tool-marks';
 import { createResultCapMiddleware } from '../core/middlewares/result-cap';
+import { createToolExecutionMiddleware } from '../core/middlewares/tool-execution';
+import { budgetedLlm } from '../core/budgeted-llm';
+import { ToolScheduler, type ToolLane } from '../core/tool-scheduler';
+import {
+  HarnessLimitError,
+  TurnBudget,
+  turnLimitsFromEnv,
+} from '../core/turn-budget';
 import { READ_RESULT_TOOL_NAME } from '../core/read-result-tool';
 import {
   ContextWindowResolver,
@@ -512,6 +520,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private readonly aborts = new Map<string, AbortController>();
     /** Durable runs (docs/plans/durable-runs.md): the rows, and the live side. */
     private runStore: RunStore | null = null;
+    /**
+     * Tool concurrency of this user object (tool-scheduler.ts): writes one
+     * at a time across every session and turn, reads and sub-agents in
+     * bounded lanes. Lives as long as the object.
+     */
+    private readonly toolScheduler = new ToolScheduler();
     private runs: RunCoordinator | null = null;
     private readonly runConfig: RunDurabilityConfig = runDurabilityConfig(
       this.env,
@@ -3869,11 +3883,65 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // effect map is filled from the build below; the closure reads it at
       // call time, so the middleware can be created before the agent.
       const toolEffects = new Map<string, ToolEffect>();
+      const subAgentToolNames = new Set<string>();
+      const effectOf = (name: string): ToolEffect =>
+        toolEffects.get(name) ?? toolEffectOf({ name });
       const marksMiddleware = createToolMarksMiddleware({
         runId: run.runId,
         store: this.runStore!,
-        effectOf: (name) => toolEffects.get(name) ?? toolEffectOf({ name }),
+        effectOf,
         continuation: run.continuation,
+        logger: console,
+      });
+      // The turn's budget (turn-budget.ts): model calls are charged by the
+      // metered adapter every model of this turn comes from, tool calls by
+      // the execution middleware below, and the deadline aborts the run
+      // with the limit as the reason (the stream reports it as a terminal
+      // error, not as a user abort).
+      const turnLimits = turnLimitsFromEnv(core.validatedEnv);
+      const budget = new TurnBudget(turnLimits);
+      const meteredLlm = budgetedLlm(ambient.llm, {
+        budget,
+        outputReserveTokens: contextBudget.outputReserveTokens,
+        signal: abortController.signal,
+      });
+      const deadline = setTimeout(() => {
+        if (abortController.signal.aborted) return;
+        console.warn(
+          `[harness] turn ${req.requestId} reached its deadline (${turnLimits.durationMs} ms); aborting`,
+        );
+        abortController.abort(
+          new HarnessLimitError(
+            'budget_exhausted',
+            'time',
+            'The turn reached its time limit. Completed work is preserved; no further work was started.',
+          ),
+        );
+      }, turnLimits.durationMs);
+      turnDisposables.add(async () => {
+        clearTimeout(deadline);
+        const usage = budget.snapshot();
+        console.log(
+          `[harness] turn ${req.requestId} usage: ~${usage.tokens} tokens (${usage.reportedTokens} reported over ${usage.modelCalls} model calls), ${usage.toolAttempts} tool attempts, ${usage.elapsedMs} ms`,
+        );
+        await this.runStore
+          ?.update(run.runId, { usage: JSON.stringify(usage) })
+          .catch((error: unknown) => {
+            console.warn(
+              `[harness] could not record the turn's usage: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      });
+      const laneOf = (name: string): ToolLane =>
+        subAgentToolNames.has(name) ? 'subagent' : effectOf(name);
+      const executionMiddleware = createToolExecutionMiddleware({
+        budget,
+        scheduler: this.toolScheduler,
+        laneOf,
+        runId: run.runId,
+        sessionId: req.sessionId,
+        claims: this.runStore!,
+        signal: abortController.signal,
         logger: console,
       });
       // Every tool result above the budget's cap is saved whole and handed
@@ -3899,8 +3967,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         availablePlugins: core.availablePlugins,
         byoProvider: byoTurn?.provider,
         contextBudget,
+        turnBudget: budget,
         ambient: {
           ...ambient,
+          llm: meteredLlm,
           attachments: attachmentAccess,
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
         },
@@ -3911,8 +3981,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ? [createWorkStatusMiddleware({ producer: this.workStatus })]
             : [],
           // Applied to the main agent AND every sub-agent: a sub-agent's
-          // own tool calls are marked and capped too.
-          toolMiddlewares: [marksMiddleware, capMiddleware],
+          // own tool calls are marked, scheduled, claimed and capped too.
+          toolMiddlewares: [
+            marksMiddleware,
+            executionMiddleware,
+            capMiddleware,
+          ],
           resultCap,
           onContextOverflow: (error) =>
             this.contextWindows.learnFromError(mainModelId, error, {
@@ -3969,6 +4043,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const { agent, context } = built;
       for (const [name, effect] of built.toolEffects)
         toolEffects.set(name, effect);
+      for (const name of built.subAgentToolNames) subAgentToolNames.add(name);
 
       const attachmentKwargs =
         prepared && prepared.metas.length > 0
@@ -4044,7 +4119,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         signal: abortController.signal,
         recursionLimit: turnRecursionLimit(this.env),
         metadata: tracing.metadata,
-        ...(tracing.callbacks ? { callbacks: tracing.callbacks } : {}),
+        callbacks: [meteredLlm.callback, ...(tracing.callbacks ?? [])],
       };
       return {
         agent,

@@ -14,7 +14,8 @@
  *      fail at the provider.
  *   3. **Overflow recovery.** When the provider rejects the request anyway,
  *      the limit it names is learned (the window is lowered for good), the
- *      request is pruned hard, and it is retried once.
+ *      request is pruned hard, and it is retried once — only when the prune
+ *      made it strictly smaller; an unchanged request is never sent twice.
  *
  * Token counts are chars/4 estimates; the thresholds leave the slack for it.
  */
@@ -254,7 +255,13 @@ export function createContextGuardMiddleware(
           kind: 'overflow-retry',
           ...(learned !== undefined ? { learnedWindow: learned } : {}),
         });
+        const before = tokens;
         shrink(PRUNE_HARD, 'overflow', 'after the provider overflow');
+        if (tokens >= before)
+          throw new ContextOverflowError(
+            "The conversation no longer fits the model's context window and nothing more could be trimmed. Start a new session.",
+            error,
+          );
         try {
           return await handler({ ...request, messages });
         } catch (retryError) {

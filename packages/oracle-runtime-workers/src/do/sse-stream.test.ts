@@ -1,5 +1,6 @@
 import { ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
+import { HarnessLimitError } from '../core/turn-budget';
 import { createSseTurnStream, isImmediateFrame } from './sse-stream';
 
 async function* fakeEvents(): AsyncGenerator<unknown> {
@@ -482,5 +483,89 @@ describe('isImmediateFrame', () => {
     expect(isImmediateFrame('message', { content: 'x' })).toBe(false);
     expect(isImmediateFrame('error', { error: 'x' })).toBe(false);
     expect(isImmediateFrame('router.update', { step: 'x' })).toBe(false);
+  });
+});
+
+describe('createSseTurnStream turn budget', () => {
+  const frames = (sse: string) =>
+    sse
+      .split('\n\n')
+      .filter((f) => f.includes('event: '))
+      .map((f) => ({
+        event: /event: (\S+)/.exec(f)?.[1],
+        data: JSON.parse(/data: (.*)/.exec(f)?.[1] ?? '{}') as Record<
+          string,
+          unknown
+        >,
+      }));
+
+  it('reports a deadline abort as a terminal error, settling the running tool, then done', async () => {
+    const abortController = new AbortController();
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_tool_start',
+        run_id: 'run-1',
+        name: 'search_web',
+        data: { input: { input: { query: 'x' } } },
+      };
+      abortController.abort(
+        new HarnessLimitError(
+          'budget_exhausted',
+          'time',
+          'The turn reached its time limit.',
+        ),
+      );
+      throw abortController.signal.reason;
+    }
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController,
+    });
+    const out = frames(await new Response(stream).text());
+    const tool = out.find(
+      (f) => f.event === 'tool_call' && f.data.status === 'done',
+    );
+    expect(tool?.data.output).toBe('⏱️ Tool did not complete');
+    const error = out.find((f) => f.event === 'error');
+    expect(error?.data).toMatchObject({
+      kind: 'budget_exhausted',
+      limit: 'time',
+      retryable: false,
+      error: 'The turn reached its time limit.',
+    });
+    const done = out.at(-1);
+    expect(done?.event).toBe('done');
+    expect(done?.data).toMatchObject({ failed: true });
+    expect(done?.data.aborted).toBeUndefined();
+  });
+
+  it('reports a budget error thrown by the graph the same way', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'run-2',
+        data: { chunk: { content: 'Working…' } },
+      };
+      throw new HarnessLimitError(
+        'budget_exhausted',
+        'tokens',
+        'The turn reached its token limit.',
+      );
+    }
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's1',
+      requestId: 'r1',
+      abortController: new AbortController(),
+    });
+    const out = frames(await new Response(stream).text());
+    expect(out.find((f) => f.event === 'error')?.data).toMatchObject({
+      kind: 'budget_exhausted',
+      limit: 'tokens',
+      retryable: false,
+    });
+    expect(out.at(-1)?.data).toMatchObject({ failed: true });
   });
 });

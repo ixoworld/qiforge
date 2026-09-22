@@ -25,6 +25,10 @@ import {
   redactOperatorFault,
 } from '../llm/provider-error';
 import { type AIMessageChunk, ToolMessage } from '@langchain/core/messages';
+import {
+  isHarnessLimitError,
+  type HarnessLimitError,
+} from '../core/turn-budget';
 import { RunBuffer, type RunFrame } from './run-buffer';
 
 /** Where the producer puts frames — a `RunBuffer`, or a test sink. */
@@ -303,6 +307,32 @@ export async function runTurnFrames(
     ...(input.runId ? { runId: input.runId } : {}),
   });
 
+  // The turn hit its budget (tokens, tool attempts, deadline): the abort
+  // was the harness's, not the user's, so the client gets a terminal
+  // `error` naming the limit before `done` — not a silent "aborted".
+  const limitFailure = (limit: HarnessLimitError) => {
+    flushOrphans();
+    write('reasoning', {
+      sessionId,
+      requestId,
+      reasoning: '',
+      isComplete: true,
+      timestamp: new Date().toISOString(),
+    });
+    write('error', {
+      error: limit.message,
+      kind: limit.kind,
+      limit: limit.limit,
+      source: 'platform',
+      retryable: false,
+      sessionId,
+      requestId,
+      timestamp: new Date().toISOString(),
+    });
+    doneFrame({ failed: true });
+    return { status: 'failed' as const, fullText: fullContent, error: limit };
+  };
+
   const flushOrphans = () => {
     for (const evt of actionCallMap.values()) {
       write('action_call', {
@@ -579,12 +609,17 @@ export async function runTurnFrames(
       doneFrame();
       return { status: 'completed', fullText: fullContent };
     }
+    const reason: unknown = abortController.signal.reason;
+    if (isHarnessLimitError(reason)) return limitFailure(reason);
     // Aborted (POST /messages/abort, or superseded): close the stream
     // cleanly so the UI leaves its "thinking" state.
     flushOrphans();
     doneFrame({ aborted: true });
     return { status: 'aborted', fullText: fullContent };
   } catch (error) {
+    if (isHarnessLimitError(error)) return limitFailure(error);
+    const reason: unknown = abortController.signal.reason;
+    if (isHarnessLimitError(reason)) return limitFailure(reason);
     // The run's signal is the authority: LangGraph rethrows the signal's
     // reason (whatever the aborter passed), not always an `AbortError`.
     const aborted =

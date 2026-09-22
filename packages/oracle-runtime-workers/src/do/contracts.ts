@@ -158,6 +158,10 @@ export interface OracleWorkerEnv {
   MAIN_REASONING_EFFORT?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
+  /** Turn budget: cumulative model tokens (default 500000), tool attempts (120), deadline in ms (600000). */
+  TURN_MAX_TOKENS?: string;
+  TURN_MAX_TOOL_CALLS?: string;
+  TURN_TIMEOUT_MS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;

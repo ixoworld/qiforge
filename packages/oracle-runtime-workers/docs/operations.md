@@ -719,3 +719,37 @@ that can handle the requested parameters` is the memory engine's own
 | A user object never unloads (`instanceUptimeMs` grows while idle)                       | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).     |
 | Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                              | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                         |
 | `Network connection lost` on a gateway RPC                                              | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                      |
+
+## Write claims and turn usage
+
+`turn_write_claims` (in the user's run ledger, next to `turn_runs` and
+`turn_tool_marks`) holds one row per write whose outcome is not known:
+the SHA-256 of the tool name and canonical arguments, the tool name, the
+run and session that started it, when, and a state. Never the arguments.
+
+- A returned outcome — success, or a failure the service reported (a 4xx,
+  a validation error) — releases the row.
+- An abort, the turn deadline, a dropped connection or a 5xx keeps it
+  (`pending`).
+- An identical write attempted while a row stands is not run. The model
+  gets an error tool message asking it to verify with a read and tell the
+  user; the row becomes `warned` and is owned by that run, which stays
+  blocked. A later turn that asks for the same write again runs it: the
+  user was told and asked again.
+- Rows are per user object (every session of the user) and are dropped
+  with the run retention (7 days) at the next setup.
+
+To inspect, use the existing storage inspection route and read
+`turn_write_claims`. To clear one by hand after reconciling the external
+receipt, delete its row; do not clear rows merely to make a retry pass.
+
+`turn_runs.usage` carries the turn's usage once the run ended: estimated
+and provider-reported tokens, model calls, tool attempts and elapsed time
+(`[harness] turn <requestId> usage: …` in the logs). Estimates, not an
+invoice.
+
+A turn that ends on a budget or deadline shows on the wire as an `error`
+frame with `kind: budget_exhausted` and `retryable: false`, then `done`
+with `failed: true`. The client SDK reports it as a failed run; it never
+resubmits a POST by itself. Before raising a limit, check the run's usage
+and the tool marks for the loop that spent it.

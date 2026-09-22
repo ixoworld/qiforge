@@ -21,3 +21,14 @@ export { createPageContextMiddleware } from './page-context';
 export type { PageContextMiddlewareOptions } from './page-context';
 export { createSafetyGuardrailMiddleware } from './safety-guardrail';
 export type { SafetyGuardrailMiddlewareOptions } from './safety-guardrail';
+export {
+  createToolExecutionMiddleware,
+  isUncertainOutcome,
+  operationKey,
+  uncertainWriteToolResult,
+} from './tool-execution';
+export type {
+  ToolExecutionOptions,
+  WriteClaim,
+  WriteClaimStore,
+} from './tool-execution';

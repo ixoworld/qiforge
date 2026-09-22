@@ -511,3 +511,15 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     warm,
   };
 }
+export {
+  DEFAULT_TURN_LIMITS,
+  HarnessLimitError,
+  TurnBudget,
+  isHarnessLimitError,
+  turnLimitsFromEnv,
+} from './turn-budget';
+export type { TurnLimits, TurnUsage } from './turn-budget';
+export { budgetedLlm } from './budgeted-llm';
+export type { BudgetedLlm, BudgetedLlmOptions } from './budgeted-llm';
+export { ToolScheduler } from './tool-scheduler';
+export type { ToolLane, ToolSchedulerOptions } from './tool-scheduler';

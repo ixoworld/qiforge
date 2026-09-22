@@ -14,10 +14,15 @@
  *   - `turn_tool_marks`: one row per tool call, written BEFORE the tool runs
  *     (`started`) and updated when it returns (`done`). This is what makes a
  *     resume safe: a started-but-unfinished write call is never re-executed.
+ *   - `turn_write_claims`: one row per write whose outcome is not known yet
+ *     (tool-execution.ts), keyed by the fingerprint of the tool name and
+ *     arguments. Released by a returned outcome; kept by an abort, a deadline
+ *     or a dropped connection, so the same write is not repeated blindly by
+ *     a later call — across sessions of the user, until the run retention.
  *
  * Cost shape (SQLite-backed DO storage bills rows written or deleted): a run
  * costs 1 insert + ~2 updates, a segment 1 insert + 1 delete, a tool call
- * 1 insert + 1 update.
+ * 1 insert + 1 update, a write 1 insert + 1 delete more.
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment } from './run-buffer';
@@ -73,6 +78,22 @@ export interface RunRecord {
   taskRunId: string | null;
   /** Instance that owns the run — a different instance at boot means an orphan. */
   instanceId: string;
+  /** JSON: the turn's budget usage (`TurnUsage`), written once when the run ends. */
+  usage: string | null;
+}
+
+/**
+ * A write whose outcome the ledger still has to account for (tool-execution.ts).
+ * `pending`: started, no known outcome yet. `warned`: an identical write was
+ * refused since and the model was told; a later turn may run it again.
+ */
+export interface WriteClaimRecord {
+  fingerprint: string;
+  toolName: string;
+  runId: string;
+  sessionId: string;
+  startedAt: string;
+  state: 'pending' | 'warned';
 }
 
 export interface ToolMark {
@@ -197,6 +218,16 @@ type RunRow = {
   error: string | null;
   task_run_id: string | null;
   instance_id: string;
+  usage: string | null;
+} & Record<string, string | number | null>;
+
+type ClaimRow = {
+  fingerprint: string;
+  tool_name: string;
+  run_id: string;
+  session_id: string;
+  started_at: string;
+  state: string;
 } & Record<string, string | number | null>;
 
 type MarkRow = {
@@ -217,7 +248,7 @@ type SegmentRow = {
 } & Record<string, string | number | null>;
 
 const RUN_COLUMNS =
-  'run_id, session_id, request_id, client, status, started_at, updated_at, request, attempts, generation, next_attempt_at, checkpoint_id, last_seq, partial_text, message_id, error, task_run_id, instance_id';
+  'run_id, session_id, request_id, client, status, started_at, updated_at, request, attempts, generation, next_attempt_at, checkpoint_id, last_seq, partial_text, message_id, error, task_run_id, instance_id, usage';
 
 function toRecord(row: RunRow): RunRecord {
   return {
@@ -240,6 +271,18 @@ function toRecord(row: RunRow): RunRecord {
     error: row.error,
     taskRunId: row.task_run_id,
     instanceId: row.instance_id,
+    usage: row.usage,
+  };
+}
+
+function toClaim(row: ClaimRow): WriteClaimRecord {
+  return {
+    fingerprint: row.fingerprint,
+    toolName: row.tool_name,
+    runId: row.run_id,
+    sessionId: row.session_id,
+    startedAt: row.started_at,
+    state: row.state === 'warned' ? 'warned' : 'pending',
   };
 }
 
@@ -303,6 +346,8 @@ export class RunStore {
       await this.db.run(
         `ALTER TABLE turn_runs ADD COLUMN generation INTEGER NOT NULL DEFAULT 0`,
       );
+    if (!columns.some((c) => c.name === 'usage'))
+      await this.db.run(`ALTER TABLE turn_runs ADD COLUMN usage TEXT`);
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_turn_runs_session ON turn_runs(session_id, started_at)`,
     );
@@ -326,9 +371,21 @@ export class RunStore {
         attempts INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (run_id, tool_call_id)
       ) WITHOUT ROWID`);
+    await this.db.run(`
+      CREATE TABLE IF NOT EXISTS turn_write_claims (
+        fingerprint TEXT PRIMARY KEY,
+        tool_name TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+      ) WITHOUT ROWID`);
     // Ended runs older than the retention window: their segments are gone
     // already (cutover); drop the rows and marks in one pass per boot.
     const cutoff = new Date(this.now() - RUN_RETENTION_MS).toISOString();
+    await this.db.run(`DELETE FROM turn_write_claims WHERE started_at < ?`, [
+      cutoff,
+    ]);
     const stale = await this.db.exec<{ run_id: string }>(
       `SELECT run_id FROM turn_runs WHERE status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
       [cutoff],
@@ -365,7 +422,7 @@ export class RunStore {
     const at = this.iso();
     await this.db.run(
       `INSERT INTO turn_runs (${RUN_COLUMNS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, 0, NULL, NULL, NULL, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, 0, NULL, NULL, NULL, ?, ?, NULL)`,
       [
         input.runId,
         input.sessionId,
@@ -460,6 +517,7 @@ export class RunStore {
         | 'error'
         | 'taskRunId'
         | 'instanceId'
+        | 'usage'
       >
     >,
   ): Promise<void> {
@@ -478,6 +536,7 @@ export class RunStore {
       error: 'error',
       taskRunId: 'task_run_id',
       instanceId: 'instance_id',
+      usage: 'usage',
     };
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) continue;
@@ -600,5 +659,86 @@ export class RunStore {
       [runId],
     );
     return rows.map(toMark);
+  }
+
+  // ── write claims ────────────────────────────────────────────────────────
+
+  /**
+   * Claim a write before it runs. `claimed` when no identical write is
+   * outstanding. `blocked` when one is: a `pending` claim becomes `warned`
+   * (owned by this run, so the same turn stays blocked); a claim already
+   * `warned` by an earlier run is released to this run — the user was told
+   * and asked again.
+   */
+  async claimWrite(input: {
+    fingerprint: string;
+    toolName: string;
+    runId: string;
+    sessionId: string;
+  }): Promise<
+    | { status: 'claimed' }
+    | { status: 'blocked'; toolName: string; since: string }
+  > {
+    await this.setup();
+    const inserted = await this.db.run(
+      `INSERT OR IGNORE INTO turn_write_claims (fingerprint, tool_name, run_id, session_id, started_at, state)
+       VALUES (?, ?, ?, ?, ?, 'pending')`,
+      [
+        input.fingerprint,
+        input.toolName,
+        input.runId,
+        input.sessionId,
+        this.iso(),
+      ],
+    );
+    if (inserted.changes === 1) return { status: 'claimed' };
+    const existing = await this.getClaim(input.fingerprint);
+    if (!existing) return { status: 'claimed' };
+    if (existing.state === 'warned' && existing.runId !== input.runId) {
+      await this.db.run(
+        `UPDATE turn_write_claims SET run_id = ?, session_id = ?, started_at = ?, state = 'pending' WHERE fingerprint = ?`,
+        [input.runId, input.sessionId, this.iso(), input.fingerprint],
+      );
+      return { status: 'claimed' };
+    }
+    if (existing.state === 'pending')
+      await this.db.run(
+        `UPDATE turn_write_claims SET state = 'warned', run_id = ? WHERE fingerprint = ? AND state = 'pending'`,
+        [input.runId, input.fingerprint],
+      );
+    return {
+      status: 'blocked',
+      toolName: existing.toolName,
+      since: existing.startedAt,
+    };
+  }
+
+  /** The write returned an outcome (or a known failure): nothing to account for. */
+  async releaseWrite(fingerprint: string, runId: string): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      `DELETE FROM turn_write_claims WHERE fingerprint = ? AND run_id = ?`,
+      [fingerprint, runId],
+    );
+  }
+
+  async getClaim(fingerprint: string): Promise<WriteClaimRecord | undefined> {
+    await this.setup();
+    const row = await this.db.get<ClaimRow>(
+      `SELECT fingerprint, tool_name, run_id, session_id, started_at, state
+       FROM turn_write_claims WHERE fingerprint = ?`,
+      [fingerprint],
+    );
+    return row ? toClaim(row) : undefined;
+  }
+
+  /** Outstanding claims, oldest first (operator inspection). */
+  async listClaims(): Promise<WriteClaimRecord[]> {
+    await this.setup();
+    const rows = await this.db.exec<ClaimRow>(
+      `SELECT fingerprint, tool_name, run_id, session_id, started_at, state
+       FROM turn_write_claims ORDER BY started_at ASC`,
+    );
+    return rows.map(toClaim);
   }
 }
