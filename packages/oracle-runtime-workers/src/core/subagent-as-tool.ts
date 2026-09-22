@@ -13,6 +13,7 @@ import {
   type StructuredTool,
 } from 'langchain';
 import { createDanglingToolCallRepairMiddleware } from './middlewares/dangling-tool-calls';
+import { isHarnessLimitError } from './turn-budget';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
@@ -307,9 +308,10 @@ export function createSubagentAsTool(
 
         return buildResult(messages, config.toolCall?.id ?? '');
       } catch (err) {
-        // An aborted turn propagates (the graph stops); anything else is the
-        // sub-agent's failure, reported to the parent as its result.
-        if (config.signal?.aborted) throw err;
+        // An aborted turn, or one out of budget, propagates (the parent
+        // graph stops); anything else is the sub-agent's failure, reported
+        // to the parent as its result.
+        if (config.signal?.aborted || isHarnessLimitError(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
         return `Error running ${spec.name}: ${message}`;
       }

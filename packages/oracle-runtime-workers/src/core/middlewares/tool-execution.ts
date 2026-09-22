@@ -13,9 +13,13 @@
  * same write again, after that warning, runs it — the user was informed and
  * asked again — and the ledger drops claims with the run retention.
  *
- * Applied to the main agent and to every sub-agent's inner graph, so a
- * sub-agent's own writes are claimed too. Sub-agent dispatches are counted
- * as tool attempts and scheduled in their own lane, never fingerprinted.
+ * Placed innermost around the tool (`MainAgentHooks.toolExecution`): it
+ * must see the tool's own thrown error, which the retry middlewares would
+ * otherwise have turned into an error ToolMessage, and each retry attempt
+ * is charged and scheduled again. Applied to every sub-agent's inner graph
+ * too, so a sub-agent's own writes are claimed. Sub-agent dispatches are
+ * counted as tool attempts and scheduled in their own lane, never
+ * fingerprinted.
  */
 import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
@@ -113,12 +117,22 @@ export function createToolExecutionMiddleware(
 ): AgentMiddleware {
   const logger = options.logger ?? NOOP_LOGGER;
   const { budget, scheduler, claims } = options;
+  // Executions per tool call id: a second one is a retry (the log is the
+  // operator's only view of a read that failed and then succeeded).
+  const attempts = new Map<string, number>();
   return createMiddleware({
     name: 'ToolExecutionMiddleware',
     wrapToolCall: async (request, handler) => {
       const { toolCall } = request;
       const toolName = toolCall.name;
       const lane = options.laneOf(toolName);
+      const callId = toolCall.id ?? '';
+      const attempt = (attempts.get(callId) ?? 0) + 1;
+      attempts.set(callId, attempt);
+      if (attempt > 1)
+        logger.log(
+          `[tool-execution] ${toolName} (${callId}): attempt ${attempt}`,
+        );
       // Refused before waiting for a slot: a turn over its limit takes no
       // more slots. The slot wait itself ends with the abort signal.
       budget.check(options.signal);

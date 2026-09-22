@@ -515,6 +515,7 @@ export {
   DEFAULT_TURN_LIMITS,
   HarnessLimitError,
   TurnBudget,
+  harnessLimitOf,
   isHarnessLimitError,
   turnLimitsFromEnv,
 } from './turn-budget';

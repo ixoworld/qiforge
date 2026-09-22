@@ -8,52 +8,8 @@ import {
   isUncertainOutcome,
   operationKey,
   uncertainWriteToolResult,
-  type WriteClaimStore,
 } from './tool-execution';
-
-/** The ledger's claim rules (run-store.ts), in memory. */
-function fakeClaims() {
-  const rows = new Map<
-    string,
-    { toolName: string; runId: string; state: 'pending' | 'warned' }
-  >();
-  const log: string[] = [];
-  const store: WriteClaimStore = {
-    async claimWrite(input) {
-      const existing = rows.get(input.fingerprint);
-      if (!existing) {
-        rows.set(input.fingerprint, {
-          toolName: input.toolName,
-          runId: input.runId,
-          state: 'pending',
-        });
-        log.push(`claim:${input.toolName}`);
-        return { status: 'claimed' };
-      }
-      if (existing.state === 'warned' && existing.runId !== input.runId) {
-        rows.set(input.fingerprint, {
-          toolName: input.toolName,
-          runId: input.runId,
-          state: 'pending',
-        });
-        log.push(`reclaim:${input.toolName}`);
-        return { status: 'claimed' };
-      }
-      if (existing.state === 'pending') {
-        existing.state = 'warned';
-        existing.runId = input.runId;
-      }
-      log.push(`blocked:${input.toolName}`);
-      return { status: 'blocked', toolName: existing.toolName, since: 't0' };
-    },
-    async releaseWrite(fingerprint, runId) {
-      const existing = rows.get(fingerprint);
-      if (existing && existing.runId === runId) rows.delete(fingerprint);
-      log.push(`release:${existing?.toolName ?? '?'}`);
-    },
-  };
-  return { store, rows, log };
-}
+import { makeClaimStore } from '../test-fixtures';
 
 type WrapToolCall = NonNullable<
   ReturnType<typeof createToolExecutionMiddleware>['wrapToolCall']
@@ -78,7 +34,7 @@ function middlewareFor(
     { tokens: 1_000_000, tools: 5, durationMs: 60_000 },
     () => 0,
   );
-  const claims = fakeClaims();
+  const claims = makeClaimStore();
   const middleware = createToolExecutionMiddleware({
     budget,
     scheduler: new ToolScheduler(),
@@ -221,7 +177,7 @@ describe('createToolExecutionMiddleware', () => {
   });
 
   it('runs the write again for a later turn that asks after the warning', async () => {
-    const shared = fakeClaims();
+    const shared = makeClaimStore();
     const first = middlewareFor({ claims: shared.store, runId: 'run-1' });
     await Promise.resolve(
       first.wrap(requestFor('send_message', { to: 'b' }), async () => {

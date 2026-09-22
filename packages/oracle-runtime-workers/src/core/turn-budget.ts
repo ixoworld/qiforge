@@ -33,13 +33,37 @@ export class HarnessLimitError extends Error {
   }
 }
 
-export function isHarnessLimitError(
-  error: unknown,
-): error is HarnessLimitError {
-  return (
-    error instanceof HarnessLimitError ||
-    (error instanceof Error && error.name === 'HarnessLimitError')
-  );
+const LIMITS: ReadonlySet<string> = new Set(['tokens', 'tools', 'time']);
+
+function limitOf(error: Error): HarnessLimitError['limit'] | undefined {
+  const value: unknown = Reflect.get(error, 'limit');
+  return value === 'tokens' || value === 'tools' || value === 'time'
+    ? value
+    : undefined;
+}
+
+/**
+ * The `HarnessLimitError` behind `error`, if there is one. LangChain wraps an
+ * error thrown from a middleware in a `MiddlewareError` — same name and
+ * message, the original as `cause`, once per middleware layer — so the
+ * original (with `kind` and `limit`) is found by walking the causes. A copy
+ * of the class from another bundle is recognized by name and fields.
+ */
+export function harnessLimitOf(error: unknown): HarnessLimitError | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 32 && current instanceof Error; depth += 1) {
+    if (current instanceof HarnessLimitError) return current;
+    const limit = limitOf(current);
+    if (current.name === 'HarnessLimitError' && limit && LIMITS.has(limit))
+      return new HarnessLimitError('budget_exhausted', limit, current.message);
+    current = current.cause;
+  }
+  return undefined;
+}
+
+/** `true` when `error` is, or wraps, a turn-budget exhaustion. */
+export function isHarnessLimitError(error: unknown): boolean {
+  return harnessLimitOf(error) !== undefined;
 }
 
 export interface TurnLimits {

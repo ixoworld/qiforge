@@ -4040,12 +4040,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ? [createWorkStatusMiddleware({ producer: this.workStatus })]
             : [],
           // Applied to the main agent AND every sub-agent: a sub-agent's
-          // own tool calls are marked, scheduled, claimed and capped too.
-          toolMiddlewares: [
-            marksMiddleware,
-            executionMiddleware,
-            capMiddleware,
-          ],
+          // own tool calls are marked and capped too.
+          toolMiddlewares: [marksMiddleware, capMiddleware],
+          // Budget, scheduling and write claims, innermost around each tool
+          // call (main agent and sub-agents alike).
+          toolExecution: executionMiddleware,
           resultCap,
           onContextOverflow: (error) =>
             this.contextWindows.learnFromError(mainModelId, error, {

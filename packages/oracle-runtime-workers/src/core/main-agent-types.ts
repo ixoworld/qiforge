@@ -87,6 +87,14 @@ export interface MainAgentHooks {
    */
   toolMiddlewares?: AgentMiddleware[];
   /**
+   * The tool-execution middleware (budget, scheduling, write claims). It
+   * must see a tool's own thrown error, so on the main agent it is placed
+   * innermost — inside the retry middlewares, which turn a thrown error into
+   * an error ToolMessage — and each retry attempt passes through it. Every
+   * sub-agent gets it after `toolMiddlewares`.
+   */
+  toolExecution?: AgentMiddleware;
+  /**
    * The turn's result cap (result-cap.ts), applied inside every wrapped
    * tool — plugin, meta and sub-agent inner tools — so a large result is
    * truncated and saved before it becomes a ToolMessage or an SSE frame.

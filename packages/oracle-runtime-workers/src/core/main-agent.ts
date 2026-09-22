@@ -298,8 +298,13 @@ export async function createMainAgent(
     sharedFactory,
     fallbackContext,
     subAgents: subAgentEntries,
-    ...(hooks?.toolMiddlewares
-      ? { extraMiddleware: hooks.toolMiddlewares }
+    ...(hooks?.toolMiddlewares || hooks?.toolExecution
+      ? {
+          extraMiddleware: [
+            ...(hooks.toolMiddlewares ?? []),
+            ...(hooks.toolExecution ? [hooks.toolExecution] : []),
+          ],
+        }
       : {}),
     ...(resultCap ? { resultCap } : {}),
   });
@@ -372,8 +377,11 @@ export async function createMainAgent(
   const readToolNames = [...toolEffects]
     .filter(([, effect]) => effect === 'read')
     .map(([name]) => name);
-  // The message the model reads when a tool call failed for good.
+  // The message the model reads when a tool call failed for good. A turn
+  // that ran out of budget is not a tool failure: it is rethrown so the turn
+  // ends (LangChain's retry middleware propagates what `onFailure` throws).
   const toolFailureMessage = (error: Error): string => {
+    if (isHarnessLimitError(error)) throw error;
     const rejected = isToolInvocationError(error);
     ambient.logger.warn(
       `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed'}: ${error.message.split('\n')[0] ?? error.message}`,
@@ -499,6 +507,11 @@ export async function createMainAgent(
           }),
         ]
       : []),
+    // Innermost around the tool itself (the first middleware in the list is
+    // the outermost layer): charged and scheduled per attempt, and it sees
+    // the tool's own error before the retry middlewares turn it into a
+    // message, which is what keeps a write claim on an unknown outcome.
+    ...(hooks?.toolExecution ? [hooks.toolExecution] : []),
   ];
   if (contextBudget)
     ambient.logger.log(`[context] ${describeBudget(contextBudget)}`);

@@ -3,6 +3,7 @@ import {
   DEFAULT_TURN_LIMITS,
   HarnessLimitError,
   TurnBudget,
+  harnessLimitOf,
   isHarnessLimitError,
   turnLimitsFromEnv,
 } from './turn-budget';
@@ -95,5 +96,39 @@ describe('TurnBudget', () => {
     controller.abort(reason);
     expect(() => budget.reserveTool(controller.signal)).toThrow(reason);
     expect(budget.snapshot().toolAttempts).toBe(0);
+  });
+});
+
+describe('harnessLimitOf', () => {
+  it('finds the original through LangChain’s middleware wrapping', () => {
+    const original = new HarnessLimitError('budget_exhausted', 'tools', 'hit');
+    // What `MiddlewareError` does, once per layer: same name and message,
+    // no fields, the error as `cause`.
+    const wrap = (inner: Error): Error => {
+      const outer = new Error(inner.message, { cause: inner });
+      outer.name = inner.name;
+      return outer;
+    };
+    const wrapped = wrap(wrap(original));
+    expect(harnessLimitOf(wrapped)).toBe(original);
+    expect(isHarnessLimitError(wrapped)).toBe(true);
+  });
+
+  it('recognizes a copy of the class by name and fields, and nothing else', () => {
+    const copy = Object.assign(new Error('hit'), {
+      name: 'HarnessLimitError',
+      limit: 'time',
+    });
+    expect(harnessLimitOf(copy)).toMatchObject({
+      kind: 'budget_exhausted',
+      limit: 'time',
+      message: 'hit',
+    });
+    const nameOnly = Object.assign(new Error('x'), {
+      name: 'HarnessLimitError',
+    });
+    expect(harnessLimitOf(nameOnly)).toBeUndefined();
+    expect(isHarnessLimitError(new Error('fetch failed'))).toBe(false);
+    expect(isHarnessLimitError('HarnessLimitError')).toBe(false);
   });
 });

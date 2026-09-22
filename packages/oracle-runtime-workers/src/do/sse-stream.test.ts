@@ -541,18 +541,23 @@ describe('createSseTurnStream turn budget', () => {
     expect(done?.data.aborted).toBeUndefined();
   });
 
-  it('reports a budget error thrown by the graph the same way', async () => {
+  it('reports a budget error thrown by the graph, through LangChain wrapping, the same way', async () => {
     async function* events(): AsyncGenerator<unknown> {
       yield {
         event: 'on_chat_model_stream',
         run_id: 'run-2',
         data: { chunk: { content: 'Working…' } },
       };
-      throw new HarnessLimitError(
+      // As the graph surfaces it: LangChain's MiddlewareError keeps the
+      // name and message and moves the original into `cause`.
+      const original = new HarnessLimitError(
         'budget_exhausted',
         'tokens',
         'The turn reached its token limit.',
       );
+      const wrapped = new Error(original.message, { cause: original });
+      wrapped.name = original.name;
+      throw wrapped;
     }
     const stream = createSseTurnStream({
       events: events(),
