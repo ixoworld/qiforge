@@ -20,7 +20,7 @@ getCommerceRouterPort(); // core, per turn — null when unregistered
 
 Same shape as the bridge's existing `setDeliverHandler` / `setRoomSessionResolver`. One commerce plugin per process, by construction.
 
-`CommerceRouterPort` (see the file for the full interface) exposes `getServices`, `findActiveEngagement`, `checkContractGate`, `startEngagement`, plus an optional `routerModel` override. `findActiveEngagement` is keyed by the SENDER, not by the room or thread — it returns the user's one live engagement together with the room and thread its durable record lives in. The chain write stays behind `startEngagement` — the router only ever learns pass or fail.
+`CommerceRouterPort` (see the file for the full interface) exposes `getServices`, `findActiveEngagement`, `checkContractGate`, `startEngagement`, plus the optional `routerModel`, `routerEngine`, and `routerDecisionName` routing controls. `findActiveEngagement` is keyed by the SENDER, not by the room or thread — it returns the user's one live engagement together with the room and thread its durable record lives in. The chain write stays behind `startEngagement` — the router only ever learns pass or fail.
 
 Registered from `plugins/oracle-payments/commerce-port.registrar.ts`. **Unregistered is the default and must stay a no-op:** `MessageRouterService.route` returns `undefined` when the slot is empty, the bridge skips the routing call because `router.isActive()` is false, and a Matrix turn behaves exactly as it did before the feature — apart from the liveness card, which is not commerce-gated and posts on every Matrix turn.
 
@@ -36,7 +36,10 @@ graph TD
     E -->|yes| W[work — sticky, no model call]
     E -->|no| C{card has services?}
     C -->|no| S[support — classifier never runs]
-    C -->|yes| CLS[classify on the routing role]
+    C -->|yes| SH{decision-shadow?}
+    SH -->|yes| JEV[start bounded Decision in parallel<br/>telemetry only, never awaited]
+    SH -->|no| CLS[classify on the routing role]
+    JEV --> CLS
     CLS -->|support / low confidence / unknown id| S
     CLS -->|work| G{contract gate}
     G -->|fail| SG[support + gate context]
@@ -52,6 +55,38 @@ Two rules the code enforces and reviews should protect:
 - **Failing open is not failing silent.** Every refusal carries a `detail` — the chain's rejection text, the engine's status, the numbers that did not add up — onto `ctx.commerce.gate` and into the overlay instruction. A reason alone is a code the agent can only read back at the user, so no lane may end with the cause in a log line and a bare enum on the wire. A lookup that never got an answer refuses as `contract_check_failed`, never as `not_contracted`: an unanswered check is not evidence of a missing contract.
 
 The classifier's timeout and confidence floor are constants at the top of the file. `routerModel` from the port overrides the `routing` role model.
+
+### Bounded Decision shadow mode
+
+`ORACLE_PAYMENTS_ROUTER_ENGINE=decision-shadow` runs the registered
+`oracle-payments.route-message` Decision alongside the legacy classifier for
+eligible turns. It starts only after the active-engagement and empty-catalog
+short circuits, so sticky work and oracles with no services incur no Decision
+call.
+
+Shadow mode is deliberately non-blocking: `MessageRouterService` starts the
+Decision, runs the legacy classifier exactly as before, and never awaits the
+Decision before returning the route. The Decision also receives the owning
+turn's abort signal, so a superseded/cancelled turn can stop any still-running
+shadow request. The legacy classifier remains the only input to the contract
+gate and engagement start. A missing Decision provider, timeout, malformed
+result, or provider error can therefore affect telemetry only.
+
+Shadow mode is an explicit operator opt-in because the Decision provider receives
+the projected semantic state: the current coalesced Matrix turn and the
+published service descriptors. It does not receive the sender DID, room id,
+thread id, contract state, UCANs, prices, escrow state, or prior conversation.
+Enable it only where the configured Decision provider's data-handling policy is
+acceptable for the oracle's traffic.
+
+The shadow line is `[commerce-router-shadow]` and contains routing metadata
+only: the per-turn request id (for joining it to the live router decision),
+legacy intent/confidence/service/latency, Decision work probability,
+service/confidence/latency, provider/model, and intent/service agreement. It
+never contains the user message or projected Decision state. The
+`decisionIntentAt50` field uses 0.5 only as a comparison boundary for
+agreement reporting; it is not a production routing threshold. Production
+thresholds are intentionally deferred until replay/shadow calibration.
 
 ## How the decision reaches the agent
 

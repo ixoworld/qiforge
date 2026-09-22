@@ -72,12 +72,24 @@ export type CommerceEngagementStartResult =
  * never imports the plugin — with no port registered it is inert and Matrix
  * turns behave exactly as they do today.
  */
+export type CommerceRouterEngine = 'llm' | 'decision-shadow';
+
 export interface CommerceRouterPort {
   /**
    * Classifier model override (`ORACLE_PAYMENTS_ROUTER_MODEL`, validated
    * plugin config). Undefined → the provider's `routing` role default.
    */
   routerModel?: string;
+
+  /**
+   * Routing engine selected by the oracle-payments plugin. `decision-shadow`
+   * evaluates the bounded Decision in parallel but NEVER changes the legacy
+   * classifier's routing outcome.
+   */
+  routerEngine?: CommerceRouterEngine;
+
+  /** Boot-registered bounded Decision to evaluate in shadow mode. */
+  routerDecisionName?: string;
 
   /** The oracle's published services, or `null` when no agent card resolves. */
   getServices(): Promise<CommerceRoutedService[] | null>;

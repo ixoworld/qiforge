@@ -10,6 +10,7 @@ import {
   setCommerceRouterPort,
 } from '../../modules/messages/commerce-router-port.js';
 import { AgentCardService } from './agent-card.service.js';
+import { COMMERCE_ROUTE_DECISION_NAME } from './commerce-route.decision.js';
 import { ContractGateService } from './contract-gate.service.js';
 import { EngagementService } from './engagement.service.js';
 import { toRoutedService } from './util.js';
@@ -41,9 +42,15 @@ export class CommerceRouterPortRegistrar
   onModuleInit(): void {
     const entityDid = this.config.getOrThrow<string>('ORACLE_ENTITY_DID');
     const routerModel = this.config.get<string>('ORACLE_PAYMENTS_ROUTER_MODEL');
+    const routerEngine =
+      this.config.get<'llm' | 'decision-shadow'>(
+        'ORACLE_PAYMENTS_ROUTER_ENGINE',
+      ) ?? 'llm';
 
     setCommerceRouterPort({
       ...(routerModel ? { routerModel } : {}),
+      routerEngine,
+      routerDecisionName: COMMERCE_ROUTE_DECISION_NAME,
       getServices: async () => {
         if (!entityDid) return null;
         const services = await this.agentCard.getServices(entityDid);
@@ -59,7 +66,9 @@ export class CommerceRouterPortRegistrar
       startEngagement: (roomId, threadId, start) =>
         this.intent.startEngagement(roomId, threadId, start),
     });
-    this.logger.log('[oracle-payments] commerce router port registered.');
+    this.logger.log(
+      `[oracle-payments] commerce router port registered (engine=${routerEngine}).`,
+    );
   }
 
   onModuleDestroy(): void {
