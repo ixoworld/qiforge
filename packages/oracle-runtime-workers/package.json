@@ -40,7 +40,7 @@
     "@composio/langchain": "0.9.2",
     "@ixo/common": "workspace:*",
     "@ixo/editor": "6.0.1",
-    "@ixo/matrix-bot-workers-sdk": "0.4.0",
+    "@ixo/matrix-bot-workers-sdk": "0.7.0",
     "@ixo/matrix-crdt": "^1.2.5",
     "@ixo/ucan": "workspace:*",
     "@langchain/core": "1.1.48",
