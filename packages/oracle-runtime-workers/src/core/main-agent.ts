@@ -57,6 +57,7 @@ import {
 } from './runtime-context';
 import { MainAgentGraphState, type BrowserToolCall } from './state';
 import { toolEffectOf } from './middlewares/tool-marks';
+import { isHarnessLimitError } from './turn-budget';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName } from './subagent-as-tool';
 import { wrapPluginTool } from './wrap-plugin-tool';
@@ -304,8 +305,13 @@ export async function createMainAgent(
     sharedFactory,
     fallbackContext,
     subAgents: subAgentEntries,
-    ...(hooks?.toolMiddlewares
-      ? { extraMiddleware: hooks.toolMiddlewares }
+    ...(hooks?.toolMiddlewares || hooks?.toolExecution
+      ? {
+          extraMiddleware: [
+            ...(hooks.toolMiddlewares ?? []),
+            ...(hooks.toolExecution ? [hooks.toolExecution] : []),
+          ],
+        }
       : {}),
     ...(resultCap ? { resultCap } : {}),
   });
@@ -373,6 +379,33 @@ export async function createMainAgent(
   // `hooks.resolveModel` override covers the summary model too.
   const resolveModel = hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
 
+  // Tools the retry middleware may run again after a transient failure:
+  // read-only ones (declared or by name), never a sub-agent dispatch.
+  const readToolNames = [...toolEffects]
+    .filter(([, effect]) => effect === 'read')
+    .map(([name]) => name);
+  // The message the model reads when a tool call failed for good. A turn
+  // that ran out of budget is not a tool failure: it is rethrown so the turn
+  // ends (LangChain's retry middleware propagates what `onFailure` throws).
+  const toolFailureMessage = (error: Error): string => {
+    if (isHarnessLimitError(error)) throw error;
+    const rejected = isToolInvocationError(error);
+    ambient.logger.warn(
+      `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed'}: ${error.message.split('\n')[0] ?? error.message}`,
+    );
+    if (!rejected) return error.message;
+    // The model (and the Portal's card) get the reason, not the kwargs
+    // dump — `Error invoking tool 'x' with kwargs {…} with error: Error:
+    // Received tool input did not match expected schema` stays in the tail.
+    const toolName = /^Error invoking tool '([^']+)'/.exec(error.message)?.[1];
+    const reason =
+      error.message
+        .split(' with error: ')
+        .at(-1)
+        ?.replace(/^Error: /, '') ?? error.message;
+    return `Invalid arguments for ${toolName ?? 'the tool'}: ${reason}. Check the tool's parameter schema and call it again with corrected arguments.`;
+  };
+
   const middleware = [
     // Outermost of all: the durable-run tool marks (write-ahead record per
     // tool call, resume policy, continuation note) must see every call
@@ -408,6 +441,7 @@ export async function createMainAgent(
             summaryInputTokens: contextBudget.summaryInputTokens,
           }
         : {}),
+      ...(args.turnBudget ? { budget: args.turnBudget } : {}),
     }),
     createCapabilityGateMiddleware({
       pluginByToolName,
@@ -420,34 +454,32 @@ export async function createMainAgent(
       logger: ambient.logger,
     }),
     createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
-    // Retries are for transient failures. A ToolInvocationError is the
+    // A thrown tool error becomes an error ToolMessage here, for every
+    // tool (the outer instance never retries). A ToolInvocationError is the
     // model's arguments failing the tool's schema: the same call again gives
-    // the same rejection, so it is not retried — and it is logged, because
-    // the error ToolMessage it becomes is otherwise invisible in the logs
-    // (the tool-validation middleware above never sees it; ToolNode throws
-    // it before the tool runs).
+    // the same rejection — it is logged, because the error ToolMessage it
+    // becomes is otherwise invisible in the logs (the tool-validation
+    // middleware above never sees it; ToolNode throws it before the tool
+    // runs). The inner instance below retries transient failures once, for
+    // read-only tools only: a write whose call failed may still have
+    // happened, and the tool-execution middleware keeps its claim instead.
     toolRetryMiddleware({
-      retryOn: (error) => !isToolInvocationError(error),
-      onFailure: (error) => {
-        const rejected = isToolInvocationError(error);
-        ambient.logger.warn(
-          `[tool-retry] ${rejected ? 'tool call rejected by the tool schema' : 'tool failed after retries'}: ${error.message.split('\n')[0] ?? error.message}`,
-        );
-        if (!rejected) return error.message;
-        // The model (and the Portal's card) get the reason, not the kwargs
-        // dump — `Error invoking tool 'x' with kwargs {…} with error: Error:
-        // Received tool input did not match expected schema` stays in the tail.
-        const toolName = /^Error invoking tool '([^']+)'/.exec(
-          error.message,
-        )?.[1];
-        const reason =
-          error.message
-            .split(' with error: ')
-            .at(-1)
-            ?.replace(/^Error: /, '') ?? error.message;
-        return `Invalid arguments for ${toolName ?? 'the tool'}: ${reason}. Check the tool's parameter schema and call it again with corrected arguments.`;
-      },
+      maxRetries: 0,
+      onFailure: toolFailureMessage,
     }),
+    // (LangChain refuses two middlewares of one name; this one is renamed.)
+    {
+      ...toolRetryMiddleware({
+        maxRetries: 1,
+        tools: readToolNames,
+        retryOn: (error) =>
+          !isToolInvocationError(error) &&
+          !isHarnessLimitError(error) &&
+          error.name !== 'AbortError',
+        onFailure: toolFailureMessage,
+      }),
+      name: 'readToolRetryMiddleware',
+    },
     // Same host-gated pair as the Node runtime: the page-context block needs a
     // title lookup, the safety guardrail a classification model.
     ...(hooks?.getRoomTitle
@@ -483,6 +515,11 @@ export async function createMainAgent(
           }),
         ]
       : []),
+    // Innermost around the tool itself (the first middleware in the list is
+    // the outermost layer): charged and scheduled per attempt, and it sees
+    // the tool's own error before the retry middlewares turn it into a
+    // message, which is what keeps a write claim on an unknown outcome.
+    ...(hooks?.toolExecution ? [hooks.toolExecution] : []),
   ];
   if (contextBudget)
     ambient.logger.log(`[context] ${describeBudget(contextBudget)}`);
@@ -547,6 +584,7 @@ export async function createMainAgent(
     systemPrompt,
     boundToolNames: tools.map((t) => t.name),
     toolEffects,
+    subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
   };
 }

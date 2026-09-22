@@ -68,6 +68,7 @@ class MemoryRunStore implements RunCoordinatorStore {
       partialText: null,
       messageId: null,
       error: null,
+      usage: null,
       taskRunId: null,
       instanceId: 'old-instance',
       ...record,

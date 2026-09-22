@@ -118,6 +118,15 @@ export const baseEnvSchema = z.object({
     .int()
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
+  /**
+   * The turn budget (docs/plans/workers-harness-hardening.md): cumulative
+   * model tokens across the main agent, sub-agents and helper models; tool
+   * attempts; and the wall-clock deadline. Exhaustion ends the turn and keeps
+   * the work done so far. Parsed by `turnLimitsFromEnv`.
+   */
+  TURN_MAX_TOKENS: z.coerce.number().int().positive().default(500_000),
+  TURN_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(120),
+  TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
 
   // --- decisions ----------------------------------------------------------
   // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,

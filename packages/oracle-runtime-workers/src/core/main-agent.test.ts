@@ -20,7 +20,17 @@ import { SkillsPlugin } from './plugins/skills';
 import { PortalPlugin } from '../plugins/portal';
 import { WeatherPlugin } from './plugins/weather';
 import { createNoopAmbient, type AmbientServices } from './runtime-context';
-import { makeEnv, makeManifest, makePlugin, makeTool } from './test-fixtures';
+import {
+  makeClaimStore,
+  makeEnv,
+  makeManifest,
+  makePlugin,
+  makeTool,
+} from './test-fixtures';
+import { createToolExecutionMiddleware } from './middlewares/tool-execution';
+import { ToolScheduler } from './tool-scheduler';
+import { harnessLimitOf, TurnBudget } from './turn-budget';
+import { z } from 'zod';
 
 // ── Open-Meteo / skills-registry fetch stub ─────────────────────────────────
 
@@ -759,4 +769,117 @@ describe('createMainAgent', () => {
     expect(untouched.messages.some(isSummarizationMessage)).toBe(false);
     expect(toolMessages(untouched.messages)).toHaveLength(12);
   });
+});
+
+// ── Tool execution inside the real middleware stack ─────────────────────────
+
+describe('createMainAgent tool execution', () => {
+  /** A read that fails once like a dropped connection, and a write that always does. */
+  function flakyPlugin() {
+    const calls = { read: 0, write: 0 };
+    const plugin = makePlugin({
+      name: 'flaky',
+      getTools: () => [
+        makeTool('get_flaky', {
+          effect: 'read',
+          handler: async () => {
+            calls.read += 1;
+            if (calls.read === 1) throw new TypeError('fetch failed');
+            return 'read ok';
+          },
+        }),
+        makeTool('send_flaky', {
+          effect: 'write',
+          schema: z.object({ to: z.string() }),
+          handler: async () => {
+            calls.write += 1;
+            throw new TypeError('fetch failed');
+          },
+        }),
+      ],
+    });
+    return { plugin, calls };
+  }
+
+  async function build(
+    plugin: OraclePlugin,
+    script: Script,
+    limits = { tokens: 1_000_000, tools: 20, durationMs: 60_000 },
+  ) {
+    const core = bootCore([plugin]);
+    await core.warm();
+    const claims = makeClaimStore();
+    const budget = new TurnBudget(limits);
+    const built = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({ main: script })),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+      hooks: {
+        toolExecution: createToolExecutionMiddleware({
+          budget,
+          scheduler: new ToolScheduler(),
+          laneOf: (name) =>
+            built.subAgentToolNames.has(name)
+              ? 'subagent'
+              : (built.toolEffects.get(name) ?? 'write'),
+          runId: 'run-1',
+          sessionId: 'sess-1',
+          claims: claims.store,
+        }),
+      },
+    });
+    return { agent: built.agent, claims, budget };
+  }
+
+  it('retries a transient read once, never a write, and keeps the write’s claim', async () => {
+    const { plugin, calls } = flakyPlugin();
+    const { agent, claims, budget } = await build(plugin, [
+      [
+        { name: 'get_flaky', args: {}, id: 'r1' },
+        { name: 'send_flaky', args: { to: 'bob' }, id: 'w1' },
+      ],
+      [],
+    ]);
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('go')] },
+      { configurable: { thread_id: 'sess-1' } },
+    )) as { messages: BaseMessage[] };
+    const byId = new Map(
+      toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+    );
+    expect(calls).toEqual({ read: 2, write: 1 });
+    expect(byId.get('r1')?.content).toBe('read ok');
+    expect(byId.get('w1')?.status).toBe('error');
+    // The write failed on the wire: its outcome is unknown, the claim stays.
+    expect([...claims.rows.values()]).toEqual([
+      { toolName: 'send_flaky', runId: 'run-1', state: 'pending' },
+    ]);
+    // Both read attempts and the write were charged.
+    expect(budget.snapshot().toolAttempts).toBe(3);
+  }, 15_000);
+
+  it('ends the turn when a retry runs out of budget, instead of reporting a tool error', async () => {
+    const { plugin, calls } = flakyPlugin();
+    const { agent } = await build(
+      plugin,
+      [[{ name: 'get_flaky', args: {}, id: 'r1' }], []],
+      { tokens: 1_000_000, tools: 1, durationMs: 60_000 },
+    );
+    await expect(
+      agent.invoke(
+        { messages: [new HumanMessage('go')] },
+        { configurable: { thread_id: 'sess-2' } },
+      ),
+    ).rejects.toSatisfy(
+      // LangChain wraps it once per middleware layer; the stream recovers
+      // the original the same way.
+      (error: unknown) => harnessLimitOf(error)?.limit === 'tools',
+    );
+    expect(calls.read).toBe(1);
+  }, 15_000);
 });

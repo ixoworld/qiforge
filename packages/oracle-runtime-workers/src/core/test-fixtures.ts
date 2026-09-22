@@ -12,6 +12,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../plugin-api/types';
+import type { WriteClaimStore } from './middlewares/tool-execution';
 import {
   buildRuntimeContext,
   createNoopAmbient,
@@ -230,4 +231,52 @@ export function makeEnv(
     MATRIX_GATEWAY: { idFromName: () => undefined },
     ...overrides,
   };
+}
+
+/**
+ * The run ledger's write-claim rules (`RunStore.claimWrite`), in memory:
+ * a pending claim blocks and becomes `warned` (owned by the blocked run);
+ * a claim already warned by another run is handed to the new run.
+ */
+export function makeClaimStore() {
+  const rows = new Map<
+    string,
+    { toolName: string; runId: string; state: 'pending' | 'warned' }
+  >();
+  const log: string[] = [];
+  const store: WriteClaimStore = {
+    async claimWrite(input) {
+      const existing = rows.get(input.fingerprint);
+      if (!existing) {
+        rows.set(input.fingerprint, {
+          toolName: input.toolName,
+          runId: input.runId,
+          state: 'pending',
+        });
+        log.push(`claim:${input.toolName}`);
+        return { status: 'claimed' };
+      }
+      if (existing.state === 'warned' && existing.runId !== input.runId) {
+        rows.set(input.fingerprint, {
+          toolName: input.toolName,
+          runId: input.runId,
+          state: 'pending',
+        });
+        log.push(`reclaim:${input.toolName}`);
+        return { status: 'claimed' };
+      }
+      if (existing.state === 'pending') {
+        existing.state = 'warned';
+        existing.runId = input.runId;
+      }
+      log.push(`blocked:${input.toolName}`);
+      return { status: 'blocked', toolName: existing.toolName, since: 't0' };
+    },
+    async releaseWrite(fingerprint, runId) {
+      const existing = rows.get(fingerprint);
+      if (existing && existing.runId === runId) rows.delete(fingerprint);
+      log.push(`release:${existing?.toolName ?? '?'}`);
+    },
+  };
+  return { store, rows, log };
 }

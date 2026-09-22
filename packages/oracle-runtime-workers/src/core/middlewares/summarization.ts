@@ -2,6 +2,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { BaseMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
+import type { TurnBudget } from '../turn-budget';
 
 /**
  * IXO-flavoured prompt instructing the summarizer to preserve identifiers
@@ -73,6 +74,12 @@ export interface SummarizationMiddlewareOptions {
   keepMessages?: number;
   /** What the summarizer itself may read (tokens); default LangChain's. */
   summaryInputTokens?: number;
+  /**
+   * The turn's budget: a summary is not started after the deadline or the
+   * abort, and its model call is charged like any other (the metered
+   * adapter does that; the check here is the cheap early exit).
+   */
+  budget?: TurnBudget;
   logger?: Pick<Logger, 'warn' | 'log'>;
 }
 
@@ -141,6 +148,7 @@ export const createSummarizationMiddleware = (
   // A summary that failed keeps the history exactly as it was: the turn
   // runs on the full context and the next turn tries again.
   const guarded: typeof handler = async (state, runtime) => {
+    options.budget?.check(runtime.signal);
     const update = await handler(state, runtime);
     const messages =
       update && typeof update === 'object' && 'messages' in update

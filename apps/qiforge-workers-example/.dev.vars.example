@@ -34,3 +34,11 @@ OPEN_ROUTER_API_KEY=
 # Capability router (needs DECISION_PROVIDER): shadow logs which on-demand plugin
 # it would preload per turn without acting; on preloads it for that turn.
 # CAPABILITY_ROUTER=shadow
+
+# Turn budget (docs/plans/workers-harness-hardening.md): cumulative model
+# tokens, tool attempts and the wall-clock deadline of one turn, shared by the
+# main agent, its sub-agents and the helper models. Defaults 500000 / 120 /
+# 600000 (10 min); exhaustion ends the turn with a terminal error frame.
+# TURN_MAX_TOKENS=500000
+# TURN_MAX_TOOL_CALLS=120
+# TURN_TIMEOUT_MS=600000
