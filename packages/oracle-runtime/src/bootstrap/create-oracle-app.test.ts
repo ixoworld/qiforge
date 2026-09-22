@@ -252,6 +252,48 @@ describe('createOracleApp — Decision provider', () => {
     ).resolves.toBeDefined();
   });
 
+  it('boots when openrouter-jev reuses the LLM OpenRouter key', async () => {
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'openrouter-jev',
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('fails boot when openrouter-jev is selected without OPEN_ROUTER_API_KEY', async () => {
+    const errors: string[] = [];
+    const logger = {
+      log: () => undefined,
+      warn: () => undefined,
+      error: (msg: unknown) =>
+        errors.push(typeof msg === 'string' ? msg : JSON.stringify(msg)),
+    };
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          // Nebius as the chat provider so the LLM cross-check passes while the
+          // Decision provider is left without its OpenRouter key.
+          LLM_PROVIDER: 'nebius',
+          NEBIUS_API_KEY: 'nebius-test',
+          OPEN_ROUTER_API_KEY: undefined,
+          DECISION_PROVIDER: 'openrouter-jev',
+        },
+        logger,
+      }),
+    ).rejects.toThrow(/Env validation failed/);
+
+    expect(errors.join('\n')).toMatch(/OPEN_ROUTER_API_KEY/);
+  });
+
   it('lets an explicit decisionAdapter override incomplete env provider config', async () => {
     const decisionAdapter: DecisionAdapter = {
       provider: 'custom',

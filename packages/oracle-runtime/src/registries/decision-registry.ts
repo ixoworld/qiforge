@@ -1,4 +1,4 @@
-import type { DecisionRegistration } from '@ixo/common';
+import type { DecisionLookup, DecisionRegistration } from '@ixo/common';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type { PluginContext } from '../plugin-api/types.js';
 
@@ -7,34 +7,41 @@ export interface RegisteredDecision {
   decision: DecisionRegistration;
 }
 
-export class DecisionRegistry {
+export class DecisionRegistry implements DecisionLookup {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredDecision[] | null = null;
+  /** Name → registration; the first registration of a name wins. */
+  private byName: Map<string, RegisteredDecision> | null = null;
 
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
+    this.byName = null;
   }
 
   collect(buildCtx: PluginContext): RegisteredDecision[] {
     if (this.bootCache !== null) return this.bootCache;
 
     const out: RegisteredDecision[] = [];
+    const byName = new Map<string, RegisteredDecision>();
     for (const plugin of this.plugins) {
       if (!plugin.getDecisions) continue;
       for (const decision of plugin.getDecisions(buildCtx)) {
-        out.push({ pluginName: plugin.name, decision });
+        const entry: RegisteredDecision = { pluginName: plugin.name, decision };
+        out.push(entry);
+        if (!byName.has(decision.name)) byName.set(decision.name, entry);
       }
     }
     this.bootCache = out;
+    this.byName = byName;
     return out;
   }
 
   get(name: string): RegisteredDecision | undefined {
-    if (this.bootCache === null) {
+    if (this.byName === null) {
       throw new Error('DecisionRegistry.get called before collect');
     }
-    return this.bootCache.find((entry) => entry.decision.name === name);
+    return this.byName.get(name);
   }
 
   namesForPlugin(pluginName: string): string[] {

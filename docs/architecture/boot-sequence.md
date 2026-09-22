@@ -49,11 +49,17 @@ Hard violations are collected; if non-empty, boot throws `Plugin manifest valida
 
 ### 6a. Decision provider cross-check
 
-When no explicit host `decisionAdapter` is supplied,
-`validateDecisionProviderConfig(validated.config)` validates the optional
-bounded Decision provider. `DECISION_PROVIDER='cloudflare-jev'` requires
-`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`; the AI Gateway id is
-optional. An explicit adapter bypasses this env-specific credential check.
+When no explicit host `decisionAdapter` is supplied, one
+`resolveDecisionAdapter(validated.config, { openRouterHeaders })` call (from
+`@ixo/common`) both validates the optional bounded Decision provider and
+builds its adapter, so a misconfigured provider fails here rather than on the
+first evaluation. `DECISION_PROVIDER='openrouter-jev'` requires the existing
+`OPEN_ROUTER_API_KEY`; `'cloudflare-jev'` requires `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`. An unset provider leaves Decisions unconfigured. Each
+missing field is reported as its own boot error before the
+`Env validation failed (N issues)` throw. The resulting adapter is handed to
+`buildAmbientServices` in step 14. An explicit host adapter wins and skips this
+check entirely.
 
 ### 7. Build OracleIdentity
 
@@ -184,6 +190,7 @@ The bootstrap logger reports `[boot-error]` for each issue. Aborts when:
 - Manifest validation collects errors.
 - Env validation collects errors.
 - LLM provider cross-check fails.
+- Decision provider cross-check fails (provider selected without its credentials).
 - `ORACLE_ENTITY_DID` is empty after validation.
 
 What does NOT fail boot:

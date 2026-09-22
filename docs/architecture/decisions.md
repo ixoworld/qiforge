@@ -5,8 +5,12 @@ projected state. They sit beside tools, skills, sub-agents, and middleware but
 serve a different purpose: a Decision answers a finite question; deterministic
 application code decides what consequences, if any, follow.
 
-Provider-independent types live in `@ixo/common/ai/decisions`. The Node runtime
-adds registration, evaluation, timeout handling, provenance, and
+The runtime-independent core lives in `@ixo/common/ai/decisions`: the types,
+`defineDecision`, request/result validation, the `DecisionRuntime` (timeouts,
+abort propagation, provenance), the Jev adapters, and `resolveDecisionAdapter`,
+which turns env config into an adapter. The Node runtime and the Workers
+runtime both consume that module. The Node side adds plugin registration
+(`DecisionRegistry`), the boot-time provider check, and
 `RuntimeContext.decisions`.
 
 ## Why this is a separate primitive
@@ -39,11 +43,11 @@ A Decision never grants authority and never executes a side effect.
 
 QiForge exposes provider-neutral names:
 
-| QiForge kind | Meaning                              | Jev mapping |
-| ------------ | ------------------------------------ | ----------- |
-| `boolean`    | Probability that a condition is true | Noul        |
-| `choice`     | Select one option from a finite set  | Choice      |
-| `ordinal`    | Place the input on an ordered rubric | Score       |
+| QiForge kind | Meaning                              | Jev mapping                                         |
+| ------------ | ------------------------------------ | --------------------------------------------------- |
+| `boolean`    | Probability that a condition is true | Noul (true/false criteria folded into instructions) |
+| `choice`     | Select one option from a finite set  | Choice                                              |
+| `ordinal`    | Place the input on an ordered rubric | Score (at most 10 levels)                           |
 
 Jev is only one possible adapter. Plugin code depends on the QiForge contract,
 not on provider-specific request or response shapes.
@@ -163,7 +167,8 @@ The core validation layer enforces:
 
 1. At least one and at most 16 questions per evaluation.
 2. A finite answer space: choice questions have 2–32 options; ordinal
-   questions have 2–16 levels.
+   questions have 2–10 levels (the Jev Score cap, so a definition that
+   validates locally is accepted by every adapter).
 3. Projected state may be scalar, array, or object; it must be JSON-serializable and at most 64 KiB by default.
 4. Provider answer keys exactly match requested question keys.
 5. Choice answers can only select declared options.
@@ -196,7 +201,13 @@ interface DecisionAdapter {
 }
 ```
 
-Hosts supply an adapter with:
+Without an adapter, `ctx.decisions.evaluate(...)` throws
+`DecisionProviderUnavailableError`. The test runtime provides a deterministic
+mock adapter.
+
+### Choosing a provider
+
+An adapter comes from one of two places. A host can supply one directly:
 
 ```ts
 createOracleApp({
@@ -205,28 +216,48 @@ createOracleApp({
 });
 ```
 
-PR 1 introduces no production provider. Without an adapter,
-`ctx.decisions.evaluate(...)` throws `DecisionProviderUnavailableError`.
-The test runtime provides a deterministic mock adapter.
-
-The first production adapter maps the provider-neutral question kinds to
-TypeSafe Jev through Cloudflare's AI REST API. Enable it with:
+Otherwise `resolveDecisionAdapter(config)` from `@ixo/common` builds one from
+env at boot. A host adapter always wins over env configuration, and when one
+is supplied the env credential check is skipped entirely. The env keys are the
+shared `decisionProviderEnvShape`, spread into the Node base env schema:
 
 ```text
-DECISION_PROVIDER=cloudflare-jev
-CLOUDFLARE_ACCOUNT_ID=<account id>
-CLOUDFLARE_API_TOKEN=<token>
-CLOUDFLARE_AI_GATEWAY_ID=<optional gateway id>
+DECISION_PROVIDER=openrouter-jev | cloudflare-jev
+DECISION_MODEL=<optional model override>
 ```
 
-When the provider is selected, the account id and token are required at boot.
-An explicit `createOracleApp({ decisionAdapter })` override wins over env
-configuration. The optional gateway id is forwarded as
-`cf-aig-gateway-id`; third-party Jev requests otherwise use Cloudflare's
-default gateway behavior.
+| `DECISION_PROVIDER` | Credentials                                                                                                                  |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `openrouter-jev`    | Reuses the existing `OPEN_ROUTER_API_KEY`; nothing else to set.                                                              |
+| `cloudflare-jev`    | On Node: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` (Cloudflare REST API). On Workers: just the `AI` binding, no keys. |
 
-The adapter maps `boolean → Noul`, `choice → Choice`, and
-`ordinal → Score` without changing plugin Decision definitions.
+Leaving `DECISION_PROVIDER` unset leaves Decisions unconfigured. Selecting a
+provider without its credentials fails boot with one reported issue per
+missing field. There is no AI Gateway option; requests go straight to the
+provider.
+
+`DECISION_MODEL` overrides the default model id. OpenRouter's decisions
+endpoint is still alpha, so the OpenRouter adapter pins a specific Jev model
+version by default rather than tracking `latest`; Cloudflare uses the
+account's `typesafe/jev` model.
+
+### Jev mapping
+
+All Jev adapters share one wire layer (`packages/common/src/ai/decisions/jev/`)
+that
+maps the provider-neutral request onto Jev's question types without changing
+plugin Decision definitions:
+
+- `boolean → noul`. Jev's noul question takes instructions only, so any
+  `criteria.true` / `criteria.false` text is folded into the instructions.
+- `choice → choice`, with the declared options as Jev criteria.
+- `ordinal → score`, with the declared levels as Jev criteria. Jev accepts at
+  most 10 levels, which is why the default ordinal limit is 10.
+
+On the way back, probability maps are normalised before validation: any
+declared option or level the provider left out is filled with `0`, since a
+missing entry means the provider assigned it no mass. Keys that were never
+declared still fail validation, as does any answer outside the declared set.
 
 ## Testing
 

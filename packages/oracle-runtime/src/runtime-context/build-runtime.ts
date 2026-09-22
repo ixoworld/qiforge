@@ -9,23 +9,11 @@ import type {
   UserContextData,
 } from '../plugin-api/types.js';
 import { createScopedEmitter } from '../events/scoped-emitter.js';
-import {
-  DecisionProviderUnavailableError,
-  type DecisionEvaluator,
-} from '../decisions/decision-runtime.js';
+import { UNAVAILABLE_DECISION_EVALUATOR } from '@ixo/common';
 import type { AmbientServices } from './ambient.js';
 
 /** Fixed empty `shared` accessors — frozen so callers can't mutate. */
 const EMPTY_SHARED: SharedAccessors = Object.freeze({});
-
-const UNAVAILABLE_DECISIONS: DecisionEvaluator = {
-  async evaluate() {
-    throw new DecisionProviderUnavailableError();
-  },
-  async evaluateByName() {
-    throw new DecisionProviderUnavailableError();
-  },
-};
 
 /**
  * The user channel passed in via LangGraph's per-run context. Mirrors today's
@@ -126,7 +114,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   );
 
   const abortSignal = runConfig.signal ?? new AbortController().signal;
-  const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISIONS;
+  const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISION_EVALUATOR;
   const decisions: RuntimeContext['decisions'] = {
     evaluate: (definition, input, options) =>
       decisionEvaluator.evaluate(definition, input, {

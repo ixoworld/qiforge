@@ -20,12 +20,13 @@ import {
   validateLangsmithTracing,
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
-import {
-  createDecisionAdapterFromConfig,
-  validateDecisionProviderConfig,
-} from '../decisions/index.js';
+import { resolveDecisionAdapter } from '../decisions/index.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
-import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
+import {
+  getModelForRole,
+  getOpenRouterAttributionHeaders,
+  getProviderConfig,
+} from '../llm/llm-provider.js';
 import {
   mergeManifestOverride,
   type PluginManifestOverride,
@@ -285,24 +286,30 @@ export async function createOracleApp(
     );
   }
 
-  // Cross-field check for the optional bounded Decision provider. An explicit
-  // host adapter wins over env configuration, so its presence deliberately
-  // bypasses auto-provider credential validation.
-  if (!opts.decisionAdapter) {
-    const decisionProviderErrors = validateDecisionProviderConfig(
-      validated.config,
-    );
-    if (decisionProviderErrors.length > 0) {
-      for (const issue of decisionProviderErrors) {
+  // Cross-field check for the optional bounded Decision provider, resolved
+  // into its adapter in the same step so a selected provider with missing
+  // credentials fails here rather than on the first evaluation. An explicit
+  // host adapter wins over env configuration and skips the env check.
+  let decisionAdapter: DecisionAdapter | undefined = opts.decisionAdapter;
+  if (!decisionAdapter) {
+    const oracleName = validated.config.ORACLE_NAME;
+    const resolved = resolveDecisionAdapter(validated.config, {
+      openRouterHeaders: getOpenRouterAttributionHeaders(
+        typeof oracleName === 'string' ? oracleName : undefined,
+      ),
+    });
+    if (!resolved.ok) {
+      for (const issue of resolved.issues) {
         reportBootError(
           logger,
           `Decision provider env validation failed for '${issue.field}': ${issue.message}`,
         );
       }
       throw new Error(
-        `Env validation failed (${decisionProviderErrors.length} issue${decisionProviderErrors.length === 1 ? '' : 's'}).`,
+        `Env validation failed (${resolved.issues.length} issue${resolved.issues.length === 1 ? '' : 's'}).`,
       );
     }
+    decisionAdapter = resolved.adapter;
   }
 
   // Cross-field check for the LangSmith selective-tracing allowlist —
@@ -483,9 +490,6 @@ export async function createOracleApp(
       `[createOracleApp] Swagger setup skipped: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-
-  const decisionAdapter =
-    opts.decisionAdapter ?? createDecisionAdapterFromConfig(validated.config);
 
   // 8. AmbientServices — built once Nest's DI container exists. Plugins reach
   // this through `buildRuntimeContext(runConfig, ambient, state)`, wired by

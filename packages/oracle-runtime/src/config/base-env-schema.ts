@@ -1,3 +1,4 @@
+import { decisionProviderEnvShape } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 
 /**
@@ -76,12 +77,10 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
-  // Bounded semantic Decision provider. Optional so deployments that do not
-  // use Decisions preserve their existing behavior.
-  DECISION_PROVIDER: z.enum(['cloudflare-jev']).optional(),
-  CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
-  CLOUDFLARE_API_TOKEN: z.string().optional(),
-  CLOUDFLARE_AI_GATEWAY_ID: z.string().optional(),
+  // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,
+  // Cloudflare credentials). Shared with the Workers runtime; optional so
+  // deployments that do not use Decisions preserve their existing behavior.
+  ...decisionProviderEnvShape,
 
   /**
    * Default model for new chats — an OpenRouter slug (e.g.
