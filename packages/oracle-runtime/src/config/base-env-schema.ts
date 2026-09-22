@@ -1,4 +1,7 @@
-import { decisionProviderEnvShape } from '@ixo/common/ai/decisions';
+import {
+  capabilityRouterEnvShape,
+  decisionProviderEnvShape,
+} from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 
 /**
@@ -81,6 +84,11 @@ export const baseEnvSchema = z.object({
   // Cloudflare credentials). Shared with the Workers runtime; optional so
   // deployments that do not use Decisions preserve their existing behavior.
   ...decisionProviderEnvShape,
+
+  // Capability router (`CAPABILITY_ROUTER=off|shadow|on`): the pre-model
+  // Decision that preloads an on-demand plugin's tools for one turn. Shared
+  // with the Workers runtime; consumed by `modules/messages/capability-router.ts`.
+  ...capabilityRouterEnvShape,
 
   /**
    * Default model for new chats — an OpenRouter slug (e.g.

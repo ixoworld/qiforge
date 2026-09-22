@@ -152,6 +152,7 @@ export async function createMainAgent(
     ambient,
     state,
     availablePlugins,
+    preloadedPlugins = new Set<string>(),
     hooks,
   } = args;
 
@@ -171,6 +172,16 @@ export async function createMainAgent(
   );
 
   const loadedSet = new Set<string>(state.loadedPlugins ?? []);
+  // What tool handlers and the capability gate treat as loaded THIS turn: the
+  // thread's persisted set plus the capability router's one-turn preload. The
+  // union lives only here — `state` is the caller's and stays untouched, so a
+  // preload never reaches the checkpointed `loadedPlugins` channel. Prompt
+  // composition keeps reading `loadedSet`: a prediction exposes tools, it does
+  // not buy operating-guide tokens on a turn where it may be wrong.
+  const visiblePlugins: ReadonlySet<string> = new Set<string>([
+    ...loadedSet,
+    ...preloadedPlugins,
+  ]);
   // Carry the prior request state (editorRoomId, spaceId, browserTools,
   // agActions, …) into the per-request RuntimeContext and the tool-wrapper
   // closures, but NOT the message history: keeping the full `messages` array
@@ -185,12 +196,12 @@ export async function createMainAgent(
   // receives full history via the agent's own `stateInput`.
   //
   // Explicit fields come last so they win over the spread (notably
-  // `loadedPlugins`, which must be the de-duped Set, not the raw state array).
+  // `loadedPlugins`, which must be the visible Set, not the raw state array).
   const wrapState: RuntimeStateInput = {
     ...state,
     messages: [],
     userContext: state.userContext,
-    loadedPlugins: loadedSet,
+    loadedPlugins: visiblePlugins,
   };
 
   // ── THE COMMERCE-LANE GUARD ─────────────────────────────────────────────
@@ -351,6 +362,7 @@ export async function createMainAgent(
       eagerTools: eagerTools.length,
       onDemandTools: onDemandTools.length,
       loadedPlugins: Array.from(loadedSet),
+      preloadedPlugins: Array.from(preloadedPlugins),
       silentTools: silentTools.length,
       subAgents: {
         count: subAgentEntries.length,
@@ -418,6 +430,7 @@ export async function createMainAgent(
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
+      preloadedPlugins,
       logger: ambient.logger,
     }),
     createToolValidationMiddleware({

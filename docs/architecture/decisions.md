@@ -286,10 +286,26 @@ await rt.invokeDecision('example.route', input);
 This keeps bounded semantic evaluation independently testable from generative
 agent behavior.
 
+## Runtime consumers
+
+Two pieces of runtime infrastructure evaluate a Decision on the message path,
+both ahead of the first generative model call and both failing open:
+
+| Consumer                                                             | Decision                        | Where                                                     | What the verdict drives                                                                                                              |
+| -------------------------------------------------------------------- | ------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Commerce routing (`ORACLE_PAYMENTS_ROUTER_ENGINE=decision\|-shadow`) | `oracle-payments.route-message` | `modules/messages/message-router.service.ts`, Matrix only | support vs. work persona; see [Matrix commerce](matrix-commerce.md)                                                                  |
+| Capability router (`CAPABILITY_ROUTER=on\|shadow`)                   | `runtime.route-capabilities`    | `modules/messages/capability-router.ts`, every ingress    | which on-demand plugin's tools to expose for the turn; see [Meta-tools and discovery](meta-tools-and-discovery.md#capability-router) |
+
+The capability router's Decision and its policy (`decideCapabilityRoute`, the
+0.7 floor) are defined in `@ixo/common/ai/decisions/capability-router.ts` so
+the Node and Workers runtimes preload on identical rules; only the wiring is
+runtime-specific.
+
 ## Read next
 
 - [Plugin lifecycle](plugin-lifecycle.md) — when Decisions are registered.
 - [Runtime context](runtime-context.md) — how `ctx.decisions` is scoped to a
   turn.
-- [Matrix commerce](matrix-commerce.md) — the first planned production
-  consumer.
+- [Matrix commerce](matrix-commerce.md) — the first production consumer.
+- [Meta-tools and discovery](meta-tools-and-discovery.md#capability-router)
+  — the second: the pre-model capability preload.

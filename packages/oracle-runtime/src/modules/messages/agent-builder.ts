@@ -24,6 +24,10 @@ import {
 import { UcanService } from '../ucan/ucan.service.js';
 import { EditorPlugin } from '../../plugins/editor/editor.plugin.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
+import {
+  CapabilityRouter,
+  type CapabilityRouteShadow,
+} from './capability-router.js';
 import { resolveLangsmithTracing } from './langsmith-tracing.js';
 import type { SendMessageRequest } from './messages.service.js';
 import { OracleRuntimeBundleHolder } from './oracle-runtime-bundle.js';
@@ -75,6 +79,15 @@ export interface BuiltAgent {
    * when classifying the error it sends to the client.
    */
   byoProvider: ByoProvider | null;
+  /**
+   * Present when the capability router ran in `shadow` mode this turn. A
+   * runner that ends up holding the final graph state (the batch path) hands
+   * it the turn's `loadedPlugins` so the shadow line can say whether the
+   * prediction agreed with what the model actually loaded. The SSE path
+   * streams events and never sees the final state, so it cannot compare
+   * without re-reading the checkpoint; it leaves the handle unused.
+   */
+  capabilityRouteShadow?: CapabilityRouteShadow;
 }
 
 /**
@@ -126,6 +139,7 @@ export class AgentBuilder {
     private readonly config: ConfigService,
     private readonly byoLlm: ByoLlmService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    private readonly capabilityRouter: CapabilityRouter,
   ) {}
 
   async build(
@@ -437,6 +451,25 @@ export class AgentBuilder {
       ? { ...hooks, checkpointerForUser: () => Promise.resolve(checkpointer) }
       : hooks;
 
+    // Capability router: predict which still-unloaded on-demand plugin this
+    // message needs and expose its tools for THIS turn, sparing the model a
+    // `load_capability` round trip. Off by default; `on` is awaited here (the
+    // Decision's own 2 s budget bounds it) and fails open to no preload. The
+    // result reaches `createMainAgent` as `preloadedPlugins` and nothing
+    // else — deliberately not `buildTimeState` or `stateInput`, whose
+    // `loadedPlugins` is a checkpointed set-union that only
+    // `load_capability` may grow. The candidate set excludes everything the
+    // turn already treats as loaded, the editor seed above included.
+    const capabilityRoute = await this.capabilityRouter.route({
+      requestId: prepared.requestId,
+      mode: bundle.config.CAPABILITY_ROUTER,
+      text: payload.message,
+      manifests: bundle.registries.manifests.collect(),
+      loadedPlugins: new Set(buildTimeState.loadedPlugins ?? []),
+      commerceMode: payload.commerce?.mode,
+      signal: abortController?.signal,
+    });
+
     // On a BYO turn, swap in a request-scoped LLM adapter so the main model,
     // sub-agents and plugin `rtCtx.llm` consumers all run on the user's
     // credential (roles the provider can't serve fall through to the platform
@@ -458,6 +491,9 @@ export class AgentBuilder {
       ambient,
       requestCtx,
       state: buildTimeState,
+      ...(capabilityRoute.preloadedPlugins.size > 0 && {
+        preloadedPlugins: capabilityRoute.preloadedPlugins,
+      }),
     });
 
     const stateInput: Partial<TMainAgentGraphState> = {
@@ -528,6 +564,9 @@ export class AgentBuilder {
       stateInput,
       langGraphConfig,
       byoProvider: byoTurn?.provider ?? null,
+      ...(capabilityRoute.shadow && {
+        capabilityRouteShadow: capabilityRoute.shadow,
+      }),
     };
   }
 
