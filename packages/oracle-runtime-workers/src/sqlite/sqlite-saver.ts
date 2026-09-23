@@ -137,7 +137,12 @@ interface CheckpointWithMessages extends Checkpoint {
  * Compile-time guard: the metadata keys `list()` accepts as filters must stay
  * in sync with `CheckpointMetadata`. If this stops compiling, update the list.
  */
-const checkpointMetadataKeys = ['source', 'step', 'parents'] as const;
+const checkpointMetadataKeys = [
+  'source',
+  'step',
+  'parents',
+  'counters_since_delta_snapshot',
+] as const;
 type MetadataKey = keyof CheckpointMetadata;
 type CheckKeys<K extends readonly MetadataKey[]> = [MetadataKey] extends [
   K[number],

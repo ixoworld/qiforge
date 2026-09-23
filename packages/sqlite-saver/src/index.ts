@@ -99,7 +99,12 @@ const PRUNE_SLACK = 5;
 // In the `SqliteSaver.list` method, we need to sanitize the `options.filter` argument to ensure it only contains keys
 // that are part of the `CheckpointMetadata` type. The lines below ensure that we get compile-time errors if the list
 // of keys that we use is out of sync with the `CheckpointMetadata` type.
-const checkpointMetadataKeys = ['source', 'step', 'parents'] as const;
+const checkpointMetadataKeys = [
+  'source',
+  'step',
+  'parents',
+  'counters_since_delta_snapshot',
+] as const;
 
 type CheckKeys<T, K extends readonly (keyof T)[]> = [K[number]] extends [
   keyof T,
