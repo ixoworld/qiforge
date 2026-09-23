@@ -1,5 +1,11 @@
 # @ixo/oracles-client-sdk
 
+## 1.4.1
+
+### Patch Changes
+
+- [#297](https://github.com/ixoworld/qiforge/pull/297) [`d38f90a`](https://github.com/ixoworld/qiforge/commit/d38f90a06efaf641ae73d1e75e51464c187e3751) Thanks [@ig-shaun](https://github.com/ig-shaun)! - SSE parser follows the specification for framing: a frame's lines may arrive across any number of network reads (UTF-8 sequences included), `\r\n` line ends are accepted, several `data:` lines are joined, and a heartbeat comment never ends a frame in progress. Event ids, malformed-frame handling and abort behaviour are unchanged.
+
 ## 1.4.0
 
 ### Minor Changes
