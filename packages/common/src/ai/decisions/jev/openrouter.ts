@@ -40,7 +40,7 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
     this.apiKey = options.apiKey;
     this.model = options.model?.trim() || JEV_MODEL_OPENROUTER;
     this.baseUrl = (options.baseUrl ?? OPENROUTER_API_BASE).replace(/\/$/, '');
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.extraHeaders = { ...options.headers };
   }
 

@@ -49,7 +49,7 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
     this.apiToken = options.apiToken;
     this.model = options.model?.trim() || JEV_MODEL_CLOUDFLARE;
     this.baseUrl = (options.baseUrl ?? CLOUDFLARE_API_BASE).replace(/\/$/, '');
-    this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   async evaluate(
