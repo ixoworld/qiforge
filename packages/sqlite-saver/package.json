@@ -26,7 +26,7 @@
     "@ixo/eslint-config": "workspace:*",
     "@ixo/typescript-config": "workspace:*",
     "@ixo/vitest-config": "workspace:*",
-    "@langchain/langgraph": "1.3.2",
+    "@langchain/langgraph": "1.4.17",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
     "langchain": "1.4.2",
@@ -36,7 +36,7 @@
   "dependencies": {
     "@ixo/logger": "workspace:*",
     "@langchain/core": "1.1.48",
-    "@langchain/langgraph-checkpoint": "1.0.2",
+    "@langchain/langgraph-checkpoint": "1.1.5",
     "better-sqlite3": "^12.9.0"
   }
 }
