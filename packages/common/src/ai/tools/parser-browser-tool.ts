@@ -31,9 +31,14 @@ export function parserBrowserTool(params: IParserBrowserToolParams) {
         void logActionToMatrix(
           {
             name: toolName,
-            args: input as Record<string, unknown>,
-            result,
-            success: true,
+            args: {},
+            result: { requestId },
+            success: !(
+              typeof result === 'object' &&
+              result !== null &&
+              'success' in result &&
+              result.success === false
+            ),
           },
           {
             roomId: configs.matrix.roomId,

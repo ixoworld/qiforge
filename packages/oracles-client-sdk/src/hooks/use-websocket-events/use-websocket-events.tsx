@@ -125,19 +125,12 @@ export function useWebSocketEvents(
       // (a dedicated `on(...)` per event name on top of it delivered
       // tool_call / render_component / cache invalidation twice).
 
-      if (
-        browserToolsRef.current &&
-        Object.keys(browserToolsRef.current).length > 0
-      ) {
-        // Listen for browser tool calls
-        newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
-          await executeBrowserToolCall(
-            newSocket,
-            browserToolsRef.current,
-            data,
-          );
-        });
-      }
+      // Tools can arrive after connection. Bind routing to this connection's
+      // authenticated session and read the current registry only at dispatch.
+      newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
+        if (cancelled || data.sessionId !== sessionId) return;
+        await executeBrowserToolCall(newSocket, browserToolsRef.current, data);
+      });
 
       // Listen for AG-UI action calls (always register listener, even if no tools yet)
       // The listener will check actionToolsRef at execution time
@@ -151,6 +144,12 @@ export function useWebSocketEvents(
           args: Record<string, unknown>;
           status: string;
         }) => {
+          if (
+            cancelled ||
+            data.sessionId !== sessionId ||
+            data.status !== 'isRunning'
+          )
+            return;
           const tool = actionToolsRef.current?.[data.toolName];
           if (!tool) {
             console.error(

@@ -55,15 +55,17 @@ export abstract class BaseEvent<P> {
    */
   static registerEventHandlers(
     server: Server<DefaultEventsMap, DefaultEventsMap>,
-  ): void {
-    rootEventEmitter.on(this.eventName, (data) => {
+  ): () => void {
+    const listener = (data: unknown) => {
       const payload = shouldHaveSessionId(data);
       // console.log(
       //   `Emitting WS event: ${this.eventName} with payload:`,
       //   payload,
       // );
       server.to(payload.sessionId).emit(this.eventName, data);
-    });
+    };
+    rootEventEmitter.on(this.eventName, listener);
+    return () => rootEventEmitter.removeListener(this.eventName, listener);
   }
 
   /**

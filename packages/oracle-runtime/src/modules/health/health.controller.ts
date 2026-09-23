@@ -30,6 +30,14 @@ export class HealthController {
   @Get('health')
   @ApiOperation({ summary: 'Liveness probe.' })
   health() {
-    return { status: 'ok', timestamp: new Date().toISOString() };
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      frontendTools: {
+        protocolVersion: 2,
+        execution: 'single-socket',
+        timeoutOutcome: 'unknown',
+      },
+    };
   }
 }

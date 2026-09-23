@@ -8,6 +8,25 @@ import {
 import { ToolRegistry } from './tool-registry.js';
 
 describe('ToolRegistry', () => {
+  it('rejects request descriptors that shadow an installed tool', async () => {
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'authority',
+        getTools: () => [makeTool('mutate_topic')],
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [makeTool('mutate_topic')],
+      }),
+    );
+    await expect(
+      reg.collect(makeBuildCtx(), makeRuntimeContext()),
+    ).rejects.toThrow('collisions');
+  });
+
   it('collects tools from a single plugin in registration order', async () => {
     const reg = new ToolRegistry();
     reg.register(
@@ -96,7 +115,6 @@ describe('ToolRegistry', () => {
     );
 
     await reg.collect(makeBuildCtx());
-
     expect(() => reg.assertNoCollisions()).toThrow(/send_message/);
     expect(() => reg.assertNoCollisions()).toThrow(/slack/);
     expect(() => reg.assertNoCollisions()).toThrow(/matrix/);

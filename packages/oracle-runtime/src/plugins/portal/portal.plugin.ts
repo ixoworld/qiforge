@@ -170,21 +170,50 @@ function buildBrowserTool(descriptor: BrowserToolCall): PluginTool | null {
       const requestId = ctx.session.requestId;
       const toolCallId = `tc-${requestId ?? 'noreq'}`;
 
+      let invocationId: string | undefined;
       const result = await callBrowserTool({
         sessionId,
         toolCallId,
+        onInvocation: (id) => {
+          invocationId = id;
+        },
         toolName: descriptor.name,
         args,
-        timeout: BROWSER_TOOL_TIMEOUT_MS,
+        timeout:
+          descriptor.name === 'mutate_topic'
+            ? 120_000
+            : BROWSER_TOOL_TIMEOUT_MS,
       });
 
       if (ctx.session.roomId) {
         void logActionToMatrix(
           {
             name: descriptor.name,
-            args,
-            result,
-            success: true,
+            args: {},
+            result: {
+              invocationId,
+              commandId:
+                typeof result === 'object' &&
+                result !== null &&
+                'commandId' in result &&
+                typeof result.commandId === 'string' &&
+                /^[a-f0-9]{64}$/.test(result.commandId)
+                  ? result.commandId
+                  : undefined,
+              outcome:
+                typeof result === 'object' &&
+                result !== null &&
+                'outcome' in result &&
+                result.outcome === 'unknown'
+                  ? 'unknown'
+                  : undefined,
+            },
+            success: !(
+              typeof result === 'object' &&
+              result !== null &&
+              'success' in result &&
+              result.success === false
+            ),
           },
           {
             roomId: ctx.session.roomId,

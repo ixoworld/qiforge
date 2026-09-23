@@ -21,6 +21,9 @@ import {
 } from '../auth/validate-ucan-invocation.js';
 import { UcanService } from '../ucan/ucan.service.js';
 import { WsService } from './ws.service.js';
+import { FrontendInvocations } from './frontend-invocations.js';
+import { authenticatedFrontendResult } from './frontend-result.js';
+import { SessionsService } from '../sessions/sessions.service.js';
 
 @WebSocketGateway({
   cors: {
@@ -34,17 +37,36 @@ export class WsGateway
   @WebSocketServer()
   server!: Server;
 
+  private detachEvents?: () => void;
+
+  onModuleDestroy(): void {
+    this.detachEvents?.();
+  }
+
+  private readonly frontendInvocations = new FrontendInvocations();
+
   private readonly logger = new Logger(WsGateway.name);
 
   constructor(
     private readonly wsService: WsService,
     private readonly configService: ConfigService,
     @Optional() private readonly ucanService?: UcanService,
+    @Optional() private readonly sessionsService?: SessionsService,
   ) {}
 
   afterInit(): void {
     this.logger.log('WebSocket gateway initialized');
-    GraphEventEmitter.registerEventHandlers(this.server);
+    this.detachEvents?.();
+    this.detachEvents = GraphEventEmitter.registerEventHandlers(
+      this.server,
+      (kind, data) => {
+        this.frontendInvocations.dispatch(
+          kind,
+          data,
+          this.server.sockets.sockets.values(),
+        );
+      },
+    );
   }
 
   async handleConnection(client: Socket): Promise<void> {
@@ -138,9 +160,23 @@ export class WsGateway
       return;
     }
 
+    try {
+      if (
+        !this.sessionsService ||
+        !(await this.sessionsService.ownsSession(sessionId, userDid))
+      ) {
+        client.disconnect();
+        return;
+      }
+    } catch {
+      client.disconnect();
+      return;
+    }
+
     // Stash the validated identity on the socket so disconnect-time history
     // processing reads the authenticated DID rather than the untrusted query.
     client.data.userDid = userDid;
+    client.data.sessionId = sessionId;
 
     this.logger.log(
       `WebSocket connection established for session: ${sessionId}, did: ${userDid}, client: ${client.id}`,
@@ -244,11 +280,21 @@ export class WsGateway
       `${eventType} received for session: ${sessionId}, toolId: ${toolId}`,
     );
 
-    rootEventEmitter.emit(eventType, {
-      sessionId,
-      ...data,
-      timestamp: new Date().toISOString(),
-    });
+    const result = authenticatedFrontendResult(
+      client.data.sessionId,
+      client.data.userDid,
+      data,
+    );
+    if (
+      result &&
+      this.frontendInvocations.accept(
+        eventType,
+        client,
+        result.sessionId,
+        result.toolCallId,
+      )
+    )
+      rootEventEmitter.emit(eventType, result);
   }
 
   @SubscribeMessage('tool_result')

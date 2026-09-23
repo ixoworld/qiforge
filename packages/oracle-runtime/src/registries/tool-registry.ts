@@ -173,6 +173,7 @@ export class ToolRegistry {
       description: tool.description,
       origin,
     }));
+    if (rtCtx) this.assertNoCollisions();
     return out;
   }
 
@@ -228,7 +229,7 @@ export class ToolRegistry {
     const collisions: string[] = [];
     for (const { pluginName, name } of this.summaries()) {
       const prev = seen.get(name);
-      if (prev !== undefined && prev !== pluginName) {
+      if (prev !== undefined) {
         collisions.push(
           `Tool "${name}" registered by both "${prev}" and "${pluginName}"`,
         );
