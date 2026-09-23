@@ -97,6 +97,14 @@ function makeRuntimeContext(
       }),
       getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
     },
+    decisions: {
+      evaluate: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
+      evaluateByName: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
+    },
     llm: {
       get: () =>
         ({}) as unknown as RuntimeContext['llm'] extends {

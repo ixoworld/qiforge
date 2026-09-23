@@ -1,4 +1,46 @@
 export { createOracleApp } from './bootstrap/index.js';
+export {
+  defineDecision,
+  DEFAULT_DECISION_LIMITS,
+  validateDecisionProviderResult,
+  validateDecisionRequest,
+} from '@ixo/common';
+export type {
+  DecisionAdapter,
+  DecisionAnswer,
+  DecisionDefinition,
+  DecisionEvaluateOptions,
+  DecisionEvaluation,
+  DecisionProviderResult,
+  DecisionQuestion,
+  DecisionRegistration,
+  DecisionRequest,
+} from '@ixo/common';
+export {
+  DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionProviderUnavailableError,
+  DecisionRuntime,
+  UNAVAILABLE_DECISION_EVALUATOR,
+  CloudflareJevDecisionAdapter,
+  DECISION_PROVIDERS,
+  JevDecisionError,
+  OpenRouterJevDecisionAdapter,
+  WorkersAiJevDecisionAdapter,
+  decisionProviderEnvShape,
+  resolveDecisionAdapter,
+} from './decisions/index.js';
+export type {
+  CloudflareJevAdapterOptions,
+  DecisionEvaluator,
+  DecisionProviderConfigIssue,
+  DecisionProviderName,
+  JevProviderName,
+  OpenRouterJevAdapterOptions,
+  ResolveDecisionAdapterOptions,
+  ResolveDecisionAdapterResult,
+  WorkersAiBinding,
+  WorkersAiJevAdapterOptions,
+} from './decisions/index.js';
 export type {
   OracleApp,
   CreateOracleAppOptions,
@@ -6,6 +48,9 @@ export type {
   PluginStatusReport,
   PluginStatusChangeEvent,
 } from './bootstrap/index.js';
+
+export { DecisionRegistry } from './registries/decision-registry.js';
+export type { RegisteredDecision } from './registries/decision-registry.js';
 
 export { OraclePlugin } from './plugin-api/oracle-plugin.js';
 export { defineOraclePlugin } from './plugin-api/define-plugin.js';

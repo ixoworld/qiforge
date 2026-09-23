@@ -4,6 +4,13 @@
  * Durable Objects, Matrix, or Hono; the host (`src/do`, `src/shell`) supplies
  * those through the `AmbientServices` adapters and mounts `pluginRoutes`.
  */
+import {
+  DecisionRuntime,
+  resolveDecisionAdapter,
+  type DecisionAdapter,
+  type DecisionEvaluator,
+  type WorkersAiBinding,
+} from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 import type { OraclePlugin, PluginRoute } from '../plugin-api/oracle-plugin';
 import type {
@@ -14,7 +21,11 @@ import type {
   PluginContext,
 } from '../plugin-api/types';
 import { baseEnvSchema, composeEnvSchema, validateEnv } from './env';
-import { createLlmAdapter, type OpenRouterLlmAdapter } from './llm';
+import {
+  createLlmAdapter,
+  openRouterAttributionHeaders,
+  type OpenRouterLlmAdapter,
+} from './llm';
 import { validateManifest, type PluginManifestOverride } from './manifest';
 import {
   resolvePlugins,
@@ -50,6 +61,7 @@ export type {
 
 export {
   ConfigSchemaRegistry,
+  DecisionRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
   SharedStateRegistry,
@@ -61,6 +73,7 @@ export {
 export type {
   ManifestCrossCheckResult,
   RegisteredConfigSchema,
+  RegisteredDecision,
   RegisteredManifest,
   RegisteredMiddleware,
   RegisteredSharedAccessor,
@@ -69,6 +82,34 @@ export type {
   Registries,
   ToolSummary,
 } from './registries';
+
+export {
+  CloudflareJevDecisionAdapter,
+  DECISION_PROVIDERS,
+  DecisionProviderUnavailableError,
+  DecisionRuntime,
+  JevDecisionError,
+  OpenRouterJevDecisionAdapter,
+  UNAVAILABLE_DECISION_EVALUATOR,
+  WorkersAiJevDecisionAdapter,
+  decisionProviderEnvShape,
+  resolveDecisionAdapter,
+} from '@ixo/common/ai/decisions';
+export type {
+  CloudflareJevAdapterOptions,
+  DecisionAdapter,
+  DecisionEvaluator,
+  DecisionLookup,
+  DecisionProviderConfigIssue,
+  DecisionProviderName,
+  DecisionRuntimeLogger,
+  JevProviderName,
+  OpenRouterJevAdapterOptions,
+  ResolveDecisionAdapterOptions,
+  ResolveDecisionAdapterResult,
+  WorkersAiBinding,
+  WorkersAiJevAdapterOptions,
+} from '@ixo/common/ai/decisions';
 
 export {
   estimateTokensApprox,
@@ -114,6 +155,7 @@ export {
   isAllowedModel,
   listModelCatalog,
   listModels,
+  openRouterAttributionHeaders,
 } from './llm';
 export {
   OPENROUTER_MODELS_URL,
@@ -253,6 +295,12 @@ export interface RuntimeCoreOptions {
    * namespaces, …) are stripped from `validatedEnv`.
    */
   env: Record<string, unknown>;
+  /**
+   * Host-supplied bounded Decision adapter (the Node runtime's
+   * `createOracleApp` option of the same name). Wins over the
+   * `DECISION_PROVIDER` env configuration, which is then not checked.
+   */
+  decisionAdapter?: DecisionAdapter;
   /** Boot + runtime logger. Defaults to a silent logger. */
   logger?: Logger;
 }
@@ -278,13 +326,20 @@ export interface RuntimeCore {
   authExcludedRoutes: AuthExcludedRoute[];
   /** OpenRouter-backed LLM adapter (`get(role, params?)`). */
   llm: OpenRouterLlmAdapter;
+  /**
+   * Bounded semantic Decision evaluator over the decision registry and the
+   * configured adapter — what `ctx.decisions` forwards to. Without a provider
+   * every call rejects with `DecisionProviderUnavailableError`.
+   */
+  decisions: DecisionEvaluator;
   logger: Logger;
   /** A boot-time `PluginContext` scoped to `pluginName` (default `__runtime__`). */
   buildCtx(pluginName?: string): PluginContext;
   /**
    * Warm the registries' boot caches (`getTools` / `getSubAgents` /
-   * `getMiddlewares`) and run the cross-plugin checks that need them: tool,
-   * sub-agent and shared-state name collisions (fatal), and every manifest's
+   * `getMiddlewares` / `getDecisions`) and run the cross-plugin checks that
+   * need them: tool, sub-agent, shared-state and decision name collisions
+   * (fatal), and every manifest's
    * `examples[].tool` references (advisory — logged). Memoised — safe to
    * await on every turn; the first agent build would otherwise perform the
    * collection lazily without the checks. Rejects with the boot error.
@@ -295,6 +350,19 @@ export interface RuntimeCore {
 function reportBootError(logger: Logger, message: string, hint?: string): void {
   const body = hint ? `${message}\n            ${hint}` : message;
   logger.error(`[boot-error] ${body}`);
+}
+
+/**
+ * The Workers AI binding (`env.AI`) is an object exposing `run`. Only its
+ * shape can be checked: bindings carry no brand the runtime could test for.
+ */
+function isWorkersAiBinding(value: unknown): value is WorkersAiBinding {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'run' in value &&
+    typeof value.run === 'function'
+  );
 }
 
 function validateConfig(config: OracleConfig): void {
@@ -386,7 +454,39 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     );
   }
 
-  // 4. Identity.
+  // 4. Decision provider — resolved here so a selected provider with missing
+  // credentials fails at boot rather than on the first evaluation. A host
+  // adapter wins over env and skips the check. The Workers AI binding is not
+  // a string, so Zod strips it from `validated.config`; it is read from the
+  // raw env.
+  let decisionAdapter = opts.decisionAdapter;
+  if (!decisionAdapter) {
+    const workersAi = opts.env.AI;
+    const resolvedAdapter = resolveDecisionAdapter(validated.config, {
+      ...(isWorkersAiBinding(workersAi) ? { workersAi } : {}),
+      openRouterHeaders: openRouterAttributionHeaders(
+        String(validated.config.ORACLE_NAME),
+      ),
+    });
+    if (!resolvedAdapter.ok) {
+      const lines: string[] = [];
+      for (const issue of resolvedAdapter.issues) {
+        const message = `Decision provider env validation failed for '${issue.field}': ${issue.message}`;
+        reportBootError(
+          logger,
+          message,
+          `Set '${issue.field}' on the Worker (wrangler secret / vars).`,
+        );
+        lines.push(message);
+      }
+      throw new Error(
+        `Env validation failed (${lines.length} issues):\n  - ${lines.join('\n  - ')}`,
+      );
+    }
+    decisionAdapter = resolvedAdapter.adapter;
+  }
+
+  // 5. Identity.
   const oracleDid = String(validated.config.ORACLE_DID);
   const entityDid =
     typeof validated.config.ORACLE_ENTITY_DID === 'string' &&
@@ -401,14 +501,20 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     prompt: opts.config.prompt ?? {},
   };
 
-  // 5. Registries.
+  // 6. Registries.
   for (const plugin of resolved.loaded) {
     registries.tools.register(plugin);
     registries.subAgents.register(plugin);
     registries.middlewares.register(plugin);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
+    registries.decisions.register(plugin);
   }
+  const decisions: DecisionEvaluator = new DecisionRuntime(
+    registries.decisions,
+    decisionAdapter,
+    logger,
+  );
 
   const availablePlugins: ReadonlySet<string> = loadedNames;
   const buildCtx = (pluginName = '__runtime__'): PluginContext =>
@@ -420,7 +526,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
       pluginName,
     });
 
-  // 6. Routes + auth exclusions (sync — plugins close over config here).
+  // 7. Routes + auth exclusions (sync — plugins close over config here).
   const pluginRoutes: PluginRoute[] = resolved.loaded.flatMap(
     (p) => p.getRoutes?.(buildCtx(p.name)) ?? [],
   );
@@ -428,7 +534,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     (p) => p.getAuthExcludedRoutes?.() ?? [],
   );
 
-  // 7. LLM.
+  // 8. LLM.
   const llm = createLlmAdapter(
     {
       OPEN_ROUTER_API_KEY: String(validated.config.OPEN_ROUTER_API_KEY),
@@ -446,7 +552,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     logger,
   );
 
-  // 8. Warm-up (memoised). Collision + manifest cross-checks need the boot
+  // 9. Warm-up (memoised). Collision + manifest cross-checks need the boot
   // caches, which may involve async `getTools`, so they cannot run here.
   let warmed: Promise<void> | null = null;
   const warm = (): Promise<void> => {
@@ -455,10 +561,12 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
       await registries.tools.collectBoot(ctx);
       registries.subAgents.collectBoot(ctx);
       registries.middlewares.collect(ctx);
+      registries.decisions.collect(ctx);
       try {
         registries.tools.assertNoCollisions();
         registries.subAgents.assertNoCollisions();
         registries.sharedState.assertNoCollisions();
+        registries.decisions.assertNoCollisions();
         // Advisory only: request-time tools (`getRequestTools`) are invisible
         // at boot, so an example that names one reads as "unknown" here. The
         // Node runtime does not run this check at boot at all; surfacing it
@@ -506,6 +614,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     pluginRoutes,
     authExcludedRoutes,
     llm,
+    decisions,
     logger,
     buildCtx,
     warm,

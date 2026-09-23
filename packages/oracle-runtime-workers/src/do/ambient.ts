@@ -12,6 +12,7 @@
  *  - emit      → routed to the SSE writer of the turn that owns the
  *                payload's `sessionId` (same shape as the Node `wsEmitter`).
  */
+import type { DecisionEvaluator } from '@ixo/common/ai/decisions';
 import type {
   AmbientServices,
   DelegationLike,
@@ -249,6 +250,8 @@ export interface CreateAmbientInput {
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
   llm: LlmAdapter;
+  /** The core's Decision evaluator (`RuntimeCore.decisions`), behind `ctx.decisions`. */
+  decisions?: DecisionEvaluator;
   logger: Logger;
   storage: DurableObjectStorage;
   gateway: DurableObjectStub<MatrixGatewayObject>;
@@ -276,6 +279,7 @@ export function createAmbientServices(
     identity: input.identity,
     availablePlugins: input.availablePlugins,
     llm: input.llm,
+    ...(input.decisions ? { decisions: input.decisions } : {}),
     logger: input.logger,
     emit: input.events,
     blobStore: createBlobStore(input.storage),

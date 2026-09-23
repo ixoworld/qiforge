@@ -49,6 +49,7 @@ describe('CommerceRouterPortRegistrar', () => {
     const { registrar, sendIntent } = makeRegistrar({
       ORACLE_ENTITY_DID,
       ORACLE_PAYMENTS_ROUTER_MODEL: 'openai/custom-router',
+      ORACLE_PAYMENTS_ROUTER_ENGINE: 'decision-shadow',
     });
     expect(getCommerceRouterPort()).toBeNull();
 
@@ -56,6 +57,8 @@ describe('CommerceRouterPortRegistrar', () => {
     const port = getCommerceRouterPort();
     expect(port).not.toBeNull();
     expect(port?.routerModel).toBe('openai/custom-router');
+    expect(port?.routerEngine).toBe('decision-shadow');
+    expect(port?.routerDecisionName).toBe('oracle-payments.route-message');
 
     // Services are reduced from the card views to the routed shape.
     const services = await port!.getServices();
@@ -143,6 +146,21 @@ describe('CommerceRouterPortRegistrar', () => {
 
     registrar.onModuleDestroy();
     expect(getCommerceRouterPort()).toBeNull();
+  });
+
+  it('registers the decision engine when configured', () => {
+    const { registrar } = makeRegistrar({
+      ORACLE_ENTITY_DID,
+      ORACLE_PAYMENTS_ROUTER_ENGINE: 'decision',
+    });
+
+    registrar.onModuleInit();
+
+    expect(getCommerceRouterPort()).toMatchObject({
+      routerEngine: 'decision',
+      routerDecisionName: 'oracle-payments.route-message',
+    });
+    registrar.onModuleDestroy();
   });
 
   it('persists work mode, so the next turn routes to work with no classifier call', async () => {

@@ -217,10 +217,20 @@ export function getProviderConfig() {
     provider,
     baseURL: 'https://openrouter.ai/api/v1',
     apiKey: process.env.OPEN_ROUTER_API_KEY ?? '',
-    headers: {
-      'HTTP-Referer': 'oracle-app.com',
-      'X-Title': process.env.ORACLE_NAME ?? 'Oracle App',
-    },
+    headers: getOpenRouterAttributionHeaders(process.env.ORACLE_NAME),
+  };
+}
+
+/**
+ * App-attribution headers OpenRouter reads on every request. Shared by the
+ * chat-model transport and the Decision adapter so both report the same app.
+ */
+export function getOpenRouterAttributionHeaders(
+  oracleName: string | undefined,
+): Record<string, string> {
+  return {
+    'HTTP-Referer': 'oracle-app.com',
+    'X-Title': oracleName ?? 'Oracle App',
   };
 }
 

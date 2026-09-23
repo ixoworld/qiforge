@@ -1,3 +1,9 @@
+import {
+  UNAVAILABLE_DECISION_EVALUATOR,
+  type DecisionEvaluateOptions,
+  type DecisionEvaluator,
+} from '@ixo/common/ai/decisions';
+import type { Callbacks } from '@langchain/core/callbacks/manager';
 import type { BotCredentials } from '../do/contracts';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -165,6 +171,12 @@ export interface AmbientServices {
   emit: EmitAdapter;
   ucan: UcanAdapter;
   logger: Logger;
+  /**
+   * Bounded semantic Decision evaluator behind `ctx.decisions`. Optional only
+   * for legacy and test ambients: without one every call rejects with
+   * `DecisionProviderUnavailableError`.
+   */
+  decisions?: DecisionEvaluator;
   /** Host task scheduler for the current user, when the host provides one. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   /** Host user-preferences store for the current user, when provided. */
@@ -314,6 +326,13 @@ export interface RunConfigContext {
 export interface RunConfig {
   context: RunConfigContext;
   signal?: AbortSignal;
+  /**
+   * LangChain callbacks scoped to the current run, which for a tool call is
+   * the tool's own run. `ctx.decisions` hands them to each evaluation so its
+   * trace span nests under the tool: Workers has no implicit run context for
+   * the span to find its parent through.
+   */
+  callbacks?: Callbacks;
   toolCall?: { id?: string };
   /**
    * The LIVE graph state at the moment the tool is called (LangGraph's
@@ -376,6 +395,26 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   );
 
   const abortSignal = runConfig.signal ?? new AbortController().signal;
+
+  // The turn's signal is the default for every Decision, so an aborted turn
+  // cancels its in-flight evaluations; a caller may still scope one tighter.
+  // The run's callbacks are the default tracer, so a Decision a tool makes
+  // shows up under that tool in LangSmith when the turn is traced.
+  const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISION_EVALUATOR;
+  const withTurnDefaults = (
+    options: DecisionEvaluateOptions | undefined,
+  ): DecisionEvaluateOptions => ({
+    ...options,
+    signal: options?.signal ?? abortSignal,
+    ...(options?.callbacks === undefined &&
+      runConfig.callbacks !== undefined && { callbacks: runConfig.callbacks }),
+  });
+  const decisions: RuntimeContext['decisions'] = {
+    evaluate: (definition, input, options) =>
+      decisionEvaluator.evaluate(definition, input, withTurnDefaults(options)),
+    evaluateByName: (name, input, options) =>
+      decisionEvaluator.evaluateByName(name, input, withTurnDefaults(options)),
+  };
 
   const delegation = user.ucanDelegation;
 
@@ -448,6 +487,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
+    decisions,
     llm: {
       get: (role, params) => ambient.llm.get(role, params),
     },
@@ -606,8 +646,9 @@ export type NoopAmbientOverrides = Partial<AmbientServices>;
 /**
  * An `AmbientServices` bag with sane defaults for tests and for hosts that
  * do not wire every adapter: no-op secrets, an in-memory blob store,
- * throwing Matrix, unsigned UCAN, a throwing LLM, a discarding emitter and a
- * silent logger. Every field can be overridden.
+ * throwing Matrix, unsigned UCAN, a throwing LLM, a discarding emitter, a
+ * silent logger and no Decision evaluator (every `ctx.decisions` call rejects
+ * as unavailable). Every field can be overridden.
  */
 export function createNoopAmbient(
   overrides: NoopAmbientOverrides = {},
@@ -631,5 +672,6 @@ export function createNoopAmbient(
     emit: overrides.emit ?? { emit: () => undefined },
     ucan: overrides.ucan ?? createUnsignedUcanAdapter(),
     logger: overrides.logger ?? NOOP_LOGGER,
+    ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
   };
 }

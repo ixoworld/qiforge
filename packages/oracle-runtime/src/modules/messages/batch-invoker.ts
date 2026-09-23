@@ -49,7 +49,7 @@ export class BatchInvoker {
   async invoke(input: BatchInvokeInput): Promise<BatchInvokeResult> {
     const { payload, prepared, inputMessages, abortController } = input;
 
-    const { agent, stateInput, langGraphConfig } =
+    const { agent, stateInput, langGraphConfig, capabilityRouteShadow } =
       await this.agentBuilder.build(
         { payload, prepared, inputMessages },
         abortController,
@@ -66,6 +66,10 @@ export class BatchInvoker {
       stateInput,
       invokeConfig,
     );
+    // This path is the one that holds the final state, so it is where the
+    // capability router's shadow prediction can be checked against what the
+    // model actually loaded. Logging only; nothing about the reply changes.
+    capabilityRouteShadow?.compare(result.loadedPlugins);
     const messages = result.messages;
     const lastMessage = messages?.at(-1);
     if (!lastMessage) {

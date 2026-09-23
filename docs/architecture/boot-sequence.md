@@ -47,19 +47,34 @@ Hard violations are collected; if non-empty, boot throws `Plugin manifest valida
 
 `validateLlmProviderKey(validated.config)` — Zod can't express "the API key for the selected provider is required". This step does it: when `LLM_PROVIDER='openrouter'`, `OPEN_ROUTER_API_KEY` must be present; when `'nebius'`, `NEBIUS_API_KEY` must be present.
 
+### 6a. Decision provider cross-check
+
+When no explicit host `decisionAdapter` is supplied, one
+`resolveDecisionAdapter(validated.config, { openRouterHeaders })` call (from
+`@ixo/common`) both validates the optional bounded Decision provider and
+builds its adapter, so a misconfigured provider fails here rather than on the
+first evaluation. `DECISION_PROVIDER='openrouter-jev'` requires the existing
+`OPEN_ROUTER_API_KEY`; `'cloudflare-jev'` requires `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN`. An unset provider leaves Decisions unconfigured. Each
+missing field is reported as its own boot error before the
+`Env validation failed (N issues)` throw. The resulting adapter is handed to
+`buildAmbientServices` in step 14. An explicit host adapter wins and skips this
+check entirely.
+
 ### 7. Build OracleIdentity
 
 `identity = { name, org, description, entityDid, prompt }` — built from `opts.config` plus the validated `ORACLE_ENTITY_DID` env. A missing/empty `ORACLE_ENTITY_DID` after validation throws explicitly.
 
 ### 8. Registry population
 
-Six registries are constructed and populated:
+Seven registries are constructed and populated:
 
 ```ts
 const registries = {
   tools: new ToolRegistry(),
   subAgents: new SubAgentRegistry(),
   middlewares: new MiddlewareRegistry(),
+  decisions: new DecisionRegistry(),
   manifests: new ManifestRegistry(),
   configSchema: new ConfigSchemaRegistry(),
   sharedState: new SharedStateRegistry(),
@@ -120,7 +135,7 @@ CORS enabled (configurable origin, fixed allowed headers/methods). Swagger UI mo
 
 ### 14. AmbientServices
 
-`buildAmbientServices({ nestApp, config, identity, availablePlugins, logger })` resolves every Tier-0 service via `nestApp.get(...)` and packs them into an `AmbientServices` bag that `MessagesController` reads on every request to build a `RuntimeContext`.
+`buildAmbientServices({ nestApp, config, identity, availablePlugins, logger, decisionRegistry, decisionAdapter })` resolves every Tier-0 service via `nestApp.get(...)` and packs them into an `AmbientServices` bag that `MessagesController` reads on every request to build a `RuntimeContext`.
 
 ### 15. Warm boot caches
 
@@ -128,9 +143,10 @@ CORS enabled (configurable origin, fixed allowed headers/methods). Swagger UI mo
 await registries.tools.collectBoot(warmBuildCtx);
 registries.subAgents.collectBoot(warmBuildCtx);
 registries.middlewares.collect(warmBuildCtx);
+registries.decisions.collect(warmBuildCtx);
 ```
 
-Each registry calls every plugin's boot-time hook (`getTools`, `getSubAgents`, `getMiddlewares`) once and caches the result. Per-request agent builds reuse the cache; only `getRequestTools` / `getRequestSubAgents` re-run per turn.
+Each registry calls every plugin's boot-time hook (`getTools`, `getSubAgents`, `getMiddlewares`, `getDecisions`) once and caches the result. Per-request agent builds reuse the cache; only `getRequestTools` / `getRequestSubAgents` re-run per turn.
 
 ### 16. Merge MainAgentHooks
 
@@ -174,6 +190,7 @@ The bootstrap logger reports `[boot-error]` for each issue. Aborts when:
 - Manifest validation collects errors.
 - Env validation collects errors.
 - LLM provider cross-check fails.
+- Decision provider cross-check fails (provider selected without its credentials).
 - `ORACLE_ENTITY_DID` is empty after validation.
 
 What does NOT fail boot:

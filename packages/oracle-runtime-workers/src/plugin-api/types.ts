@@ -1,3 +1,8 @@
+import type {
+  DecisionDefinition,
+  DecisionEvaluateOptions,
+  DecisionEvaluation,
+} from '@ixo/common/ai/decisions';
 import type { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -669,6 +674,23 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       | { token: string; with: string }
       | { error: 'no-delegation' | 'store-error'; detail?: string }
     >;
+  };
+
+  /**
+   * Bounded semantic decisions. A decision only returns structured judgment;
+   * policy, authority checks, and side effects remain outside this primitive.
+   */
+  decisions: {
+    evaluate<TSchema extends z.ZodType>(
+      definition: DecisionDefinition<TSchema>,
+      input: z.input<TSchema>,
+      options?: DecisionEvaluateOptions,
+    ): Promise<DecisionEvaluation>;
+    evaluateByName(
+      name: string,
+      input: unknown,
+      options?: DecisionEvaluateOptions,
+    ): Promise<DecisionEvaluation>;
   };
 
   /** LLM provider. */

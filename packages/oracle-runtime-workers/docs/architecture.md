@@ -29,6 +29,23 @@ The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
 
+**Capability router.** On-demand plugin tools are bound at build time but
+hidden by the capability gate until the model calls `load_capability`, which
+costs a model round trip. With `CAPABILITY_ROUTER=on` the turn build
+(`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
+(`src/core/capability-router.ts`) over the user's message and the on-demand
+plugins the thread has not loaded, and hands the routed plugin to
+`createMainAgent` as `preloadedPlugins`. The gate admits its tools and tool
+handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
+never written to the checkpointed `loadedPlugins` channel, which stays the
+monotonic record of what `load_capability` loaded. The router fails open — a
+missing provider, a timeout or a malformed verdict preloads nothing and warns
+`[capability-router] … status=fallback reason=<error name>`; a preload logs
+`[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
+the same evaluation under `waitUntil` without awaiting it, logs
+`[capability-router-shadow] … wouldPreload=[…]`, and after the turn compares
+the prediction with what the turn actually loaded (`agree=<bool>`).
+
 ### `MatrixGatewayDO` — one per oracle
 
 A subclass of `MatrixBotDO` from

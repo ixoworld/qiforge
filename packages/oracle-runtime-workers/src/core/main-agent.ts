@@ -137,6 +137,7 @@ export async function createMainAgent(
     ambient,
     state,
     availablePlugins,
+    preloadedPlugins,
     checkpointer,
     abortSignal,
     byoProvider,
@@ -159,7 +160,13 @@ export async function createMainAgent(
     state.loadedPlugins,
   );
 
-  const loadedSet = new Set<string>(state.loadedPlugins ?? []);
+  // What the turn treats as loaded: the thread's checkpointed plugins plus the
+  // router's one-turn preload. Only the RuntimeContext and the gate see this
+  // union; the graph state keeps the checkpointed list alone.
+  const loadedSet = new Set<string>([
+    ...(state.loadedPlugins ?? []),
+    ...(preloadedPlugins ?? []),
+  ]);
   // Carry the prior request state (browserTools, agActions, …) into the
   // per-request RuntimeContext and the tool-wrapper closures, but NOT the
   // message history: keeping the full `messages` array here would pin the
@@ -439,6 +446,7 @@ export async function createMainAgent(
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
+      preloadedPlugins,
       logger: ambient.logger,
     }),
     createToolValidationMiddleware({

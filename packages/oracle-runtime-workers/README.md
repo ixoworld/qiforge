@@ -2,7 +2,9 @@
 
 Run a QiForge oracle on **Cloudflare Workers** — no server, no disk, no Redis.
 The same plugin API, wire protocol and UCAN auth as `@ixo/oracle-runtime`,
-re-hosted on Durable Objects.
+re-hosted on Durable Objects. Bounded semantic Decisions are included too, and
+can run on Workers AI through the `AI` binding instead of account credentials
+(see [configuration](docs/configuration.md#decisions)).
 
 ```ts
 // src/index.ts of your oracle Worker

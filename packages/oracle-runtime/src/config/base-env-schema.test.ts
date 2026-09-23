@@ -34,6 +34,7 @@ describe('baseEnvSchema', () => {
     expect(parsed.data.MATRIX_STORE_PATH).toBe('./matrix-storage');
     expect(parsed.data.ORACLE_SECRETS).toBe('');
     expect(parsed.data.LIVE_AGENT_AUTH_API_KEY).toBe('');
+    expect(parsed.data.CAPABILITY_ROUTER).toBe('off');
   });
 
   it('rejects when a required Tier-0 var is missing', () => {
@@ -117,7 +118,13 @@ describe('baseEnvSchema', () => {
       'OPENAI_API_KEY',
       'OPEN_ROUTER_API_KEY',
       'NEBIUS_API_KEY',
+      'DECISION_PROVIDER',
+      'DECISION_MODEL',
+      'CLOUDFLARE_ACCOUNT_ID',
+      'CLOUDFLARE_API_TOKEN',
+      'CAPABILITY_ROUTER',
       'DEFAULT_MODEL',
+      'SESSION_TITLE_MODEL',
       'MODEL_PRICE_MARKUP',
       'LIVE_AGENT_AUTH_API_KEY',
       'LANGSMITH_TRACING',

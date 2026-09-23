@@ -31,6 +31,10 @@ Both scripts need:
   leaked token cannot burn unbounded LLM spend. No binding = no limiting
   (local harness). Pair it with a WAF rate-limiting rule at the edge for
   unauthenticated flood protection.
+- Optionally a Workers AI binding named `AI` (`"ai": { "binding": "AI" }`)
+  when the oracle uses [Decisions](#decisions) with
+  `DECISION_PROVIDER=cloudflare-jev`: the binding authenticates implicitly, so
+  no Cloudflare account credentials are needed. Leave it off otherwise.
 
 ### Two scripts and migrations
 
@@ -166,6 +170,26 @@ same object; each plugin's `configSchema` is the reference.
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `LANGSMITH_TRACED_DIDS`                                                                                                                              | Global (`'true'`) or per-DID allowlist tracing (`*` = everyone).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `BYO_LLM_ENABLED`                                                                                                                                                                                                                         | `'true'` enables the bring-your-own-credential lane (`/byo-llm/*`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `BYO_CHATGPT_BACKEND_URL`, `BYO_CHATGPT_PROXY_AUTH_TOKEN`, `BYO_CHATGPT_CLIENT_ID`                                                                                                                                                        | ChatGPT-subscription backend proxy (required on Cloudflare, see operations), its optional gate token, OAuth client id override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+### Decisions
+
+Bounded semantic Decisions (`getDecisions` / `ctx.decisions`, the Node
+runtime's primitive of the same name). Unset = Decisions unconfigured: every
+`ctx.decisions` call rejects with `DecisionProviderUnavailableError`.
+`createOracleWorker({ decisionAdapter })` supplies an adapter directly and
+bypasses these variables.
+
+When the turn is traced (see the LangSmith variables), every evaluation is a
+`decision:<name>` span on the turn's tracer: a tool's Decision nests under the
+tool, and the capability router's Decision is its own trace with the turn's
+`thread_id`. See `docs/architecture/decisions.md#tracing` at the repo root.
+
+| Variable                                                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DECISION_PROVIDER`                                      | `openrouter-jev` (the Jev model on OpenRouter; reuses `OPEN_ROUTER_API_KEY`) or `cloudflare-jev` (Jev on Workers AI).                                                                                                                                                                                                                                                                      |
+| `DECISION_MODEL`                                         | Model id override. Default `typesafe/jev-1.13` on OpenRouter, `typesafe/jev` on Workers AI.                                                                                                                                                                                                                                                                                                |
+| `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (secret) | Only for `cloudflare-jev` **without** the `AI` binding: the account and Workers AI token for the REST API. With `"ai": { "binding": "AI" }` declared in `wrangler.jsonc` the binding is used and neither is needed.                                                                                                                                                                        |
+| `CAPABILITY_ROUTER`                                      | Capability router, the runtime's own Decision (requires a `DECISION_PROVIDER`). `off` (default) never evaluates; `shadow` evaluates off the turn's path and logs `[capability-router-shadow]` verdicts for accuracy measurement; `on` awaits the verdict before the first model call and preloads the predicted on-demand plugin's tools for that turn only. Any failure preloads nothing. |
 
 ### Ops and misc
 

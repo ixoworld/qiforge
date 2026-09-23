@@ -1,16 +1,29 @@
+import type {
+  BooleanDecisionAnswer,
+  ChoiceDecisionAnswer,
+  DecisionEvaluation,
+} from '@ixo/common';
+import type { DecisionTraceOptions } from '@ixo/common/ai/decisions';
 import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { Logger } from '@nestjs/common';
 import { z } from 'zod';
+import type { DecisionEvaluator } from '../../decisions/decision-runtime.js';
 import { getProviderChatModel } from '../../llm/llm-provider.js';
 import type { CommerceContext } from '../../plugin-api/types.js';
 import {
   getCommerceRouterPort,
   type CommerceRoutedService,
+  type CommerceRouterEngine,
   type CommerceRouterPort,
 } from './commerce-router-port.js';
 
-/** Classifier verdicts below this confidence fall open to the free persona. */
+/**
+ * Work verdicts below this confidence fall open to the free persona. Shared by
+ * both routing engines: the LLM's self-reported confidence and the Decision's
+ * work probability are measured against the same floor, so switching engines
+ * never moves the line between free and billable.
+ */
 const MIN_WORK_CONFIDENCE = 0.6;
 
 /** Hard ceiling on a classifier call — a hung model must not hang the turn. */
@@ -21,6 +34,34 @@ const classificationSchema = z.object({
   serviceId: z.string().optional(),
   confidence: z.number().min(0).max(1),
 });
+
+/** The one verdict shape every engine reduces to before the gate pipeline. */
+type Classification = z.infer<typeof classificationSchema>;
+
+/**
+ * A classifiable turn's verdict together with the engine that produced it.
+ * `engine` is the engine that actually answered — a `decision` turn that fell
+ * back to the LLM reports `llm`. The raw Decision answers ride along so the
+ * decision line can show what drove a Decision-routed turn.
+ */
+interface EngineVerdict {
+  engine: CommerceRouterEngine;
+  classification: Classification | null;
+  workProbability?: number;
+  serviceConfidence?: number;
+}
+
+/** The Decision's input, projected identically for shadow and live routing. */
+interface RouteDecisionInput {
+  text: string;
+  services: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    tags?: string[];
+    examples?: string[];
+  }>;
+}
 
 /** Structured-output surface the router needs from a chat model. */
 export interface RoutingStructuredModel {
@@ -42,11 +83,19 @@ const defaultModelFactory: RoutingModelFactory = (params) => {
 
 export interface MessageRouterDeps {
   getModel?: RoutingModelFactory;
+  getDecisionEvaluator?: () => DecisionEvaluator | undefined;
   logger?: Pick<Logger, 'log' | 'warn' | 'debug'>;
 }
 
 /** Log prefix shared by every routing line, so one grep shows the whole lane. */
 const LOG_PREFIX = '[commerce-router]';
+const SHADOW_LOG_PREFIX = '[commerce-router-shadow]';
+/**
+ * Comparison-only boundary for shadow telemetry. This is NOT a production
+ * routing threshold; the raw probability is logged so calibration can choose
+ * that later.
+ */
+const SHADOW_INTENT_BOUNDARY = 0.5;
 
 /**
  * Why a turn ended up in the mode it did. One value per branch of `decide`,
@@ -78,12 +127,17 @@ interface RoutingDecisionFields {
    * after a user complaint need the same sentence the agent was given.
    */
   detail?: string;
+  /** Which engine answered this turn. Absent when no classification ran. */
+  engine?: CommerceRouterEngine;
   /**
    * `intent/confidence` as the classifier returned it, pre-threshold — or the
    * literal `skipped`, which is how the line states that no classification ran
    * at all because the user is already locked into a job.
    */
   classifier?: string;
+  /** Raw Decision answers, present only when the `decision` engine routed. */
+  workProbability?: number;
+  serviceConfidence?: number;
   /** Where a continued engagement actually lives, when it is not this thread. */
   engagementRoomId?: string;
   engagementThreadId?: string;
@@ -92,11 +146,20 @@ interface RoutingDecisionFields {
 /** One coalesced Matrix turn, as the bridge hands it over pre-delivery. */
 export interface RouteTurnInput {
   roomId: string;
+  /** Per-turn request id, when available, for joining async shadow telemetry. */
+  requestId?: string;
+  /** Abort a running Decision (shadow or live) when the turn is superseded. */
+  abortSignal?: AbortSignal;
   /** Thread root event id — session id and engagement key. */
   threadId: string;
   senderDid: string;
   /** The coalesced user text of the turn. */
   text: string;
+  /**
+   * The turn's tracer and trace metadata. Routing runs before the graph,
+   * outside any LangChain run, so without these its Decision is not traced.
+   */
+  trace?: DecisionTraceOptions;
 }
 
 /**
@@ -115,10 +178,11 @@ export interface RouteTurnInput {
  *      rejected: false positives are catastrophic when a follow-up like
  *      "now edit the report" must simply continue the work).
  *   2. No engagement, no agent card → support, no model call.
- *   3. Otherwise one structured-output classification on the cheap `routing`
- *      model decides support vs work (+ which service). Low confidence and
- *      every model/lookup failure fall OPEN to support — never accidentally
- *      into billable work.
+ *   3. Otherwise one classification decides support vs work (+ which
+ *      service): a structured-output call on the cheap `routing` model, or —
+ *      with the port's `decision` engine — the bounded Decision, mapped to the
+ *      same verdict shape. Low confidence and every model/lookup failure fall
+ *      OPEN to support — never accidentally into billable work.
  *   4. Work intent passes the contract gate (no other job already running for
  *      this user, then the engine record + AuthZ snapshot, via the port)
  *      before an engagement starts; a gate failure routes to support with the
@@ -136,12 +200,21 @@ export interface RouteTurnInput {
  */
 export class MessageRouterService {
   private readonly getModel: RoutingModelFactory;
+  private readonly getDecisionEvaluator: () => DecisionEvaluator | undefined;
   private readonly logger: Pick<Logger, 'log' | 'warn' | 'debug'>;
   /** One-shot guard for the "commerce is off" first-use notice. */
   private inactiveNoticeLogged = false;
+  /**
+   * One-shot guard for the `decision` engine's configuration fallback: a
+   * missing evaluator or Decision name is a boot-time fact, so it is said once
+   * per process rather than once per turn. Per-turn evaluation failures are
+   * not guarded — each one warns.
+   */
+  private decisionUnavailableNoticeLogged = false;
 
   constructor(deps: MessageRouterDeps = {}) {
     this.getModel = deps.getModel ?? defaultModelFactory;
+    this.getDecisionEvaluator = deps.getDecisionEvaluator ?? (() => undefined);
     this.logger = deps.logger ?? new Logger(MessageRouterService.name);
   }
 
@@ -238,21 +311,37 @@ export class MessageRouterService {
       `${LOG_PREFIX} classifying thread ${input.threadId} against ${services.length} published service(s)`,
     );
 
-    const classification = await this.classify(port, input.text, services);
+    const routed = await this.classifyTurn(port, input, services);
+    const { classification } = routed;
     if (!classification) {
       this.logDecision(input, {
         decision: 'classifier-unavailable',
         mode: 'support',
+        engine: routed.engine,
       });
       return { mode: 'support' };
     }
 
-    const verdict = `${classification.intent}/${classification.confidence}`;
+    // Every line below carries the same verdict fields, whichever engine
+    // produced them, so one grep compares engines turn for turn.
+    const verdict: Pick<
+      RoutingDecisionFields,
+      'engine' | 'classifier' | 'workProbability' | 'serviceConfidence'
+    > = {
+      engine: routed.engine,
+      classifier: `${classification.intent}/${classification.confidence}`,
+      ...(routed.workProbability !== undefined && {
+        workProbability: routed.workProbability,
+      }),
+      ...(routed.serviceConfidence !== undefined && {
+        serviceConfidence: routed.serviceConfidence,
+      }),
+    };
     if (classification.intent === 'support') {
       this.logDecision(input, {
         decision: 'classifier-support',
         mode: 'support',
-        classifier: verdict,
+        ...verdict,
       });
       return { mode: 'support' };
     }
@@ -261,7 +350,7 @@ export class MessageRouterService {
       this.logDecision(input, {
         decision: 'low-confidence',
         mode: 'support',
-        classifier: verdict,
+        ...verdict,
         ...(classification.serviceId !== undefined && {
           serviceId: classification.serviceId,
         }),
@@ -271,13 +360,15 @@ export class MessageRouterService {
 
     const service = services.find((s) => s.id === classification.serviceId);
     if (!service) {
+      // For the decision engine this is also where the Decision's own
+      // "no single service matches" option lands: not a catalog id ⇒ support.
       this.logger.warn(
-        `${LOG_PREFIX} classifier picked unknown serviceId "${classification.serviceId ?? ''}" — routing to support`,
+        `${LOG_PREFIX} ${routed.engine} engine picked unknown serviceId "${classification.serviceId ?? ''}" — routing to support`,
       );
       this.logDecision(input, {
         decision: 'unknown-service',
         mode: 'support',
-        classifier: verdict,
+        ...verdict,
         ...(classification.serviceId !== undefined && {
           serviceId: classification.serviceId,
         }),
@@ -298,7 +389,7 @@ export class MessageRouterService {
         serviceId: service.id,
         reason: gate.reason,
         ...(gate.detail !== undefined && { detail: gate.detail }),
-        classifier: verdict,
+        ...verdict,
       });
       return {
         mode: 'support',
@@ -327,7 +418,7 @@ export class MessageRouterService {
         serviceId: service.id,
         reason: started.reason,
         ...(started.detail !== undefined && { detail: started.detail }),
-        classifier: verdict,
+        ...verdict,
       });
       return {
         mode: 'support',
@@ -343,7 +434,7 @@ export class MessageRouterService {
       decision: 'engagement-started',
       mode: 'work',
       serviceId: service.id,
-      classifier: verdict,
+      ...verdict,
     });
     return {
       mode: 'work',
@@ -351,6 +442,257 @@ export class MessageRouterService {
       engagementRoomId: input.roomId,
       engagementThreadId: input.threadId,
     };
+  }
+
+  /**
+   * Produce the turn's verdict with whichever engine the port selects. The
+   * `decision` engine routes on the bounded Decision and falls back to the LLM
+   * for that turn when the Decision cannot answer; `llm` and `decision-shadow`
+   * both route on the LLM, shadow additionally observing the Decision.
+   */
+  private async classifyTurn(
+    port: CommerceRouterPort,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+  ): Promise<EngineVerdict> {
+    if (port.routerEngine === 'decision') {
+      return this.classifyWithDecision(port, input, services);
+    }
+
+    const shadow = this.startDecisionShadow(port, input, services);
+    const legacyStartedAt = Date.now();
+    const classification = await this.classify(port, input.text, services);
+    if (shadow) {
+      this.observeDecisionShadow(
+        shadow,
+        input,
+        services,
+        classification,
+        Date.now() - legacyStartedAt,
+      );
+    }
+    return { engine: port.routerEngine ?? 'llm', classification };
+  }
+
+  /**
+   * Route on the bounded Decision. Its two answers are reduced to the LLM's
+   * verdict shape so the confidence floor, catalog check, contract gate and
+   * engagement start run unchanged:
+   *
+   *   - work when `workRequestedNow` clears {@link MIN_WORK_CONFIDENCE}, with
+   *     the chosen option as `serviceId` and the lower of the work probability
+   *     and the choice confidence as `confidence`; the Decision's no-match
+   *     option is not a catalog id and so lands in the unknown-service lane.
+   *   - support otherwise, with `1 - workProbability` as `confidence`.
+   *
+   * Anything that stops the Decision from answering — no evaluator, no
+   * Decision name, a provider error, a timeout, a malformed answer — warns
+   * with safe metadata only and hands the turn to the LLM classifier. Fallback
+   * is per turn: the next turn tries the Decision again.
+   */
+  private async classifyWithDecision(
+    port: CommerceRouterPort,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+  ): Promise<EngineVerdict> {
+    const decisionName = port.routerDecisionName;
+    const evaluator = this.getDecisionEvaluator();
+    if (!decisionName || !evaluator) {
+      if (!this.decisionUnavailableNoticeLogged) {
+        this.decisionUnavailableNoticeLogged = true;
+        this.logDecisionFallback(
+          input,
+          decisionName ? 'missing-evaluator' : 'missing-decision-name',
+          'logged once per process',
+        );
+      }
+      return this.classifyWithModel(port, input, services);
+    }
+
+    let evaluation: DecisionEvaluation;
+    try {
+      evaluation = await evaluateRouteDecision(
+        evaluator,
+        decisionName,
+        input,
+        services,
+      );
+    } catch (error) {
+      this.logDecisionFallback(input, safeErrorType(error));
+      return this.classifyWithModel(port, input, services);
+    }
+
+    const work = evaluation.answers.workRequestedNow;
+    const service = evaluation.answers.service;
+    if (work?.kind !== 'boolean' || service?.kind !== 'choice') {
+      this.logDecisionFallback(input, 'malformed-answer');
+      return this.classifyWithModel(port, input, services);
+    }
+
+    return {
+      engine: 'decision',
+      classification: toClassification(work, service),
+      workProbability: work.probabilityTrue,
+      serviceConfidence: service.confidence,
+    };
+  }
+
+  /** The LLM classifier as an engine verdict — the `decision` engine's fallback. */
+  private async classifyWithModel(
+    port: CommerceRouterPort,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+  ): Promise<EngineVerdict> {
+    return {
+      engine: 'llm',
+      classification: await this.classify(port, input.text, services),
+    };
+  }
+
+  /** Safe-metadata warn for a `decision` turn handed to the LLM classifier. */
+  private logDecisionFallback(
+    input: RouteTurnInput,
+    reason: string,
+    note?: string,
+  ): void {
+    this.logger.warn(
+      [
+        `${LOG_PREFIX} thread=${input.threadId}`,
+        ...(input.requestId ? [`request=${input.requestId}`] : []),
+        'engine=decision',
+        'status=fallback',
+        `reason=${reason}`,
+        ...(note ? [`(${note})`] : []),
+      ].join(' '),
+    );
+  }
+
+  /**
+   * Start the bounded Decision in parallel with the legacy classifier. The
+   * returned promise is NEVER awaited by the routing path: shadow mode cannot
+   * delay, authorize, start, or otherwise change the user's turn.
+   */
+  private startDecisionShadow(
+    port: CommerceRouterPort,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+  ): Promise<{ evaluation: DecisionEvaluation; latencyMs: number }> | null {
+    if (port.routerEngine !== 'decision-shadow') return null;
+    const decisionName = port.routerDecisionName;
+    if (!decisionName) {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=unavailable reason=missing-decision-name`,
+      );
+      return null;
+    }
+
+    const evaluator = this.getDecisionEvaluator();
+    if (!evaluator) {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=unavailable reason=missing-evaluator`,
+      );
+      return null;
+    }
+
+    const startedAt = Date.now();
+    // Promise.resolve().then() also converts any synchronous preparation
+    // failure into this shadow promise, keeping it out of the live route.
+    return Promise.resolve()
+      .then(() =>
+        evaluateRouteDecision(evaluator, decisionName, input, services),
+      )
+      .then((evaluation) => ({
+        evaluation,
+        latencyMs: Date.now() - startedAt,
+      }));
+  }
+
+  /**
+   * Observe a shadow evaluation without blocking routing. Failures are reduced
+   * to safe metadata: never log the provider's message because a third-party
+   * error could echo Decision state.
+   */
+  private observeDecisionShadow(
+    shadow: Promise<{ evaluation: DecisionEvaluation; latencyMs: number }>,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+    legacy: Classification | null,
+    legacyLatencyMs: number,
+  ): void {
+    void shadow
+      .then(({ evaluation, latencyMs }) => {
+        this.logDecisionShadow(
+          evaluation,
+          input,
+          services,
+          legacy,
+          legacyLatencyMs,
+          latencyMs,
+        );
+      })
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=failed errorType=${safeErrorType(error)}`,
+        );
+      });
+  }
+
+  private logDecisionShadow(
+    evaluation: DecisionEvaluation,
+    input: RouteTurnInput,
+    services: CommerceRoutedService[],
+    legacy: Classification | null,
+    legacyLatencyMs: number,
+    decisionLatencyMs: number,
+  ): void {
+    const work = evaluation.answers.workRequestedNow;
+    const service = evaluation.answers.service;
+    if (work?.kind !== 'boolean' || service?.kind !== 'choice') {
+      this.logger.warn(
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}${input.requestId ? ` request=${input.requestId}` : ''} status=invalid-normalized-answer`,
+      );
+      return;
+    }
+
+    const decisionIntent =
+      work.probabilityTrue >= SHADOW_INTENT_BOUNDARY ? 'work' : 'support';
+    const selectedService = services.find(
+      (candidate) => candidate.id === service.value,
+    )?.id;
+    const intentAgree =
+      legacy === null ? undefined : legacy.intent === decisionIntent;
+    const serviceAgree =
+      legacy?.intent === 'work' && decisionIntent === 'work'
+        ? legacy.serviceId === selectedService
+        : undefined;
+
+    this.logger.log(
+      [
+        `${SHADOW_LOG_PREFIX} thread=${input.threadId}`,
+        ...(input.requestId ? [`request=${input.requestId}`] : []),
+        'status=ok',
+        `legacyIntent=${legacy?.intent ?? 'unavailable'}`,
+        `legacyConfidence=${legacy?.confidence ?? 'unavailable'}`,
+        `legacyService=${legacy?.serviceId ?? 'none'}`,
+        `legacyLatencyMs=${legacyLatencyMs}`,
+        `decisionIntentAt50=${decisionIntent}`,
+        `workProbability=${work.probabilityTrue}`,
+        `decisionService=${selectedService ?? 'none'}`,
+        `serviceConfidence=${service.confidence}`,
+        ...(intentAgree === undefined
+          ? []
+          : [`intentAgree=${String(intentAgree)}`]),
+        ...(serviceAgree === undefined
+          ? []
+          : [`serviceAgree=${String(serviceAgree)}`]),
+        `decisionLatencyMs=${decisionLatencyMs}`,
+        `provider=${evaluation.provider}`,
+        `model=${evaluation.model}`,
+        ...(evaluation.modelVersion
+          ? [`modelVersion=${evaluation.modelVersion}`]
+          : []),
+      ].join(' '),
+    );
   }
 
   /**
@@ -365,12 +707,20 @@ export class MessageRouterService {
     this.logger.log(
       [
         `${LOG_PREFIX} thread=${input.threadId}`,
+        ...(input.requestId ? [`request=${input.requestId}`] : []),
         `mode=${fields.mode}`,
         `decision=${fields.decision}`,
         ...(fields.serviceId ? [`service=${fields.serviceId}`] : []),
         ...(fields.reason ? [`reason=${fields.reason}`] : []),
         ...(fields.detail ? [`detail="${fields.detail}"`] : []),
+        ...(fields.engine ? [`engine=${fields.engine}`] : []),
         ...(fields.classifier ? [`classifier=${fields.classifier}`] : []),
+        ...(fields.workProbability !== undefined
+          ? [`workProbability=${fields.workProbability}`]
+          : []),
+        ...(fields.serviceConfidence !== undefined
+          ? [`serviceConfidence=${fields.serviceConfidence}`]
+          : []),
         ...(fields.engagementRoomId
           ? [`engagementRoom=${fields.engagementRoomId}`]
           : []),
@@ -391,7 +741,7 @@ export class MessageRouterService {
     port: CommerceRouterPort,
     text: string,
     services: CommerceRoutedService[],
-  ): Promise<z.infer<typeof classificationSchema> | null> {
+  ): Promise<Classification | null> {
     let raw: unknown;
     try {
       const model = this.getModel(
@@ -423,6 +773,68 @@ export class MessageRouterService {
     }
     return parsed.data;
   }
+}
+
+/**
+ * One projection of the turn for the Decision, shared by shadow and live
+ * routing so the two evaluate — and can be compared on — identical input.
+ */
+function toRouteDecisionInput(
+  text: string,
+  services: CommerceRoutedService[],
+): RouteDecisionInput {
+  return {
+    text,
+    services: services.map((service) => ({
+      id: service.id,
+      name: service.name,
+      ...(service.description ? { description: service.description } : {}),
+      ...(service.tags?.length ? { tags: service.tags } : {}),
+      ...(service.examples?.length ? { examples: service.examples } : {}),
+    })),
+  };
+}
+
+/** Evaluate the route Decision, forwarding the turn's abort signal when it has one. */
+function evaluateRouteDecision(
+  evaluator: DecisionEvaluator,
+  decisionName: string,
+  input: RouteTurnInput,
+  services: CommerceRoutedService[],
+): Promise<DecisionEvaluation> {
+  const decisionInput = toRouteDecisionInput(input.text, services);
+  return evaluator.evaluateByName(decisionName, decisionInput, {
+    ...input.trace,
+    ...(input.abortSignal && { signal: input.abortSignal }),
+  });
+}
+
+/** Reduce the Decision's two answers to the classifier's verdict shape. */
+function toClassification(
+  work: BooleanDecisionAnswer,
+  service: ChoiceDecisionAnswer,
+): Classification {
+  if (work.probabilityTrue >= MIN_WORK_CONFIDENCE) {
+    return {
+      intent: 'work',
+      serviceId: service.value,
+      confidence: Math.min(work.probabilityTrue, service.confidence),
+    };
+  }
+  // Rounded so the routing log line prints 0.03, not the float residue of
+  // `1 - 0.97`; the value only feeds that line, never a threshold.
+  return {
+    intent: 'support',
+    confidence: Number((1 - work.probabilityTrue).toFixed(4)),
+  };
+}
+
+/**
+ * An error's type name and nothing else. Provider messages can echo Decision
+ * state (which includes the user's text), so they never reach a log line.
+ */
+function safeErrorType(error: unknown): string {
+  return error instanceof Error ? error.name || 'Error' : typeof error;
 }
 
 function buildClassifierPrompt(services: CommerceRoutedService[]): string {

@@ -1,3 +1,4 @@
+import type { DecisionEvaluation } from '@ixo/common';
 import { HumanMessage, type BaseMessage } from '@langchain/core/messages';
 import {
   resolvePlugins,
@@ -5,6 +6,7 @@ import {
 } from '../bootstrap/plugin-loader.js';
 import type { PluginManifestOverride } from '../manifest/merge-override.js';
 import { validateManifest } from '../manifest/validator.js';
+import { DecisionRuntime } from '../decisions/decision-runtime.js';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin.js';
 import type {
   AgentMiddleware,
@@ -17,6 +19,7 @@ import type {
 } from '../plugin-api/types.js';
 import {
   ConfigSchemaRegistry,
+  DecisionRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
   SharedStateRegistry,
@@ -31,6 +34,7 @@ import {
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import {
   mockBlobStore,
+  mockDecisionAdapter,
   mockEmit,
   mockLlm,
   mockLogger,
@@ -38,6 +42,7 @@ import {
   mockSecrets,
   mockUcan,
   type FetchHandler,
+  type MockDecisionOptions,
   type MockMatrixOverrides,
 } from './mocks.js';
 
@@ -76,6 +81,7 @@ export interface CreateTestRuntimeOptions {
     matrix?: MockMatrixOverrides;
     secrets?: Record<string, string>;
     llm?: { respondWith?: string | string[] };
+    decision?: MockDecisionOptions;
   };
 }
 
@@ -101,6 +107,8 @@ export interface TestRuntime {
   ) => Promise<{ before?: unknown; after?: unknown }>;
   /** Invoke a sub-agent with a textual task; returns the LLM's first response. */
   invokeSubAgent: (name: string, task: string) => Promise<string>;
+  /** Evaluate a registered bounded semantic decision by name. */
+  invokeDecision: (name: string, input: unknown) => Promise<DecisionEvaluation>;
   /** List tools. Filter by plugin if supplied. */
   listTools: (plugin?: string) => PluginTool[];
   /** Read a plugin's manifest. Throws if unknown. */
@@ -160,10 +168,11 @@ export async function createTestRuntime(
 
   const loadedPluginNames = new Set(resolved.loaded.map((p) => p.name));
 
-  // 2. Populate the six registries.
+  // 2. Populate the seven registries.
   const tools = new ToolRegistry();
   const subAgents = new SubAgentRegistry();
   const middlewares = new MiddlewareRegistry();
+  const decisions = new DecisionRegistry();
   const manifests = new ManifestRegistry();
   const configSchemas = new ConfigSchemaRegistry();
   const sharedState = new SharedStateRegistry();
@@ -173,6 +182,7 @@ export async function createTestRuntime(
     tools.register(plugin);
     subAgents.register(plugin);
     middlewares.register(plugin);
+    decisions.register(plugin);
     manifests.register(plugin, manifestOverrides[plugin.name]);
     configSchemas.register(plugin);
     sharedState.register(plugin);
@@ -185,6 +195,14 @@ export async function createTestRuntime(
   const blobStoreAdapter = mockBlobStore();
   const ucanAdapter = mockUcan();
   const emitAdapter = mockEmit();
+  const decisionAdapter = opts.mocks?.decision
+    ? mockDecisionAdapter(opts.mocks.decision)
+    : undefined;
+  const decisionRuntime = new DecisionRuntime(
+    decisions,
+    decisionAdapter,
+    logger,
+  );
   let fetchHandler: FetchHandler | undefined = opts.mocks?.fetch;
 
   const identity: OracleIdentity = {
@@ -208,6 +226,7 @@ export async function createTestRuntime(
       return matrixAdapter;
     },
     llm: llmAdapter,
+    decisions: decisionRuntime,
     emit: emitAdapter,
     ucan: ucanAdapter,
     logger,
@@ -232,6 +251,7 @@ export async function createTestRuntime(
   const collectedTools = await tools.collect(sharedBuildCtx);
   const collectedSubAgents = await subAgents.collect(sharedBuildCtx);
   const collectedMiddlewares = middlewares.collect(sharedBuildCtx);
+  decisions.collect(sharedBuildCtx);
 
   const loadedSet = new Set<string>();
 
@@ -295,6 +315,10 @@ export async function createTestRuntime(
       const after2 = await runHook(m.afterAgent, state, runtimeCtx);
       if (after2 !== undefined) out.after = after2;
       return out;
+    },
+
+    async invokeDecision(name, input) {
+      return decisionRuntime.evaluateByName(name, input);
     },
 
     async invokeSubAgent(name, task) {
@@ -383,6 +407,7 @@ export async function createTestRuntime(
       tools.assertNoCollisions();
       subAgents.assertNoCollisions();
       middlewares.assertNoCollisions();
+      decisions.assertNoCollisions();
       manifests.assertNoCollisions();
       configSchemas.assertNoCollisions();
       sharedState.assertNoCollisions();

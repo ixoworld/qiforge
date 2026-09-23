@@ -59,7 +59,7 @@ A fork's `main.ts` calls `createOracleApp(opts)`. The runtime:
 2. Topologically sorts by `dependsOn`.
 3. Validates every plugin manifest.
 4. Composes the env schema from base + every plugin's `configSchema`; validates `process.env`.
-5. Populates six registries (tools, sub-agents, middlewares, manifests, configSchema, sharedState).
+5. Populates seven registries (tools, sub-agents, middlewares, decisions, manifests, configSchema, sharedState).
 6. Builds `RuntimeAppModule` with the runtime's always-on modules + plugin Nest modules + user Nest modules.
 7. Bootstraps NestJS.
 8. Schedules Matrix init in the background.

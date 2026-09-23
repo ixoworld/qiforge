@@ -121,6 +121,14 @@ export interface MainAgentArgs {
   ambient: AmbientServices;
   state: Partial<TMainAgentGraphState>;
   availablePlugins: ReadonlySet<string>;
+  /**
+   * Plugins the capability router chose for this turn. The capability gate
+   * admits their tools and tool handlers see them in `ctx.loadedPlugins`,
+   * exactly as if they were loaded — but only for this turn: they are never
+   * written to graph state, so the checkpointed `loadedPlugins` channel keeps
+   * growing through `load_capability` alone.
+   */
+  preloadedPlugins?: ReadonlySet<string>;
   hooks?: MainAgentHooks;
 }
 

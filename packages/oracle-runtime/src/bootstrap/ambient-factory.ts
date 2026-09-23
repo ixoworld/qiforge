@@ -1,6 +1,8 @@
+import type { DecisionAdapter } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import type { AllEvents } from '@ixo/oracles-events';
 import type { INestApplication } from '@nestjs/common';
+import { DecisionRuntime } from '../decisions/decision-runtime.js';
 import { getProviderChatModel } from '../llm/llm-provider.js';
 import { BlobStoreService } from '../modules/blob-store/blob-store.service.js';
 import { SecretsService } from '../modules/secrets/secrets.service.js';
@@ -14,6 +16,7 @@ import type {
   SecretIndex,
 } from '../plugin-api/types.js';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors.js';
+import type { DecisionRegistry } from '../registries/decision-registry.js';
 import type {
   AmbientServices,
   BlobStoreAdapter,
@@ -35,6 +38,10 @@ export interface BuildAmbientOptions {
   availablePlugins: ReadonlySet<string>;
   /** Boot-time logger; reused across adapters that don't get their own. */
   logger: PluginLogger;
+  /** Boot-collected bounded semantic decisions. */
+  decisionRegistry?: DecisionRegistry;
+  /** Optional host/provider adapter. Until configured, decisions fail closed. */
+  decisionAdapter?: DecisionAdapter;
 }
 
 /**
@@ -58,6 +65,11 @@ export function buildAmbientServices(
   const ucanService = opts.nestApp.get(UcanService);
   const blobStoreService = opts.nestApp.get(BlobStoreService);
   const secretsService = SecretsService.getInstance();
+  const decisionRuntime = new DecisionRuntime(
+    opts.decisionRegistry,
+    opts.decisionAdapter,
+    opts.logger,
+  );
 
   const ucanAdapter: UcanAdapter = {
     hasCapability(delegation, resource, action) {
@@ -220,6 +232,7 @@ export function buildAmbientServices(
     blobStore: blobStoreAdapter,
     matrix: matrixAdapter,
     llm: llmAdapter,
+    decisions: decisionRuntime,
     emit: emitAdapter,
     ucan: ucanAdapter,
     logger: opts.logger,

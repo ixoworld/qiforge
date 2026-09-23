@@ -1,6 +1,6 @@
 {
   "name": "@ixo/common",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -25,6 +25,10 @@
     "./ai": {
       "types": "./dist/ai/index.d.ts",
       "import": "./dist/ai/index.js"
+    },
+    "./ai/decisions": {
+      "types": "./dist/ai/decisions/index.d.ts",
+      "import": "./dist/ai/decisions/index.js"
     },
     "./*": {
       "types": "./dist/*.d.ts",

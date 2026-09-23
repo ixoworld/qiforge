@@ -27,6 +27,14 @@ OPEN_ROUTER_API_KEY=
 # 600, three times the Node runtime's 200; a tool-call round trip costs ~6
 # steps with the bundled middlewares, so 600 is roughly 100 chained tool calls)
 # TURN_RECURSION_LIMIT=600
+# Bounded semantic Decisions (unset = off). openrouter-jev reuses OPEN_ROUTER_API_KEY;
+# cloudflare-jev uses the AI binding from wrangler.jsonc instead of account credentials.
+# DECISION_PROVIDER=openrouter-jev
+# DECISION_MODEL=typesafe/jev-1.13
+# Capability router (needs DECISION_PROVIDER): shadow logs which on-demand plugin
+# it would preload per turn without acting; on preloads it for that turn.
+# CAPABILITY_ROUTER=shadow
+
 # Turn budget (docs/plans/workers-harness-hardening.md): cumulative model
 # tokens, tool attempts and the wall-clock deadline of one turn, shared by the
 # main agent, its sub-agents and the helper models. Defaults 500000 / 120 /

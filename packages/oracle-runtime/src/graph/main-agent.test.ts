@@ -19,6 +19,7 @@ import {
 } from '../registries/test-fixtures.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import type * as Langchain from 'langchain';
+import type * as CapabilityGate from './middlewares/capability-gate-middleware.js';
 
 // Capture every createAgent invocation so the tests can introspect the
 // arguments without spinning up a real LangGraph runtime.
@@ -42,7 +43,31 @@ vi.mock('langchain', async () => {
   };
 });
 
-import { createMainAgent, type MainAgentArgs } from './main-agent.js';
+// Record what the build hands the capability gate, without replacing it: the
+// real middleware is returned so the ordering test above keeps its name.
+const gateOptions = vi.hoisted(
+  (): CapabilityGate.CapabilityGateMiddlewareOptions[] => [],
+);
+vi.mock('./middlewares/capability-gate-middleware.js', async () => {
+  const actual = await vi.importActual<typeof CapabilityGate>(
+    './middlewares/capability-gate-middleware.js',
+  );
+  return {
+    ...actual,
+    createCapabilityGateMiddleware: (
+      options: CapabilityGate.CapabilityGateMiddlewareOptions,
+    ) => {
+      gateOptions.push(options);
+      return actual.createCapabilityGateMiddleware(options);
+    },
+  };
+});
+
+import {
+  createMainAgent,
+  type MainAgentArgs,
+  type TMainAgentGraphState,
+} from './main-agent.js';
 import { MemoryPlugin } from '../plugins/memory/index.js';
 import { OraclePaymentsPlugin } from '../plugins/oracle-payments/oracle-payments.plugin.js';
 
@@ -146,6 +171,7 @@ function baseArgs(overrides: Partial<MainAgentArgs> = {}): MainAgentArgs {
 describe('createMainAgent', () => {
   beforeEach(() => {
     createAgentCalls.length = 0;
+    gateOptions.length = 0;
     fakeCompiledAgent.invoke.mockReset();
     fakeCompiledAgent.stream.mockReset();
   });
@@ -378,6 +404,70 @@ describe('createMainAgent', () => {
       const names = (params.tools as { name: string }[]).map((t) => t.name);
       expect(names).toContain('composio_search');
     }
+  });
+
+  it('exposes preloadedPlugins to the gate and to tool handlers, but never to graph state or the prompt', async () => {
+    const registries = emptyRegistries();
+    let seenLoaded: ReadonlySet<string> | undefined;
+    const weather = makePlugin({
+      name: 'weather',
+      manifest: makeManifest({ title: 'Weather', visibility: 'on-demand' }),
+      getTools: () => [
+        makeTool('get_weather', {
+          handler: async (_args, ctx) => {
+            seenLoaded = ctx.loadedPlugins;
+            return 'sunny';
+          },
+        }),
+      ],
+    });
+    registries.tools.register(weather);
+    registries.manifests.register(weather);
+
+    // Nothing loaded on the thread; the router preloaded two plugins, one of
+    // which (flows) would inject an operating guide if it were truly loaded.
+    const state: Partial<TMainAgentGraphState> = {};
+    await createMainAgent(
+      baseArgs({
+        registries,
+        state,
+        preloadedPlugins: new Set(['weather', 'flows']),
+      }),
+    );
+
+    // The gate is what turns the preload into visible tools.
+    expect(gateOptions.at(-1)?.preloadedPlugins).toEqual(
+      new Set(['weather', 'flows']),
+    );
+
+    // Tool handlers see the preload as loaded.
+    const params = createAgentCalls[0];
+    if (!params) throw new Error('createAgent was not called');
+    const wrapped = (
+      params.tools as {
+        name: string;
+        invoke: (args: unknown, runtime: unknown) => Promise<unknown>;
+      }[]
+    ).find((t) => t.name === 'get_weather');
+    if (!wrapped) throw new Error('get_weather was not bound');
+    await wrapped.invoke(
+      {},
+      {
+        context: {
+          user: { did: 'did:ixo:user1', matrixUserId: '@u:ixo.world' },
+          session: { id: 'sess-1', client: 'portal', requestId: 'req-1' },
+        },
+        state: { messages: [] },
+      },
+    );
+    expect(seenLoaded?.has('weather')).toBe(true);
+
+    // The caller's state is untouched — a preload lasts one turn and must not
+    // leak into the checkpointed set-union channel through this object.
+    expect(state.loadedPlugins).toBeUndefined();
+
+    // The prompt reads the persisted set only: no Flow Builder guide.
+    expect(String(params.systemPrompt)).not.toContain('### Flow Builder mode');
   });
 
   it("drops billing:'contracted' tools unless the turn runs in work mode", async () => {

@@ -1,3 +1,4 @@
+import type { DecisionAdapter } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import {
   loadEncryptionKey,
@@ -19,8 +20,13 @@ import {
   validateLangsmithTracing,
   validateLlmProviderKey,
 } from '../config/base-env-schema.js';
+import { resolveDecisionAdapter } from '../decisions/index.js';
 import type { MainAgentHooks } from '../graph/main-agent-types.js';
-import { getModelForRole, getProviderConfig } from '../llm/llm-provider.js';
+import {
+  getModelForRole,
+  getOpenRouterAttributionHeaders,
+  getProviderConfig,
+} from '../llm/llm-provider.js';
 import {
   mergeManifestOverride,
   type PluginManifestOverride,
@@ -44,6 +50,7 @@ import type { AmbientServices } from '../runtime-context/ambient.js';
 import { buildAmbientServices } from './ambient-factory.js';
 import {
   ConfigSchemaRegistry,
+  DecisionRegistry,
   ManifestRegistry,
   MiddlewareRegistry,
   SharedStateRegistry,
@@ -127,6 +134,11 @@ export interface CreateOracleAppOptions {
    * swap it for an alternate implementation.
    */
   hooks?: MainAgentHooks;
+  /**
+   * Provider adapter for bounded semantic decisions. Decisions remain
+   * registered without one, but evaluation throws until an adapter is supplied.
+   */
+  decisionAdapter?: DecisionAdapter;
 }
 
 export interface PluginStatusReport {
@@ -274,6 +286,32 @@ export async function createOracleApp(
     );
   }
 
+  // Cross-field check for the optional bounded Decision provider, resolved
+  // into its adapter in the same step so a selected provider with missing
+  // credentials fails here rather than on the first evaluation. An explicit
+  // host adapter wins over env configuration and skips the env check.
+  let decisionAdapter: DecisionAdapter | undefined = opts.decisionAdapter;
+  if (!decisionAdapter) {
+    const oracleName = validated.config.ORACLE_NAME;
+    const resolved = resolveDecisionAdapter(validated.config, {
+      openRouterHeaders: getOpenRouterAttributionHeaders(
+        typeof oracleName === 'string' ? oracleName : undefined,
+      ),
+    });
+    if (!resolved.ok) {
+      for (const issue of resolved.issues) {
+        reportBootError(
+          logger,
+          `Decision provider env validation failed for '${issue.field}': ${issue.message}`,
+        );
+      }
+      throw new Error(
+        `Env validation failed (${resolved.issues.length} issue${resolved.issues.length === 1 ? '' : 's'}).`,
+      );
+    }
+    decisionAdapter = resolved.adapter;
+  }
+
   // Cross-field check for the LangSmith selective-tracing allowlist —
   // `LANGSMITH_TRACED_DIDS` requires an API key and must not be combined
   // with the global `LANGSMITH_TRACING=true` switch. Failing here beats
@@ -313,6 +351,7 @@ export async function createOracleApp(
     tools: new ToolRegistry(),
     subAgents: new SubAgentRegistry(),
     middlewares: new MiddlewareRegistry(),
+    decisions: new DecisionRegistry(),
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
@@ -321,6 +360,7 @@ export async function createOracleApp(
     registries.tools.register(plugin);
     registries.subAgents.register(plugin);
     registries.middlewares.register(plugin);
+    registries.decisions.register(plugin);
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
     registries.configSchema.register(plugin);
     registries.sharedState.register(plugin);
@@ -460,6 +500,8 @@ export async function createOracleApp(
     identity,
     availablePlugins: loadedPluginNames,
     logger,
+    decisionRegistry: registries.decisions,
+    decisionAdapter,
   });
 
   // 9. Warm the boot caches inside each registry so the per-request agent
@@ -476,9 +518,10 @@ export async function createOracleApp(
   await registries.tools.collectBoot(warmBuildCtx);
   registries.subAgents.collectBoot(warmBuildCtx);
   registries.middlewares.collect(warmBuildCtx);
+  registries.decisions.collect(warmBuildCtx);
 
   // Fail the boot if two plugins contribute the same tool name, sub-agent
-  // name, or shared-state key. Without this, a collision is silently
+  // name, decision name, or shared-state key. Without this, a collision is silently
   // resolved last-write-wins: the agent binds duplicate tools and the
   // capability gate mis-attributes one of them, leaving it unreachable.
   // Only the boot-time contributions are checked here — request-time tools
@@ -486,6 +529,7 @@ export async function createOracleApp(
   // assertion can't cover them.
   registries.tools.assertNoCollisions();
   registries.subAgents.assertNoCollisions();
+  registries.decisions.assertNoCollisions();
   registries.sharedState.assertNoCollisions();
 
   // 10. Build the merged hooks the agent build will use:

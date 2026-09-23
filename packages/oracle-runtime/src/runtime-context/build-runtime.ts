@@ -9,6 +9,7 @@ import type {
   UserContextData,
 } from '../plugin-api/types.js';
 import { createScopedEmitter } from '../events/scoped-emitter.js';
+import { UNAVAILABLE_DECISION_EVALUATOR } from '@ixo/common';
 import type { AmbientServices } from './ambient.js';
 
 /** Fixed empty `shared` accessors — frozen so callers can't mutate. */
@@ -113,6 +114,19 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   );
 
   const abortSignal = runConfig.signal ?? new AbortController().signal;
+  const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISION_EVALUATOR;
+  const decisions: RuntimeContext['decisions'] = {
+    evaluate: (definition, input, options) =>
+      decisionEvaluator.evaluate(definition, input, {
+        ...options,
+        signal: options?.signal ?? abortSignal,
+      }),
+    evaluateByName: (name, input, options) =>
+      decisionEvaluator.evaluateByName(name, input, {
+        ...options,
+        signal: options?.signal ?? abortSignal,
+      }),
+  };
 
   const delegation = user.ucanDelegation;
 
@@ -180,6 +194,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
     },
+    decisions,
     llm: {
       get: (role, params) => ambient.llm.get(role, params),
     },

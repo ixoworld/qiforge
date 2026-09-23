@@ -1,3 +1,4 @@
+import type { DecisionRegistration } from '@ixo/common/ai/decisions';
 import type { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type {
@@ -17,7 +18,7 @@ import {
 import { computeSubAgentToolName } from './subagent-as-tool';
 
 /**
- * The six registries the runtime composes. Instances are created per
+ * The seven registries the runtime composes. Instances are created per
  * `createRuntimeCore()` call — never at module scope — so an isolate that
  * boots two oracles (tests, or a multi-tenant shell) never shares caches.
  */
@@ -28,6 +29,7 @@ export interface Registries {
   manifests: ManifestRegistry;
   configSchema: ConfigSchemaRegistry;
   sharedState: SharedStateRegistry;
+  decisions: DecisionRegistry;
 }
 
 /** Build a fresh, empty set of registries. */
@@ -39,6 +41,7 @@ export function createRegistries(): Registries {
     manifests: new ManifestRegistry(),
     configSchema: new ConfigSchemaRegistry(),
     sharedState: new SharedStateRegistry(),
+    decisions: new DecisionRegistry(),
   };
 }
 
@@ -636,6 +639,96 @@ export class SharedStateRegistry {
     if (collisions.length > 0) {
       throw new Error(
         `SharedStateRegistry: shared-state key collisions detected:\n  - ${collisions.join('\n  - ')}`,
+      );
+    }
+  }
+}
+
+// ── Decision registry ───────────────────────────────────────────────────────
+
+/** A collected decision tagged with the plugin that contributed it. */
+export interface RegisteredDecision {
+  pluginName: string;
+  decision: DecisionRegistration;
+}
+
+interface DecisionBootCache {
+  entries: RegisteredDecision[];
+  /** First registration per name; duplicates surface in `assertNoCollisions`. */
+  byName: Map<string, RegisteredDecision>;
+}
+
+/**
+ * Stores the bounded semantic decisions plugins contribute through
+ * `getDecisions(ctx)`. Collected once per isolate (in `warm()`); the
+ * `DecisionRuntime` resolves `evaluateByName` through `get`. Name collisions
+ * across plugins are a boot error.
+ */
+export class DecisionRegistry {
+  private readonly plugins: OraclePlugin[] = [];
+  private bootCache: DecisionBootCache | null = null;
+
+  register(plugin: OraclePlugin): void {
+    this.plugins.push(plugin);
+    this.bootCache = null;
+  }
+
+  /** Collect every plugin's decisions once; later calls return the cache. */
+  collect(buildCtx: PluginContext): RegisteredDecision[] {
+    if (this.bootCache !== null) return this.bootCache.entries;
+
+    const entries: RegisteredDecision[] = [];
+    const byName = new Map<string, RegisteredDecision>();
+    for (const plugin of this.plugins) {
+      if (!plugin.getDecisions) continue;
+      for (const decision of plugin.getDecisions(buildCtx)) {
+        const entry: RegisteredDecision = { pluginName: plugin.name, decision };
+        entries.push(entry);
+        if (!byName.has(decision.name)) byName.set(decision.name, entry);
+      }
+    }
+    this.bootCache = { entries, byName };
+    return entries;
+  }
+
+  get(name: string): RegisteredDecision | undefined {
+    if (this.bootCache === null) {
+      throw new Error('DecisionRegistry.get called before collect');
+    }
+    return this.bootCache.byName.get(name);
+  }
+
+  namesForPlugin(pluginName: string): string[] {
+    if (this.bootCache === null) return [];
+    return this.bootCache.entries
+      .filter((entry) => entry.pluginName === pluginName)
+      .map((entry) => entry.decision.name);
+  }
+
+  /** Throw if two plugins contribute decisions under the same name. */
+  assertNoCollisions(): void {
+    if (this.bootCache === null) {
+      throw new Error(
+        'DecisionRegistry.assertNoCollisions called before collect',
+      );
+    }
+
+    const seen = new Map<string, string>();
+    const collisions: string[] = [];
+    for (const { pluginName, decision } of this.bootCache.entries) {
+      const previous = seen.get(decision.name);
+      if (previous && previous !== pluginName) {
+        collisions.push(
+          `Decision "${decision.name}" registered by both "${previous}" and "${pluginName}"`,
+        );
+      } else if (!previous) {
+        seen.set(decision.name, pluginName);
+      }
+    }
+
+    if (collisions.length > 0) {
+      throw new Error(
+        `DecisionRegistry: decision name collisions detected:\n  - ${collisions.join('\n  - ')}`,
       );
     }
   }

@@ -1,4 +1,5 @@
 import { SessionManagerService, type ChatSession } from '@ixo/common';
+import type { DecisionTraceOptions } from '@ixo/common/ai/decisions';
 import {
   type MatrixManager,
   type MessageEvent,
@@ -16,6 +17,7 @@ import { normalizeDid } from '../../config/normalize-did.js';
 import { workStatusProducer } from '../../matrix/work-status-producer.js';
 import { lruInsert } from '../../utils/lru.js';
 import type { CommerceContext } from '../../plugin-api/types.js';
+import { resolveLangsmithTracing } from './langsmith-tracing.js';
 import { MessageRouterService } from './message-router.service.js';
 
 const FILE_MSGTYPES = new Set(['m.file', 'm.image', 'm.video', 'm.audio']);
@@ -346,6 +348,38 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * The turn's LangSmith tracer and metadata for the commerce routing
+   * Decision, which runs before the graph and so outside its trace. Same
+   * gate as the turn itself: `callbacks` only for a DID on the
+   * `LANGSMITH_TRACED_DIDS` allowlist, nothing extra in global mode.
+   * `thread_id` matches the graph run's, so LangSmith groups the two.
+   */
+  private routingTrace(
+    did: string,
+    requestId: string,
+    graphThreadId: string,
+  ): DecisionTraceOptions {
+    const tracing = resolveLangsmithTracing({
+      userDid: did,
+      client: 'matrix',
+      env: {
+        tracing: this.config.get<string>('LANGSMITH_TRACING'),
+        apiKey: this.config.get<string>('LANGSMITH_API_KEY'),
+        project: this.config.get<string>('LANGSMITH_PROJECT'),
+        tracedDids: this.config.get<string>('LANGSMITH_TRACED_DIDS'),
+      },
+    });
+    return {
+      ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+      metadata: {
+        ...tracing.metadata,
+        thread_id: graphThreadId,
+        request_id: requestId,
+      },
+    };
+  }
+
   private async flush(
     threadId: string,
     langchainThreadId?: string,
@@ -451,9 +485,12 @@ export class MatrixListenerBridge implements OnModuleInit, OnModuleDestroy {
     if (this.router.isActive()) {
       commerce = await this.router.route({
         roomId: first.roomId,
+        requestId,
+        abortSignal: abortController.signal,
         threadId,
         senderDid: did,
         text: turnMessage,
+        trace: this.routingTrace(did, requestId, langchainThreadId ?? threadId),
       });
     }
 

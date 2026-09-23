@@ -7,6 +7,7 @@ import { UserMatrixSqliteSyncService } from '../../matrix/checkpointer/user-matr
 import { UcanModule } from '../ucan/ucan.module.js';
 import { AgentBuilder } from './agent-builder.js';
 import { BatchInvoker } from './batch-invoker.js';
+import { CapabilityRouter } from './capability-router.js';
 import { DelegationController } from './delegation.controller.js';
 import { FileProcessingService } from './file-processing.service.js';
 import { HomeServerCache } from './homeserver-cache.js';
@@ -36,11 +37,29 @@ import { UserContextFetcher } from './user-context-fetcher.js';
     PostMessageSyncer,
     MatrixListenerBridge,
     {
-      // Plain construction: the router's collaborators (the commerce port
-      // holder, the routing-model factory, the status producer) are
-      // module-scope singletons, not Nest providers.
+      // The router runs before RuntimeContext exists, but bounded Decisions
+      // live on the boot-populated ambient runtime. Resolve them lazily through
+      // the holder so module construction still works before createOracleApp
+      // has populated the bundle.
       provide: MessageRouterService,
-      useFactory: () => new MessageRouterService(),
+      useFactory: (holder: OracleRuntimeBundleHolder) =>
+        new MessageRouterService({
+          getDecisionEvaluator: () =>
+            holder.isReady() ? holder.get().ambient.decisions : undefined,
+        }),
+      inject: [OracleRuntimeBundleHolder],
+    },
+    {
+      // Same lazy resolution as the commerce router: the capability router
+      // runs inside the agent build, before RuntimeContext exists, and its
+      // Decision evaluator lives on the boot-populated bundle.
+      provide: CapabilityRouter,
+      useFactory: (holder: OracleRuntimeBundleHolder) =>
+        new CapabilityRouter({
+          getDecisionEvaluator: () =>
+            holder.isReady() ? holder.get().ambient.decisions : undefined,
+        }),
+      inject: [OracleRuntimeBundleHolder],
     },
     {
       // `MemoryEngineService` is OPTIONAL. `UserContextFetcher` reads it
