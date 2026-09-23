@@ -3,6 +3,7 @@ import type {
   ChoiceDecisionAnswer,
   DecisionEvaluation,
 } from '@ixo/common';
+import type { DecisionTraceOptions } from '@ixo/common/ai/decisions';
 import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { Logger } from '@nestjs/common';
@@ -154,6 +155,11 @@ export interface RouteTurnInput {
   senderDid: string;
   /** The coalesced user text of the turn. */
   text: string;
+  /**
+   * The turn's tracer and trace metadata. Routing runs before the graph,
+   * outside any LangChain run, so without these its Decision is not traced.
+   */
+  trace?: DecisionTraceOptions;
 }
 
 /**
@@ -797,11 +803,10 @@ function evaluateRouteDecision(
   services: CommerceRoutedService[],
 ): Promise<DecisionEvaluation> {
   const decisionInput = toRouteDecisionInput(input.text, services);
-  return input.abortSignal
-    ? evaluator.evaluateByName(decisionName, decisionInput, {
-        signal: input.abortSignal,
-      })
-    : evaluator.evaluateByName(decisionName, decisionInput);
+  return evaluator.evaluateByName(decisionName, decisionInput, {
+    ...input.trace,
+    ...(input.abortSignal && { signal: input.abortSignal }),
+  });
 }
 
 /** Reduce the Decision's two answers to the classifier's verdict shape. */

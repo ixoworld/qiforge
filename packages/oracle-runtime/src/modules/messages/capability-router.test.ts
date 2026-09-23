@@ -156,6 +156,26 @@ describe('CapabilityRouter', () => {
       expect(options).toEqual({ signal });
     });
 
+    it('hands the turn trace to the evaluation in both modes', async () => {
+      const callbacks = [{ handleChainStart: () => undefined }];
+      const trace = {
+        callbacks,
+        metadata: { user_did: 'did:test:user', thread_id: 'thread-1' },
+      };
+      const signal = new AbortController().signal;
+
+      for (const mode of ['on', 'shadow'] as const) {
+        const { route, evaluate } = harness({ mode });
+        await route({ trace, signal });
+        await flush();
+        expect(evaluate.mock.calls[0]?.[2]).toEqual({
+          callbacks,
+          metadata: trace.metadata,
+          signal,
+        });
+      }
+    });
+
     it('skips the router when every on-demand plugin is already loaded', async () => {
       const { route, evaluate } = harness({ mode: 'on' });
 

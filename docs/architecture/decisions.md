@@ -185,6 +185,34 @@ The core validation layer enforces:
 Application code must still implement fail-open, fail-closed, human escalation,
 payments, and other consequence policy explicitly.
 
+## Tracing
+
+Every evaluation runs as a LangChain run named `decision:<name>`, tagged
+`decision`, so the turn's LangSmith tracer records it as a span. The span's
+inputs are the Decision name, the projected state and the questions. Its
+output is the evaluation, or the error when the provider fails or times out.
+Its metadata carries `decision_name`, `decision_version`, `decision_provider`
+and `decision_model`. With no tracer active, the run is a plain call.
+
+Where the span attaches depends on where the Decision is evaluated:
+
+- **Inside the graph** (a plugin tool calling `ctx.decisions`), the span nests
+  under the tool's run. On Node it finds the parent through LangChain's
+  implicit run context. On Workers, which has none, `ctx.decisions` passes the
+  tool run's callbacks explicitly.
+- **Before the graph** (the capability router and the commerce router), there
+  is no parent run. Both routers receive the turn's tracer and metadata in
+  `DecisionEvaluateOptions.callbacks` and `.metadata`, resolved by the same
+  `resolveLangsmithTracing` call as the turn. The span is its own trace, and
+  its `thread_id` metadata matches the graph run's, so LangSmith's thread view
+  shows it next to the turn.
+
+The gate is the turn's gate. In selective mode a router span is uploaded only
+for a DID on `LANGSMITH_TRACED_DIDS`. In Node's global mode
+(`LANGSMITH_TRACING=true`) LangChain attaches its tracer to every run, spans
+included. Abort and timeout stay inside `DecisionRuntime`; the runnable never
+receives the signal, so callers see the same errors as before.
+
 ## Adapter boundary
 
 `DecisionAdapter` is intentionally small:

@@ -6,6 +6,7 @@ import {
   toRoutableCapabilities,
   type CapabilityRouteVerdict,
   type CapabilityRouterMode,
+  type DecisionTraceOptions,
   type RoutableCapability,
 } from '@ixo/common/ai/decisions';
 import { Logger } from '@nestjs/common';
@@ -48,6 +49,11 @@ export interface CapabilityRouteRequest {
   commerceMode?: 'support' | 'work';
   /** Aborting the turn aborts a running evaluation, live or shadow. */
   signal?: AbortSignal;
+  /**
+   * The turn's tracer and trace metadata. The router runs before the graph,
+   * outside any LangChain run, so without these its Decision is not traced.
+   */
+  trace?: DecisionTraceOptions;
 }
 
 /**
@@ -155,7 +161,10 @@ export class CapabilityRouter {
     // path cheap), so the router sees the current message only; the
     // Decision's `recentTurns` stays empty rather than costing a history read.
     const input = { text: request.text, recentTurns: [], capabilities };
-    const options = request.signal ? { signal: request.signal } : undefined;
+    const options = {
+      ...request.trace,
+      ...(request.signal && { signal: request.signal }),
+    };
     const evaluate = () =>
       evaluator.evaluate(capabilityRouteDecision, input, options);
 

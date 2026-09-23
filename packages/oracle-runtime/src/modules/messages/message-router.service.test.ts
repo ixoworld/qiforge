@@ -467,6 +467,34 @@ describe('MessageRouterService', () => {
   }
 
   describe('bounded Decision shadow routing', () => {
+    it('hands the turn trace and abort signal to the Decision', async () => {
+      makePort({
+        routerEngine: 'decision-shadow',
+        routerDecisionName: 'oracle-payments.route-message',
+      });
+      const { evaluator, evaluateByName } = evaluatorFor();
+      const { router } = makeRouter(
+        [{ intent: 'support', confidence: 0.91 }],
+        evaluator,
+      );
+      const callbacks = [{ handleChainStart: () => undefined }];
+      const metadata = { user_did: 'did:test:user', thread_id: 'thread-1' };
+      const abortSignal = new AbortController().signal;
+
+      await router.route({
+        ...turn('how much is a tax report?'),
+        abortSignal,
+        trace: { callbacks, metadata },
+      });
+
+      await vi.waitFor(() => expect(evaluateByName).toHaveBeenCalledTimes(1));
+      expect(evaluateByName.mock.calls[0]?.[2]).toEqual({
+        callbacks,
+        metadata,
+        signal: abortSignal,
+      });
+    });
+
     it('observes Jev without changing the legacy routing outcome', async () => {
       const { spies } = makePort({
         routerEngine: 'decision-shadow',
@@ -502,6 +530,7 @@ describe('MessageRouterService', () => {
             },
           ],
         },
+        {},
       );
 
       await vi.waitFor(() =>
@@ -668,6 +697,7 @@ describe('MessageRouterService', () => {
             },
           ],
         },
+        {},
       );
       expect(invocations).toHaveLength(0);
       expect(spies.checkContractGate).toHaveBeenCalledWith({

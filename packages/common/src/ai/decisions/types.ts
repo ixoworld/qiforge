@@ -1,3 +1,4 @@
+import type { Callbacks } from '@langchain/core/callbacks/manager';
 import type { z } from 'zod';
 
 export type DecisionState =
@@ -109,7 +110,24 @@ export interface DecisionDefinition<
 export interface DecisionEvaluateOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /**
+   * Callbacks for the evaluation's trace span, typically the turn's LangSmith
+   * tracer. Only needed outside a LangChain run: inside one (a tool, a node)
+   * the span inherits the run's callbacks and nests under it on its own.
+   */
+  callbacks?: Callbacks;
+  /** Extra metadata on the trace span, e.g. the user DID and thread id. */
+  metadata?: Record<string, unknown>;
 }
+
+/**
+ * The tracing half of `DecisionEvaluateOptions`, for callers that forward a
+ * turn's tracer to code that evaluates Decisions on its behalf.
+ */
+export type DecisionTraceOptions = Pick<
+  DecisionEvaluateOptions,
+  'callbacks' | 'metadata'
+>;
 
 export interface DecisionEvaluation {
   decision: {

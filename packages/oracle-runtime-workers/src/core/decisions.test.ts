@@ -304,4 +304,45 @@ describe('buildRuntimeContext decisions', () => {
       { signal: own.signal, timeoutMs: 10 },
     );
   });
+
+  it("traces on the run's callbacks unless the caller passes its own", async () => {
+    const evaluation: DecisionEvaluation = {
+      decision: { name: 'commerce.route', version: '1.0.0' },
+      provider: 'stub',
+      model: 'stub-model',
+      answers: { match: { kind: 'boolean', probabilityTrue: 0.75 } },
+      latencyMs: 1,
+      evaluatedAt: '2026-09-22T00:00:00.000Z',
+    };
+    const decisions: DecisionEvaluator = {
+      evaluate: vi.fn(async () => evaluation),
+      evaluateByName: vi.fn(async () => evaluation),
+    };
+    const turn = new AbortController();
+    const toolRunCallbacks = [{ handleChainStart: () => undefined }];
+    const ctx = buildRuntimeContext(
+      makeRunConfig({ signal: turn.signal, callbacks: toolRunCallbacks }),
+      createNoopAmbient({ decisions }),
+      state,
+    );
+
+    await ctx.decisions.evaluate(ROUTE, { value: 'x' });
+    expect(decisions.evaluate).toHaveBeenCalledWith(
+      ROUTE,
+      { value: 'x' },
+      { signal: turn.signal, callbacks: toolRunCallbacks },
+    );
+
+    const own = [{ handleChainEnd: () => undefined }];
+    await ctx.decisions.evaluateByName(
+      'commerce.route',
+      { value: 'x' },
+      { callbacks: own },
+    );
+    expect(decisions.evaluateByName).toHaveBeenCalledWith(
+      'commerce.route',
+      { value: 'x' },
+      { signal: turn.signal, callbacks: own },
+    );
+  });
 });

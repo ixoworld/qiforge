@@ -1,7 +1,9 @@
 import {
   UNAVAILABLE_DECISION_EVALUATOR,
+  type DecisionEvaluateOptions,
   type DecisionEvaluator,
 } from '@ixo/common/ai/decisions';
+import type { Callbacks } from '@langchain/core/callbacks/manager';
 import type { BotCredentials } from '../do/contracts';
 import type { AttachmentViewSurface } from '../attachments/view';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -324,6 +326,13 @@ export interface RunConfigContext {
 export interface RunConfig {
   context: RunConfigContext;
   signal?: AbortSignal;
+  /**
+   * LangChain callbacks scoped to the current run, which for a tool call is
+   * the tool's own run. `ctx.decisions` hands them to each evaluation so its
+   * trace span nests under the tool: Workers has no implicit run context for
+   * the span to find its parent through.
+   */
+  callbacks?: Callbacks;
   toolCall?: { id?: string };
   /**
    * The LIVE graph state at the moment the tool is called (LangGraph's
@@ -389,18 +398,22 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
 
   // The turn's signal is the default for every Decision, so an aborted turn
   // cancels its in-flight evaluations; a caller may still scope one tighter.
+  // The run's callbacks are the default tracer, so a Decision a tool makes
+  // shows up under that tool in LangSmith when the turn is traced.
   const decisionEvaluator = ambient.decisions ?? UNAVAILABLE_DECISION_EVALUATOR;
+  const withTurnDefaults = (
+    options: DecisionEvaluateOptions | undefined,
+  ): DecisionEvaluateOptions => ({
+    ...options,
+    signal: options?.signal ?? abortSignal,
+    ...(options?.callbacks === undefined &&
+      runConfig.callbacks !== undefined && { callbacks: runConfig.callbacks }),
+  });
   const decisions: RuntimeContext['decisions'] = {
     evaluate: (definition, input, options) =>
-      decisionEvaluator.evaluate(definition, input, {
-        ...options,
-        signal: options?.signal ?? abortSignal,
-      }),
+      decisionEvaluator.evaluate(definition, input, withTurnDefaults(options)),
     evaluateByName: (name, input, options) =>
-      decisionEvaluator.evaluateByName(name, input, {
-        ...options,
-        signal: options?.signal ?? abortSignal,
-      }),
+      decisionEvaluator.evaluateByName(name, input, withTurnDefaults(options)),
   };
 
   const delegation = user.ucanDelegation;

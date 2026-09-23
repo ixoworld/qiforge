@@ -1,3 +1,4 @@
+import { RunnableLambda } from '@langchain/core/runnables';
 import type { z } from 'zod';
 import type {
   DecisionAdapter,
@@ -113,11 +114,12 @@ export class DecisionRuntime implements DecisionEvaluator {
     const forwardAbort = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', forwardAbort, { once: true });
 
+    const adapter = this.adapter;
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
+    const run = async (): Promise<DecisionEvaluation> => {
       const raw = await Promise.race([
-        this.adapter.evaluate(request, { signal: controller.signal }),
+        adapter.evaluate(request, { signal: controller.signal }),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(() => {
             controller.abort(
@@ -132,7 +134,7 @@ export class DecisionRuntime implements DecisionEvaluator {
 
       const latencyMs = Date.now() - started;
       this.logger?.debug?.(
-        `[decisions] name=${registration.name} provider=${this.adapter.provider} model=${this.adapter.model} latencyMs=${latencyMs}`,
+        `[decisions] name=${registration.name} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
       );
 
       return {
@@ -140,14 +142,46 @@ export class DecisionRuntime implements DecisionEvaluator {
           name: registration.name,
           version: registration.version,
         },
-        provider: this.adapter.provider,
-        model: this.adapter.model,
+        provider: adapter.provider,
+        model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
         evaluatedAt: new Date().toISOString(),
       };
+    };
+
+    try {
+      // The evaluation runs as a LangChain run so an active tracer records it
+      // as a span: the request as inputs, the evaluation (or the error) as
+      // outputs. With no tracer attached this is a plain call. Inside a
+      // LangChain run the span nests under it through the implicit run
+      // config; before the graph starts (the routers) the caller passes the
+      // turn's tracer in `options.callbacks`. The signal is deliberately not
+      // handed to the runnable: abort and timeout stay owned by the code in
+      // `run`, so callers keep seeing the same errors.
+      return await RunnableLambda.from(run).invoke(
+        {
+          decision: registration.name,
+          state: request.state,
+          questions: request.questions,
+        },
+        {
+          runName: `decision:${registration.name}`,
+          tags: ['decision'],
+          metadata: {
+            ...options?.metadata,
+            decision_name: registration.name,
+            decision_version: registration.version,
+            decision_provider: adapter.provider,
+            decision_model: adapter.model,
+          },
+          ...(options?.callbacks !== undefined && {
+            callbacks: options.callbacks,
+          }),
+        },
+      );
     } finally {
       if (timer) clearTimeout(timer);
       sourceSignal?.removeEventListener('abort', forwardAbort);

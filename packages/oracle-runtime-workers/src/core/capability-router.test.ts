@@ -258,6 +258,28 @@ describe('createCapabilityRouter', () => {
     );
   });
 
+  it('hands the turn trace to the evaluation, with the signal only when awaited', async () => {
+    const trace = {
+      callbacks: [{ handleChainStart: () => undefined }],
+      metadata: { user_did: 'did:test:user', thread_id: 'session-1' },
+    };
+    const signal = new AbortController().signal;
+
+    const live = evaluatorOf(async () => evaluation(0.92, 'weather', 0.88));
+    await createCapabilityRouter({ evaluator: live, logger: loggerSpy() })(
+      turn({ signal, trace }),
+    );
+    expect(live.evaluate.mock.calls[0]?.[2]).toEqual({ ...trace, signal });
+
+    const shadow = evaluatorOf(async () => evaluation(0.92, 'weather', 0.88));
+    await createCapabilityRouter({
+      evaluator: shadow,
+      logger: loggerSpy(),
+      background: vi.fn(),
+    })(turn({ mode: 'shadow', signal, trace }));
+    expect(shadow.evaluate.mock.calls[0]?.[2]).toEqual(trace);
+  });
+
   it('shadow: returns at once, never awaits the evaluation, and is not bound to the turn signal', async () => {
     const evaluator = evaluatorOf(
       () => new Promise<DecisionEvaluation>(() => {}),

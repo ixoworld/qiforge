@@ -179,6 +179,11 @@ runtime's primitive of the same name). Unset = Decisions unconfigured: every
 `createOracleWorker({ decisionAdapter })` supplies an adapter directly and
 bypasses these variables.
 
+When the turn is traced (see the LangSmith variables), every evaluation is a
+`decision:<name>` span on the turn's tracer: a tool's Decision nests under the
+tool, and the capability router's Decision is its own trace with the turn's
+`thread_id`. See `docs/architecture/decisions.md#tracing` at the repo root.
+
 | Variable                                                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                    |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DECISION_PROVIDER`                                      | `openrouter-jev` (the Jev model on OpenRouter; reuses `OPEN_ROUTER_API_KEY`) or `cloudflare-jev` (Jev on Workers AI).                                                                                                                                                                                                                                                                      |

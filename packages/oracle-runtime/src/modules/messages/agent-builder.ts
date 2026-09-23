@@ -460,6 +460,28 @@ export class AgentBuilder {
     // `loadedPlugins` is a checkpointed set-union that only
     // `load_capability` may grow. The candidate set excludes everything the
     // turn already treats as loaded, the editor seed above included.
+    //
+    // LangSmith: resolved here rather than next to the graph config so the
+    // router's Decision, which runs before the graph, lands on the same
+    // tracer (and the same allowlist gate) as the turn. `metadata` is
+    // attached unconditionally so any active tracer, the global env-driven
+    // one or the selective per-DID one, can filter per user; it is inert
+    // when no tracer runs. `callbacks` appears only when this user's DID is
+    // in the `LANGSMITH_TRACED_DIDS` allowlist, and the explicit tracer
+    // propagates through the whole turn (model calls, tools, sub-agents) via
+    // LangGraph's config inheritance.
+    const tracing = resolveLangsmithTracing({
+      userDid: payload.did,
+      client: clientType,
+      env: {
+        tracing: this.config.get<string>('LANGSMITH_TRACING'),
+        apiKey: this.config.get<string>('LANGSMITH_API_KEY'),
+        project: this.config.get<string>('LANGSMITH_PROJECT'),
+        tracedDids: this.config.get<string>('LANGSMITH_TRACED_DIDS'),
+      },
+      timings: { prepareDurationMs: prepared.prepareDurationMs },
+    });
+
     const capabilityRoute = await this.capabilityRouter.route({
       requestId: prepared.requestId,
       mode: bundle.config.CAPABILITY_ROUTER,
@@ -468,6 +490,16 @@ export class AgentBuilder {
       loadedPlugins: new Set(buildTimeState.loadedPlugins ?? []),
       commerceMode: payload.commerce?.mode,
       signal: abortController?.signal,
+      trace: {
+        ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+        // `thread_id` is the key LangGraph copies onto the graph run, so
+        // LangSmith's thread view groups the router span with the turn.
+        metadata: {
+          ...tracing.metadata,
+          thread_id: prepared.langchainThreadId,
+          request_id: prepared.requestId,
+        },
+      },
     });
 
     // On a BYO turn, swap in a request-scoped LLM adapter so the main model,
@@ -519,28 +551,6 @@ export class AgentBuilder {
       ...(editorSessionActive && { loadedPlugins: [EditorPlugin.NAME] }),
     };
 
-    // LangSmith: metadata (user DID, ingress client, pre-graph timings) is
-    // attached unconditionally so any active tracer — the global env-driven
-    // one or the selective per-DID one — can filter and aggregate per user;
-    // it is inert when no tracer runs. `callbacks` appears only when this
-    // user's DID is in the `LANGSMITH_TRACED_DIDS` allowlist, and the
-    // explicit tracer propagates through the whole turn (model calls, tools,
-    // sub-agents) via LangGraph's config inheritance.
-    const tracing = resolveLangsmithTracing({
-      userDid: payload.did,
-      client: clientType,
-      env: {
-        tracing: this.config.get<string>('LANGSMITH_TRACING'),
-        apiKey: this.config.get<string>('LANGSMITH_API_KEY'),
-        project: this.config.get<string>('LANGSMITH_PROJECT'),
-        tracedDids: this.config.get<string>('LANGSMITH_TRACED_DIDS'),
-      },
-      timings: {
-        prepareDurationMs: prepared.prepareDurationMs,
-        agentBuildDurationMs: Math.round(performance.now() - buildStartedAt),
-      },
-    });
-
     // `version: 'v2'` is REQUIRED for `agent.streamEvents` to emit the
     // `{event, data, tags}` envelope the SSE loop expects. Without it,
     // langchain defaults to v1 (or emits nothing) and the FE sees a
@@ -554,7 +564,10 @@ export class AgentBuilder {
       recursionLimit: 200,
       configurable: prepared.runnableConfig.configurable,
       context: requestCtx,
-      metadata: tracing.metadata,
+      metadata: {
+        ...tracing.metadata,
+        agent_build_duration_ms: Math.round(performance.now() - buildStartedAt),
+      },
       ...(tracing.callbacks && { callbacks: tracing.callbacks }),
       ...(abortController && { signal: abortController.signal }),
     };

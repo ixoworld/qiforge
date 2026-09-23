@@ -6,6 +6,7 @@ import {
   toRoutableCapabilities,
   type CapabilityRouterMode,
   type DecisionEvaluator,
+  type DecisionTraceOptions,
   type RoutableCapability,
 } from '@ixo/common/ai/decisions';
 import type { Logger } from '../plugin-api/types';
@@ -43,6 +44,11 @@ export interface CapabilityRouteTurn {
   requestId: string;
   /** The turn's abort signal; only an awaited (`on`) evaluation is bound to it. */
   signal?: AbortSignal;
+  /**
+   * The turn's tracer and trace metadata. The router runs before the graph,
+   * outside any LangChain run, so without these its Decision is not traced.
+   */
+  trace?: DecisionTraceOptions;
   /**
    * Shadow mode only: receives what the router would have preloaded once its
    * evaluation completes, so the host can compare it with what the turn
@@ -154,7 +160,7 @@ export function createCapabilityRouter(
       const started = now();
       background(
         evaluator
-          .evaluate(capabilityRouteDecision, input)
+          .evaluate(capabilityRouteDecision, input, turn.trace)
           .then((evaluation) => {
             const verdict = decideCapabilityRoute(evaluation, capabilities);
             logger.log(
@@ -184,7 +190,10 @@ export function createCapabilityRouter(
       const evaluation = await evaluator.evaluate(
         capabilityRouteDecision,
         input,
-        turn.signal ? { signal: turn.signal } : undefined,
+        {
+          ...turn.trace,
+          ...(turn.signal && { signal: turn.signal }),
+        },
       );
       const verdict = decideCapabilityRoute(evaluation, capabilities);
       if (verdict.preload.length === 0) {

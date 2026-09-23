@@ -3964,6 +3964,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         priorMeta.loadedPlugins ?? [],
       );
       this.shadowRoutes.delete(req.sessionId);
+      // LangSmith: resolved before the router so its Decision, which runs
+      // ahead of the graph, lands on the turn's tracer under the same
+      // allowlist gate. Metadata is attached unconditionally (inert without a
+      // tracer); the explicit tracer only when this turn is traced (global
+      // switch or per-DID allowlist — see `resolveLangsmithTracing`).
+      const tracing = resolveLangsmithTracing({
+        userDid: req.identity.userDid,
+        client: req.client,
+        env: langsmithEnvFromWorkerEnv(this.env),
+      });
       const preloadedPlugins = this.capabilityRouter
         ? await this.capabilityRouter({
             mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
@@ -3972,6 +3982,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             text: body.message,
             requestId: req.requestId,
             signal: abortController.signal,
+            trace: {
+              ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+              // `thread_id` matches the graph run's, so LangSmith's thread
+              // view groups the router span with the turn.
+              metadata: {
+                ...tracing.metadata,
+                thread_id: req.sessionId,
+                request_id: req.requestId,
+              },
+            },
             onShadowVerdict: (wouldPreload) =>
               this.shadowRoutes.set(req.sessionId, {
                 requestId: req.requestId,
@@ -4215,15 +4235,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ...metadataGraphInput(meta, priorMeta),
         ...surface.input,
       };
-      // LangSmith: metadata is attached unconditionally (inert without a
-      // tracer); the explicit tracer only when this turn is traced (global
-      // switch or per-DID allowlist — see `resolveLangsmithTracing`).
-      const tracing = resolveLangsmithTracing({
-        userDid: req.identity.userDid,
-        client: req.client,
-        env: langsmithEnvFromWorkerEnv(this.env),
-      });
-
       const config = {
         configurable: { thread_id: req.sessionId },
         context,

@@ -1,3 +1,7 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
+import { RunnableLambda } from '@langchain/core/runnables';
+import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { defineDecision } from './define-decision.js';
@@ -187,6 +191,145 @@ describe('DecisionRuntime', () => {
         { signal: controller.signal },
       ),
     ).rejects.toThrow(/caller cancelled/);
+  });
+});
+
+interface RecordedRun {
+  runId: string;
+  parentRunId?: string;
+  runName?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  inputs: Record<string, unknown>;
+  outputs?: Record<string, unknown>;
+  error?: Error;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Records chain runs synchronously so assertions see them after `invoke`. */
+class RecordingHandler extends BaseCallbackHandler {
+  name = 'recording-handler';
+  awaitHandlers = true;
+  readonly runs: RecordedRun[] = [];
+
+  // The callback manager calls this as (chain, inputs, runId, parentRunId,
+  // tags, metadata, runType, runName), which is not the parameter order
+  // `BaseCallbackHandler` declares, so the arguments are read by position
+  // and narrowed at runtime.
+  override handleChainStart(...args: unknown[]): void {
+    const [, inputs, runId, parentRunId, tags, metadata, , runName] = args;
+    if (typeof runId !== 'string' || !isRecord(inputs)) return;
+    this.runs.push({
+      runId,
+      inputs,
+      ...(typeof parentRunId === 'string' && { parentRunId }),
+      ...(typeof runName === 'string' && { runName }),
+      ...(Array.isArray(tags) && {
+        tags: tags.filter((tag): tag is string => typeof tag === 'string'),
+      }),
+      ...(isRecord(metadata) && { metadata }),
+    });
+  }
+
+  override handleChainEnd(
+    outputs: Record<string, unknown>,
+    runId: string,
+  ): void {
+    const run = this.runs.find((entry) => entry.runId === runId);
+    if (run) run.outputs = outputs;
+  }
+
+  override handleChainError(error: Error, runId: string): void {
+    const run = this.runs.find((entry) => entry.runId === runId);
+    if (run) run.error = error;
+  }
+
+  decisionRuns(): RecordedRun[] {
+    return this.runs.filter((run) => run.runName?.startsWith('decision:'));
+  }
+}
+
+describe('DecisionRuntime tracing', () => {
+  const answering = stubAdapter(async () => ({
+    answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+  }));
+
+  it('records the evaluation as a decision span on the given callbacks', async () => {
+    const handler = new RecordingHandler();
+    const runtime = new DecisionRuntime(lookup, answering);
+
+    const evaluation = await runtime.evaluate(
+      decision,
+      { text: 'yes' },
+      { callbacks: [handler], metadata: { user_did: 'did:test:user' } },
+    );
+
+    const [span] = handler.decisionRuns();
+    expect(handler.decisionRuns()).toHaveLength(1);
+    expect(span?.runName).toBe('decision:test.boolean');
+    expect(span?.tags).toContain('decision');
+    expect(span?.metadata).toMatchObject({
+      user_did: 'did:test:user',
+      decision_name: 'test.boolean',
+      decision_version: '1.0.0',
+      decision_provider: 'test-provider',
+      decision_model: 'test-model',
+    });
+    expect(span?.inputs).toMatchObject({
+      decision: 'test.boolean',
+      state: { text: 'yes' },
+    });
+    expect(span?.outputs).toMatchObject({
+      provider: 'test-provider',
+      answers: evaluation.answers,
+    });
+  });
+
+  it('records a failure on the span and rethrows the original error', async () => {
+    class ProviderDown extends Error {
+      override name = 'ProviderDown';
+    }
+    const failure = new ProviderDown('provider down');
+    const handler = new RecordingHandler();
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => {
+        throw failure;
+      }),
+    );
+
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }, { callbacks: [handler] }),
+    ).rejects.toBe(failure);
+    expect(handler.decisionRuns()[0]?.error).toBe(failure);
+  });
+
+  it('nests under the surrounding LangChain run without explicit callbacks', async () => {
+    AsyncLocalStorageProviderSingleton.initializeGlobalInstance(
+      new AsyncLocalStorage(),
+    );
+    const handler = new RecordingHandler();
+    const runtime = new DecisionRuntime(lookup, answering);
+    const parent = RunnableLambda.from(async (text: string) =>
+      runtime.evaluate(decision, { text }),
+    ).withConfig({ runName: 'tool-call' });
+
+    await parent.invoke('yes', { callbacks: [handler] });
+
+    const parentRun = handler.runs.find((run) => run.runName === 'tool-call');
+    const [span] = handler.decisionRuns();
+    expect(parentRun).toBeDefined();
+    expect(span?.parentRunId).toBe(parentRun?.runId);
+  });
+
+  it('runs untraced when no callbacks are given', async () => {
+    const runtime = new DecisionRuntime(lookup, answering);
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }),
+    ).resolves.toMatchObject({ provider: 'test-provider' });
   });
 });
 
