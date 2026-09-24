@@ -35,6 +35,35 @@ tool / Flow / payment / chain transaction
 
 A Decision never grants authority and never executes a side effect.
 
+## Open Decisions profile
+
+QiForge follows the draft
+[Open Decisions: Trustworthy Decision-to-Action Profile](../../specs/open-decisions-trustworthy-action.md)
+for consequential decision flows.
+
+The profile makes the runtime separation above normative:
+
+```text
+Evidence → Semantic Judgment → Decision Policy → Authority → Action
+```
+
+In particular:
+
+- semantic confidence MUST NOT be treated as execution authority;
+- components that can mutate an executable action MUST run before final subject
+  binding, or MUST invalidate and repeat the decision/authorization;
+- consequential flows MUST bind approval to a canonical Final Decision Subject
+  before execution;
+- provider-specific confidence, probability, and calibration semantics MUST NOT
+  be conflated;
+- MCDA criterion estimates and principal preference weights MUST remain
+  logically distinct.
+
+The current Decision primitive implements the semantic-judgment boundary and is
+closest to the profile's OD-J conformance level. Final Decision Subject hashing,
+authority receipts, and action-bound execution receipts are follow-on runtime
+work required before QiForge can claim OD-A conformance.
+
 ## Question types
 
 QiForge exposes provider-neutral names:
@@ -257,6 +286,8 @@ agent behavior.
 
 ## Read next
 
+- [Open Decisions trustworthy action profile](../../specs/open-decisions-trustworthy-action.md) —
+  normative judgment-to-action invariants and conformance levels.
 - [Plugin lifecycle](plugin-lifecycle.md) — when Decisions are registered.
 - [Runtime context](runtime-context.md) — how `ctx.decisions` is scoped to a
   turn.
