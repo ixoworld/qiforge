@@ -66,6 +66,46 @@ describe('Final Decision Subject binding', () => {
     ).toThrow(/finite JSON numbers/);
   });
 
+  it('rejects sparse arrays', () => {
+    const sparse = new Array(2) as unknown as string[];
+
+    expect(() =>
+      canonicalizeFinalDecisionSubject({
+        kind: 'allocation',
+        action: { priority: sparse },
+      }),
+    ).toThrow(/sparse holes/);
+  });
+
+  it('digests the execution subject only once before producing the receipt', () => {
+    const approved = subject();
+    const authority = createDecisionAuthorityReceipt({
+      subject: approved,
+      mechanism: 'ucan',
+    });
+
+    let reads = 0;
+    const action = {
+      currency: 'USD',
+      payee: 'did:ixo:recipient',
+      get amount() {
+        reads += 1;
+        return reads === 1 ? '125.00' : '1250.00';
+      },
+    };
+
+    const execution = createDecisionExecutionReceipt({
+      authority,
+      currentSubject: {
+        ...approved,
+        action,
+      },
+    });
+
+    expect(reads).toBe(1);
+    expect(execution.actionDigest).toBe(authority.subject.subjectDigest);
+  });
+
   it('allows execution when the authorized subject is unchanged', () => {
     const authority = createDecisionAuthorityReceipt({
       subject: subject(),
