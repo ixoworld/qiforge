@@ -24,6 +24,10 @@ export const commerceRouteDecision = defineDecision({
     const noneOption = noMatchingServiceOption(input.services.map((s) => s.id));
 
     return {
+      applicability: {
+        applicable: true,
+        evidenceComplete: true,
+      },
       state: {
         message: input.text,
         services: input.services.map((service) => ({

@@ -40,6 +40,42 @@ describe('bounded decisions', () => {
     });
   });
 
+  it('validates explicit applicability metadata', () => {
+    expect(() =>
+      validateDecisionRequest({
+        state: { text: 'delegated task unavailable' },
+        applicability: {
+          applicable: false,
+          evidenceComplete: false,
+          reason: 'Encrypted agent message is not observable.',
+        },
+        questions: {
+          route: {
+            kind: 'boolean',
+            instructions: 'Should a tool be used?',
+          },
+        },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      validateDecisionRequest({
+        state: {},
+        applicability: {
+          applicable: true,
+          evidenceComplete: false,
+          reason: '   ',
+        },
+        questions: {
+          route: {
+            kind: 'boolean',
+            instructions: 'Should a tool be used?',
+          },
+        },
+      }),
+    ).toThrow(/reason must be non-empty/);
+  });
+
   it('accepts scalar state as well as structured state', () => {
     expect(() =>
       validateDecisionRequest({
@@ -131,6 +167,55 @@ describe('bounded decisions', () => {
         },
       }),
     ).toThrow(/unknown option/);
+  });
+
+  it('validates judgment method and calibration provenance', () => {
+    const request = routeDecision.prepare({ text: 'file my taxes' });
+
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers: {
+          work: { kind: 'boolean', probabilityTrue: 0.95 },
+          service: {
+            kind: 'choice',
+            value: 'tax',
+            confidence: 0.9,
+            probabilities: { tax: 0.9, none: 0.1 },
+          },
+        },
+        provenance: {
+          method: {
+            kind: 'specialized',
+            name: 'L2',
+            artifactRef: 'head:qwen3-4b:route:v3',
+          },
+          calibration: {
+            method: 'temperature-scaling',
+            artifactRef: 'cal:route:v3',
+            workload: 'support-routing',
+            ece: 0.04,
+            brier: 0.12,
+          },
+        },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers: {
+          work: { kind: 'boolean', probabilityTrue: 0.95 },
+          service: {
+            kind: 'choice',
+            value: 'tax',
+            confidence: 0.9,
+            probabilities: { tax: 0.9, none: 0.1 },
+          },
+        },
+        provenance: {
+          method: { kind: '' },
+        },
+      }),
+    ).toThrow(/method kind/);
   });
 
   it('validates provider answers against the declared question space', () => {

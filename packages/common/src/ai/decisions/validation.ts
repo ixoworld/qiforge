@@ -31,6 +31,23 @@ export function validateDecisionRequest(
     throw new Error('Decision request must be an object.');
   }
 
+  if (request.applicability !== undefined) {
+    if (
+      typeof request.applicability.applicable !== 'boolean' ||
+      typeof request.applicability.evidenceComplete !== 'boolean'
+    ) {
+      throw new Error(
+        'Decision applicability must declare boolean applicable and evidenceComplete values.',
+      );
+    }
+    if (
+      request.applicability.reason !== undefined &&
+      !request.applicability.reason.trim()
+    ) {
+      throw new Error('Decision applicability reason must be non-empty when supplied.');
+    }
+  }
+
   const questionEntries = Object.entries(request.questions ?? {});
   if (questionEntries.length === 0) {
     throw new Error('Decision request must contain at least one question.');
@@ -87,6 +104,58 @@ export function validateDecisionProviderResult(
     const question = request.questions[key]!;
     const answer = result.answers[key]!;
     validateAnswer(key, question, answer);
+  }
+
+  if (result.provenance) {
+    if (!result.provenance.method.kind.trim()) {
+      throw new Error('Decision judgment method kind must be non-empty.');
+    }
+    if (
+      result.provenance.method.name !== undefined &&
+      !result.provenance.method.name.trim()
+    ) {
+      throw new Error('Decision judgment method name must be non-empty when supplied.');
+    }
+    if (
+      result.provenance.method.artifactRef !== undefined &&
+      !result.provenance.method.artifactRef.trim()
+    ) {
+      throw new Error('Decision judgment method artifactRef must be non-empty when supplied.');
+    }
+
+    const calibration = result.provenance.calibration;
+    if (calibration) {
+      if (!calibration.method.trim()) {
+        throw new Error('Decision calibration method must be non-empty.');
+      }
+      for (const [name, value] of [
+        ['ece', calibration.ece],
+        ['brier', calibration.brier],
+      ] as const) {
+        if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+          throw new Error(
+            `Decision calibration ${name} must be a finite non-negative number.`,
+          );
+        }
+      }
+      for (const [name, value] of [
+        ['artifactRef', calibration.artifactRef],
+        ['workload', calibration.workload],
+        ['version', calibration.version],
+      ] as const) {
+        if (value !== undefined && !value.trim()) {
+          throw new Error(
+            `Decision calibration ${name} must be non-empty when supplied.`,
+          );
+        }
+      }
+      if (
+        calibration.evaluatedAt !== undefined &&
+        Number.isNaN(Date.parse(calibration.evaluatedAt))
+      ) {
+        throw new Error('Decision calibration evaluatedAt must be a valid timestamp.');
+      }
+    }
   }
 }
 

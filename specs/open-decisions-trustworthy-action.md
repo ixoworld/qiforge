@@ -35,7 +35,11 @@ A runtime:
 - MUST define the evidence projection supplied to the semantic evaluator;
 - MUST NOT silently add execution authority to evidence;
 - SHOULD minimize disclosed evidence to what is necessary for the bounded question;
-- SHOULD identify externally referenced evidence by stable digest, URI, credential identifier, or equivalent reference when the downstream consequence is material.
+- SHOULD identify externally referenced evidence by stable digest, URI, credential identifier, or equivalent reference when the downstream consequence is material;
+- MUST determine whether the decision is applicable to the observed state and whether decision-relevant evidence is complete before requesting an authoritative semantic judgment for consequential use;
+- MUST treat evidence as incomplete when the runtime knows that decision-relevant state is unavailable, opaque, encrypted, truncated, or otherwise unobservable.
+
+If `applicable=false` or `evidenceComplete=false`, the runtime MUST NOT interpret the absence of observed evidence as a negative semantic answer. It MUST abstain, pass through to a capable upstream process, request additional evidence, or escalate according to explicit policy.
 
 ### 3.2 Semantic Judgment
 
@@ -47,7 +51,7 @@ A semantic evaluator:
 - MUST return structured output;
 - MUST NOT execute side effects;
 - MUST NOT grant authority by virtue of model confidence, probability, score, or selected outcome;
-- MUST expose provider and model provenance;
+- MUST expose provider, model, judgment-method, and question-set provenance;
 - MUST preserve probability distributions when available;
 - MUST distinguish probability-like values from provider-specific confidence or concentration values.
 
@@ -131,11 +135,24 @@ A provider-neutral result SHOULD distinguish at least:
 
 ```ts
 interface SemanticJudgmentResult {
+  applicability: {
+    applicable: boolean;
+    evidenceComplete: boolean;
+    reason?: string;
+  };
+
   outcomes: Record<string, number>;
   selectedOutcome?: string;
   provider: string;
   model: string;
   modelVersion?: string;
+  questionSetVersion: string;
+
+  method: {
+    kind: string;
+    name?: string;
+    artifactRef?: string;
+  };
 
   confidence?: {
     value: number;
@@ -144,6 +161,7 @@ interface SemanticJudgmentResult {
 
   calibration?: {
     method: string;
+    artifactRef?: string;
     workload?: string;
     version?: string;
     evaluatedAt?: string;
@@ -155,10 +173,12 @@ interface SemanticJudgmentResult {
 
 Requirements:
 
+- `applicability` MUST state whether the judgment was applicable and whether decision-relevant evidence was complete. A semantic provider MUST NOT be invoked as an authoritative negative-decision mechanism when either value is false.
 - `outcomes` MUST describe the declared outcome space when the provider exposes a distribution.
 - `selectedOutcome` MUST be optional.
 - A confidence value MUST NOT be assumed to be a calibrated probability unless its semantics explicitly state that.
-- Calibration metadata MUST identify the workload or evaluation domain when calibration is workload-specific.
+- Judgment provenance MUST identify the method used. Specialized or fitted methods SHOULD identify their immutable artifact.
+- Calibration metadata MUST identify the workload or evaluation domain when calibration is workload-specific and SHOULD identify the immutable calibration artifact when one exists.
 - Runtimes MUST NOT compare confidence values across providers unless their semantics are known to be comparable.
 
 ## 6. Decision receipt
@@ -257,7 +277,9 @@ For a decision provider or runtime to claim conformance for consequential use, i
 7. abstention/escalation behavior at policy boundaries;
 8. provenance preservation;
 9. evidence-minimization checks where sensitive state exists;
-10. middleware-order tests when downstream components can alter actions.
+10. middleware-order tests when downstream components can alter actions;
+11. incomplete/opaque-evidence tests proving the runtime abstains, passes through, or escalates rather than inferring a negative answer;
+12. packed-question isolation tests for providers that evaluate multiple questions against shared state, comparing each question packed versus evaluated alone and reporting selection flips and probability/score deltas.
 
 Where multilingual traffic is in scope, the conformance suite SHOULD include representative language/script robustness tests.
 
@@ -270,7 +292,10 @@ A system is OD-J conformant when it:
 - exposes a finite declared outcome space;
 - returns typed semantic judgments;
 - validates result shape;
-- exposes provider/model provenance;
+- exposes provider/model, judgment-method, and question-set provenance;
+- exposes calibration artifact/workload provenance when calibrated probabilities are claimed;
+- prevents authoritative provider invocation when the runtime declares the decision inapplicable or decision-relevant evidence incomplete;
+- tests packed-question isolation when the provider supports multi-question requests;
 - does not execute side effects.
 
 ### OD-P: Policy Conformant
@@ -304,6 +329,8 @@ A conforming Decision-to-Pay flow SHOULD preserve:
 Claim
   ↓
 Evidence
+  ↓
+applicability + evidence completeness
   ↓
 Semantic judgments
   ↓
@@ -377,9 +404,9 @@ QiForge currently maps to this profile as follows:
 | Authority | contract gates, UCANs, human or policy controls |
 | Action | tool, Flow, payment, chain transaction, engagement start |
 
-Current QiForge Decisions are closest to OD-J.
+QiForge Decisions implement the OD-J boundary with explicit applicability/evidence-completeness gating, judgment-method provenance, optional calibration provenance, and a packed-question isolation conformance probe.
 
-The next implementation step toward OD-A is to add a canonical Final Decision Subject and subject digest at consequential action boundaries, then bind policy/authority receipts to that digest.
+QiForge also provides canonical Final Decision Subject hashing plus authority and execution receipts. Consequential consumers still need to compose those primitives with explicit decision policy and independent authority before claiming OD-A for a complete application flow.
 
 ## 12. Non-goals
 

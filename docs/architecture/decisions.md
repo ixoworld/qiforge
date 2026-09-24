@@ -224,6 +224,68 @@ The result preserves provenance:
 
 The raw projected state is not copied into the evaluation result.
 
+### Applicability and evidence completeness
+
+A Decision may declare that its projected state is not fit for authoritative
+semantic judgment:
+
+```ts
+return {
+  state,
+  applicability: {
+    applicable: true,
+    evidenceComplete: false,
+    reason: 'Delegated task payload is encrypted and unavailable.',
+  },
+  questions,
+};
+```
+
+The runtime checks this before provider invocation. If `applicable` or
+`evidenceComplete` is false, it throws `DecisionNotApplicableError` and the
+provider is not called. Application policy can then pass through, request more
+evidence, or escalate; missing evidence is never converted into a negative
+semantic answer.
+
+Successful evaluations normalize omitted applicability metadata to
+`{ applicable: true, evidenceComplete: true }` for backwards compatibility.
+
+### Judgment reliability provenance
+
+Every runtime evaluation now carries a `judgment` block. The Decision version
+is recorded as `questionSetVersion`; adapters may additionally declare their
+method and calibration artifacts:
+
+```ts
+judgment: {
+  questionSetVersion: '1.0.0',
+  method: {
+    kind: 'specialized',
+    name: 'L2',
+    artifactRef: 'head:qwen3-4b:route:v3',
+  },
+  calibration: {
+    method: 'temperature-scaling',
+    artifactRef: 'cal:route:v3',
+    workload: 'support-routing',
+    ece: 0.04,
+    brier: 0.12,
+  },
+}
+```
+
+If an adapter does not expose method metadata, the runtime records
+`provider-native`. This does not imply that provider confidence is calibrated.
+
+### Packed-question isolation
+
+Providers that evaluate several questions against shared state can be probed
+with `measureDecisionQuestionIsolation(adapter, request)`. The probe evaluates
+the packed request and then each question alone against identical state, reporting
+selection flips plus probability/score deltas. Open Decisions conformance requires
+this test for multi-question providers; the acceptable tolerance remains an
+explicit workload/profile policy rather than a universal constant.
+
 ## Runtime invariants
 
 The core validation layer enforces:

@@ -274,6 +274,12 @@ function normalizeJevResult(result: JevResult): DecisionProviderResult {
   return {
     answers,
     ...(result.model ? { modelVersion: result.model } : {}),
+    provenance: {
+      method: {
+        kind: 'provider-native',
+        name: 'typesafe-system-one',
+      },
+    },
     ...(result.usage
       ? {
           usage: {

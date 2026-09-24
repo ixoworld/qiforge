@@ -2,6 +2,7 @@ import {
   validateDecisionProviderResult,
   validateDecisionRequest,
   type DecisionAdapter,
+  type DecisionApplicability,
   type DecisionDefinition,
   type DecisionEvaluateOptions,
   type DecisionEvaluation,
@@ -33,6 +34,19 @@ export class DecisionProviderUnavailableError extends Error {
       'No DecisionAdapter is configured. Supply createOracleApp({ decisionAdapter }) or configure a test decision mock.',
     );
     this.name = 'DecisionProviderUnavailableError';
+  }
+}
+
+export class DecisionNotApplicableError extends Error {
+  constructor(readonly applicability: DecisionApplicability) {
+    super(
+      applicability.reason
+        ? `Decision is not applicable: ${applicability.reason}`
+        : !applicability.evidenceComplete
+          ? 'Decision is not applicable because decision-relevant evidence is incomplete.'
+          : 'Decision is not applicable to the projected state.',
+    );
+    this.name = 'DecisionNotApplicableError';
   }
 }
 
@@ -79,9 +93,17 @@ export class DecisionRuntime implements DecisionEvaluator {
     request: DecisionRequest,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
-    if (!this.adapter) throw new DecisionProviderUnavailableError();
-
     validateDecisionRequest(request);
+
+    const applicability: DecisionApplicability = request.applicability ?? {
+      applicable: true,
+      evidenceComplete: true,
+    };
+    if (!applicability.applicable || !applicability.evidenceComplete) {
+      throw new DecisionNotApplicableError(applicability);
+    }
+
+    if (!this.adapter) throw new DecisionProviderUnavailableError();
 
     const timeoutMs =
       options?.timeoutMs ??
@@ -126,6 +148,14 @@ export class DecisionRuntime implements DecisionEvaluator {
         provider: this.adapter.provider,
         model: this.adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
+        applicability,
+        judgment: {
+          method: result.provenance?.method ?? { kind: 'provider-native' },
+          ...(result.provenance?.calibration
+            ? { calibration: result.provenance.calibration }
+            : {}),
+          questionSetVersion: registration.version,
+        },
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
