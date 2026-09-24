@@ -86,7 +86,7 @@ export interface BeginRunInput {
   runId: string;
   sessionId: string;
   requestId: string;
-  client: 'portal' | 'matrix';
+  client: 'portal' | 'matrix' | 'channel';
   /** JSON the host needs to rebuild the attempt (see `StoredRunRequest`). */
   request: string;
   multitask: 'interrupt' | 'enqueue';
@@ -354,7 +354,9 @@ export class RunCoordinator {
       await live.buffer.close();
       const partialText =
         outcome.status === 'finished'
-          ? null
+          ? live.record.client === 'channel'
+            ? outcome.text
+            : null
           : outcome.text ||
             partialTextOf([
               ...framesOfSegments(await this.host.store.readSegments(runId)),

@@ -1,3 +1,12 @@
+import { ChannelTurns } from '../channels/turns';
+import { assertActiveChannelBinding } from '../channels/auth';
+import {
+  ChannelError,
+  channelRequestHash,
+  channelOrigin,
+  type ChannelTurnInput,
+  type ChannelTurnOutcome,
+} from '../channels/contract';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * `UserOracleDO` — one Durable Object per (user DID, oracle).
@@ -163,7 +172,7 @@ import { turnRecursionLimit } from './turn-config';
 import { decideMatrixTurn, MatrixTurnLedger } from './matrix-turn-ledger';
 import { decideBootDirty } from './boot-dirty';
 import { decideFlush } from './flush-schedule';
-import { mirrorTxnId, RoomMirror } from './room-mirror';
+import { mirrorTxnId, mirrorEventContent, RoomMirror } from './room-mirror';
 import { prefixSpeaker } from './speaker-prefix';
 import {
   type ObservedMessage,
@@ -663,6 +672,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private matrixLedger: MatrixTurnLedger | null = null;
     /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
     private mirror: RoomMirror | null = null;
+    private channelTurns: ChannelTurns | null = null;
     /** The oracle room of each session this instance resolved: spares the mirrors a row read per send. */
     private readonly sessionRooms = new Map<string, string>();
     /** The user's main oracle room, once resolved (the session list is scoped to it). */
@@ -1248,6 +1258,68 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
+      });
+
+      this.channelTurns = new ChannelTurns(liveDb, {
+        createSession: async (identity, markerTxnId) => {
+          const room = await this.gateway.resolveUserRoom(identity.userDid);
+          if (!room) throw new ChannelError(409, 'Companion room is not ready');
+          return (
+            await this.createSession(identity, {
+              roomId: room.roomId,
+              markerTxnId,
+            })
+          ).sessionId;
+        },
+        assertSession: async (identity, sessionId) => {
+          const session = await this.sessions!.getSession(sessionId);
+          const room = await this.gateway.resolveUserRoom(identity.userDid);
+          if (
+            !session ||
+            !sessionId.startsWith('$') ||
+            !room ||
+            session.roomId !== room.roomId
+          )
+            throw new ChannelError(404, 'Companion session not found');
+          const encryption = await this.gateway.getRoomStateEvent(
+            room.roomId,
+            'm.room.encryption',
+          );
+          const parsed: unknown = encryption ? JSON.parse(encryption) : null;
+          if (
+            !parsed ||
+            typeof parsed !== 'object' ||
+            !('algorithm' in parsed) ||
+            parsed.algorithm !== 'm.megolm.v1.aes-sha2'
+          )
+            throw new ChannelError(409, 'Companion room must be encrypted');
+        },
+        getRun: (runId) => this.runStore!.get(runId),
+        wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
+        begin: async (runId, request) => {
+          const { live } = await this.runs!.begin({
+            runId,
+            sessionId: request.sessionId,
+            requestId: request.requestId,
+            client: 'channel',
+            request: JSON.stringify(storedRunRequest(request)),
+            multitask: 'enqueue',
+          });
+          this.markDirty();
+          const recoveryAt = Date.now() + this.runConfig.keepAliveMs;
+          const alarm = await this.ctx.storage.getAlarm();
+          if (alarm === null || alarm > recoveryAt)
+            await this.ctx.storage.setAlarm(recoveryAt);
+          await this.ctx.storage.sync();
+          this.ctx.waitUntil(live.done.catch(() => undefined));
+          return live.record;
+        },
+        mirror: (request, text, author) =>
+          this.replayToRoom(request, text, author),
+        changed: async () => {
+          this.markDirty();
+          await this.ctx.storage.sync();
+        },
       });
 
       const core = this.core;
@@ -1844,7 +1916,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     async createSession(
       identity: TurnIdentity,
-      o: { roomId?: string; sessionId?: string } = {},
+      o: { roomId?: string; sessionId?: string; markerTxnId?: string } = {},
     ): Promise<SessionSummary> {
       await this.ready(identity);
       const sessions = this.sessions!;
@@ -1879,7 +1951,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // the same transaction id across the restart window, which the
           // homeserver deduplicates. Node fails the request on send failure;
           // so do we — no silent local id when the user has an oracle room.
-          const txnId = `marker-${crypto.randomUUID()}`;
+          const txnId = o.markerTxnId ?? `marker-${crypto.randomUUID()}`;
           sessionId = await retryGateway(
             () =>
               this.gateway.sendText(room.roomId, NEW_CONVERSATION_TEXT, {
@@ -1899,6 +1971,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
       }
       sessionId ??= `s_${crypto.randomUUID()}`;
+      if (o.markerTxnId) {
+        const existing = await sessions.getSession(sessionId);
+        if (existing) return toSummary(existing);
+      }
       const row = await sessions.createSession({
         sessionId,
         roomId,
@@ -1908,6 +1984,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       this.markDirty();
       return toSummary(row);
+    }
+
+    async channelTurn(
+      identity: TurnIdentity,
+      input: ChannelTurnInput,
+      requestHash: string,
+    ): Promise<ChannelTurnOutcome> {
+      try {
+        if (identity.ucanDelegation)
+          throw new ChannelError(
+            403,
+            'Channel grants cannot become tool authority',
+          );
+        await this.ready(identity);
+        await assertActiveChannelBinding(identity, this.env);
+        return {
+          ok: true,
+          result: await this.channelTurns!.submit(identity, input, requestHash),
+        };
+      } catch (error) {
+        if (error instanceof ChannelError)
+          return { ok: false, status: error.status, message: error.message };
+        throw error;
+      }
     }
 
     async listSessions(
@@ -2698,6 +2798,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.sessions = null;
       this.matrixLedger = null;
       this.runStore = null;
+      this.channelTurns = null;
       this.runs = null;
       this.resultStore = null;
       this.sessionRooms.clear();
@@ -3072,10 +3173,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
       const stream = body.stream !== false;
       if (!stream) {
-        this.replayToRoom(req, body.message, 'user');
+        void this.replayToRoom(req, body.message, 'user');
         try {
           const result = await this.runTurn(req);
-          this.replayToRoom(req, result.text, 'oracle');
+          void this.replayToRoom(req, result.text, 'oracle');
           // Node's `SendMessageResponse.message` is `{ type, content, id }`.
           const payload: Record<string, unknown> = {
             message: {
@@ -3108,7 +3209,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // A streamed turn is a durable run: recorded, kept alive and resumable
       // (docs/plans/durable-runs.md). The response is one subscriber of the
       // run's buffer; the run itself outlives it.
-      this.replayToRoom(req, body.message, 'user');
+      void this.replayToRoom(req, body.message, 'user');
       const { live, queued } = await this.runs!.begin({
         runId: crypto.randomUUID(),
         sessionId,
@@ -3222,6 +3323,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<RunOutcome> {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
+      if (req.client === 'channel') {
+        await this.ctx.storage.sync();
+        await assertActiveChannelBinding(req.identity, this.env);
+      }
       const {
         agent,
         stateInput,
@@ -3285,7 +3390,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           onFrame: () => this.runs?.touchKeepAlive(),
           onComplete: async () => {
             completed = true;
-            this.replayToRoom(req, lastAiText(capture), 'oracle');
+            if (req.client !== 'channel')
+              void this.replayToRoom(req, lastAiText(capture), 'oracle');
             await this.afterTurn(sessionId, capture);
           },
           onError: (err) => {
@@ -3340,6 +3446,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       record: RunRecord,
       outcome: RunOutcome,
     ): Promise<void> {
+      if (record.client === 'channel' && outcome.status === 'finished') {
+        const stored = JSON.parse(record.request) as StoredRunRequest;
+        await this.replayToRoom(stored.turn, outcome.text, 'oracle');
+      }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')
@@ -4213,6 +4323,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               oracleName: core.identity.name,
               msgFromMatrixRoom: req.client === 'matrix',
               ...speakerKwargs,
+              ...(req.channel
+                ? { 'org.ixo.qi.origin': channelOrigin(req.channel) }
+                : {}),
               ...attachmentKwargs,
             },
           }),
@@ -4267,18 +4380,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       req: TurnRequest,
       text: string,
       who: 'user' | 'oracle',
-    ): void {
-      if (req.client === 'matrix') return;
-      if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX)) return;
+    ): Promise<void> {
+      if (req.client === 'matrix') return Promise.resolve();
+      if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
+        return Promise.resolve();
       // A local session id has no marker event to thread on: the user had
       // no oracle room when the session was created, so there is no room
       // transcript to mirror either.
-      if (!req.sessionId.startsWith('$')) return;
-      if (!text.trim()) return;
+      if (!req.sessionId.startsWith('$')) return Promise.resolve();
+      if (!text.trim()) return Promise.resolve();
       const label = who === 'user' ? 'user message' : 'AI response';
       // Serialised per session, retried across a gateway restart with a fixed
       // transaction id, kept alive past the request (room-mirror.ts).
-      void this.roomMirror().enqueue(
+      return this.roomMirror().enqueue(
         req.sessionId,
         async () => {
           const roomId =
@@ -4302,24 +4416,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             body,
             ...(formattedBody ? { formattedBody } : {}),
             threadId: req.sessionId,
-            txnId: mirrorTxnId(req.sessionId, req.requestId, who),
+            txnId: req.channel
+              ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
+              : mirrorTxnId(req.sessionId, req.requestId, who),
+            ...(req.channel ? { origin: req.channel } : {}),
           };
         },
         label,
+        req.client === 'channel',
       );
     }
 
     private roomMirror(): RoomMirror {
       this.mirror ??= new RoomMirror({
         sendText: (send) =>
-          this.gateway.sendText(send.roomId, send.body, {
-            threadId: send.threadId,
-            ...(send.formattedBody
-              ? { formattedBody: send.formattedBody }
-              : {}),
-            priority: 'background',
-            txnId: send.txnId,
-          }),
+          send.origin
+            ? this.gateway.sendEvent(
+                send.roomId,
+                'm.room.message',
+                JSON.stringify(mirrorEventContent(send)),
+                { txnId: send.txnId },
+              )
+            : this.gateway.sendText(send.roomId, send.body, {
+                threadId: send.threadId,
+                ...(send.formattedBody
+                  ? { formattedBody: send.formattedBody }
+                  : {}),
+                priority: 'background',
+                txnId: send.txnId,
+              }),
         keepAlive: (work) => this.ctx.waitUntil(work),
         log: (message) => console.log(message),
         warn: (message) => console.warn(message),

@@ -769,7 +769,7 @@ export interface ResolveLangsmithTracingArgs {
   /** The turn's user DID — from the authenticated payload, never client-set metadata. */
   userDid: string;
   /** Ingress surface, so latency can be sliced per client in LangSmith. */
-  client: 'portal' | 'matrix' | 'slack';
+  client: 'portal' | 'matrix' | 'slack' | 'channel';
   env: LangsmithTracingEnv;
 }
 

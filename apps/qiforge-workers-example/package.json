@@ -25,7 +25,8 @@
     "test:e2e:context": "tsx test/e2e-context.ts",
     "test:e2e:transcript": "tsx test/e2e-transcript.ts",
     "test:e2e:threads": "tsx test/e2e-threads.ts",
-    "test:e2e:group": "tsx test/e2e-group.ts"
+    "test:e2e:group": "tsx test/e2e-group.ts",
+    "test:e2e:channels": "tsx test/e2e-channels.ts"
   },
   "dependencies": {
     "@ixo/matrix-bot-workers-sdk": "0.7.0",

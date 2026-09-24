@@ -44,7 +44,7 @@ export const MainAgentGraphState = Annotation.Root({
     reducer: (prev, curr) => ({ ...prev, ...curr }),
   }),
 
-  client: Annotation<'portal' | 'matrix' | 'slack'>({
+  client: Annotation<'portal' | 'matrix' | 'slack' | 'channel'>({
     default: () => 'portal',
     reducer: (_, curr) => curr,
   }),

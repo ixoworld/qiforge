@@ -348,3 +348,43 @@ describe('RunStore', () => {
     expect(await s.rowCount('turn_run_segments')).toBe(0);
   });
 });
+
+it('prunes channel payloads and retains only a terminal tombstone', async () => {
+  const s = stub('channel-retention');
+  await s.setNow(T0);
+  await s.create({
+    runId: 'channel-original',
+    sessionId: '$session',
+    requestId: 'wa:one',
+    client: 'channel',
+    status: 'running',
+    request: '{"message":"Private channel prompt"}',
+    checkpointId: null,
+    instanceId: 'first',
+  });
+  await s.appendSegment('channel-original', {
+    seqFrom: 1,
+    seqTo: 1,
+    payload: '["Private response fragment"]',
+  });
+  await s.startMark({
+    runId: 'channel-original',
+    toolCallId: 'channel-tool',
+    toolName: 'lookup',
+    effect: 'read',
+  });
+  await s.update('channel-original', {
+    status: 'finished',
+    partialText: 'Stored answer',
+  });
+  await s.setNow(T0 + RUN_RETENTION_MS + 1000);
+  await s.reopen();
+  expect(await s.get('channel-original')).toBeUndefined();
+  expect(await s.wasChannelRunPruned('channel-original')).toBe(true);
+  expect(await s.columnsOf('channel_run_tombstones')).toEqual([
+    'run_id',
+    'status',
+  ]);
+  expect(await s.rowCount('turn_tool_marks')).toBe(0);
+  expect(await s.rowCount('turn_run_segments')).toBe(0);
+});

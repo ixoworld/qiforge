@@ -61,6 +61,10 @@ export class RunStoreTestDO extends DurableObject {
     return (await this.runStore()).get(runId);
   }
 
+  async wasChannelRunPruned(runId: string): Promise<boolean> {
+    return (await this.runStore()).wasChannelRunPruned(runId);
+  }
+
   async update(
     runId: string,
     patch: Parameters<RunStore['update']>[1],

@@ -1,3 +1,14 @@
+import {
+  authenticateChannel,
+  assertActiveChannelBinding,
+  channelAuthConfig,
+} from '../channels/auth';
+import {
+  ChannelError,
+  ChannelTurnBody,
+  channelRequestHash,
+  readChannelBody,
+} from '../channels/contract';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * The HTTP shell — a Hono app that speaks the same wire protocol as the Node
@@ -182,6 +193,53 @@ export function createShell(
       },
     ),
   );
+
+  app.post('/channels/turn', async (c) => {
+    try {
+      if (!c.env.CHANNEL_SERVICE_DID)
+        return c.json({ message: 'Channels are not configured' }, 503);
+      const raw = await readChannelBody(c.req.raw);
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        throw new ChannelError(400, 'Invalid JSON request');
+      }
+      const parsed = ChannelTurnBody.safeParse(json);
+      if (!parsed.success) throw new ChannelError(400, 'Invalid channel turn');
+      const identity = await authenticateChannel(
+        c.req.raw.headers,
+        raw,
+        parsed.data,
+        channelAuthConfig(c.env),
+      );
+      await assertActiveChannelBinding(identity, c.env);
+      if (
+        c.env.RATE_LIMIT &&
+        !(await c.env.RATE_LIMIT.limit({ key: identity.userDid })).success
+      )
+        throw new ChannelError(429, 'Too many requests');
+      const outcome = await userStub(c.env, identity.userDid).channelTurn(
+        identity,
+        parsed.data,
+        await channelRequestHash(raw),
+      );
+      if (!outcome.ok)
+        return c.json({ message: outcome.message }, outcome.status);
+      const result = outcome.result;
+      return c.json(
+        result,
+        ['queued', 'running', 'recovering'].includes(result.status) ? 202 : 200,
+      );
+    } catch (error) {
+      if (error instanceof ChannelError)
+        return c.json({ message: error.message }, error.status);
+      return c.json(
+        { message: 'Channel turn is temporarily unavailable' },
+        503,
+      );
+    }
+  });
 
   // --- auth ------------------------------------------------------------------
   app.use('*', async (c, next) => {
