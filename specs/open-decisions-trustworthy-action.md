@@ -24,7 +24,7 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RE
 
 ## 3. Core model
 
-A conforming implementation MUST preserve five logically distinct layers.
+The five-layer model below is the architectural reference for consequential decisions. An implementation claiming OD-A MUST preserve all five layers. OD-J and OD-P conformance is scoped by Section 9 and does not require an implementation to provide layers beyond its declared conformance level.
 
 ### 3.1 Evidence
 
@@ -204,7 +204,7 @@ interface OpenDecisionReceipt {
 }
 ```
 
-If the receipt includes an executed action, `execution.actionDigest` MUST equal the digest of the executed canonical action subject and MUST remain compatible with `subjectDigest`.
+If the receipt includes an executed action, `execution.actionDigest` is the digest of the complete executed Final Decision Subject in this profile version and MUST equal `subjectDigest` exactly. A verifier MUST reject a receipt when they differ. Implementations MAY record a separate action-payload-only digest under another explicitly named field, but it does not replace this equality check.
 
 A receipt MUST NOT imply that semantic evaluation itself provided authority.
 
@@ -311,9 +311,9 @@ Rubric / policy
   ↓
 allow | deny | abstain | escalate
   ↓
-Payment authority
+canonical final payment subject + digest
   ↓
-final payment subject digest
+Payment authority bound to subject digest
   ↓
 settlement
 ```
