@@ -13,12 +13,13 @@ export class ChannelTurnsTestDO extends DurableObject {
   private db?: DoSqliteDatabase;
   private runs?: RunStore;
   private turns?: ChannelTurns;
+  private nowMs = Date.now();
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
     this.db = await DoSqliteDatabase.open(this.ctx, 'channels-test.db');
     const db = this.db;
-    this.runs = new RunStore(db);
+    this.runs = new RunStore(db, () => this.nowMs);
     await this.runs.setup();
     const runs = this.runs;
     this.turns = new ChannelTurns(db, {
@@ -28,6 +29,7 @@ export class ChannelTurnsTestDO extends DurableObject {
           throw new ChannelError(404, 'Session not owned');
       },
       getRun: (runId) => runs.get(runId),
+      wasPruned: (runId) => runs.wasChannelRunPruned(runId),
       begin: async (runId, request) => {
         await runs.create({
           runId,
@@ -86,6 +88,29 @@ export class ChannelTurnsTestDO extends DurableObject {
       partialText: 'One answer',
       messageId: 'message-1',
     });
+  }
+
+  async expire(ms: number): Promise<void> {
+    this.nowMs += ms;
+    await this.reopen();
+    await this.ready();
+    await this.ctx.storage.sync();
+  }
+
+  async retained(): Promise<Record<string, number>> {
+    await this.ready();
+    const counts: Record<string, number> = {};
+    for (const table of [
+      'turn_runs',
+      'turn_tool_marks',
+      'turn_run_segments',
+      'channel_run_tombstones',
+    ]) {
+      counts[table] = (await this.db!.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM ${table}`,
+      ))!.n;
+    }
+    return counts;
   }
 
   async count(): Promise<number> {

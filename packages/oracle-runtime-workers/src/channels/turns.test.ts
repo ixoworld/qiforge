@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { ChannelTurnsTestDO } from './test-do';
 import type { ChannelTurnInput } from './contract';
+import { RUN_RETENTION_MS } from '../do/run-store';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Workers test binding augmentation.
@@ -52,6 +53,37 @@ describe('durable channel requests', () => {
     await stub.reopen();
     expect(await stub.submit(message)).toEqual(first);
     expect(await stub.count()).toBe(1);
+  });
+
+  it('erases expired response payloads without permitting a replay after reset', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('expired-response');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    await stub.expire(RUN_RETENTION_MS - 1);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    await stub.expire(2);
+    expect(await stub.retained()).toEqual({
+      turn_runs: 0,
+      turn_tool_marks: 0,
+      turn_run_segments: 0,
+      channel_run_tombstones: 1,
+    });
+    await stub.reset().catch(() => undefined);
+    const recovered = env.CHANNEL_TURNS_TEST.getByName('expired-response');
+    expect(await recovered.submit(message)).toEqual({
+      ok: false,
+      status: 410,
+      message:
+        'Channel response has expired; this request cannot execute again',
+    });
+    expect(
+      await recovered.submit({ ...message, message: 'Replacement' }),
+    ).toMatchObject({ ok: false, status: 409 });
+    expect(await recovered.count()).toBe(1);
   });
 
   it('rejects a changed payload for the same binding and request ID', async () => {

@@ -380,25 +380,49 @@ export class RunStore {
         started_at TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending'
       ) WITHOUT ROWID`);
+    await this.db.run(`CREATE TABLE IF NOT EXISTS channel_run_tombstones (
+      run_id TEXT PRIMARY KEY, status TEXT NOT NULL
+    ) WITHOUT ROWID`);
     // Ended runs older than the retention window: their segments are gone
     // already (cutover); drop the rows and marks in one pass per boot.
     const cutoff = new Date(this.now() - RUN_RETENTION_MS).toISOString();
     await this.db.run(`DELETE FROM turn_write_claims WHERE started_at < ?`, [
       cutoff,
     ]);
-    const stale = await this.db.exec<{ run_id: string }>(
-      `SELECT run_id FROM turn_runs WHERE client != 'channel' AND status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
+    const stale = await this.db.exec<{
+      run_id: string;
+      client: string;
+      status: string;
+    }>(
+      `SELECT run_id, client, status FROM turn_runs WHERE status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
       [cutoff],
     );
     for (const row of stale) {
-      await this.db.run(`DELETE FROM turn_tool_marks WHERE run_id = ?`, [
-        row.run_id,
-      ]);
-      await this.db.run(`DELETE FROM turn_run_segments WHERE run_id = ?`, [
-        row.run_id,
-      ]);
-      await this.db.run(`DELETE FROM turn_runs WHERE run_id = ?`, [row.run_id]);
+      await this.db.transaction(async () => {
+        if (row.client === 'channel')
+          await this.db.run(
+            'INSERT OR IGNORE INTO channel_run_tombstones (run_id, status) VALUES (?, ?)',
+            [row.run_id, row.status],
+          );
+        await this.db.run(`DELETE FROM turn_tool_marks WHERE run_id = ?`, [
+          row.run_id,
+        ]);
+        await this.db.run(`DELETE FROM turn_run_segments WHERE run_id = ?`, [
+          row.run_id,
+        ]);
+        await this.db.run(`DELETE FROM turn_runs WHERE run_id = ?`, [
+          row.run_id,
+        ]);
+      });
     }
+  }
+
+  async wasChannelRunPruned(runId: string): Promise<boolean> {
+    await this.setup();
+    return !!(await this.db.get<{ run_id: string }>(
+      'SELECT run_id FROM channel_run_tombstones WHERE run_id = ?',
+      [runId],
+    ));
   }
 
   private iso(): string {

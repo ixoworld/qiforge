@@ -1295,6 +1295,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             throw new ChannelError(409, 'Companion room must be encrypted');
         },
         getRun: (runId) => this.runStore!.get(runId),
+        wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
         begin: async (runId, request) => {
           const { live } = await this.runs!.begin({
             runId,

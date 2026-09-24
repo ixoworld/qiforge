@@ -51,7 +51,7 @@ Polling repeats the original POST body exactly. A fresh UCAN invocation can auth
 
 The tuple `(userDid, bindingId, requestId)` identifies one durable run. Concurrent submissions and requests after object restarts reuse it. A different request body under that tuple returns `409`. An aborted, failed, or interrupted run remains terminal. Retrying it never starts a replacement model or tool execution.
 
-Channel receipts and their run rows remain in the user's SQLite working copy and owner snapshot. The ordinary seven-day run cleanup excludes channel rows so delayed delivery cannot erase idempotency evidence. This initial retention policy requires a later explicit erasure and tombstone policy before automated pruning is enabled.
+Completed channel runs follow the ordinary seven-day run retention: database boot removes their request, answer, segments, and tool marks. The same transaction retains only a run ID and terminal status tombstone. The receipt keeps the binding ID, request ID, body hash, run ID, and session ID inside the user-scoped database. No message text enters the receipt or tombstone. An identical request after pruning returns `410`; a changed body still returns `409`. Neither response permits a replacement execution. The canonical session and Matrix transcript keep their existing retention policy.
 
 ## Matrix continuity
 

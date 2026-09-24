@@ -63,13 +63,13 @@ export type ChannelTurnOutcome =
   | { ok: true; result: ChannelTurnResponse }
   | {
       ok: false;
-      status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 503;
+      status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 429 | 503;
       message: string;
     };
 
 export class ChannelError extends Error {
   constructor(
-    readonly status: 400 | 401 | 403 | 404 | 409 | 413 | 429 | 503,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 410 | 413 | 429 | 503,
     message: string,
   ) {
     super(message);

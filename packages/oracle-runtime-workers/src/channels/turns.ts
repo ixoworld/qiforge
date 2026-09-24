@@ -20,6 +20,7 @@ export interface ChannelTurnsHost {
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
   assertSession(identity: TurnIdentity, sessionId: string): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
+  wasPruned(runId: string): Promise<boolean>;
   begin(runId: string, request: TurnRequest): Promise<RunRecord>;
   mirror(
     request: TurnRequest,
@@ -98,6 +99,11 @@ export class ChannelTurns {
       throw new ChannelError(
         409,
         'This request ID already belongs to another message',
+      );
+    if (await this.host.wasPruned(runId))
+      throw new ChannelError(
+        410,
+        'Channel response has expired; this request cannot execute again',
       );
     let sessionId = receipt.session_id;
     if (!sessionId) {
