@@ -300,7 +300,7 @@ export interface RuntimeUserContext {
 /** Session info threaded through from the shell / gateway. */
 export interface RuntimeSessionContext {
   id: string;
-  client: 'portal' | 'matrix' | 'slack';
+  client: 'portal' | 'matrix' | 'slack' | 'channel';
   wsId?: string;
   requestId: string;
   roomId?: string;

@@ -496,7 +496,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   session: {
     /** = `thread_id`; thread root `eventId`. */
     id: string;
-    client: 'portal' | 'matrix' | 'slack';
+    client: 'portal' | 'matrix' | 'slack' | 'channel';
     wsId?: string;
     requestId: string;
     roomId?: string;

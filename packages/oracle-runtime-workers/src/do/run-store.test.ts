@@ -348,3 +348,28 @@ describe('RunStore', () => {
     expect(await s.rowCount('turn_run_segments')).toBe(0);
   });
 });
+
+it('retains completed channel runs so old webhook replays cannot start new work', async () => {
+  const s = stub('channel-retention');
+  await s.setNow(T0);
+  await s.create({
+    runId: 'channel-original',
+    sessionId: '$session',
+    requestId: 'wa:one',
+    client: 'channel',
+    status: 'running',
+    request: '{}',
+    checkpointId: null,
+    instanceId: 'first',
+  });
+  await s.update('channel-original', {
+    status: 'finished',
+    partialText: 'Stored answer',
+  });
+  await s.setNow(T0 + RUN_RETENTION_MS + 1000);
+  await s.reopen();
+  expect(await s.get('channel-original')).toMatchObject({
+    status: 'finished',
+    partialText: 'Stored answer',
+  });
+});

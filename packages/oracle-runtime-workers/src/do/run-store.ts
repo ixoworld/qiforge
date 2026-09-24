@@ -48,7 +48,7 @@ export interface RunRecord {
   runId: string;
   sessionId: string;
   requestId: string;
-  client: 'portal' | 'matrix';
+  client: 'portal' | 'matrix' | 'channel';
   status: RunStatus;
   startedAt: string;
   updatedAt: string;
@@ -387,7 +387,7 @@ export class RunStore {
       cutoff,
     ]);
     const stale = await this.db.exec<{ run_id: string }>(
-      `SELECT run_id FROM turn_runs WHERE status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
+      `SELECT run_id FROM turn_runs WHERE client != 'channel' AND status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
       [cutoff],
     );
     for (const row of stale) {
@@ -411,7 +411,7 @@ export class RunStore {
     runId: string;
     sessionId: string;
     requestId: string;
-    client: 'portal' | 'matrix';
+    client: 'portal' | 'matrix' | 'channel';
     status: 'queued' | 'running';
     request: string;
     checkpointId: string | null;

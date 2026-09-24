@@ -422,3 +422,34 @@ describe('pageThreadTranscript', () => {
     ).rejects.toBeInstanceOf(TranscriptCursorError);
   });
 });
+
+it('preserves only validated channel provenance on human messages in session history', async () => {
+  const origin = {
+    v: 1,
+    transport: 'whatsapp',
+    binding_id: 'chb_one',
+    remote_ref: `hmac:${'a'.repeat(64)}`,
+  };
+  const result = await transformTranscript([
+    new HumanMessage({
+      id: 'channel-user',
+      content: 'Hello Qi',
+      additional_kwargs: { 'org.ixo.qi.origin': origin },
+    }),
+    new AIMessage({
+      id: 'channel-answer',
+      content: 'Hello',
+      additional_kwargs: { 'org.ixo.qi.origin': origin },
+    }),
+    new HumanMessage({
+      id: 'invalid-origin',
+      content: 'Other message',
+      additional_kwargs: {
+        'org.ixo.qi.origin': { ...origin, phone: 'sensitive' },
+      },
+    }),
+  ]);
+  expect(result.messages[0]?.metadata).toEqual({ 'org.ixo.qi.origin': origin });
+  expect(result.messages[1]?.metadata).toBeUndefined();
+  expect(result.messages[2]?.metadata).toBeUndefined();
+});

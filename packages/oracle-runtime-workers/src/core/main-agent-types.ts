@@ -31,7 +31,7 @@ export const mainAgentRequestContextSchema = z.object({
   }),
   session: z.object({
     id: z.string(),
-    client: z.enum(['portal', 'matrix', 'slack']),
+    client: z.enum(['portal', 'matrix', 'slack', 'channel']),
     requestId: z.string(),
     wsId: z.string().optional(),
     roomId: z.string().optional(),

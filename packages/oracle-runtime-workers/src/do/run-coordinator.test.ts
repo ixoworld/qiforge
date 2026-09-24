@@ -524,3 +524,26 @@ describe('RunCoordinator', () => {
     expect(failing.size).toBe(0);
   });
 });
+
+it('persists the final channel reply for cross-service receipt polling', async () => {
+  const h = harness();
+  const { live } = await h.runs.begin({
+    runId: 'channel-once',
+    sessionId: SESSION,
+    requestId: 'wa:one',
+    client: 'channel',
+    request: '{}',
+    multitask: 'enqueue',
+  });
+  h.attempts[0]!.finish({
+    status: 'finished',
+    text: 'The complete answer',
+    messageId: 'message-1',
+  });
+  await live.done;
+  expect(await h.store.get('channel-once')).toMatchObject({
+    status: 'finished',
+    partialText: 'The complete answer',
+    messageId: 'message-1',
+  });
+});

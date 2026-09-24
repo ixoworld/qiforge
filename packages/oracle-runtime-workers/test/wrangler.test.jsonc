@@ -19,6 +19,7 @@
   "r2_buckets": [{ "binding": "TIER_TEST", "bucket_name": "tier-test" }],
   "durable_objects": {
     "bindings": [
+      { "name": "CHANNEL_TURNS_TEST", "class_name": "ChannelTurnsTestDO" },
       { "name": "SQLITE_TEST", "class_name": "SqliteTestDO" },
       { "name": "TASKS_TEST", "class_name": "TasksTestDO" },
       { "name": "REALTIME_TEST", "class_name": "RealtimeTestDO" },
@@ -33,5 +34,6 @@
     },
     { "tag": "v2", "new_sqlite_classes": ["RunStoreTestDO"] },
     { "tag": "v3", "new_sqlite_classes": ["ResultStoreTestDO"] },
+    { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
   ],
 }
