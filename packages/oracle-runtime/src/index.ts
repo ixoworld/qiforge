@@ -7,19 +7,26 @@ export {
 } from '@ixo/common';
 export type {
   DecisionAdapter,
+  DecisionApplicability,
+  DecisionCalibrationProvenance,
   DecisionAnswer,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionJudgmentMethod,
+  DecisionJudgmentProvenance,
   DecisionProviderResult,
+  DecisionProviderProvenance,
   DecisionQuestion,
   DecisionRegistration,
   DecisionRequest,
 } from '@ixo/common';
 export {
   DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionNotApplicableError,
   DecisionProviderUnavailableError,
   DecisionRuntime,
+  measureDecisionQuestionIsolation,
   assertFinalDecisionSubjectUnchanged,
   canonicalizeFinalDecisionSubject,
   createDecisionAuthorityReceipt,
@@ -33,6 +40,8 @@ export {
 } from './decisions/index.js';
 export type {
   CloudflareJevAdapterOptions,
+  DecisionQuestionIsolationObservation,
+  DecisionQuestionIsolationReport,
   DecisionAuthorityReceipt,
   DecisionExecutionReceipt,
   FinalDecisionSubject,

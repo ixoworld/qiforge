@@ -34,9 +34,22 @@ export type DecisionQuestion =
   | ChoiceDecisionQuestion
   | OrdinalDecisionQuestion;
 
+/**
+ * Declares whether the projected state is fit for semantic judgment.
+ *
+ * A negative value is not a semantic answer. Runtimes must abstain before
+ * provider invocation when either flag is false.
+ */
+export interface DecisionApplicability {
+  applicable: boolean;
+  evidenceComplete: boolean;
+  reason?: string;
+}
+
 export interface DecisionRequest {
   state: DecisionState;
   questions: Record<string, DecisionQuestion>;
+  applicability?: DecisionApplicability;
 }
 
 export interface BooleanDecisionAnswer {
@@ -72,9 +85,37 @@ export interface DecisionUsage {
   outputTokens?: number;
 }
 
+export interface DecisionJudgmentMethod {
+  /**
+   * Provider-neutral method category, for example provider-native, raw,
+   * debiased, calibrated, specialized, deterministic, or human.
+   */
+  kind: string;
+  /** Provider-specific method/level name, for example L2 or System One. */
+  name?: string;
+  /** Immutable artifact used by the method, such as a fitted head. */
+  artifactRef?: string;
+}
+
+export interface DecisionCalibrationProvenance {
+  method: string;
+  artifactRef?: string;
+  workload?: string;
+  version?: string;
+  evaluatedAt?: string;
+  ece?: number;
+  brier?: number;
+}
+
+export interface DecisionProviderProvenance {
+  method: DecisionJudgmentMethod;
+  calibration?: DecisionCalibrationProvenance;
+}
+
 export interface DecisionProviderResult {
   answers: Record<string, DecisionAnswer>;
   modelVersion?: string;
+  provenance?: DecisionProviderProvenance;
   usage?: DecisionUsage;
 }
 
@@ -111,6 +152,11 @@ export interface DecisionEvaluateOptions {
   timeoutMs?: number;
 }
 
+export interface DecisionJudgmentProvenance extends DecisionProviderProvenance {
+  /** Version of the Decision definition/question set that was evaluated. */
+  questionSetVersion: string;
+}
+
 export interface DecisionEvaluation {
   decision: {
     name: string;
@@ -119,6 +165,8 @@ export interface DecisionEvaluation {
   provider: string;
   model: string;
   modelVersion?: string;
+  applicability: DecisionApplicability;
+  judgment: DecisionJudgmentProvenance;
   answers: Record<string, DecisionAnswer>;
   latencyMs: number;
   usage?: DecisionUsage;

@@ -118,6 +118,12 @@ describe('CloudflareJevDecisionAdapter', () => {
 
     expect(result).toEqual({
       modelVersion: 'jev-1.13.0',
+      provenance: {
+        method: {
+          kind: 'provider-native',
+          name: 'typesafe-system-one',
+        },
+      },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.98 },
         service: {

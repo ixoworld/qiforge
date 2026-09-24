@@ -16,6 +16,11 @@ describe('commerceRouteDecision', () => {
       ],
     });
 
+    expect(request.applicability).toEqual({
+      applicable: true,
+      evidenceComplete: true,
+    });
+
     expect(request.state).toEqual({
       message: 'File my taxes now',
       services: [
