@@ -391,7 +391,7 @@ export function createShell(
     if (body === null)
       return c.json({ error: 'Reporter request too large' }, 413);
     return userStub(c.env, auth.userDid).fetch(
-      `https://user-oracle${c.req.path}`,
+      `https://user-oracle${c.req.path}${new URL(c.req.url).search}`,
       {
         method: c.req.method,
         headers: {

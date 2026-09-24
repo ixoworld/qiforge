@@ -8,7 +8,15 @@ import {
   validateNarrative,
   validateSnapshot,
   snapshotSchema,
+  boundedNarrativeSchema,
+  historySchema,
+  sessionPageSchema,
+  runSchema,
+  jsonBytes,
+  REPORTER_PAGE_BYTES,
 } from './contracts';
+
+import { boundaryFixtures, fieldBoundaryFixtures } from './fixtures/boundaries';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Cloudflare Env augmentation requires a namespace.
@@ -219,6 +227,193 @@ describe('Reporter over owner SQLite in workerd', () => {
     );
     expect(await s.callCount()).toBeLessThanOrEqual(1);
   });
+  it('keeps known invalid output failed with its original receipts and never infers it again', async () => {
+    const { s, path, turn } = await setup();
+    await s.configure({ invalidOutput: true });
+    await s.request(path, turn);
+    await s.drain();
+    const original = await s.request(`${path}/${turn.requestId}`);
+    const run = runSchema.parse(JSON.parse(original.body));
+    expect(run.status).toBe('failed');
+    expect(run.narrative).toBeUndefined();
+    expect(run.execution?.inputTokens).toBe(12);
+    expect(run.skill?.outputDigest).toMatch(/^[a-f0-9]{64}$/);
+    await s.restart();
+    expect((await s.request(path, turn)).body).toBe(original.body);
+    expect(await s.callCount()).toBe(1);
+  });
+  it('paginates maximum byte sized runs and snapshot, preserving every request across pages and restart', async () => {
+    const s = stub();
+    const boundary = boundaryFixtures();
+    const { digest: _, ...source } = boundary.snapshot;
+    const snapshot = { ...source, digest: await sha256(canonical(source)) };
+    const response = await s.request('/reporter/sessions', {
+      version: 1,
+      requestId: crypto.randomUUID(),
+      snapshot,
+    });
+    expect(response.status).toBe(200);
+    const { sessionId } = sessionResponse.parse(response.body);
+    boundary.narrative.snapshotDigest = snapshot.digest;
+    boundary.history[0]!.narrative.snapshotDigest = snapshot.digest;
+    const ids = await s.seedRuns(
+      sessionId,
+      boundary.narrative,
+      boundary.history,
+      4,
+    );
+    await s.restart();
+    let cursor: string | null = null;
+    const seen: string[] = [];
+    do {
+      const pageResponse = await s.request(
+        `/reporter/sessions/${sessionId}${cursor ? `?cursor=${cursor}` : ''}`,
+      );
+      expect(pageResponse.status).toBe(200);
+      expect(
+        new TextEncoder().encode(pageResponse.body).length,
+      ).toBeLessThanOrEqual(REPORTER_PAGE_BYTES);
+      const page = sessionPageSchema.parse(JSON.parse(pageResponse.body));
+      expect(page.runs).toHaveLength(1);
+      seen.push(...page.runs.map((run) => run.requestId));
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toEqual([...ids].reverse());
+    const recovered = await s.request(
+      `/reporter/sessions/${sessionId}/turns/${ids[0]}`,
+    );
+    expect(runSchema.parse(JSON.parse(recovered.body)).requestId).toBe(ids[0]);
+    expect(
+      (
+        await s.request(
+          `/reporter/sessions/${sessionId}?cursor=${crypto.randomUUID()}`,
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (await s.request(`/reporter/sessions/${sessionId}?cursor=bad`)).status,
+    ).toBe(400);
+    expect(
+      (
+        await s.request(
+          `/reporter/sessions/${sessionId}?cursor=${ids[0]}&cursor=${ids[1]}`,
+        )
+      ).status,
+    ).toBe(400);
+    expect(await s.callCount()).toBe(0);
+  });
+  it('fills a real session page to its byte limit with source-bound receipts', async () => {
+    const s = stub();
+    const boundary = boundaryFixtures();
+    const { digest: _, ...source } = boundary.snapshot;
+    const snapshot = { ...source, digest: await sha256(canonical(source)) };
+    const created = await s.request('/reporter/sessions', {
+      version: 1,
+      requestId: crypto.randomUUID(),
+      snapshot,
+    });
+    const { sessionId } = sessionResponse.parse(created.body);
+    boundary.narrative.snapshotDigest = snapshot.digest;
+    boundary.history[0]!.narrative.snapshotDigest = snapshot.digest;
+    const small = {
+      version: 1 as const,
+      snapshotDigest: snapshot.digest,
+      sections: [
+        {
+          topic: 'what' as const,
+          units: [
+            {
+              kind: 'missing' as const,
+              text: 'This information is not recorded' as const,
+            },
+          ],
+        },
+      ],
+    };
+    await s.seedRuns(sessionId, small, [], 1);
+    const [firstId] = await s.seedRuns(
+      sessionId,
+      boundary.narrative,
+      boundary.history,
+      1,
+    );
+    const first = runSchema.parse(
+      JSON.parse(
+        (await s.request(`/reporter/sessions/${sessionId}/turns/${firstId}`))
+          .body,
+      ),
+    );
+    const nextNarrative = structuredClone(boundary.narrative);
+    const second = { ...first, history: [], narrative: nextNarrative };
+    const provisional = {
+      version: 1,
+      sessionId,
+      snapshot,
+      runs: [first, second],
+      nextCursor: firstId,
+    };
+    let excess = jsonBytes(provisional) - REPORTER_PAGE_BYTES;
+    for (const unit of [...nextNarrative.sections[0]!.units].reverse()) {
+      if (unit.kind !== 'interpretation' || excess <= 0) continue;
+      const removed = Math.min(excess, unit.text.length - 1);
+      unit.text = unit.text.slice(0, unit.text.length - removed);
+      excess -= removed;
+    }
+    expect(excess).toBe(0);
+    await s.seedRuns(sessionId, nextNarrative, [], 1);
+    const response = await s.request(`/reporter/sessions/${sessionId}`);
+    expect(response.status).toBe(200);
+    const page = sessionPageSchema.parse(JSON.parse(response.body));
+    expect(page.runs).toHaveLength(2);
+    expect(page.nextCursor).toBe(firstId);
+    expect(jsonBytes(page)).toBe(REPORTER_PAGE_BYTES);
+    for (const run of page.runs) {
+      expect(run.skill!.inputDigest).toBe(
+        await sha256(
+          canonical({ snapshot, message: run.message, history: run.history }),
+        ),
+      );
+      expect(run.skill!.outputDigest).toBe(
+        await sha256(canonical(run.narrative)),
+      );
+    }
+  });
+  it('paginates small histories by count in chronological order within each page', async () => {
+    const { s, sessionId, snapshot } = await setup();
+    const ids = await s.seedRuns(
+      sessionId,
+      {
+        version: 1,
+        snapshotDigest: snapshot.digest,
+        sections: [
+          {
+            topic: 'what',
+            units: [
+              { kind: 'missing', text: 'This information is not recorded' },
+            ],
+          },
+        ],
+      },
+      [],
+      55,
+    );
+    const page = sessionPageSchema.parse(
+      JSON.parse((await s.request(`/reporter/sessions/${sessionId}`)).body),
+    );
+    expect(page.runs.map((run) => run.requestId)).toEqual(ids.slice(5));
+    expect(page.nextCursor).toBe(ids[5]);
+    const older = sessionPageSchema.parse(
+      JSON.parse(
+        (
+          await s.request(
+            `/reporter/sessions/${sessionId}?cursor=${page.nextCursor}`,
+          )
+        ).body,
+      ),
+    );
+    expect(older.runs.map((run) => run.requestId)).toEqual(ids.slice(0, 5));
+    expect(older.nextCursor).toBeNull();
+  });
   it('advertises no credit funding and no models when credentials are absent', async () => {
     const s = stub();
     await s.configure({ connected: false });
@@ -276,5 +471,43 @@ describe('Reporter source validation', () => {
         snapshot,
       ),
     ).toThrow('reference mismatch');
+  });
+});
+
+describe('Reporter shared boundary fixtures', () => {
+  it.each(fieldBoundaryFixtures())(
+    'enforces $name at the exact accepted boundary',
+    ({ schema, accepted, rejected }) => {
+      const schemas = {
+        snapshot: snapshotSchema,
+        narrative: boundedNarrativeSchema,
+        history: historySchema,
+      };
+      expect(schemas[schema].safeParse(accepted).success).toBe(true);
+      expect(schemas[schema].safeParse(rejected).success).toBe(false);
+    },
+  );
+  it('accepts exactly 64 KiB and rejects one more UTF8 byte for each aggregate', () => {
+    const { snapshot, narrative, history } = boundaryFixtures();
+    expect(jsonBytes(snapshot)).toBe(65536);
+    expect(jsonBytes(narrative)).toBe(65536);
+    expect(jsonBytes(history)).toBe(65536);
+    expect(snapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(boundedNarrativeSchema.safeParse(narrative).success).toBe(true);
+    expect(historySchema.safeParse(history).success).toBe(true);
+    const unicode = { ...snapshot, title: 'é' + snapshot.title.slice(1) };
+    expect(JSON.stringify(unicode).length).toBe(
+      JSON.stringify(snapshot).length,
+    );
+    expect(jsonBytes(unicode)).toBe(65537);
+    expect(snapshotSchema.safeParse(unicode).success).toBe(false);
+    snapshot.title += 'x';
+    const last = narrative.sections[0]!.units.at(-1)!;
+    if (last.kind !== 'interpretation') throw new Error('Wrong fixture');
+    last.text += 'x';
+    history[0]!.message += 'x';
+    expect(snapshotSchema.safeParse(snapshot).success).toBe(false);
+    expect(boundedNarrativeSchema.safeParse(narrative).success).toBe(false);
+    expect(historySchema.safeParse(history).success).toBe(false);
   });
 });

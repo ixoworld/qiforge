@@ -10,8 +10,9 @@ import {
   type Narrative,
   type Snapshot,
   type TurnBody,
+  type HistoryTurn,
 } from './contracts';
-import { reportingSkill } from './skill';
+import { ReportingOutputError, reportingSkill } from './skill';
 import { SessionsStore } from '../sqlite/sessions-store';
 
 export class ReporterTestDO extends DurableObject {
@@ -20,6 +21,7 @@ export class ReporterTestDO extends DurableObject {
   private background: Promise<void>[] = [];
   private controllers = new Map<string, AbortController>();
   private connected = true;
+  private invalidOutput = false;
   private failOwner = false;
   private calls = 0;
   private hold = false;
@@ -39,9 +41,11 @@ export class ReporterTestDO extends DurableObject {
   }
   async configure(options: {
     connected?: boolean;
+    invalidOutput?: boolean;
     failOwner?: boolean;
     hold?: boolean;
   }) {
+    this.invalidOutput = options.invalidOutput ?? this.invalidOutput;
     this.connected = options.connected ?? this.connected;
     this.failOwner = options.failOwner ?? this.failOwner;
     this.hold = options.hold ?? this.hold;
@@ -108,7 +112,7 @@ export class ReporterTestDO extends DurableObject {
             },
           ],
         };
-        return {
+        const result = {
           narrative,
           skill: {
             ...(await reportingSkill()),
@@ -121,12 +125,15 @@ export class ReporterTestDO extends DurableObject {
             requestedModel: turn.byoModelId,
             actualModel: turn.mainModelId,
             provider: turn.provider,
-            funding: 'byo_only',
+            funding: 'byo_only' as const,
             inputTokens: 12,
             outputTokens: 15,
-            settlement: 'not_applicable',
+            settlement: 'not_applicable' as const,
           },
         };
+        if (this.invalidOutput)
+          throw new ReportingOutputError(result.skill, result.execution);
+        return result;
       },
     });
     const response = await service.handle(
@@ -157,6 +164,53 @@ export class ReporterTestDO extends DurableObject {
     const session = await store.createSession(crypto.randomUUID(), snapshot);
     const { run } = await store.reserve(session.sessionId, body);
     return run;
+  }
+  async seedRuns(
+    sessionId: string,
+    narrative: Narrative,
+    history: HistoryTurn[],
+    count: number,
+  ) {
+    const store = await this.store();
+    const ids: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const body: TurnBody = {
+        version: 1,
+        requestId: crypto.randomUUID(),
+        message: `Synthetic question ${index}`,
+        model: 'byo:openai/gpt-5.6-terra',
+        funding: 'byo_only',
+      };
+      const { run } = await store.reserve(sessionId, body);
+      await store.save({
+        ...run,
+        history,
+        narrative,
+        status: 'completed',
+        skill: {
+          ...(await reportingSkill()),
+          inputDigest: await sha256(
+            canonical({
+              snapshot: await store.snapshot(sessionId),
+              message: run.message,
+              history,
+            }),
+          ),
+          outputDigest: await sha256(canonical(narrative)),
+        },
+        execution: {
+          requestedModel: body.model,
+          actualModel: 'gpt-5.6-terra',
+          provider: 'openai',
+          funding: 'byo_only',
+          inputTokens: 12,
+          outputTokens: 15,
+          settlement: 'not_applicable',
+        },
+      });
+      ids.push(run.requestId);
+    }
+    return ids;
   }
   async genericSessions() {
     await this.store();

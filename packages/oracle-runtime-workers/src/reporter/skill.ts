@@ -4,6 +4,7 @@ import { createByoChatModel } from '../llm/byo-client';
 import type { ByoTurnState } from '../llm/byo-service';
 import {
   canonical,
+  executionReceiptSchema,
   narrativeSchema,
   sha256,
   validateNarrative,
@@ -72,7 +73,7 @@ export async function executeReportingSkill(
     !Number.isSafeInteger(usage.output_tokens)
   )
     throw new Error('Provider execution receipt unavailable');
-  const execution: ExecutionReceipt = {
+  const execution = executionReceiptSchema.parse({
     requestedModel: turn.byoModelId,
     actualModel,
     provider: turn.provider,
@@ -80,7 +81,7 @@ export async function executeReportingSkill(
     inputTokens: usage.input_tokens,
     outputTokens: usage.output_tokens,
     settlement: 'not_applicable',
-  };
+  });
   const skill: SkillReceipt = {
     ...(await reportingSkill()),
     inputDigest: await sha256(canonical(input)),

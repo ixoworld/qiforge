@@ -46,7 +46,8 @@ export class ReporterService {
   ) {}
   async handle(request: Request): Promise<Response> {
     try {
-      const path = new URL(request.url).pathname;
+      const url = new URL(request.url);
+      const path = url.pathname;
       if (path === '/reporter/capabilities' && request.method === 'GET') {
         const creds = await this.deps.byo.getCredentials(this.deps.userDid, {
           refresh: true,
@@ -145,7 +146,16 @@ export class ReporterService {
         });
       }
       if (request.method === 'GET' && !path.endsWith('/turns')) {
-        const session = await this.deps.store.session(sessionId);
+        const cursor = url.searchParams.get('cursor');
+        if (
+          [...url.searchParams.keys()].some((key) => key !== 'cursor') ||
+          url.searchParams.getAll('cursor').length > 1
+        )
+          throw new ReporterError(400, 'Invalid session cursor');
+        const session = await this.deps.store.session(
+          sessionId,
+          cursor === null ? undefined : z.uuid().parse(cursor),
+        );
         await this.deps.persist();
         return Response.json(session);
       }
@@ -222,13 +232,18 @@ export class ReporterService {
         run.skill = error.skill;
         run.execution = error.execution;
       }
-      run.status = inferred ? 'uncertain' : 'failed';
+      run.status =
+        inferred && !(error instanceof ReportingOutputError)
+          ? 'uncertain'
+          : 'failed';
       run.error =
-        error instanceof ReporterError
-          ? error.message
-          : inferred
-            ? 'Provider result could not be confirmed; this request will not be inferred again'
-            : 'Reporter execution could not start';
+        error instanceof ReportingOutputError
+          ? 'Provider output failed Reporter validation'
+          : error instanceof ReporterError
+            ? error.message
+            : inferred
+              ? 'Provider result could not be confirmed; this request will not be inferred again'
+              : 'Reporter execution could not start';
     }
     this.deps.controllers.delete(run.runId);
     if (!(await this.deps.store.transition(run, ['pending', 'running']))) {

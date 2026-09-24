@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+export const REPORTER_VALUE_BYTES = 64 * 1024;
+export const REPORTER_PAGE_BYTES = 256 * 1024 - 1024;
+export const REPORTER_RUN_BYTES = 192 * 1024 - 2048;
+export function jsonBytes(value: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
 export const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const text = z.string().max(4096);
 export const factSchema = z.strictObject({
@@ -9,31 +16,36 @@ export const factSchema = z.strictObject({
   unit: text.nullable(),
 });
 const referenceSchema = factSchema.pick({ nodeId: true, property: true });
-export const snapshotSchema = z.strictObject({
-  version: z.literal(1),
-  digest: digestSchema,
-  certificateDigest: digestSchema,
-  capturedAt: z.iso.datetime(),
-  title: text,
-  facts: z.array(factSchema).max(1000),
-  checks: z
-    .array(
-      z.strictObject({
-        id: text,
-        status: z.enum([
-          'running',
-          'passed',
-          'failed',
-          'incomplete',
-          'unsupported',
-          'access_required',
-          'not_checked',
-        ]),
-      }),
-    )
-    .max(200),
-  disclaimer: text,
-});
+export const snapshotSchema = z
+  .strictObject({
+    version: z.literal(1),
+    digest: digestSchema,
+    certificateDigest: digestSchema,
+    capturedAt: z.iso.datetime(),
+    title: text.min(1),
+    facts: z.array(factSchema).max(1000),
+    checks: z
+      .array(
+        z.strictObject({
+          id: text.min(1),
+          status: z.enum([
+            'running',
+            'passed',
+            'failed',
+            'incomplete',
+            'unsupported',
+            'access_required',
+            'not_checked',
+          ]),
+        }),
+      )
+      .max(200),
+    disclaimer: text.min(1),
+  })
+  .refine(
+    (value) => jsonBytes(value) <= REPORTER_VALUE_BYTES,
+    'Snapshot exceeds 64 KiB',
+  );
 export const narrativeSchema = z.strictObject({
   version: z.literal(1),
   snapshotDigest: digestSchema,
@@ -55,8 +67,8 @@ export const narrativeSchema = z.strictObject({
               factSchema.extend({ kind: z.literal('fact') }),
               z.strictObject({
                 kind: z.literal('interpretation'),
-                text,
-                refs: z.array(referenceSchema).min(1).max(50),
+                text: text.min(1),
+                refs: z.array(referenceSchema).min(1).max(30),
               }),
               z.strictObject({
                 kind: z.literal('missing'),
@@ -64,12 +76,17 @@ export const narrativeSchema = z.strictObject({
               }),
             ]),
           )
-          .max(100),
+          .min(1)
+          .max(50),
       }),
     )
     .min(1)
     .max(20),
 });
+export const boundedNarrativeSchema = narrativeSchema.refine(
+  (value) => jsonBytes(value) <= REPORTER_VALUE_BYTES,
+  'Narrative exceeds 64 KiB',
+);
 export const sessionBodySchema = z.strictObject({
   version: z.literal(1),
   requestId: z.uuid(),
@@ -103,28 +120,63 @@ export const executionReceiptSchema = z.strictObject({
 });
 export const historyTurnSchema = z.strictObject({
   message: text.min(1),
-  narrative: narrativeSchema,
+  narrative: boundedNarrativeSchema,
 });
+export const historySchema = z
+  .array(historyTurnSchema)
+  .max(8)
+  .refine(
+    (value) => jsonBytes(value) <= REPORTER_VALUE_BYTES,
+    'History exceeds 64 KiB',
+  );
 export const runSchema = z
   .strictObject({
     version: z.literal(1),
     message: text.min(1),
-    history: z.array(historyTurnSchema).max(8),
+    history: historySchema,
     requestId: z.uuid(),
     runId: z.uuid(),
     sessionId: z.uuid(),
     snapshotDigest: digestSchema,
     status: z.enum(['pending', 'running', 'completed', 'failed', 'uncertain']),
-    narrative: narrativeSchema.optional(),
+    narrative: boundedNarrativeSchema.optional(),
     skill: skillReceiptSchema.optional(),
     execution: executionReceiptSchema.optional(),
-    error: text.optional(),
+    error: z.string().min(1).max(512).optional(),
   })
   .refine(
     (run) =>
       run.status !== 'completed' ||
       Boolean(run.narrative && run.skill && run.execution),
     'Completed run requires narrative and receipts',
+  )
+  .refine(
+    (run) => Boolean(run.skill) === Boolean(run.execution),
+    'Receipts must be paired',
+  )
+  .refine(
+    (run) => !run.narrative || run.status === 'completed',
+    'Only completed runs have a narrative',
+  )
+  .refine(
+    (run) => !run.skill || !['pending', 'running'].includes(run.status),
+    'Active runs cannot have receipts',
+  )
+  .refine(
+    (run) => jsonBytes(run) <= REPORTER_RUN_BYTES,
+    'Run exceeds byte limit',
+  );
+export const sessionPageSchema = z
+  .strictObject({
+    version: z.literal(1),
+    sessionId: z.uuid(),
+    snapshot: snapshotSchema,
+    runs: z.array(runSchema).max(50),
+    nextCursor: z.uuid().nullable(),
+  })
+  .refine(
+    (page) => jsonBytes(page) <= REPORTER_PAGE_BYTES,
+    'Session page exceeds byte limit',
   );
 export type SkillReceipt = z.infer<typeof skillReceiptSchema>;
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
@@ -172,7 +224,7 @@ export function validateNarrative(
   value: unknown,
   snapshot: Snapshot,
 ): Narrative {
-  const narrative = narrativeSchema.parse(value);
+  const narrative = boundedNarrativeSchema.parse(value);
   if (narrative.snapshotDigest !== snapshot.digest)
     throw new Error('Narrative source mismatch');
   for (const section of narrative.sections)

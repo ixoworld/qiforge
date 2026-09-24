@@ -47,7 +47,7 @@ it('authenticates a Reporter request and forwards local grants without depositin
   const response = await createShell({
     reporter: { profile: 'reporter-grounded-v1' },
   }).request(
-    '/reporter/capabilities',
+    '/reporter/sessions/11111111-1111-4111-8111-111111111111?cursor=22222222-2222-4222-8222-222222222222',
     {
       headers: {
         authorization: `Bearer ${invocation}`,
@@ -66,6 +66,9 @@ it('authenticates a Reporter request and forwards local grants without depositin
     },
   });
   expect(dispatch).toHaveBeenCalledOnce();
+  expect(dispatch.mock.calls[0]![0]).toBe(
+    'https://user-oracle/reporter/sessions/11111111-1111-4111-8111-111111111111?cursor=22222222-2222-4222-8222-222222222222',
+  );
   expect(setDelegation).not.toHaveBeenCalled();
   expect(sendStateEvent).not.toHaveBeenCalled();
 });

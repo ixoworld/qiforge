@@ -2,7 +2,11 @@ import { URL as NodeURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical, sha256, type Snapshot } from './contracts';
-import { executeReportingSkill, reportingSkill } from './skill';
+import {
+  executeReportingSkill,
+  reportingSkill,
+  ReportingOutputError,
+} from './skill';
 import { reportingSkillSource } from './skill-source';
 
 const source: Snapshot = {
@@ -99,6 +103,82 @@ describe('bundled reporting skill with the real BYO client', () => {
     expect(result.skill.outputDigest).toBe(await sha256(canonical(narrative)));
     expect(JSON.stringify(result)).not.toContain('secret-test-key');
   });
+  it.each(['invalid-json', 'invented-fact'])(
+    'preserves receipt availability for %s output',
+    async (kind) => {
+      const content =
+        kind === 'invalid-json'
+          ? 'not json'
+          : JSON.stringify({
+              ...narrative,
+              sections: [
+                {
+                  topic: 'what',
+                  units: [{ kind: 'fact', ...source.facts[0], value: '999' }],
+                },
+              ],
+            });
+      const fetcher = vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: 'chatcmpl-invalid',
+              object: 'chat.completion',
+              created: 1234,
+              model: 'gpt-5.6-terra',
+              choices: [
+                {
+                  index: 0,
+                  message: { role: 'assistant', content },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: {
+                prompt_tokens: 21,
+                completion_tokens: 34,
+                total_tokens: 55,
+              },
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
+      );
+      vi.stubGlobal('fetch', fetcher);
+      const error = await executeReportingSkill(
+        source,
+        'Question',
+        {
+          provider: 'openai',
+          credential: { provider: 'openai', apiKey: 'secret-test-key' },
+          byoModelId: 'byo:openai/gpt-5.6-terra',
+          mainModelId: 'gpt-5.6-terra',
+        },
+        [],
+      ).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(
+        kind === 'invalid-json' ? SyntaxError : ReportingOutputError,
+      );
+      const receipt =
+        error instanceof ReportingOutputError ? error.execution : undefined;
+      const knownReceipt = expect.objectContaining({
+        inputTokens: 21,
+        outputTokens: 34,
+        actualModel: 'gpt-5.6-terra',
+      });
+      expect(receipt).toEqual(
+        kind === 'invalid-json' ? undefined : knownReceipt,
+      );
+      const outputDigest =
+        error instanceof ReportingOutputError
+          ? error.skill.outputDigest
+          : undefined;
+      const digestMatcher = expect.stringMatching(/^[a-f0-9]{64}$/);
+      expect(outputDigest).toEqual(
+        kind === 'invalid-json' ? undefined : digestMatcher,
+      );
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(error)).not.toContain('secret-test-key');
+    },
+  );
   it('makes a single attempt when the transport loses the provider result', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => {
       throw new Error('connection lost');

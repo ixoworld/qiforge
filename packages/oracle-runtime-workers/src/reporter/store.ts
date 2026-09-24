@@ -2,6 +2,10 @@ import type { DoSqliteDatabase } from '../sqlite/database';
 import { SessionsStore } from '../sqlite/sessions-store';
 import {
   canonical,
+  jsonBytes,
+  REPORTER_VALUE_BYTES,
+  REPORTER_PAGE_BYTES,
+  sessionPageSchema,
   ReporterError,
   sha256,
   snapshotSchema,
@@ -11,6 +15,7 @@ import {
   type ReporterRun,
   type TurnBody,
   type HistoryTurn,
+  historyTurnSchema,
 } from './contracts';
 
 type SessionRow = {
@@ -153,22 +158,13 @@ export class ReporterStore {
         return { run, created: false };
       }
       const recent = await this.db.exec<{ result: string }>(
-        'SELECT result FROM reporter_runs WHERE user_did=? AND session_id=? ORDER BY rowid DESC LIMIT 100',
+        "SELECT json_object('message', json_extract(result, '$.message'), 'narrative', json_extract(result, '$.narrative')) AS result FROM reporter_runs WHERE user_did=? AND session_id=? AND json_extract(result, '$.status')='completed' ORDER BY rowid DESC LIMIT 8",
         [this.owner.userDid, sessionId],
       );
       const history: HistoryTurn[] = [];
       for (const row of recent) {
-        const priorRun = runSchema.parse(JSON.parse(row.result));
-        if (priorRun.status !== 'completed' || !priorRun.narrative) continue;
-        const next = {
-          message: priorRun.message,
-          narrative: priorRun.narrative,
-        };
-        if (
-          new TextEncoder().encode(JSON.stringify([...history, next])).length >
-          64 * 1024
-        )
-          break;
+        const next = historyTurnSchema.parse(JSON.parse(row.result));
+        if (jsonBytes([...history, next]) > REPORTER_VALUE_BYTES) break;
         history.unshift(next);
         if (history.length === 8) break;
       }
@@ -194,6 +190,7 @@ export class ReporterStore {
     });
   }
   async save(run: ReporterRun): Promise<void> {
+    runSchema.parse(run);
     await this.db.run(
       'UPDATE reporter_runs SET result=? WHERE user_did=? AND session_id=? AND request_id=?',
       [JSON.stringify(run), this.owner.userDid, run.sessionId, run.requestId],
@@ -203,6 +200,7 @@ export class ReporterStore {
     run: ReporterRun,
     from: ReporterRun['status'][],
   ): Promise<boolean> {
+    runSchema.parse(run);
     const placeholders = from.map(() => '?').join(',');
     const result = await this.db.run(
       `UPDATE reporter_runs SET result=? WHERE user_did=? AND session_id=? AND request_id=? AND json_extract(result, '$.status') IN (${placeholders})`,
@@ -216,17 +214,46 @@ export class ReporterStore {
     );
     return result.changes === 1;
   }
-  async session(sessionId: string) {
+  async session(sessionId: string, cursor?: string) {
     const snapshot = await this.snapshot(sessionId);
+    const boundary = cursor
+      ? await this.db.get<{ rowid: number }>(
+          'SELECT rowid FROM reporter_runs WHERE user_did=? AND session_id=? AND request_id=?',
+          [this.owner.userDid, sessionId, cursor],
+        )
+      : undefined;
+    if (cursor && !boundary)
+      throw new ReporterError(400, 'Invalid session cursor');
     const rows = await this.db.exec<{ request_id: string }>(
-      'SELECT request_id FROM reporter_runs WHERE user_did=? AND session_id=? ORDER BY rowid DESC LIMIT 100',
-      [this.owner.userDid, sessionId],
+      `SELECT request_id FROM reporter_runs WHERE user_did=? AND session_id=?${boundary ? ' AND rowid<?' : ''} ORDER BY rowid DESC LIMIT 51`,
+      [this.owner.userDid, sessionId, ...(boundary ? [boundary.rowid] : [])],
     );
-    const runs: ReporterRun[] = [];
-    for (const row of rows.reverse()) {
+    const page = {
+      version: 1 as const,
+      sessionId,
+      snapshot,
+      runs: [] as ReporterRun[],
+      nextCursor: null as string | null,
+    };
+    for (const row of rows) {
       const run = await this.getRun(sessionId, row.request_id);
-      if (run) runs.push(run);
+      if (!run) throw new Error('Reporter page run missing');
+      const candidate = {
+        ...page,
+        runs: [run, ...page.runs],
+        nextCursor: run.requestId,
+      };
+      if (
+        page.runs.length === 50 ||
+        jsonBytes(candidate) > REPORTER_PAGE_BYTES
+      ) {
+        if (!page.runs.length)
+          throw new ReporterError(503, 'Reporter run exceeds page limit');
+        page.nextCursor = page.runs[0]!.requestId;
+        break;
+      }
+      page.runs.unshift(run);
     }
-    return { version: 1 as const, sessionId, snapshot, runs };
+    return sessionPageSchema.parse(page);
   }
 }
