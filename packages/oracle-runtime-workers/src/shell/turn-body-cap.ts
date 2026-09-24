@@ -17,3 +17,33 @@ export const MAX_TURN_BODY_BYTES = 256 * 1024;
 export function turnBodyTooLarge(body: string): boolean {
   return new TextEncoder().encode(body).byteLength > MAX_TURN_BODY_BYTES;
 }
+
+export async function readBoundedBody(
+  request: Request,
+  limit = MAX_TURN_BODY_BYTES,
+): Promise<string | null> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) {
+    await request.body?.cancel();
+    return null;
+  }
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) return text + decoder.decode();
+      bytes += chunk.value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel();
+        return null;
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}

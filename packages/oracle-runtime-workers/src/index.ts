@@ -30,6 +30,8 @@ import {
 import { MatrixGatewayDO } from './matrix/gateway-do';
 import { createShell, gateway, type PluginRoute } from './shell/app';
 import type { RouteExclusion } from './shell/auth';
+import type { ReporterProfileOptions } from './reporter/service';
+export type { ReporterProfileOptions } from './reporter/service';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -161,6 +163,7 @@ export {
 } from './llm/chatgpt-oauth';
 
 export interface CreateOracleWorkerOptions {
+  reporter?: ReporterProfileOptions;
   config: OracleConfig;
   plugins?: OraclePlugin[];
   features?: RuntimeCoreOptions['features'];
@@ -244,6 +247,7 @@ export function createOracleWorker(
     if (!app) {
       const core = coreFor(env);
       app = createShell({
+        reporter: opts.reporter,
         routes: [...core.pluginRoutes, ...(opts.routes ?? [])],
         authExcludedRoutes: [
           ...core.authExcludedRoutes,
@@ -261,6 +265,7 @@ export function createOracleWorker(
   };
 
   const UserOracleDO = createUserOracleDO({
+    reporter: opts.reporter,
     core: coreFor,
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
   });

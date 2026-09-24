@@ -49,6 +49,9 @@ export interface VfsClientOptions {
 /** A file's identity + display metadata (worker `FileMetadata`). */
 export interface VfsFileStat {
   id: string;
+  cid?: string;
+  contentHash?: string;
+  version?: number;
   path: string;
   name: string;
   mimeType: string;
@@ -176,6 +179,9 @@ function parseFile(v: unknown, fallbackPath?: string): VfsFileStat | null {
     mimeType: str(v.mimeType) ?? '',
     size: num(v.size) ?? 0,
     publicUrl: str(v.publicUrl),
+    cid: str(v.cid),
+    contentHash: str(v.contentHash),
+    version: num(v.version),
   };
 }
 

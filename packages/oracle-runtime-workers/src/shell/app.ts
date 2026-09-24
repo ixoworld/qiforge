@@ -27,8 +27,10 @@ import {
   type AuthResult,
   type RouteExclusion,
 } from './auth';
-import { turnBodyTooLarge } from './turn-body-cap';
+import { readBoundedBody, turnBodyTooLarge } from './turn-body-cap';
 import { z } from 'zod';
+import type { ReporterProfileOptions } from '../reporter/service';
+import { validateDelegation } from './auth';
 
 const DebugEventBody = z.object({
   type: z
@@ -55,6 +57,7 @@ export interface PluginRoute {
 }
 
 export interface ShellOptions {
+  reporter?: ReporterProfileOptions;
   /** Routes contributed by plugins (`getRoutes`) and the host. */
   routes?: PluginRoute[];
   /** Auth exclusions contributed by plugins and the host. */
@@ -185,13 +188,19 @@ export function createShell(
 
   // --- auth ------------------------------------------------------------------
   app.use('*', async (c, next) => {
-    if (isExcluded(c.req.method, c.req.path, exclusions)) return next();
+    if (
+      !c.req.path.startsWith('/reporter/') &&
+      isExcluded(c.req.method, c.req.path, exclusions)
+    )
+      return next();
     const outcome = await authenticate(c.req.raw.headers, {
       oracleDid: c.env.ORACLE_DID,
       blocksyncUri: c.env.BLOCKSYNC_GRAPHQL_URL,
-      maxTtlSeconds: c.env.UCAN_AUTH_MAX_TTL_SECONDS
-        ? Number(c.env.UCAN_AUTH_MAX_TTL_SECONDS)
-        : undefined,
+      maxTtlSeconds: c.req.path.startsWith('/reporter/')
+        ? 60
+        : c.env.UCAN_AUTH_MAX_TTL_SECONDS
+          ? Number(c.env.UCAN_AUTH_MAX_TTL_SECONDS)
+          : undefined,
     });
     if (!outcome.ok)
       return c.json(
@@ -367,18 +376,74 @@ export function createShell(
     return new Response(res.body, { status: res.status, headers });
   });
 
+  app.all('/reporter/*', async (c) => {
+    if (!opts.reporter) return c.json({ error: 'Not found' }, 404);
+    const auth = c.get('auth');
+    if (auth.via !== 'invocation' || !auth.delegation)
+      return c.json(
+        {
+          error: 'Reporter requires an invocation and request-local delegation',
+        },
+        403,
+      );
+    const body =
+      c.req.method === 'POST' ? await readBoundedBody(c.req.raw) : undefined;
+    if (body === null)
+      return c.json({ error: 'Reporter request too large' }, 413);
+    return userStub(c.env, auth.userDid).fetch(
+      `https://user-oracle${c.req.path}`,
+      {
+        method: c.req.method,
+        headers: {
+          'content-type': 'application/json',
+          'x-identity': JSON.stringify(identityOf(auth, c.req.raw.headers)),
+        },
+        body,
+      },
+    );
+  });
+
   // --- delegation (room-state persisted, for header-less Matrix turns) -----------
   app.post('/delegation', async (c) => {
     const auth = c.get('auth');
-    const body = (await c.req.json().catch(() => ({}))) as {
-      raw?: string;
-      expiration?: number;
-    };
+    const rawBody = await readBoundedBody(c.req.raw);
+    if (rawBody === null)
+      return c.json({ message: 'Delegation body too large' }, 413);
+    let value: unknown;
+    try {
+      value = JSON.parse(rawBody);
+    } catch {
+      return c.json({ message: 'Invalid delegation body' }, 400);
+    }
+    const parsed = z
+      .strictObject({
+        raw: z
+          .string()
+          .min(1)
+          .max(128 * 1024)
+          .optional(),
+        expiration: z.number().int().positive().optional(),
+      })
+      .safeParse(value);
+    if (!parsed.success)
+      return c.json({ message: 'Invalid delegation body' }, 400);
+    const body = parsed.data;
     const raw = body.raw ?? auth.delegation;
     if (!raw) return c.json({ message: 'raw delegation is required' }, 400);
+    const validated = await validateDelegation(raw, {
+      oracleDid: c.env.ORACLE_DID,
+      blocksyncUri: c.env.BLOCKSYNC_GRAPHQL_URL,
+    });
+    if (!validated.ok || validated.userDid !== auth.userDid)
+      return c.json({ message: 'Invalid delegation for this account' }, 403);
+    if (
+      body.expiration !== undefined &&
+      body.expiration !== validated.expiration
+    )
+      return c.json({ message: 'Delegation expiration mismatch' }, 400);
+    const expiration = validated.expiration;
     const room = await gateway(c.env).resolveUserRoom(auth.userDid);
     if (!room) return c.json({ message: 'No oracle room for this user' }, 404);
-    const expiration = body.expiration ?? auth.delegationExpiration;
     // The Node runtime's `DelegationStore` record, in its compressed
     // room-state envelope, so a user can move between runtimes without
     // re-authorising (`updatedAt` is required by Node's schema).
@@ -408,7 +473,7 @@ export function createShell(
       });
     return c.json({
       ok: true,
-      expiration: body.expiration ?? auth.delegationExpiration,
+      expiration,
     });
   });
   app.get('/delegation', async (c) => {
