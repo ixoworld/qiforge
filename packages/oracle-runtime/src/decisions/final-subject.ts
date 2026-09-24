@@ -53,7 +53,8 @@ export class StaleDecisionSubjectError extends Error {
  *
  * ixo-json-v1 deliberately supports only JSON-safe values, sorts object keys,
  * preserves array order, and rejects values whose normal JSON serialization can
- * silently change meaning (undefined, functions, symbols, bigint, NaN, Infinity).
+ * silently change meaning (undefined, functions, symbols, bigint, NaN, Infinity,
+ * and sparse arrays).
  */
 export function canonicalizeFinalDecisionSubject(
   subject: FinalDecisionSubject,
@@ -105,23 +106,14 @@ export function assertFinalDecisionSubjectUnchanged(
   binding: FinalDecisionSubjectBinding,
   currentSubject: FinalDecisionSubject,
 ): void {
-  const current = digestFinalDecisionSubject(currentSubject);
-
-  if (
-    binding.algorithm !== current.algorithm ||
-    binding.canonicalization !== current.canonicalization ||
-    !safeHexEqual(binding.subjectDigest, current.subjectDigest)
-  ) {
-    throw new StaleDecisionSubjectError(
-      binding.subjectDigest,
-      current.subjectDigest,
-    );
-  }
+  assertBindingMatches(binding, digestFinalDecisionSubject(currentSubject));
 }
 
 /**
  * Creates an execution receipt only after checking the action still matches the
- * subject that authority was granted for.
+ * subject that authority was granted for. The subject is digested exactly once
+ * so accessor-backed or proxied values cannot change between validation and
+ * receipt creation.
  */
 export function createDecisionExecutionReceipt(input: {
   authority: DecisionAuthorityReceipt;
@@ -129,18 +121,31 @@ export function createDecisionExecutionReceipt(input: {
   reference?: string;
   executedAt?: Date | string;
 }): DecisionExecutionReceipt {
-  assertFinalDecisionSubjectUnchanged(
-    input.authority.subject,
-    input.currentSubject,
-  );
-
   const binding = digestFinalDecisionSubject(input.currentSubject);
+  assertBindingMatches(input.authority.subject, binding);
+
   return {
     subject: binding,
     actionDigest: binding.subjectDigest,
     executedAt: toIsoTimestamp(input.executedAt),
     ...(input.reference ? { reference: input.reference } : {}),
   };
+}
+
+function assertBindingMatches(
+  expected: FinalDecisionSubjectBinding,
+  actual: FinalDecisionSubjectBinding,
+): void {
+  if (
+    expected.algorithm !== actual.algorithm ||
+    expected.canonicalization !== actual.canonicalization ||
+    !safeHexEqual(expected.subjectDigest, actual.subjectDigest)
+  ) {
+    throw new StaleDecisionSubjectError(
+      expected.subjectDigest,
+      actual.subjectDigest,
+    );
+  }
 }
 
 function canonicalizeJson(value: FinalDecisionSubjectValue): string {
@@ -160,6 +165,11 @@ function canonicalizeJson(value: FinalDecisionSubjectValue): string {
       return Object.is(value, -0) ? '0' : JSON.stringify(value);
     case 'object':
       if (Array.isArray(value)) {
+        if (Object.keys(value).length !== value.length) {
+          throw new TypeError(
+            'Final Decision Subject arrays must not contain sparse holes.',
+          );
+        }
         return `[${value.map((item) => canonicalizeJson(item)).join(',')}]`;
       }
 
@@ -198,6 +208,7 @@ function isSupportedJsonValue(
     return true;
   }
   if (Array.isArray(value)) {
+    if (Object.keys(value).length !== value.length) return false;
     return value.every(isSupportedJsonValue);
   }
   if (isPlainObject(value)) {
