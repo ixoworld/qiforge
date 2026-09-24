@@ -16,6 +16,11 @@ export default defineConfig({
     // real runtime.
     include: [
       'src/core/**/*.test.ts',
+      'src/reporter/skill.test.ts',
+      'src/reporter/grant.test.ts',
+      'src/reporter/shell.test.ts',
+      'src/reporter/owner-policy.test.ts',
+      'src/shell/delegation.test.ts',
       'src/plugins/*.test.ts',
       'src/plugins/!(editor|flows)/**/*.test.ts',
       'src/secrets/**/*.test.ts',

@@ -187,6 +187,7 @@ export class SessionsStore {
     limit = 20,
     offset = 0,
     excludeIdPrefix?: string,
+    excludeProfile?: string,
   ): Promise<ListSessionsResult> {
     await this.setup();
     const clauses: string[] = [];
@@ -199,6 +200,12 @@ export class SessionsStore {
       // substr() rather than LIKE: DO SQL rejects LIKE patterns.
       clauses.push('substr(session_id, 1, ?) <> ?');
       params.push(excludeIdPrefix.length, excludeIdPrefix);
+    }
+    if (excludeProfile) {
+      clauses.push(
+        "COALESCE(json_extract(user_context, '$.profile'), '') <> ?",
+      );
+      params.push(excludeProfile);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     params.push(limit, offset);

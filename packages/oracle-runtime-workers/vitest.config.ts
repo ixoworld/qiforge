@@ -47,6 +47,11 @@ export default defineConfig({
     // compiler on the real runtime — so they stay in this pool.
     exclude: [
       'src/plugins/*.test.ts',
+      'src/reporter/skill.test.ts',
+      'src/reporter/grant.test.ts',
+      'src/reporter/shell.test.ts',
+      'src/reporter/owner-policy.test.ts',
+      'src/shell/delegation.test.ts',
       'src/plugins/!(editor|flows)/**/*.test.ts',
       // Plain-Node suite (fake fetch); runs in vitest.core.config.ts.
       'src/memory/**/*.test.ts',

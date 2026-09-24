@@ -16,6 +16,13 @@
  * A Durable Object is single-threaded, which replaces the Node runtime's
  * per-user ref-counting, busy timeouts and cron locks outright.
  */
+import {
+  ReporterService,
+  type ReporterProfileOptions,
+} from '../reporter/service';
+import { ReporterStore } from '../reporter/store';
+import { reporterGrant, ReporterAuthority } from '../reporter/grant';
+import { requirePrivateOwnerState } from '../reporter/owner-policy';
 import { DurableObject } from 'cloudflare:workers';
 import {
   AIMessage,
@@ -407,6 +414,7 @@ export interface OracleWorkerHooks {
 }
 
 export interface UserOracleDOOptions {
+  reporter?: ReporterProfileOptions;
   core: (env: OracleWorkerEnv) => RuntimeCore;
   hooks?: OracleWorkerHooks;
 }
@@ -642,6 +650,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /** Identifies this in-memory instance: a new id means the platform unloaded the object in between. */
     private readonly instanceId = crypto.randomUUID();
+    private readonly reporterControllers = new Map<string, AbortController>();
+    private readonly reporterAuthority = new ReporterAuthority();
 
     private readonly bootedAt = Date.now();
     /** Memoised `META_COMPACT_DONE` (null = not yet read from storage). */
@@ -769,7 +779,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.installDebugTimerTracker();
       this.adoptHibernatedSockets();
       let delegationReplaced = false;
-      if (identity.ucanDelegation) {
+      if (!this.reporterAuthority.getStore() && identity.ucanDelegation) {
         // Clients (the Portal's SDK) send their cached delegation with every
         // request; a token this object has not seen is a re-authorization.
         const known =
@@ -787,7 +797,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             ? { expiration: identity.ucanDelegationExpiration }
             : {}),
         } satisfies StoredDelegation);
-      } else if (!this.delegations.has(identity.userDid)) {
+      } else if (
+        !this.reporterAuthority.getStore() &&
+        !this.delegations.has(identity.userDid)
+      ) {
         await this.hydrateDelegation(identity.userDid);
       }
       if (!this.initPromise) {
@@ -1079,8 +1092,26 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             this.markDirty();
           }
         } else if (head && knownEtag && head.etag !== knownEtag) {
+          const reporter = await db
+            .get<{ n: number }>('SELECT count(*) AS n FROM reporter_sessions')
+            .catch(() => undefined);
           const loaded = await this.ownerStore.load().catch(() => null);
-          if (loaded) {
+          if (reporter?.n) {
+            if (!loaded)
+              throw new Error(
+                'Reporter owner state changed; reconciliation required',
+              );
+            const remote = await measureForSave(loaded.stream);
+            const checksum = await db.checksum();
+            if (remote.sha256Hex !== checksum)
+              throw new Error(
+                'Reporter owner state changed; reconciliation required',
+              );
+            await this.ctx.storage.put(META_OWNER_ETAG, loaded.etag);
+            await this.ctx.storage.put(META_LAST_CHECKSUM, checksum);
+            await this.ctx.storage.put(META_UPLOADED_GEN, db.writeGeneration);
+            await this.clearDirty();
+          } else if (loaded) {
             await this.adoptOwnerCopy(db, loaded);
             this.reloadedFromOwnerStore = true;
             console.log(
@@ -1365,9 +1396,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           env.VFS_BASE_URL ??
           VFS_DEFAULT_BASE_URLS[network] ??
           VFS_DEFAULT_BASE_URLS.devnet!,
-        // The user's one delegation to this oracle — hydrated by `ready()`
-        // before boot, replaced at once by `setDelegation` / `clearDelegation`.
-        delegation: () => this.delegations.get(userDid)?.raw,
+        delegation: () =>
+          this.reporterAuthority.ownerDelegation(
+            () => this.delegations.get(userDid)?.raw,
+          ),
       });
       return new MigratingOwnerStore({
         primary: vfsStore,
@@ -1481,18 +1513,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return (await db.checksum()) === lastChecksum;
     }
 
-    /** Checkpoint rows in the working copy — zero means no turn ever ran here. */
     private async localTurnCount(db: DoSqliteDatabase): Promise<number> {
       const row = await db
         .get<{ n: number }>('SELECT count(*) AS n FROM checkpoints')
         .catch(() => undefined);
-      return row?.n ?? 0;
+      const reporter = await db
+        .get<{ n: number }>('SELECT count(*) AS n FROM reporter_sessions')
+        .catch(() => undefined);
+      return (row?.n ?? 0) + (reporter?.n ?? 0);
     }
 
     private markDirty(): void {
       this.dirty = true;
       void this.ctx.storage.put(META_DIRTY, true);
-      void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
+      if (!this.reporterAuthority.getStore())
+        void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
     }
 
     /**
@@ -1927,6 +1962,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         o.limit ?? 20,
         o.offset ?? 0,
         TASK_SESSION_PREFIX,
+        'reporter-grounded-v1',
       );
       return { sessions: sessions.map(toSummary), total };
     }
@@ -2203,7 +2239,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // The mark is on disk already (its deadline too); adopt it and make
         // sure the alarm is armed for that deadline.
         this.dirty = true;
-        void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
+        if (!this.reporterAuthority.getStore())
+          void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
       } else if (decision === 'behind-upload') {
         console.log(
           `[user-do] working copy of ${userDid} is at generation ${db.writeGeneration}, last upload at ${String(got.get(META_UPLOADED_GEN))} — a turn ended without marking it; flushing`,
@@ -2520,7 +2557,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
         if (userDid) await this.ready({ userDid });
       }
-      if (this.flushInFlight) return this.flushInFlight;
+      if (this.flushInFlight) {
+        if (!this.reporterAuthority.getStore()) return this.flushInFlight;
+        await this.flushInFlight.catch(() => undefined);
+        return this.flushToOwnerStore();
+      }
       const run = this.flushOnce().finally(() => {
         this.flushInFlight = null;
       });
@@ -2580,7 +2621,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const line = `[user-do] owner-store flush failed (${failures} in a row) for ${this.userDid} — working copy kept dirty, retrying in ${FLUSH_RETRY_DELAY_MS / 60_000} min: ${detail}`;
           if (failures >= FLUSH_FAILURES_ERROR_THRESHOLD) console.error(line);
           else console.warn(line);
-          await this.scheduleFlushRetry(Date.now() + FLUSH_RETRY_DELAY_MS);
+          if (!this.reporterAuthority.getStore())
+            await this.scheduleFlushRetry(Date.now() + FLUSH_RETRY_DELAY_MS);
           throw err;
         }
         await this.ctx.storage.put(META_OWNER_ETAG, saved.etag);
@@ -2992,6 +3034,75 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const url = new URL(request.url);
       if (url.pathname.startsWith('/socket.io')) {
         return this.realtime.handleUpgrade(request, url);
+      }
+      if (url.pathname.startsWith('/reporter/')) {
+        if (!opts.reporter) return new Response('Not found', { status: 404 });
+        const identity = await reporterGrant(request.headers.get('x-identity'));
+        if (!identity)
+          return Response.json(
+            { error: 'Reporter request-local authority required' },
+            { status: 403 },
+          );
+        return this.reporterAuthority.run(
+          { raw: identity.ucanDelegation },
+          async () => {
+            try {
+              if (this.env.OWNER_STORE === 'matrix')
+                return Response.json(
+                  { error: 'Private owner state unavailable' },
+                  { status: 503 },
+                );
+              const requestUcan =
+                this.ucan ??
+                new WorkersUcanService({
+                  oracleDid: this.env.ORACLE_DID,
+                  signingMnemonic: await this.resolveSigningMnemonic(),
+                  logger: console,
+                });
+              await requirePrivateOwnerState(
+                requestUcan,
+                identity.ucanDelegation,
+                this.env.VFS_BASE_URL ??
+                  VFS_DEFAULT_BASE_URLS[this.env.NETWORK ?? 'devnet']!,
+              );
+              await this.ready(identity);
+              if (!this.db || !this.byo)
+                return Response.json(
+                  { error: 'Private owner state unavailable' },
+                  { status: 503 },
+                );
+              const store = new ReporterStore(
+                this.db,
+                {
+                  userDid: identity.userDid,
+                  oracleDid: this.env.ORACLE_DID,
+                  oracleEntityDid:
+                    this.env.ORACLE_ENTITY_DID ?? this.env.ORACLE_DID,
+                  oracleName: this.env.ORACLE_NAME,
+                },
+                this.instanceId,
+              );
+              const service = new ReporterService({
+                store,
+                controllers: this.reporterControllers,
+                byo: this.byo,
+                userDid: identity.userDid,
+                persist: async () => {
+                  this.markDirty();
+                  await this.flushToOwnerStore();
+                },
+                background: (work) =>
+                  this.ctx.waitUntil(work.catch(() => undefined)),
+              });
+              return service.handle(request);
+            } catch {
+              return Response.json(
+                { error: 'Reporter owner state unavailable' },
+                { status: 503 },
+              );
+            }
+          },
+        );
       }
       if (url.pathname.startsWith('/byo-llm/')) {
         const byoIdentity = JSON.parse(
@@ -3744,6 +3855,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const baseAmbient = this.ambient!;
       const saver = this.saver!;
       const sessions = this.sessions!;
+      if (
+        (await sessions.getSession(req.sessionId))?.userContext?.profile ===
+        'reporter-grounded-v1'
+      )
+        throw new Error('Reporter sessions require the Reporter profile');
 
       // Per-request model override, resolved BEFORE the agent build because
       // the BYO leg needs it. Platform ids are gated by the catalog

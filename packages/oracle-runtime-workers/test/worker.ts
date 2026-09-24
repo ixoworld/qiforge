@@ -13,6 +13,8 @@ export { RealtimeTestDO } from '../src/realtime/test-do';
 export { RunStoreTestDO } from '../src/do/run-store-test-do';
 export { ResultStoreTestDO } from '../src/do/result-store-test-do';
 
+export { ReporterTestDO } from '../src/reporter/test-do';
+
 export default {
   async fetch(): Promise<Response> {
     return new Response('oracle-runtime-workers test worker', { status: 200 });

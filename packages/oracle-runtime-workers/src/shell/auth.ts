@@ -113,7 +113,14 @@ async function validateInvocation(
   | { ok: true; userDid: string; expiration: number }
   | { ok: false; error: string }
 > {
-  const key = await sha256(invocation);
+  const key = await sha256(
+    JSON.stringify([
+      cfg.oracleDid,
+      cfg.blocksyncUri,
+      cfg.maxTtlSeconds,
+      invocation,
+    ]),
+  );
   const cached = invocationCache.get(key);
   if (cached) return { ok: true, ...cached };
 
@@ -156,14 +163,16 @@ async function validateInvocation(
   return { ok: true, ...verdict };
 }
 
-async function validateDelegation(
+export async function validateDelegation(
   header: string,
   cfg: AuthConfig,
 ): Promise<
   | { ok: true; userDid: string; expiration?: number }
   | { ok: false; error: string }
 > {
-  const key = await sha256(header);
+  const key = await sha256(
+    JSON.stringify([cfg.oracleDid, cfg.blocksyncUri, header]),
+  );
   const cached = delegationCache.get(key);
   if (cached) return { ok: true, ...cached };
 
