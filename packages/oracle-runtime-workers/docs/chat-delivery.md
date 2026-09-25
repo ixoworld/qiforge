@@ -138,7 +138,10 @@ https://<viewer>#a=<encoded https://<oracle>/a/<artifactId>>&k=<key>   ARTIFACT_
   - It is rate-limited per client IP through `RATE_LIMIT` (key `artifact:<ip>`).
   - An expired object answers `410` and is deleted.
 - Both routes sit ahead of CORS and auth. Without the key they serve nothing readable.
-- With **`ARTIFACT_VIEWER_URL`** set, links open a shared viewer (the Qi.Space page) instead. It receives the source and the key in the fragment, so its server learns neither. Without it, the built-in page works on its own.
+- With **`ARTIFACT_VIEWER_URL`** set, links open a shared viewer instead: the Portal's `/artifact` page on Qi.Space.
+  - It receives the source and the key in the fragment, so its server learns neither.
+  - It fetches only `/a/<id>` paths on allowlisted hosts, and its analytics and error reporting drop the fragment.
+  - Without it, the built-in page works on its own.
 
 Link unfurlers (WhatsApp, Telegram, Slack, Matrix URL previews) fetch the path, never the fragment. They get the generic page and nothing else.
 
