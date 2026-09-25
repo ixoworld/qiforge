@@ -50,6 +50,7 @@ export type {
   RouterEventPayload,
   RuntimeContext,
   SecretIndex,
+  SessionSurface,
   SharedAccessors,
   ToolCallEventPayload,
   UcanDelegation,

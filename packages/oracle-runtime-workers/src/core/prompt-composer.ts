@@ -95,6 +95,11 @@ export interface ComposePromptInput {
   oracleNameOverride?: string;
   /** Degraded-services notice appended after the main prompt body. */
   degradedServicesBlock?: string;
+  /**
+   * How to write for the surface the reply lands on (chat delivery). Empty on
+   * Portal turns, which render a streamed document.
+   */
+  surfaceBlock?: string;
 }
 
 /** Headers used for each populated memory-context sub-section. */
@@ -412,6 +417,10 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 
 {{{COMMUNICATION_STYLE}}}
 {{/COMMUNICATION_STYLE}}
+{{#SURFACE_BLOCK}}
+
+{{{SURFACE_BLOCK}}}
+{{/SURFACE_BLOCK}}
 {{#CUSTOM_INSTRUCTIONS}}
 
 ## Custom Instructions
@@ -479,6 +488,7 @@ export async function composePrompt(
       input.capabilityDiscovery === false ? '' : DISCOVERY_PRINCIPLE,
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
+    SURFACE_BLOCK: input.surfaceBlock ?? '',
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,

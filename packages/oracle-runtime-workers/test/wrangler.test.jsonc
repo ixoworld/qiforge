@@ -15,8 +15,11 @@
     // editor plugin substitutes a linkedom-backed shim.
     "jsdom": "../src/plugins/editor/jsdom-shim.ts",
   },
-  // A local (miniflare) R2 bucket for the page-tier tests.
-  "r2_buckets": [{ "binding": "TIER_TEST", "bucket_name": "tier-test" }],
+  // Local (miniflare) R2 buckets for the page-tier and artefact tests.
+  "r2_buckets": [
+    { "binding": "TIER_TEST", "bucket_name": "tier-test" },
+    { "binding": "ARTIFACT_TEST", "bucket_name": "artifact-test" },
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "CHANNEL_TURNS_TEST", "class_name": "ChannelTurnsTestDO" },
@@ -25,6 +28,7 @@
       { "name": "REALTIME_TEST", "class_name": "RealtimeTestDO" },
       { "name": "RUN_STORE_TEST", "class_name": "RunStoreTestDO" },
       { "name": "RESULT_STORE_TEST", "class_name": "ResultStoreTestDO" },
+      { "name": "ARTIFACT_STORE_TEST", "class_name": "ArtifactStoreTestDO" },
     ],
   },
   "migrations": [
@@ -35,5 +39,6 @@
     { "tag": "v2", "new_sqlite_classes": ["RunStoreTestDO"] },
     { "tag": "v3", "new_sqlite_classes": ["ResultStoreTestDO"] },
     { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
+    { "tag": "v5", "new_sqlite_classes": ["ArtifactStoreTestDO"] },
   ],
 }

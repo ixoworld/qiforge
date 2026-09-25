@@ -201,6 +201,58 @@ const summaryRow = () =>
     additional_kwargs: { lc_source: 'summarization' },
   });
 
+describe('transcript of a chat reply', () => {
+  const url = `https://oracle.test/a/${'a'.repeat(32)}#k=key`;
+  const artifactTurn = (text: string): BaseMessage[] => [
+    new HumanMessage({ id: 'h1', content: 'plan my week' }),
+    new AIMessage({
+      id: 'a1',
+      content: text,
+      tool_calls: [
+        {
+          id: 'call-1',
+          name: 'create_artifact',
+          args: {
+            title: 'Week plan',
+            content: '# Week',
+            message: 'Here is the week.',
+            followUp: 'Book the slots?',
+          },
+        },
+      ],
+    }),
+    new ToolMessage({
+      tool_call_id: 'call-1',
+      name: 'create_artifact',
+      content: JSON.stringify({
+        ok: true,
+        artifactId: 'a'.repeat(32),
+        title: 'Week plan',
+        url,
+        mime: 'text/markdown',
+        bytes: 6,
+        expiresAt: '2026-10-25T09:00:00.000Z',
+      }),
+    }),
+  ];
+
+  it('lists a reply that ended in create_artifact as the message, link and question the user got', async () => {
+    const { messages } = await transformTranscript(artifactTurn(''));
+    expect(messages[1]).toMatchObject({
+      type: 'ai',
+      content: `Here is the week.\n\n[Week plan](${url})\n\nBook the slots?`,
+      toolCalls: [{ name: 'create_artifact', status: 'done' }],
+    });
+  });
+
+  it('keeps the text of a step that wrote its own', async () => {
+    const { messages } = await transformTranscript(
+      artifactTurn('Putting it in a document.'),
+    );
+    expect(messages[1]?.content).toBe('Putting it in a document.');
+  });
+});
+
 describe('parseTranscriptPageQuery', () => {
   it('defaults, clamps and rejects', () => {
     expect(parseTranscriptPageQuery({})).toEqual({

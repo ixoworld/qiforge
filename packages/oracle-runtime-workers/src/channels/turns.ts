@@ -1,6 +1,8 @@
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
+import { parseReplyPlan, planText } from '../delivery/schema';
+import type { ReplyPlan } from '../delivery/types';
 import {
   ChannelError,
   channelRequestHash,
@@ -24,6 +26,8 @@ export interface ChannelTurnsHost {
   /** Throws a `ChannelError` when the user has no stored delegation for this oracle. */
   requireDelegation(identity: TurnIdentity): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
+  /** The Reply Plan (JSON) a finished run was built into, if any. */
+  getPlan(runId: string): Promise<string | null>;
   wasPruned(runId: string): Promise<boolean>;
   begin(runId: string, request: TurnRequest): Promise<RunRecord>;
   mirror(
@@ -225,8 +229,16 @@ export class ChannelTurns {
       await this.host.mirror(request, request.message, 'user');
       record = await this.host.begin(runId, request);
     }
-    if (record.status === 'finished')
-      await this.deliver(request, runId, record.partialText ?? '');
+    let plan: ReplyPlan | null = null;
+    if (record.status === 'finished') {
+      plan = parseReplyPlan(await this.host.getPlan(runId));
+      // The Companion room records the reply the channel user received.
+      await this.deliver(
+        request,
+        runId,
+        plan ? planText(plan) : (record.partialText ?? ''),
+      );
+    }
     return {
       requestId: input.requestId,
       runId,
@@ -236,6 +248,7 @@ export class ChannelTurns {
       ...(record.status === 'finished'
         ? { text: record.partialText ?? '' }
         : {}),
+      ...(plan ? { plan } : {}),
     };
   }
 }

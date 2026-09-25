@@ -67,6 +67,10 @@ import { isHarnessLimitError } from './turn-budget';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName } from './subagent-as-tool';
 import { wrapPluginTool } from './wrap-plugin-tool';
+import { renderSurfaceSection } from '../delivery/prompt';
+import { createReturnDirectFirstMiddleware } from './middlewares/return-direct-first';
+import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
+import type { SessionSurface } from '../plugin-api/types';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
@@ -148,8 +152,19 @@ export async function createMainAgent(
     abortSignal,
     byoProvider,
     contextBudget,
+    delivery,
     hooks,
   } = args;
+  const surface: SessionSurface | undefined =
+    delivery?.kind === 'chat'
+      ? { kind: 'chat', surface: delivery.surface, label: delivery.label }
+      : delivery
+        ? { kind: 'stream' }
+        : undefined;
+  const turnTools = hooks?.turnTools ?? [];
+  const returnDirectNames = new Set(
+    turnTools.filter((t) => t.returnDirect).map((t) => t.tool.name),
+  );
 
   // ── 1. Plugin context (boot-time, no per-request fields) ────────────────
   const buildCtx: PluginContext = buildPluginContext({
@@ -211,6 +226,7 @@ export async function createMainAgent(
         requestId: requestCtx.session.requestId,
         wsId: requestCtx.session.wsId,
         roomId: requestCtx.session.roomId,
+        ...(surface ? { surface } : {}),
       },
       ...(byoProvider ? { byo: { provider: byoProvider, active: true } } : {}),
     },
@@ -344,6 +360,8 @@ export async function createMainAgent(
   // is opaque, hence a write.
   const toolEffects = new Map<string, 'read' | 'write'>();
   for (const t of metaTools) toolEffects.set(t.name, 'read');
+  for (const { tool } of turnTools)
+    toolEffects.set(tool.name, toolEffectOf(tool));
   for (const { tool } of allTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
@@ -370,6 +388,17 @@ export async function createMainAgent(
         ...(resultCap ? { resultCap } : {}),
       }),
     ),
+    ...turnTools.map(({ tool, returnDirect }) => {
+      const wrapped = wrapPluginTool(tool, {
+        ambient,
+        state: wrapState,
+        sharedFactory,
+        fallbackContext,
+        ...(resultCap ? { resultCap } : {}),
+      });
+      if (returnDirect) wrapped.returnDirect = true;
+      return wrapped;
+    }),
     ...eagerTools.map(wrap),
     ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
@@ -543,6 +572,9 @@ export async function createMainAgent(
       : []),
     ...pluginMiddlewares,
     ...(hooks?.middlewares ?? []),
+    ...(returnDirectNames.size > 0
+      ? [createReturnDirectFirstMiddleware(returnDirectNames)]
+      : []),
     // Innermost: sees the request exactly as it goes to the provider. Prunes
     // old tool results under pressure, refuses what cannot fit, and learns
     // the window from a provider overflow (context-guard.ts).
@@ -603,6 +635,10 @@ export async function createMainAgent(
     currentEntityDid: state.currentEntityDid ?? '',
     oracleNameOverride: state.userPreferences?.agentName,
     degradedServicesBlock: hooks?.degradedServicesBlock,
+    surfaceBlock: renderSurfaceSection(
+      delivery,
+      turnTools.some(({ tool }) => tool.name === CREATE_ARTIFACT_TOOL),
+    ),
   });
 
   // ── 8. Model ────────────────────────────────────────────────────────────

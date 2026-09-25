@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ReplyPlan } from '../delivery/types';
 
 export const ChannelTurnBody = z.strictObject({
   provider: z.literal('whatsapp'),
@@ -57,6 +58,12 @@ export interface ChannelTurnResponse {
     | 'failed';
   messageId?: string;
   text?: string;
+  /**
+   * A finished turn's Reply Plan: the parts to deliver in order (short
+   * messages and artefact links). `text` stays the whole reply as one
+   * message for gateways that predate plans.
+   */
+  plan?: ReplyPlan;
 }
 
 export type ChannelTurnOutcome =

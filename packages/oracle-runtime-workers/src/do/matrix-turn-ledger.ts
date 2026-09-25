@@ -29,6 +29,8 @@ export interface MatrixTurnRecord {
   startedAt: string;
   answeredAt: string | null;
   replyText: string | null;
+  /** The Reply Plan (JSON) a chat-style reply was delivered as. */
+  replyPlan?: string;
 }
 
 export type MatrixTurnDecision = 'run' | 'answered' | 'interrupted';
@@ -50,6 +52,7 @@ type LedgerRow = {
   started_at: string;
   answered_at: string | null;
   reply_text: string | null;
+  reply_plan: string | null;
 } & Record<string, string | null>;
 
 export class MatrixTurnLedger {
@@ -76,8 +79,14 @@ export class MatrixTurnLedger {
         request_id TEXT NOT NULL,
         started_at TEXT NOT NULL,
         answered_at TEXT,
-        reply_text TEXT
+        reply_text TEXT,
+        reply_plan TEXT
       )`);
+    const columns = await this.db.exec<{ name: string }>(
+      `PRAGMA table_info(matrix_turns)`,
+    );
+    if (!columns.some((c) => c.name === 'reply_plan'))
+      await this.db.run(`ALTER TABLE matrix_turns ADD COLUMN reply_plan TEXT`);
     await this.db.run(`DELETE FROM matrix_turns WHERE started_at < ?`, [
       new Date(this.now() - RETENTION_MS).toISOString(),
     ]);
@@ -86,7 +95,7 @@ export class MatrixTurnLedger {
   async get(eventId: string): Promise<MatrixTurnRecord | undefined> {
     await this.setup();
     const row = await this.db.get<LedgerRow>(
-      `SELECT event_id, session_id, request_id, started_at, answered_at, reply_text
+      `SELECT event_id, session_id, request_id, started_at, answered_at, reply_text, reply_plan
        FROM matrix_turns WHERE event_id = ?`,
       [eventId],
     );
@@ -98,6 +107,7 @@ export class MatrixTurnLedger {
       startedAt: row.started_at,
       answeredAt: row.answered_at,
       replyText: row.reply_text,
+      ...(row.reply_plan !== null ? { replyPlan: row.reply_plan } : {}),
     };
   }
 
@@ -116,11 +126,20 @@ export class MatrixTurnLedger {
   }
 
   /** Record the reply; from now on the event is answered, never re-run. */
-  async answer(eventId: string, replyText: string): Promise<void> {
+  async answer(
+    eventId: string,
+    replyText: string,
+    replyPlan?: string,
+  ): Promise<void> {
     await this.setup();
     await this.db.run(
-      `UPDATE matrix_turns SET reply_text = ?, answered_at = ? WHERE event_id = ?`,
-      [replyText, new Date(this.now()).toISOString(), eventId],
+      `UPDATE matrix_turns SET reply_text = ?, reply_plan = ?, answered_at = ? WHERE event_id = ?`,
+      [
+        replyText,
+        replyPlan ?? null,
+        new Date(this.now()).toISOString(),
+        eventId,
+      ],
     );
   }
 }
