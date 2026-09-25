@@ -81,9 +81,29 @@ export function isNarration(text: string): boolean {
 }
 
 /**
+ * What a resumed run still has to deliver of `continuation`, the text it
+ * streamed before the reset. That text starts with the steps the checkpoint
+ * kept, verbatim, and those steps are in `steps` already; the rest was cut
+ * off mid-step and belongs in front of the first step after them.
+ */
+function pendingContinuation(
+  continuation: string,
+  steps: readonly TurnStep[],
+): { text: string; step: number } {
+  let rest = continuation;
+  let step = 0;
+  for (const { text } of steps) {
+    const trimmed = rest.trimStart();
+    if (!trimmed.startsWith(text)) break;
+    rest = trimmed.slice(text.length);
+    step++;
+  }
+  return { text: rest, step: Math.min(step, steps.length - 1) };
+}
+
+/**
  * The plan before any artefact exists: spills are still drafts. `continuation`
- * is the reply a run had already produced before a reset; it belongs in front
- * of the final step.
+ * is the text a run had streamed before a reset (see `pendingContinuation`).
  */
 export function draftReplyPlan(input: {
   steps: TurnStep[];
@@ -93,11 +113,13 @@ export function draftReplyPlan(input: {
   canSpill: boolean;
 }): DraftPart[] {
   const parts: DraftPart[] = [];
-  const last = input.steps.length - 1;
+  const pending = input.continuation
+    ? pendingContinuation(input.continuation, input.steps)
+    : null;
   input.steps.forEach((step, i) => {
     const text =
-      i === last && input.continuation
-        ? `${input.continuation}${step.text}`.trim()
+      pending && i === pending.step && pending.text.trim()
+        ? `${pending.text}${step.text}`.trim()
         : step.text;
     if (text && !(step.toolCalls.length > 0 && isNarration(text))) {
       const shape = shapeStep(text, input.limits, input.canSpill);
@@ -116,27 +138,60 @@ export function draftReplyPlan(input: {
   return parts;
 }
 
-/** Over the run's cap: merge the shortest neighbouring messages, order kept. */
-function capParts(parts: ReplyContent[], max: number): ReplyContent[] {
+/**
+ * A part before it is numbered. `framing` marks a spill's lead or closing
+ * question: its artefact holds the same text.
+ */
+type PlanPart = ReplyContent & { framing?: boolean };
+
+/**
+ * Over the run's cap: merge the shortest neighbouring messages while the
+ * result stays within `bubbleMax`, then drop spill framing, keeping the
+ * reply's last part for as long as possible. Order is kept, and text that
+ * exists nowhere else is never dropped: a reply with several documents, or a
+ * long one without artefact storage, can stay over the cap.
+ */
+function capParts(parts: PlanPart[], limits: ChatLimits): ReplyContent[] {
   const out = [...parts];
-  while (out.length > max) {
+  const merge = (): boolean => {
     let best = -1;
     let bestLength = Infinity;
     for (let i = 0; i + 1 < out.length; i++) {
       const a = out[i];
       const b = out[i + 1];
       if (a?.kind !== 'text' || b?.kind !== 'text') continue;
-      if (a.text.length + b.text.length < bestLength) {
+      const length = a.text.length + 2 + b.text.length;
+      if (length <= limits.bubbleMax && length < bestLength) {
         best = i;
-        bestLength = a.text.length + b.text.length;
+        bestLength = length;
       }
     }
     const a = out[best];
     const b = out[best + 1];
-    if (a?.kind !== 'text' || b?.kind !== 'text') break;
-    out.splice(best, 2, { kind: 'text', text: `${a.text}\n\n${b.text}` });
+    if (a?.kind !== 'text' || b?.kind !== 'text') return false;
+    out.splice(best, 2, {
+      kind: 'text',
+      text: `${a.text}\n\n${b.text}`,
+      framing: a.framing === true && b.framing === true,
+    });
+    return true;
+  };
+  const dropFraming = (): boolean => {
+    const framing = out.flatMap((part, i) => (part.framing ? [i] : []));
+    const i = framing.find((index) => index < out.length - 1) ?? framing[0];
+    if (i === undefined) return false;
+    out.splice(i, 1);
+    return true;
+  };
+  while (out.length > limits.maxPartsPerRun) {
+    if (!merge() && !dropFraming()) break;
   }
-  return out;
+  return out.map(
+    (part): ReplyContent =>
+      part.kind === 'text'
+        ? { kind: 'text', text: part.text }
+        : { kind: 'artifact', artifact: part.artifact },
+  );
 }
 
 /**
@@ -151,7 +206,7 @@ export async function materializeReplyPlan(
     onSpillError?: (error: unknown) => void;
   },
 ): Promise<ReplyPlan> {
-  const parts: ReplyContent[] = [];
+  const parts: PlanPart[] = [];
   for (const part of draft) {
     if (part.kind !== 'spill') {
       parts.push(part);
@@ -164,10 +219,11 @@ export async function materializeReplyPlan(
         return null;
       });
     if (ref) {
-      if (part.spill.lead) parts.push({ kind: 'text', text: part.spill.lead });
+      if (part.spill.lead)
+        parts.push({ kind: 'text', text: part.spill.lead, framing: true });
       parts.push({ kind: 'artifact', artifact: ref });
       if (part.spill.closing)
-        parts.push({ kind: 'text', text: part.spill.closing });
+        parts.push({ kind: 'text', text: part.spill.closing, framing: true });
     } else {
       const shape = shapeStep(part.spill.markdown, options.limits, false);
       if (shape.kind === 'messages')
@@ -176,7 +232,7 @@ export async function materializeReplyPlan(
         );
     }
   }
-  const capped = capParts(parts, options.limits.maxPartsPerRun);
+  const capped = capParts(parts, options.limits);
   return {
     v: 1,
     parts: capped.map(

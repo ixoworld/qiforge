@@ -173,6 +173,44 @@ describe('draftReplyPlan', () => {
       },
     ]);
   });
+
+  it('does not repeat a step the checkpoint kept when it puts back the text before a reset', () => {
+    const kept =
+      'Two things first:\n\n- the offsite moved to Friday\n- Sam is out on Monday';
+    const plan = draftReplyPlan({
+      steps: [
+        {
+          text: kept,
+          toolCalls: [{ id: 'call-1', name: 'calendar_list', args: {} }],
+        },
+        { text: 'and the deck is due Wednesday.', toolCalls: [] },
+      ],
+      toolResults: new Map(),
+      continuation: `${kept}\n\nYou have 14 meetings this week, `,
+      limits: limits(),
+      canSpill: true,
+    });
+    expect(plan).toEqual([
+      { kind: 'text', text: kept },
+      {
+        kind: 'text',
+        text: 'You have 14 meetings this week, and the deck is due Wednesday.',
+      },
+    ]);
+  });
+
+  it('adds nothing when the whole reply had been streamed before the reset', () => {
+    const plan = draftReplyPlan({
+      steps: [{ text: 'You have 14 meetings this week.', toolCalls: [] }],
+      toolResults: new Map(),
+      continuation: 'You have 14 meetings this week.',
+      limits: limits(),
+      canSpill: true,
+    });
+    expect(plan).toEqual([
+      { kind: 'text', text: 'You have 14 meetings this week.' },
+    ]);
+  });
 });
 
 describe('materializeReplyPlan', () => {
@@ -246,6 +284,62 @@ describe('materializeReplyPlan', () => {
         text: 'three is longer than the others\n\nfour',
       },
     ]);
+  });
+
+  it('never merges messages past the hard size to meet the cap', async () => {
+    const chunks = Array.from({ length: 8 }, (_, i) =>
+      `${i} `.padEnd(700, 'x'),
+    );
+    const plan = await materializeReplyPlan(
+      chunks.map((text): DraftPart => ({ kind: 'text', text })),
+      { limits: limits({ maxPartsPerRun: 3 }), createSpill: async () => REF },
+    );
+    const texts = plan.parts.map((p) => (p.kind === 'text' ? p.text : ''));
+    // Pairs fit the 1,500-character hard size; a third message would not.
+    expect(texts).toHaveLength(4);
+    for (const text of texts) expect(text.length).toBeLessThanOrEqual(1500);
+    expect(texts.join('\n\n')).toBe(chunks.join('\n\n'));
+  });
+
+  it('drops spill leads and closings, which the artefacts hold, before going over the cap', async () => {
+    const budget: ArtifactRef = {
+      ...REF,
+      artifactId: 'b'.repeat(32),
+      title: 'Budget',
+    };
+    const second: DraftPart = {
+      kind: 'spill',
+      key: 'step-1',
+      spill: {
+        title: 'Budget',
+        markdown: '## Budget\n\n| A | B |\n|---|---|\n| 1 | 2 |',
+        lead: 'The budget is tight.',
+        closing: 'Want the breakdown?',
+      },
+    };
+    const plan = await materializeReplyPlan([spillDraft, second], {
+      limits: limits({ maxPartsPerRun: 3 }),
+      createSpill: async (key) => (key === 'step-0' ? REF : budget),
+    });
+    expect(plan.parts).toEqual([
+      { partId: 'p1', kind: 'artifact', artifact: REF },
+      { partId: 'p2', kind: 'artifact', artifact: budget },
+      { partId: 'p3', kind: 'text', text: 'Want the breakdown?' },
+    ]);
+  });
+
+  it('keeps text found nowhere else, even over the cap', async () => {
+    const draft: DraftPart[] = [
+      { kind: 'text', text: 'Here is the deck.' },
+      { kind: 'artifact', artifact: REF },
+      { kind: 'text', text: 'And the budget.' },
+      { kind: 'artifact', artifact: { ...REF, artifactId: 'b'.repeat(32) } },
+    ];
+    const plan = await materializeReplyPlan(draft, {
+      limits: limits({ maxPartsPerRun: 2 }),
+      createSpill: async () => REF,
+    });
+    expect(plan.parts).toHaveLength(4);
   });
 });
 

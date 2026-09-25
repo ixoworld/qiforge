@@ -127,17 +127,19 @@ function packPieces(
 
 /** Split at the largest boundary that works: paragraph, line, sentence, word. */
 export function splitText(text: string, max: number): string[] {
-  if (text.length <= max) return [text];
+  // A size below one character would never move through the text.
+  const size = Number.isFinite(max) && max >= 1 ? Math.floor(max) : 1;
+  if (text.length <= size) return [text];
   for (const separator of ['\n\n', '\n']) {
     const pieces = text.split(separator);
-    if (pieces.length > 1) return packPieces(pieces, separator, max);
+    if (pieces.length > 1) return packPieces(pieces, separator, size);
   }
   const sentences = sentencesOf(text);
-  if (sentences.length > 1) return packPieces(sentences, '', max);
+  if (sentences.length > 1) return packPieces(sentences, '', size);
   const words = text.split(/(?<=\s)/);
-  if (words.length > 1) return packPieces(words, '', max);
+  if (words.length > 1) return packPieces(words, '', size);
   const out: string[] = [];
-  for (let i = 0; i < text.length; i += max) out.push(text.slice(i, i + max));
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
   return out;
 }
 
@@ -146,9 +148,11 @@ function splitBlock(block: Block, max: number): string[] {
   if (block.md.length <= max) return [block.md];
   if (isCode(block.token)) {
     const fence = '```' + (block.token.lang ?? '');
-    return splitText(block.token.text, max - fence.length - 5).map(
-      (piece) => `${fence}\n${piece}\n\`\`\``,
-    );
+    const room = max - fence.length - 5;
+    if (room >= 1)
+      return splitText(block.token.text, room).map(
+        (piece) => `${fence}\n${piece}\n\`\`\``,
+      );
   }
   return splitText(block.md, max);
 }

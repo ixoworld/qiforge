@@ -184,4 +184,22 @@ describe('splitText', () => {
       'x'.repeat(5),
     ]);
   });
+
+  it('finishes for a size below one character', () => {
+    expect(splitText('abc', 0)).toEqual(['a', 'b', 'c']);
+    expect(splitText('abc', -4)).toEqual(['a', 'b', 'c']);
+    expect(splitText('abc', Number.NaN)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('splits a code block without re-fencing when the fence leaves no room', () => {
+    const shape = shapeStep(
+      '```ts\nconst a = 1;\n```',
+      { ...whatsappLimits(), bubbleMax: 5, minBubble: 1 },
+      false,
+    );
+    expect(shape).toEqual({
+      kind: 'messages',
+      messages: ['```ts', 'const', 'a =', '1;', '```'],
+    });
+  });
 });

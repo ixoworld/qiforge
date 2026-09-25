@@ -61,6 +61,8 @@ createOracleWorker({
 });
 ```
 
+A count override must be a whole number of at least 1, and `tables` a boolean; any other value keeps the default. `bubbleTarget` and `minBubble` are held at or below `bubbleMax`.
+
 Plugins see the profile as `ctx.session.surface`: `{ kind: 'stream' }` or `{ kind: 'chat', surface, label }`. A plugin can use it to return compact output on chat.
 
 ## The surface section
@@ -94,7 +96,8 @@ The plan is built once, when the run finishes, from the turn's AI messages (`src
    - It splits the text into messages on paragraph, line and sentence boundaries, and keeps each message under `bubbleMax`.
    - It turns headings into bold lines, strips HTML, and keeps a lead-in ending in `:` together with the list that follows it.
    - A step that is too long, holds a table, long code or a long list, or needs more than `maxBubbles` messages is **spilled**: the full text becomes an artefact. The step's messages become a lead (a list preview, or the first paragraph), the link, and the step's closing question, if it had one.
-4. **The plan is capped** at `maxPartsPerRun` by merging the shortest adjacent pair of text parts.
+4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing question go, since its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
+5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them.
 
 Part ids are `p1`…`pn`. The plan is stored in `turn_run_plans` with the run, and pruned with it after the seven-day run retention. A re-poll, a replayed Matrix event or a recovered run therefore gets the same plan and the same artefact links. If an artefact can't be stored, its step is sent as plain messages and the run still finishes.
 

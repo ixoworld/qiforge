@@ -17,7 +17,10 @@ export interface ChatLimits {
   minBubble: number;
   /** Messages one model step may become before it moves to an artefact. */
   maxBubbles: number;
-  /** Parts one run may deliver in total. */
+  /**
+   * Parts one run delivers at most, met by merging text within `bubbleMax`
+   * and dropping spill framing. Text found nowhere else is never dropped.
+   */
   maxPartsPerRun: number;
   /** A step longer than this moves to an artefact. */
   spillChars: number;

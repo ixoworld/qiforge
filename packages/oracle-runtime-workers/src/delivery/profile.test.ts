@@ -49,6 +49,47 @@ describe('resolveDeliveryProfile', () => {
       }),
     ).toMatchObject({ limits: { maxBubbles: 2, bubbleMax: 1500 } });
   });
+
+  it('keeps the default for an override that is not a whole number of at least 1', () => {
+    expect(
+      resolveDeliveryProfile(whatsapp, {
+        limits: {
+          whatsapp: {
+            bubbleMax: 0,
+            maxPartsPerRun: -2,
+            maxBubbles: 2.5,
+            spillChars: Number.NaN,
+            maxCodeLines: 20,
+          },
+        },
+      }),
+    ).toMatchObject({
+      limits: {
+        bubbleMax: 1500,
+        maxPartsPerRun: 6,
+        maxBubbles: 4,
+        spillChars: 1800,
+        maxCodeLines: 20,
+      },
+    });
+  });
+
+  it('keeps the soft target and the merge threshold within the hard size', () => {
+    expect(
+      resolveDeliveryProfile(whatsapp, {
+        limits: { whatsapp: { bubbleMax: 400 } },
+      }),
+    ).toMatchObject({
+      limits: { bubbleMax: 400, bubbleTarget: 400, minBubble: 60 },
+    });
+    expect(
+      resolveDeliveryProfile(whatsapp, {
+        limits: { whatsapp: { bubbleMax: 50 } },
+      }),
+    ).toMatchObject({
+      limits: { bubbleMax: 50, bubbleTarget: 50, minBubble: 50 },
+    });
+  });
 });
 
 describe('renderSurfaceSection', () => {

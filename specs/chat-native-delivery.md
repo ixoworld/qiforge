@@ -121,7 +121,7 @@ export interface ChatLimits {
 }
 ```
 
-These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; `OracleConfig.delivery.matrixChat: false` gives Matrix rooms the `stream` profile. Artefacts are available on every chat surface whenever artefact storage is configured.
+These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; a count must be a whole number of at least 1, or the default stays. `OracleConfig.delivery.matrixChat: false` gives Matrix rooms the `stream` profile. Artefacts are available on every chat surface whenever artefact storage is configured.
 
 | Field                    | `whatsapp`  | `telegram`  | `slack`       | `matrix`      | `generic`   |
 | ------------------------ | ----------- | ----------- | ------------- | ------------- | ----------- |
@@ -196,7 +196,8 @@ The plan is built **once, when the run finishes** (`src/delivery/plan.ts`). Ther
 2. Text of 200 characters or less that precedes a tool call, in one paragraph with no list or code, is **narration** and is dropped. Once the answer arrives, "Checking your calendar" adds nothing.
 3. Any other step text is **content**. It goes through the shaper ([§6.3](#63-the-shaper)). This fixes finding 4: a plan the model writes before calling tools is no longer lost.
 4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → question shape as an automatic spill.
-5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as often as needed.
+5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing question go, because its artefact holds both. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
+6. A resumed run puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them.
 
 The model's checkpointed messages are **never rewritten**. The model remembers what it actually wrote, and the plan is a projection of it for one surface.
 
