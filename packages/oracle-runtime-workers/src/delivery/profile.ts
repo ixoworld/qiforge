@@ -58,6 +58,34 @@ const DEFAULT_LIMITS: Readonly<Record<string, ChatLimits>> = {
 /** A group room hears one short answer, not a series. */
 const GROUP_LIMITS: Partial<ChatLimits> = { maxBubbles: 2, maxPartsPerRun: 3 };
 
+const COUNTS = [
+  'bubbleTarget',
+  'bubbleMax',
+  'minBubble',
+  'maxBubbles',
+  'maxPartsPerRun',
+  'spillChars',
+  'maxListItems',
+  'previewItems',
+  'maxCodeLines',
+] as const satisfies ReadonlyArray<keyof ChatLimits>;
+
+/**
+ * The overrides an oracle may set: whole numbers of at least 1, and a
+ * boolean `tables`. Anything else keeps the default, since a size of zero
+ * would leave the shaper nothing to split into.
+ */
+function validLimits(overrides: Partial<ChatLimits> = {}): Partial<ChatLimits> {
+  const out: Partial<ChatLimits> = {};
+  for (const key of COUNTS) {
+    const value = overrides[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 1)
+      out[key] = value;
+  }
+  if (typeof overrides.tables === 'boolean') out.tables = overrides.tables;
+  return out;
+}
+
 const LABELS: Readonly<Record<string, string>> = {
   whatsapp: 'WhatsApp',
   telegram: 'Telegram',
@@ -80,12 +108,19 @@ export function resolveDeliveryProfile(
       : turn.channel?.provider && DEFAULT_LIMITS[turn.channel.provider]
         ? turn.channel.provider
         : 'generic';
-  const limits: ChatLimits = {
+  const merged: ChatLimits = {
     ...(DEFAULT_LIMITS[surface] ?? GENERIC),
     ...(turn.client === 'matrix' && turn.roomKind === 'group'
       ? GROUP_LIMITS
       : {}),
-    ...config.limits?.[surface],
+    ...validLimits(config.limits?.[surface]),
+  };
+  // The soft target and the merge threshold never exceed the hard size.
+  const bubbleTarget = Math.min(merged.bubbleTarget, merged.bubbleMax);
+  const limits: ChatLimits = {
+    ...merged,
+    bubbleTarget,
+    minBubble: Math.min(merged.minBubble, bubbleTarget),
   };
   return {
     kind: 'chat',
