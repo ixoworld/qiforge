@@ -1,8 +1,19 @@
 # Chat-native delivery: concise replies, multi-message turns and browser artefacts
 
-**Status:** Proposed · **Date:** 2026-09-25
-**Scope:** `packages/oracle-runtime-workers`, `ixoworld/ixo-channel-gateway`, `ixoworld/companion` (configuration only)
+**Status:** Accepted; phases 1 and 2 implemented · **Date:** 2026-09-25
+**Scope:** `packages/oracle-runtime-workers`, `ixoworld/ixo-channel-gateway`, `ixoworld/ixo-portal` (the shared viewer), `ixoworld/companion` (configuration only)
 **Builds on:** `packages/oracle-runtime-workers/docs/channels.md`, `docs/plans/durable-runs.md`, the gateway's `docs/engineering-spec.txt`
+
+**Decisions taken on the proposal:**
+
+| Question                          | Decision                                                                                                                                    |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| WhatsApp eligibility              | Provider rendering stays behind the gateway adapter, so Telegram, Slack and Matrix never depend on it.                                      |
+| Who can open an artefact link     | Anyone with the link, until it expires (30 days by default). The repository README records the decision and recommends reviewing it.        |
+| Where the viewer lives            | A shared Qi.Space page (`ARTIFACT_VIEWER_URL`). The runtime's built-in page at `/a/:id` works without it.                                   |
+| Progress lines                    | None. The typing indicator is the liveness signal.                                                                                          |
+| Matrix rooms                      | Chat style by default. Third-party oracles are used through Matrix rooms in the Portal. `OracleConfig.delivery.matrixChat: false` opts out. |
+| Empty channel replies (finding 9) | Fixed separately, outside this work.                                                                                                        |
 
 ---
 
@@ -13,7 +24,7 @@ The Companion replies on WhatsApp, Matrix and (later) Telegram and Slack the sam
 This spec makes chat a **delivery profile**, chosen per turn, inside the same runtime. It has four pieces:
 
 1. **A surface section in the prompt.** On chat surfaces the model is told it is texting: lead with the answer, write 1–3 short messages, and don't use headings or tables.
-2. **Reply Plans.** A run on a chat surface produces an ordered list of **parts**: short text bubbles, an optional progress line, and artefact cards. Every part has a stable ID and is delivered exactly once, extending the idempotency that channel runs already have.
+2. **Reply Plans.** A run on a chat surface finishes as an ordered list of **parts**: short text messages and artefact links. Every part has a stable ID and is delivered exactly once, extending the idempotency that channel runs already have.
 3. **Artefacts.** Long output (plans, reports, tables, drafts) becomes a document the user opens in a browser. The model creates one with `create_artifact`, and a deterministic shaper creates one automatically when the model writes too much anyway. The user's own database holds the canonical copy. The link serves only ciphertext, and the key sits in the URL fragment, so link unfurlers never see the content.
 4. **Rendering stays at the edge.** QiForge decides what the parts are. IXO Channels decides how each provider renders and paces them. The Matrix gateway does the same for Matrix rooms. The Portal is unchanged.
 
@@ -43,10 +54,10 @@ Finding 9 blocks any live channel acceptance run and should be fixed first. The 
 
 1. **One Companion, many surfaces.** The conversation, memory, runs and transcript are canonical and shared. A surface is a rendering. This is the invariant of IXO Channels: "WhatsApp never becomes their identity, their agent, or their source of truth".
 2. **Write for the surface, then enforce it deterministically.** The model is told where it is speaking. A cheap, deterministic shaper guarantees the contract whatever the model does. By default, no extra LLM call is made to shape a reply.
-3. **Semantics in QiForge, syntax at the edge.** QiForge decides the bubbles, the progress lines and the artefacts. The gateway decides provider syntax, UI primitives, pacing and whether a send is allowed at all. The policy kernel stays in the gateway, per its spec §14: "The Companion must never decide whether a channel operation is legally or operationally permitted."
+3. **Semantics in QiForge, syntax at the edge.** QiForge decides the messages and the artefacts. The gateway decides provider syntax, UI primitives, pacing and whether a send is allowed at all. The policy kernel stays in the gateway, per its spec §14: "The Companion must never decide whether a channel operation is legally or operationally permitted."
 4. **Exactly-once per part.** The `(userDid, bindingId, requestId)` idempotency extends to `(…, partId)`. It is still better to lose a message than to send a duplicate.
 5. **Private by default.** Artefact links are safe against link unfurlers. No plaintext is stored on operator infrastructure. The canonical copy belongs to the user.
-6. **The Portal is untouched.** Its SSE streaming, frames and tools do not change.
+6. **The Portal's streaming is untouched.** Its SSE streaming, frames and tools do not change. The Portal gains only the shared artefact viewer.
 
 ---
 
@@ -83,68 +94,68 @@ A turn resolves a **delivery profile** from its surface. The profile feeds four 
 
 The runtime already knows the surface of every turn:
 
-| Ingress               | `TurnRequest.client` | Extra                                 | Profile                                         |
-| --------------------- | -------------------- | ------------------------------------- | ----------------------------------------------- |
-| Portal HTTP           | `portal`             | none                                  | `stream`: today's behaviour, no shaping         |
-| `POST /channels/turn` | `channel`            | `channel.provider` (`whatsapp` today) | `chat:<provider>`, else `chat:generic`          |
-| Matrix room message   | `matrix`             | `roomKind` (`direct` / `group`)       | `chat:matrix` (group: 1–2 bubbles, no progress) |
-| Scheduled task run    | `matrix`             | `task:` session                       | `chat:matrix` (final answer only)               |
+| Ingress               | `TurnRequest.client` | Extra                           | Profile                                                                              |
+| --------------------- | -------------------- | ------------------------------- | ------------------------------------------------------------------------------------ |
+| Portal HTTP           | `portal`             | none                            | `stream`: today's behaviour, no shaping                                              |
+| `POST /channels/turn` | `channel`            | `channel.provider`              | `chat` with that provider's limits (`whatsapp`, `telegram`, `slack`), else `generic` |
+| Matrix room message   | `matrix`             | `roomKind` (`direct` / `group`) | `chat` `matrix`; a group room gets at most 2 messages per step and 3 parts per reply |
+| Scheduled task run    | `matrix`             | `task:` session                 | `chat` `matrix`; the task delivers the reply as one message (the plan's text)        |
 
 ```ts
-// src/delivery/profile.ts
-export interface DeliveryProfile {
-  kind: 'stream' | 'chat';
-  /** Human name the prompt uses: "WhatsApp", "Matrix", "a chat app". */
-  label: string;
+// src/delivery/types.ts
+export type DeliveryProfile =
+  | { kind: 'stream' }
+  | { kind: 'chat'; surface: string; label: string; limits: ChatLimits };
+
+export interface ChatLimits {
   bubbleTarget: number; // soft size of one message, characters
   bubbleMax: number; // hard size before a sentence split
   minBubble: number; // shorter fragments merge into the next message
   maxBubbles: number; // per model step; more → spill to an artefact
-  maxPartsPerRun: number; // across the whole run, progress included
+  maxPartsPerRun: number; // across the whole reply
   spillChars: number; // a step's text longer than this → spill
   maxListItems: number; // a longer list → spill with a preview
-  previewItems: number; // list items kept in the lead bubble
+  previewItems: number; // list items kept in the lead message
   maxCodeLines: number; // a longer code block → spill
   tables: boolean; // may a table stay inline?
-  progress: { graceMs: number; max: number; minGapMs: number } | null;
-  artifacts: boolean; // bind create_artifact and allow auto-spill
 }
 ```
 
-These are the defaults. An oracle overrides them in `OracleConfig.delivery.profiles`, and a later phase adds a per-user verbosity preference.
+These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; `OracleConfig.delivery.matrixChat: false` gives Matrix rooms the `stream` profile. Artefacts are available on every chat surface whenever artefact storage is configured.
 
-| Field                    | `chat:whatsapp`            | `chat:telegram` | `chat:slack`  | `chat:matrix`                                       | `chat:generic`   |
-| ------------------------ | -------------------------- | --------------- | ------------- | --------------------------------------------------- | ---------------- |
-| bubbleTarget / bubbleMax | 600 / 1,500                | 800 / 2,000     | 1,200 / 3,000 | 1,200 / 4,000                                       | 600 / 1,500      |
-| maxBubbles / per run     | 4 / 6                      | 4 / 6           | 3 / 5         | 3 / 5                                               | 3 / 5            |
-| spillChars               | 1,800                      | 2,400           | 3,500         | 4,000                                               | 1,800            |
-| tables inline            | no                         | no              | no            | no                                                  | no               |
-| progress                 | 6 s grace, ≤ 2, 20 s apart | same            | same          | none: the `work_status` card already shows liveness | same as WhatsApp |
+| Field                    | `whatsapp`  | `telegram`  | `slack`       | `matrix`      | `generic`   |
+| ------------------------ | ----------- | ----------- | ------------- | ------------- | ----------- |
+| bubbleTarget / bubbleMax | 600 / 1,500 | 800 / 2,000 | 1,200 / 3,000 | 1,200 / 4,000 | 600 / 1,500 |
+| maxBubbles / per run     | 4 / 6       | 4 / 6       | 3 / 5         | 3 / 5         | 3 / 5       |
+| spillChars               | 1,800       | 2,400       | 3,500         | 4,000         | 1,800       |
+| tables inline            | no          | no          | no            | no            | no          |
 
 The runtime targets are deliberately far below the provider hard limits in the [appendix](#appendix-provider-limits-that-shape-the-design). The gateway enforces those limits a second time.
 
-The profile also appears on `RuntimeContext` as `ctx.session.surface` (`{ kind, label, provider? }`). Plugins can then adapt their output, for example a tasks plugin returning a compact list on chat. This is a public API addition, so it needs a matching update to the public docs.
+The profile also appears on `RuntimeContext` as `ctx.session.surface`: `{ kind: 'stream' }` or `{ kind: 'chat', surface, label }`. Plugins can then adapt their output, for example a tasks plugin returning a compact list on chat. This is a public API addition, so it needs a matching update to the public docs.
 
 ---
 
 ## 5. Writing for the surface
 
-This is a new framework-owned slot in `core/prompt-composer.ts`, after `COMMUNICATION_STYLE`. It renders only when `profile.kind === 'chat'`. It adds about 180 tokens.
+This is a new framework-owned slot in `core/prompt-composer.ts`, after `COMMUNICATION_STYLE`. `renderSurfaceSection` (`src/delivery/prompt.ts`) fills it only on chat turns.
 
 ```text
 ## Where this conversation is happening
 
-You are replying in {label}. The user reads your reply as chat messages on their phone, not as a document.
+You are replying in {label}. The user reads your reply as chat messages, not as a document.
 
 - Lead with the answer. Write like a sharp person texting: short sentences, no preamble, no sign-off.
-- Aim for 1–3 short messages. A blank line starts a new message; keep each under about {bubbleTarget} characters.
+- Aim for one to three short messages. A blank line starts a new message; keep each under about {bubbleTarget} characters.
 - No headings, tables or horizontal rules. Short lists (up to {maxListItems} items) and **bold** for the key fact are fine.
-- For anything longer, such as a plan, report, comparison, draft, table or code, call create_artifact with the full Markdown, a one-line message and, if needed, one follow-up question. The user gets the message, a link that opens the document in their browser, and then the question.
-- Before a long piece of tool work you may send one brief heads-up ("Checking your calendar and inbox."). Don't narrate each step.
+- Anything longer, such as a plan, report, comparison, draft, table or code, goes in `create_artifact`: the full Markdown as the document, a one-line message, and at most one follow-up question. The user gets the message, a link that opens the document in their browser, then the question.
+- The user sees a typing indicator while you work. Do not narrate your steps or announce tool calls.
 - End with at most one question.
 ```
 
-Why a composer slot rather than a plugin middleware: the surface belongs to the framework, like Node's Slack slot, not to any plugin. A slot is also visible in the prompt snapshot test (`core/__snapshots__/prompt-composer.test.ts.snap`). The Companion's own `communicationStyle` ("Match energy: one-liners back when terse…") is consistent with the slot and needs no change.
+Without artefact storage, the `create_artifact` line reads instead: "When something is too long for chat, send the short version and offer the rest."
+
+Why a composer slot rather than a plugin middleware: the surface belongs to the framework, like Node's Slack slot, not to any plugin. The Companion's own `communicationStyle` ("Match energy: one-liners back when terse…") is consistent with the slot and needs no change.
 
 ---
 
@@ -155,43 +166,39 @@ Why a composer slot rather than a plugin middleware: the surface belongs to the 
 ```ts
 // Shared by the runtime, the channel contract and the gateway.
 export type ReplyPart =
-  | { partId: string; seq: number; kind: 'progress'; text: string }
-  | { partId: string; seq: number; kind: 'text'; text: string }
-  | { partId: string; seq: number; kind: 'artifact'; artifact: ArtifactRef }
-  | {
-      partId: string;
-      seq: number;
-      kind: 'choices';
-      prompt?: string;
-      options: { id: string; label: string }[];
-    };
+  | { partId: string; kind: 'text'; text: string }
+  | { partId: string; kind: 'artifact'; artifact: ArtifactRef };
+
+export interface ReplyPlan {
+  v: 1;
+  parts: ReplyPart[];
+}
 
 export interface ArtifactRef {
   artifactId: string;
-  title: string; // ≤ 60 characters (fits a WhatsApp CTA header)
-  summary?: string; // ≤ 200 characters
+  title: string; // ≤ 120 characters; a gateway shortens it where it must (a WhatsApp CTA header takes 60)
   url: string; // viewer URL, including the #k= fragment
-  mime: 'text/markdown' | 'text/csv' | 'text/html';
+  mime: 'text/markdown';
   bytes: number;
   expiresAt: string; // ISO 8601
 }
 ```
 
-`text` and `progress` carry **chat Markdown**, a CommonMark subset: `**bold**`, `_italic_`, `~~strike~~`, inline code, fenced code, `-` and `1.` lists, `>` quotes, and links. The shaper produces nothing outside this subset. Each gateway maps it to provider syntax.
+`text` carries **chat Markdown**, a CommonMark subset: `**bold**`, `_italic_`, `~~strike~~`, inline code, fenced code, `-` and `1.` lists, `>` quotes, and links. The shaper produces nothing outside this subset. Each gateway maps it to provider syntax.
 
-`choices` arrives in phase 3. It lets a reply end in tappable options (WhatsApp reply buttons, Telegram inline keyboards, Slack buttons), as in the gateway spec's "[Review Topic] [Keep chatting]" example.
+A `choices` part (tappable options: WhatsApp reply buttons, Telegram inline keyboards, Slack buttons) is a later phase.
 
 ### 6.2 From a run to a plan
 
-A run is a sequence of **model steps**. Each step can write text and can call tools. The plan is built step by step, so the user sees content as soon as it exists:
+The plan is built **once, when the run finishes** (`src/delivery/plan.ts`). There are no progress lines to release early: the typing indicator is the liveness signal. So one plan per run is the simplest thing that is also idempotent. Streaming a message while it is written stays possible later without changing the contract.
 
-1. A step's text becomes eligible for delivery **when the step ends**: when its first tool call starts, or when the run ends.
-2. A step ending in a tool call whose text is short narration (≤ 200 characters, one paragraph) is a **`progress` candidate**. It is released only if the run is still going `graceMs` later, at most `max` per run and at least `minGapMs` apart. Candidates that are never released are dropped: once the answer arrives, "Checking your calendar" adds nothing.
-3. Any other step text is **content**. It goes through the shaper ([§6.3](#63-the-shaper)) and is released immediately. This fixes finding 4: a plan the model writes before calling tools is no longer lost.
+1. The turn's **model steps** are its AI messages after the last human message. Each step can write text and call tools.
+2. Text of 200 characters or less that precedes a tool call, in one paragraph with no list or code, is **narration** and is dropped. Once the answer arrives, "Checking your calendar" adds nothing.
+3. Any other step text is **content**. It goes through the shaper ([§6.3](#63-the-shaper)). This fixes finding 4: a plan the model writes before calling tools is no longer lost.
 4. A `create_artifact` call adds three parts in order: its `message` as a text part, its `artifact` part, then its optional `followUp` question. This is the same lead → artefact → question shape as an automatic spill.
-5. The run as a whole may not exceed `maxPartsPerRun`. Anything beyond that spills into one artefact.
+5. The reply is capped at `maxPartsPerRun` by merging the shortest adjacent pair of text parts, as often as needed.
 
-Live steps come from the run buffer that SSE already uses: text deltas, then a `tool_call` frame with `status: 'isRunning'`. The final step comes from the completed graph state (`capture`), the same source `lastAiText` reads today. The model's checkpointed messages are **never rewritten**. The model remembers what it actually wrote, and the plan is a projection of it for one surface.
+The model's checkpointed messages are **never rewritten**. The model remembers what it actually wrote, and the plan is a projection of it for one surface.
 
 ### 6.3 The shaper
 
@@ -209,7 +216,7 @@ This is a pure function, `shape(markdown, profile) → ReplyPart[]`. It uses the
    - The lead is the first content block, cut to `bubbleTarget` at a sentence boundary. A lead-in that ends in `:` keeps its list's first `previewItems` items plus "…and N more".
    - The artefact is the whole step text, titled by its first heading or else its first sentence.
    - If the step ends with a question, that question is kept as a final bubble, because chat depends on it.
-5. **Normalise** to chat Markdown. Headings become bold, rules and raw HTML are dropped, and tables go to an artefact.
+5. **Normalise** to chat Markdown. Headings become bold, rules and raw HTML are dropped, and tables go to an artefact. Without artefact storage, a table becomes a list instead.
 
 The rules above were checked on a scratch prototype with typical Companion output. Example: "plan my week", 789 characters with a table and a 5-step list, is what the model writes for the Portal today.
 
@@ -228,24 +235,19 @@ With the §5 prompt the model should usually write the short form itself. The sh
 
 ### 6.4 Durability and idempotency
 
-- **Stable IDs.**
-  - Progress parts are `p<seq>`, where `seq` is the sequence number of the `tool_call` frame that closed the step.
-  - Content parts are `s<step>.<n>`.
-  - Frame sequence numbers survive recovery (`attemptSeqBase`), so a re-poll, a recovered run or a replay produces the same IDs.
-- **Persistence.** Released parts are written to `turn_run_parts(run_id, part_id, seq, kind, body, released_at)` with `INSERT OR IGNORE`. The final step's parts go in the same transaction as the run's terminal status. Parts hold text, so they are pruned with the run's payload, and the existing channel tombstone rules (410 after pruning) are unchanged.
-- **Artefact IDs are deterministic.**
-  - A `create_artifact` call's ID is derived from `(runId, toolCallId)`, so the tool is declared idempotent and a recovered run converges on the same artefact rather than being answered "outcome unknown" by `ToolMarksMiddleware`.
-  - An auto-spill artefact's ID is derived from `(runId, 'spill', step)`.
-- **Channel contract.** The response gains a plan alongside the existing fields. `text` stays the canonical final text, so current gateways keep working:
+- **Stable IDs.** Parts are `p1` … `pn` in delivery order. The plan is stored with the run, so a re-poll, a replayed Matrix event and a recovered run all read the same plan.
+- **Persistence.** `turn_run_plans(run_id, plan)` holds the plan. It is pruned with the run after the seven-day retention, and the channel tombstone rules (410 after pruning) are unchanged.
+- **Artefact IDs are deterministic.** An ID is the first 128 bits of a SHA-256 over `(runId, source)`. The source is the `create_artifact` call's tool call ID, or the step key of an automatic spill. Creation is idempotent per ID. So the tool is declared read-only for recovery, and a recovered run converges on the same artefact rather than being answered "outcome unknown" by `ToolMarksMiddleware`.
+- **Channel contract.** A finished response carries the plan next to the existing fields. `text` becomes the plan rendered as one Markdown message, with artefacts as links, so gateways that predate plans keep working:
 
   ```ts
   interface ChannelTurnResponse {
     // …existing fields: requestId, runId, sessionId, status, messageId?, text?
-    plan?: { v: 1; complete: boolean; parts: ReplyPart[] }; // parts released so far
+    plan?: ReplyPlan; // finished turns of chat runs
   }
   ```
 
-  Polling still repeats the exact request body. The gateway remembers which `partId`s it has queued, so no cursor is needed in the body. Artefact content never travels in the plan, only its link.
+  Polling still repeats the exact request body. Artefact content never travels in the plan, only its link.
 
 ---
 
@@ -253,58 +255,72 @@ With the §5 prompt the model should usually write the short form itself. The sh
 
 ### 7.1 `create_artifact`
 
-This tool is in a bundled `artifacts` plugin. `getRequestTools` binds it only when `ctx.session.surface.kind === 'chat'`.
+The runtime binds this tool on chat turns when artefact storage is configured (`src/artifacts/tool.ts`). It is a turn tool of the runtime, not a plugin tool: whether it exists depends on the delivery profile, which the runtime owns.
 
 ```ts
 create_artifact({
-  title: string,        // ≤ 60 chars
-  content: string,      // full Markdown (v1); CSV and HTML in phase 3
-  message: string,      // the one-line chat message sent before the link
-  followUp?: string,    // at most one question, sent after the link
-}) → { artifactId, url, expiresAt }
+  title: string,        // ≤ 120 characters
+  content: string,      // full Markdown, ≤ 200,000 characters
+  message: string,      // the one-line chat message sent before the link, ≤ 600
+  followUp?: string,    // at most one question, sent after the link, ≤ 300
+}) → { ok: true, artifactId, title, url, mime, bytes, expiresAt }
 ```
 
-- **Return-direct.** It ends the run without another model call, which saves a full-context round trip for every artefact. LangChain 1.4's `createAgent` exits when the **last** tool result of a step comes from a return-direct tool. So the tool description asks for `create_artifact` as the final call, on its own. When the model calls it alongside other tools anyway, a small `afterModel` hook in the plugin moves it to the front of that step's tool calls. The loop then continues, and the model sees every result.
-- **Read-only access.** A second tool, `read_artifact`, lets the model quote from or update an earlier artefact. Phase 3.
+- **Return-direct.** It ends the run without another model call, which saves a full-context round trip for every artefact.
+  - LangChain 1.4's `createAgent` exits only when the **last** tool result of a step comes from a return-direct tool. So the tool description asks for `create_artifact` as the final call, on its own.
+  - When the model calls it alongside other tools anyway, an `afterModel` hook in the core (`middlewares/return-direct-first.ts`) moves it to the front of that step's tool calls. The loop then continues, and the model sees every result.
+- **Read access.** A second tool, `read_artifact`, would let the model quote from or update an earlier artefact. Later.
 
 ### 7.2 Storage
 
-| Copy                             | Where                                                                                                                | Why                                                                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Canonical**                    | `artifacts` table in the user's SQLite (gzipped blob, like other rows)                                               | It is exported with the rest of the working copy to `/.oracles/<oracleDid>/state.db.gz`, so **the user owns it** and needs no new grant. |
-| Library copy (optional, phase 3) | `/Qi/Artefacts/<date> <title>.md` in the user's VFS                                                                  | Makes it visible in Qi.Space's Library, when the user has granted the vfs plugin library access.                                         |
-| **Share copy**                   | R2 object `art/<artifactId>`: AES-256-GCM ciphertext of `{v, title, mime, content}`, with custom metadata `exp` only | Serves the browser link without waking the user object. The operator bucket never holds plaintext.                                       |
+| Copy          | Where                                                                                                                         | Why                                                                                                                                      |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| **Canonical** | `artifacts` table in the user's SQLite                                                                                        | It is exported with the rest of the working copy to `/.oracles/<oracleDid>/state.db.gz`, so **the user owns it** and needs no new grant. |
+| **Share**     | R2 object `art/<artifactId>` in `ARTIFACT_BUCKET`: AES-256-GCM ciphertext of `{v, title, mime, content, createdAt}`, IV first | Serves the browser link without waking the user object. The operator bucket never holds plaintext. Custom metadata: `expiresAt` only.    |
+| Library copy  | `/Qi/Artefacts/<date> <title>.md` in the user's VFS                                                                           | Later: visible in Qi.Space's Library when the user has granted the vfs plugin library access.                                            |
 
-The share copy needs one R2 binding, `ARTIFACT_BUCKET`, plus a lifecycle rule on `art/`. The Companion binds no R2 bucket today, so adding one also turns on the existing `ResultStore` spill for tool results over about 1.5 MB, which currently are "not saved".
+The share copy needs one R2 binding, `ARTIFACT_BUCKET` (its own binding, separate from the page tier's `TIER_BUCKET`), a public origin (`ORACLE_PUBLIC_URL`) and a lifecycle rule on `art/`. Without them, artefacts are off: long replies are split into messages, and `create_artifact` is not offered.
 
 ### 7.3 Links and the viewer
 
 ```
-https://<oracle host>/a/<artifactId>#k=<key>
-        artifactId: 128-bit random, base64url · key: 256-bit AES-GCM key, base64url
+https://<oracle>/a/<artifactId>#k=<key>                                   built-in page
+https://<viewer>#a=<encoded https://<oracle>/a/<artifactId>>&k=<key>      ARTIFACT_VIEWER_URL (Qi.Space)
+        artifactId: 128 bits · key: 256-bit AES-GCM key, base64url
 ```
 
-- **`GET /a/:artifactId`** serves a static viewer shell, identical for every artefact. It is a plugin route (`getRoutes()`) that the plugin also lists in `getAuthExcludedRoutes()`.
-  - Its Open Graph tags are generic ("Qi artefact").
-  - Headers: `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`, and a strict CSP (`default-src 'none'`; scripts, styles and connections to `'self'` only; `frame-ancestors 'none'`).
-- **`GET /a/:artifactId/data`** returns the ciphertext with `Cache-Control: private, max-age=60`, so revocation takes effect quickly. It is rate-limited per IP.
-- **In the browser**, the viewer reads the key from `location.hash`, decrypts with WebCrypto, and renders the Markdown to sanitised HTML. It offers Copy, Download `.md` and, when `PORTAL_URL` is configured, **Open in Qi.Space**.
-  - HTML artefacts (phase 3) render in a sandboxed `srcdoc` iframe without `allow-same-origin`.
+- **`GET /a/:artifactId`** serves a static viewer page, identical for every artefact. It is mounted ahead of CORS and auth.
+  - Headers: `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer`, `nosniff`.
+  - CSP: `default-src 'none'`; only the page's own hashed script and style; `connect-src 'self'`; `frame-ancestors 'none'`.
+  - In the browser, the page reads the key from `location.hash` and decrypts with WebCrypto. It renders the Markdown through DOM APIs only: no `innerHTML`, only `http(s)` and `mailto` links, and images as links. It offers Copy and Download `.md`.
+- **`GET /a/:artifactId/data`** returns the ciphertext.
+  - It answers any origin (`Access-Control-Allow-Origin: *`), because the shared viewer fetches it from another host.
+  - `Cache-Control: private, max-age=60`, so a revocation takes effect within a minute.
+  - It is rate-limited per client IP.
+  - An expired object answers `410` and is deleted.
+- **The shared viewer** is the Portal's `/artifact` page, set as `ARTIFACT_VIEWER_URL`.
+  - It fetches only `/a/<id>` paths over https, on hosts in `NEXT_PUBLIC_ARTIFACT_SOURCE_HOSTS` (default `ixo.earth`).
+  - It decrypts in the browser, renders with the Portal's Markdown component with images as links, and states that an agent wrote the document.
+  - The Portal's product analytics and error reporting remove the fragment from every URL they record, so the key never reaches either.
 - **Expiry and revocation.**
-  - Links default to 30 days (`ARTIFACT_LINK_TTL_DAYS`).
-  - Revoking deletes the R2 object. The canonical copy stays, and asking Qi again mints a fresh link with a new key.
-  - Revoking a channel binding can revoke the links created in that binding's session.
-- **Origin isolation.** A dedicated hostname on the **same** Worker script (for example `view.companion.<env>.ixo.earth`) is recommended, so user-generated content never shares an origin with the API.
+  - Links default to 30 days (`ARTIFACT_LINK_TTL_DAYS`). No setting makes a link live longer than 365 days.
+  - `DELETE /artifacts/:id` (the owner, authenticated) deletes the share copy. The canonical copy stays, and asking Qi again mints a fresh link with a new key.
+  - `GET /artifacts/:id` returns the canonical copy, with `url` only while the link works.
+  - Deleting a session deletes its artefacts, share copies first.
+  - Revoking a channel binding does not yet revoke the links created through it. Later.
+- **Origin.** The built-in page runs on the oracle's API origin. That origin holds no cookies or stored credentials (auth is a UCAN header per request), and the page runs only its own hashed script. A dedicated hostname on the same Worker script remains an option.
 
 ### 7.4 Security properties
 
-| Threat                                                                     | Outcome                                                                                                                                                                                |
-| -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Link unfurlers: WhatsApp and Telegram clients or servers, Slack's unfurler | They fetch the path, never the fragment, and get only the generic shell. On top of this, the gateways send artefacts as buttons and disable previews.                                  |
-| Server, proxy and CDN logs                                                 | The path holds a random ID. The key is in the fragment and is never sent.                                                                                                              |
-| An operator or bucket leak                                                 | The bucket holds AES-GCM ciphertext only. Keys live in the user's own database and in the link.                                                                                        |
-| A forwarded message                                                        | This is bearer-link semantics, like `vfs_share`, but the link expires and can be revoked. A later user preference, `artefactLinks: 'signed-in'`, can require a Qi.Space login instead. |
-| Prompt injection leaking data through an artefact                          | No new channel. The link goes only to the user who asked. Sending it elsewhere still needs a tool with its own authority.                                                              |
+| Threat                                                                     | Outcome                                                                                                                                                                                                          |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Link unfurlers: WhatsApp and Telegram clients or servers, Slack's unfurler | They fetch the path, never the fragment, and get only the generic page. On top of this, the WhatsApp gateway sends artefacts as buttons and turns link previews off.                                             |
+| Server, proxy and CDN logs                                                 | The path holds a random ID. The key is in the fragment and is never sent.                                                                                                                                        |
+| An operator or bucket leak                                                 | The bucket holds AES-GCM ciphertext only. Keys live in the user's own database and in the link.                                                                                                                  |
+| The shared viewer's telemetry                                              | PostHog events and Sentry reports from the Portal have the viewer's fragment removed before they are sent.                                                                                                       |
+| A forwarded message                                                        | Bearer-link semantics, by decision: anyone holding the link can read the document until it expires or is revoked. The repository README records the decision and recommends reviewing it.                        |
+| A document used for phishing                                               | Anyone can have an agent write a document and share its link. The shared viewer fetches only from allowlisted oracle hosts, and says that an agent wrote the document.                                           |
+| Prompt injection leaking data through an artefact                          | No new channel: the link goes only to the user who asked. Both viewers render images as links, so opening a document fetches nothing on its own. Sending it elsewhere still needs a tool with its own authority. |
 
 ---
 
@@ -322,60 +338,57 @@ sequenceDiagram
     U->>G: "Plan my week"
     G->>U: mark read + typing
     G->>Q: POST /channels/turn
-    Q-->>G: 202 running, plan: no parts yet
-    Note over Q: step 1 writes "Pulling your calendar and tasks." then calls tools
+    Q-->>G: 202 running
+    G->>U: typing (renewed every 20 s while polling)
     G->>Q: poll, same body
-    Q-->>G: 202 running, plan: p41 progress, released after grace
-    G->>U: Pulling your calendar and tasks.
-    G->>U: typing (re-sent while polling)
-    Note over Q: final step: create_artifact(plan) returns direct
-    G->>Q: poll, same body
-    Q-->>G: 200 finished, plan complete: s2.1 message, s2.2 artifact, s2.3 followUp
-    G->>U: You have 14 meetings... (bubble)
-    G->>U: CTA button "Open plan" (artefact link)
-    G->>U: Want me to add the focus blocks? (bubble)
-    Q->>Q: mirror one event to the Companion room with org.ixo.qi.delivery
+    Q-->>G: 200 finished, plan: p1 message, p2 artefact, p3 question
+    G->>U: CTA card: title, the message, "Open document"
+    G->>U: Want me to add the focus blocks?
+    Q->>Q: mirror the reply to the Companion room
 ```
 
-| Area                          | Change                                                                                                                                                                                                                                                                                                                                                                                 |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/qiforge.ts`              | Parse `plan` (zod) next to `text`. A 202 response can now carry released parts.                                                                                                                                                                                                                                                                                                        |
-| `outbound_delivery`           | Add `part_id` and `seq`, and replace `UNIQUE(request_id)` with `UNIQUE(request_id, part_id)`. The ID becomes `del_` + HMAC(`requestId \0 partId`): still 64 hex characters, so the receipt regex and `biz_opaque_callback_data` reconciliation still work. Mark the inbound row `answered` only when `plan.complete` is true and every part is queued.                                 |
-| Ordering and pacing           | Deliver parts strictly in `seq` order, with a short gap (1–2 s) and a typing indicator between bubbles. Keep a per-recipient token bucket that mirrors WhatsApp's pair limit (1 message per 6 s; bursts borrow from future quota), running below Meta's 45-message burst. When the bucket cannot cover the remaining parts, **merge adjacent text parts** instead of delaying them.    |
-| Ambiguous sends               | A part in `unknown` is never resent. Wait up to 10 s for its status webhook before sending the next part, then continue. This keeps the gateway spec's rule: "prefer one missing response over multiple user-visible duplicate replies".                                                                                                                                               |
-| Policy                        | Run the binding re-check and `channelPolicy` before **every** part. A binding revoked in the middle of a reply suppresses the rest. The 24-hour window is checked per part.                                                                                                                                                                                                            |
-| Liveness                      | On admission, mark the message read and show the typing indicator. WhatsApp clears it after 25 s, so re-send it while the run is still being polled (confirm on the live API that a re-send extends it). This needs the raw inbound message ID, kept sealed in the pending payload until the turn ends.                                                                                |
-| `packages/channel-core`       | Implement spec §9.1's `send(destination, output: ChannelOutput)` with `ChannelOutput = text \| link \| choices`, plus provider `capabilities` and `typing()`.                                                                                                                                                                                                                          |
-| `packages/whatsapp/render.ts` | Map chat Markdown to WhatsApp syntax: `*bold*`, `_italic_`, `~strike~`, code, lists, quotes. A link with a label becomes `label: url`. An artefact becomes an `interactive` **CTA URL** message: body ≤ 1,024 characters, header ≤ 60, a button such as "Open plan" ≤ 20. Anything still over 4,096 characters is split at paragraph and then sentence boundaries. **Never truncate.** |
-| Inbound                       | Normalise `interactive.button_reply` and `list_reply` to text, so a tapped choice becomes the next user message. Phase 3.                                                                                                                                                                                                                                                              |
+| Area                          | Change                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/qiforge.ts`              | Parses `plan` next to `text`. A plan that does not parse is dropped (counted as `qiforge_plan_invalid_total`), and `text` is sent instead.                                                                                                                                                                                                                                                                                                 |
+| `outbound_delivery`           | One row per part: `part_id`, `UNIQUE(request_id, part_id)`. The ID is `del_` + HMAC(`delivery \0 requestId \0 partId`): still 64 hex characters, so the receipt regex and `biz_opaque_callback_data` reconciliation still work. Existing objects rebuild the table in place.                                                                                                                                                               |
+| Ordering and pacing           | Parts go out strictly in order, about a second apart. After an ambiguous (`unknown`) send, the rest of the reply waits ten seconds so the receipt can land first. Graph API pacing errors (pair rate limit 131056; throughput 4, 80007, 130429) are retried without spending the part's attempts.                                                                                                                                          |
+| Ambiguous sends               | A part in `unknown` is never resent. This keeps the gateway spec's rule: "prefer one missing response over multiple user-visible duplicate replies".                                                                                                                                                                                                                                                                                       |
+| Policy                        | The binding check and `channelPolicy` run again before **every** part. A binding revoked in the middle of a reply suppresses the rest. The 24-hour window is checked per part. A document link is allowed only as an outbound reply.                                                                                                                                                                                                       |
+| Liveness                      | While the turn runs, the message is marked read and the typing indicator is shown, renewed every 20 seconds while polling. The raw inbound message ID this needs is sealed in the pending payload and removed with it.                                                                                                                                                                                                                     |
+| `packages/whatsapp/render.ts` | Maps chat Markdown to WhatsApp syntax: `*bold*`, `_italic_`, `~strike~`, monospace, lists, quotes; `label (url)` for links. An artefact becomes a **CTA URL** card: the title as its header (≤ 60), the message before it as its body when that fits (≤ 1,024), "Open document" as its button, and the expiry as its footer. Anything over 4,096 characters is split at paragraph, line, sentence and word boundaries. **Never truncate.** |
 
 Later adapters use the same parts:
 
 - **Telegram:** HTML parse mode, URL inline keyboards for artefacts, `sendChatAction` for typing.
 - **Slack:** the `markdown` block and a URL button.
-- **Streaming:** both now support native streaming (Telegram's `sendMessageDraft`, Slack's `chat.startStream`). A later phase can stream the bubble currently being written, without any change to the plan contract.
+- **Streaming:** both now support native streaming (Telegram's `sendMessageDraft`, Slack's `chat.startStream`). A later phase can stream the message currently being written, without any change to the plan contract.
 
 ### 8.2 Matrix rooms
 
-- The `MatrixGatewayDO` delivers the same plan, with one `m.text` per text part in the thread.
-  - Each is rendered to HTML with the same `marked` path as `formatReplay`, which fixes finding 6.
-  - Transaction IDs are `reply-<eventId>-<partId>`, so the homeserver still de-duplicates.
-- Artefact parts post a link plus an `org.ixo.qi.artifact` content key, so Qi.Space can render a card.
-- Progress parts are not posted. The `work_status` card already shows liveness in Matrix.
-- `MatrixTurnLedger` stores the plan rather than a single string, so a replayed turn re-delivers the same parts.
-- Task deliveries go through the shaper too. A long daily digest becomes a three-line summary plus the full digest as an artefact.
+Matrix rooms get the chat profile by default. This is how third-party oracles are used from the Portal.
+
+- `MatrixGatewayDO` posts one `m.text` per part in the thread.
+  - Each is rendered to HTML with `formatReplay`, which fixes finding 6.
+  - An artefact part is its title and an "Open document" link.
+  - Transaction IDs are `reply-<eventId>-<partId>`, so the homeserver still deduplicates a replay.
+- There are no progress parts. The typing notification and the `work_status` card show liveness.
+- `MatrixTurnLedger` stores the plan with the reply, so a replayed turn re-delivers the same parts.
+- A `stream` reply (with `matrixChat: false`) is one message, now with `formattedBody` too.
+- Task deliveries post the plan's text as one message. A long digest becomes its lead, the artefact link and its question.
+- An `org.ixo.qi.artifact` content key, which would let Qi.Space render a card, is later.
 
 ### 8.3 Portal / Qi.Space
 
 - The `stream` profile leaves SSE, frames, browser tools and AG-UI as they are, and `create_artifact` is not bound.
-- History from chat surfaces shows the canonical message. Artefacts render as a card: the owner opens the canonical copy through an authenticated `GET /artifacts/:id`, with no bearer link involved.
-- The dead `present_files` / `ArtifactPreview` remnants in the SDK should be replaced by this card.
+- The shared viewer is the `/artifact` page ([§7.3](#73-links-and-the-viewer)). It is public: the person may not be signed in on that device.
+- History from chat surfaces shows the canonical message. A reply that ended in `create_artifact` lists as the message, the link and the question the user received.
+- An artefact card that opens the canonical copy through the authenticated `GET /artifacts/:id` is later. It would replace the dead `present_files` / `ArtifactPreview` remnants in the SDK.
 
 ### 8.4 Canonical transcript and the Companion room
 
-- The model's checkpointed messages are unchanged (§6.2).
-- The channel mirror still posts **one** event per run into the canonical encrypted room. It holds the delivered content joined in order, with artefact links, so Qi.Space and Element show what the user actually received.
-- `org.ixo.qi.delivery: { v: 1, parts: [{ partId, kind, artifactId? }] }` records how the reply was rendered, next to the existing `org.ixo.qi.origin`. Progress parts are transient and are not mirrored.
+- The model's checkpointed messages are unchanged ([§6.2](#62-from-a-run-to-a-plan)).
+- The channel mirror still posts **one** event per run into the canonical encrypted room. It holds the plan's text: the delivered content joined in order, with artefact links. So Qi.Space and Element show what the user actually received.
+- An `org.ixo.qi.delivery` key recording how the reply was split, next to the existing `org.ixo.qi.origin`, is later.
 
 ---
 
@@ -411,16 +424,12 @@ Later adapters use the same parts:
 
 ## 10. Rollout
 
-Effort legend: 🟢 small · 🟡 medium · 🔴 large.
-
-| Phase                              | Scope                                                                                                                                                                                                                                                                                                                                             | Effort |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| **0. Prerequisite and quick wins** | - Fix finding 9, with a SQLite-store test.<br>- Gateway: stop truncating (split at paragraph and sentence boundaries up to 4,096), add the Markdown→WhatsApp renderer, mark as read and show typing.<br>- Runtime: the surface prompt slot for `channel` and `matrix` turns, and HTML-rendered Matrix replies.<br>These need no contract changes. | 🟢     |
-| **1. Reply Plans**                 | - Runtime: profiles, shaper with golden tests, step projection, `turn_run_parts`, `plan` in `/channels/turn`, and plan delivery in `MatrixGatewayDO`.<br>- Gateway: per-part rows, ordering, pacing and merging, per-part policy.                                                                                                                 | 🟡     |
-| **2. Artefacts**                   | - Runtime: the `artifacts` plugin (`create_artifact`, auto-spill, the `artifacts` table, share copies, viewer routes and static viewer), and the `ARTIFACT_BUCKET` env.<br>- Gateway: CTA URL rendering.<br>- Companion: an R2 binding and the viewer hostname.<br>- Qi.Space: the artefact card.                                                 | 🟡     |
-| **3. Liveness and interaction**    | - Progress parts, `choices` with interactive inbound replies, a verbosity preference, `read_artifact`, and CSV and HTML artefacts.<br>- Telegram and Slack adapters, and native streaming where providers support it.                                                                                                                             | 🔴     |
-
-Phase 0 alone removes the worst of today's experience: truncation, raw Markdown and silence. Phases 1–2 deliver the chat-native experience this spec describes.
+| Phase                         | Scope                                                                                                                                                                                                                                                                         | Status                                                                            |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **0. Prerequisite**           | Fix finding 9, with a SQLite-store test.                                                                                                                                                                                                                                      | Being fixed separately                                                            |
+| **1. Chat replies**           | Runtime: profiles, the surface section, the shaper, Reply Plans, `plan` on `/channels/turn`, plan delivery and HTML replies in `MatrixGatewayDO`. Gateway: per-part rows, ordering and pacing, per-part policy, the Markdown→WhatsApp renderer, no truncation, read + typing. | Done                                                                              |
+| **2. Artefacts**              | Runtime: `create_artifact`, auto-spill, the `artifacts` table, share copies, the built-in viewer, owner routes. Gateway: CTA URL cards. Portal: the shared `/artifact` viewer. Companion: an artefact bucket and `ORACLE_PUBLIC_URL`.                                         | Done; the Companion's buckets and lifecycle rules must be created before a deploy |
+| **3. Interaction and polish** | `choices` with interactive inbound replies, a verbosity preference, `read_artifact`, CSV and HTML artefacts, Telegram and Slack adapters, native streaming, `org.ixo.qi.artifact` / `org.ixo.qi.delivery` keys, revoking links with a binding, the Portal's artefact card.    | Later                                                                             |
 
 ---
 
@@ -429,8 +438,8 @@ Phase 0 alone removes the worst of today's experience: truncation, raw Markdown 
 **Tests** (following `docs/testing/` conventions; no test-side retries that mask failures):
 
 - **Shaper:** pure unit tests with golden fixtures: short answer, list with a lead-in, table, long list, code, a closing question, CJK and emoji segmentation. Every output part is checked for byte and character limits, and for staying inside the chat Markdown subset.
-- **Plans:** workerd tests for stable part IDs across re-poll, object abort and recovery, and for idempotent `create_artifact` after a reset. Also: `plan.complete` only after the terminal status, and pruning removes parts but keeps the tombstone.
-- **Gateway:** exactly one provider send per part under duplicate polls and restarts, `unknown` never resent, revocation in the middle of a reply suppressing the rest, token-bucket merging, and never truncating.
+- **Plans:** workerd tests for the plan a finished channel turn returns, the same plan on re-poll, idempotent artefact creation, and pruning that removes the plan with the run but keeps the tombstone.
+- **Gateway:** exactly one provider send per part under duplicate polls and restarts, `unknown` never resent, revocation in the middle of a reply suppressing the rest, pacing errors retried without spending attempts, the outbox migration, and never truncating.
 - **Viewer:** the page never renders content without the fragment; CSP and noindex headers are present; decryption round-trips; expired and revoked links return a clear page.
 - **Evaluations** (per `specs/agent-evaluations.md`): about 30 chat-surface prompts (quick facts, plans, research, lists, drafts). Deterministic checks cover bubble count and length, and headings and tables. An LLM judge scores "reads like a message", "answer first" and "long content in an artefact".
 
@@ -449,12 +458,13 @@ Phase 0 alone removes the worst of today's experience: truncation, raw Markdown 
 
 ## 12. Risks and open questions
 
-1. **WhatsApp eligibility.** Meta's Business terms barred general-purpose AI assistants from 15 January 2026. A March 2026 revision re-admitted them for a fee. The European Commission's interim measures of June 2026 require free access in the EEA while its investigation runs. The gateway spec already treats provider eligibility as a release gate. This design keeps rendering behind the adapter seam, so Telegram, Slack and Matrix do not depend on that outcome.
+1. **WhatsApp eligibility.** Meta's Business terms barred general-purpose AI assistants from 15 January 2026. A March 2026 revision re-admitted them for a fee. The European Commission's interim measures of June 2026 require free access in the EEA while its investigation runs. The gateway spec already treats provider eligibility as a release gate. _Decided:_ rendering stays behind the adapter seam, so Telegram, Slack and Matrix do not depend on that outcome.
 2. **Model compliance varies by model** (Companion users can pick models or bring their own). The shaper makes the contract independent of the model, and evaluations track the gap.
-3. **Bearer links.** Open question: should `link` (the default, which expires) or `signed-in` be the default for everyone?
-4. **Viewer hostname.** Open question: a per-oracle subdomain, or a shared Qi.Space viewer that uses the same URL grammar and fetches ciphertext from the oracle? The runtime default must work without Qi.Space.
-5. **Progress lines.** Are they worth it beyond typing indicators? Ship them in phase 3 behind the profile, and compare time to first message and user sentiment.
+3. **Bearer links.** _Decided:_ "anyone with the link" with expiry is the default. The README recommends reviewing it before chat channels leave pilot: a signed-in mode through Qi.Space for sensitive content, the 30-day default, and a per-user choice.
+4. **Viewer hostname.** _Decided:_ a shared Qi.Space viewer, with the runtime's built-in page as the default that needs nothing else.
+5. **Progress lines.** _Decided:_ none. The typing indicator is enough.
 6. **Summary quality on auto-spill.** The lead is extractive, and with the §5 prompt the model normally writes the summary itself. If measurement shows poor leads, an optional bounded Decision can pick the best lead paragraph without generating free text.
+7. **Pacing under WhatsApp's pair limit.** A reply of four parts is a burst that borrows from the next 24 seconds of quota. A quick follow-up can then hit error 131056, which the gateway waits out. If that proves common, merge adjacent text parts when the quota is short.
 
 ---
 
