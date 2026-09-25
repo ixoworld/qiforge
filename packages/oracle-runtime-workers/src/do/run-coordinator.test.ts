@@ -1,5 +1,7 @@
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { Logger } from '../plugin-api/types';
+import { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment, RunFrame } from './run-buffer';
 import {
   RunCoordinator,
@@ -10,10 +12,21 @@ import {
 } from './run-coordinator';
 import {
   attemptSeqBase,
+  RunStore,
   type RunDurabilityConfig,
   type RunRecord,
   type RunStatus,
 } from './run-store';
+import type { RunStoreTestDO } from './run-store-test-do';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace -- augmenting the ambient `Cloudflare.Env` needs namespace syntax
+  namespace Cloudflare {
+    interface Env {
+      RUN_STORE_TEST: DurableObjectNamespace<RunStoreTestDO>;
+    }
+  }
+}
 
 const T0 = Date.parse('2026-09-13T10:00:00.000Z');
 const SESSION = 'sess-1';
@@ -546,4 +559,52 @@ it('persists the final channel reply for cross-service receipt polling', async (
     partialText: 'The complete answer',
     messageId: 'message-1',
   });
+});
+
+it('persists the final channel reply through the SQLite run store and ends the run as a channel run', async () => {
+  // The memory store hands back the client it was given; the SQLite store
+  // reads it back from the row, which is what `finalize` and `onRunEnded` see.
+  await runInDurableObject(
+    env.RUN_STORE_TEST.getByName('coordinator-channel-reply'),
+    async (_instance, state) => {
+      const db = await DoSqliteDatabase.open(state, 'coordinator-test.db');
+      const store = new RunStore(db, () => T0);
+      const ended: RunRecord[] = [];
+      const runs = new RunCoordinator({
+        store,
+        config: CONFIG,
+        instanceId: 'new-instance',
+        log: silent,
+        now: () => T0,
+        requestAlarm: () => undefined,
+        runAttempt: async () => ({
+          status: 'finished',
+          text: 'The complete answer',
+          messageId: 'message-1',
+        }),
+        checkpointIdOf: async () => null,
+        onRunEnded: async (record) => {
+          ended.push(record);
+        },
+      });
+      const { live } = await runs.begin({
+        runId: 'channel-once',
+        sessionId: SESSION,
+        requestId: 'wa:one',
+        client: 'channel',
+        request: '{}',
+        multitask: 'enqueue',
+      });
+      await live.done;
+      await settled();
+      expect(await store.get('channel-once')).toMatchObject({
+        client: 'channel',
+        status: 'finished',
+        partialText: 'The complete answer',
+        messageId: 'message-1',
+      });
+      expect(ended.map((record) => record.client)).toEqual(['channel']);
+      await db.close();
+    },
+  );
 });

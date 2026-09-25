@@ -255,7 +255,10 @@ function toRecord(row: RunRow): RunRecord {
     runId: row.run_id,
     sessionId: row.session_id,
     requestId: row.request_id,
-    client: row.client === 'matrix' ? 'matrix' : 'portal',
+    client:
+      row.client === 'matrix' || row.client === 'channel'
+        ? row.client
+        : 'portal',
     status: row.status as RunStatus,
     startedAt: row.started_at,
     updatedAt: row.updated_at,

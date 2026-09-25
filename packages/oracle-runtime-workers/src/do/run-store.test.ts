@@ -6,6 +6,7 @@ import {
   DEFAULT_RECOVERY_DELAYS_MS,
   RUN_RETENTION_MS,
   runDurabilityConfig,
+  type RunRecord,
 } from './run-store';
 
 declare global {
@@ -102,6 +103,30 @@ describe('RunStore', () => {
     await s.update('r1', { status: 'finished', messageId: 'm1', lastSeq: 7 });
     expect(await s.activeForSession('sess')).toBeUndefined();
     expect((await s.get('r1'))?.messageId).toBe('m1');
+  });
+
+  it('reads each client back as it was stored, and an unknown one as portal', async () => {
+    const s = stub('runs-client');
+    await s.setNow(T0);
+    const clients: Array<RunRecord['client']> = ['portal', 'matrix', 'channel'];
+    for (const client of clients) {
+      await s.create({
+        runId: `run-${client}`,
+        sessionId: 'sess',
+        requestId: `req-${client}`,
+        client,
+        status: 'running',
+        request: '{}',
+        checkpointId: null,
+        instanceId: 'i1',
+      });
+      expect((await s.get(`run-${client}`))?.client).toBe(client);
+    }
+    await s.rawRun(
+      `INSERT INTO turn_runs (run_id, session_id, request_id, client, status, started_at, updated_at, request, instance_id)
+       VALUES ('run-unknown', 'sess', 'req', 'unknown', 'finished', '2026-09-13T10:00:00.000Z', '2026-09-13T10:00:00.000Z', '{}', 'i0')`,
+    );
+    expect((await s.get('run-unknown'))?.client).toBe('portal');
   });
 
   it('adds the generation column to a turn_runs table created before it existed', async () => {
