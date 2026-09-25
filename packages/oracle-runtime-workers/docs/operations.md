@@ -20,6 +20,8 @@ Public (UCAN-authenticated unless noted):
 | `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                         |
 | `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                      |
 | `GET /user-preferences`                                                         | The user's stored preferences.                                           |
+| `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.            |
+| `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.              |
 
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:

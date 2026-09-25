@@ -29,6 +29,8 @@ import {
 } from './test-fixtures';
 import { createToolExecutionMiddleware } from './middlewares/tool-execution';
 import { ToolScheduler } from './tool-scheduler';
+import { tool as pluginTool } from '../plugin-api/tool-helper';
+import { resolveDeliveryProfile } from '../delivery/profile';
 import { harnessLimitOf, TurnBudget } from './turn-budget';
 import { z } from 'zod';
 
@@ -882,4 +884,90 @@ describe('createMainAgent tool execution', () => {
     );
     expect(calls.read).toBe(1);
   }, 15_000);
+});
+
+// ── Chat delivery ─────────────────────────────────────────────────────────────
+
+describe('createMainAgent — chat delivery', () => {
+  const whatsapp = resolveDeliveryProfile({
+    client: 'channel',
+    channel: {
+      provider: 'whatsapp',
+      bindingId: 'chb_x',
+      remoteMessageRef: 'hmac:x',
+    },
+  });
+
+  it('binds the turn tool, tells the model it is in a chat and ends the run on a return-direct call', async () => {
+    const core = bootCore();
+    const surfaces: unknown[] = [];
+    const sendDocument = pluginTool(
+      async (_args, ctx) => {
+        surfaces.push(ctx.session.surface);
+        return { ok: true };
+      },
+      {
+        name: 'create_artifact',
+        description: 'Send a document.',
+        schema: z.object({}),
+        effect: 'read',
+      },
+    );
+    const { agent, systemPrompt, boundToolNames, toolEffects, context } =
+      await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(
+          core,
+          scriptedLlm({
+            main: [[{ name: 'create_artifact', args: {}, id: 'c1' }], []],
+          }),
+        ),
+        requestCtx: {
+          ...requestCtx,
+          session: { ...requestCtx.session, client: 'channel' },
+        },
+        state: {},
+        delivery: whatsapp,
+        hooks: { turnTools: [{ tool: sendDocument, returnDirect: true }] },
+      });
+    expect(boundToolNames).toContain('create_artifact');
+    expect(toolEffects.get('create_artifact')).toBe('read');
+    expect(systemPrompt).toContain('You are replying in WhatsApp.');
+    expect(systemPrompt).toContain('`create_artifact`');
+    expect(context.session.surface).toEqual({
+      kind: 'chat',
+      surface: 'whatsapp',
+      label: 'WhatsApp',
+    });
+
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Plan my week')] },
+      { configurable: { thread_id: 'sess-chat' }, context },
+    )) as { messages: BaseMessage[] };
+    expect(result.messages.at(-1)?.type).toBe('tool');
+    expect(surfaces).toEqual([
+      { kind: 'chat', surface: 'whatsapp', label: 'WhatsApp' },
+    ]);
+  });
+
+  it('adds nothing to a Portal turn', async () => {
+    const core = bootCore();
+    const { systemPrompt, context } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx,
+      state: {},
+      delivery: { kind: 'stream' },
+    });
+    expect(systemPrompt).not.toContain(
+      '## Where this conversation is happening',
+    );
+    expect(context.session.surface).toEqual({ kind: 'stream' });
+  });
 });

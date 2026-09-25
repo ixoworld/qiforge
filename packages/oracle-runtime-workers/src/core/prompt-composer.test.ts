@@ -247,3 +247,34 @@ describe('composePrompt — browser tools this turn', () => {
     expect(empty).toBe(absent);
   });
 });
+
+describe('composePrompt — chat surface', () => {
+  it('places the surface section after the communication style, only when given', async () => {
+    const portal = await composePrompt(
+      baseInput({
+        identity: {
+          ...IDENTITY,
+          prompt: { communicationStyle: '- Lead with the answer.' },
+        },
+      }),
+    );
+    expect(portal).not.toContain('## Where this conversation is happening');
+
+    const chat = await composePrompt(
+      baseInput({
+        identity: {
+          ...IDENTITY,
+          prompt: { communicationStyle: '- Lead with the answer.' },
+        },
+        surfaceBlock:
+          '## Where this conversation is happening\n\nYou are replying in WhatsApp.',
+      }),
+    );
+    const style = chat.indexOf('- Lead with the answer.');
+    const surface = chat.indexOf('## Where this conversation is happening');
+    expect(style).toBeGreaterThan(-1);
+    expect(surface).toBeGreaterThan(style);
+    expect(surface).toBeLessThan(chat.indexOf('## Operational mode'));
+    expect(chat).not.toContain('{{');
+  });
+});

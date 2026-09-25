@@ -157,6 +157,26 @@ same object; each plugin's `configSchema` is the reference.
 | `TIER_EVICT_AFTER_PERIODS` | no       | Periods a chunk must go untouched before eviction (default 2).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `TIER_PERIOD_MS`           | no       | Length of one access-tracking period (default one day; ≥ 1000). Tests shorten it; production keeps the day.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
+### Chat delivery and artefacts
+
+Turns from IXO Channels and Matrix rooms reply in chat style: a few short messages, with a browser document for anything long. The Portal keeps streaming. See [chat delivery](chat-delivery.md). Artefacts need a bucket and a public origin. Without them, long chat replies are split into messages, and `create_artifact` is not offered.
+
+| Variable                 | Required      | Meaning                                                                                                                                                                                                                                                               |
+| ------------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ARTIFACT_BUCKET`        | no            | **Binding**, not a var: `"r2_buckets": [{ "binding": "ARTIFACT_BUCKET", "bucket_name": "<oracle>-artifacts" }]`. Holds the encrypted share copies under `art/`. It never holds plaintext.                                                                             |
+| `ORACLE_PUBLIC_URL`      | with a bucket | The oracle script's public origin, for example `https://companion.devnet.ixo.earth`. Links are `<origin>/a/<id>#k=<key>`. It must be `https`; `http` is allowed only for `localhost` and `127.0.0.1`.                                                                 |
+| `ARTIFACT_VIEWER_URL`    | no            | A shared viewer page (the Qi.Space artefact page) that opens links instead of the oracle's own page. Links become `<viewer>#a=<source>&k=<key>`; the viewer fetches `<source>/data` and decrypts in the browser. Unset = the built-in page, which needs nothing else. |
+| `ARTIFACT_LINK_TTL_DAYS` | no            | Link lifetime in days (default 30, at most 365). Links are bearer links until they expire: see the [link policy](../../../README.md#artefact-link-policy).                                                                                                            |
+
+Add a lifecycle rule to the bucket, so share copies nobody opened are removed. The data route already refuses expired ones. Set the rule to one day more than the link lifetime:
+
+```bash
+wrangler r2 bucket create <oracle>-artifacts
+wrangler r2 bucket lifecycle add <oracle>-artifacts artefact-expiry art/ --expire-days 31
+```
+
+`OracleConfig.delivery` tunes the behaviour: `matrixChat: false` makes Matrix rooms reply like the Portal, and `limits` overrides the per-surface limits.
+
 ### LLM, tracing, BYO
 
 | Variable                                                                                                                                                                                                                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |

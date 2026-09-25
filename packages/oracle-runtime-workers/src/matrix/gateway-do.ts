@@ -91,6 +91,10 @@ import {
   ThreadRootCache,
 } from './reply-chain';
 import { fetchUserMatrixServerName } from './user-homeserver';
+import { parseReplyPlan } from '../delivery/schema';
+import type { ReplyPlan } from '../delivery/types';
+import { replyPartContent, replyPartTxnId } from './reply-parts';
+import { formatReplay } from './replay-format';
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_TIMEOUT_MS = 30_000;
@@ -595,7 +599,10 @@ export class MatrixGatewayDO
           'info',
           `turn ${requestId}: reply served from the user object's ledger (turn had already finished)`,
         );
-      if (result.text.trim()) {
+      const plan = parseReplyPlan(result.plan);
+      if (plan && plan.parts.length > 0) {
+        await this.sendReplyPlan(turn, plan);
+      } else if (result.text.trim()) {
         // The transaction id is derived from the event id, so this reply is
         // deduplicated by the homeserver if a previous incarnation already
         // sent it before it died (see inbox-store.ts).
@@ -603,6 +610,11 @@ export class MatrixGatewayDO
         // thread on it (Node's listener bridge does the same).
         await this.sendText(turn.roomId, result.text, {
           threadId: turn.threadId,
+          formattedBody: formatReplay({
+            message: result.text,
+            isOracle: true,
+            disablePrefix: true,
+          }).formattedBody,
           ...(turn.eventIds[0] ? { txnId: replyTxnId(turn.eventIds[0]) } : {}),
         });
       } else {
@@ -656,6 +668,26 @@ export class MatrixGatewayDO
             err,
           ),
         );
+    }
+  }
+
+  /**
+   * A chat-style reply (chat delivery): each part is its own message in the
+   * thread, in order, through the durable outbox. Part transaction ids are
+   * derived from the event id, so a replay after a reset posts nothing twice.
+   */
+  private async sendReplyPlan(
+    turn: IngestTurn,
+    plan: ReplyPlan,
+  ): Promise<void> {
+    const eventId = turn.eventIds[0];
+    for (const part of plan.parts) {
+      const { body, formattedBody } = replyPartContent(part);
+      await this.sendText(turn.roomId, body, {
+        threadId: turn.threadId,
+        formattedBody,
+        ...(eventId ? { txnId: replyPartTxnId(eventId, part) } : {}),
+      });
     }
   }
 

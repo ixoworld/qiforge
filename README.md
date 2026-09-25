@@ -189,6 +189,32 @@ Requirements: a reachable Matrix homeserver, a persistent volume for encrypted s
 
 ---
 
+## Artefact link policy
+
+When an oracle on the Workers runtime replies in a chat app (WhatsApp, Matrix, Telegram, Slack), it sends anything too long for chat as a document. The user opens the document in a browser from a link in the chat.
+
+**Decision: artefact links are "anyone with the link", with expiry.** Whoever holds a link can open the document without signing in until the link expires. Links expire 30 days after creation by default (`ARTIFACT_LINK_TTL_DAYS`, at most 365).
+
+What protects the document:
+
+- The decryption key is in the link's fragment (`#k=…`). Browsers never send the fragment to a server, so link previews, proxies and server logs never see it.
+- The oracle's bucket holds only ciphertext. The readable copy lives in the user's own database.
+- The link expires. The user can revoke it (`DELETE /artifacts/:id`). Deleting the conversation deletes its documents.
+
+What it does not protect against: anyone the link is forwarded to, or who sees it, can read the document until it expires or is revoked.
+
+Why we chose this: chat users open links on their phones, often in an in-app browser where they are not signed in to Qi.Space. Requiring a sign-in would break the main use.
+
+**We recommend reviewing this policy** before chat channels leave pilot, and again whenever a new surface or a new kind of sensitive content is added. The review should cover:
+
+- whether some content (health, finance, legal, other people's data) should need a signed-in viewer on Qi.Space instead of a bearer link;
+- whether 30 days is the right default;
+- whether users should choose the policy themselves, per document or as a preference.
+
+The implementation is described in [`packages/oracle-runtime-workers/docs/chat-delivery.md`](packages/oracle-runtime-workers/docs/chat-delivery.md).
+
+---
+
 ## Roadmap
 
 - **Tasks plugin** — background jobs (placeholder today; clean rebuild planned)

@@ -10,6 +10,7 @@ import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
 import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
+import type { OwnedArtifact } from '../artifacts/store';
 /**
  * Cross-object contracts for the Workers runtime.
  *
@@ -142,6 +143,19 @@ export interface OracleWorkerEnv {
   TIER_EVICT_AFTER_PERIODS?: string;
   /** Length of one access-tracking period in ms (default one day; tests shorten it). */
   TIER_PERIOD_MS?: string;
+  /**
+   * Artefacts (chat delivery): long replies on chat surfaces become documents
+   * behind a link. The R2 bucket holds only ciphertext share copies; absent
+   * bucket or public origin = artefacts off, and long replies are split into
+   * messages instead.
+   */
+  ARTIFACT_BUCKET?: R2Bucket;
+  /** The oracle Worker's public origin; artefact links point at `/a/:id` under it. */
+  ORACLE_PUBLIC_URL?: string;
+  /** A shared viewer page (Qi.Space). Unset = the oracle's own `/a/:id` page. */
+  ARTIFACT_VIEWER_URL?: string;
+  /** Days an artefact link stays valid (default 30). */
+  ARTIFACT_LINK_TTL_DAYS?: string;
   /** IXO VFS worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */
   VFS_BASE_URL?: string;
   /** UCAN store worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */
@@ -460,8 +474,10 @@ export interface RunsStatus {
 export interface TurnResult {
   sessionId: string;
   requestId: string;
-  /** Final assistant text. */
+  /** Final assistant text (on a chat surface: the plan as one message). */
   text: string;
+  /** Chat-surface turns: the Reply Plan (JSON) to deliver part by part. */
+  plan?: JsonString;
   /** Id of the final assistant message, when one was produced. */
   messageId?: string;
   /** Tool calls made during the turn (name + summarized status), for logging. */
@@ -590,6 +606,13 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     opts?: { limit?: number; offset?: number },
   ): Promise<{ sessions: SessionSummary[]; total: number }>;
   deleteSession(identity: TurnIdentity, sessionId: string): Promise<boolean>;
+  /** `GET /artifacts/:id` — the owner's canonical copy, or null. */
+  artifact(
+    identity: TurnIdentity,
+    artifactId: string,
+  ): Promise<OwnedArtifact | null>;
+  /** `DELETE /artifacts/:id` — false when there is no such artefact. */
+  revokeArtifact(identity: TurnIdentity, artifactId: string): Promise<boolean>;
   /** JSON-encoded `MessageDto[]` for `GET /messages/:sessionId`. */
   listMessages(identity: TurnIdentity, sessionId: string): Promise<JsonString>;
   /**

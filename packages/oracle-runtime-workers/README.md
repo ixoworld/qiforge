@@ -87,6 +87,8 @@ Every variable, binding and migration is explained in
 | `GET /matrix/status`, `POST /matrix/start`            | Gateway status and start                              |
 | `POST/GET /sessions`, `POST/GET /messages/:id`        | The chat API                                          |
 | `/delegation`, `/models`, `/socket.io/`, `/byo-llm/*` | Delegation, models, realtime channel, BYO LLM         |
+| `GET /a/:id`, `GET /a/:id/data`                       | Artefact links opened from chat apps (public)         |
+| `GET/DELETE /artifacts/:id`                           | An artefact's canonical copy; revoke its link         |
 | `/debug/*` (with `ORACLE_DEBUG_ROUTES=true`)          | Storage, tasks, sockets, outbox, gateway restart      |
 
 The status fields, the runbook and the behaviour of both objects over their
@@ -100,6 +102,8 @@ lifetime are in [operations](docs/operations.md).
 | [node-parity](docs/node-parity.md)     | What is identical to the Node runtime, what is ported differently, what is not ported    |
 | [configuration](docs/configuration.md) | Wrangler config, migrations, every env var, first-time setup, the bot's send rate        |
 | [operations](docs/operations.md)       | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook |
+| [chat-delivery](docs/chat-delivery.md) | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links    |
+| [channels](docs/channels.md)           | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity         |
 | [testing](docs/testing.md)             | Unit, harness e2e, the devnet feature matrix, stress                                     |
 | [load-tests](docs/load-tests.md)       | Measurements and the findings that shaped the gateway                                    |
 

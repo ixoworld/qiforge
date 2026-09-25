@@ -1,6 +1,7 @@
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
+import { parseReplyPlan } from '../delivery/schema';
 import {
   ChannelError,
   channelRequestHash,
@@ -20,6 +21,8 @@ export interface ChannelTurnsHost {
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
   assertSession(identity: TurnIdentity, sessionId: string): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
+  /** The Reply Plan (JSON) a finished run was built into, if any. */
+  getPlan(runId: string): Promise<string | null>;
   wasPruned(runId: string): Promise<boolean>;
   begin(runId: string, request: TurnRequest): Promise<RunRecord>;
   mirror(
@@ -154,6 +157,10 @@ export class ChannelTurns {
     }
     if (record.status === 'finished')
       await this.host.mirror(request, record.partialText ?? '', 'oracle');
+    const plan =
+      record.status === 'finished'
+        ? parseReplyPlan(await this.host.getPlan(runId))
+        : null;
     return {
       requestId: input.requestId,
       runId,
@@ -163,6 +170,7 @@ export class ChannelTurns {
       ...(record.status === 'finished'
         ? { text: record.partialText ?? '' }
         : {}),
+      ...(plan ? { plan } : {}),
     };
   }
 }

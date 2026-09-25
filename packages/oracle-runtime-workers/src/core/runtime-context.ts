@@ -27,6 +27,7 @@ import type {
   RouterEventPayload,
   RuntimeContext,
   SecretIndex,
+  SessionSurface,
   SharedAccessors,
   ToolCallEventPayload,
   UcanDelegation,
@@ -304,6 +305,7 @@ export interface RuntimeSessionContext {
   wsId?: string;
   requestId: string;
   roomId?: string;
+  surface?: SessionSurface;
 }
 
 /** What LangGraph hands us at invocation time on `runtime.context`. */
