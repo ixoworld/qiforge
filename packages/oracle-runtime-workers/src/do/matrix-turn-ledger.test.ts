@@ -86,6 +86,47 @@ describe('MatrixTurnLedger (SQLite)', () => {
     });
   });
 
+  it('keeps the Reply Plan of a chat reply, and adds its column to an older ledger', async () => {
+    await runInDurableObject(stub('ledger-plan'), async (_instance, state) => {
+      const now = 1_700_000_000_000;
+      const at = new Date(now).toISOString();
+      const db = await DoSqliteDatabase.open(state, 'ledger.db');
+      await db.run(`
+        CREATE TABLE matrix_turns (
+          event_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          answered_at TEXT,
+          reply_text TEXT
+        )`);
+      await db.run(
+        `INSERT INTO matrix_turns VALUES ('$before', 'matrix:!r', 'req-0', ?, ?, 'before plans')`,
+        [at, at],
+      );
+      const ledger = new MatrixTurnLedger(db, () => now);
+      expect(await ledger.get('$before')).toEqual({
+        eventId: '$before',
+        sessionId: 'matrix:!r',
+        requestId: 'req-0',
+        startedAt: at,
+        answeredAt: at,
+        replyText: 'before plans',
+      });
+      const plan = JSON.stringify({
+        v: 1,
+        parts: [{ partId: 'p1', kind: 'text', text: 'Done.' }],
+      });
+      await ledger.start('$e1', 'matrix:!r', 'req-1');
+      await ledger.answer('$e1', 'Done.', plan);
+      expect(await ledger.get('$e1')).toMatchObject({
+        replyText: 'Done.',
+        replyPlan: plan,
+      });
+      await db.close();
+    });
+  });
+
   it('prunes rows older than the retention window at setup', async () => {
     await runInDurableObject(stub('ledger-2'), async (_instance, state) => {
       let now = 1_700_000_000_000;

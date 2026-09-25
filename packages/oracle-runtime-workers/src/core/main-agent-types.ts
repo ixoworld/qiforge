@@ -13,7 +13,9 @@ import type {
   MergedConfig,
   ModelRole,
   OracleIdentity,
+  PluginTool,
 } from '../plugin-api/types';
+import type { DeliveryProfile } from '../delivery/types';
 import type { Registries } from './registries';
 import type { AmbientServices, RunConfigContext } from './runtime-context';
 import type { TMainAgentGraphState } from './state';
@@ -119,6 +121,12 @@ export interface MainAgentHooks {
     offset: number,
     length: number,
   ) => Promise<ReadResultOutcome>;
+  /**
+   * Tools the host binds for this turn only, outside every plugin and the
+   * capability gate (chat delivery's `create_artifact`). `returnDirect` ends
+   * the run once the tool has answered, without another model call.
+   */
+  turnTools?: Array<{ tool: PluginTool; returnDirect?: boolean }>;
 }
 
 export interface MainAgentArgs {
@@ -163,6 +171,12 @@ export interface MainAgentArgs {
    * deadline. Omitted → unbudgeted (tests, stateless builds).
    */
   turnBudget?: TurnBudget;
+  /**
+   * Where the reply lands (chat delivery). A `chat` profile adds the surface
+   * section to the prompt; tools see it as `ctx.session.surface`. Omitted →
+   * a Portal turn.
+   */
+  delivery?: DeliveryProfile;
   hooks?: MainAgentHooks;
 }
 

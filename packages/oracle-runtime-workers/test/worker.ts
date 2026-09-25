@@ -1,4 +1,5 @@
 export { ChannelTurnsTestDO } from '../src/channels/test-do';
+export { ArtifactStoreTestDO } from '../src/artifacts/test-do';
 /**
  * Test-only Worker entry for the vitest Workers pool. It exposes the Durable
  * Object classes the unit tests drive directly through `env.*` bindings.

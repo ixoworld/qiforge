@@ -383,6 +383,10 @@ export class RunStore {
     await this.db.run(`CREATE TABLE IF NOT EXISTS channel_run_tombstones (
       run_id TEXT PRIMARY KEY, status TEXT NOT NULL
     ) WITHOUT ROWID`);
+    // The Reply Plan a finished chat-surface run delivers (chat delivery).
+    await this.db.run(`CREATE TABLE IF NOT EXISTS turn_run_plans (
+      run_id TEXT PRIMARY KEY, plan TEXT NOT NULL
+    ) WITHOUT ROWID`);
     // Ended runs older than the retention window: their segments are gone
     // already (cutover); drop the rows and marks in one pass per boot.
     const cutoff = new Date(this.now() - RUN_RETENTION_MS).toISOString();
@@ -407,6 +411,9 @@ export class RunStore {
         await this.db.run(`DELETE FROM turn_tool_marks WHERE run_id = ?`, [
           row.run_id,
         ]);
+        await this.db.run(`DELETE FROM turn_run_plans WHERE run_id = ?`, [
+          row.run_id,
+        ]);
         await this.db.run(`DELETE FROM turn_run_segments WHERE run_id = ?`, [
           row.run_id,
         ]);
@@ -415,6 +422,24 @@ export class RunStore {
         ]);
       });
     }
+  }
+
+  /** Record the Reply Plan (JSON) a chat-surface run finished with. */
+  async setPlan(runId: string, plan: string): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      'INSERT OR REPLACE INTO turn_run_plans (run_id, plan) VALUES (?, ?)',
+      [runId, plan],
+    );
+  }
+
+  async getPlan(runId: string): Promise<string | null> {
+    await this.setup();
+    const row = await this.db.get<{ plan: string }>(
+      'SELECT plan FROM turn_run_plans WHERE run_id = ?',
+      [runId],
+    );
+    return row?.plan ?? null;
   }
 
   async wasChannelRunPruned(runId: string): Promise<boolean> {

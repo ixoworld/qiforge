@@ -9,6 +9,7 @@
  * run one attempt, the latest checkpoint of a session, and what to do when
  * a run ends (deliver a task result, close a Matrix card).
  */
+import type { ReplyPlan } from '../delivery/types';
 import type { Logger } from '../plugin-api/types';
 import {
   framesOfSegments,
@@ -29,6 +30,8 @@ export interface RunOutcome {
   status: 'finished' | 'aborted' | 'interrupted' | 'failed';
   /** The reply (the last assistant message, or the streamed text so far). */
   text: string;
+  /** A finished chat-surface run: the reply as its surface delivers it. */
+  plan?: ReplyPlan;
   messageId?: string;
   toolCalls?: Array<{ name: string; status: 'done' | 'error' }>;
   error?: unknown;

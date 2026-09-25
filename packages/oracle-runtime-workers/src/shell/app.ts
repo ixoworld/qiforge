@@ -39,6 +39,11 @@ import {
   type RouteExclusion,
 } from './auth';
 import { turnBodyTooLarge } from './turn-body-cap';
+import {
+  artifactDataResponse,
+  artifactPageResponse,
+} from '../artifacts/routes';
+import { ARTIFACT_ID_RE } from '../artifacts/store';
 import { z } from 'zod';
 
 const DebugEventBody = z.object({
@@ -141,6 +146,27 @@ export function createShell(
     const forwarded = new Request(target, c.req.raw);
     forwarded.headers.set(ROUTED_USER_HEADER, userDid);
     return userStub(c.env, userDid).fetch(forwarded);
+  });
+
+  // --- artefact links (public) -----------------------------------------------
+  // Also ahead of CORS and auth: a link is opened by whoever holds it, and
+  // the data route answers any origin itself (a shared viewer on another
+  // host fetches it). Both serve only what is safe without the key, which
+  // stays in the link's fragment: a static page and ciphertext.
+  app.get('/a/:artifactId', (c) =>
+    artifactPageResponse(c.env, c.req.param('artifactId')),
+  );
+  app.get('/a/:artifactId/data', async (c) => {
+    const ip = c.req.header('cf-connecting-ip');
+    if (
+      ip &&
+      c.env.RATE_LIMIT &&
+      !(await c.env.RATE_LIMIT.limit({ key: `artifact:${ip}` })).success
+    )
+      return c.text('Too many requests', 429, {
+        'access-control-allow-origin': '*',
+      });
+    return artifactDataResponse(c.env, c.req.param('artifactId'));
   });
 
   app.use('*', async (c, next) => {
@@ -317,6 +343,31 @@ export function createShell(
     return ok
       ? c.json({ message: 'Session deleted successfully' })
       : c.json({ message: 'Session not found' }, 404);
+  });
+
+  // --- artefacts (owner) ---------------------------------------------------------
+  app.get('/artifacts/:artifactId', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const artifactId = c.req.param('artifactId');
+    const artifact = ARTIFACT_ID_RE.test(artifactId)
+      ? await userStub(c.env, identity.userDid).artifact(identity, artifactId)
+      : null;
+    return artifact
+      ? c.json(artifact)
+      : c.json({ statusCode: 404, message: 'Artefact not found' }, 404);
+  });
+  app.delete('/artifacts/:artifactId', async (c) => {
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const artifactId = c.req.param('artifactId');
+    const revoked =
+      ARTIFACT_ID_RE.test(artifactId) &&
+      (await userStub(c.env, identity.userDid).revokeArtifact(
+        identity,
+        artifactId,
+      ));
+    return revoked
+      ? c.json({ revoked: true })
+      : c.json({ statusCode: 404, message: 'Artefact not found' }, 404);
   });
 
   // --- messages ----------------------------------------------------------------
