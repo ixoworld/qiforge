@@ -82,6 +82,92 @@ describe('createCapabilityGateMiddleware', () => {
     ]);
     expect(passed()).not.toContain('call_weather_planner_agent');
   });
+
+  describe('tool calls', () => {
+    function gate(preloadedPlugins?: Set<string>) {
+      const warn = vi.fn();
+      const mw = createCapabilityGateMiddleware({
+        preloadedPlugins,
+        pluginByToolName: new Map([
+          ['always_tool', 'always_plugin'],
+          ['silent_tool', 'silent_plugin'],
+          ['on_demand_tool', 'on_demand_plugin'],
+          ['call_weather_planner_agent', 'weather'],
+        ]),
+        visibilityByToolName: new Map<string, Visibility>([
+          ['always_tool', 'always'],
+          ['silent_tool', 'silent'],
+          ['on_demand_tool', 'on-demand'],
+          ['call_weather_planner_agent', 'on-demand'],
+        ]),
+        logger: { log: vi.fn(), warn, error: vi.fn() },
+      });
+      const wrap = mw.wrapToolCall;
+      if (!wrap) throw new Error('wrapToolCall missing');
+      const ran = new ToolMessage({
+        content: 'ran',
+        tool_call_id: 'tc-1',
+        name: 'x',
+      });
+      const call = async (name: string, loadedPlugins: string[] = []) => {
+        const handler = vi.fn().mockResolvedValue(ran);
+        const result = await wrap(
+          {
+            toolCall: { name, args: {}, id: 'tc-1' },
+            tool: { name },
+            state: { messages: [], loadedPlugins },
+            runtime: {},
+          } as never,
+          handler as never,
+        );
+        return { result, ran: handler.mock.calls.length > 0 };
+      };
+      return { call, warn };
+    }
+
+    it('refuses a call to an on-demand tool or sub-agent whose plugin is not loaded, without running it', async () => {
+      const { call, warn } = gate();
+      for (const name of ['on_demand_tool', 'call_weather_planner_agent']) {
+        const { result, ran } = await call(name);
+        expect(ran).toBe(false);
+        expect(result).toBeInstanceOf(ToolMessage);
+        const refusal = result as ToolMessage;
+        expect(refusal.status).toBe('error');
+        expect(refusal.tool_call_id).toBe('tc-1');
+        expect(refusal.name).toBe(name);
+        expect(String(refusal.content)).toContain('was not run');
+        expect(String(refusal.content)).toContain('load_capability');
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        "refused a call to on_demand_tool: capability 'on_demand_plugin' is not loaded",
+      );
+    });
+
+    it('runs the call once the plugin is loaded in state or preloaded for the turn', async () => {
+      expect(
+        (await gate().call('on_demand_tool', ['on_demand_plugin'])).ran,
+      ).toBe(true);
+      const preloaded = gate(new Set(['weather']));
+      expect((await preloaded.call('call_weather_planner_agent')).ran).toBe(
+        true,
+      );
+      expect((await preloaded.call('on_demand_tool')).ran).toBe(false);
+    });
+
+    it('never stands in the way of always, silent, meta or unknown tools', async () => {
+      const { call, warn } = gate();
+      for (const name of [
+        'always_tool',
+        'silent_tool',
+        'load_capability',
+        'not_a_bound_tool',
+      ]) {
+        expect((await call(name)).ran).toBe(true);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
 });
 
 type FakeToolRequest = {
@@ -165,6 +251,52 @@ describe('createToolRepetitionGuardMiddleware', () => {
       status: 'error',
     }),
   ];
+
+  it('lets through the same call after a capability-gate refusal (the tool never ran)', async () => {
+    const gate = createCapabilityGateMiddleware({
+      pluginByToolName: new Map([['probe_run', 'probe']]),
+      visibilityByToolName: new Map<string, Visibility>([
+        ['probe_run', 'on-demand'],
+      ]),
+    });
+    const gateWrap = gate.wrapToolCall;
+    const guardWrap = createToolRepetitionGuardMiddleware().wrapToolCall;
+    if (!gateWrap || !guardWrap) throw new Error('wrapToolCall missing');
+    const refusal = (await gateWrap(
+      makeRequest({
+        toolCall: { name: 'probe_run', args: {}, id: 'tc-prior' },
+        tool: { name: 'probe_run' },
+      }) as never,
+      vi.fn() as never,
+    )) as ToolMessage;
+    expect(refusal.status).toBe('error');
+
+    const handler = vi.fn().mockResolvedValue('ran');
+    await guardWrap(
+      makeRequest({
+        toolCall: { name: 'probe_run', args: {}, id: 'tc-now' },
+        tool: { name: 'probe_run' },
+        state: {
+          messages: [
+            new AIMessage({
+              content: '',
+              tool_calls: [
+                {
+                  name: 'probe_run',
+                  args: {},
+                  id: 'tc-prior',
+                  type: 'tool_call',
+                },
+              ],
+            }),
+            refusal,
+          ],
+        },
+      }) as never,
+      handler as never,
+    );
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
 
   it('short-circuits an identical call that already failed, quoting the error', async () => {
     const mw = createToolRepetitionGuardMiddleware();

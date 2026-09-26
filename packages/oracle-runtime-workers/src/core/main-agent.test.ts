@@ -420,6 +420,85 @@ describe('createMainAgent', () => {
     expect(checkpointedLoadedPlugins(await agent.getState(config))).toEqual([]);
   });
 
+  it('refuses to run an on-demand tool the model calls before its capability is loaded', async () => {
+    let probeRuns = 0;
+    const probe = makePlugin({
+      name: 'probe',
+      manifest: makeManifest({
+        title: 'Probe',
+        summary: 'Counts its runs.',
+        visibility: 'on-demand',
+      }),
+      getTools: () => [
+        makeTool('probe_run', {
+          handler: async () => {
+            probeRuns += 1;
+            return 'probe ran';
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), probe]);
+    await core.warm();
+
+    const run = async (script: Script, threadId: string) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Run the probe.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+    const loadProbe = (id: string) => ({
+      name: 'load_capability',
+      args: { names: ['probe'] },
+      id,
+    });
+
+    // Called by name while hidden: refused and never run; after the load
+    // step the same tool runs.
+    const direct = await run(
+      [
+        [{ name: 'probe_run', args: {}, id: 'c1' }],
+        [loadProbe('c2')],
+        [{ name: 'probe_run', args: {}, id: 'c3' }],
+        [],
+      ],
+      'gate-direct',
+    );
+    expect(direct.get('c1')?.status).toBe('error');
+    expect(String(direct.get('c1')?.content)).toContain(
+      'belongs to the "probe" capability, which is not loaded',
+    );
+    expect(String(direct.get('c3')?.content)).toBe('probe ran');
+    expect(probeRuns).toBe(1);
+
+    // A load in the same model response does not unlock the call beside
+    // it: both run on the state from before either.
+    const sameStep = await run(
+      [
+        [loadProbe('c1'), { name: 'probe_run', args: {}, id: 'c2' }],
+        [{ name: 'probe_run', args: {}, id: 'c3' }],
+        [],
+      ],
+      'gate-same-step',
+    );
+    expect(sameStep.get('c2')?.status).toBe('error');
+    expect(String(sameStep.get('c3')?.content)).toBe('probe ran');
+    expect(probeRuns).toBe(2);
+  });
+
   it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {
     const core = bootCore([new PortalPlugin(), new SkillsPlugin()]);
     await core.warm();
@@ -509,6 +588,9 @@ describe('createMainAgent', () => {
     const result = (await agent.invoke(
       {
         messages: [new HumanMessage('Do I need a jacket in Berlin tomorrow?')],
+        // The thread has weather loaded: the graph state says so as well as
+        // the build-time state (the gate checks the graph's at tool-call time).
+        loadedPlugins: ['weather'],
       },
       { configurable: { thread_id: 'sess-2' } },
     )) as { messages: BaseMessage[] };

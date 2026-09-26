@@ -217,6 +217,11 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   (`operations.md`, "Rooms and aliases"). Browser-tool and AG-UI results
   settle a call only from a socket of the call's own session; Node matched
   them by `toolCallId` alone.
+- **The capability gate also guards execution.** Node's gate only trims the
+  tools advertised to the model, and every on-demand tool is bound, so a
+  call to a hidden tool still runs there. Here the gate checks each tool
+  call against the same rule and answers a hidden one with an error instead
+  of running it (`architecture.md`, "Capability gate").
 - **A user↔oracle room is always direct.** Node classified a room by the
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the

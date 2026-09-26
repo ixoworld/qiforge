@@ -6,6 +6,7 @@ import {
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import { NOOP_LOGGER } from '../utils';
+import { isCapabilityGateRefusal } from './capability-gate';
 
 export interface ToolRepetitionGuardMiddlewareOptions {
   /**
@@ -47,6 +48,9 @@ export const createToolRepetitionGuardMiddleware = (
         const msg = messages[i];
         if (!(msg instanceof ToolMessage)) continue;
         if (msg.status !== 'error') continue;
+        // The capability gate refused it without running it; after a
+        // `load_capability` the same call is the expected next step.
+        if (isCapabilityGateRefusal(msg)) continue;
         if (msg.name !== toolName) continue;
 
         const priorArgs = findToolCallArgsById(messages, msg.tool_call_id);

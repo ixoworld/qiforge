@@ -29,9 +29,23 @@ The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
 
-**Capability router.** On-demand plugin tools are bound at build time but
-hidden by the capability gate until the model calls `load_capability`, which
-costs a model round trip. With `CAPABILITY_ROUTER=on` the turn build
+**Capability gate.** On-demand plugin tools and sub-agents are bound at
+build time but hidden from the model until the thread has loaded their plugin
+(`load_capability`) or the turn preloaded it. The gate
+(`src/core/middlewares/capability-gate.ts`) applies the same rule on both
+sides of the model: it trims the tools each model request advertises, and it
+checks every tool call before it runs. A call to a hidden tool (named from
+an earlier thread, guessed, or planted by injected text) is not executed: it
+is answered with an error tool message naming the capability to load, and
+logged as `[CapabilityGateMiddleware] refused a call to <tool>`. The check
+reads the graph state the tool node runs with, so a load from an earlier step
+of the run counts and a `load_capability` in the same model response as the
+call does not. The repetition guard lets the same call through again after a
+refusal, since the tool never ran. The gate is discovery, not authorization:
+any non-silent plugin can be loaded.
+
+**Capability router.** Loading a plugin with `load_capability` costs a
+model round trip. With `CAPABILITY_ROUTER=on` the turn build
 (`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
 (`src/core/capability-router.ts`) over the user's message and the on-demand
 plugins the thread has not loaded, and hands the routed plugin to
