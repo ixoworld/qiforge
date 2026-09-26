@@ -3,6 +3,11 @@ import { Command } from '@langchain/langgraph';
 import { ToolMessage } from '@langchain/core/messages';
 import { tool } from '../plugin-api/tool-helper';
 import type { PluginManifest, PluginTool } from '../plugin-api/types';
+import {
+  describeRequirements,
+  unmetRequirements,
+  type CapabilityRequirement,
+} from './manifest';
 import type { ManifestRegistry, ToolRegistry } from './registries';
 import { acquireToolLock } from './utils';
 
@@ -27,6 +32,11 @@ interface CapabilityListing {
   loaded: boolean;
   category?: PluginManifest['category'];
   tags: string[];
+  /**
+   * Present only when the user's authorization does not grant what the
+   * plugin requires: it cannot be loaded or used until they re-authorize.
+   */
+  unavailable?: { missing: CapabilityRequirement[] };
 }
 
 /**
@@ -54,13 +64,17 @@ export function buildListCapabilitiesTool(
         if (visibility === 'silent' && !includeSilent) continue;
         if (visibility === 'on-demand' && !includeOnDemand) continue;
 
+        const missing = unmetRequirements(manifest, ctx.ucan.hasCapability);
         out.push({
           name: pluginName,
           summary: manifest.summary,
           visibility,
-          loaded: visibility === 'always' || loadedSet.has(pluginName),
+          loaded:
+            missing.length === 0 &&
+            (visibility === 'always' || loadedSet.has(pluginName)),
           category: manifest.category,
           tags: manifest.tags ?? [],
+          ...(missing.length > 0 ? { unavailable: { missing } } : {}),
         });
       }
       ctx.logger.debug?.(
@@ -103,6 +117,11 @@ interface LoadCapabilityResult extends PluginManifest {
   alreadyAvailable: boolean;
   /** One entry per tool the plugin contributes. */
   tools: ToolDetail[];
+  /**
+   * Present when the plugin was NOT loaded because the user's authorization
+   * does not grant what it requires (`manifest.requires`).
+   */
+  refused?: { missing: CapabilityRequirement[]; reason: string };
 }
 
 /**
@@ -116,6 +135,9 @@ interface LoadCapabilityResult extends PluginManifest {
  *  - Unknown plugin → throws, instructing the agent to call
  *    `list_capabilities` first.
  *  - `silent` plugin → throws (silent plugins are not agent-loadable).
+ *  - Plugin whose `requires` the user's delegation does not grant →
+ *    included in the result with `refused` (what is missing) and not
+ *    loaded; the rest of the batch is unaffected.
  *  - Plugin already loaded, or visibility is `always` → included in result
  *    with `alreadyAvailable: true` (no state change for that plugin).
  *  - Otherwise → added to the `loadedPlugins` state update.
@@ -157,6 +179,23 @@ export function buildLoadCapabilityTool(
             );
           }
 
+          const missing = unmetRequirements(
+            entry.manifest,
+            ctx.ucan.hasCapability,
+          );
+          if (missing.length > 0) {
+            results.push({
+              ...entry.manifest,
+              alreadyAvailable: false,
+              tools: [],
+              refused: {
+                missing,
+                reason: `The user's authorization for this oracle does not grant ${describeRequirements(missing)}, which "${name}" requires, so it was not loaded. Tell the user; they can re-authorize the oracle with that permission and ask again.`,
+              },
+            });
+            continue;
+          }
+
           const tools: ToolDetail[] = toolRegistry
             .toolSummariesForPlugin(name)
             .map((t) => ({
@@ -175,8 +214,10 @@ export function buildLoadCapabilityTool(
           }
         }
 
+        // Text, never the bare array: LangChain would pass an array of
+        // objects through as the message's content blocks.
         if (newToLoad.length === 0) {
-          return results;
+          return JSON.stringify(results);
         }
 
         const update: Record<string, unknown> = {

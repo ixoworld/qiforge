@@ -29,9 +29,55 @@ The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
 
-**Capability router.** On-demand plugin tools are bound at build time but
-hidden by the capability gate until the model calls `load_capability`, which
-costs a model round trip. With `CAPABILITY_ROUTER=on` the turn build
+**Capability gate.** On-demand plugin tools and sub-agents are bound at
+build time but hidden from the model until the thread has loaded their plugin
+(`load_capability`) or the turn preloaded it. The gate
+(`src/core/middlewares/capability-gate.ts`) applies the same rule on both
+sides of the model: it trims the tools each model request advertises, and it
+checks every tool call before it runs. A call to a hidden tool (named from
+an earlier thread, guessed, or planted by injected text) is not executed: it
+is answered with an error tool message naming the capability to load, and
+logged as `[CapabilityGateMiddleware] refused a call to <tool>`. The check
+reads the graph state the tool node runs with, so a load from an earlier step
+of the run counts and a `load_capability` in the same model response as the
+call does not. The repetition guard lets the same call through again after a
+refusal, since the tool never ran.
+
+**Plugin requirements.** Loading is discovery; authorization comes from the
+user's delegation to the oracle. A manifest may declare `requires: [{
+resource, action }]`, the UCAN capabilities that delegation must grant. The
+turn's `ctx.user.ucanDelegation` carries the capabilities parsed from the
+token (the request's, else the user's stored one;
+`WorkersUcanService.withCapabilities`), and `ctx.ucan.hasCapability` checks
+them: a grant covers a required pair when its resource is `*`, the same, or a
+parent (`ixo:filesystem` covers `ixo:filesystem/.oracles`, never the reverse)
+and its ability is `*`, the same, or a namespace wildcard (`fs/*` covers
+`fs/read`). While a requirement is unmet, `load_capability` does not load the
+plugin and returns it with `refused` (what is missing, and a reason for the
+model to relay); `list_capabilities` lists it `loaded: false` with
+`unavailable`. The gate hides its tools and sub-agents and refuses calls to
+them, whatever the plugin's visibility and even when an earlier turn or the
+router loaded it, and an always-on one is left out of the prompt. A manifest
+that declares nothing can be loaded by anyone.
+
+The bundled plugins require what they prove through that delegation, from
+one constant each (`src/plugins/delegated-capabilities.ts`) that both the
+manifest and the mint read:
+
+| Plugin   | Requires                     |
+| -------- | ---------------------------- |
+| memory   | `memory/*` on `ixo:memory`   |
+| sandbox  | `sandbox/*` on `ixo:sandbox` |
+| composio | `sandbox/*` on `ixo:sandbox` |
+
+Without the grant each already contributed no tools, as its mint failed; now
+the model is told why. The rest declare nothing: the vfs plugin proves
+through its own `ixo:filesystem` delegation from the UCAN store, skills
+fall back to public capsules without `ixo:skills`, and the others call no
+UCAN-guarded service.
+
+**Capability router.** Loading a plugin with `load_capability` costs a
+model round trip. With `CAPABILITY_ROUTER=on` the turn build
 (`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
 (`src/core/capability-router.ts`) over the user's message and the on-demand
 plugins the thread has not loaded, and hands the routed plugin to

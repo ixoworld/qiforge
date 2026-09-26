@@ -83,13 +83,29 @@ implementation, and what is deliberately left out.
   state by the Node agent-builder's rules (`src/do/turn-metadata.ts`): a
   request that names the editor room also defines its session run, an active
   editor context seeds the editor plugin into `loadedPlugins`.
-- **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`)
-  with the `x-ucan-delegation` fallback; DID keys resolved through Blocksync.
+- **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`);
+  DID keys resolved through Blocksync. **A bare `x-ucan-delegation` does not
+  authenticate** (Node accepts it as a fallback): a delegation travels on as
+  proof in the invocations the runtime mints for other services, so it must
+  not double as a login. It is refused with a 401 asking for an invocation,
+  on HTTP and on the socket CONNECT alike, unless the deployment sets
+  `UCAN_ALLOW_BARE_DELEGATION_AUTH=true` for clients that do not send one yet
+  (each such request logs `[auth] … authenticated with a bare delegation`).
+  Sent beside an invocation, the delegation is still the authorization for
+  downstream calls.
   Header-less turns mint plugin invocations from the delegation deposited via
   `POST /delegation`, cached in the object; `POST`/`DELETE /delegation`
   update the object at once. `GET /delegation` additionally returns the
   stored delegation's `capabilities` (Node returns `authorized` and
-  `expiration` only).
+  `expiration` only). **A delegation must expire**, here and not on Node: an
+  `x-ucan-delegation` header, or a delegation deposited with
+  `POST /delegation`, with no expiry anywhere in its chain is refused (401
+  for a header that is the only credential under the legacy fallback; beside
+  a valid invocation it is dropped, not carried downstream; 400 at
+  `POST /delegation`).
+  `POST /delegation` also validates what it stores (this oracle's audience,
+  issued by the caller, else 403) and stores the token's own expiry, never
+  an `expiration` sent in the body.
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
   `MODEL_PRICE_MARKUP`.
@@ -121,7 +137,14 @@ implementation, and what is deliberately left out.
   socket of a session going away.
 - **Per-room secrets**: the JWE scheme byte-compatible with
   `oracles-chain-client` (`ECDH-ES+A256KW` + `A256GCM`, PIN-locked account
-  room key), served to plugins through the same secrets surface.
+  room key), served to plugins through the same secrets surface, minus the
+  runtime's own LLM credentials. Every secret named `BYO_LLM_*` (the BYO
+  API keys and the ChatGPT OAuth tokens, refresh token included) is
+  neither listed nor read for a plugin (`src/do/secrets-adapter.ts`). Node
+  serves them to plugins like any other secret, so its sandbox forwards
+  them as `x-us-*` headers to code the model writes. The user's other
+  secrets and the operator's `ORACLE_SECRETS` still reach the sandbox,
+  which is what they are stored for.
 - **Matrix liveness**: the `work_status` card (`ixo.oracle.component`, edited
   in place: routing → Step n · … → delivering → done / superseded), quote-reply
   chains resolved to their thread (`src/matrix/reply-chain.ts`), and the
@@ -210,6 +233,36 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   instead of as a finished call.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
+- **A room message's sender is checked against the DID's homeserver.**
+  Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
+  sender's server (or, for a non-DID sender, the room alias's) must be the
+  homeserver the DID document registers, or the message is dropped
+  (`operations.md`, "Rooms and aliases"). Browser-tool and AG-UI results
+  settle a call only from a socket of the call's own session; Node matched
+  them by `toolCallId` alone.
+- **The capability gate also guards execution.** Node's gate only trims the
+  tools advertised to the model, and every on-demand tool is bound, so a
+  call to a hidden tool still runs there. Here the gate checks each tool
+  call against the same rule and answers a hidden one with an error instead
+  of running it (`architecture.md`, "Capability gate").
+- **A plugin can require delegated capabilities.** Node has no
+  `manifest.requires`, and its `ctx.ucan.hasCapability` matches resource and
+  action exactly. Here a plugin whose `requires` the user's delegation does
+  not grant cannot be loaded or used, the turn's delegation (the stored one
+  on a Matrix turn too) carries every capability parsed from the token, and
+  a grant covers child resources and namespaced abilities (`architecture.md`,
+  "Plugin requirements"). The memory, sandbox and composio plugins require
+  their `ixo:memory` / `ixo:sandbox` grants; on Node they simply have no
+  tools without them.
+- **The repetition guard works per turn.** Node's guard blocks an identical
+  call that failed within the last 20 messages, whatever the turn, so a
+  user who fixed the cause and asked again was still refused, and a failure
+  more than 20 messages back in a long turn was missed. Here it covers the
+  whole current turn (from the latest human message; the summarizer's
+  summary starts none) and nothing before it. It also caps identical calls
+  that succeeded: a write runs once per turn with the same arguments (an
+  identical call in the same model response counts), a read five times;
+  Node has no such cap.
 - **A user↔oracle room is always direct.** Node classified a room by the
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the

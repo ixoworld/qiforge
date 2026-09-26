@@ -22,8 +22,10 @@ import {
   type DelegatedCapability,
 } from '../do/ucan-service';
 import {
+  authConfigFromEnv,
   authenticate,
   isExcluded,
+  validateDelegation,
   type AuthResult,
   type RouteExclusion,
 } from './auth';
@@ -186,17 +188,18 @@ export function createShell(
   // --- auth ------------------------------------------------------------------
   app.use('*', async (c, next) => {
     if (isExcluded(c.req.method, c.req.path, exclusions)) return next();
-    const outcome = await authenticate(c.req.raw.headers, {
-      oracleDid: c.env.ORACLE_DID,
-      blocksyncUri: c.env.BLOCKSYNC_GRAPHQL_URL,
-      maxTtlSeconds: c.env.UCAN_AUTH_MAX_TTL_SECONDS
-        ? Number(c.env.UCAN_AUTH_MAX_TTL_SECONDS)
-        : undefined,
-    });
+    const outcome = await authenticate(
+      c.req.raw.headers,
+      authConfigFromEnv(c.env),
+    );
     if (!outcome.ok)
       return c.json(
         { statusCode: outcome.status, message: outcome.error },
         outcome.status as 401,
+      );
+    if (outcome.auth.via === 'delegation')
+      console.warn(
+        `[auth] ${c.req.method} ${c.req.path}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
       );
     c.set('auth', outcome.auth);
     return next();
@@ -370,15 +373,27 @@ export function createShell(
   // --- delegation (room-state persisted, for header-less Matrix turns) -----------
   app.post('/delegation', async (c) => {
     const auth = c.get('auth');
-    const body = (await c.req.json().catch(() => ({}))) as {
-      raw?: string;
-      expiration?: number;
-    };
+    const body = (await c.req.json().catch(() => ({}))) as { raw?: string };
     const raw = body.raw ?? auth.delegation;
     if (!raw) return c.json({ message: 'raw delegation is required' }, 400);
+    // What is stored here authorizes header-less turns long after this
+    // request, so it gets the header's checks: for this oracle, issued by
+    // the caller, with a bounded expiry — and that expiry is the token's,
+    // never a value the client states beside it.
+    const checked = await validateDelegation(raw, authConfigFromEnv(c.env));
+    if (!checked.ok)
+      return c.json(
+        { message: `Invalid UCAN delegation: ${checked.error}` },
+        400,
+      );
+    if (checked.userDid !== auth.userDid)
+      return c.json(
+        { message: 'The delegation was not issued by the authenticated user' },
+        403,
+      );
     const room = await gateway(c.env).resolveUserRoom(auth.userDid);
     if (!room) return c.json({ message: 'No oracle room for this user' }, 404);
-    const expiration = body.expiration ?? auth.delegationExpiration;
+    const { expiration } = checked;
     // The Node runtime's `DelegationStore` record, in its compressed
     // room-state envelope, so a user can move between runtimes without
     // re-authorising (`updatedAt` is required by Node's schema).
@@ -390,7 +405,7 @@ export function createShell(
           raw,
           issuer: auth.userDid,
           audience: c.env.ORACLE_DID,
-          ...(expiration && { expiration }),
+          expiration,
           updatedAt: new Date().toISOString(),
         }),
       ),
@@ -406,10 +421,7 @@ export function createShell(
           `[shell] could not push the deposited delegation to ${auth.userDid}'s object: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
-    return c.json({
-      ok: true,
-      expiration: body.expiration ?? auth.delegationExpiration,
-    });
+    return c.json({ ok: true, expiration });
   });
   app.get('/delegation', async (c) => {
     const auth = c.get('auth');

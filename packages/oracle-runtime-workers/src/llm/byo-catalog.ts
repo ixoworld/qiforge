@@ -98,6 +98,19 @@ export const BYO_PROVIDER_INFO: Record<ByoProvider, ByoProviderInfo> = {
  * after the token exchange. Stored in the canonical user↔oracle room, so the
  * credential is account-level for this oracle, not per-session.
  */
+/**
+ * The room-secret namespace reserved for the runtime's own LLM credentials:
+ * every `BYO_SECRET_NAMES` entry, and any provider added later. Plugins never
+ * see a secret under it (`createSecretsAdapter`) — above all the sandbox,
+ * which forwards what it sees to code the model writes.
+ */
+export const BYO_SECRET_PREFIX = 'BYO_LLM_';
+
+/** A room secret only the runtime itself may read (a BYO LLM credential). */
+export function isRuntimeOnlySecret(name: string): boolean {
+  return name.startsWith(BYO_SECRET_PREFIX);
+}
+
 export const BYO_SECRET_NAMES: Record<ByoProvider, string> = {
   chatgpt: 'BYO_LLM_CHATGPT_OAUTH',
   openai: 'BYO_LLM_OPENAI_API_KEY',

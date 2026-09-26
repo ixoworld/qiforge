@@ -104,15 +104,16 @@ same object; each plugin's `configSchema` is the reference.
 
 ### Identity and auth
 
-| Variable                    | Required | Meaning                                                                                                                                                                                                            |
-| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ORACLE_NAME`               | yes      | Display name (device names, replies).                                                                                                                                                                              |
-| `ORACLE_DID`                | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                         |
-| `ORACLE_ENTITY_DID`         | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                |
-| `NETWORK`                   | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                  |
-| `BLOCKSYNC_GRAPHQL_URL`     | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                              |
-| `UCAN_AUTH_MAX_TTL_SECONDS` | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                |
-| `ORACLE_SIGNING_MNEMONIC`   | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup). |
+| Variable                          | Required | Meaning                                                                                                                                                                                                            |
+| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ORACLE_NAME`                     | yes      | Display name (device names, replies).                                                                                                                                                                              |
+| `ORACLE_DID`                      | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                         |
+| `ORACLE_ENTITY_DID`               | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                |
+| `NETWORK`                         | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                  |
+| `BLOCKSYNC_GRAPHQL_URL`           | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                              |
+| `UCAN_AUTH_MAX_TTL_SECONDS`       | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                |
+| `UCAN_ALLOW_BARE_DELEGATION_AUTH` | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per request). Off by default: requests must carry a UCAN invocation.                                            |
+| `ORACLE_SIGNING_MNEMONIC`         | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup). |
 
 ### Matrix
 
@@ -301,16 +302,20 @@ Every turn runs under one budget shared by the main agent, its sub-agents
 and the helper models the turn's LLM adapter hands out (the summarizer,
 extraction). See [docs/plans/workers-harness-hardening.md](../../../docs/plans/workers-harness-hardening.md).
 
-| Variable              | Default  | Meaning                                                                                                 |
-| --------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `TURN_MAX_TOKENS`     | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
-| `TURN_MAX_TOOL_CALLS` | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
-| `TURN_TIMEOUT_MS`     | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
+| Variable                    | Default  | Meaning                                                                                                 |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `TURN_MAX_TOKENS`           | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
+| `TURN_MAX_TOOL_CALLS`       | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
+| `TURN_TIMEOUT_MS`           | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
+| `TURN_MAX_IDENTICAL_WRITES` | `1`      | Identical successful write calls (same tool, same arguments) per turn; one more is refused.             |
+| `TURN_MAX_IDENTICAL_READS`  | `5`      | The same for a read, or a `repeatable` UI step such as a browser tool.                                  |
 
 Exhaustion ends the turn with an `error` frame (`kind: budget_exhausted`,
 `limit: tokens | tools | time`, `retryable: false`) followed by `done`
 (`failed: true`); work already done is kept. These are estimated resource
-limits, not billing. `TURN_RECURSION_LIMIT` remains the separate graph
+limits, not billing. The two `TURN_MAX_IDENTICAL_*` caps end nothing: the
+refused call gets an error tool message with the earlier outcome and the turn
+goes on. `TURN_RECURSION_LIMIT` remains the separate graph
 guard; raising it does not raise a budget. The context window and reply
 reserve come from the context budget (`MODEL_CONTEXT_TOKENS`, `CONTEXT_*`).
 
@@ -321,7 +326,15 @@ the MCP `readOnlyHint` annotation, or matches the read-name convention
 (`get_`, `list_`, `search_`, `read_` …); everything else is a write. Only
 reads are retried once after a transient failure. A write whose outcome is
 unknown (abort, deadline, dropped connection, 5xx) is claimed in the run
-ledger; see [operations](operations.md#write-claims-and-turn-usage).
+ledger; see [operations](operations.md#write-claims-and-turn-usage). Within
+one turn the repetition guard refuses an identical call (same tool, same
+arguments) that already failed, a second identical write that already
+succeeded (an identical call earlier in the same model response counts), and
+a sixth identical read (`TURN_MAX_IDENTICAL_WRITES` / `TURN_MAX_IDENTICAL_READS`
+in the table above); the model gets the earlier outcome instead. A tool
+that declares `repeatable: true` (the Portal's browser tools and AG-UI
+actions: a UI step such as scrolling, where the same arguments again is a new
+action) is capped like a read, whatever its `effect`.
 
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test

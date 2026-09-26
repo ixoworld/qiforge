@@ -561,9 +561,33 @@ export function createMemoryBlobStore(): BlobStoreAdapter {
   };
 }
 
+/** Does a granted ability (`*`, `ns/*`, or an exact ability) cover `required`? */
+export function abilityCovers(granted: string, required: string): boolean {
+  if (granted === '*' || granted === required) return true;
+  if (granted.endsWith('/*')) {
+    const ns = granted.slice(0, -2);
+    return required === ns || required.startsWith(`${ns}/`);
+  }
+  return false;
+}
+
 /**
- * Pure capability check over a delegation's declared capabilities. A `*`
- * resource or action matches anything, mirroring the Node adapter.
+ * Does a granted resource cover `required`? `*`, the same resource, or a
+ * parent of it (`ixo:filesystem` covers `ixo:filesystem/.oracles`) — never a
+ * narrower grant standing in for the broader resource.
+ */
+export function resourceCovers(granted: string, required: string): boolean {
+  return (
+    granted === '*' ||
+    granted === required ||
+    required.startsWith(`${granted}/`)
+  );
+}
+
+/**
+ * Pure capability check over a delegation's declared capabilities: some
+ * grant must cover both the resource (`resourceCovers`) and the action
+ * (`abilityCovers`).
  */
 export function delegationHasCapability(
   delegation: DelegationLike,
@@ -573,8 +597,8 @@ export function delegationHasCapability(
   const caps = delegation?.capabilities ?? [];
   return caps.some(
     (cap) =>
-      (cap.resource === '*' || cap.resource === resource) &&
-      (cap.action === '*' || cap.action === action),
+      resourceCovers(cap.resource, resource) &&
+      abilityCovers(cap.action, action),
   );
 }
 

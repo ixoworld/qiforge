@@ -11,6 +11,10 @@
  *   - otherwise                        → resolve(result)
  *   - no result within `timeoutMs`     → reject("<kind> timeout after <ms>ms: <tool>")
  *
+ * A result settles a call only when it arrives on a socket of the session
+ * the call was made for: `toolCallId` alone is not a secret, and another
+ * session's page must not answer this one's call.
+ *
  * Purely in-memory: a pending call does not survive an object restart, and
  * neither does the turn that made it.
  */
@@ -19,6 +23,8 @@ export type FrontendCallKind = 'browser' | 'agui';
 
 export interface FrontendCallResult {
   toolCallId: string;
+  /** The session of the socket the result arrived on (never the client's claim). */
+  sessionId: string;
   result?: unknown;
   error?: string;
 }
@@ -115,12 +121,13 @@ export class FrontendCallRegistry {
 
   /**
    * Deliver a result from the socket. Returns false when nothing was waiting
-   * for that id (late, duplicate or unknown result — logged by the caller).
+   * for that id in that session (late, duplicate, unknown or another
+   * session's result — logged by the caller); the call keeps waiting.
    */
   settle(kind: FrontendCallKind, data: FrontendCallResult): boolean {
     const key = this.key(kind, data.toolCallId);
     const entry = this.pending.get(key);
-    if (!entry) return false;
+    if (!entry || entry.sessionId !== data.sessionId) return false;
     this.finish(key);
     if (data.error) {
       entry.reject(new Error(data.error));

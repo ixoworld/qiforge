@@ -17,6 +17,10 @@ import {
   signerFromMnemonic,
   type SupportedDID,
 } from '@ixo/ucan';
+import {
+  abilityCovers,
+  delegationHasCapability,
+} from '../core/runtime-context';
 import type { RuntimeContext, UcanDelegation } from '../plugin-api/types';
 
 type MintResult = { invocation: string } | { error: string };
@@ -34,16 +38,6 @@ function toSupportedDid(did: string): SupportedDID {
   if (did.startsWith('did:ixo:') || did.startsWith('did:key:'))
     return did as SupportedDID;
   throw new Error(`Unsupported oracle DID method: ${did}`);
-}
-
-/** Does a granted ability (`*`, `ns/*`, or an exact ability) cover `required`? */
-export function abilityCovers(granted: string, required: string): boolean {
-  if (granted === '*' || granted === required) return true;
-  if (granted.endsWith('/*')) {
-    const ns = granted.slice(0, -2);
-    return required === ns || required.startsWith(`${ns}/`);
-  }
-  return false;
 }
 
 /** One capability of a delegation, as the wire carries it. */
@@ -88,6 +82,27 @@ export class WorkersUcanService {
   private readonly capabilitiesCache = new Map<string, DelegatedCapability[]>();
 
   constructor(private readonly opts: UcanServiceOptions) {}
+
+  /**
+   * A raw delegation with the capabilities it grants, the shape
+   * `ctx.ucan.hasCapability` and plugin `requires` read. A token that cannot
+   * be parsed grants nothing.
+   */
+  async withCapabilities(raw: string): Promise<UcanDelegation> {
+    if (!raw) return { raw };
+    try {
+      const granted = await this.delegationCapabilities(raw);
+      return {
+        raw,
+        capabilities: granted.map((c) => ({ resource: c.with, action: c.can })),
+      };
+    } catch (err) {
+      this.opts.logger?.warn(
+        `[UCAN] cannot read a delegation's capabilities: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { raw, capabilities: [] };
+    }
+  }
 
   hasSigningKey(): boolean {
     return Boolean(this.opts.signingMnemonic);
@@ -341,13 +356,8 @@ export class WorkersUcanService {
     userDid: string,
     delegation: UcanDelegation | undefined,
   ): RuntimeContext['ucan'] {
-    const caps = delegation?.capabilities ?? [];
     const has = (resource: string, action: string) =>
-      caps.some(
-        (c) =>
-          (c.resource === resource || c.resource.startsWith(resource)) &&
-          abilityCovers(c.action, action),
-      );
+      delegationHasCapability(delegation, resource, action);
     return {
       hasCapability: has,
       requireCapability: (resource, action) => {

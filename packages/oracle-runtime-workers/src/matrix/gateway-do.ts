@@ -57,6 +57,7 @@ import {
   SIGNING_MNEMONIC_STATE_TYPE,
 } from '../secrets/signing-mnemonic';
 import {
+  attributeUser,
   IngestPipeline,
   userDidFromRoomAlias,
   type InboundAttachment,
@@ -242,6 +243,11 @@ export class MatrixGatewayDO
   private ingest: IngestPipeline | null = null;
   /** `m.room.canonical_alias` per room (null = none), read once per instance. */
   private readonly roomAliases = new Map<string, string | null>();
+  /**
+   * User DID → registered Matrix server name (lowercased), refreshed before
+   * every offer from `userServerName` so the pipeline can check it synchronously.
+   */
+  private readonly userServers = new Map<string, string>();
   /** Quote-reply chain → thread root memo (see reply-chain.ts). */
   private readonly threadRoots = new ThreadRootCache();
   private readonly turnGate = new Semaphore(
@@ -348,6 +354,7 @@ export class MatrixGatewayDO
       oracleDid: cfg.oracleRoomDid,
       botUserId: cfg.userId,
       canonicalAlias: (roomId) => this.roomAliases.get(roomId) ?? null,
+      userServerName: (userDid) => this.userServers.get(userDid) ?? null,
       dispatch: (turn) => this.dispatchTurn(turn),
       onError: (err, context) =>
         this.log('error', `ingest failed (${context})`, err),
@@ -387,9 +394,10 @@ export class MatrixGatewayDO
     // message back if the instance dies before its reply is in the outbox.
     const sql = this.inboxSql();
     insertInboxRow(sql, inbound, Date.now());
-    // Resolved before the offer so the pipeline's synchronous alias lookup
-    // (room alias → user DID) can answer from the memo.
+    // Resolved before the offer so the pipeline's synchronous lookups (room
+    // alias → user DID, user DID → registered homeserver) answer from memos.
     await this.canonicalAliasOf(message.roomId);
+    await this.resolveSenderServer(inbound);
     const threadRootId = await this.threadRootFor(
       eventId,
       message.roomId,
@@ -409,10 +417,30 @@ export class MatrixGatewayDO
     if (outcome !== 'queued') {
       deleteInboxRows(this.inboxSql(), [inbound.eventId]);
       this.log(
-        'debug',
-        `ingest dropped ${inbound.eventId} in ${inbound.roomId}: ${outcome}`,
+        // A DID-shaped identity from a server that is not the DID's own is
+        // someone presenting a DID they do not control.
+        outcome === 'foreign' ? 'warn' : 'debug',
+        `ingest dropped ${inbound.eventId} in ${inbound.roomId} from ${inbound.sender}: ${outcome}`,
       );
     }
+  }
+
+  /**
+   * Look up the registered homeserver of the user a message is attributed
+   * to, for the pipeline's sender check. `userServerName` answers the
+   * oracle's own server when the DID document names none or Blocksync is
+   * unreachable, so a sender on the oracle's homeserver is accepted then and
+   * a sender on any other server is not.
+   */
+  private async resolveSenderServer(inbound: InboundMessage): Promise<void> {
+    const attribution = attributeUser({
+      alias: this.roomAliases.get(inbound.roomId) ?? null,
+      sender: inbound.sender,
+      oracleDid: this.cfg().oracleRoomDid,
+    });
+    if (!attribution) return;
+    const server = await this.userServerName(attribution.userDid);
+    this.userServers.set(attribution.userDid, server.toLowerCase());
   }
 
   /** A membership change invalidates what the group-chat gate knows about the room. */
@@ -767,6 +795,18 @@ export class MatrixGatewayDO
         this.log('warn', `inbox: alias lookup failed for ${row.roomId}`, err);
       }
       const inbound = inboundOfRow(row);
+      try {
+        await this.resolveSenderServer(inbound);
+      } catch (err) {
+        // Offering now would drop the message as foreign; the row stays and
+        // the next replay tries again (its attempts were bumped above).
+        this.log(
+          'warn',
+          `inbox: homeserver lookup failed for ${inbound.sender}; keeping ${row.eventId} for the next replay`,
+          err,
+        );
+        continue;
+      }
       const threadRootId = await this.threadRootForRow(row);
       if (threadRootId !== inbound.threadRootId) {
         inbound.threadRootId = threadRootId;

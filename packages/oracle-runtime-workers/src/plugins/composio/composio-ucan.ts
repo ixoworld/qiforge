@@ -1,4 +1,5 @@
 import type { RuntimeContext } from '../../plugin-api/types';
+import { SANDBOX_CAPABILITY } from '../delegated-capabilities';
 import { mintInvocationSafely, resolveServiceDidSafely } from '../ucan-failure';
 
 /**
@@ -33,11 +34,11 @@ export async function mintComposioInvocation(
   // `401 REPLAY: Invocation has already been used`. Mint fresh every call.
   return mintInvocationSafely(
     runCtx,
-    { did: composioDid, capability: 'ixo:sandbox' },
+    { did: composioDid, capability: SANDBOX_CAPABILITY.resource },
     'composio',
     // can: composio routes through the sandbox capability, and the user's
     // delegation grants `sandbox/*`. A `'*'` claim is satisfiable only by a
     // `'*'` grant — `'*'.startsWith('sandbox/')` is false.
-    { skipCache: true, can: 'sandbox/*' },
+    { skipCache: true, can: SANDBOX_CAPABILITY.action },
   );
 }

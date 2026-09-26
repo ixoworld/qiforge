@@ -16,7 +16,8 @@
  *   42["ping"] / 42["status"] / 42["list-events"]
  *     → Node's diagnostic events, same payloads.
  *   42["tool_result",{toolCallId,result,error?}] / 42["action_call_result",…]
- *     → settle the pending browser-tool / AG-UI call with that id.
+ *     → settle the pending browser-tool / AG-UI call with that id, when it
+ *       was made for the session this socket authenticated into.
  *
  * Outbound, every event the runtime emits for a session (`ctx.emit.*`,
  * `browser_tool_call`, `action_call`, …) is fanned out to the session's
@@ -543,12 +544,14 @@ export class RealtimeEndpoint {
     const error = readString(record, 'error');
     const settled = this.calls.settle(kind, {
       toolCallId,
+      // The socket's own session; a `sessionId` in the payload is ignored.
+      sessionId: meta.sessionId,
       result: record.result,
       ...(error ? { error } : {}),
     });
     if (!settled) {
       this.deps.logger.warn(
-        `[realtime] ${kind} result for ${toolCallId} had no pending call (late or duplicate)`,
+        `[realtime] ${kind} result for ${toolCallId} from session ${meta.sessionId} had no pending call there (late, duplicate or another session's)`,
       );
     }
   }
