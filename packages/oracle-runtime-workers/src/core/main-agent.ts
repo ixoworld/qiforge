@@ -371,9 +371,10 @@ export async function createMainAgent(
   }
 
   // ── 6. Middleware stack — always-on + plugin contributions ──────────────
-  const pluginMiddlewares = registries.middlewares
-    .collect(buildCtx)
-    .map(({ middleware }) => middleware);
+  const pluginMiddlewares = [
+    ...registries.middlewares.collect(buildCtx),
+    ...(await registries.middlewares.collectRequest(rtCtx)),
+  ].map(({ middleware }) => middleware);
 
   // The summarization middleware needs the same resolver so a host's
   // `hooks.resolveModel` override covers the summary model too.

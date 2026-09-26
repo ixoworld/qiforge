@@ -9,11 +9,13 @@
 import type { RunSummary, TurnRequest } from './contracts';
 import type { RunRecord } from './run-store';
 import type { TurnBody } from './turn-body';
+import type { RequestDisposition } from '../plugin-api/request-admission';
 
 /** The client-declared surface of a turn, as the body carries it. */
 export type ClientSurfaceBody = Pick<TurnBody, 'tools' | 'agActions'>;
 
 export interface StoredRunRequest extends ClientSurfaceBody {
+  disposition?: RequestDisposition;
   turn: Omit<TurnRequest, 'attachments'> & {
     attachments?: TurnRequest['attachments'];
   };

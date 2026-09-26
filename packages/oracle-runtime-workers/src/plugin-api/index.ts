@@ -7,6 +7,11 @@
  */
 export { OraclePlugin } from './oracle-plugin';
 export type {
+  RequestAdmissionContext,
+  RequestAdmissionResult,
+  RequestDisposition,
+} from './request-admission';
+export type {
   PluginEnv,
   PluginRoute,
   PluginRouteMethod,

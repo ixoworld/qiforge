@@ -26,7 +26,7 @@ import {
   friendlyInputsToNb,
   stepIdToBlockId,
 } from './translator';
-import type { Condition } from './types';
+import type { Condition, FlowStep } from './types';
 
 const DOC = 'document';
 
@@ -52,7 +52,7 @@ export function setStepInputs(
   stepId: string,
   inputs: Record<string, unknown>,
 ): void {
-  setStepProps(doc, stepId, {
+  setStepExecutionProps(doc, stepId, {
     inputs: JSON.stringify(friendlyInputsToNb(inputs) ?? {}),
   });
 }
@@ -62,8 +62,49 @@ export function setStepConditions(
   stepId: string,
   conditions: Condition[],
 ): void {
-  setStepProps(doc, stepId, {
+  setStepExecutionProps(doc, stepId, {
     conditions: conditions.length > 0 ? buildConditionsProp(conditions) : '',
+  });
+}
+
+export function setStepSemanticGate(
+  doc: YDoc,
+  stepId: string,
+  gate: FlowStep['semanticGate'],
+): void {
+  setStepExecutionProps(doc, stepId, {
+    semanticGate: gate ? JSON.stringify(gate) : '',
+  });
+}
+
+function setStepExecutionProps(
+  doc: YDoc,
+  stepId: string,
+  props: Record<string, string>,
+): void {
+  requireStep(doc, stepId);
+  const nodes = doc.getMap('qi.flow.nodes');
+  const node = nodes.get(stepId);
+  if (!(node instanceof Y.Map))
+    throw new FlowError(
+      'step_not_found',
+      `No compiled step "${stepId}" in this flow.`,
+    );
+  doc.transact(() => {
+    setStepProps(doc, stepId, props);
+    const existing: unknown = node.get('props');
+    if (existing instanceof Y.Map) {
+      for (const [key, value] of Object.entries(props))
+        existing.set(key, value);
+    } else {
+      node.set('props', {
+        ...(existing && typeof existing === 'object' && !Array.isArray(existing)
+          ? existing
+          : {}),
+        ...props,
+      });
+    }
+    for (const [key, value] of Object.entries(props)) node.set(key, value);
   });
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as Y from 'yjs';
 import { collectAllBlocks, extractBlockProperties } from './ydoc-helpers';
 import { flowSpecToBaseUcan, stepIdToBlockId } from './translator';
 import { readFlowSpec, readStep } from './read';
@@ -7,6 +8,7 @@ import {
   reorderStep,
   setStepAssignment,
   setStepConditions,
+  setStepSemanticGate,
   setStepConfirmation,
   setStepEventTrigger,
   setStepInputs,
@@ -49,6 +51,14 @@ describe('edit: per-block isolation (the core guarantee)', () => {
 
     setStepInputs(doc, 'b', { y: 'changed', extra: '{{a.output.value}}' });
 
+    const compiled = doc.getMap<Y.Map<unknown>>('qi.flow.nodes').get('b')!;
+    expect(compiled.get('inputs')).toBe(
+      JSON.stringify({
+        y: 'changed',
+        extra: { $ref: `${stepIdToBlockId('a')}.output.value` },
+      }),
+    );
+
     const flow = readFlowSpec(doc, 'r')!;
     const byId = Object.fromEntries(flow.steps.map((s) => [s.id, s]));
     expect(byId.a!.inputs).toEqual({ x: 'a-value' });
@@ -63,6 +73,45 @@ describe('edit: per-block isolation (the core guarantee)', () => {
 });
 
 describe('edit: settings round-trip via read', () => {
+  it('preserves a separate semantic gate without changing deterministic conditions', () => {
+    const doc = threeStepDoc();
+    const gate = {
+      version: 1 as const,
+      decision: 'flow.gate.semantic' as const,
+      criterion: 'Meets requirements',
+      rubric: 'Only supplied evidence',
+      inputFields: ['evidence'],
+    };
+    setStepConditions(doc, 'b', [
+      {
+        source: 'configured_input',
+        fromStep: 'a',
+        field: 'x',
+        is: 'equals',
+        value: 'a-value',
+      },
+    ]);
+    setStepSemanticGate(doc, 'b', gate);
+    const compiled = doc.getMap<Y.Map<unknown>>('qi.flow.nodes').get('b')!;
+    expect(compiled.get('semanticGate')).toBe(JSON.stringify(gate));
+    const compiledProps = compiled.get('props');
+    expect(
+      compiledProps instanceof Y.Map ? compiledProps.toJSON() : compiledProps,
+    ).toEqual(expect.objectContaining({ semanticGate: JSON.stringify(gate) }));
+    expect(JSON.parse(String(compiled.get('conditions')))).toEqual(
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ source: 'configured_input' }),
+        ]),
+      }),
+    );
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toEqual(gate);
+    expect(readStep(doc, 'r', 'b')?.runWhen?.source).toBe('configured_input');
+    setStepSemanticGate(doc, 'b', undefined);
+    expect(compiled.get('semanticGate')).toBe('');
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toBeUndefined();
+    expect(readStep(doc, 'r', 'b')?.runWhen?.source).toBe('configured_input');
+  });
   it('conditions are written in the evaluator vocabulary and round-trip', () => {
     const doc = threeStepDoc();
     setStepConditions(doc, 'b', [

@@ -60,6 +60,8 @@ import {
   type CapabilityRouter,
 } from '../core/capability-router';
 import { createMainAgent } from '../core/main-agent';
+import { admitRequest, admissionMetadata } from '../core/request-admission';
+import type { RequestDisposition } from '../plugin-api/request-admission';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
@@ -3222,6 +3224,53 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<RunOutcome> {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
+      if (!stored.disposition && !resumed) {
+        stored.disposition = { kind: 'admitting' };
+        const request = JSON.stringify(stored);
+        await this.runStore!.update(live.runId, { request });
+        live.record.request = request;
+      }
+      if (!stored.disposition || stored.disposition.kind === 'admitting') {
+        const admission =
+          stored.disposition?.kind === 'admitting' && !req.attachments?.length
+            ? await admitRequest(this.core.plugins, {
+                config: this.core.validatedEnv,
+                user: {
+                  did: req.identity.userDid,
+                  matrixUserId: req.identity.matrixUserId ?? '',
+                  ucanDelegation: { raw: req.identity.ucanDelegation ?? '' },
+                  timezone: req.identity.timezone,
+                  currentTime: new Date().toISOString(),
+                },
+                session: {
+                  id: req.sessionId,
+                  client: req.client,
+                  requestId: req.requestId,
+                  roomId:
+                    req.roomId ??
+                    (await this.sessions!.getSession(req.sessionId))?.roomId,
+                },
+                message: req.message,
+                metadata: admissionMetadata(req.metadata),
+                signal: live.abort.signal,
+              })
+            : { kind: 'pass' as const };
+        stored.disposition =
+          admission.kind === 'handled'
+            ? {
+                kind: 'direct-read',
+                text: admission.text,
+                title: admission.title,
+                messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+              }
+            : { kind: 'agent' };
+        const request = JSON.stringify(stored);
+        await this.runStore!.update(live.runId, { request });
+        live.record.request = request;
+      }
+      if (stored.disposition.kind === 'direct-read') {
+        return this.runDirectRead(live, req, stored.disposition, resumed);
+      }
       const {
         agent,
         stateInput,
@@ -3321,6 +3370,92 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (this.aborts.get(sessionId) === live.abort)
           this.aborts.delete(sessionId);
       }
+    }
+
+    private async runDirectRead(
+      live: LiveRun,
+      req: TurnRequest,
+      disposition: Extract<RequestDisposition, { kind: 'direct-read' }>,
+      resumed: boolean,
+    ): Promise<RunOutcome> {
+      live.abort.signal.throwIfAborted();
+      const sessions = this.sessions!;
+      if (
+        req.client === 'matrix' &&
+        !(await sessions.getSession(req.sessionId))
+      ) {
+        await sessions.createSession({
+          sessionId: req.sessionId,
+          roomId: req.roomId,
+          oracleName: this.core.identity.name,
+          oracleDid: this.env.ORACLE_DID,
+          oracleEntityDid: this.core.identity.entityDid,
+        });
+      }
+      const kwargs = {
+        timestamp: new Date().toISOString(),
+        oracleName: this.core.identity.name,
+        msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'matrix'
+          ? {
+              senderDid: req.identity.userDid,
+              senderMatrixUserId: req.identity.matrixUserId,
+              senderDisplayName: req.senderDisplayName ?? req.identity.userDid,
+              threadId: req.sessionId,
+              eventId: req.eventId,
+            }
+          : {}),
+      };
+      const messages = [
+        new HumanMessage({
+          id: `direct:${req.sessionId}:${req.requestId}:human`,
+          content:
+            req.client === 'matrix' && req.roomKind === 'group'
+              ? prefixSpeaker(
+                  req.message,
+                  req.senderDisplayName ??
+                    req.identity.matrixUserId ??
+                    req.identity.userDid,
+                )
+              : req.message,
+          additional_kwargs: kwargs,
+        }),
+        new AIMessage({
+          id: disposition.messageId,
+          content: disposition.text,
+          additional_kwargs: {
+            timestamp: kwargs.timestamp,
+            oracleName: kwargs.oracleName,
+            msgFromMatrixRoom: kwargs.msgFromMatrixRoom,
+          },
+        }),
+      ];
+      await this.saver!.appendTurnMessages(req.sessionId, messages);
+      live.abort.signal.throwIfAborted();
+      await this.afterTurn(req.sessionId, messages, disposition);
+      this.replayToRoom(req, disposition.text, 'oracle');
+      if (!resumed)
+        live.buffer.push('run', {
+          runId: live.runId,
+          sessionId: req.sessionId,
+          requestId: req.requestId,
+        });
+      const delivered = live.continuation ?? '';
+      const content = disposition.text.startsWith(delivered)
+        ? disposition.text.slice(delivered.length)
+        : disposition.text;
+      if (content)
+        live.buffer.push('message', { content, timestamp: kwargs.timestamp });
+      live.buffer.push('done', {
+        runId: live.runId,
+        messageId: disposition.messageId,
+      });
+      return {
+        status: 'finished',
+        text: disposition.text,
+        messageId: disposition.messageId,
+        toolCalls: [],
+      };
     }
 
     /** Latest checkpoint id of a session — recovery's progress marker. */
@@ -4330,6 +4465,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async afterTurn(
       sessionId: string,
       messages: BaseMessage[],
+      disposition: RequestDisposition = { kind: 'agent' },
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
@@ -4340,10 +4476,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         },
       );
-      await this.compareShadowRoute(sessionId);
+      if (disposition.kind === 'agent')
+        await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);
       if (row && (!row.title || row.title === UNTITLED_SESSION)) {
-        const title = await this.generateTitle(messages).catch(() => null);
+        const title =
+          disposition.kind === 'direct-read'
+            ? disposition.title
+            : await this.generateTitle(messages).catch(() => null);
         if (title)
           await sessions.setTitle(sessionId, title, { onlyIfUntitled: true });
       }
