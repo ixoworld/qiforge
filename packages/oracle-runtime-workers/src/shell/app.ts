@@ -22,10 +22,10 @@ import {
   type DelegatedCapability,
 } from '../do/ucan-service';
 import {
+  authConfigFromEnv,
   authenticate,
   isExcluded,
   validateDelegation,
-  type AuthConfig,
   type AuthResult,
   type RouteExclusion,
 } from './auth';
@@ -188,11 +188,18 @@ export function createShell(
   // --- auth ------------------------------------------------------------------
   app.use('*', async (c, next) => {
     if (isExcluded(c.req.method, c.req.path, exclusions)) return next();
-    const outcome = await authenticate(c.req.raw.headers, authConfigOf(c.env));
+    const outcome = await authenticate(
+      c.req.raw.headers,
+      authConfigFromEnv(c.env),
+    );
     if (!outcome.ok)
       return c.json(
         { statusCode: outcome.status, message: outcome.error },
         outcome.status as 401,
+      );
+    if (outcome.auth.via === 'delegation')
+      console.warn(
+        `[auth] ${c.req.method} ${c.req.path}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
       );
     c.set('auth', outcome.auth);
     return next();
@@ -373,7 +380,7 @@ export function createShell(
     // request, so it gets the header's checks: for this oracle, issued by
     // the caller, with a bounded expiry — and that expiry is the token's,
     // never a value the client states beside it.
-    const checked = await validateDelegation(raw, authConfigOf(c.env));
+    const checked = await validateDelegation(raw, authConfigFromEnv(c.env));
     if (!checked.ok)
       return c.json(
         { message: `Invalid UCAN delegation: ${checked.error}` },
@@ -714,16 +721,6 @@ function clientRequestId(rawBody: string): string | null {
     // not JSON — the user object reports the malformed body
   }
   return null;
-}
-
-function authConfigOf(env: OracleWorkerEnv): AuthConfig {
-  return {
-    oracleDid: env.ORACLE_DID,
-    blocksyncUri: env.BLOCKSYNC_GRAPHQL_URL,
-    maxTtlSeconds: env.UCAN_AUTH_MAX_TTL_SECONDS
-      ? Number(env.UCAN_AUTH_MAX_TTL_SECONDS)
-      : undefined,
-  };
 }
 
 function identityOf(auth: AuthResult, headers: Headers): TurnIdentity {

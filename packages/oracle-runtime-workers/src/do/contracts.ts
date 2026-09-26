@@ -42,6 +42,8 @@ export interface OracleWorkerEnv {
   /** Blocksync GraphQL endpoint used to resolve `did:ixo` verification keys. */
   BLOCKSYNC_GRAPHQL_URL: string;
   UCAN_AUTH_MAX_TTL_SECONDS?: string;
+  /** `true` restores the legacy bare-delegation authentication (off by default). */
+  UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;

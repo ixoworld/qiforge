@@ -83,8 +83,16 @@ implementation, and what is deliberately left out.
   state by the Node agent-builder's rules (`src/do/turn-metadata.ts`): a
   request that names the editor room also defines its session run, an active
   editor context seeds the editor plugin into `loadedPlugins`.
-- **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`)
-  with the `x-ucan-delegation` fallback; DID keys resolved through Blocksync.
+- **Auth**: UCAN invocation (`Authorization: Bearer` + `X-Auth-Type: ucan`);
+  DID keys resolved through Blocksync. **A bare `x-ucan-delegation` does not
+  authenticate** (Node accepts it as a fallback): a delegation travels on as
+  proof in the invocations the runtime mints for other services, so it must
+  not double as a login. It is refused with a 401 asking for an invocation,
+  on HTTP and on the socket CONNECT alike, unless the deployment sets
+  `UCAN_ALLOW_BARE_DELEGATION_AUTH=true` for clients that do not send one yet
+  (each such request logs `[auth] … authenticated with a bare delegation`).
+  Sent beside an invocation, the delegation is still the authorization for
+  downstream calls.
   Header-less turns mint plugin invocations from the delegation deposited via
   `POST /delegation`, cached in the object; `POST`/`DELETE /delegation`
   update the object at once. `GET /delegation` additionally returns the
@@ -92,8 +100,9 @@ implementation, and what is deliberately left out.
   `expiration` only). **A delegation must expire**, here and not on Node: an
   `x-ucan-delegation` header, or a delegation deposited with
   `POST /delegation`, with no expiry anywhere in its chain is refused (401
-  for a header that is the only credential; beside a valid invocation it is
-  dropped, not carried downstream; 400 at `POST /delegation`).
+  for a header that is the only credential under the legacy fallback; beside
+  a valid invocation it is dropped, not carried downstream; 400 at
+  `POST /delegation`).
   `POST /delegation` also validates what it stores (this oracle's audience,
   issued by the caller, else 403) and stores the token's own expiry, never
   an `expiration` sent in the body.

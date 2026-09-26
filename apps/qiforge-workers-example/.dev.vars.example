@@ -11,6 +11,9 @@ ORACLE_ENTITY_DID=did:ixo:entity:oracleexample
 
 # --- auth: did:ixo key resolution ------------------------------------------
 BLOCKSYNC_GRAPHQL_URL=http://localhost:34582/graphql
+# Requests must carry a UCAN invocation; `true` lets a bare x-ucan-delegation
+# authenticate instead (legacy clients only, logged per request).
+# UCAN_ALLOW_BARE_DELEGATION_AUTH=false
 
 # --- matrix -----------------------------------------------------------------
 MATRIX_BASE_URL=http://localhost:34008

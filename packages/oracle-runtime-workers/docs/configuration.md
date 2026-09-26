@@ -104,15 +104,16 @@ same object; each plugin's `configSchema` is the reference.
 
 ### Identity and auth
 
-| Variable                    | Required | Meaning                                                                                                                                                                                                            |
-| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ORACLE_NAME`               | yes      | Display name (device names, replies).                                                                                                                                                                              |
-| `ORACLE_DID`                | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                         |
-| `ORACLE_ENTITY_DID`         | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                |
-| `NETWORK`                   | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                  |
-| `BLOCKSYNC_GRAPHQL_URL`     | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                              |
-| `UCAN_AUTH_MAX_TTL_SECONDS` | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                |
-| `ORACLE_SIGNING_MNEMONIC`   | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup). |
+| Variable                          | Required | Meaning                                                                                                                                                                                                            |
+| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ORACLE_NAME`                     | yes      | Display name (device names, replies).                                                                                                                                                                              |
+| `ORACLE_DID`                      | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                         |
+| `ORACLE_ENTITY_DID`               | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                |
+| `NETWORK`                         | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                  |
+| `BLOCKSYNC_GRAPHQL_URL`           | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                              |
+| `UCAN_AUTH_MAX_TTL_SECONDS`       | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                |
+| `UCAN_ALLOW_BARE_DELEGATION_AUTH` | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per request). Off by default: requests must carry a UCAN invocation.                                            |
+| `ORACLE_SIGNING_MNEMONIC`         | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup). |
 
 ### Matrix
 

@@ -85,7 +85,7 @@ import {
   RealtimeEndpoint,
   type RealtimeStatus,
 } from '../realtime/realtime-endpoint';
-import { authenticate } from '../shell/auth';
+import { authConfigFromEnv, authenticate } from '../shell/auth';
 import {
   compactStep,
   finishCompaction,
@@ -2928,13 +2928,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           }
           if (auth.ucanDelegation)
             headers.set('x-ucan-delegation', auth.ucanDelegation);
-          return authenticate(headers, {
-            oracleDid: this.env.ORACLE_DID,
-            blocksyncUri: this.env.BLOCKSYNC_GRAPHQL_URL,
-            maxTtlSeconds: this.env.UCAN_AUTH_MAX_TTL_SECONDS
-              ? Number(this.env.UCAN_AUTH_MAX_TTL_SECONDS)
-              : undefined,
-          });
+          return authenticate(headers, authConfigFromEnv(this.env));
         },
         sessionExists: async (userDid, sessionId) => {
           await this.ready({ userDid });

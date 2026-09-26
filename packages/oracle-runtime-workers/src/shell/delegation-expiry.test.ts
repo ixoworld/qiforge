@@ -16,12 +16,18 @@ import {
 import { describe, expect, it } from 'vitest';
 import { decodeRoomStateContent } from '../matrix/room-state-codec';
 import { createShell } from './app';
-import { authenticate } from './auth';
+import {
+  authConfigFromEnv,
+  authenticate,
+  INVOCATION_REQUIRED_ERROR,
+} from './auth';
 
 // did:key throughout: every DID resolves locally, Blocksync is never asked.
 const ORACLE_DID = (await generateKeypair()).did;
 const BLOCKSYNC = 'https://blocksync.invalid/graphql';
 const CFG = { oracleDid: ORACLE_DID, blocksyncUri: BLOCKSYNC };
+/** The legacy fallback (`UCAN_ALLOW_BARE_DELEGATION_AUTH=true`): a bare delegation authenticates. */
+const LEGACY = { ...CFG, allowBareDelegation: true };
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 async function delegationFrom(
@@ -51,12 +57,80 @@ async function invocationFrom(issuer: Signer): Promise<string> {
   );
 }
 
+describe('bare delegation (no invocation)', () => {
+  it('does not authenticate by default, however valid the delegation', async () => {
+    const user = await generateKeypair();
+    const outcome = await authenticate(
+      new Headers({
+        'x-ucan-delegation': await delegationFrom(
+          user.signer,
+          nowSeconds() + 3600,
+        ),
+      }),
+      CFG,
+    );
+    expect(outcome).toEqual({
+      ok: false,
+      status: 401,
+      error: INVOCATION_REQUIRED_ERROR,
+    });
+  });
+
+  it('is refused by the shell unless the deployment opts into the legacy fallback', async () => {
+    const user = await generateKeypair();
+    const headers = {
+      'x-ucan-delegation': await delegationFrom(
+        user.signer,
+        nowSeconds() + 3600,
+      ),
+    };
+    const env = {
+      ORACLE_DID,
+      BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC,
+      USER_ORACLE: {
+        idFromName: (name: string) => name,
+        get: () => ({ abortTurn: async () => false }),
+      },
+    };
+    const abort = (extra: Record<string, unknown>) =>
+      createShell().request(
+        '/messages/abort',
+        {
+          method: 'POST',
+          headers: { ...headers, 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: 's' }),
+        },
+        { ...env, ...extra },
+      );
+    const refused = await abort({});
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({
+      message: INVOCATION_REQUIRED_ERROR,
+    });
+    const legacy = await abort({ UCAN_ALLOW_BARE_DELEGATION_AUTH: 'true' });
+    expect(legacy.status).toBe(200);
+  });
+
+  it('reads the fallback switch from UCAN_ALLOW_BARE_DELEGATION_AUTH', () => {
+    const base = { ORACLE_DID, BLOCKSYNC_GRAPHQL_URL: BLOCKSYNC };
+    expect(authConfigFromEnv(base).allowBareDelegation).toBe(false);
+    expect(
+      authConfigFromEnv({ ...base, UCAN_ALLOW_BARE_DELEGATION_AUTH: 'false' })
+        .allowBareDelegation,
+    ).toBe(false);
+    expect(
+      authConfigFromEnv({ ...base, UCAN_ALLOW_BARE_DELEGATION_AUTH: 'true' })
+        .allowBareDelegation,
+    ).toBe(true);
+  });
+});
+
 describe('delegation header', () => {
-  it('refuses a delegation that never expires as the only credential', async () => {
+  it('refuses a delegation that never expires as the only credential (legacy fallback on)', async () => {
     const user = await generateKeypair();
     const outcome = await authenticate(
       new Headers({ 'x-ucan-delegation': await delegationFrom(user.signer) }),
-      CFG,
+      LEGACY,
     );
     expect(outcome.ok).toBe(false);
     if (outcome.ok) return;
@@ -64,14 +138,14 @@ describe('delegation header', () => {
     expect(outcome.error).toMatch(/no expiration/i);
   });
 
-  it('accepts a bounded delegation and reports its expiry', async () => {
+  it('accepts a bounded delegation and reports its expiry (legacy fallback on)', async () => {
     const user = await generateKeypair();
     const expiration = nowSeconds() + 3600;
     const outcome = await authenticate(
       new Headers({
         'x-ucan-delegation': await delegationFrom(user.signer, expiration),
       }),
-      CFG,
+      LEGACY,
     );
     expect(outcome).toMatchObject({
       ok: true,
@@ -83,7 +157,7 @@ describe('delegation header', () => {
     });
   });
 
-  it('refuses an expired delegation', async () => {
+  it('refuses an expired delegation (legacy fallback on)', async () => {
     const user = await generateKeypair();
     const outcome = await authenticate(
       new Headers({
@@ -92,9 +166,34 @@ describe('delegation header', () => {
           nowSeconds() - 60,
         ),
       }),
-      CFG,
+      LEGACY,
     );
     expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error).toMatch(/expired/i);
+  });
+
+  it('with a valid invocation, carries a bounded delegation downstream', async () => {
+    const user = await generateKeypair();
+    const expiration = nowSeconds() + 3600;
+    const delegation = await delegationFrom(user.signer, expiration);
+    const outcome = await authenticate(
+      new Headers({
+        authorization: `Bearer ${await invocationFrom(user.signer)}`,
+        'x-auth-type': 'ucan',
+        'x-ucan-delegation': delegation,
+      }),
+      CFG,
+    );
+    expect(outcome).toMatchObject({
+      ok: true,
+      auth: {
+        userDid: user.did,
+        via: 'invocation',
+        delegation,
+        delegationExpiration: expiration,
+      },
+    });
   });
 
   it('with a valid invocation, drops an unbounded delegation instead of carrying it downstream', async () => {

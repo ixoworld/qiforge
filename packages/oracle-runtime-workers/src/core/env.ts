@@ -54,6 +54,13 @@ export const baseEnvSchema = z.object({
    * declares. Default 15 minutes.
    */
   UCAN_AUTH_MAX_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  /**
+   * `true` lets a bare `x-ucan-delegation` (no invocation) authenticate a
+   * request — the legacy fallback, for clients that do not send a UCAN
+   * invocation yet. Off by default: a delegation travels on as proof in
+   * downstream invocations, so it must not also be a login credential.
+   */
+  UCAN_ALLOW_BARE_DELEGATION_AUTH: z.enum(['true', 'false']).optional(),
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: z.string().min(1),

@@ -5,12 +5,18 @@
  *  - Primary:  `Authorization: Bearer <invocation>` + `X-Auth-Type: ucan` — a
  *    user-self-signed root invocation for `{ can: '*', with: 'ixo:oracle' }`
  *    addressed to this oracle's DID. Proves WHO is calling; short TTL.
- *  - Fallback: `x-ucan-delegation: <base64 CAR>` — accepted alone for legacy
- *    clients and always used for downstream authorization when present. A
- *    delegation is only trusted when its issuer equals the authenticated DID
- *    and it expires: a delegation with no expiry anywhere in its chain is
- *    refused, since the runtime stores it and mints on it long after the
- *    request, and nothing else would ever end it.
+ *  - `x-ucan-delegation: <base64 CAR>` — authorization material for the
+ *    runtime's downstream calls, used when present. It does NOT
+ *    authenticate on its own: a delegation is a grant the user hands to
+ *    this oracle and it travels on as proof in the invocations the runtime
+ *    mints for other services, so anyone who has seen one could otherwise
+ *    present it and act as the user. `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`
+ *    restores the old fallback for clients that do not send an invocation
+ *    yet (the shell logs a deprecation warning per request). A delegation
+ *    is only trusted when its issuer equals the authenticated DID and it
+ *    expires: a delegation with no expiry anywhere in its chain is refused,
+ *    since the runtime stores it and mints on it long after the request,
+ *    and nothing else would ever end it.
  *
  * The returned `userDid` is always the cryptographically recovered signer,
  * never a client-claimed value. `did:ixo` keys resolve through Blocksync.
@@ -51,7 +57,33 @@ export interface AuthConfig {
   oracleDid: string;
   blocksyncUri: string;
   maxTtlSeconds?: number;
+  /**
+   * Accept a bare `x-ucan-delegation` (no invocation) as authentication, the
+   * legacy fallback. Off unless `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`.
+   */
+  allowBareDelegation?: boolean;
 }
+
+/** The auth config of a deployment, from its raw Worker env (shell and user object alike). */
+export function authConfigFromEnv(env: {
+  ORACLE_DID: string;
+  BLOCKSYNC_GRAPHQL_URL: string;
+  UCAN_AUTH_MAX_TTL_SECONDS?: string;
+  UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
+}): AuthConfig {
+  return {
+    oracleDid: env.ORACLE_DID,
+    blocksyncUri: env.BLOCKSYNC_GRAPHQL_URL,
+    ...(env.UCAN_AUTH_MAX_TTL_SECONDS
+      ? { maxTtlSeconds: Number(env.UCAN_AUTH_MAX_TTL_SECONDS) }
+      : {}),
+    allowBareDelegation: env.UCAN_ALLOW_BARE_DELEGATION_AUTH === 'true',
+  };
+}
+
+/** The 401 a bare delegation gets while the fallback is off. */
+export const INVOCATION_REQUIRED_ERROR =
+  'UCAN invocation required: send Authorization: Bearer <invocation> with X-Auth-Type: ucan. An x-ucan-delegation alone no longer authenticates; send it beside the invocation.';
 
 export interface AuthResult {
   userDid: string;
@@ -223,6 +255,11 @@ export async function authenticate(
       error:
         'Missing Authorization (UCAN invocation) or x-ucan-delegation header',
     };
+  }
+  // A delegation proves what the user granted this oracle, not who is
+  // calling; it authenticates only through the opt-in legacy fallback.
+  if (!invocation && !cfg.allowBareDelegation) {
+    return { ok: false, status: 401, error: INVOCATION_REQUIRED_ERROR };
   }
 
   let userDid: string | null = null;
