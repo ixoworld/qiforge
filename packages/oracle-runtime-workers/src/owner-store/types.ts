@@ -189,6 +189,23 @@ const SQLITE_HEADER_BYTES = 16;
  * again as it writes; this is what lets a store reject a corrupt or foreign
  * upload before anything downstream starts.
  */
+/**
+ * A stream that does not open with the SQLite header. `proven` when the whole
+ * header arrived and differs: those bytes will never load. A shorter read may
+ * be a transfer cut short, so it proves nothing about the stored file.
+ */
+export class NotSqliteFileError extends Error {
+  readonly proven: boolean;
+
+  constructor(what: string, headerBytesRead: number) {
+    super(
+      `${what} is not a SQLite file (${headerBytesRead} header byte(s) read)`,
+    );
+    this.name = 'NotSqliteFileError';
+    this.proven = headerBytesRead >= SQLITE_HEADER_BYTES;
+  }
+}
+
 export async function assertSqliteStream(
   stream: ReadableStream<Uint8Array>,
   what: string,
@@ -196,9 +213,7 @@ export async function assertSqliteStream(
   const { head, rest } = await peekStream(stream, SQLITE_HEADER_BYTES);
   if (isSqliteFile(head)) return rest;
   await rest.cancel(`${what} is not a SQLite file`).catch(() => undefined);
-  throw new Error(
-    `${what} is not a SQLite file (${head.byteLength} header byte(s) read)`,
-  );
+  throw new NotSqliteFileError(what, head.byteLength);
 }
 
 function concat(parts: Uint8Array[]): Uint8Array {

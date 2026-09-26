@@ -251,6 +251,7 @@ import {
   transformTranscript,
   type TranscriptPageOptions,
 } from './transcript';
+import { evictIdleWorkingCopy } from './idle-eviction';
 import { WorkersUcanService } from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
 
@@ -685,6 +686,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       { session: IndexableSession; messages: HistoryMessage[] }
     >();
     private initPromise: Promise<void> | null = null;
+    /** An idle eviction deleting the working copy; a boot waits for it. */
+    private evicting: Promise<void> | null = null;
     private reloadedFromOwnerStore = false;
     /** Set by `adoptOwnerCopy` for a legacy copy: `ready()` flushes it to the system of record right after. */
     private pendingLegacyMigration: { bytes: number } | null = null;
@@ -806,6 +809,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       } else if (!this.delegations.has(identity.userDid)) {
         await this.hydrateDelegation(identity.userDid);
       }
+      // A request that arrived while an idle eviction deletes the working
+      // copy boots afresh from the owner copy once it is gone.
+      while (this.evicting) await this.evicting;
       if (!this.initPromise) {
         this.initPromise = this.boot(identity.userDid).catch((err) => {
           this.initPromise = null;
@@ -1391,6 +1397,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
     }
 
+    /**
+     * Forget every handle on the working copy, so the next request boots
+     * afresh (and imports the owner copy into an empty file).
+     */
+    private dropInMemoryState(): void {
+      this.db = null;
+      this.saver = null;
+      this.sessions = null;
+      this.matrixLedger = null;
+      this.runStore = null;
+      this.runs = null;
+      this.resultStore = null;
+      this.sessionRooms.clear();
+      this.mainRoomId = null;
+      this.ambient = null;
+      this.secretsService = null;
+      this.byo = null;
+      this.initPromise = null;
+      this.reloadedFromOwnerStore = false;
+    }
+
+    /**
+     * Still idle after the idle tick's awaits: the same working copy, nothing
+     * written or uploading, no run, and no request since (every request
+     * records its access in `ready()`).
+     */
+    private async stillIdle(db: DoSqliteDatabase): Promise<boolean> {
+      const lastAccess =
+        (await this.ctx.storage.get<number>(META_LAST_ACCESS)) ?? Date.now();
+      return (
+        this.db === db &&
+        !this.dirty &&
+        !this.flushInFlight &&
+        (this.runs?.size ?? 0) === 0 &&
+        Date.now() - lastAccess > IDLE_EVICT_MS
+      );
+    }
+
     /** Drop the working copy entirely; the caller reopens/reboots afterwards. */
     private async wipeWorkingCopy(db: DoSqliteDatabase | null): Promise<void> {
       if (db) {
@@ -1723,18 +1767,38 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         deadlines.length === 0 &&
         (this.runs?.size ?? 0) === 0
       ) {
-        if (await this.ownerCopyIsCurrent(this.db)) {
-          await this.wipeWorkingCopy(this.db);
+        const db = this.db;
+        const outcome = await evictIdleWorkingCopy({
+          ownerCopyIsCurrent: () => this.ownerCopyIsCurrent(db),
+          stillIdle: () => this.stillIdle(db),
+          dropHandles: () => this.dropInMemoryState(),
+          wipe: () => {
+            const wipe = this.wipeWorkingCopy(db);
+            this.evicting = wipe
+              .catch(() => undefined)
+              .finally(() => {
+                this.evicting = null;
+              });
+            return wipe;
+          },
+        });
+        if (outcome === 'evicted') {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
           // An attached (idle) socket still needs its heartbeat rounds.
           if (nextPingAt !== null) await this.ctx.storage.setAlarm(nextPingAt);
           else await this.ctx.storage.deleteAlarm();
           return;
         }
-        console.warn(
-          `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
-        );
-        deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+        if (outcome === 'not-current') {
+          console.warn(
+            `[user-do] ${this.userDid} is idle but the owner copy is not verified current — keeping the working copy`,
+          );
+          deadlines.push(now + FLUSH_RETRY_DELAY_MS);
+        } else {
+          console.log(
+            `[user-do] ${this.userDid} became active during the idle check — keeping the working copy`,
+          );
+        }
       }
       deadlines.push(now + IDLE_EVICT_MS);
       const housekeeping = Math.min(...deadlines);
@@ -2709,20 +2773,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         await this.flushToOwnerStore();
       }
       await this.wipeWorkingCopy(this.db);
-      this.db = null;
-      this.saver = null;
-      this.sessions = null;
-      this.matrixLedger = null;
-      this.runStore = null;
-      this.runs = null;
-      this.resultStore = null;
-      this.sessionRooms.clear();
-      this.mainRoomId = null;
-      this.ambient = null;
-      this.secretsService = null;
-      this.byo = null;
-      this.initPromise = null;
-      this.reloadedFromOwnerStore = false;
+      this.dropInMemoryState();
       if (userDid) await this.ready({ userDid });
       return { reloadedFromOwnerStore: this.reloadedFromOwnerStore };
     }

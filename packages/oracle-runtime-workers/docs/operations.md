@@ -611,7 +611,12 @@ becomes a turn (`src/matrix/group-chat.ts`):
 - **Idle eviction.** After five days without contact (`IDLE_EVICT_MS`) the
   working copy is wiped — only after a flush and a check that the upstream
   copy is current (generation + hash); otherwise it stays and the check
-  repeats. `GET /debug/storage` shows `writeGeneration` /
+  repeats. A request can arrive while that check awaits (the hash reads the
+  whole file, from R2 for tiered pages), so idleness is read again after it
+  (last access, dirty flag, runs, a flush in flight); activity keeps the
+  copy (`became active during the idle check`). The object drops its handles
+  before the wipe starts, and a request arriving during the wipe waits for
+  it and boots afresh from the owner copy (`src/do/idle-eviction.ts`). `GET /debug/storage` shows `writeGeneration` /
   `uploadedGeneration`, `dirty`, `nextFlushAt` (the deadline, absent when
   clean), `lastFlushAt`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
   `indexingInFlight`, `flushInFlight` and the alarm.
@@ -648,7 +653,12 @@ copy removed`; `legacyCleared` in `/debug/storage`).
   and a failed VFS write after the import keeps the working copy dirty and
   retried every 10 min while the object serves the imported history. The
   boot log reads `imported N bytes from legacy Matrix media` followed by
-  `migrated N bytes from legacy Matrix media to vfs (<etag>)`.
+  `migrated N bytes from legacy Matrix media to vfs (<etag>)`. When the VFS
+  holds no file, a legacy read that fails (Matrix unreachable, a forbidden
+  or failed media download) fails the boot like any owner-copy load, and the
+  next request retries; it never starts an empty history. Only a legacy
+  copy proven unusable (its whole header arrived and is not SQLite) counts
+  as absent, logged at error as `legacy Matrix copy is unusable`.
 
 ## Realtime channel
 
