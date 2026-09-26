@@ -244,7 +244,9 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   not grant cannot be loaded or used, the turn's delegation (the stored one
   on a Matrix turn too) carries every capability parsed from the token, and
   a grant covers child resources and namespaced abilities (`architecture.md`,
-  "Plugin requirements").
+  "Plugin requirements"). The memory, sandbox and composio plugins require
+  their `ixo:memory` / `ixo:sandbox` grants; on Node they simply have no
+  tools without them.
 - **The repetition guard works per turn.** Node's guard blocks an identical
   call that failed within the last 20 messages, whatever the turn, so a
   user who fixed the cause and asked again was still refused, and a failure

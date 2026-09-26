@@ -1,4 +1,5 @@
 import type { RuntimeContext } from '../../plugin-api/types';
+import { MEMORY_CAPABILITY } from '../delegated-capabilities';
 import { mintInvocationSafely, resolveServiceDidSafely } from '../ucan-failure';
 
 /**
@@ -31,11 +32,11 @@ export async function buildMemoryHeaders(
 
   const invocation = await mintInvocationSafely(
     runCtx,
-    { did: memoryDid, capability: 'ixo:memory' },
+    { did: memoryDid, capability: MEMORY_CAPABILITY.resource },
     'memory',
     // Claim the ability the user's delegation actually grants. A `'*'` claim is
     // satisfiable only by a `'*'` grant — `'*'.startsWith('memory/')` is false.
-    { can: 'memory/*' },
+    { can: MEMORY_CAPABILITY.action },
   );
   if (!invocation) return null;
 

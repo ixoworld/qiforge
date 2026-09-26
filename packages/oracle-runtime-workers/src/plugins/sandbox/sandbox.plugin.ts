@@ -14,6 +14,7 @@ import {
   type SandboxAuthBuilder,
 } from './sandbox-mcp';
 import { createSandboxWriteBlobTool } from './sandbox-write-blob';
+import { SANDBOX_CAPABILITY } from '../delegated-capabilities';
 
 /**
  * Env this plugin owns. Unlike the Node runtime — whose Tier-0 base schema
@@ -131,6 +132,7 @@ const manifest: PluginManifest = {
   stability: 'stable',
   category: 'core',
   tags: ['sandbox', 'execution', 'workspace', 'artifacts'],
+  requires: [SANDBOX_CAPABILITY],
 };
 
 /** Minimal MCP-client surface — declared structurally so tests can stub it. */

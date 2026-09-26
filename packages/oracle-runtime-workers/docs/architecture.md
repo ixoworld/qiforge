@@ -60,6 +60,22 @@ them, whatever the plugin's visibility and even when an earlier turn or the
 router loaded it, and an always-on one is left out of the prompt. A manifest
 that declares nothing can be loaded by anyone.
 
+The bundled plugins require what they prove through that delegation, from
+one constant each (`src/plugins/delegated-capabilities.ts`) that both the
+manifest and the mint read:
+
+| Plugin   | Requires                     |
+| -------- | ---------------------------- |
+| memory   | `memory/*` on `ixo:memory`   |
+| sandbox  | `sandbox/*` on `ixo:sandbox` |
+| composio | `sandbox/*` on `ixo:sandbox` |
+
+Without the grant each already contributed no tools, as its mint failed; now
+the model is told why. The rest declare nothing: the vfs plugin proves
+through its own `ixo:filesystem` delegation from the UCAN store, skills
+fall back to public capsules without `ixo:skills`, and the others call no
+UCAN-guarded service.
+
 **Capability router.** Loading a plugin with `load_capability` costs a
 model round trip. With `CAPABILITY_ROUTER=on` the turn build
 (`prepareTurn`) first evaluates the shared `capabilityRouteDecision`

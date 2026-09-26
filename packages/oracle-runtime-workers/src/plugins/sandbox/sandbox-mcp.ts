@@ -1,4 +1,5 @@
 import type { RuntimeContext } from '../../plugin-api/types';
+import { SANDBOX_CAPABILITY } from '../delegated-capabilities';
 
 /** Tool name surfaced by the upstream sandbox MCP. */
 export const SANDBOX_RUN_TOOL_NAME = 'sandbox_run';
@@ -70,10 +71,10 @@ export function createDefaultAuthBuilder(): SandboxAuthBuilder {
     if (sandboxDid) {
       try {
         const invocation = await runCtx.ucan.mintInvocation(
-          { did: sandboxDid, capability: 'ixo:sandbox' },
+          { did: sandboxDid, capability: SANDBOX_CAPABILITY.resource },
           // Claim the ability the user's delegation actually grants. A `'*'`
           // claim is satisfiable only by a `'*'` grant.
-          { can: 'sandbox/*' },
+          { can: SANDBOX_CAPABILITY.action },
         );
         if (invocation) {
           headers.Authorization = `Bearer ${invocation}`;

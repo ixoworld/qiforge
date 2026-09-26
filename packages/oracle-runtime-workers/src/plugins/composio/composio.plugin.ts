@@ -11,6 +11,7 @@ import {
   type ComposioSessionFactory,
 } from './composio-tools';
 import { mintComposioInvocation } from './composio-ucan';
+import { SANDBOX_CAPABILITY } from '../delegated-capabilities';
 
 const configSchema = z.object({
   COMPOSIO_API_KEY: z.string().min(1, 'COMPOSIO_API_KEY must not be empty.'),
@@ -100,6 +101,7 @@ const manifest: PluginManifest = {
   category: 'integration',
   visibility: 'on-demand',
   stability: 'stable',
+  requires: [SANDBOX_CAPABILITY],
 };
 
 export interface ComposioPluginOptions {
