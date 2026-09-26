@@ -89,7 +89,14 @@ implementation, and what is deliberately left out.
   `POST /delegation`, cached in the object; `POST`/`DELETE /delegation`
   update the object at once. `GET /delegation` additionally returns the
   stored delegation's `capabilities` (Node returns `authorized` and
-  `expiration` only).
+  `expiration` only). **A delegation must expire**, here and not on Node: an
+  `x-ucan-delegation` header, or a delegation deposited with
+  `POST /delegation`, with no expiry anywhere in its chain is refused (401
+  for a header that is the only credential; beside a valid invocation it is
+  dropped, not carried downstream; 400 at `POST /delegation`).
+  `POST /delegation` also validates what it stores (this oracle's audience,
+  issued by the caller, else 403) and stores the token's own expiry, never
+  an `expiration` sent in the body.
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
   `MODEL_PRICE_MARKUP`.
