@@ -137,7 +137,14 @@ implementation, and what is deliberately left out.
   socket of a session going away.
 - **Per-room secrets**: the JWE scheme byte-compatible with
   `oracles-chain-client` (`ECDH-ES+A256KW` + `A256GCM`, PIN-locked account
-  room key), served to plugins through the same secrets surface.
+  room key), served to plugins through the same secrets surface, minus the
+  runtime's own LLM credentials. Every secret named `BYO_LLM_*` (the BYO
+  API keys and the ChatGPT OAuth tokens, refresh token included) is
+  neither listed nor read for a plugin (`src/do/secrets-adapter.ts`). Node
+  serves them to plugins like any other secret, so its sandbox forwards
+  them as `x-us-*` headers to code the model writes. The user's other
+  secrets and the operator's `ORACLE_SECRETS` still reach the sandbox,
+  which is what they are stored for.
 - **Matrix liveness**: the `work_status` card (`ixo.oracle.component`, edited
   in place: routing → Step n · … → delivering → done / superseded), quote-reply
   chains resolved to their thread (`src/matrix/reply-chain.ts`), and the
