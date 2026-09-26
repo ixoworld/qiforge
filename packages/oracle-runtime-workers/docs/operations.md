@@ -531,6 +531,19 @@ becomes a turn (`src/matrix/group-chat.ts`):
 
 ### Rooms and aliases
 
+- **Who a room message belongs to.** A DID-shaped sender
+  (`@did-ixo-…:server`) is that DID; a non-DID sender in a user↔oracle
+  room is the room's owner, named by its canonical alias. Either way the
+  server the identity came from (the sender's, or the alias's) must be the
+  user's registered homeserver: the MatrixHomeServer service of their DID
+  document, resolved through Blocksync and cached six hours. Anyone can
+  register `@did-ixo-<someone>` on a server of their own, so a message
+  whose server does not match is dropped before any user object is woken
+  (`ingest dropped … : foreign`, a warning). A DID document that names no
+  homeserver, or a Blocksync that cannot be reached, falls back to the
+  oracle's own server (`MATRIX_HOMESERVER_NAME`, else the bot's): senders
+  on it are accepted, senders anywhere else are not. Two members writing in
+  one thread of a group room are two turns, each in its own user object.
 - The user ↔ oracle room alias is
   `#<userDid>_<oracleENTITYDid>:<the USER's homeserver>` — the entity DID
   (`ORACLE_ENTITY_DID`), not the account DID, and the user's homeserver from
@@ -645,7 +658,11 @@ missed interval + timeout (240 s), then the object hibernates again. A wake
 that is only due for the heartbeat re-arms without opening the database.
 Sockets and their ping/pong bookkeeping live on the socket attachments and
 are re-adopted from `ctx.getWebSockets()` on every wake. Pending browser
-calls do not survive a restart (neither does the turn that made them). A
+calls do not survive a restart (neither does the turn that made them).
+A socket joins only a session of the user its CONNECT token proves, and a
+`tool_result` / `action_call_result` settles a call only when it arrives on
+a socket of the session the call was made for; a `sessionId` in the result
+payload is ignored. A
 dead connection is noticed by either side after up to four minutes; the
 client SDK's reconnect then restores it. `socket.io-client` must use
 `transports: ['websocket']`.

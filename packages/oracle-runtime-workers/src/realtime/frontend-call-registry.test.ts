@@ -14,7 +14,11 @@ describe('FrontendCallRegistry', () => {
     const p = reg.wait(call('browser', 'tc-1'), { timeoutMs: 1000 });
     expect(reg.size).toBe(1);
     expect(
-      reg.settle('browser', { toolCallId: 'tc-1', result: { ok: 1 } }),
+      reg.settle('browser', {
+        toolCallId: 'tc-1',
+        sessionId: 's1',
+        result: { ok: 1 },
+      }),
     ).toBe(true);
     await expect(p).resolves.toEqual({ ok: 1 });
     expect(reg.size).toBe(0);
@@ -23,28 +27,62 @@ describe('FrontendCallRegistry', () => {
   it('rejects on error, on AG-UI success:false, and ignores unknown ids', async () => {
     const reg = new FrontendCallRegistry();
     const failing = reg.wait(call('browser', 'tc-2'), { timeoutMs: 1000 });
-    reg.settle('browser', { toolCallId: 'tc-2', error: 'Tool x not found' });
+    reg.settle('browser', {
+      toolCallId: 'tc-2',
+      sessionId: 's1',
+      error: 'Tool x not found',
+    });
     await expect(failing).rejects.toThrow('Tool x not found');
 
     const action = reg.wait(call('agui', 'ag-1'), { timeoutMs: 1000 });
     reg.settle('agui', {
       toolCallId: 'ag-1',
+      sessionId: 's1',
       result: { success: false, error: 'render failed' },
     });
     await expect(action).rejects.toThrow('render failed');
 
     const action2 = reg.wait(call('agui', 'ag-2'), { timeoutMs: 1000 });
-    reg.settle('agui', { toolCallId: 'ag-2', result: { success: false } });
+    reg.settle('agui', {
+      toolCallId: 'ag-2',
+      sessionId: 's1',
+      result: { success: false },
+    });
     await expect(action2).rejects.toThrow('Action failed');
 
     // A browser result is keyed separately from an AG-UI one.
     const browser = reg.wait(call('browser', 'same'), { timeoutMs: 1000 });
-    expect(reg.settle('agui', { toolCallId: 'same', result: 1 })).toBe(false);
-    expect(reg.settle('browser', { toolCallId: 'same', result: 2 })).toBe(true);
+    expect(
+      reg.settle('agui', { toolCallId: 'same', sessionId: 's1', result: 1 }),
+    ).toBe(false);
+    expect(
+      reg.settle('browser', { toolCallId: 'same', sessionId: 's1', result: 2 }),
+    ).toBe(true);
     await expect(browser).resolves.toBe(2);
-    expect(reg.settle('browser', { toolCallId: 'nope', result: 1 })).toBe(
-      false,
-    );
+    expect(
+      reg.settle('browser', { toolCallId: 'nope', sessionId: 's1', result: 1 }),
+    ).toBe(false);
+  });
+
+  it("ignores a result from another session's socket and keeps the call waiting", async () => {
+    const reg = new FrontendCallRegistry();
+    const p = reg.wait(call('browser', 'tc-x'), { timeoutMs: 1000 });
+    expect(
+      reg.settle('browser', {
+        toolCallId: 'tc-x',
+        sessionId: 's2',
+        result: { forged: true },
+      }),
+    ).toBe(false);
+    expect(reg.size).toBe(1);
+    expect(
+      reg.settle('browser', {
+        toolCallId: 'tc-x',
+        sessionId: 's1',
+        result: { ok: 1 },
+      }),
+    ).toBe(true);
+    await expect(p).resolves.toEqual({ ok: 1 });
   });
 
   it("times out with Node's message and honours the abort signal", async () => {
@@ -71,8 +109,12 @@ describe('FrontendCallRegistry', () => {
     const a = reg.wait(call('browser', 'a'), { timeoutMs: 1000 });
     const b = reg.wait(call('agui', 'b'), { timeoutMs: 1000 });
     expect(reg.list().map((c) => c.toolCallId)).toEqual(['a', 'b']);
-    reg.settle('browser', { toolCallId: 'a', result: null });
-    reg.settle('agui', { toolCallId: 'b', result: { success: true } });
+    reg.settle('browser', { toolCallId: 'a', sessionId: 's1', result: null });
+    reg.settle('agui', {
+      toolCallId: 'b',
+      sessionId: 's1',
+      result: { success: true },
+    });
     await Promise.all([a, b]);
   });
 });

@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   aliasPartToDid,
+  attributeUser,
   IngestPipeline,
   type IngestTurn,
   type InboundMessage,
   matrixUserIdToDid,
   resolveUserDid,
+  serverNameOf,
   threadRootIdOf,
   userDidFromRoomAlias,
 } from './ingest';
@@ -18,13 +20,22 @@ const ALIAS = '#did-ixo-ixo1user_did-ixo-ixo1oracle:ixo.test';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function harness(opts: { alias?: string | null } = {}) {
+/** Every test user is registered on `ixo.test` unless a test says otherwise. */
+const registeredOnIxoTest = (): string => 'ixo.test';
+
+function harness(
+  opts: {
+    alias?: string | null;
+    userServerName?: (userDid: string) => string | null;
+  } = {},
+) {
   const turns: IngestTurn[] = [];
   const pipeline = new IngestPipeline({
     oracleDid: ORACLE_DID,
     botUserId: BOT,
     debounceMs: 40,
     canonicalAlias: () => (opts.alias === undefined ? ALIAS : opts.alias),
+    userServerName: opts.userServerName ?? registeredOnIxoTest,
     dispatch: async (turn) => {
       turns.push(turn);
     },
@@ -101,6 +112,30 @@ describe('DID mapping', () => {
     ).toBeNull();
   });
 
+  it('names the server each identity was minted on', () => {
+    expect(serverNameOf('@did-ixo-ixo1user:IXO.test')).toBe('ixo.test');
+    expect(serverNameOf('@did-ixo-ixo1user:localhost:8008')).toBe(
+      'localhost:8008',
+    );
+    expect(serverNameOf('@did-ixo-ixo1user')).toBeNull();
+    expect(
+      attributeUser({
+        alias: ALIAS,
+        sender: '@did-ixo-ixo1user:evil.example',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'evil.example' });
+    // A non-DID sender borrows the room owner's identity, so the alias's
+    // server is the one that has to be the owner's.
+    expect(
+      attributeUser({
+        alias: '#did-ixo-ixo1user_did-ixo-ixo1oracle:evil.example',
+        sender: '@legacy:evil.example',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'evil.example' });
+  });
+
   it('the thread root is the session: a threaded message keys on its root, a bare one on itself', () => {
     expect(threadRootIdOf({ eventId: '$e', threadRootId: '$root' })).toBe(
       '$root',
@@ -120,6 +155,74 @@ describe('IngestPipeline', () => {
     expect(unmapped.pipeline.offer(msg({ sender: '@legacy:ixo.test' }))).toBe(
       'unmapped',
     );
+  });
+
+  it("drops a DID-shaped sender from a server that is not the DID's registered homeserver", async () => {
+    const { pipeline, turns } = harness({ alias: null });
+    expect(
+      pipeline.offer(msg({ sender: '@did-ixo-ixo1user:evil.example' })),
+    ).toBe('foreign');
+    // Case-insensitive, like Matrix server names.
+    expect(pipeline.offer(msg({ sender: '@did-ixo-ixo1user:IXO.test' }))).toBe(
+      'queued',
+    );
+    await sleep(60);
+    expect(turns.map((t) => t.userDid)).toEqual(['did:ixo:ixo1user']);
+  });
+
+  it("drops a non-DID sender in a room whose alias sits on a server that is not the owner's", () => {
+    const forged = harness({
+      alias: '#did-ixo-ixo1user_did-ixo-ixo1oracle:evil.example',
+    });
+    expect(forged.pipeline.offer(msg({ sender: '@legacy:evil.example' }))).toBe(
+      'foreign',
+    );
+
+    const genuine = harness();
+    expect(genuine.pipeline.offer(msg({ sender: '@legacy:ixo.test' }))).toBe(
+      'queued',
+    );
+    genuine.pipeline.clear();
+  });
+
+  it("checks each speaker against their own DID's homeserver", () => {
+    const { pipeline } = harness({
+      userServerName: (did) =>
+        did === 'did:ixo:ixo1guest' ? 'guest.example' : 'ixo.test',
+    });
+    expect(
+      pipeline.offer(msg({ sender: '@did-ixo-ixo1guest:guest.example' })),
+    ).toBe('queued');
+    expect(pipeline.offer(msg({ sender: '@did-ixo-ixo1guest:ixo.test' }))).toBe(
+      'foreign',
+    );
+    pipeline.clear();
+  });
+
+  it('drops the message when the registered homeserver is unknown', () => {
+    const { pipeline } = harness({ userServerName: () => null });
+    expect(pipeline.offer(msg())).toBe('foreign');
+  });
+
+  it('two speakers in one thread are two turns, each in their own user object', async () => {
+    const { pipeline, turns } = harness();
+    pipeline.offer(msg({ eventId: '$root', body: 'from user' }));
+    pipeline.offer(
+      msg({
+        body: 'from guest',
+        threadRootId: '$root',
+        sender: '@did-ixo-ixo1guest:ixo.test',
+      }),
+    );
+    await sleep(60);
+    expect(
+      turns
+        .map((t) => [t.userDid, t.sessionId, t.message])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ).toEqual([
+      ['did:ixo:ixo1guest', '$root', 'from guest'],
+      ['did:ixo:ixo1user', '$root', 'from user'],
+    ]);
   });
 
   it('debounces per thread and dispatches one turn with the joined text', async () => {
@@ -229,6 +332,7 @@ describe('IngestPipeline', () => {
       oracleDid: ORACLE_DID,
       debounceMs: 10,
       canonicalAlias: () => ALIAS,
+      userServerName: registeredOnIxoTest,
       dispatch: async () => {
         calls++;
         if (calls === 1) throw new Error('boom');

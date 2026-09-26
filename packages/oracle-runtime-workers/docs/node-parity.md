@@ -210,6 +210,13 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   instead of as a finished call.
 - **Turn resume after an isolate reset** is not built: the in-flight turn
   dies with an SSE `error` and the user resends.
+- **A room message's sender is checked against the DID's homeserver.**
+  Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
+  sender's server (or, for a non-DID sender, the room alias's) must be the
+  homeserver the DID document registers, or the message is dropped
+  (`operations.md`, "Rooms and aliases"). Browser-tool and AG-UI results
+  settle a call only from a socket of the call's own session; Node matched
+  them by `toolCallId` alone.
 - **A user↔oracle room is always direct.** Node classified a room by the
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the

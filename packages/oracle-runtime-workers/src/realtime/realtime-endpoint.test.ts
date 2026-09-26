@@ -403,6 +403,37 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     expect((await s.status()).pendingCalls).toEqual([]);
     c.ws.close(1000, 'bye');
   });
+
+  it("does not let a socket of another session answer this session's call, whatever sessionId it claims", async () => {
+    const s = stub('cross-session');
+    const own = await connect(s, { sessionId: 'mine' });
+    const other = await connect(s, { sessionId: 'other' });
+
+    const browser = s.callBrowserTool({
+      sessionId: 'mine',
+      toolCallId: 'tc-guess',
+      toolName: 'open_url',
+      args: {},
+      timeoutMs: 5000,
+    });
+    await own.next(isEvent('browser_tool_call'));
+    other.ws.send(
+      '42["tool_result",{"toolCallId":"tc-guess","sessionId":"mine","result":{"forged":true}}]',
+    );
+    // Round-trip a ping on the other socket so its result has been handled.
+    other.ws.send('42["ping"]');
+    await other.next(isEvent('pong'));
+    expect((await s.status()).pendingCalls.map((c) => c.toolCallId)).toEqual([
+      'tc-guess',
+    ]);
+
+    own.ws.send(
+      '42["tool_result",{"toolCallId":"tc-guess","result":{"opened":true}}]',
+    );
+    expect(await browser).toEqual({ ok: true, value: { opened: true } });
+    own.ws.close(1000, 'bye');
+    other.ws.close(1000, 'bye');
+  });
 });
 
 describe('RealtimeEndpoint heartbeat (alarm-driven, hibernation-safe)', () => {

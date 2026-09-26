@@ -76,6 +76,13 @@ export interface IngestDeps {
   /** The DID that forms the oracle half of the user↔oracle room alias. */
   oracleDid: string;
   /**
+   * The Matrix server name the user's DID document registers, lowercased;
+   * null when it is not known. Synchronous like `canonicalAlias`: the gateway
+   * resolves it before the offer. A message whose attributed identity was
+   * minted on any other server is dropped (`'foreign'`).
+   */
+  userServerName(userDid: string): string | null;
+  /**
    * The bot's Matrix user id. Its first occurrence in a message is rewritten
    * to `(USER MENTIONED YOU @AI_AGENT)` before the agent sees it, as the Node
    * bridge does; omit to leave messages as sent.
@@ -129,6 +136,27 @@ export function userDidFromRoomAlias(
   return aliasPartToDid(local.slice(0, -suffix.length));
 }
 
+/** The server name of a Matrix user id or room alias (`@a:server` → `server`), lowercased; null without one. */
+export function serverNameOf(matrixId: string): string | null {
+  const colon = matrixId.indexOf(':');
+  if (colon === -1) return null;
+  const server = matrixId.slice(colon + 1).toLowerCase();
+  return server || null;
+}
+
+/** Whose turn a message is, and the server that identity was minted on. */
+export interface UserAttribution {
+  userDid: string;
+  /**
+   * The server the identity came from: the sender's for a DID-shaped sender,
+   * the alias's for a non-DID sender attributed to the room's owner. It must
+   * be the user's registered homeserver — anyone can register
+   * `@did-ixo-<someone>` on a server of their own, and a Matrix localpart
+   * says nothing about who controls the DID.
+   */
+  server: string | null;
+}
+
 /**
  * Who is the user for this message? The canonical alias names the room's
  * owner; the sender's localpart names the speaker. They agree in a 1:1
@@ -137,17 +165,31 @@ export function userDidFromRoomAlias(
  * must never run inside another user's object. A non-DID sender in an
  * owner's room is attributed to the owner (legacy / non-DID accounts).
  */
+export function attributeUser(opts: {
+  alias: string | null;
+  sender: string;
+  oracleDid: string;
+}): UserAttribution | null {
+  const fromSender = matrixUserIdToDid(opts.sender);
+  if (fromSender) {
+    return { userDid: fromSender, server: serverNameOf(opts.sender) };
+  }
+  const fromAlias = opts.alias
+    ? userDidFromRoomAlias(opts.alias, opts.oracleDid)
+    : null;
+  if (fromAlias && opts.alias) {
+    return { userDid: fromAlias, server: serverNameOf(opts.alias) };
+  }
+  return null;
+}
+
+/** The DID `attributeUser` names, without the server it came from. */
 export function resolveUserDid(opts: {
   alias: string | null;
   sender: string;
   oracleDid: string;
 }): string | null {
-  const fromSender = matrixUserIdToDid(opts.sender);
-  const fromAlias = opts.alias
-    ? userDidFromRoomAlias(opts.alias, opts.oracleDid)
-    : null;
-  if (fromSender && fromAlias && fromSender !== fromAlias) return fromSender;
-  return fromAlias ?? fromSender;
+  return attributeUser(opts)?.userDid ?? null;
 }
 
 /** The thread a message belongs to: its resolved root, else the message itself. */
@@ -169,16 +211,21 @@ export class IngestPipeline {
    * Offer a decrypted message. Returns the reason it was dropped, or
    * `'queued'` when it entered the debounce buffer.
    */
-  offer(msg: InboundMessage): 'queued' | 'empty' | 'unmapped' {
+  offer(msg: InboundMessage): 'queued' | 'empty' | 'unmapped' | 'foreign' {
     if (!msg.body.trim() && !msg.attachment) return 'empty';
-    const userDid = resolveUserDid({
+    const attribution = attributeUser({
       alias: this.deps.canonicalAlias(msg.roomId),
       sender: msg.sender,
       oracleDid: this.deps.oracleDid,
     });
-    if (!userDid) return 'unmapped';
+    if (!attribution) return 'unmapped';
+    const { userDid } = attribution;
+    const registered = this.deps.userServerName(userDid);
+    if (!registered || attribution.server !== registered) return 'foreign';
 
-    const key = `${msg.roomId}|${threadRootIdOf(msg)}`;
+    // Per speaker as well as per thread: two members typing in one thread of
+    // a group room are two turns, each in its own user's object.
+    const key = `${msg.roomId}|${threadRootIdOf(msg)}|${userDid}`;
     const existing = this.pending.get(key);
     if (existing) {
       clearTimeout(existing.timer);
