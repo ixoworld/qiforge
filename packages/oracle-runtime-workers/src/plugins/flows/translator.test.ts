@@ -180,7 +180,13 @@ describe('translator: flowSpecToBaseUcan', () => {
           id: 'two',
           action,
           after: ['one'],
-          runWhen: { fromStep: 'one', field: 'ok', is: 'equals', value: true },
+          runWhen: {
+            source: 'runtime_output',
+            fromStep: 'one',
+            field: 'ok',
+            is: 'equals',
+            value: true,
+          },
         },
       ],
     };

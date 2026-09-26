@@ -39,6 +39,7 @@ import {
   type CheckpointMetadata,
   type CheckpointTuple,
   copyCheckpoint,
+  emptyCheckpoint,
   maxChannelVersion,
   type PendingWrite,
   type SerializerProtocol,
@@ -699,6 +700,39 @@ export class SqliteSaver extends BaseCheckpointSaver {
         },
       });
     }
+  }
+
+  /** Append a deterministic turn without running or replacing pending graph work. */
+  async appendTurnMessages(
+    threadId: string,
+    messages: BaseMessage[],
+  ): Promise<void> {
+    const config = { configurable: { thread_id: threadId } };
+    const existing = await this.getTupleWithoutMessages(config);
+    if (!existing) {
+      const checkpoint = emptyCheckpoint();
+      checkpoint.channel_values.messages = messages;
+      await this.put(config, checkpoint, {
+        source: 'update',
+        step: -1,
+        parents: {},
+      });
+      return;
+    }
+    const rows = await Promise.all(
+      messages.map((message) =>
+        this.toMessageRow(message, threadId, '', existing.checkpoint.id),
+      ),
+    );
+    await this.db.transaction(async () => {
+      for (const row of rows) {
+        await this.db.run(
+          `INSERT OR IGNORE INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          row,
+        );
+      }
+    });
   }
 
   async put(

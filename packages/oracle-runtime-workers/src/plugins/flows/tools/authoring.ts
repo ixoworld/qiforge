@@ -24,6 +24,7 @@ import {
   reorderStep,
   setStepAssignment,
   setStepConditions,
+  setStepSemanticGate,
   setStepConfirmation,
   setStepEventTrigger,
   setStepExecution,
@@ -128,11 +129,16 @@ async function applyConditions(
   matrixClient: MatrixClient | undefined,
   steps: FlowStep[],
 ): Promise<void> {
-  const withConditions = steps.filter((s) => conditionsOf(s).length > 0);
+  const withConditions = steps.filter(
+    (s) => conditionsOf(s).length > 0 || s.semanticGate !== undefined,
+  );
   if (withConditions.length === 0) return;
   await withFlowDoc(ctx, flowRef, matrixClient, async (doc) => {
-    for (const step of withConditions)
+    for (const step of withConditions) {
       setStepConditions(doc, step.id, conditionsOf(step));
+      if (step.semanticGate)
+        setStepSemanticGate(doc, step.id, step.semanticGate);
+    }
   });
 }
 
@@ -376,6 +382,8 @@ export function applyStepPatch(
   patch: z.infer<typeof stepPatchSchema>,
 ): void {
   if (patch.inputs) setStepInputs(doc, stepId, patch.inputs);
+  if (patch.semanticGate !== undefined)
+    setStepSemanticGate(doc, stepId, patch.semanticGate);
   if (patch.runWhen !== undefined || patch.conditions !== undefined) {
     setStepConditions(doc, stepId, [
       ...(patch.runWhen ? [patch.runWhen] : []),

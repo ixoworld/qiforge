@@ -405,7 +405,9 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     options: DecisionEvaluateOptions | undefined,
   ): DecisionEvaluateOptions => ({
     ...options,
-    signal: options?.signal ?? abortSignal,
+    signal: options?.signal
+      ? AbortSignal.any([abortSignal, options.signal])
+      : abortSignal,
     ...(options?.callbacks === undefined &&
       runConfig.callbacks !== undefined && { callbacks: runConfig.callbacks }),
   });

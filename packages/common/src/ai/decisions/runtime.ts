@@ -63,6 +63,7 @@ export class DecisionRuntime implements DecisionEvaluator {
     input: z.input<TSchema>,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
+    options?.signal?.throwIfAborted();
     return this.evaluatePrepared(
       definition,
       definition.prepare(input),
@@ -75,6 +76,7 @@ export class DecisionRuntime implements DecisionEvaluator {
     input: unknown,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
+    options?.signal?.throwIfAborted();
     if (!this.registry) {
       throw new Error('No DecisionRegistry is configured.');
     }
@@ -118,9 +120,22 @@ export class DecisionRuntime implements DecisionEvaluator {
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const run = async (): Promise<DecisionEvaluation> => {
+      controller.signal.throwIfAborted();
       const raw = await Promise.race([
         adapter.evaluate(request, { signal: controller.signal }),
         new Promise<never>((_resolve, reject) => {
+          const rejectAbort = () => {
+            const reason: unknown = controller.signal.reason;
+            reject(
+              reason instanceof Error
+                ? reason
+                : new Error(String(reason ?? 'Decision cancelled')),
+            );
+          };
+          controller.signal.addEventListener('abort', rejectAbort, {
+            once: true,
+          });
+          if (controller.signal.aborted) rejectAbort();
           timer = setTimeout(() => {
             controller.abort(
               new Error(`Decision timed out after ${timeoutMs}ms`),
@@ -129,6 +144,8 @@ export class DecisionRuntime implements DecisionEvaluator {
           }, timeoutMs);
         }),
       ]);
+
+      controller.signal.throwIfAborted();
 
       const result = validateDecisionProviderResult(request, raw);
 
@@ -161,7 +178,7 @@ export class DecisionRuntime implements DecisionEvaluator {
       // turn's tracer in `options.callbacks`. The signal is deliberately not
       // handed to the runnable: abort and timeout stay owned by the code in
       // `run`, so callers keep seeing the same errors.
-      return await RunnableLambda.from(run).invoke(
+      const evaluation = await RunnableLambda.from(run).invoke(
         {
           decision: registration.name,
           state: request.state,
@@ -182,6 +199,8 @@ export class DecisionRuntime implements DecisionEvaluator {
           }),
         },
       );
+      controller.signal.throwIfAborted();
+      return evaluation;
     } finally {
       if (timer) clearTimeout(timer);
       sourceSignal?.removeEventListener('abort', forwardAbort);

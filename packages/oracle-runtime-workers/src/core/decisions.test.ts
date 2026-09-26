@@ -263,7 +263,7 @@ describe('buildRuntimeContext decisions', () => {
     ).rejects.toBeInstanceOf(DecisionProviderUnavailableError);
   });
 
-  it("defaults the signal to the turn's abort signal and keeps a caller's own", async () => {
+  it('combines caller cancellation with turn cancellation', async () => {
     const evaluation: DecisionEvaluation = {
       decision: { name: 'commerce.route', version: '1.0.0' },
       provider: 'stub',
@@ -298,10 +298,16 @@ describe('buildRuntimeContext decisions', () => {
       { value: 'x' },
       { signal: own.signal, timeoutMs: 10 },
     );
+    const call = vi.mocked(decisions.evaluateByName).mock.calls[0];
+    const combined = call?.[2]?.signal;
+    expect(combined?.aborted).toBe(false);
+    turn.abort(new Error('turn cancelled'));
+    expect(combined?.aborted).toBe(true);
+    expect(combined?.reason.message).toBe('turn cancelled');
     expect(decisions.evaluateByName).toHaveBeenCalledWith(
       'commerce.route',
       { value: 'x' },
-      { signal: own.signal, timeoutMs: 10 },
+      { signal: expect.any(AbortSignal), timeoutMs: 10 },
     );
   });
 
