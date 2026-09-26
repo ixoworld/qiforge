@@ -12,6 +12,7 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares';
+import { SUMMARY_PREFIX } from './middlewares/summarization';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
@@ -329,6 +330,104 @@ describe('createToolRepetitionGuardMiddleware', () => {
     expect(String(result.content)).toContain(
       'Path must be under /workspace/data/.',
     );
+  });
+
+  describe('turn scope', () => {
+    const retry = (messages: BaseMessage[], lookback?: number) => {
+      const wrap = createToolRepetitionGuardMiddleware(
+        lookback === undefined ? {} : { lookback },
+      ).wrapToolCall;
+      if (!wrap) throw new Error('wrapToolCall missing');
+      const handler = vi
+        .fn()
+        .mockResolvedValue(
+          new ToolMessage({ content: 'ok', tool_call_id: 'tc-now' }),
+        );
+      return {
+        handler,
+        run: () =>
+          wrap(
+            makeRequest({
+              toolCall: {
+                name: 'write_file',
+                args: { path: '/workspace/tmp/x.js', content: 'x' },
+                id: 'tc-now',
+              },
+              tool: { name: 'write_file' },
+              state: { messages },
+            }) as never,
+            handler as never,
+          ),
+      };
+    };
+    const failed = () =>
+      priorFailure({ path: '/workspace/tmp/x.js', content: 'x' });
+
+    it('lets the call through when it failed in an earlier turn (the user may have fixed the cause)', async () => {
+      const { run, handler } = retry([
+        new HumanMessage('write it'),
+        ...failed(),
+        new AIMessage('That path is not allowed.'),
+        new HumanMessage('I changed the policy, try again'),
+      ]);
+      await run();
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
+    it('still blocks inside the turn however far back the failure is', async () => {
+      const filler = Array.from({ length: 30 }, (_, i) => [
+        new AIMessage({
+          content: '',
+          tool_calls: [
+            { name: 'get_x', args: { i }, id: `r${i}`, type: 'tool_call' },
+          ],
+        }),
+        new ToolMessage({
+          content: 'ok',
+          tool_call_id: `r${i}`,
+          name: 'get_x',
+        }),
+      ]).flat();
+      const { run, handler } = retry([
+        new HumanMessage('write it'),
+        ...failed(),
+        ...filler,
+      ]);
+      const result = (await run()) as ToolMessage;
+      expect(handler).not.toHaveBeenCalled();
+      expect(result.status).toBe('error');
+    });
+
+    it('does not start a turn at the summary the summarizer writes mid-turn', async () => {
+      const { run, handler } = retry([
+        new HumanMessage({
+          content: `${SUMMARY_PREFIX} The user asked to write a file.`,
+          additional_kwargs: { lc_source: 'summarization' },
+        }),
+        ...failed(),
+      ]);
+      await run();
+      expect(handler).not.toHaveBeenCalled();
+      // The same history with the summary replaced by a real user message
+      // after the failure is a new turn.
+      const fresh = retry([...failed(), new HumanMessage('try again')]);
+      await fresh.run();
+      expect(fresh.handler).toHaveBeenCalledOnce();
+    });
+
+    it('honours an explicit lookback inside the turn', async () => {
+      const { run, handler } = retry(
+        [
+          new HumanMessage('write it'),
+          ...failed(),
+          new AIMessage('thinking'),
+          new AIMessage('still thinking'),
+        ],
+        2,
+      );
+      await run();
+      expect(handler).toHaveBeenCalledOnce();
+    });
   });
 
   it('lets a call with different args through', async () => {

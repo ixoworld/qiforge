@@ -1,17 +1,20 @@
 import {
   AIMessage,
   type BaseMessage,
+  HumanMessage,
   ToolMessage,
 } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import { NOOP_LOGGER } from '../utils';
 import { isCapabilityGateRefusal } from './capability-gate';
+import { isSummarizationMessage } from './summarization';
 
 export interface ToolRepetitionGuardMiddlewareOptions {
   /**
-   * How many messages back to scan for a prior identical failed call.
-   * Default 20 — enough to catch in-turn loops without trawling whole histories.
+   * At most this many messages back to scan for a prior identical failed
+   * call. The scan never reaches past the start of the current turn;
+   * unset, it covers the whole turn.
    */
   lookback?: number;
   /** Optional logger; defaults to a no-op. */
@@ -20,9 +23,13 @@ export interface ToolRepetitionGuardMiddlewareOptions {
 
 /**
  * Detects when the agent issues the same `(toolName, args)` pair after that
- * exact call already failed inside the recent window, and short-circuits
- * before the tool is invoked again. The short-circuit message quotes the
- * earlier error and tells the model to change tools/args instead.
+ * exact call already failed in the current turn, and short-circuits before
+ * the tool is invoked again. The short-circuit message quotes the earlier
+ * error and tells the model to change tools/args instead.
+ *
+ * A turn starts at the latest human message (the user's, or a sub-agent's
+ * task). A failure from an earlier turn never blocks: the user may have
+ * fixed its cause and asked again ("I granted access, try again").
  *
  * `toolRetryMiddleware` retries inside one call; this guard prevents the
  * model from making the *next* identical call.
@@ -31,7 +38,7 @@ export const createToolRepetitionGuardMiddleware = (
   options: ToolRepetitionGuardMiddlewareOptions = {},
 ): AgentMiddleware => {
   const logger = options.logger ?? NOOP_LOGGER;
-  const lookback = options.lookback ?? 20;
+  const lookback = options.lookback ?? Number.POSITIVE_INFINITY;
 
   return createMiddleware({
     name: 'ToolRepetitionGuardMiddleware',
@@ -42,7 +49,11 @@ export const createToolRepetitionGuardMiddleware = (
 
       const argsKey = canonicalArgsKey(toolCall.args);
       const messages = state.messages ?? [];
-      const start = Math.max(0, messages.length - lookback);
+      const start = Math.max(
+        turnStart(messages),
+        messages.length - lookback,
+        0,
+      );
 
       for (let i = messages.length - 1; i >= start; i--) {
         const msg = messages[i];
@@ -53,7 +64,11 @@ export const createToolRepetitionGuardMiddleware = (
         if (isCapabilityGateRefusal(msg)) continue;
         if (msg.name !== toolName) continue;
 
-        const priorArgs = findToolCallArgsById(messages, msg.tool_call_id);
+        const priorArgs = findToolCallArgsById(
+          messages,
+          msg.tool_call_id,
+          start,
+        );
         if (priorArgs === undefined) continue;
         if (canonicalArgsKey(priorArgs) !== argsKey) continue;
 
@@ -82,6 +97,24 @@ export const createToolRepetitionGuardMiddleware = (
     },
   });
 };
+
+/**
+ * Index of the message that opens the current turn: the latest human
+ * message, other than the summary the summarizer writes in place of the
+ * condensed history (it starts no turn). 0 when there is none.
+ */
+export function turnStart(messages: readonly BaseMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (
+      message &&
+      HumanMessage.isInstance(message) &&
+      !isSummarizationMessage(message)
+    )
+      return i;
+  }
+  return 0;
+}
 
 function canonicalArgsKey(args: unknown): string {
   if (args === null || args === undefined) return 'null';
@@ -115,9 +148,10 @@ function toolMessageText(msg: ToolMessage): string {
 function findToolCallArgsById(
   messages: BaseMessage[],
   callId: string | undefined,
+  start: number,
 ): unknown {
   if (!callId) return undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
+  for (let i = messages.length - 1; i >= start; i--) {
     const m = messages[i];
     if (!AIMessage.isInstance(m)) continue;
     const toolCalls = m.tool_calls;

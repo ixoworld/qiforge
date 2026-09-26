@@ -229,6 +229,12 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   call to a hidden tool still runs there. Here the gate checks each tool
   call against the same rule and answers a hidden one with an error instead
   of running it (`architecture.md`, "Capability gate").
+- **The repetition guard works per turn.** Node's guard blocks an identical
+  call that failed within the last 20 messages, whatever the turn, so a
+  user who fixed the cause and asked again was still refused, and a failure
+  more than 20 messages back in a long turn was missed. Here it covers the
+  whole current turn (from the latest human message; the summarizer's
+  summary starts none) and nothing before it.
 - **A user↔oracle room is always direct.** Node classified a room by the
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the
