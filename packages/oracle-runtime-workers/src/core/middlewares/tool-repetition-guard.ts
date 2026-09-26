@@ -17,6 +17,15 @@ export interface ToolRepetitionGuardMiddlewareOptions {
    * unset, it covers the whole turn.
    */
   lookback?: number;
+  /**
+   * Effect of a tool by name (the main agent passes its read/write map;
+   * a sub-agent dispatch is a write). Unset, every tool is capped as a read.
+   */
+  effectOf?: (toolName: string) => 'read' | 'write';
+  /** Identical successful calls of a read allowed per turn (default 5). */
+  maxIdenticalReads?: number;
+  /** Identical successful calls of a write allowed per turn (default 1). */
+  maxIdenticalWrites?: number;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -31,6 +40,14 @@ export interface ToolRepetitionGuardMiddlewareOptions {
  * task). A failure from an earlier turn never blocks: the user may have
  * fixed its cause and asked again ("I granted access, try again").
  *
+ * It also caps identical calls that SUCCEEDED in the turn: a write may run
+ * once per turn with the same arguments (again would repeat its effect —
+ * the user can ask again in a new message), a read up to
+ * `maxIdenticalReads` times (room for polling, not for a loop). An
+ * identical call earlier in the same model response counts too, since the
+ * calls of one response run side by side and neither sees the other's
+ * result.
+ *
  * `toolRetryMiddleware` retries inside one call; this guard prevents the
  * model from making the *next* identical call.
  */
@@ -39,6 +56,8 @@ export const createToolRepetitionGuardMiddleware = (
 ): AgentMiddleware => {
   const logger = options.logger ?? NOOP_LOGGER;
   const lookback = options.lookback ?? Number.POSITIVE_INFINITY;
+  const maxReads = options.maxIdenticalReads ?? 5;
+  const maxWrites = options.maxIdenticalWrites ?? 1;
 
   return createMiddleware({
     name: 'ToolRepetitionGuardMiddleware',
@@ -54,6 +73,7 @@ export const createToolRepetitionGuardMiddleware = (
         messages.length - lookback,
         0,
       );
+      const argsById = toolCallArgsById(messages, start);
 
       for (let i = messages.length - 1; i >= start; i--) {
         const msg = messages[i];
@@ -64,11 +84,7 @@ export const createToolRepetitionGuardMiddleware = (
         if (isCapabilityGateRefusal(msg)) continue;
         if (msg.name !== toolName) continue;
 
-        const priorArgs = findToolCallArgsById(
-          messages,
-          msg.tool_call_id,
-          start,
-        );
+        const priorArgs = argsById.get(msg.tool_call_id);
         if (priorArgs === undefined) continue;
         if (canonicalArgsKey(priorArgs) !== argsKey) continue;
 
@@ -93,10 +109,100 @@ export const createToolRepetitionGuardMiddleware = (
         });
       }
 
-      return handler(toolCallRequest);
+      // Identical calls that succeeded in this turn, plus identical calls
+      // earlier in this same model response (still running beside this one).
+      let identical = 0;
+      let lastResult: ToolMessage | undefined;
+      for (let i = start; i < messages.length; i++) {
+        const msg = messages[i];
+        if (!(msg instanceof ToolMessage)) continue;
+        if (msg.status === 'error' || msg.name !== toolName) continue;
+        const priorArgs = argsById.get(msg.tool_call_id);
+        if (priorArgs === undefined) continue;
+        if (canonicalArgsKey(priorArgs) !== argsKey) continue;
+        identical += 1;
+        lastResult = msg;
+      }
+      for (const sibling of stepCallsBefore(messages, toolCall.id, start)) {
+        if (
+          sibling.name === toolName &&
+          canonicalArgsKey(sibling.args) === argsKey
+        )
+          identical += 1;
+      }
+      const effect = options.effectOf?.(toolName) ?? 'read';
+      const cap = effect === 'write' ? maxWrites : maxReads;
+      if (identical < cap) return handler(toolCallRequest);
+
+      logger.warn(
+        `Repetition guard: ${toolName} already ran ${identical} time(s) this turn with these exact arguments (${effect} cap ${cap}); not run again`,
+      );
+      const earlier = lastResult
+        ? ['', 'It returned:', '', excerpt(toolMessageText(lastResult))]
+        : [];
+      return new ToolMessage({
+        content: (effect === 'write'
+          ? [
+              lastResult
+                ? `\`${toolName}\` already ran with these exact arguments in this turn, so it was NOT run again: running it twice would repeat its effect.`
+                : `An identical \`${toolName}\` call is already part of this step, so this one was NOT run: running it twice would repeat its effect.`,
+              ...earlier,
+              '',
+              'Use that outcome. If the user wants it done again, confirm with them — they can ask again in a new message.',
+            ]
+          : [
+              `You have already called \`${toolName}\` with these exact arguments ${identical} times in this turn, so it was NOT called again.`,
+              ...earlier,
+              '',
+              'Use the result you have, change the arguments, or pick a different tool.',
+            ]
+        ).join('\n'),
+        tool_call_id: toolCall.id ?? '',
+        name: toolName,
+        status: 'error',
+      });
     },
   });
 };
+
+const EXCERPT_CHARS = 800;
+
+function excerpt(text: string): string {
+  return text.length <= EXCERPT_CHARS
+    ? text
+    : `${text.slice(0, EXCERPT_CHARS)}… (${text.length - EXCERPT_CHARS} more characters)`;
+}
+
+/** Tool call id → arguments for every AI tool call from `start` on. */
+function toolCallArgsById(
+  messages: readonly BaseMessage[],
+  start: number,
+): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  for (let i = start; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m || !AIMessage.isInstance(m)) continue;
+    for (const tc of m.tool_calls ?? []) if (tc.id) out.set(tc.id, tc.args);
+  }
+  return out;
+}
+
+/** The calls that precede `callId` in the model response that issued it. */
+function stepCallsBefore(
+  messages: readonly BaseMessage[],
+  callId: string | undefined,
+  start: number,
+): Array<{ name: string; args: unknown }> {
+  if (!callId) return [];
+  for (let i = messages.length - 1; i >= start; i--) {
+    const m = messages[i];
+    if (!m || !AIMessage.isInstance(m)) continue;
+    const calls = m.tool_calls ?? [];
+    const at = calls.findIndex((tc) => tc.id === callId);
+    if (at >= 0) return calls.slice(0, at);
+  }
+  return [];
+}
 
 /**
  * Index of the message that opens the current turn: the latest human
@@ -143,21 +249,4 @@ function toolMessageText(msg: ToolMessage): string {
       .join('\n');
   }
   return '';
-}
-
-function findToolCallArgsById(
-  messages: BaseMessage[],
-  callId: string | undefined,
-  start: number,
-): unknown {
-  if (!callId) return undefined;
-  for (let i = messages.length - 1; i >= start; i--) {
-    const m = messages[i];
-    if (!AIMessage.isInstance(m)) continue;
-    const toolCalls = m.tool_calls;
-    if (!toolCalls) continue;
-    const hit = toolCalls.find((tc) => tc.id === callId);
-    if (hit) return hit.args;
-  }
-  return undefined;
 }

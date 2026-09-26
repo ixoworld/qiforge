@@ -420,6 +420,88 @@ describe('createMainAgent', () => {
     expect(checkpointedLoadedPlugins(await agent.getState(config))).toEqual([]);
   });
 
+  it('runs an identical write once per turn, whether repeated in a later step or in the same response', async () => {
+    let writes = 0;
+    let scrolls = 0;
+    const notes = makePlugin({
+      name: 'notes',
+      manifest: makeManifest({
+        title: 'Notes',
+        summary: 'Records notes.',
+        visibility: 'always',
+      }),
+      getTools: () => [
+        makeTool('record_note', {
+          handler: async () => {
+            writes += 1;
+            return `recorded #${writes}`;
+          },
+        }),
+        // A UI step: the same arguments again is a new action.
+        makeTool('scroll_page', {
+          repeatable: true,
+          handler: async () => {
+            scrolls += 1;
+            return `scrolled ${scrolls}`;
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), notes]);
+    await core.warm();
+    const note = (id: string) => ({
+      name: 'record_note',
+      args: { text: 'buy milk' },
+      id,
+    });
+
+    const run = async (script: Script, threadId: string) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Note: buy milk.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+
+    const later = await run([[note('c1')], [note('c2')], []], 'cap-later');
+    expect(String(later.get('c1')?.content)).toBe('recorded #1');
+    expect(later.get('c2')?.status).toBe('error');
+    expect(String(later.get('c2')?.content)).toContain(
+      'would repeat its effect',
+    );
+    expect(writes).toBe(1);
+
+    const sameStep = await run([[note('d1'), note('d2')], []], 'cap-same');
+    expect(String(sameStep.get('d1')?.content)).toBe('recorded #2');
+    expect(sameStep.get('d2')?.status).toBe('error');
+    expect(writes).toBe(2);
+
+    // A repeatable tool (a write by name) runs again with the same arguments.
+    const scroll = (id: string) => ({
+      name: 'scroll_page',
+      args: { direction: 'down' },
+      id,
+    });
+    const scrolled = await run(
+      [[scroll('e1')], [scroll('e2')], []],
+      'cap-repeatable',
+    );
+    expect(String(scrolled.get('e2')?.content)).toBe('scrolled 2');
+    expect(scrolls).toBe(2);
+  });
+
   it('refuses to run an on-demand tool the model calls before its capability is loaded', async () => {
     let probeRuns = 0;
     const probe = makePlugin({

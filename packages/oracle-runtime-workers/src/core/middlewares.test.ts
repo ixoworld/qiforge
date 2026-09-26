@@ -430,6 +430,134 @@ describe('createToolRepetitionGuardMiddleware', () => {
     });
   });
 
+  describe('identical successful calls', () => {
+    const effects: Record<string, 'read' | 'write'> = {
+      send_message: 'write',
+      get_status: 'read',
+    };
+    const guard = () => {
+      const warn = vi.fn();
+      const wrap = createToolRepetitionGuardMiddleware({
+        effectOf: (name) => effects[name] ?? 'write',
+        logger: { log: vi.fn(), warn, error: vi.fn() },
+      }).wrapToolCall;
+      if (!wrap) throw new Error('wrapToolCall missing');
+      return { wrap, warn };
+    };
+    let seq = 0;
+    /** One model step calling `name(args)` and its successful result. */
+    const ran = (
+      name: string,
+      args: Record<string, unknown>,
+      result = 'ok',
+    ) => {
+      const id = `prior-${(seq += 1)}`;
+      return [
+        new AIMessage({
+          content: '',
+          tool_calls: [{ name, args, id, type: 'tool_call' }],
+        }),
+        new ToolMessage({ content: result, tool_call_id: id, name }),
+      ];
+    };
+    const call = async (
+      wrap: ReturnType<typeof guard>['wrap'],
+      name: string,
+      args: Record<string, unknown>,
+      messages: BaseMessage[],
+      id = 'tc-now',
+    ) => {
+      const handler = vi
+        .fn()
+        .mockResolvedValue(
+          new ToolMessage({ content: 'ran', tool_call_id: id }),
+        );
+      const result = await wrap(
+        makeRequest({
+          toolCall: { name, args, id },
+          tool: { name },
+          state: { messages },
+        }) as never,
+        handler as never,
+      );
+      return {
+        ran: handler.mock.calls.length > 0,
+        result: result as ToolMessage,
+      };
+    };
+
+    it('runs an identical write once per turn and quotes the earlier outcome', async () => {
+      const { wrap, warn } = guard();
+      const args = { to: 'alice', text: 'hi' };
+      const history = [
+        new HumanMessage('tell alice hi'),
+        ...ran('send_message', args, 'sent, id m-1'),
+      ];
+      const again = await call(wrap, 'send_message', args, history);
+      expect(again.ran).toBe(false);
+      expect(again.result.status).toBe('error');
+      expect(String(again.result.content)).toContain('would repeat its effect');
+      expect(String(again.result.content)).toContain('sent, id m-1');
+      expect(String(warn.mock.calls[0]?.[0])).toContain('write cap 1');
+      // Different arguments are a different write.
+      expect(
+        (await call(wrap, 'send_message', { to: 'bob', text: 'hi' }, history))
+          .ran,
+      ).toBe(true);
+      // A new turn may send it again.
+      expect(
+        (
+          await call(wrap, 'send_message', args, [
+            ...history,
+            new AIMessage('Sent.'),
+            new HumanMessage('send it again'),
+          ])
+        ).ran,
+      ).toBe(true);
+    });
+
+    it('allows five identical reads per turn, then refuses the sixth', async () => {
+      const { wrap } = guard();
+      const args = { job: 'j-1' };
+      const history: BaseMessage[] = [new HumanMessage('wait for the job')];
+      for (let i = 0; i < 5; i += 1) {
+        expect((await call(wrap, 'get_status', args, history)).ran).toBe(true);
+        history.push(...ran('get_status', args, `pending ${i}`));
+      }
+      const sixth = await call(wrap, 'get_status', args, history);
+      expect(sixth.ran).toBe(false);
+      expect(String(sixth.result.content)).toContain('5 times in this turn');
+      expect(String(sixth.result.content)).toContain('pending 4');
+    });
+
+    it('refuses the second of two identical writes in one model response', async () => {
+      const { wrap } = guard();
+      const args = { to: 'alice', text: 'hi' };
+      const step = new AIMessage({
+        content: '',
+        tool_calls: [
+          { name: 'send_message', args, id: 'a', type: 'tool_call' },
+          { name: 'send_message', args, id: 'b', type: 'tool_call' },
+        ],
+      });
+      const messages = [new HumanMessage('tell alice hi'), step];
+      expect((await call(wrap, 'send_message', args, messages, 'a')).ran).toBe(
+        true,
+      );
+      expect((await call(wrap, 'send_message', args, messages, 'b')).ran).toBe(
+        false,
+      );
+    });
+
+    it('caps every tool as a read when no effect map is given', async () => {
+      const wrap = createToolRepetitionGuardMiddleware().wrapToolCall;
+      if (!wrap) throw new Error('wrapToolCall missing');
+      const args = { to: 'alice' };
+      const history = [new HumanMessage('go'), ...ran('send_message', args)];
+      expect((await call(wrap, 'send_message', args, history)).ran).toBe(true);
+    });
+  });
+
   it('lets a call with different args through', async () => {
     const mw = createToolRepetitionGuardMiddleware();
     const wrap = mw.wrapToolCall;

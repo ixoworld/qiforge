@@ -324,6 +324,11 @@ export async function createMainAgent(
   for (const { tool } of allTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
+  // Tools whose identical call is a new action (a browser step), which the
+  // repetition guard caps like a read whatever their effect.
+  const repeatableToolNames = new Set(
+    allTools.filter(({ tool }) => tool.repeatable).map(({ tool }) => tool.name),
+  );
 
   ambient.logger.debug?.(
     `[main-agent] binding summary (all bound; gated at runtime): ` +
@@ -453,7 +458,17 @@ export async function createMainAgent(
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,
     }),
-    createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
+    // Per turn: an identical failed call is not repeated; an identical
+    // successful write runs once, a read (or a `repeatable` UI step such as
+    // a browser tool) up to five times. Tools the effect map does not know
+    // count as writes, as in `toolEffectOf`.
+    createToolRepetitionGuardMiddleware({
+      logger: ambient.logger,
+      effectOf: (name) =>
+        repeatableToolNames.has(name)
+          ? 'read'
+          : (toolEffects.get(name) ?? 'write'),
+    }),
     // A thrown tool error becomes an error ToolMessage here, for every
     // tool (the outer instance never retries). A ToolInvocationError is the
     // model's arguments failing the tool's schema: the same call again gives

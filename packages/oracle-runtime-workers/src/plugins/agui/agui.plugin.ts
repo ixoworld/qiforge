@@ -119,6 +119,8 @@ export function buildActionTool(action: AgAction): PluginTool | null {
       name: action.name,
       description: action.description,
       schema,
+      // A UI action on the user's screen: running it again is a new action.
+      repeatable: true,
     },
   );
 }

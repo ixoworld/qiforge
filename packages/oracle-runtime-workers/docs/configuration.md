@@ -321,7 +321,14 @@ the MCP `readOnlyHint` annotation, or matches the read-name convention
 (`get_`, `list_`, `search_`, `read_` …); everything else is a write. Only
 reads are retried once after a transient failure. A write whose outcome is
 unknown (abort, deadline, dropped connection, 5xx) is claimed in the run
-ledger; see [operations](operations.md#write-claims-and-turn-usage).
+ledger; see [operations](operations.md#write-claims-and-turn-usage). Within
+one turn the repetition guard refuses an identical call (same tool, same
+arguments) that already failed, a second identical write that already
+succeeded (an identical call earlier in the same model response counts), and
+a sixth identical read; the model gets the earlier outcome instead. A tool
+that declares `repeatable: true` (the Portal's browser tools and AG-UI
+actions: a UI step such as scrolling, where the same arguments again is a new
+action) is capped like a read, whatever its `effect`.
 
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test

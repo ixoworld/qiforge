@@ -234,7 +234,10 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   user who fixed the cause and asked again was still refused, and a failure
   more than 20 messages back in a long turn was missed. Here it covers the
   whole current turn (from the latest human message; the summarizer's
-  summary starts none) and nothing before it.
+  summary starts none) and nothing before it. It also caps identical calls
+  that succeeded: a write runs once per turn with the same arguments (an
+  identical call in the same model response counts), a read five times;
+  Node has no such cap.
 - **A user↔oracle room is always direct.** Node classified a room by the
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the

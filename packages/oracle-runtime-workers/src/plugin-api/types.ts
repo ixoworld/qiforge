@@ -899,6 +899,14 @@ export interface PluginTool {
    */
   effect?: 'read' | 'write';
   /**
+   * `true` when calling the tool again with the same arguments is a new,
+   * intended action rather than a repeat — a step in the user's browser
+   * such as scrolling or paging. Within one turn the repetition guard lets
+   * such a tool run up to its read limit (5 identical calls) instead of once;
+   * `effect` still governs retries, write claims and resume.
+   */
+  repeatable?: boolean;
+  /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work
    * engagement (`ctx.commerce.mode === 'work'`) and hides it from the model
