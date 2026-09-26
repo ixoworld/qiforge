@@ -747,7 +747,12 @@ run and session that started it, when, and a state. Never the arguments.
 - A returned outcome — success, or a failure the service reported (a 4xx,
   a validation error) — releases the row.
 - An abort, the turn deadline, a dropped connection or a 5xx keeps it
-  (`pending`).
+  (`pending`) — thrown, or returned by a tool that catches its failures
+  (an error-status result, a JSON `ok`/`success`/`successful: false`,
+  `isError` or `error` body, or text opening with `Error` / `Failed`, whose
+  message is a timeout, a transport failure or a server error:
+  `[tool-execution] <tool>: returned a failure that leaves its outcome
+unknown (…)`). A returned failure of any other kind is a reported one.
 - An identical write attempted while a row stands is not run. The model
   gets an error tool message asking it to verify with a read and tell the
   user; the row becomes `warned` and is owned by that run, which stays
