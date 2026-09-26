@@ -455,11 +455,15 @@ describe('createMainAgent', () => {
       id,
     });
 
-    const run = async (script: Script, threadId: string) => {
+    const run = async (
+      script: Script,
+      threadId: string,
+      env: Record<string, unknown> = {},
+    ) => {
       const { agent } = await createMainAgent({
         registries: core.registries,
         identity: core.identity,
-        config: core.validatedEnv,
+        config: { ...core.validatedEnv, ...env },
         availablePlugins: core.availablePlugins,
         ambient: ambientFor(core, scriptedLlm({ main: script })),
         requestCtx,
@@ -500,6 +504,13 @@ describe('createMainAgent', () => {
     );
     expect(String(scrolled.get('e2')?.content)).toBe('scrolled 2');
     expect(scrolls).toBe(2);
+
+    // TURN_MAX_IDENTICAL_WRITES raises the write cap.
+    const raised = await run([[note('f1')], [note('f2')], []], 'cap-env', {
+      TURN_MAX_IDENTICAL_WRITES: 2,
+    });
+    expect(String(raised.get('f2')?.content)).toBe('recorded #4');
+    expect(writes).toBe(4);
   });
 
   it('refuses to run an on-demand tool the model calls before its capability is loaded', async () => {

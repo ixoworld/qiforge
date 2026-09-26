@@ -10,6 +10,40 @@ import { NOOP_LOGGER } from '../utils';
 import { isCapabilityGateRefusal } from './capability-gate';
 import { isSummarizationMessage } from './summarization';
 
+/** Identical successful calls a turn may make, per effect. */
+export interface RepetitionCaps {
+  reads: number;
+  writes: number;
+}
+
+export const DEFAULT_REPETITION_CAPS: RepetitionCaps = { reads: 5, writes: 1 };
+
+/**
+ * Parse `TURN_MAX_IDENTICAL_READS` / `TURN_MAX_IDENTICAL_WRITES`; anything
+ * that is not a positive number keeps its default (as `turnLimitsFromEnv`).
+ */
+export function repetitionCapsFromEnv(env: {
+  TURN_MAX_IDENTICAL_READS?: unknown;
+  TURN_MAX_IDENTICAL_WRITES?: unknown;
+}): RepetitionCaps {
+  const positive = (raw: unknown, fallback: number): number => {
+    if (typeof raw !== 'number' && typeof raw !== 'string') return fallback;
+    if (raw === '') return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : fallback;
+  };
+  return {
+    reads: positive(
+      env.TURN_MAX_IDENTICAL_READS,
+      DEFAULT_REPETITION_CAPS.reads,
+    ),
+    writes: positive(
+      env.TURN_MAX_IDENTICAL_WRITES,
+      DEFAULT_REPETITION_CAPS.writes,
+    ),
+  };
+}
+
 export interface ToolRepetitionGuardMiddlewareOptions {
   /**
    * At most this many messages back to scan for a prior identical failed
@@ -22,9 +56,9 @@ export interface ToolRepetitionGuardMiddlewareOptions {
    * a sub-agent dispatch is a write). Unset, every tool is capped as a read.
    */
   effectOf?: (toolName: string) => 'read' | 'write';
-  /** Identical successful calls of a read allowed per turn (default 5). */
+  /** Identical successful calls of a read allowed per turn (default 5, `TURN_MAX_IDENTICAL_READS`). */
   maxIdenticalReads?: number;
-  /** Identical successful calls of a write allowed per turn (default 1). */
+  /** Identical successful calls of a write allowed per turn (default 1, `TURN_MAX_IDENTICAL_WRITES`). */
   maxIdenticalWrites?: number;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
@@ -56,8 +90,9 @@ export const createToolRepetitionGuardMiddleware = (
 ): AgentMiddleware => {
   const logger = options.logger ?? NOOP_LOGGER;
   const lookback = options.lookback ?? Number.POSITIVE_INFINITY;
-  const maxReads = options.maxIdenticalReads ?? 5;
-  const maxWrites = options.maxIdenticalWrites ?? 1;
+  const maxReads = options.maxIdenticalReads ?? DEFAULT_REPETITION_CAPS.reads;
+  const maxWrites =
+    options.maxIdenticalWrites ?? DEFAULT_REPETITION_CAPS.writes;
 
   return createMiddleware({
     name: 'ToolRepetitionGuardMiddleware',

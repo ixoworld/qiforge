@@ -42,3 +42,7 @@ OPEN_ROUTER_API_KEY=
 # TURN_MAX_TOKENS=500000
 # TURN_MAX_TOOL_CALLS=120
 # TURN_TIMEOUT_MS=600000
+# Repetition guard: identical successful calls (same tool, same arguments) one
+# turn may make — a write (default 1) and a read or repeatable UI step (5).
+# TURN_MAX_IDENTICAL_WRITES=1
+# TURN_MAX_IDENTICAL_READS=5

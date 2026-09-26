@@ -13,6 +13,7 @@ import {
   createToolValidationMiddleware,
 } from './middlewares';
 import { SUMMARY_PREFIX } from './middlewares/summarization';
+import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
@@ -547,6 +548,35 @@ describe('createToolRepetitionGuardMiddleware', () => {
       expect((await call(wrap, 'send_message', args, messages, 'b')).ran).toBe(
         false,
       );
+    });
+
+    it('reads its caps from TURN_MAX_IDENTICAL_READS / _WRITES, keeping the default for anything unusable', () => {
+      expect(repetitionCapsFromEnv({})).toEqual({ reads: 5, writes: 1 });
+      expect(
+        repetitionCapsFromEnv({
+          TURN_MAX_IDENTICAL_READS: '8',
+          TURN_MAX_IDENTICAL_WRITES: 2,
+        }),
+      ).toEqual({ reads: 8, writes: 2 });
+      expect(
+        repetitionCapsFromEnv({
+          TURN_MAX_IDENTICAL_READS: '0',
+          TURN_MAX_IDENTICAL_WRITES: 'many',
+        }),
+      ).toEqual({ reads: 5, writes: 1 });
+    });
+
+    it('applies the caps it is given', async () => {
+      const wrap = createToolRepetitionGuardMiddleware({
+        effectOf: () => 'write',
+        maxIdenticalWrites: 2,
+      }).wrapToolCall;
+      if (!wrap) throw new Error('wrapToolCall missing');
+      const args = { to: 'alice' };
+      const once = [new HumanMessage('go'), ...ran('send_message', args)];
+      expect((await call(wrap, 'send_message', args, once)).ran).toBe(true);
+      const twice = [...once, ...ran('send_message', args)];
+      expect((await call(wrap, 'send_message', args, twice)).ran).toBe(false);
     });
 
     it('caps every tool as a read when no effect map is given', async () => {

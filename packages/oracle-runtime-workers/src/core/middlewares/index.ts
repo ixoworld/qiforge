@@ -2,8 +2,15 @@ export { createCapabilityGateMiddleware } from './capability-gate';
 export type { CapabilityGateMiddlewareOptions } from './capability-gate';
 export { createToolValidationMiddleware } from './tool-validation';
 export type { ToolValidationMiddlewareOptions } from './tool-validation';
-export { createToolRepetitionGuardMiddleware } from './tool-repetition-guard';
-export type { ToolRepetitionGuardMiddlewareOptions } from './tool-repetition-guard';
+export {
+  createToolRepetitionGuardMiddleware,
+  DEFAULT_REPETITION_CAPS,
+  repetitionCapsFromEnv,
+} from './tool-repetition-guard';
+export type {
+  RepetitionCaps,
+  ToolRepetitionGuardMiddlewareOptions,
+} from './tool-repetition-guard';
 export {
   createSummarizationMiddleware,
   isSummarizationMessage,

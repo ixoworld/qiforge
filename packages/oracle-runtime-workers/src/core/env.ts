@@ -127,6 +127,13 @@ export const baseEnvSchema = z.object({
   TURN_MAX_TOKENS: z.coerce.number().int().positive().default(500_000),
   TURN_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(120),
   TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  /**
+   * The repetition guard's per-turn caps on identical successful calls
+   * (same tool, same arguments): a write, and a read or `repeatable` tool.
+   * Parsed by `repetitionCapsFromEnv`.
+   */
+  TURN_MAX_IDENTICAL_WRITES: z.coerce.number().int().positive().default(1),
+  TURN_MAX_IDENTICAL_READS: z.coerce.number().int().positive().default(5),
 
   // --- decisions ----------------------------------------------------------
   // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,

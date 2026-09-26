@@ -17,6 +17,7 @@ import { buildMetaTools } from './meta-tools';
 import { buildReadResultTool } from './read-result-tool';
 import { describeBudget } from './context-budget';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
+import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
@@ -326,6 +327,7 @@ export async function createMainAgent(
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
   // Tools whose identical call is a new action (a browser step), which the
   // repetition guard caps like a read whatever their effect.
+  const repetitionCaps = repetitionCapsFromEnv(config);
   const repeatableToolNames = new Set(
     allTools.filter(({ tool }) => tool.repeatable).map(({ tool }) => tool.name),
   );
@@ -460,10 +462,13 @@ export async function createMainAgent(
     }),
     // Per turn: an identical failed call is not repeated; an identical
     // successful write runs once, a read (or a `repeatable` UI step such as
-    // a browser tool) up to five times. Tools the effect map does not know
-    // count as writes, as in `toolEffectOf`.
+    // a browser tool) up to five times — `TURN_MAX_IDENTICAL_WRITES` /
+    // `TURN_MAX_IDENTICAL_READS`. Tools the effect map does not know count
+    // as writes, as in `toolEffectOf`.
     createToolRepetitionGuardMiddleware({
       logger: ambient.logger,
+      maxIdenticalReads: repetitionCaps.reads,
+      maxIdenticalWrites: repetitionCaps.writes,
       effectOf: (name) =>
         repeatableToolNames.has(name)
           ? 'read'

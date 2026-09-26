@@ -170,6 +170,9 @@ export interface OracleWorkerEnv {
   TURN_MAX_TOKENS?: string;
   TURN_MAX_TOOL_CALLS?: string;
   TURN_TIMEOUT_MS?: string;
+  /** Repetition guard: identical successful writes (default 1) and reads (5) per turn. */
+  TURN_MAX_IDENTICAL_WRITES?: string;
+  TURN_MAX_IDENTICAL_READS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;

@@ -1,0 +1,5 @@
+---
+'@ixo/oracle-runtime-workers': minor
+---
+
+Identity, ownership, delegation and harness checks. A Matrix room message is dropped unless the sender's server (or, for a non-DID sender, the room alias's) is the homeserver the DID document registers, and the debounce buffer is keyed per speaker. A browser-tool / AG-UI result settles only a call of its own socket's session. The capability gate also refuses a call to a hidden on-demand tool instead of running it. A delegation must expire: an unbounded `x-ucan-delegation` is refused, and `POST /delegation` validates what it stores (audience, issuer, bounded expiry) and stores the token's own expiry. A write's claim is kept when the tool returns (rather than throws) a timeout, transport or 5xx failure. The repetition guard works per turn and caps identical successful calls — a write once, a read five times (`TURN_MAX_IDENTICAL_WRITES`, `TURN_MAX_IDENTICAL_READS`); the new `PluginTool.repeatable` flag (set by the Portal's browser tools and AG-UI actions) caps a UI step like a read.

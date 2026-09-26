@@ -301,16 +301,20 @@ Every turn runs under one budget shared by the main agent, its sub-agents
 and the helper models the turn's LLM adapter hands out (the summarizer,
 extraction). See [docs/plans/workers-harness-hardening.md](../../../docs/plans/workers-harness-hardening.md).
 
-| Variable              | Default  | Meaning                                                                                                 |
-| --------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `TURN_MAX_TOKENS`     | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
-| `TURN_MAX_TOOL_CALLS` | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
-| `TURN_TIMEOUT_MS`     | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
+| Variable                    | Default  | Meaning                                                                                                 |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `TURN_MAX_TOKENS`           | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
+| `TURN_MAX_TOOL_CALLS`       | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
+| `TURN_TIMEOUT_MS`           | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
+| `TURN_MAX_IDENTICAL_WRITES` | `1`      | Identical successful write calls (same tool, same arguments) per turn; one more is refused.             |
+| `TURN_MAX_IDENTICAL_READS`  | `5`      | The same for a read, or a `repeatable` UI step such as a browser tool.                                  |
 
 Exhaustion ends the turn with an `error` frame (`kind: budget_exhausted`,
 `limit: tokens | tools | time`, `retryable: false`) followed by `done`
 (`failed: true`); work already done is kept. These are estimated resource
-limits, not billing. `TURN_RECURSION_LIMIT` remains the separate graph
+limits, not billing. The two `TURN_MAX_IDENTICAL_*` caps end nothing: the
+refused call gets an error tool message with the earlier outcome and the turn
+goes on. `TURN_RECURSION_LIMIT` remains the separate graph
 guard; raising it does not raise a budget. The context window and reply
 reserve come from the context budget (`MODEL_CONTEXT_TOKENS`, `CONTEXT_*`).
 
@@ -325,7 +329,8 @@ ledger; see [operations](operations.md#write-claims-and-turn-usage). Within
 one turn the repetition guard refuses an identical call (same tool, same
 arguments) that already failed, a second identical write that already
 succeeded (an identical call earlier in the same model response counts), and
-a sixth identical read; the model gets the earlier outcome instead. A tool
+a sixth identical read (`TURN_MAX_IDENTICAL_WRITES` / `TURN_MAX_IDENTICAL_READS`
+in the table above); the model gets the earlier outcome instead. A tool
 that declares `repeatable: true` (the Portal's browser tools and AG-UI
 actions: a UI step such as scrolling, where the same arguments again is a new
 action) is capped like a read, whatever its `effect`.
