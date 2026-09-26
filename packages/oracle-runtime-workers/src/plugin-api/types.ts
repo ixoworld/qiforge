@@ -365,6 +365,16 @@ export interface PluginManifest {
 
   /** Stability hint surfaced to the agent (`experimental` → warning footnote). */
   stability?: 'stable' | 'beta' | 'experimental';
+
+  /**
+   * UCAN capabilities the user's delegation to this oracle must grant before
+   * the plugin may be used by that user (`ctx.ucan.hasCapability` semantics:
+   * the action may be `*`). While one is missing, `load_capability` refuses
+   * the plugin and names what is missing, `list_capabilities` marks it
+   * unavailable, and its tools are neither shown to nor run by the model —
+   * whatever its visibility. Omitted: no requirement.
+   */
+  requires?: ReadonlyArray<{ resource: string; action: string }>;
 }
 
 export interface ManifestExample {

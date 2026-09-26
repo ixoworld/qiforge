@@ -252,6 +252,7 @@ import {
   type TranscriptPageOptions,
 } from './transcript';
 import { WorkersUcanService } from './ucan-service';
+import type { UcanDelegation } from '../plugin-api/types';
 
 const DB_FILE = 'oracle.db';
 /**
@@ -762,6 +763,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           this.env.MATRIX_GATEWAY.idFromName(this.env.ORACLE_DID),
         ),
       );
+    }
+
+    /**
+     * The delegation a turn runs under: the one this request carried, else
+     * the user's stored one (a Matrix turn carries none), with the
+     * capabilities it grants.
+     */
+    private async turnDelegation(
+      identity: TurnIdentity,
+    ): Promise<UcanDelegation> {
+      const raw =
+        identity.ucanDelegation ??
+        this.delegations.get(identity.userDid)?.raw ??
+        '';
+      return this.ucan ? this.ucan.withCapabilities(raw) : { raw };
     }
 
     /** Idempotent boot: bind user, open SQLite (importing the owner copy on a cold object). */
@@ -4140,7 +4156,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               req.identity.matrixUserId ??
               (await this.resolveMatrixUserId(req.identity.userDid)) ??
               '',
-            ucanDelegation: { raw: req.identity.ucanDelegation ?? '' },
+            ucanDelegation: await this.turnDelegation(req.identity),
             timezone: req.identity.timezone,
             currentTime: new Date().toISOString(),
           },

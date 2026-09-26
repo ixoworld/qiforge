@@ -41,8 +41,24 @@ logged as `[CapabilityGateMiddleware] refused a call to <tool>`. The check
 reads the graph state the tool node runs with, so a load from an earlier step
 of the run counts and a `load_capability` in the same model response as the
 call does not. The repetition guard lets the same call through again after a
-refusal, since the tool never ran. The gate is discovery, not authorization:
-any non-silent plugin can be loaded.
+refusal, since the tool never ran.
+
+**Plugin requirements.** Loading is discovery; authorization comes from the
+user's delegation to the oracle. A manifest may declare `requires: [{
+resource, action }]`, the UCAN capabilities that delegation must grant. The
+turn's `ctx.user.ucanDelegation` carries the capabilities parsed from the
+token (the request's, else the user's stored one;
+`WorkersUcanService.withCapabilities`), and `ctx.ucan.hasCapability` checks
+them: a grant covers a required pair when its resource is `*`, the same, or a
+parent (`ixo:filesystem` covers `ixo:filesystem/.oracles`, never the reverse)
+and its ability is `*`, the same, or a namespace wildcard (`fs/*` covers
+`fs/read`). While a requirement is unmet, `load_capability` does not load the
+plugin and returns it with `refused` (what is missing, and a reason for the
+model to relay); `list_capabilities` lists it `loaded: false` with
+`unavailable`. The gate hides its tools and sub-agents and refuses calls to
+them, whatever the plugin's visibility and even when an earlier turn or the
+router loaded it, and an always-on one is left out of the prompt. A manifest
+that declares nothing can be loaded by anyone.
 
 **Capability router.** Loading a plugin with `load_capability` costs a
 model round trip. With `CAPABILITY_ROUTER=on` the turn build

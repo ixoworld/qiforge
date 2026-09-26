@@ -12,6 +12,8 @@ import {
   signerFromMnemonic,
 } from '@ixo/ucan';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createNoopAmbient } from '../core/runtime-context';
+import { createUcanAdapter } from './ambient';
 import { WorkersUcanService } from './ucan-service';
 
 // Deterministic BIP39 test vector — never a real account.
@@ -85,5 +87,46 @@ describe('WorkersUcanService.createInvocationFromDelegation', () => {
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://memory.example.com/.well-known/did.json',
     );
+  });
+});
+
+describe('WorkersUcanService.withCapabilities', () => {
+  const service = () => new WorkersUcanService({ oracleDid: ORACLE_DID });
+
+  it("reads a signed delegation's grants, which ctx.ucan.hasCapability then checks", async () => {
+    const delegation = await service().withCapabilities(
+      await userDelegationCar(),
+    );
+    expect(delegation.capabilities).toEqual([
+      { resource: 'ixo:memory', action: 'memory/*' },
+    ]);
+    const ucan = createUcanAdapter(service(), () => undefined);
+    expect(ucan.hasCapability(delegation, 'ixo:memory', 'memory/read')).toBe(
+      true,
+    );
+    expect(
+      ucan.hasCapability(delegation, 'ixo:memory/notes', 'memory/read'),
+    ).toBe(true);
+    // Not granted: another resource, another ability namespace, or a broader
+    // resource than the one delegated.
+    expect(ucan.hasCapability(delegation, 'ixo:filesystem', '*')).toBe(false);
+    expect(ucan.hasCapability(delegation, 'ixo:memory', 'fs/read')).toBe(false);
+    expect(ucan.hasCapability(delegation, 'ixo', 'memory/read')).toBe(false);
+    // The core adapter a host without a signing key uses agrees.
+    const unsigned = createNoopAmbient().ucan;
+    expect(
+      unsigned.hasCapability(delegation, 'ixo:memory', 'memory/read'),
+    ).toBe(true);
+    expect(unsigned.hasCapability(delegation, 'ixo', 'memory/read')).toBe(
+      false,
+    );
+  });
+
+  it('grants nothing for a missing or unreadable token', async () => {
+    expect(await service().withCapabilities('')).toEqual({ raw: '' });
+    expect(await service().withCapabilities('not-a-delegation')).toEqual({
+      raw: 'not-a-delegation',
+      capabilities: [],
+    });
   });
 });

@@ -170,6 +170,83 @@ describe('createCapabilityGateMiddleware', () => {
       expect(warn).not.toHaveBeenCalled();
     });
   });
+
+  describe("requirements the user's authorization does not meet", () => {
+    const VFS_REQUIREMENT = [{ resource: 'ixo:filesystem', action: '*' }];
+    function gate() {
+      const warn = vi.fn();
+      const mw = createCapabilityGateMiddleware({
+        // Loaded AND preloaded: neither admits a plugin the user may not use.
+        preloadedPlugins: new Set(['files']),
+        unmetRequirements: new Map([
+          ['files', VFS_REQUIREMENT],
+          ['notes', VFS_REQUIREMENT],
+        ]),
+        pluginByToolName: new Map([
+          ['read_file', 'files'],
+          ['write_note', 'notes'],
+          ['always_tool', 'always_plugin'],
+        ]),
+        visibilityByToolName: new Map<string, Visibility>([
+          ['read_file', 'on-demand'],
+          ['write_note', 'always'],
+          ['always_tool', 'always'],
+        ]),
+        logger: { log: vi.fn(), warn, error: vi.fn() },
+      });
+      const wrapModel = mw.wrapModelCall;
+      const wrapTool = mw.wrapToolCall;
+      if (!wrapModel || !wrapTool) throw new Error('gate hooks missing');
+      return { wrapModel, wrapTool, warn };
+    }
+
+    it('hides their tools whatever the visibility, loaded or preloaded', async () => {
+      const { wrapModel } = gate();
+      const handler = vi.fn().mockResolvedValue({ ok: true });
+      await wrapModel(
+        {
+          state: { loadedPlugins: ['files', 'notes'] },
+          tools: [
+            { name: 'load_capability' },
+            { name: 'read_file' },
+            { name: 'write_note' },
+            { name: 'always_tool' },
+          ],
+        } as never,
+        handler as never,
+      );
+      expect(
+        (
+          handler.mock.calls[0]?.[0] as { tools: Array<{ name: string }> }
+        ).tools.map((t) => t.name),
+      ).toEqual(['load_capability', 'always_tool']);
+    });
+
+    it('refuses a call to one of their tools, naming what is missing, without running it', async () => {
+      const { wrapTool, warn } = gate();
+      for (const name of ['read_file', 'write_note']) {
+        const handler = vi.fn();
+        const result = await wrapTool(
+          {
+            toolCall: { name, args: {}, id: 'tc-1' },
+            tool: { name },
+            state: { messages: [], loadedPlugins: ['files', 'notes'] },
+            runtime: {},
+          } as never,
+          handler as never,
+        );
+        expect(handler).not.toHaveBeenCalled();
+        expect(result).toBeInstanceOf(ToolMessage);
+        const refusal = result as ToolMessage;
+        expect(refusal.status).toBe('error');
+        expect(refusal.tool_call_id).toBe('tc-1');
+        expect(String(refusal.content)).toContain('was not run');
+        expect(String(refusal.content)).toContain('`*` on `ixo:filesystem`');
+        expect(String(refusal.content)).toContain('re-authorize');
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+    });
+  });
 });
 
 type FakeToolRequest = {

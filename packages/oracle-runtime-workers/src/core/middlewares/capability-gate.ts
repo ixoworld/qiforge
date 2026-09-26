@@ -2,6 +2,7 @@ import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import { z } from 'zod';
 import type { Logger, PluginManifest } from '../../plugin-api/types';
+import { describeRequirements, type CapabilityRequirement } from '../manifest';
 import { NOOP_LOGGER } from '../utils';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
@@ -36,6 +37,12 @@ export interface CapabilityGateMiddlewareOptions {
    * tools pass the gate as if loaded, without touching `state.loadedPlugins`.
    */
   preloadedPlugins?: ReadonlySet<string>;
+  /**
+   * Plugin name → the `manifest.requires` capabilities the user's delegation
+   * does not grant. Such a plugin's tools are hidden and refused whatever
+   * their visibility, loaded or preloaded.
+   */
+  unmetRequirements?: ReadonlyMap<string, readonly CapabilityRequirement[]>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -69,6 +76,16 @@ export const createCapabilityGateMiddleware = (
   const { pluginByToolName, visibilityByToolName, preloadedPlugins } = options;
   const logger = options.logger ?? NOOP_LOGGER;
 
+  /** What the user's authorization lacks for `toolName`'s plugin, or null. */
+  const unmetFor = (
+    toolName: string,
+  ): { plugin: string; missing: readonly CapabilityRequirement[] } | null => {
+    const plugin = pluginByToolName.get(toolName);
+    if (!plugin) return null;
+    const missing = options.unmetRequirements?.get(plugin);
+    return missing && missing.length > 0 ? { plugin, missing } : null;
+  };
+
   /** The plugin that has to be loaded before `toolName` may be seen or run; null when it is open. */
   const gatingPlugin = (
     toolName: string,
@@ -99,7 +116,7 @@ export const createCapabilityGateMiddleware = (
         // `unknown`. Narrow at runtime; unknown-named tools pass through.
         const name = typeof t.name === 'string' ? t.name : undefined;
         if (!name) return true;
-        return gatingPlugin(name, loaded) === null;
+        return unmetFor(name) === null && gatingPlugin(name, loaded) === null;
       });
 
       if (filtered.length !== request.tools.length) {
@@ -119,6 +136,20 @@ export const createCapabilityGateMiddleware = (
     // from before either), and the model is told to call again.
     wrapToolCall: (request, handler) => {
       const name = request.toolCall.name;
+      const unmet = unmetFor(name);
+      if (unmet) {
+        logger.warn(
+          `[CapabilityGateMiddleware] refused a call to ${name}: the user's authorization does not grant ${describeRequirements(unmet.missing)} ('${unmet.plugin}' requires it)`,
+        );
+        return new ToolMessage({
+          content:
+            `Tool "${name}" was not run: it belongs to the "${unmet.plugin}" capability, which requires ${describeRequirements(unmet.missing)}, and the user's authorization for this oracle does not grant it. ` +
+            'Tell the user; they can re-authorize the oracle with that permission and ask again.',
+          tool_call_id: request.toolCall.id ?? '',
+          name,
+          status: 'error',
+        });
+      }
       const plugin = gatingPlugin(
         name,
         new Set<string>(request.state.loadedPlugins ?? []),

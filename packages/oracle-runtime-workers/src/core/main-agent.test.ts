@@ -592,6 +592,108 @@ describe('createMainAgent', () => {
     expect(probeRuns).toBe(2);
   });
 
+  it("keeps a plugin the user's delegation does not grant out of reach: load refused, tools never run", async () => {
+    const VAULT = { resource: 'ixo:vault', action: 'vault/read' };
+    const runs = { files: 0, vault: 0 };
+    const files = makePlugin({
+      name: 'files',
+      manifest: makeManifest({
+        title: 'Files',
+        summary: 'Personal files.',
+        visibility: 'on-demand',
+        requires: [VAULT],
+      }),
+      getTools: () => [
+        makeTool('files_read', {
+          handler: async () => {
+            runs.files += 1;
+            return 'files read';
+          },
+        }),
+      ],
+    });
+    const vault = makePlugin({
+      name: 'vault',
+      manifest: makeManifest({
+        title: 'Vault',
+        summary: 'Always-on vault.',
+        visibility: 'always',
+        requires: [VAULT],
+      }),
+      getTools: () => [
+        makeTool('vault_read', {
+          handler: async () => {
+            runs.vault += 1;
+            return 'vault read';
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), files, vault]);
+    await core.warm();
+
+    const script: Script = [
+      [{ name: 'load_capability', args: { names: ['files'] }, id: 'c1' }],
+      [
+        { name: 'files_read', args: {}, id: 'c2' },
+        { name: 'vault_read', args: {}, id: 'c3' },
+      ],
+      [],
+    ];
+    const run = async (
+      capabilities: Array<{ resource: string; action: string }>,
+      threadId: string,
+    ) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: { raw: 'ucan', capabilities },
+          },
+        },
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Read my files.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+
+    const refused = await run(
+      [{ resource: 'ixo:oracle', action: '*' }],
+      'requires-refused',
+    );
+    const [load] = JSON.parse(String(refused.get('c1')?.content)) as Array<{
+      refused?: { reason: string };
+    }>;
+    expect(load?.refused?.reason).toContain('`vault/read` on `ixo:vault`');
+    for (const id of ['c2', 'c3']) {
+      expect(refused.get(id)?.status).toBe('error');
+      expect(String(refused.get(id)?.content)).toContain(
+        "the user's authorization for this oracle does not grant it",
+      );
+    }
+    expect(runs).toEqual({ files: 0, vault: 0 });
+
+    const granted = await run(
+      [{ resource: 'ixo:vault', action: 'vault/*' }],
+      'requires-granted',
+    );
+    expect(String(granted.get('c2')?.content)).toBe('files read');
+    expect(String(granted.get('c3')?.content)).toBe('vault read');
+    expect(runs).toEqual({ files: 1, vault: 1 });
+  });
+
   it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {
     const core = bootCore([new PortalPlugin(), new SkillsPlugin()]);
     await core.warm();

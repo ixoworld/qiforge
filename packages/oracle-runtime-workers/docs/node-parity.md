@@ -238,6 +238,13 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   call to a hidden tool still runs there. Here the gate checks each tool
   call against the same rule and answers a hidden one with an error instead
   of running it (`architecture.md`, "Capability gate").
+- **A plugin can require delegated capabilities.** Node has no
+  `manifest.requires`, and its `ctx.ucan.hasCapability` matches resource and
+  action exactly. Here a plugin whose `requires` the user's delegation does
+  not grant cannot be loaded or used, the turn's delegation (the stored one
+  on a Matrix turn too) carries every capability parsed from the token, and
+  a grant covers child resources and namespaced abilities (`architecture.md`,
+  "Plugin requirements").
 - **The repetition guard works per turn.** Node's guard blocks an identical
   call that failed within the last 20 messages, whatever the turn, so a
   user who fixed the cause and asked again was still refused, and a failure

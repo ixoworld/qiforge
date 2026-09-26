@@ -49,7 +49,34 @@ export const pluginManifestSchema: z.ZodType<PluginManifest> = z.object({
   category: manifestCategorySchema.optional(),
   visibility: manifestVisibilitySchema.optional(),
   stability: manifestStabilitySchema.optional(),
+  requires: z
+    .array(z.object({ resource: z.string().min(1), action: z.string().min(1) }))
+    .optional(),
 });
+
+/** A UCAN capability a plugin's manifest requires of the user's delegation. */
+export type CapabilityRequirement = NonNullable<
+  PluginManifest['requires']
+>[number];
+
+/** The manifest's requirements the user's delegation does not meet (empty when usable). */
+export function unmetRequirements(
+  manifest: Pick<PluginManifest, 'requires'>,
+  hasCapability: (resource: string, action: string) => boolean,
+): CapabilityRequirement[] {
+  return (manifest.requires ?? []).filter(
+    (r) => !hasCapability(r.resource, r.action),
+  );
+}
+
+/** `can` on `with` pairs for a message: "`*` on `ixo:filesystem`, …". */
+export function describeRequirements(
+  requirements: readonly CapabilityRequirement[],
+): string {
+  return requirements
+    .map((r) => `\`${r.action}\` on \`${r.resource}\``)
+    .join(', ');
+}
 
 // ── Validator ───────────────────────────────────────────────────────────────
 
