@@ -622,7 +622,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     hasCapability: (resource: string, action: string) => boolean;
     mintInvocation: (
       target: { did: string; capability: string },
-      opts?: { skipCache?: boolean; can?: string },
+      opts?: {
+        skipCache?: boolean;
+        can?: string;
+        /** Extra invocation facts (e.g. `rd`); the host always sets `nonce`. */
+        facts?: Record<string, unknown>;
+      },
     ) => Promise<string>;
     /**
      * Resolve a downstream service URL to its did:web identifier. Returns
@@ -646,7 +651,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       delegationCar: string,
       serviceUrl: string,
       capability: { can: string; with: string; nb?: Record<string, unknown> },
-      options?: { maxTtlSeconds?: number },
+      options?: { maxTtlSeconds?: number; facts?: Record<string, unknown> },
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
      * Mint a SELF-SIGNED invocation — issued by this oracle with NO proof
@@ -674,6 +679,15 @@ export interface RuntimeContext<TConfig = MergedConfig> {
       | { token: string; with: string }
       | { error: 'no-delegation' | 'store-error'; detail?: string }
     >;
+    /**
+     * Every active delegation in the UCAN store issued by `userDid` and
+     * addressed to `opts.audienceDid` (checked on the token itself), e.g. the
+     * user's IXO Search Gateway grants. At most 20.
+     */
+    listAudienceGrants: (
+      userDid: string,
+      opts: { storeUrl: string; audienceDid: string },
+    ) => Promise<{ tokens: string[] } | { error: string }>;
   };
 
   /**

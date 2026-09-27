@@ -22,6 +22,7 @@ import { PortalPlugin } from './portal';
 import { AGUIPlugin } from './agui';
 import { AttachmentsPlugin } from './attachments';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats';
+import { SearchGatewayPlugin } from './search-gateway';
 
 export * from './composio';
 export * from './editor';
@@ -35,6 +36,7 @@ export * from './vfs';
 export * from './user-preferences';
 export * from './portal';
 export * from './agui';
+export * from './search-gateway';
 
 export const memoryPlugin = new MemoryPlugin();
 export const sandboxPlugin = new SandboxPlugin();
@@ -48,6 +50,7 @@ export const portalPlugin = new PortalPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const attachmentsPlugin = new AttachmentsPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
+export const searchGatewayPlugin = new SearchGatewayPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -63,6 +66,7 @@ export const BUNDLED_WORKERS_PLUGINS = [
   domainIndexerPlugin,
   composioPlugin,
   vfsPlugin,
+  searchGatewayPlugin,
   tasksPlugin,
   editorPlugin,
   userPreferencesPlugin,
