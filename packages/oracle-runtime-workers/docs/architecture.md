@@ -16,6 +16,31 @@ graph LR
 
 ## The objects
 
+### Supplied-context tasks
+
+A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
+when it creates a task through `ctx.tasks`. The task must run once with
+`approval: 'never'`. The adapter must obtain authorization for the supplied
+text before creation. This profile does not provide an authorization UI or
+an HTTP task endpoint.
+
+The scheduler persists the profile in the task row and its Markdown spec.
+It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
+Before original or resumed execution, the runtime checks the owner, task,
+run, session, profile and exact task input. The profile and task inputs
+cannot change. A revision requires a new task.
+
+The agent binds no tools and rejects model-emitted tool calls. Preparation
+excludes personal preferences, memory, plugin hooks, page context, attachment
+processing and capability routing. Model selection, token and time budgets,
+checkpoints and delivery recovery continue to use the existing runtime.
+The output is generated text, not proof that the user's goal was achieved
+or that a reviewer accepted it.
+
+Before rolling back to a runtime that predates this profile, cancel or drain
+all restricted tasks. An older scheduler ignores the new profile column
+and can execute a pending restricted task with its ordinary tool set.
+
 ### `UserOracleDO` — one per user DID
 
 Holds the user's SQLite database (LangGraph checkpoints, sessions, the full
