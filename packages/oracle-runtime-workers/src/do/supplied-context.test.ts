@@ -268,3 +268,72 @@ describe('session-history indexing around task runs', () => {
     expect(o.indexed.mock.calls).toEqual([['s_chat']]);
   });
 });
+
+describe('task Start alarm persistence', () => {
+  it('returns the production storage promise and propagates a failed arm', async () => {
+    const core = createRuntimeCore({
+      config: { name: 'Test', org: 'Test', description: 'Test' },
+      plugins: [],
+      env: makeEnv(),
+    });
+    const Oracle = createUserOracleDO({ core: () => core });
+    const arm = Reflect.get(Oracle.prototype, 'requestAlarm');
+    let release: (() => void) | undefined;
+    const storage = {
+      getAlarm: vi.fn(async () => null),
+      setAlarm: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      ),
+    };
+    const host = { ctx: { storage }, alarmArm: Promise.resolve() };
+    const pending = Reflect.apply(arm, host, [123]);
+    if (!(pending instanceof Promise))
+      throw new Error('Alarm arm must be awaitable');
+    let resolved = false;
+    void pending.then(() => {
+      resolved = true;
+    });
+    await expect.poll(() => storage.setAlarm.mock.calls.length).toBe(1);
+    expect(resolved).toBe(false);
+    release?.();
+    await pending;
+    expect(resolved).toBe(true);
+    storage.setAlarm.mockRejectedValueOnce(new Error('Storage failed'));
+    await expect(Reflect.apply(arm, host, [123])).rejects.toThrow(
+      'Storage failed',
+    );
+  });
+  it('serializes concurrent arms so a later deadline cannot overwrite Start', async () => {
+    const core = createRuntimeCore({
+      config: { name: 'Test', org: 'Test', description: 'Test' },
+      plugins: [],
+      env: makeEnv(),
+    });
+    const Oracle = createUserOracleDO({ core: () => core });
+    const arm = Reflect.get(Oracle.prototype, 'requestAlarm');
+    let existing: number | null = null;
+    const storage = {
+      getAlarm: vi.fn(async () => existing),
+      setAlarm: vi.fn(async (at: number) => {
+        await Promise.resolve();
+        existing = at;
+      }),
+    };
+    const host = { ctx: { storage }, alarmArm: Promise.resolve() };
+    await Promise.all([
+      Reflect.apply(arm, host, [100]),
+      Reflect.apply(arm, host, [200]),
+    ]);
+    expect(existing).toBe(100);
+    expect(storage.setAlarm.mock.calls).toEqual([[100]]);
+    storage.setAlarm.mockRejectedValueOnce(new Error('Storage failed'));
+    await expect(Reflect.apply(arm, host, [50])).rejects.toThrow(
+      'Storage failed',
+    );
+    await Reflect.apply(arm, host, [50]);
+    expect(existing).toBe(50);
+  });
+});

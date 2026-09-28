@@ -26,6 +26,13 @@
  * (driven by the `resolve_task_approval` tool) triggers or drops the actual
  * run.
  */
+import {
+  deliverableIntent,
+  markdownDigest,
+  type TopicDeliverableRequest,
+  type TopicDeliverableResult,
+  type TopicDeliverableSnapshot,
+} from './topic-deliverables';
 import type {
   Logger,
   OracleTaskInput,
@@ -108,8 +115,9 @@ export interface TaskSchedulerHost {
   gateway: TaskGateway;
   /** Run one agent turn in this user's object (same entry the HTTP shell uses). */
   runTurn: (req: TurnRequest) => Promise<TurnResult>;
+  abortTurn?: (sessionId: string) => Promise<boolean>;
   /** Ask the object to re-arm its alarm no later than `at` (ms epoch). */
-  requestAlarm: (at: number) => void;
+  requestAlarm: (at: number) => void | Promise<void>;
   /**
    * Whether the durable turn run of a task run (`TurnRequest.taskRunId`) is
    * still live in the object — recovering or executing — so an open
@@ -143,6 +151,12 @@ export interface TaskScheduler {
    * restricted. Derived from the task row, never from a request.
    */
   isRestrictedSession(sessionId: string): Promise<boolean>;
+  startTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult>;
+  readTopicDeliverable(operationId: string): Promise<TopicDeliverableResult>;
+  cancelTopicDeliverable(operationId: string): Promise<TopicDeliverableResult>;
   /** Earliest pending deadline (ms epoch), or null when nothing is scheduled. */
   nextWakeAt(): Promise<number | null>;
   /** Run everything that is due. Must be safe to call spuriously. */
@@ -310,6 +324,133 @@ class AlarmTaskScheduler implements TaskScheduler {
     };
   }
 
+  async startTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    const created = await this.host.db.transaction(async () => {
+      const existing = await this.store.getTopicOperation(operationId);
+      if (existing) {
+        if (JSON.stringify(existing.topicRequest) !== JSON.stringify(request)) {
+          return {
+            ok: false,
+            status: 409,
+            message: 'This operation is already bound to different input.',
+          } as const;
+        }
+        return { ok: true, task: existing } as const;
+      }
+      if ((await this.store.countLive()) >= this.maxTasksPerUser) {
+        return {
+          ok: false,
+          status: 429,
+          message: 'Too many active tasks.',
+        } as const;
+      }
+      const now = new Date().toISOString();
+      const task: TaskRecord = {
+        id: newTaskId(request.title),
+        title: request.title,
+        intent: deliverableIntent(request),
+        executionProfile: 'supplied-context-markdown',
+        schedule: { kind: 'once', at: now },
+        approval: 'never',
+        status: 'active',
+        createdAt: now,
+        updatedAt: now,
+        nextRunAt: now,
+        consecutiveFailures: 0,
+        topicOperationId: operationId,
+        topicRequest: request,
+      };
+      await this.store.insert(task);
+      return { ok: true, task } as const;
+    });
+    if (!created.ok) return created;
+    if (created.task.nextRunAt)
+      await this.host.requestAlarm(Date.parse(created.task.nextRunAt));
+    return this.readTopicDeliverable(operationId);
+  }
+
+  async readTopicDeliverable(
+    operationId: string,
+  ): Promise<TopicDeliverableResult> {
+    const { task, run } = await this.host.db.transaction(async () => {
+      const task = await this.store.getTopicOperation(operationId);
+      return {
+        task,
+        run: task ? await this.store.topicRun(task.id) : undefined,
+      };
+    });
+    if (
+      !task?.topicRequest ||
+      task.executionProfile !== 'supplied-context-markdown'
+    ) {
+      return { ok: false, status: 404, message: 'Deliverable not found.' };
+    }
+    const snapshot: TopicDeliverableSnapshot = {
+      operationId,
+      taskId: task.id,
+      topic: task.topicRequest.topic,
+      status: 'queued',
+      ...(run ? { runId: run.run_id } : {}),
+    };
+    if (
+      run?.result_text &&
+      run.completed_at &&
+      ['delivering', 'delivered', 'failed'].includes(run.state ?? '')
+    ) {
+      snapshot.status = 'ready';
+      snapshot.output = {
+        markdown: run.result_text,
+        sha256: await markdownDigest(run.result_text),
+        completedAt: run.completed_at,
+      };
+      snapshot.delivery =
+        run.state === 'delivered'
+          ? 'delivered'
+          : run.state === 'failed'
+            ? 'failed'
+            : 'pending';
+    } else if (run?.state === 'running') {
+      snapshot.status = 'working';
+    } else if (run?.state === 'interrupted') {
+      snapshot.status = 'interrupted';
+    } else if (run || task.status !== 'active') {
+      snapshot.status = 'failed';
+    }
+    if (task.status === 'cancelled') {
+      snapshot.status =
+        run?.state === 'running' &&
+        (this.hasActiveRun(task.id) || this.host.turnRunLive?.(run.run_id))
+          ? 'stopping'
+          : 'cancelled';
+    }
+    return { ok: true, snapshot };
+  }
+
+  async cancelTopicDeliverable(
+    operationId: string,
+  ): Promise<TopicDeliverableResult> {
+    const task = await this.store.getTopicOperation(operationId);
+    if (!task?.topicRequest)
+      return { ok: false, status: 404, message: 'Deliverable not found.' };
+    const cancelled = await this.host.db.transaction(async () => {
+      const current = await this.store.get(task.id);
+      if (current?.status === 'completed') return false;
+      await this.cancel(task.id);
+      return true;
+    });
+    if (!cancelled)
+      return {
+        ok: false,
+        status: 409,
+        message: 'Already completed; execution cannot be cancelled.',
+      };
+    await this.host.abortTurn?.(`${TASK_SESSION_PREFIX}${task.id}`);
+    return this.readTopicDeliverable(operationId);
+  }
+
   // ── alarm client ─────────────────────────────────────────────────────────
 
   async nextWakeAt(): Promise<number | null> {
@@ -376,6 +517,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         state: 'delivering',
         ...(roomId ? { roomId } : {}),
         resultText: trimmed,
+        completedAt: new Date().toISOString(),
       });
     });
     const refreshed = (await this.store.get(task.id)) ?? task;
@@ -457,7 +599,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       }
     }
     const next = await this.nextWakeAt();
-    if (next !== null) this.host.requestAlarm(Math.max(next, now + 1000));
+    if (next !== null) await this.host.requestAlarm(Math.max(next, now + 1000));
   }
 
   /**
@@ -679,7 +821,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       if (roomId) record.deliveryRoomId = roomId;
     }
     await this.store.insert(record);
-    this.host.requestAlarm(nextMs);
+    await this.host.requestAlarm(nextMs);
     this.host.log.log(
       `[tasks] created ${record.id} — ${summarizeSchedule(record.schedule)}; next run ${record.nextRunAt}`,
     );
@@ -758,7 +900,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     }
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
-    if (nextMs !== null) this.host.requestAlarm(nextMs);
+    if (nextMs !== null) await this.host.requestAlarm(nextMs);
     return task;
   }
 
@@ -800,7 +942,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     delete task.pendingApprovalAt;
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
-    this.host.requestAlarm(nextMs);
+    await this.host.requestAlarm(nextMs);
     return task;
   }
 
@@ -1054,6 +1196,7 @@ class AlarmTaskScheduler implements TaskScheduler {
           state: 'delivering',
           roomId,
           resultText: text,
+          completedAt: new Date().toISOString(),
         });
       });
       open = {
@@ -1138,7 +1281,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         ] ?? 60_000;
       const retryAt = Math.max(nowMs, Date.now()) + pause;
       await this.store.updateRun(run.runId, { attempts, retryAt });
-      this.host.requestAlarm(retryAt);
+      await this.host.requestAlarm(retryAt);
       this.host.log.warn(
         `[tasks] run ${run.runId} of ${task.id}: delivery round ${attempts} failed (${errorMessage(err)}); next round at ${new Date(retryAt).toISOString()}`,
       );
@@ -1148,18 +1291,18 @@ class AlarmTaskScheduler implements TaskScheduler {
     const finishedAt = new Date().toISOString();
     // Delivered. Bookkeeping goes onto the task as it is NOW (a pause or
     // cancel during the send must stand); only an active one-shot completes.
-    const current = (await this.store.get(task.id)) ?? task;
-    current.lastRunAt = run.startedAt;
-    current.lastResult = {
-      ok: true,
-      summary: text.slice(0, RESULT_SUMMARY_MAX),
-      at: finishedAt,
-    };
-    current.consecutiveFailures = 0;
-    if (current.schedule.kind === 'once' && current.status === 'active')
-      current.status = 'completed';
-    current.updatedAt = finishedAt;
     await this.host.db.transaction(async () => {
+      const current = (await this.store.get(task.id)) ?? task;
+      current.lastRunAt = run.startedAt;
+      current.lastResult = {
+        ok: true,
+        summary: text.slice(0, RESULT_SUMMARY_MAX),
+        at: finishedAt,
+      };
+      current.consecutiveFailures = 0;
+      if (current.schedule.kind === 'once' && current.status === 'active')
+        current.status = 'completed';
+      current.updatedAt = finishedAt;
       await this.store.save(current);
       await this.store.updateRun(run.runId, {
         state: 'delivered',

@@ -1,3 +1,7 @@
+import type {
+  TopicDeliverableCommand,
+  TopicDeliverableResult,
+} from '../tasks/topic-deliverables';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
@@ -28,6 +32,7 @@ import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  TOPIC_DELIVERABLES_ENABLED?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -559,6 +564,11 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  topicDeliverable(
+    identity: TurnIdentity,
+    operationId: string,
+    command: TopicDeliverableCommand,
+  ): Promise<TopicDeliverableResult>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**

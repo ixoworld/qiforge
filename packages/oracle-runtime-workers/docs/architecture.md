@@ -558,3 +558,60 @@ and an object stops hibernating or a request dies with an opaque error.
   waited sends retry with the same transaction id (`src/do/gateway-retry.ts`).
 - **DO SQL** allows at most 100 bound parameters per statement and dislikes
   `LIKE` patterns; wa-sqlite's heap never shrinks (~16 MiB steady state).
+
+### Topic deliverable API
+
+`TOPIC_DELIVERABLES_ENABLED=true` enables an owner-only pilot API. It is off
+by default. Every route requires a signed UCAN invocation using the existing
+`*` capability on `ixo:oracle`. A delegation alone is insufficient. The
+validated signer selects the user's Durable Object. Topic, room, thread and
+attempt identifiers are correlation data, never publication authority.
+
+- `PUT /topic-deliverables/:operationId` starts or recovers one operation.
+- `GET /topic-deliverables/:operationId` reads its persisted result without
+  starting a model turn.
+- `POST /topic-deliverables/:operationId/cancel` persists cancellation before
+  aborting the isolated task session. A completed execution returns `409`.
+
+The start body is `{ topic: { id, roomId, threadId, attemptId }, title, goal,
+instructions, sources: [{ label, text }] }`. Unknown properties are rejected.
+Operation IDs contain 1–128 ASCII letters, digits, hyphens or underscores.
+The body limit is 128 KiB. Source text is supplied inline, with at most 12
+sources and 32,000 characters per source. Titles are limited to 120 characters,
+goals to 4,000, instructions to 16,000, and IDs and source labels to 255.
+
+The existing task row stores the unique operation ID and canonical validated
+request in the same transaction. An identical retry returns that task, including
+after a lost response or restart. Different input for the same ID returns `409`.
+Start acknowledges success only after its alarm is armed. A failed arm keeps the
+bound task, so an identical retry repairs scheduling without another task.
+A new revision requires a new operation and attempt ID. The existing task cap
+returns `429` for a new task; it does not prevent retrying an existing operation.
+The server sets the one-shot schedule. No new room is created. The restricted
+`supplied-context-markdown` profile executes through the existing scheduler,
+durable turn coordinator and run ledger. The existing PA room receives output;
+Portal remains responsible for authorized publication into a Topic.
+
+Responses contain `{ operationId, taskId, topic, status, runId?, output?,
+delivery? }`. Status is `queued`, `working`, `ready`, `stopping`, `cancelled`,
+`failed` or `interrupted`. A persisted output contains the full `markdown`, its
+lowercase 64-character hexadecimal SHA-256 in `sha256`, and `completedAt`, saved
+when execution produced the result. Delivery is independently `pending`,
+`delivered` or `failed`. A failed delivery does not erase completed work.
+
+Cancellation cannot retract an in-flight or acknowledged Matrix message. A
+cancelled response retains any already-persisted output for reconciliation,
+but is never `ready`. Late output produced after cancellation is dropped.
+Consumers must require `status === 'ready'` before offering the artifact for
+human acceptance. This API never accepts work or completes a Topic itself.
+
+Activation requires integrating the owner-lifetime hardening from QiForge
+[PR #324](https://github.com/ixoworld/qiforge/pull/324) or a verified equivalent,
+then proving that Start cannot race idle eviction or housekeeping into losing
+work or its alarm. That change uses owner activity checks and eviction state;
+merging it alone is not evidence that this new RPC passes those races. This API
+must remain disabled on the current base. Activation also requires a deployed
+runtime containing this API and a pinned, published Topic recipe in Portal.
+These tests use real workerd and SQLite with
+a scripted model and Matrix gateway; they do not prove a deployed model run or
+a signed-in Portal journey.

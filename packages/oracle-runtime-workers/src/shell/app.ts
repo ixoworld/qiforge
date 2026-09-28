@@ -6,6 +6,13 @@
  * work unchanged. Every authenticated route resolves the caller's
  * `UserOracleDO` and forwards to it; streaming turns are proxied byte-for-byte.
  */
+import { bodyLimit } from 'hono/body-limit';
+import {
+  TopicOperationId,
+  TopicDeliverableRequestSchema,
+  TOPIC_DELIVERABLE_BODY_BYTES,
+  type TopicDeliverableCommand,
+} from '../tasks/topic-deliverables';
 import { parseTranscriptPageQuery } from '../do/transcript';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
@@ -263,6 +270,59 @@ export function createShell(
       ? c.json({ message: 'Session deleted successfully' })
       : c.json({ message: 'Session not found' }, 404);
   });
+
+  app.use('/topic-deliverables/*', async (c, next) => {
+    if (c.env.TOPIC_DELIVERABLES_ENABLED !== 'true')
+      return c.json({ message: 'Not found.' }, 404);
+    if (c.get('auth')?.via !== 'invocation')
+      return c.json({ message: 'A signed invocation is required.' }, 401);
+    return next();
+  });
+  app.use(
+    '/topic-deliverables/*',
+    bodyLimit({
+      maxSize: TOPIC_DELIVERABLE_BODY_BYTES,
+      onError: (c) => c.json({ message: 'Request is too large.' }, 413),
+    }),
+  );
+  app.on(
+    ['PUT', 'GET', 'POST'],
+    [
+      '/topic-deliverables/:operationId',
+      '/topic-deliverables/:operationId/cancel',
+    ],
+    async (c) => {
+      const cancelling =
+        c.req.routePath === '/topic-deliverables/:operationId/cancel';
+      if (cancelling !== (c.req.method === 'POST'))
+        return c.json({ message: 'Not found.' }, 404);
+      const operationId = TopicOperationId.safeParse(
+        c.req.param('operationId'),
+      );
+      if (!operationId.success)
+        return c.json({ message: 'Invalid operation ID.' }, 400);
+      let command: TopicDeliverableCommand;
+      if (c.req.method === 'PUT') {
+        const parsed = TopicDeliverableRequestSchema.safeParse(
+          await c.req.json().catch(() => null),
+        );
+        if (!parsed.success)
+          return c.json({ message: 'Invalid deliverable request.' }, 400);
+        command = { action: 'start', request: parsed.data };
+      } else {
+        command = { action: cancelling ? 'cancel' : 'read' };
+      }
+      const auth = c.get('auth');
+      const result = await userStub(c.env, auth.userDid).topicDeliverable(
+        identityOf(auth, c.req.raw.headers),
+        operationId.data,
+        command,
+      );
+      return result.ok
+        ? c.json(result.snapshot)
+        : c.json({ message: result.message }, result.status);
+    },
+  );
 
   // --- messages ----------------------------------------------------------------
   app.post('/messages/abort', async (c) => {
