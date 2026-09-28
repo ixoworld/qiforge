@@ -137,7 +137,15 @@ export class WorkersUcanService {
     delegationCar: string,
     serviceUrlOrDid: string,
     capability: { can: string; with: string; nb?: Record<string, unknown> },
-    options: { maxTtlSeconds?: number } = {},
+    options: {
+      maxTtlSeconds?: number;
+      /**
+       * Extra invocation facts (e.g. the IXO Search Gateway's `rd` request
+       * digest). The host always generates `nonce` last, so a caller can never
+       * choose it.
+       */
+      facts?: Record<string, unknown>;
+    } = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
       return {
@@ -208,7 +216,7 @@ export class WorkersUcanService {
         },
         proofs: [delegation],
         expiration,
-        facts: [{ nonce: crypto.randomUUID() }],
+        facts: [{ ...options.facts, nonce: crypto.randomUUID() }],
       });
       return { invocation: await serializeInvocation(invocation) };
     } catch (error) {
@@ -333,6 +341,86 @@ export class WorkersUcanService {
   }
 
   /**
+   * Every active delegation the user deposited in the UCAN store that is
+   * issued by the user and addressed to `audienceDid` (e.g. the IXO Search
+   * Gateway's grants: `search/query`, `search/list`, ...). Unlike
+   * `getServiceDelegation` this checks the token's own issuer and audience,
+   * because a store row matched only by capability could be the user's
+   * delegation to this oracle rather than to the service.
+   */
+  async listAudienceGrants(
+    userDid: string,
+    opts: { storeUrl: string; audienceDid: string },
+  ): Promise<{ tokens: string[] } | { error: string }> {
+    const inv = await this.mintSelfSignedInvocation(
+      opts.storeUrl,
+      { can: 'store/get', with: 'ixo:ucan-store' },
+      { maxTtlSeconds: 120 },
+    );
+    if ('error' in inv) return { error: inv.error };
+    // The store pages its list (`limit`/`offset`, echoed with `total`), and a
+    // user's gateway grants can sit behind many other delegations. Walk the
+    // pages until the cap is met or the list ends; the page cap bounds a store
+    // that ignores `offset`.
+    const pageSize = 100;
+    const maxPages = 10;
+    const maxTokens = 20;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const tokens: string[] = [];
+    let offset = 0;
+    for (let page = 0; page < maxPages && tokens.length < maxTokens; page++) {
+      let body: {
+        delegations?: Array<{
+          token: string;
+          expiresAt: number | null;
+          lifecycleState: string;
+        }>;
+        total?: number;
+      };
+      try {
+        const res = await fetch(
+          `${opts.storeUrl}/api/delegations?rootIssuer=${encodeURIComponent(userDid)}&limit=${pageSize}&offset=${offset}`,
+          {
+            headers: {
+              authorization: `Bearer ${inv.invocation}`,
+              'x-auth-type': 'ucan',
+            },
+          },
+        );
+        if (res.status === 404) break;
+        if (!res.ok) return { error: `store ${res.status}` };
+        body = await res.json();
+      } catch (error) {
+        return {
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      const rows = body.delegations ?? [];
+      for (const row of rows) {
+        if (row.lifecycleState !== 'active') continue;
+        if (row.expiresAt != null && row.expiresAt <= nowSeconds) continue;
+        try {
+          const delegation = await parseDelegation(row.token);
+          if (
+            delegation.issuer.did() === userDid &&
+            delegation.audience.did() === opts.audienceDid &&
+            !tokens.includes(row.token)
+          ) {
+            tokens.push(row.token);
+          }
+        } catch {
+          // A malformed row is skipped; the service verifies what is sent.
+        }
+        if (tokens.length >= maxTokens) break;
+      }
+      offset += rows.length;
+      if (rows.length === 0) break;
+      if (typeof body.total === 'number' && offset >= body.total) break;
+    }
+    return { tokens };
+  }
+
+  /**
    * Build the `ctx.ucan` surface for one turn. `delegation` is the user's
    * delegation for this oracle (from the request header or the room state) —
    * `mintInvocation` proves through it; capability checks read it.
@@ -369,6 +457,7 @@ export class WorkersUcanService {
             can,
             with: target.capability,
           },
+          opts?.facts ? { facts: opts.facts } : {},
         );
         if ('error' in minted) throw new Error(minted.error);
         return minted.invocation;
@@ -378,6 +467,7 @@ export class WorkersUcanService {
       mintSelfSignedInvocation: (url, cap, o) =>
         this.mintSelfSignedInvocation(url, cap, o),
       getServiceDelegation: (did, o) => this.getServiceDelegation(did, o),
+      listAudienceGrants: (did, o) => this.listAudienceGrants(did, o),
     };
   }
 }

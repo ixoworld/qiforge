@@ -117,7 +117,11 @@ export interface UcanAdapter {
   mintInvocation(
     userDid: string,
     target: { did: string; capability: string },
-    opts?: { skipCache?: boolean; can?: string },
+    opts?: {
+      skipCache?: boolean;
+      can?: string;
+      facts?: Record<string, unknown>;
+    },
   ): Promise<string>;
   /**
    * Resolve a downstream service URL to its did:web identifier. Returns
@@ -130,7 +134,7 @@ export interface UcanAdapter {
     delegationCar: string,
     serviceUrl: string,
     capability: { can: string; with: string },
-    options?: { maxTtlSeconds?: number },
+    options?: { maxTtlSeconds?: number; facts?: Record<string, unknown> },
   ): Promise<{ invocation: string } | { error: string }>;
   mintSelfSignedInvocation(
     serviceUrl: string,
@@ -144,6 +148,10 @@ export interface UcanAdapter {
     | { token: string; with: string }
     | { error: 'no-delegation' | 'store-error'; detail?: string }
   >;
+  listAudienceGrants(
+    userDid: string,
+    opts: { storeUrl: string; audienceDid: string },
+  ): Promise<{ tokens: string[] } | { error: string }>;
 }
 
 /** Raw event payload — what callers pass before the scoped emitter adds session/request ids. */
@@ -486,6 +494,8 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         ambient.ucan.mintSelfSignedInvocation(serviceUrl, capability, opts),
       getServiceDelegation: (userDid, opts) =>
         ambient.ucan.getServiceDelegation(userDid, opts),
+      listAudienceGrants: (userDid, opts) =>
+        ambient.ucan.listAudienceGrants(userDid, opts),
     },
     decisions,
     llm: {
@@ -611,6 +621,9 @@ export function createUnsignedUcanAdapter(): UcanAdapter {
     },
     async getServiceDelegation() {
       return { error: 'no-delegation' as const };
+    },
+    async listAudienceGrants() {
+      return { error: unavailable };
     },
   };
 }

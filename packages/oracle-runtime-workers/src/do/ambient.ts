@@ -222,6 +222,7 @@ export function createUcanAdapter(
           can: opts?.can ?? '*',
           with: target.capability,
         },
+        opts?.facts ? { facts: opts.facts } : {},
       );
       if ('error' in minted) throw new Error(minted.error);
       return minted.invocation;
@@ -233,6 +234,7 @@ export function createUcanAdapter(
     mintSelfSignedInvocation: (url, cap, o) =>
       service.mintSelfSignedInvocation(url, cap, o),
     getServiceDelegation: (did, o) => service.getServiceDelegation(did, o),
+    listAudienceGrants: (did, o) => service.listAudienceGrants(did, o),
   };
 }
 
