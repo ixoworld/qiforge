@@ -528,13 +528,23 @@ class AlarmTaskScheduler implements TaskScheduler {
 
   async assertTurnProfile(req: TurnRequest): Promise<void> {
     const requested = taskExecutionProfile(req.executionProfile);
-    const task = req.sessionId.startsWith(TASK_SESSION_PREFIX)
-      ? await this.store.get(req.sessionId.slice(TASK_SESSION_PREFIX.length))
-      : null;
-    if (!requested && !task?.executionProfile) return;
     const run = req.taskRunId
       ? await this.store.getOpenRun(req.taskRunId)
       : null;
+    if (
+      req.taskRunId &&
+      (!run || req.sessionId !== `${TASK_SESSION_PREFIX}${run.taskId}`)
+    ) {
+      throw new Error(
+        'Task execution profile does not match its persisted run',
+      );
+    }
+    const task = run
+      ? await this.store.get(run.taskId)
+      : req.sessionId.startsWith(TASK_SESSION_PREFIX)
+        ? await this.store.get(req.sessionId.slice(TASK_SESSION_PREFIX.length))
+        : null;
+    if (!requested && !task?.executionProfile) return;
     if (
       !task ||
       task.executionProfile !== requested ||

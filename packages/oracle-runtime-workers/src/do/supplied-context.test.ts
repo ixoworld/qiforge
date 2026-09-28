@@ -7,7 +7,6 @@ import { makeEnv } from '../core/test-fixtures';
 import { ToolScheduler } from '../core/tool-scheduler';
 import { createUserOracleDO } from './user-oracle-do';
 
-// Exercise the production preparer with services that fail if enrichment is attempted.
 describe('supplied-context turn preparation', () => {
   it.each([false, true])(
     'skips external context and retains the model budget (resumed=%s)',

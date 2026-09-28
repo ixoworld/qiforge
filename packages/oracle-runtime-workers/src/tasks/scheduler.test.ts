@@ -1023,6 +1023,13 @@ describe('closed supplied-context task policy', () => {
     expect(
       await s.profileError({ ...request, taskRunId: 'another-run' }),
     ).toMatch(/persisted run/);
+    expect(
+      await s.profileError({
+        ...request,
+        sessionId: 'ordinary-session',
+        executionProfile: undefined,
+      }),
+    ).toMatch(/persisted run/);
     await s.cancel(task.id);
     expect(await s.profileError(request)).toMatch(/no longer active/);
   });
