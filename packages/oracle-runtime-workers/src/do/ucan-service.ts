@@ -358,46 +358,64 @@ export class WorkersUcanService {
       { maxTtlSeconds: 120 },
     );
     if ('error' in inv) return { error: inv.error };
-    let body: {
-      delegations?: Array<{
-        token: string;
-        expiresAt: number | null;
-        lifecycleState: string;
-      }>;
-    };
-    try {
-      const res = await fetch(
-        `${opts.storeUrl}/api/delegations?rootIssuer=${encodeURIComponent(userDid)}`,
-        {
-          headers: {
-            authorization: `Bearer ${inv.invocation}`,
-            'x-auth-type': 'ucan',
-          },
-        },
-      );
-      if (res.status === 404) return { tokens: [] };
-      if (!res.ok) return { error: `store ${res.status}` };
-      body = await res.json();
-    } catch (error) {
-      return { error: error instanceof Error ? error.message : String(error) };
-    }
+    // The store pages its list (`limit`/`offset`, echoed with `total`), and a
+    // user's gateway grants can sit behind many other delegations. Walk the
+    // pages until the cap is met or the list ends; the page cap bounds a store
+    // that ignores `offset`.
+    const pageSize = 100;
+    const maxPages = 10;
+    const maxTokens = 20;
     const nowSeconds = Math.floor(Date.now() / 1000);
     const tokens: string[] = [];
-    for (const row of body.delegations ?? []) {
-      if (row.lifecycleState !== 'active') continue;
-      if (row.expiresAt != null && row.expiresAt <= nowSeconds) continue;
+    let offset = 0;
+    for (let page = 0; page < maxPages && tokens.length < maxTokens; page++) {
+      let body: {
+        delegations?: Array<{
+          token: string;
+          expiresAt: number | null;
+          lifecycleState: string;
+        }>;
+        total?: number;
+      };
       try {
-        const delegation = await parseDelegation(row.token);
-        if (
-          delegation.issuer.did() === userDid &&
-          delegation.audience.did() === opts.audienceDid
-        ) {
-          tokens.push(row.token);
-        }
-      } catch {
-        // A malformed row is skipped; the service verifies what is sent.
+        const res = await fetch(
+          `${opts.storeUrl}/api/delegations?rootIssuer=${encodeURIComponent(userDid)}&limit=${pageSize}&offset=${offset}`,
+          {
+            headers: {
+              authorization: `Bearer ${inv.invocation}`,
+              'x-auth-type': 'ucan',
+            },
+          },
+        );
+        if (res.status === 404) break;
+        if (!res.ok) return { error: `store ${res.status}` };
+        body = await res.json();
+      } catch (error) {
+        return {
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
-      if (tokens.length >= 20) break;
+      const rows = body.delegations ?? [];
+      for (const row of rows) {
+        if (row.lifecycleState !== 'active') continue;
+        if (row.expiresAt != null && row.expiresAt <= nowSeconds) continue;
+        try {
+          const delegation = await parseDelegation(row.token);
+          if (
+            delegation.issuer.did() === userDid &&
+            delegation.audience.did() === opts.audienceDid &&
+            !tokens.includes(row.token)
+          ) {
+            tokens.push(row.token);
+          }
+        } catch {
+          // A malformed row is skipped; the service verifies what is sent.
+        }
+        if (tokens.length >= maxTokens) break;
+      }
+      offset += rows.length;
+      if (rows.length === 0) break;
+      if (typeof body.total === 'number' && offset >= body.total) break;
     }
     return { tokens };
   }
