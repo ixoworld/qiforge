@@ -217,6 +217,15 @@ export class TasksTestDO extends DurableObject {
     return this.ready().surface.resume(id);
   }
 
+  async profileError(req: TurnRequest): Promise<string> {
+    try {
+      await this.ready().assertTurnProfile(req);
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
   async cancel(id: string): Promise<OracleTaskRecord> {
     return this.ready().surface.cancel(id);
   }

@@ -946,3 +946,84 @@ describe('durable runs: a task run recovered by the object', () => {
     expect((await s.sentMessages())[0]?.body).toMatch(/hourly result/);
   });
 });
+
+describe('closed supplied-context task policy', () => {
+  it('persists across reset, rejects mutation and forwards the profile to its isolated turn', async () => {
+    const s = stub('closed-profile');
+    await s.init();
+    const task = await s.create({
+      title: 'Brief',
+      intent: 'Authorized source text',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+      executionProfile: 'supplied-context-markdown',
+    });
+    expect(
+      parseTaskSpec((await s.specOf(task.id))!).frontmatter.executionProfile,
+    ).toBe('supplied-context-markdown');
+    await s.simulateReset();
+    expect((await s.get(task.id))?.executionProfile).toBe(
+      'supplied-context-markdown',
+    );
+    expect(
+      await s.errorOf({
+        kind: 'update',
+        id: task.id,
+        patch: { executionProfile: undefined },
+      }),
+    ).toMatch(/immutable/);
+    expect(
+      await s.errorOf({
+        kind: 'update',
+        id: task.id,
+        patch: { intent: 'Use unrelated context' },
+      }),
+    ).toMatch(/immutable/);
+    await s.tick(Date.parse(task.nextRunAt!));
+    expect(await s.turnRequests()).toMatchObject([
+      {
+        sessionId: `task:${task.id}`,
+        executionProfile: 'supplied-context-markdown',
+      },
+    ]);
+  });
+
+  it('checks the persisted profile and run on original and recovered requests', async () => {
+    const s = stub('closed-profile-authority');
+    await s.init();
+    const task = await s.create({
+      title: 'Brief',
+      intent: 'Authorized source text',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+      executionProfile: 'supplied-context-markdown',
+    });
+    const taskRunId = await s.injectOpenRun({
+      taskId: task.id,
+      state: 'running',
+    });
+    const request = {
+      identity: { userDid: 'did:ixo:taskstestuser' },
+      sessionId: `task:${task.id}`,
+      message: `[Scheduled task run — "${task.title}" (${task.id})]\nYou are executing a scheduled background task for the user. No user is present in this turn: do the work now and reply with the final result only — your reply is delivered to their chat room as the task result.\n\nTask instructions:\n${task.intent}`,
+      client: 'matrix' as const,
+      requestId: 'request',
+      taskRunId,
+      executionProfile: 'supplied-context-markdown' as const,
+    };
+    expect(await s.profileError(request)).toBe('');
+    await s.simulateReset();
+    expect(await s.profileError(JSON.parse(JSON.stringify(request)))).toBe('');
+    expect(
+      await s.profileError({ ...request, executionProfile: undefined }),
+    ).toMatch(/persisted run/);
+    expect(
+      await s.profileError({ ...request, sessionId: 'ordinary-session' }),
+    ).toMatch(/persisted run/);
+    expect(
+      await s.profileError({ ...request, taskRunId: 'another-run' }),
+    ).toMatch(/persisted run/);
+    await s.cancel(task.id);
+    expect(await s.profileError(request)).toMatch(/no longer active/);
+  });
+});

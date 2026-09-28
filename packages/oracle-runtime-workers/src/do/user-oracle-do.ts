@@ -3740,6 +3740,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         continuation: string | null;
       },
     ) {
+      await this.taskScheduler?.assertTurnProfile(req);
+      if (req.executionProfile && !this.taskScheduler)
+        throw new Error('Task scheduler unavailable');
+      const suppliedContextOnly =
+        req.executionProfile === 'supplied-context-markdown';
+      if (
+        suppliedContextOnly &&
+        (body.attachments?.length ||
+          body.tools?.length ||
+          body.agActions?.length)
+      ) {
+        throw new Error('Supplied-context task accepts plain text only');
+      }
       const core = this.core;
       const baseAmbient = this.ambient!;
       const saver = this.saver!;
@@ -3852,15 +3865,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // memory engine rejects calls that carry no `x-room-id` (as a generic
       // "invalid token"). Matrix-ingress turns bring the room; HTTP turns
       // take it from the session row or resolve the user↔oracle room alias.
-      const sessionRoomId =
-        req.roomId ??
-        (await sessions.getSession(req.sessionId))?.roomId ??
-        (
-          await this.gateway
-            .resolveUserRoom(req.identity.userDid)
-            .catch(() => null)
-        )?.roomId;
-      if (!sessionRoomId) {
+      const sessionRoomId = suppliedContextOnly
+        ? undefined
+        : (req.roomId ??
+          (await sessions.getSession(req.sessionId))?.roomId ??
+          (
+            await this.gateway
+              .resolveUserRoom(req.identity.userDid)
+              .catch(() => null)
+          )?.roomId);
+      if (!suppliedContextOnly && !sessionRoomId) {
         console.warn(
           `[user-do] no oracle room resolved for ${req.identity.userDid}; room-scoped plugins (memory) will be unavailable this turn`,
         );
@@ -3883,7 +3897,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // on turn 1, exactly like the Node AgentBuilder. Best-effort: a
       // preferences read failure never fails the turn.
       const userPreferences =
-        sessionRoomId && this.preferences
+        !suppliedContextOnly && sessionRoomId && this.preferences
           ? await this.preferences.get(sessionRoomId).catch((err: unknown) => {
               console.warn(
                 `[user-do] could not load user preferences for ${sessionRoomId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -3937,14 +3951,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       abortController.signal.addEventListener('abort', () => {
         void this.runTurnDisposables(turnDisposables);
       });
-      const attachmentAccess = await this.attachmentViewSurface({
-        sessionId: req.sessionId,
-        roomId: sessionRoomId,
-        model: attachmentModel,
-        ambientLlm: baseAmbient.llm,
-        platform: core.llm,
-        signal: abortController.signal,
-      });
+      const attachmentAccess = suppliedContextOnly
+        ? undefined
+        : await this.attachmentViewSurface({
+            sessionId: req.sessionId,
+            roomId: sessionRoomId,
+            model: attachmentModel,
+            ambientLlm: baseAmbient.llm,
+            platform: core.llm,
+            signal: abortController.signal,
+          });
 
       const existing = await saver.getTupleWithoutMessages({
         configurable: { thread_id: req.sessionId },
@@ -3952,8 +3968,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const priorState = existing?.checkpoint.channel_values ?? {};
       // Request metadata (editor room, space, session run, entity) → state,
       // by the Node agent-builder's rules (see turn-metadata.ts).
-      const meta = parseTurnMetadata(req.metadata);
-      const priorMeta = priorMetadataState(priorState);
+      const meta = parseTurnMetadata(
+        suppliedContextOnly ? undefined : req.metadata,
+      );
+      const priorMeta = priorMetadataState(
+        suppliedContextOnly ? {} : priorState,
+      );
 
       // Capability router: predict the on-demand plugin this message needs
       // and preload it for THIS turn only. `on` is awaited here, ahead of the
@@ -3974,41 +3994,48 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         client: req.client,
         env: langsmithEnvFromWorkerEnv(this.env),
       });
-      const preloadedPlugins = this.capabilityRouter
-        ? await this.capabilityRouter({
-            mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
-            manifests: core.registries.manifests.collect(),
-            loaded: priorLoaded,
-            text: body.message,
-            requestId: req.requestId,
-            signal: abortController.signal,
-            trace: {
-              ...(tracing.callbacks && { callbacks: tracing.callbacks }),
-              // `thread_id` matches the graph run's, so LangSmith's thread
-              // view groups the router span with the turn.
-              metadata: {
-                ...tracing.metadata,
-                thread_id: req.sessionId,
-                request_id: req.requestId,
+      const preloadedPlugins =
+        !suppliedContextOnly && this.capabilityRouter
+          ? await this.capabilityRouter({
+              mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
+              manifests: core.registries.manifests.collect(),
+              loaded: priorLoaded,
+              text: body.message,
+              requestId: req.requestId,
+              signal: abortController.signal,
+              trace: {
+                ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+                // `thread_id` matches the graph run's, so LangSmith's thread
+                // view groups the router span with the turn.
+                metadata: {
+                  ...tracing.metadata,
+                  thread_id: req.sessionId,
+                  request_id: req.requestId,
+                },
               },
-            },
-            onShadowVerdict: (wouldPreload) =>
-              this.shadowRoutes.set(req.sessionId, {
-                requestId: req.requestId,
-                priorLoaded,
-                wouldPreload,
-              }),
-          })
-        : undefined;
+              onShadowVerdict: (wouldPreload) =>
+                this.shadowRoutes.set(req.sessionId, {
+                  requestId: req.requestId,
+                  priorLoaded,
+                  wouldPreload,
+                }),
+            })
+          : undefined;
 
       // Host page-context / safety-guardrail hooks, resolved against this
       // object's ambient services (see `OracleWorkerHooks`).
-      const hostRoomTitle = opts.hooks?.getRoomTitle;
-      const hostSafetyModel = opts.hooks?.safetyModel;
+      const hostRoomTitle = suppliedContextOnly
+        ? undefined
+        : opts.hooks?.getRoomTitle;
+      const hostSafetyModel = suppliedContextOnly
+        ? undefined
+        : opts.hooks?.safetyModel;
 
       // The client-declared tool surface: this body's, else the thread's
       // checkpointed one (run-request.ts).
-      const surface = clientSurfaceFor(body, priorState);
+      const surface = suppliedContextOnly
+        ? clientSurfaceFor({}, {})
+        : clientSurfaceFor(body, priorState);
 
       // Write-ahead tool marks + the resume policy (tool-marks.ts). The
       // effect map is filled from the build below; the closure reads it at
@@ -4092,6 +4119,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const capMiddleware = createResultCapMiddleware(resultCap);
 
       const built = await createMainAgent({
+        executionProfile: req.executionProfile,
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
@@ -4159,7 +4187,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           model: effectiveModel,
         },
         state: {
-          ...priorState,
+          ...(suppliedContextOnly ? {} : priorState),
           userPreferences,
           ...metadataBuildState(meta, priorMeta),
           // The client-declared surface: the portal and AG-UI plugins turn

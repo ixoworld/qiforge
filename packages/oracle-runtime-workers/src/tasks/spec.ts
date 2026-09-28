@@ -75,6 +75,7 @@ export const TASK_APPROVALS = ['never', 'before-action'] as const;
 
 const SpecFrontmatterSchema = z.object({
   id: z.string().regex(TASK_ID_PATTERN),
+  executionProfile: z.literal('supplied-context-markdown').optional(),
   title: z.string().min(1).max(120),
   schedule: TaskScheduleSchema,
   approval: z.enum(TASK_APPROVALS),
@@ -99,6 +100,9 @@ function toPlainSchedule(schedule: OracleTaskSchedule): OracleTaskSchedule {
 export function renderTaskSpec(record: OracleTaskRecord): string {
   const frontmatter: TaskSpecFrontmatter = {
     id: record.id,
+    ...(record.executionProfile
+      ? { executionProfile: record.executionProfile }
+      : {}),
     title: record.title,
     schedule: toPlainSchedule(record.schedule),
     approval: record.approval,

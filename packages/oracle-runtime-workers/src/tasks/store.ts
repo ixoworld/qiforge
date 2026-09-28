@@ -16,6 +16,7 @@
  * `<=` comparisons stay numeric. No statement binds more than 13 parameters
  * (DO SQL caps at 100) and nothing uses LIKE.
  */
+import { taskExecutionProfile } from '../core/execution-profile';
 import type { DoSqliteDatabase, SqlParam } from '../sqlite/database';
 import type {
   OracleTaskRecord,
@@ -120,6 +121,7 @@ type TaskRow = {
   consecutive_failures: number;
   pending_approval_at: string | null;
   delivery_room_id: string | null;
+  execution_profile: string | null;
 };
 
 type RunRow = {
@@ -158,7 +160,7 @@ const RUN_COLUMN_UPGRADES: ReadonlyArray<readonly [string, string]> = [
 
 const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_at,
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
-  delivery_room_id`;
+  delivery_room_id, execution_profile`;
 
 function isTaskStatus(value: string): value is OracleTaskStatus {
   return (TASK_STATUSES as readonly string[]).includes(value);
@@ -203,6 +205,7 @@ function rowToRecord(row: TaskRow): TaskRecord {
   );
   const record: TaskRecord = {
     id: row.id,
+    executionProfile: taskExecutionProfile(row.execution_profile),
     title: row.title,
     intent: specIntentOf(row.spec),
     schedule,
@@ -244,6 +247,7 @@ function recordParams(record: TaskRecord): SqlParam[] {
     record.consecutiveFailures,
     record.pendingApprovalAt ?? null,
     record.deliveryRoomId ?? null,
+    record.executionProfile ?? null,
   ];
 }
 
@@ -283,6 +287,9 @@ export class TasksStore {
     const columns = await this.db.exec<{ name: string }>(
       `PRAGMA table_info(tasks)`,
     );
+    if (!columns.some((c) => c.name === 'execution_profile')) {
+      await this.db.run(`ALTER TABLE tasks ADD COLUMN execution_profile TEXT`);
+    }
     if (!columns.some((c) => c.name === 'delivery_room_id')) {
       await this.db.run(`ALTER TABLE tasks ADD COLUMN delivery_room_id TEXT`);
     }
@@ -323,7 +330,7 @@ export class TasksStore {
   async insert(record: TaskRecord): Promise<void> {
     await this.setup();
     await this.db.run(
-      `INSERT INTO tasks (${TASK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (${TASK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [record.id, ...recordParams(record)],
     );
   }
@@ -335,7 +342,7 @@ export class TasksStore {
       `UPDATE tasks SET title = ?, spec = ?, schedule_json = ?, status = ?, approval = ?,
          created_at = ?, updated_at = ?, next_run_at = ?, last_run_at = ?,
          last_result_json = ?, consecutive_failures = ?, pending_approval_at = ?,
-         delivery_room_id = ?
+         delivery_room_id = ?, execution_profile = ?
        WHERE id = ?`,
       [...recordParams(record), record.id],
     );

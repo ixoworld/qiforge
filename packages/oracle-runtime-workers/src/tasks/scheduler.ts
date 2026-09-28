@@ -53,6 +53,7 @@ import {
   type TaskRecord,
   type TaskRunState,
 } from './store';
+import { taskExecutionProfile } from '../core/execution-profile';
 import { retryGateway } from '../do/gateway-retry';
 
 /** Session-id prefix for the synthetic sessions task runs execute on. */
@@ -125,6 +126,7 @@ export interface TaskSchedulerHost {
 export interface TaskScheduler {
   /** Plugin-facing surface, exposed as `ctx.tasks`. */
   surface: OracleTasksSurface;
+  assertTurnProfile(req: TurnRequest): Promise<void>;
   /** Earliest pending deadline (ms epoch), or null when nothing is scheduled. */
   nextWakeAt(): Promise<number | null>;
   /** Run everything that is due. Must be safe to call spuriously. */
@@ -524,7 +526,50 @@ class AlarmTaskScheduler implements TaskScheduler {
     return { ok: problems.length === 0, nextRuns, problems };
   }
 
+  async assertTurnProfile(req: TurnRequest): Promise<void> {
+    const requested = taskExecutionProfile(req.executionProfile);
+    const task = req.sessionId.startsWith(TASK_SESSION_PREFIX)
+      ? await this.store.get(req.sessionId.slice(TASK_SESSION_PREFIX.length))
+      : null;
+    if (!requested && !task?.executionProfile) return;
+    const run = req.taskRunId
+      ? await this.store.getOpenRun(req.taskRunId)
+      : null;
+    if (
+      !task ||
+      task.executionProfile !== requested ||
+      !run ||
+      run.taskId !== task.id ||
+      run.state !== 'running'
+    ) {
+      throw new Error(
+        'Task execution profile does not match its persisted run',
+      );
+    }
+    if (
+      req.identity.userDid !== this.host.userDid ||
+      req.message !== buildRunMessage(task)
+    ) {
+      throw new Error(
+        'Supplied-context task does not match its authorized input',
+      );
+    }
+    if (task.status !== 'active') throw new Error('Task is no longer active');
+    if (req.attachments?.length || req.metadata)
+      throw new Error('Supplied-context task accepts plain text only');
+  }
+
   private async create(input: OracleTaskInput): Promise<OracleTaskRecord> {
+    const executionProfile = taskExecutionProfile(input.executionProfile);
+    if (
+      executionProfile &&
+      (input.schedule.kind !== 'once' ||
+        (input.approval && input.approval !== 'never'))
+    ) {
+      throw new Error(
+        'Supplied-context tasks must be one-shot without an approval conversation',
+      );
+    }
     const problems = await this.problemsFor(input);
     if (problems.length > 0) throw new Error(problems.join(' '));
     const nowMs = Date.now();
@@ -534,6 +579,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     const nowIso = new Date(nowMs).toISOString();
     const record: TaskRecord = {
       id: newTaskId(title),
+      executionProfile,
       title,
       intent: input.intent.trim(),
       schedule: input.schedule,
@@ -586,6 +632,20 @@ class AlarmTaskScheduler implements TaskScheduler {
     patch: Partial<OracleTaskInput>,
   ): Promise<OracleTaskRecord> {
     const task = await this.load(id);
+    if (
+      'executionProfile' in patch &&
+      patch.executionProfile !== task.executionProfile
+    ) {
+      throw new Error('Task execution profile is immutable');
+    }
+    if (
+      task.executionProfile &&
+      Object.keys(patch).some((key) => key !== 'executionProfile')
+    ) {
+      throw new Error(
+        'Supplied-context tasks are immutable; create a new attempt',
+      );
+    }
     if (task.status === 'completed' || task.status === 'cancelled') {
       throw new Error(
         `A ${task.status} task cannot be updated — create a new one.`,
@@ -879,6 +939,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         // Links the durable turn run to this task run: a reset mid-turn is
         // recovered and delivered by the object instead of closed.
         taskRunId: runId,
+        executionProfile: task.executionProfile,
       });
       const text = result.text.trim();
       if (text.length === 0) throw new Error('Agent returned no output');

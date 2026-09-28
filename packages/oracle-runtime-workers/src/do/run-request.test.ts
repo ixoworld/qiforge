@@ -64,3 +64,17 @@ describe('clientSurfaceFor', () => {
     expect(surface.input).toEqual({});
   });
 });
+
+describe('restricted task durable request', () => {
+  it('retains the closed execution profile and task linkage in persisted recovery input', () => {
+    const taskRequest: TurnRequest = {
+      ...req,
+      sessionId: 'task:attempt-one',
+      taskRunId: 'run-one',
+      executionProfile: 'supplied-context-markdown',
+    };
+    expect(
+      JSON.parse(JSON.stringify(storedRunRequest(taskRequest))).turn,
+    ).toEqual(taskRequest);
+  });
+});
