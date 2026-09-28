@@ -42,8 +42,8 @@ export interface TopicDeliverableSnapshot {
   delivery?: 'pending' | 'delivered' | 'failed';
 }
 export type TopicDeliverableCommand =
-  | { action: 'start'; request: TopicDeliverableRequest }
-  | { action: 'read' | 'cancel' };
+  | { action: 'start' | 'cancel'; request: TopicDeliverableRequest }
+  | { action: 'read' };
 export type TopicDeliverableResult =
   | { ok: true; snapshot: TopicDeliverableSnapshot }
   | { ok: false; status: 404 | 409 | 429; message: string };

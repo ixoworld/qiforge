@@ -267,8 +267,11 @@ export class TasksTestDO extends DurableObject {
   async readTopic(operationId: string): Promise<TopicDeliverableResult> {
     return this.ready().readTopicDeliverable(operationId);
   }
-  async cancelTopic(operationId: string): Promise<TopicDeliverableResult> {
-    return this.ready().cancelTopicDeliverable(operationId);
+  async cancelTopic(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    return this.ready().cancelTopicDeliverable(operationId, request);
   }
   async abortedTurns(): Promise<
     Array<{ sessionId: string; status: string | undefined }>

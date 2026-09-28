@@ -80,7 +80,7 @@ describe('Topic deliverable HTTP authority boundary', () => {
             'x-ucan-delegation': delegation,
             'content-type': 'application/json',
           },
-          ...(method === 'PUT' ? { body: JSON.stringify(request) } : {}),
+          ...(method !== 'GET' ? { body: JSON.stringify(request) } : {}),
         },
         f.bindings,
       );
@@ -157,7 +157,7 @@ describe('Topic deliverable HTTP authority boundary', () => {
       (
         await f.app.request(
           '/topic-deliverables/cancel/cancel',
-          { method: 'POST', headers },
+          { method: 'POST', headers, body: JSON.stringify(request) },
           f.bindings,
         )
       ).status,
@@ -165,9 +165,38 @@ describe('Topic deliverable HTTP authority boundary', () => {
     expect(f.topicDeliverable).toHaveBeenLastCalledWith(
       expect.objectContaining({ userDid: did }),
       'cancel',
-      { action: 'cancel' },
+      { action: 'cancel', request },
     );
     expect(f.idFromName).toHaveBeenCalledWith(`${oracleDid}::${did}`);
+  });
+
+  it('requires the full validated Start body to cancel before selecting an owner object', async () => {
+    const { invocation } = await credentials();
+    const f = fixture();
+    const headers = {
+      authorization: `Bearer ${invocation}`,
+      'x-auth-type': 'ucan',
+      'content-type': 'application/json',
+    };
+    for (const body of [
+      undefined,
+      '{}',
+      JSON.stringify({ ...request, owner: 'forged' }),
+    ]) {
+      const res = await f.app.request(
+        '/topic-deliverables/op/cancel',
+        { method: 'POST', headers, body },
+        f.bindings,
+      );
+      expect(res.status).toBe(400);
+    }
+    const res = await f.app.request(
+      '/topic-deliverables/op/cancel',
+      { method: 'POST', headers, body: 'x'.repeat(128 * 1024 + 1) },
+      f.bindings,
+    );
+    expect(res.status).toBe(413);
+    expect(f.get).not.toHaveBeenCalled();
   });
 
   it('stays off by default and rejects missing or invalid authentication', async () => {

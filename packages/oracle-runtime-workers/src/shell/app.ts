@@ -302,15 +302,18 @@ export function createShell(
       if (!operationId.success)
         return c.json({ message: 'Invalid operation ID.' }, 400);
       let command: TopicDeliverableCommand;
-      if (c.req.method === 'PUT') {
+      if (c.req.method === 'PUT' || cancelling) {
         const parsed = TopicDeliverableRequestSchema.safeParse(
           await c.req.json().catch(() => null),
         );
         if (!parsed.success)
           return c.json({ message: 'Invalid deliverable request.' }, 400);
-        command = { action: 'start', request: parsed.data };
+        command = {
+          action: cancelling ? 'cancel' : 'start',
+          request: parsed.data,
+        };
       } else {
-        command = { action: cancelling ? 'cancel' : 'read' };
+        command = { action: 'read' };
       }
       const auth = c.get('auth');
       const result = await userStub(c.env, auth.userDid).topicDeliverable(

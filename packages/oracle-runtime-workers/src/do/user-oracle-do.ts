@@ -2963,7 +2963,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         case 'read':
           return this.taskScheduler.readTopicDeliverable(operationId);
         case 'cancel':
-          return this.taskScheduler.cancelTopicDeliverable(operationId);
+          return this.taskScheduler.cancelTopicDeliverable(
+            operationId,
+            TopicDeliverableRequestSchema.parse(command.request),
+          );
       }
     }
 

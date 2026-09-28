@@ -53,6 +53,72 @@ describe('Topic deliverables on the existing scheduler', () => {
     expect(await s.createdRooms()).toHaveLength(0);
   });
 
+  it('persists cancellation before a delayed Start, without consuming capacity or arming an alarm', async () => {
+    const s = stub('cancel-before-start');
+    await s.init({ maxTasksPerUser: 1 });
+    await s.startTopic('capacity', request);
+    const alarms = await s.requestedAlarms();
+    const cancelled = snapshot(await s.cancelTopic('operation', request));
+    expect(cancelled.status).toBe('cancelled');
+    expect(await s.requestedAlarms()).toEqual(alarms);
+    await s.simulateReset();
+    expect(snapshot(await s.startTopic('operation', request))).toEqual(
+      cancelled,
+    );
+    expect(snapshot(await s.cancelTopic('operation', request))).toEqual(
+      cancelled,
+    );
+    expect(await s.requestedAlarms()).toEqual(alarms);
+    expect(
+      await s.startTopic('operation', { ...request, goal: 'Changed' }),
+    ).toMatchObject({ ok: false, status: 409 });
+    expect(
+      await s.cancelTopic('operation', { ...request, goal: 'Changed' }),
+    ).toMatchObject({ ok: false, status: 409 });
+    expect(await s.turnRequests()).toHaveLength(0);
+    const task = (await s.list()).find((task) => task.id === cancelled.taskId);
+    expect(task?.status).toBe('cancelled');
+    expect(task).not.toHaveProperty('nextRunAt');
+  });
+
+  it('does not charge active capacity for a cancellation recorded before Start', async () => {
+    const s = stub('cancel-capacity');
+    await s.init({ maxTasksPerUser: 1 });
+    expect(snapshot(await s.cancelTopic('cancelled', request)).status).toBe(
+      'cancelled',
+    );
+    expect(snapshot(await s.startTopic('active', request)).status).toBe(
+      'queued',
+    );
+  });
+
+  it.each(['cancel-first', 'start-first'])(
+    'never restarts confirmed cancellation with concurrent arrivals: %s',
+    async (order) => {
+      const s = stub(order);
+      await s.init();
+      const results = await Promise.all(
+        order === 'cancel-first'
+          ? [
+              s.cancelTopic('operation', request),
+              s.startTopic('operation', request),
+            ]
+          : [
+              s.startTopic('operation', request),
+              s.cancelTopic('operation', request),
+            ],
+      );
+      expect(results.every((result) => result.ok)).toBe(true);
+      expect(snapshot(await s.readTopic('operation')).status).toBe('cancelled');
+      await s.simulateReset();
+      await s.tick(Date.now() + 1000);
+      expect(snapshot(await s.startTopic('operation', request)).status).toBe(
+        'cancelled',
+      );
+      expect(await s.turnRequests()).toHaveLength(0);
+    },
+  );
+
   it('does not acknowledge Start before its alarm is armed and repairs an arm failure on retry', async () => {
     const s = stub('alarm');
     await s.init();
@@ -126,7 +192,9 @@ describe('Topic deliverables on the existing scheduler', () => {
     const queued = snapshot(await s.startTopic('operation', request));
     const tick = s.tick(Date.now() + 1000);
     await expect.poll(async () => (await s.turnRequests()).length).toBe(1);
-    expect(snapshot(await s.cancelTopic('operation')).status).toBe('stopping');
+    expect(snapshot(await s.cancelTopic('operation', request)).status).toBe(
+      'stopping',
+    );
     expect(await s.abortedTurns()).toEqual([
       { sessionId: `task:${queued.taskId}`, status: 'cancelled' },
     ]);
@@ -152,7 +220,7 @@ describe('Topic deliverables on the existing scheduler', () => {
     await s.startTopic('operation', request);
     await s.tick(Date.now() + 1000);
     const prior = snapshot(await s.readTopic('operation'));
-    const cancelled = snapshot(await s.cancelTopic('operation'));
+    const cancelled = snapshot(await s.cancelTopic('operation', request));
     expect(cancelled).toMatchObject({
       status: 'cancelled',
       output: prior.output,
@@ -171,7 +239,9 @@ describe('Topic deliverables on the existing scheduler', () => {
     await s.startTopic('operation', request);
     const tick = s.tick(Date.now() + 1000);
     await expect.poll(async () => (await s.sentMessages()).length).toBe(1);
-    expect(snapshot(await s.cancelTopic('operation')).status).toBe('cancelled');
+    expect(snapshot(await s.cancelTopic('operation', request)).status).toBe(
+      'cancelled',
+    );
     await s.releaseSends();
     await tick;
     expect(snapshot(await s.readTopic('operation'))).toMatchObject({
@@ -186,7 +256,7 @@ describe('Topic deliverables on the existing scheduler', () => {
     await s.init();
     await s.startTopic('operation', request);
     await s.tick(Date.now() + 1000);
-    expect(await s.cancelTopic('operation')).toMatchObject({
+    expect(await s.cancelTopic('operation', request)).toMatchObject({
       ok: false,
       status: 409,
     });

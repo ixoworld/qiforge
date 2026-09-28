@@ -156,7 +156,10 @@ export interface TaskScheduler {
     request: TopicDeliverableRequest,
   ): Promise<TopicDeliverableResult>;
   readTopicDeliverable(operationId: string): Promise<TopicDeliverableResult>;
-  cancelTopicDeliverable(operationId: string): Promise<TopicDeliverableResult>;
+  cancelTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult>;
   /** Earliest pending deadline (ms epoch), or null when nothing is scheduled. */
   nextWakeAt(): Promise<number | null>;
   /** Run everything that is due. Must be safe to call spuriously. */
@@ -324,6 +327,29 @@ class AlarmTaskScheduler implements TaskScheduler {
     };
   }
 
+  private newTopicTask(
+    operationId: string,
+    request: TopicDeliverableRequest,
+    status: 'active' | 'cancelled',
+  ): TaskRecord {
+    const now = new Date().toISOString();
+    return {
+      id: newTaskId(request.title),
+      title: request.title,
+      intent: deliverableIntent(request),
+      executionProfile: 'supplied-context-markdown',
+      schedule: { kind: 'once', at: now },
+      approval: 'never',
+      status,
+      createdAt: now,
+      updatedAt: now,
+      ...(status === 'active' ? { nextRunAt: now } : {}),
+      consecutiveFailures: 0,
+      topicOperationId: operationId,
+      topicRequest: request,
+    };
+  }
+
   async startTopicDeliverable(
     operationId: string,
     request: TopicDeliverableRequest,
@@ -347,22 +373,7 @@ class AlarmTaskScheduler implements TaskScheduler {
           message: 'Too many active tasks.',
         } as const;
       }
-      const now = new Date().toISOString();
-      const task: TaskRecord = {
-        id: newTaskId(request.title),
-        title: request.title,
-        intent: deliverableIntent(request),
-        executionProfile: 'supplied-context-markdown',
-        schedule: { kind: 'once', at: now },
-        approval: 'never',
-        status: 'active',
-        createdAt: now,
-        updatedAt: now,
-        nextRunAt: now,
-        consecutiveFailures: 0,
-        topicOperationId: operationId,
-        topicRequest: request,
-      };
+      const task = this.newTopicTask(operationId, request, 'active');
       await this.store.insert(task);
       return { ok: true, task } as const;
     });
@@ -431,23 +442,34 @@ class AlarmTaskScheduler implements TaskScheduler {
 
   async cancelTopicDeliverable(
     operationId: string,
+    request: TopicDeliverableRequest,
   ): Promise<TopicDeliverableResult> {
-    const task = await this.store.getTopicOperation(operationId);
-    if (!task?.topicRequest)
-      return { ok: false, status: 404, message: 'Deliverable not found.' };
     const cancelled = await this.host.db.transaction(async () => {
-      const current = await this.store.get(task.id);
-      if (current?.status === 'completed') return false;
-      await this.cancel(task.id);
-      return true;
+      const existing = await this.store.getTopicOperation(operationId);
+      if (!existing) {
+        const task = this.newTopicTask(operationId, request, 'cancelled');
+        await this.store.insert(task);
+        return { ok: true, task } as const;
+      }
+      if (JSON.stringify(existing.topicRequest) !== JSON.stringify(request)) {
+        return {
+          ok: false,
+          status: 409,
+          message: 'This operation is already bound to different input.',
+        } as const;
+      }
+      if (existing.status === 'completed') {
+        return {
+          ok: false,
+          status: 409,
+          message: 'Already completed; execution cannot be cancelled.',
+        } as const;
+      }
+      await this.cancel(existing.id);
+      return { ok: true, task: existing } as const;
     });
-    if (!cancelled)
-      return {
-        ok: false,
-        status: 409,
-        message: 'Already completed; execution cannot be cancelled.',
-      };
-    await this.host.abortTurn?.(`${TASK_SESSION_PREFIX}${task.id}`);
+    if (!cancelled.ok) return cancelled;
+    await this.host.abortTurn?.(`${TASK_SESSION_PREFIX}${cancelled.task.id}`);
     return this.readTopicDeliverable(operationId);
   }
 

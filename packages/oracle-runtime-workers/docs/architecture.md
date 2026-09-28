@@ -571,9 +571,10 @@ attempt identifiers are correlation data, never publication authority.
 - `GET /topic-deliverables/:operationId` reads its persisted result without
   starting a model turn.
 - `POST /topic-deliverables/:operationId/cancel` persists cancellation before
-  aborting the isolated task session. A completed execution returns `409`.
+  aborting the isolated task session. It also records cancellation when Start
+  has not arrived. A completed execution returns `409`.
 
-The start body is `{ topic: { id, roomId, threadId, attemptId }, title, goal,
+Both Start and cancellation require the body `{ topic: { id, roomId, threadId, attemptId }, title, goal,
 instructions, sources: [{ label, text }] }`. Unknown properties are rejected.
 Operation IDs contain 1–128 ASCII letters, digits, hyphens or underscores.
 The body limit is 128 KiB. Source text is supplied inline, with at most 12
@@ -583,7 +584,11 @@ goals to 4,000, instructions to 16,000, and IDs and source labels to 255.
 The existing task row stores the unique operation ID and canonical validated
 request in the same transaction. An identical retry returns that task, including
 after a lost response or restart. Different input for the same ID returns `409`.
-Start acknowledges success only after its alarm is armed. A failed arm keeps the
+Cancellation and Start bind the same validated request. Cancellation can insert
+a cancelled task before Start, even when active task capacity is full. It does
+not schedule an alarm or consume active capacity. A delayed identical Start
+returns the cancelled task. Conflicting input returns `409` for either command.
+Start acknowledges active work only after its alarm is armed. A failed arm keeps the
 bound task, so an identical retry repairs scheduling without another task.
 A new revision requires a new operation and attempt ID. The existing task cap
 returns `429` for a new task; it does not prevent retrying an existing operation.
