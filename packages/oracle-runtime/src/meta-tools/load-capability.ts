@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Command } from '@langchain/langgraph';
 import { ToolMessage } from '@langchain/core/messages';
 import { tool } from '../plugin-api/tool-helper.js';
+import { canAccessToolPlane } from '../plugin-api/tool-plane.js';
 import type { PluginManifest, PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import type { ToolRegistry } from '../registries/tool-registry.js';
@@ -85,6 +86,7 @@ export function buildLoadCapabilityTool(
 
           const tools: ToolDetail[] = toolRegistry
             .toolSummariesForPlugin(name)
+            .filter((candidate) => canAccessToolPlane(ctx, candidate))
             .map((t) => ({
               name: t.name,
               description: t.description,
