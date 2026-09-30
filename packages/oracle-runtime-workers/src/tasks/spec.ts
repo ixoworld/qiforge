@@ -8,6 +8,7 @@
  * to the queryable index columns, so the owner file stays self-describing and
  * portable.
  */
+import type { AgentWake, PortableWorkDefinition } from '@ixo/common';
 import matter from 'gray-matter';
 import { z } from 'zod';
 import type { OracleTaskRecord, OracleTaskSchedule } from '../plugin-api/types';
@@ -122,4 +123,42 @@ export function parseTaskSpec(markdown: string): ParsedTaskSpec {
 /** The intent body of a spec without validating the frontmatter. */
 export function specIntentOf(markdown: string): string {
   return matter(markdown).content.trim();
+}
+
+
+/**
+ * Extract the inert, reusable definition of a task. Owner, schedule,
+ * approvals, credentials and execution state are intentionally excluded.
+ */
+export function portableWorkFromTaskRecord(
+  record: OracleTaskRecord,
+): PortableWorkDefinition {
+  return {
+    version: 1,
+    title: record.title,
+    intent: record.intent,
+  };
+}
+
+/**
+ * Describe one scheduled occurrence as a notify-only pointer. The Durable
+ * Object scheduler still re-reads current state before executing the run.
+ */
+export function agentWakeFromTaskRecord(
+  record: OracleTaskRecord,
+  principal: string,
+  occurredAt: string,
+): AgentWake {
+  return {
+    version: 1,
+    wakeId: `task:${record.id}@${occurredAt}`,
+    principal,
+    source: 'task',
+    resourceRef: `task:${record.id}`,
+    observedRevision: record.updatedAt,
+    evaluatedThrough: occurredAt,
+    reason: 'scheduled-run',
+    occurredAt,
+    notifyOnly: true,
+  };
 }
