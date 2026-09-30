@@ -143,10 +143,10 @@ describe('list_capabilities', () => {
         hasCapability: () => false,
       },
     });
-    const raw = await buildListCapabilitiesTool(
-      manifests,
-      tools,
-    ).handler({}, denied);
+    const raw = await buildListCapabilitiesTool(manifests, tools).handler(
+      {},
+      denied,
+    );
     expect(JSON.parse(String(raw))).toEqual([]);
   });
 });
