@@ -85,7 +85,7 @@ describe('buildMetaTools', () => {
 
 describe('list_capabilities', () => {
   it('lists always + on-demand (not silent) as JSON with loaded flags', async () => {
-    const { manifests } = await buildRegistries();
+    const { manifests, tools } = await buildRegistries();
     const tool = buildListCapabilitiesTool(manifests, tools);
 
     const raw = await tool.handler(
@@ -113,6 +113,42 @@ describe('list_capabilities', () => {
       'weather',
     ]);
     expect(after.find((e) => e.name === 'weather')?.loaded).toBe(true);
+  });
+});
+
+  it('hides admin-only capabilities from principals without the tool delegation', async () => {
+    const manifests = new ManifestRegistry();
+    const tools = new ToolRegistry();
+    const admin = makePlugin({
+      name: 'authority-admin',
+      manifest: makeManifest({
+        title: 'Authority Admin',
+        summary: 'Manage delegated authority.',
+        visibility: 'on-demand',
+      }),
+      getTools: () => [
+        makeTool('grant_authority', {
+          plane: 'admin',
+          description: 'Grant delegated authority.',
+        }),
+      ],
+    });
+    manifests.register(admin);
+    tools.register(admin);
+    await tools.collect(makeBuildCtx());
+
+    const deniedBase = makeRuntimeContext();
+    const denied = makeRuntimeContext({
+      ucan: {
+        ...deniedBase.ucan,
+        hasCapability: () => false,
+      },
+    });
+    const raw = await buildListCapabilitiesTool(
+      manifests,
+      tools,
+    ).handler({}, denied);
+    expect(JSON.parse(String(raw))).toEqual([]);
   });
 });
 
