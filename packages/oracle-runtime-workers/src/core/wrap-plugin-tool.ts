@@ -2,6 +2,7 @@ import { Command } from '@langchain/langgraph';
 import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
+import { requireToolPlane } from '../plugin-api/tool-plane';
 import type {
   PluginTool,
   RuntimeContext,
@@ -104,6 +105,7 @@ export function wrapPluginTool(
         state,
         sharedFactory,
       );
+      requireToolPlane(ctx, pluginTool);
       const output = await pluginTool.handler(args, ctx);
       if (!resultCap || output instanceof Command || output == null)
         return output;
