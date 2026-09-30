@@ -60,7 +60,15 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility, plane, billing, effect } = options;
+  const {
+    name,
+    description,
+    schema,
+    visibility,
+    plane,
+    billing,
+    effect,
+  } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
