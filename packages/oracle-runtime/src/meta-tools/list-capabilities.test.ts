@@ -73,39 +73,57 @@ function newRegistry(): ManifestRegistry {
 
 describe('list_capabilities', () => {
   it('declares its name and schema', () => {
-    const tool = buildListCapabilitiesTool(new ManifestRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      new ManifestRegistry(),
+      new ToolRegistry(),
+    );
     expect(tool.name).toBe('list_capabilities');
   });
 
   it('returns a JSON-stringified payload', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const raw = await tool.handler({}, makeRuntimeContext());
     expect(typeof raw).toBe('string');
     expect(() => JSON.parse(raw as string)).not.toThrow();
   });
 
   it('returns always + on-demand by default; excludes silent', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const out = await invokeList(tool, {});
     const names = out.map((e) => e.name).sort();
     expect(names).toEqual(['composio', 'memory']);
   });
 
   it('includes silent plugins when includeSilent is true', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const out = await invokeList(tool, { includeSilent: true });
     const names = out.map((e) => e.name).sort();
     expect(names).toEqual(['composio', 'memory', 'tracing']);
   });
 
   it('excludes on-demand plugins when includeOnDemand is false', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const out = await invokeList(tool, { includeOnDemand: false });
     expect(out.map((e) => e.name)).toEqual(['memory']);
   });
 
   it('marks always-visible plugins as loaded regardless of state', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const out = await invokeList(
       tool,
       {},
@@ -116,7 +134,10 @@ describe('list_capabilities', () => {
   });
 
   it('marks an on-demand plugin loaded only when state.loadedPlugins includes it', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
 
     const before = await invokeList(
       tool,
@@ -170,7 +191,10 @@ describe('list_capabilities', () => {
   });
 
   it('emits the manifest fields needed by the agent (summary, tags, category)', async () => {
-    const tool = buildListCapabilitiesTool(newRegistry(), new ToolRegistry());
+    const tool = buildListCapabilitiesTool(
+      newRegistry(),
+      new ToolRegistry(),
+    );
     const out = await invokeList(tool, {});
     const composio = out.find((e) => e.name === 'composio');
     expect(composio?.summary).toBe('External SaaS actions.');
