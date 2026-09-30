@@ -114,7 +114,6 @@ describe('list_capabilities', () => {
     ]);
     expect(after.find((e) => e.name === 'weather')?.loaded).toBe(true);
   });
-});
 
   it('hides admin-only capabilities from principals without the tool delegation', async () => {
     const manifests = new ManifestRegistry();
