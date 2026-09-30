@@ -10,9 +10,9 @@ import {
 describe('tool privilege planes', () => {
   it('defaults tools to the orchestration plane', () => {
     expect(toolPlaneOf(makeTool('read_topic'))).toBe('orchestration');
-    expect(canAccessToolPlane(makeRuntimeContext(), makeTool('read_topic'))).toBe(
-      true,
-    );
+    expect(
+      canAccessToolPlane(makeRuntimeContext(), makeTool('read_topic')),
+    ).toBe(true);
   });
 
   it('requires a tool-specific UCAN for admin-plane tools', () => {
