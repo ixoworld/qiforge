@@ -14,6 +14,14 @@ export type {
 export { defineOraclePlugin } from './define-plugin';
 export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';
+export {
+  ADMIN_TOOL_ACTION,
+  ADMIN_TOOL_RESOURCE_PREFIX,
+  adminToolCapability,
+  canAccessToolPlane,
+  requireToolPlane,
+  toolPlaneOf,
+} from './tool-plane';
 export type { ToolHelperOptions } from './tool-helper';
 export { UcanMintUnavailableError } from './ucan-errors';
 export type {
@@ -52,6 +60,7 @@ export type {
   SecretIndex,
   SharedAccessors,
   ToolCallEventPayload,
+  ToolPlane,
   UcanDelegation,
   UserContextData,
 } from './types';
