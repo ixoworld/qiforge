@@ -125,7 +125,6 @@ export function specIntentOf(markdown: string): string {
   return matter(markdown).content.trim();
 }
 
-
 /**
  * Extract the inert, reusable definition of a task. Owner, schedule,
  * approvals, credentials and execution state are intentionally excluded.
