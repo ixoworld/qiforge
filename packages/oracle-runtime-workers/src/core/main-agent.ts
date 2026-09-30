@@ -11,6 +11,7 @@ import type {
   RuntimeContext,
   SharedAccessors,
 } from '../plugin-api/types';
+import { canAccessToolPlane } from '../plugin-api/tool-plane';
 import type { MainAgentArgs, MainAgentBuildResult } from './main-agent-types';
 import { renderTier1, type Tier1Entry } from './manifest';
 import { buildMetaTools } from './meta-tools';
@@ -221,10 +222,13 @@ export async function createMainAgent(
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
   // slower of the two — not their sum — gates the build.
-  const [allTools, subAgentEntries] = await Promise.all([
+  const [collectedTools, subAgentEntries] = await Promise.all([
     registries.tools.collect(buildCtx, rtCtx),
     registries.subAgents.collect(buildCtx, rtCtx),
   ]);
+  const allTools = collectedTools.filter(({ tool }) =>
+    canAccessToolPlane(rtCtx, tool),
+  );
 
   // The per-turn tool-surface line. Request tools are named in full (there
   // are only a handful and they are the ones that vary turn to turn); the
