@@ -3,7 +3,9 @@ import type {
   PluginContext,
   PluginTool,
   RuntimeContext,
+  ToolPlane,
 } from '../plugin-api/types.js';
+import { toolPlaneOf } from '../plugin-api/tool-plane.js';
 
 /** Log prefix for the registry's own diagnostics. */
 const LOG_PREFIX = '[tool-registry]';
@@ -67,6 +69,7 @@ export interface ToolSummary {
   pluginName: string;
   name: string;
   description: string;
+  plane: ToolPlane;
   origin: 'boot' | 'request';
 }
 
@@ -171,6 +174,7 @@ export class ToolRegistry {
       pluginName,
       name: tool.name,
       description: tool.description,
+      plane: toolPlaneOf(tool),
       origin,
     }));
     return out;
@@ -183,6 +187,7 @@ export class ToolRegistry {
       pluginName,
       name: tool.name,
       description: tool.description,
+      plane: toolPlaneOf(tool),
       origin,
     }));
   }
@@ -209,10 +214,10 @@ export class ToolRegistry {
    */
   toolSummariesForPlugin(
     pluginName: string,
-  ): Array<{ name: string; description: string }> {
+  ): Array<{ name: string; description: string; plane: ToolPlane }> {
     return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map(({ name, description }) => ({ name, description }));
+      .map(({ name, description, plane }) => ({ name, description, plane }));
   }
 
   /**
