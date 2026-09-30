@@ -529,8 +529,17 @@ export async function createMainAgent(
     ambient.logger.log(`[context] ${describeBudget(contextBudget)}`);
 
   // ── 7. Prompt composition ───────────────────────────────────────────────
+  const collectedPluginNames = new Set(
+    collectedTools.map(({ pluginName }) => pluginName),
+  );
+  const visiblePluginNames = new Set(
+    allTools.map(({ pluginName }) => pluginName),
+  );
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
-    ({ manifest }) => manifest.visibility === 'always',
+    ({ pluginName, manifest }) =>
+      manifest.visibility === 'always' &&
+      (!collectedPluginNames.has(pluginName) ||
+        visiblePluginNames.has(pluginName)),
   );
   const tier1 = renderTier1({ manifests: eagerEntries });
   for (const warning of tier1.warnings) ambient.logger.warn(warning);
