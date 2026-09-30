@@ -174,7 +174,6 @@ export function specHash(title: string, body: string): string {
     .slice(0, 16);
 }
 
-
 /**
  * Extract the inert, reusable definition of a task. Runtime identity,
  * scheduling, approval, delivery and execution state deliberately stay out.
