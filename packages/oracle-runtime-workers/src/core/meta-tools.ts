@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { Command } from '@langchain/langgraph';
 import { ToolMessage } from '@langchain/core/messages';
 import { tool } from '../plugin-api/tool-helper';
+import { canAccessToolPlane } from '../plugin-api/tool-plane';
 import type { PluginManifest, PluginTool } from '../plugin-api/types';
 import type { ManifestRegistry, ToolRegistry } from './registries';
 import { acquireToolLock } from './utils';
@@ -38,6 +39,7 @@ interface CapabilityListing {
  */
 export function buildListCapabilitiesTool(
   manifestRegistry: ManifestRegistry,
+  toolRegistry: ToolRegistry,
 ): PluginTool {
   return tool(
     async (args, ctx) => {
@@ -53,6 +55,14 @@ export function buildListCapabilitiesTool(
 
         if (visibility === 'silent' && !includeSilent) continue;
         if (visibility === 'on-demand' && !includeOnDemand) continue;
+
+        const knownTools = toolRegistry.toolSummariesForPlugin(pluginName);
+        if (
+          knownTools.length > 0 &&
+          !knownTools.some((candidate) => canAccessToolPlane(ctx, candidate))
+        ) {
+          continue;
+        }
 
         out.push({
           name: pluginName,
@@ -159,6 +169,7 @@ export function buildLoadCapabilityTool(
 
           const tools: ToolDetail[] = toolRegistry
             .toolSummariesForPlugin(name)
+            .filter((candidate) => canAccessToolPlane(ctx, candidate))
             .map((t) => ({
               name: t.name,
               description: t.description,
@@ -227,6 +238,6 @@ export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
   const { manifestRegistry, toolRegistry } = opts;
   return [
     buildLoadCapabilityTool(manifestRegistry, toolRegistry),
-    buildListCapabilitiesTool(manifestRegistry),
+    buildListCapabilitiesTool(manifestRegistry, toolRegistry),
   ];
 }
