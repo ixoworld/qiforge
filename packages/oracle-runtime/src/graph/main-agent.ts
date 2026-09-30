@@ -468,10 +468,18 @@ export async function createMainAgent(
   // `list_capabilities`/`load_capability` footer — those tools are not bound
   // there, and a prompt that ends with instructions to call them teaches the
   // model a loading flow that cannot happen.
+  const collectedPluginNames = new Set(
+    collectedTools.map(({ pluginName }) => pluginName),
+  );
+  const visiblePluginNames = new Set(
+    allTools.map(({ pluginName }) => pluginName),
+  );
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
     ({ pluginName, manifest }) =>
       manifest.visibility === 'always' &&
-      (!supportMode || SUPPORT_MODE_PLUGINS.includes(pluginName)),
+      (!supportMode || SUPPORT_MODE_PLUGINS.includes(pluginName)) &&
+      (!collectedPluginNames.has(pluginName) ||
+        visiblePluginNames.has(pluginName)),
   );
   const tier1 = renderTier1({
     manifests: eagerEntries,
