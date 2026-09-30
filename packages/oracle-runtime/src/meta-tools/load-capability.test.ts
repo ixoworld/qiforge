@@ -176,6 +176,66 @@ describe('load_capability', () => {
     expect(payload.every((r) => !r.alreadyAvailable)).toBe(true);
   });
 
+  it('filters admin-plane tools from load results unless the principal is delegated that tool', async () => {
+    const { manifests, tools } = await buildRegistries();
+    const privileged = makePlugin({
+      name: 'authority-admin',
+      manifest: makeManifest({
+        title: 'Authority Admin',
+        summary: 'Manage delegated authority.',
+        visibility: 'on-demand',
+      }),
+      getTools: () => [
+        makeTool('grant_authority', {
+          plane: 'admin',
+          description: 'Grant delegated authority.',
+        }),
+        makeTool('inspect_authority', {
+          description: 'Inspect current authority.',
+        }),
+      ],
+    });
+    manifests.register(privileged);
+    tools.register(privileged);
+    await tools.collect(makeBuildCtx());
+
+    const base = makeRuntimeContext();
+    const denied = makeRuntimeContext({
+      loadedPlugins: new Set(['authority-admin']),
+      ucan: {
+        ...base.ucan,
+        hasCapability: () => false,
+      },
+    });
+    const deniedResult = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+    ).handler({ names: ['authority-admin'] }, denied);
+    expect(Array.isArray(deniedResult)).toBe(true);
+    if (!Array.isArray(deniedResult)) {
+      throw new Error('expected already-loaded capability detail');
+    }
+    expect(deniedResult[0]?.tools.map((t) => t.name)).toEqual([
+      'inspect_authority',
+    ]);
+
+    const allowed = makeRuntimeContext({
+      loadedPlugins: new Set(['authority-admin']),
+    });
+    const allowedResult = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+    ).handler({ names: ['authority-admin'] }, allowed);
+    expect(Array.isArray(allowedResult)).toBe(true);
+    if (!Array.isArray(allowedResult)) {
+      throw new Error('expected already-loaded capability detail');
+    }
+    expect(allowedResult[0]?.tools.map((t) => t.name).sort()).toEqual([
+      'grant_authority',
+      'inspect_authority',
+    ]);
+  });
+
   it('returns alreadyAvailable + full detail when the plugin is already in loadedPlugins', async () => {
     const { manifests, tools } = await buildRegistries();
     const loadTool = buildLoadCapabilityTool(manifests, tools);
