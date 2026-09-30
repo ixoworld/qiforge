@@ -43,7 +43,14 @@ describe('tool privilege planes', () => {
       capability.action,
     );
 
-    const allowed = makeRuntimeContext();
+    const allowedBase = makeRuntimeContext();
+    const allowed = makeRuntimeContext({
+      ucan: {
+        ...allowedBase.ucan,
+        hasCapability: () => true,
+        requireCapability: () => undefined,
+      },
+    });
     expect(canAccessToolPlane(allowed, tool)).toBe(true);
     expect(() => requireToolPlane(allowed, tool)).not.toThrow();
   });
