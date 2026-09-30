@@ -86,7 +86,7 @@ describe('buildMetaTools', () => {
 describe('list_capabilities', () => {
   it('lists always + on-demand (not silent) as JSON with loaded flags', async () => {
     const { manifests } = await buildRegistries();
-    const tool = buildListCapabilitiesTool(manifests);
+    const tool = buildListCapabilitiesTool(manifests, tools);
 
     const raw = await tool.handler(
       {},
