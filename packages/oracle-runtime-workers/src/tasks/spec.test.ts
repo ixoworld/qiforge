@@ -4,8 +4,10 @@
 import { describe, expect, it } from 'vitest';
 import type { OracleTaskRecord } from '../plugin-api/types';
 import {
+  agentWakeFromTaskRecord,
   newTaskId,
   parseTaskSpec,
+  portableWorkFromTaskRecord,
   renderTaskSpec,
   specIntentOf,
   TASK_ID_PATTERN,
@@ -75,5 +77,36 @@ describe('task spec markdown', () => {
 
   it('rejects a spec whose frontmatter drifted from the schema', () => {
     expect(() => parseTaskSpec('---\nid: nonsense\n---\nbody')).toThrow();
+  });
+
+  it('exports definition-only portable work', () => {
+    const portable = portableWorkFromTaskRecord(record());
+    expect(portable).toEqual({
+      version: 1,
+      title: 'Morning Brief',
+      intent:
+        '## What to do\nSummarize the news.\n\n## Constraints\n- Under 300 words.',
+    });
+    expect(portable).not.toHaveProperty('schedule');
+    expect(portable).not.toHaveProperty('approval');
+    expect(portable).not.toHaveProperty('status');
+  });
+
+  it('creates stable notify-only task wakes without copying work content', () => {
+    const at = '2026-01-15T07:00:00.000Z';
+    const wake = agentWakeFromTaskRecord(record(), 'did:ixo:alice', at);
+    expect(agentWakeFromTaskRecord(record(), 'did:ixo:alice', at)).toEqual(
+      wake,
+    );
+    expect(wake).toMatchObject({
+      principal: 'did:ixo:alice',
+      source: 'task',
+      resourceRef: 'task:task_morning-brief_0a1b2c3d',
+      observedRevision: '2026-01-15T06:00:00.000Z',
+      evaluatedThrough: at,
+      notifyOnly: true,
+    });
+    expect(wake).not.toHaveProperty('intent');
+    expect(wake).not.toHaveProperty('approval');
   });
 });
