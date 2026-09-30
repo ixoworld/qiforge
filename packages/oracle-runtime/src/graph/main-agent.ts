@@ -288,11 +288,7 @@ export async function createMainAgent(
   ambient.logger.log(
     `[main-agent] tool surface: ${allTools.length} tools ` +
       `(boot ${allTools.length - requestTools.length}, request ${requestTools.length}` +
-      `${
-        gated > 0
-          ? `, ${gated} hidden by runtime policy gates`
-          : ''
-      }) ` +
+      `${gated > 0 ? `, ${gated} hidden by runtime policy gates` : ''}) ` +
       `commerce=${commerce?.mode ?? 'none'} — request tools: ${formatByPlugin(requestTools) || '∅'}`,
   );
   ambient.logger.debug?.(
