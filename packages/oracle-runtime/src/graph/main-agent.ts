@@ -10,6 +10,7 @@ import type {
   PluginManifest,
   PluginTool,
 } from '../plugin-api/types.js';
+import { canAccessToolPlane } from '../plugin-api/tool-plane.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import { formatByPlugin } from '../registries/tool-registry.js';
 import {
@@ -260,9 +261,12 @@ export async function createMainAgent(
   //    every non-Matrix oracle.
   //  - Support allowlist: Matrix support mode binds only the front-desk
   //    plugins (see `SUPPORT_MODE_PLUGINS`).
+  const planeVisibleTools = collectedTools.filter(({ tool }) =>
+    canAccessToolPlane(rtCtx, tool),
+  );
   const workMode = commerce?.mode === 'work';
   const supportMode = commerce?.mode === 'support';
-  const allTools = collectedTools.filter(({ pluginName, tool }) => {
+  const allTools = planeVisibleTools.filter(({ pluginName, tool }) => {
     if (commerce && tool.billing === 'contracted' && !workMode) return false;
     if (supportMode && !SUPPORT_MODE_PLUGINS.includes(pluginName)) return false;
     return true;
@@ -286,7 +290,7 @@ export async function createMainAgent(
       `(boot ${allTools.length - requestTools.length}, request ${requestTools.length}` +
       `${
         gated > 0
-          ? `, ${gated} hidden by the ${supportMode ? 'support-mode allowlist' : 'contracted-billing gate'}`
+          ? `, ${gated} hidden by runtime policy gates`
           : ''
       }) ` +
       `commerce=${commerce?.mode ?? 'none'} — request tools: ${formatByPlugin(requestTools) || '∅'}`,
