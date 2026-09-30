@@ -55,6 +55,14 @@ export type { RegisteredDecision } from './registries/decision-registry.js';
 export { OraclePlugin } from './plugin-api/oracle-plugin.js';
 export { defineOraclePlugin } from './plugin-api/define-plugin.js';
 export { tool } from './plugin-api/tool-helper.js';
+export {
+  ADMIN_TOOL_ACTION,
+  ADMIN_TOOL_RESOURCE_PREFIX,
+  adminToolCapability,
+  canAccessToolPlane,
+  requireToolPlane,
+  toolPlaneOf,
+} from './plugin-api/tool-plane.js';
 export { acquireToolLock } from './utils/tool-lock.js';
 
 export type {
@@ -63,6 +71,7 @@ export type {
   PluginContext,
   RuntimeContext,
   PluginTool,
+  ToolPlane,
   PluginSubAgent,
   AuthExcludedRoute,
   OracleConfig,
