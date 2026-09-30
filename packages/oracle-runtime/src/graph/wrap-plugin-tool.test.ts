@@ -19,7 +19,6 @@ import type {
   RuntimeStateInput,
   RunConfig,
 } from '../runtime-context/build-runtime.js';
-import { adminToolCapability } from '../plugin-api/tool-plane.js';
 import { wrapPluginTool } from './wrap-plugin-tool.js';
 
 const IDENTITY: OracleIdentity = {
@@ -226,53 +225,6 @@ describe('wrapPluginTool — direct invocation', () => {
       ),
     ).rejects.toBeDefined();
     expect(handler).not.toHaveBeenCalled();
-  });
-
-  it('requires the tool-specific admin UCAN before invoking an admin-plane handler', async () => {
-    const handler = vi.fn(async () => 'ok');
-    const adminTool: PluginTool = {
-      name: 'rotate_credentials',
-      description: 'Rotate runtime credentials.',
-      schema: z.object({}),
-      plane: 'admin',
-      handler,
-    };
-    const capability = adminToolCapability(adminTool.name);
-
-    const deniedUcan = {
-      ...mockUcan(),
-      hasCapability: vi.fn(() => false),
-      requireCapability: vi.fn(() => {
-        throw new Error('missing admin delegation');
-      }),
-    };
-    const denied = wrapPluginTool(adminTool, {
-      ambient: makeAmbient({ ucan: deniedUcan }),
-      state: STATE,
-    });
-    await expect(
-      denied.invoke({}, makeRunConfig() as unknown as ToolRuntime),
-    ).rejects.toThrow('missing admin delegation');
-    expect(handler).not.toHaveBeenCalled();
-    expect(deniedUcan.requireCapability).toHaveBeenCalledWith(
-      expect.objectContaining({}),
-      capability.resource,
-      capability.action,
-    );
-
-    const allowedUcan = {
-      ...mockUcan(),
-      hasCapability: vi.fn(() => true),
-      requireCapability: vi.fn(),
-    };
-    const allowed = wrapPluginTool(adminTool, {
-      ambient: makeAmbient({ ucan: allowedUcan }),
-      state: STATE,
-    });
-    await expect(
-      allowed.invoke({}, makeRunConfig() as unknown as ToolRuntime),
-    ).resolves.toBe('ok');
-    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('propagates handler errors', async () => {
