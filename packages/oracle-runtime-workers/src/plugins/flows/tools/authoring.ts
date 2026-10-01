@@ -24,6 +24,7 @@ import {
   reorderStep,
   setStepAssignment,
   setStepConditions,
+  setStepSemanticGate,
   setStepConfirmation,
   setStepEventTrigger,
   setStepExecution,
@@ -46,6 +47,7 @@ import { flowSpecToBaseUcan } from '../translator';
 import {
   flowSpecSchema,
   flowStepSchema,
+  semanticGateSchema,
   type Condition,
   type FlowSpecInput,
   type FlowStep,
@@ -128,11 +130,16 @@ async function applyConditions(
   matrixClient: MatrixClient | undefined,
   steps: FlowStep[],
 ): Promise<void> {
-  const withConditions = steps.filter((s) => conditionsOf(s).length > 0);
+  const withConditions = steps.filter(
+    (s) => conditionsOf(s).length > 0 || s.semanticGate !== undefined,
+  );
   if (withConditions.length === 0) return;
   await withFlowDoc(ctx, flowRef, matrixClient, async (doc) => {
-    for (const step of withConditions)
+    for (const step of withConditions) {
       setStepConditions(doc, step.id, conditionsOf(step));
+      if (step.semanticGate)
+        setStepSemanticGate(doc, step.id, step.semanticGate);
+    }
   });
 }
 
@@ -355,13 +362,19 @@ const connectSchema = z.object({
   toStep: z.string().min(1),
   input: z.string().min(1),
 });
-const stepPatchSchema = flowStepSchema.partial().extend({
+export const stepPatchSchema = flowStepSchema.partial().extend({
   phase: z
     .string()
     .min(1)
     .nullable()
     .optional()
     .describe('Set the step phase, or use null to clear an existing phase.'),
+  semanticGate: semanticGateSchema
+    .nullable()
+    .optional()
+    .describe(
+      'Set the additional semantic gate, or use null to clear an existing gate.',
+    ),
 });
 const updateStepSchema = z.object({
   ...base,
@@ -376,6 +389,8 @@ export function applyStepPatch(
   patch: z.infer<typeof stepPatchSchema>,
 ): void {
   if (patch.inputs) setStepInputs(doc, stepId, patch.inputs);
+  if (patch.semanticGate !== undefined)
+    setStepSemanticGate(doc, stepId, patch.semanticGate);
   if (patch.runWhen !== undefined || patch.conditions !== undefined) {
     setStepConditions(doc, stepId, [
       ...(patch.runWhen ? [patch.runWhen] : []),
@@ -508,7 +523,7 @@ export function buildAuthoringTools(
         description:
           "Update any subset of a step's settings in one call (phase, execution boundary, required skills, inputs, conditions, schedule, assignee, confirmation, " +
           'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
-          'clear an onEvent auto-trigger. Set phase to null to clear an existing phase.',
+          'clear an onEvent auto-trigger. Set phase or semanticGate to null to clear it.',
         schema: updateStepSchema,
       },
     ),

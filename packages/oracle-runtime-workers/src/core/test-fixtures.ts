@@ -93,6 +93,8 @@ export function makeMiddleware(label: string): AgentMiddleware {
 }
 
 export interface TestPluginInit {
+  getRequestAdmission?: OraclePlugin['getRequestAdmission'];
+  getRequestMiddlewares?: OraclePlugin['getRequestMiddlewares'];
   name: string;
   version?: string;
   manifest?: PluginManifest;
@@ -154,6 +156,8 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
     }
 
     override getRequestTools = init.getRequestTools;
+    override getRequestAdmission = init.getRequestAdmission;
+    override getRequestMiddlewares = init.getRequestMiddlewares;
     override getRequestSubAgents = init.getRequestSubAgents;
 
     override getSharedState(): Record<

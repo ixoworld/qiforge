@@ -14,7 +14,7 @@ Final shipping set: `load_capability` and `list_capabilities`.
 export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
   return [
     buildLoadCapabilityTool(opts.manifestRegistry, opts.toolRegistry),
-    buildListCapabilitiesTool(opts.manifestRegistry),
+    buildListCapabilitiesTool(opts.manifestRegistry, opts.toolRegistry),
   ];
 }
 ```
@@ -103,6 +103,47 @@ sequenceDiagram
 ```
 
 In practice the agent often skips `list_capabilities` and goes straight to `load_capability` when the user's intent is unambiguous. The runtime allows this — `load_capability` works with any known plugin name; the throw only happens for unknown plugins.
+
+## Privilege planes
+
+Agent-facing tools have two privilege planes:
+
+- `orchestration` (default) — ordinary cooperation, reads, work requests and
+  bounded state changes that do not manage the runtime's authority/security
+  lifecycle.
+- `admin` — authority grants/revocation, credential lifecycle, host/security
+  controls, or similarly privileged administration.
+
+A plugin author opts a tool into the privileged plane explicitly:
+
+```ts
+tool(handler, {
+  name: 'grant_authority',
+  description: 'Grant delegated authority.',
+  schema,
+  plane: 'admin',
+});
+```
+
+Admin tools use a tool-specific UCAN capability:
+
+```text
+resource = ixo:qiforge:admin-tool:<tool-name>
+action   = invoke
+```
+
+The runtime projects this authorization into the agent surface before the model
+sees it. `list_capabilities` suppresses a known capability when all of its
+tools are inaccessible; `load_capability` omits inaccessible admin tool
+descriptors; and `createMainAgent` removes unauthorized admin tools before
+binding. `wrapPluginTool` checks the same UCAN again immediately before the
+handler executes, so bypassing discovery cannot bypass authorization.
+
+This plane is distinct from tool `visibility` and from Workers tool `effect`:
+visibility controls eager/on-demand discovery, effect controls durable-run
+replay semantics, and plane controls privileged authority. It is also not a
+substitute for consequence approval: an authorized admin tool can still require
+a Decision/ActionGuard before a real-world side effect.
 
 ## Capability router
 

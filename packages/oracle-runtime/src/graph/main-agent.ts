@@ -10,6 +10,7 @@ import type {
   PluginManifest,
   PluginTool,
 } from '../plugin-api/types.js';
+import { canAccessToolPlane } from '../plugin-api/tool-plane.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
 import { formatByPlugin } from '../registries/tool-registry.js';
 import {
@@ -260,9 +261,12 @@ export async function createMainAgent(
   //    every non-Matrix oracle.
   //  - Support allowlist: Matrix support mode binds only the front-desk
   //    plugins (see `SUPPORT_MODE_PLUGINS`).
+  const planeVisibleTools = collectedTools.filter(({ tool }) =>
+    canAccessToolPlane(rtCtx, tool),
+  );
   const workMode = commerce?.mode === 'work';
   const supportMode = commerce?.mode === 'support';
-  const allTools = collectedTools.filter(({ pluginName, tool }) => {
+  const allTools = planeVisibleTools.filter(({ pluginName, tool }) => {
     if (commerce && tool.billing === 'contracted' && !workMode) return false;
     if (supportMode && !SUPPORT_MODE_PLUGINS.includes(pluginName)) return false;
     return true;
@@ -284,11 +288,7 @@ export async function createMainAgent(
   ambient.logger.log(
     `[main-agent] tool surface: ${allTools.length} tools ` +
       `(boot ${allTools.length - requestTools.length}, request ${requestTools.length}` +
-      `${
-        gated > 0
-          ? `, ${gated} hidden by the ${supportMode ? 'support-mode allowlist' : 'contracted-billing gate'}`
-          : ''
-      }) ` +
+      `${gated > 0 ? `, ${gated} hidden by runtime policy gates` : ''}) ` +
       `commerce=${commerce?.mode ?? 'none'} — request tools: ${formatByPlugin(requestTools) || '∅'}`,
   );
   ambient.logger.debug?.(
@@ -464,10 +464,18 @@ export async function createMainAgent(
   // `list_capabilities`/`load_capability` footer — those tools are not bound
   // there, and a prompt that ends with instructions to call them teaches the
   // model a loading flow that cannot happen.
+  const collectedPluginNames = new Set(
+    collectedTools.map(({ pluginName }) => pluginName),
+  );
+  const visiblePluginNames = new Set(
+    allTools.map(({ pluginName }) => pluginName),
+  );
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
     ({ pluginName, manifest }) =>
       manifest.visibility === 'always' &&
-      (!supportMode || SUPPORT_MODE_PLUGINS.includes(pluginName)),
+      (!supportMode || SUPPORT_MODE_PLUGINS.includes(pluginName)) &&
+      (!collectedPluginNames.has(pluginName) ||
+        visiblePluginNames.has(pluginName)),
   );
   const tier1 = renderTier1({
     manifests: eagerEntries,

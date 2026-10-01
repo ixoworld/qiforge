@@ -18,6 +18,13 @@ export interface ToolHelperOptions {
    */
   visibility?: PluginTool['visibility'];
   /**
+   * Privilege plane. Defaults to `orchestration`; `admin` marks a tool the
+   * user must explicitly delegate (`adminToolCapability`) before the model
+   * may see or run it — authority, credential or similar lifecycle
+   * operations. See `PluginTool.plane`.
+   */
+  plane?: PluginTool['plane'];
+  /**
    * `'read'` for a tool with no external effect (safe to run again when a
    * turn resumes after a reset); omitted or `'write'` otherwise.
    */
@@ -56,8 +63,16 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility, billing, effect, repeatable } =
-    options;
+  const {
+    name,
+    description,
+    schema,
+    visibility,
+    plane,
+    billing,
+    effect,
+    repeatable,
+  } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -82,6 +97,9 @@ export function tool(
   };
   if (visibility !== undefined) {
     pluginTool.visibility = visibility;
+  }
+  if (plane !== undefined) {
+    pluginTool.plane = plane;
   }
   if (billing !== undefined) {
     pluginTool.billing = billing;

@@ -254,6 +254,13 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   "Plugin requirements"). The memory, sandbox and composio plugins require
   their `ixo:memory` / `ixo:sandbox` grants; on Node they simply have no
   tools without them.
+- **Admin-plane tools are named by plugin and tool.** Node checks
+  `invoke` on `ixo:qiforge:admin-tool:<toolName>` with its exact matcher.
+  Here the capability is `admin-tool/invoke` on
+  `ixo:qiforge:admin-tool/<pluginName>/<toolName>`, so a plugin-level or
+  root grant covers it and two plugins' tools of the same name differ;
+  sub-agent tools, manifest examples and the capability router are filtered
+  too (`architecture.md`, "Admin-plane tools").
 - **The repetition guard works per turn.** Node's guard blocks an identical
   call that failed within the last 20 messages, whatever the turn, so a
   user who fixed the cause and asked again was still refused, and a failure

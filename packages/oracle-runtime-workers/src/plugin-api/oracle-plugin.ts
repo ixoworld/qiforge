@@ -1,4 +1,8 @@
 import type { DecisionRegistration } from '@ixo/common/ai/decisions';
+import type {
+  RequestAdmissionContext,
+  RequestAdmissionResult,
+} from './request-admission';
 import type { z } from 'zod';
 import type { PluginRoute } from '../shell/app';
 import type {
@@ -117,6 +121,16 @@ export abstract class OraclePlugin {
    * (summarization, capability gate, tool validation, repetition guard, retry).
    */
   getMiddlewares?(ctx: PluginContext): AgentMiddleware[];
+
+  /** Per-turn extensions for the ordinary agent; never cached across users. */
+  getRequestMiddlewares?(
+    ctx: RuntimeContext,
+  ): AgentMiddleware[] | Promise<AgentMiddleware[]>;
+
+  /** Runs before agent preparation. Only authorized deterministic reads may be handled. */
+  getRequestAdmission?(
+    ctx: RequestAdmissionContext,
+  ): RequestAdmissionResult | Promise<RequestAdmissionResult>;
 
   /**
    * Read-only accessors this plugin exposes to other plugins via `ctx.shared`.

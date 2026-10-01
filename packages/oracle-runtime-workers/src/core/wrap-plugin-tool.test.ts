@@ -2,6 +2,7 @@ import { Command } from '@langchain/langgraph';
 import { describe, expect, it, vi } from 'vitest';
 import { tool as pluginTool } from '../plugin-api/tool-helper';
 import { createNoopAmbient } from './runtime-context';
+import { makeRunConfig } from './test-fixtures';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { z } from 'zod';
 
@@ -101,5 +102,75 @@ describe('wrapPluginTool result cap', () => {
         } as never),
       ),
     ).toHaveLength(10_000);
+  });
+});
+
+describe('wrapPluginTool admin plane', () => {
+  /** The request context of a turn whose delegation grants `capabilities`. */
+  const contextGranting = (
+    capabilities: { resource: string; action: string }[],
+  ) => {
+    const run = makeRunConfig();
+    return {
+      ...run.context,
+      user: {
+        ...run.context.user,
+        ucanDelegation: { raw: 'delegation', capabilities },
+      },
+    };
+  };
+  const adminTool = (handler: () => Promise<unknown>) =>
+    pluginTool(handler, {
+      name: 'rotate_key',
+      description: 'rotates the signing key',
+      schema: z.object({}),
+      plane: 'admin',
+    });
+
+  it('refuses to run an admin tool the delegation does not grant, even when a host bound it', async () => {
+    const handler = vi.fn(async () => 'rotated');
+    // Bound directly, past the turn's filtering and the gate.
+    const bound = wrapPluginTool(adminTool(handler), {
+      ambient: createNoopAmbient(),
+      state: { messages: [] },
+      pluginName: 'keys',
+      fallbackContext: contextGranting([
+        {
+          resource: 'ixo:qiforge:admin-tool/keys/rotate_key_all',
+          action: 'admin-tool/invoke',
+        },
+      ]),
+    });
+    await expect(bound.invoke({})).rejects.toThrow(
+      'Missing required capability: admin-tool/invoke on ixo:qiforge:admin-tool/keys/rotate_key',
+    );
+    expect(handler).not.toHaveBeenCalled();
+
+    const granted = wrapPluginTool(adminTool(handler), {
+      ambient: createNoopAmbient(),
+      state: { messages: [] },
+      pluginName: 'keys',
+      fallbackContext: contextGranting([
+        {
+          resource: 'ixo:qiforge:admin-tool/keys',
+          action: 'admin-tool/invoke',
+        },
+      ]),
+    });
+    expect(await granted.invoke({})).toBe('rotated');
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('will not wrap an admin tool without the plugin that names its capability', () => {
+    expect(() =>
+      wrapPluginTool(
+        adminTool(async () => 'rotated'),
+        {
+          ambient: createNoopAmbient(),
+          state: { messages: [] },
+          fallbackContext: contextGranting([{ resource: '*', action: '*' }]),
+        },
+      ),
+    ).toThrow(/needs `pluginName`/);
   });
 });
