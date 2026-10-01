@@ -1,9 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
+import type { TurnRequest } from '../do/contracts';
 import { RunStore } from '../do/run-store';
 import { ChannelTurns } from './turns';
 import {
   channelRequestHash,
+  requireChannelDelegation,
   type ChannelTurnInput,
   type ChannelTurnOutcome,
   ChannelError,
@@ -27,7 +29,13 @@ export class ChannelTurnsTestDO extends DurableObject {
       assertSession: async (_identity, sessionId) => {
         if (!sessionId.startsWith('$channel-session-'))
           throw new ChannelError(404, 'Session not owned');
+        if ((await this.deletedSessions()).includes(sessionId))
+          throw new ChannelError(404, 'Session deleted');
       },
+      requireDelegation: async () =>
+        requireChannelDelegation(
+          (await this.ctx.storage.get<boolean>('delegation-revoked')) !== true,
+        ),
       getRun: (runId) => runs.get(runId),
       wasPruned: (runId) => runs.wasChannelRunPruned(runId),
       begin: async (runId, request) => {
@@ -50,7 +58,13 @@ export class ChannelTurnsTestDO extends DurableObject {
         if (!row) throw new Error('Run was not persisted');
         return row;
       },
-      mirror: async (_request, _text, _author) => undefined,
+      mirror: async (_request, _text, author) => {
+        const key = `mirrors:${author}`;
+        await this.ctx.storage.put(
+          key,
+          ((await this.ctx.storage.get<number>(key)) ?? 0) + 1,
+        );
+      },
       changed: () => this.ctx.storage.sync(),
     });
     return this.turns;
@@ -90,6 +104,40 @@ export class ChannelTurnsTestDO extends DurableObject {
     });
   }
 
+  /** What the user object's `onRunEnded` does for a finished channel run. */
+  async deliverReply(runId: string): Promise<void> {
+    const turns = await this.ready();
+    const record = await this.runs!.get(runId);
+    if (!record) throw new Error('No such run');
+    const request: TurnRequest = JSON.parse(record.request);
+    await turns.deliverReply(request, runId, record.partialText ?? '');
+  }
+
+  async mirrors(): Promise<{ user: number; oracle: number }> {
+    return {
+      user: (await this.ctx.storage.get<number>('mirrors:user')) ?? 0,
+      oracle: (await this.ctx.storage.get<number>('mirrors:oracle')) ?? 0,
+    };
+  }
+
+  /** What `UserOracleDO.deleteSession` does: the session is gone, the binding released. */
+  async deleteSession(sessionId: string): Promise<boolean> {
+    const turns = await this.ready();
+    await this.ctx.storage.put('deleted-sessions', [
+      ...(await this.deletedSessions()),
+      sessionId,
+    ]);
+    return turns.forgetSession(sessionId);
+  }
+
+  private async deletedSessions(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>('deleted-sessions')) ?? [];
+  }
+
+  async revokeDelegation(): Promise<void> {
+    await this.ctx.storage.put('delegation-revoked', true);
+  }
+
   async expire(ms: number): Promise<void> {
     this.nowMs += ms;
     await this.reopen();
@@ -105,6 +153,7 @@ export class ChannelTurnsTestDO extends DurableObject {
       'turn_tool_marks',
       'turn_run_segments',
       'channel_run_tombstones',
+      'channel_requests',
     ]) {
       counts[table] = (await this.db!.get<{ n: number }>(
         `SELECT COUNT(*) AS n FROM ${table}`,

@@ -66,23 +66,29 @@ describe('durable channel requests', () => {
       result: { status: 'finished', text: 'One answer' },
     });
     await stub.expire(2);
-    expect(await stub.retained()).toEqual({
+    const pruned = {
       turn_runs: 0,
       turn_tool_marks: 0,
       turn_run_segments: 0,
       channel_run_tombstones: 1,
-    });
+      channel_requests: 0,
+    };
+    expect(await stub.retained()).toEqual(pruned);
     await stub.reset().catch(() => undefined);
     const recovered = env.CHANNEL_TURNS_TEST.getByName('expired-response');
-    expect(await recovered.submit(message)).toEqual({
+    const expired = {
       ok: false,
       status: 410,
       message:
         'Channel response has expired; this request cannot execute again',
-    });
+    };
+    expect(await recovered.submit(message)).toEqual(expired);
+    // The receipt (and its body hash) is gone with the run: a changed body
+    // is refused by the tombstone too, and neither refusal writes a receipt.
     expect(
       await recovered.submit({ ...message, message: 'Replacement' }),
-    ).toMatchObject({ ok: false, status: 409 });
+    ).toEqual(expired);
+    expect(await recovered.retained()).toEqual(pruned);
     expect(await recovered.count()).toBe(1);
   });
 
@@ -121,6 +127,66 @@ describe('durable channel requests', () => {
       message: 'Session not owned',
     });
     expect(await stub.count()).toBe(0);
+  });
+
+  it('mirrors the reply once: the run end delivers it and later polls do not resend', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-once');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    await stub.deliverReply(first.result.runId);
+    await stub.submit(message);
+    await stub.reopen();
+    await stub.submit(message);
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+  });
+
+  it('delivers the reply on the first poll when the run end did not, then never again', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-on-poll');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    await stub.submit(message);
+    await stub.deliverReply(first.result.runId);
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+  });
+
+  it('opens a new session for the binding after its session was deleted', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('deleted-session');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(await stub.deleteSession(first.result.sessionId)).toBe(true);
+    const next = await stub.submit({ ...message, requestId: 'wa:two' });
+    if (!next.ok) throw new Error(`Turn rejected: ${next.message}`);
+    expect(next.result.sessionId).not.toBe(first.result.sessionId);
+    const third = await stub.submit({ ...message, requestId: 'wa:three' });
+    if (!third.ok) throw new Error('Turn rejected');
+    expect(third.result.sessionId).toBe(next.result.sessionId);
+    expect(await stub.deleteSession('$unrelated')).toBe(false);
+  });
+
+  it('refuses a new turn without a stored delegation but still answers an admitted one', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('no-delegation');
+    const admitted = await stub.submit(message);
+    if (!admitted.ok) throw new Error('Turn rejected');
+    await stub.finish(admitted.result.runId);
+    await stub.revokeDelegation();
+    expect(await stub.submit({ ...message, requestId: 'wa:two' })).toEqual({
+      ok: false,
+      status: 409,
+      message:
+        'Companion delegation required: the user must authorize this oracle again',
+    });
+    expect(await stub.count()).toBe(1);
+    expect((await stub.mirrors()).user).toBe(1);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
   });
 });
 

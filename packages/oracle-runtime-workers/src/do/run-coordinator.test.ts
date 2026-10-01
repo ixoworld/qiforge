@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Logger } from '../plugin-api/types';
 import type { PackedSegment, RunFrame } from './run-buffer';
 import {
+  RunAttemptDeferred,
   RunCoordinator,
   type LiveRun,
   type RunCoordinatorHost,
@@ -64,6 +65,10 @@ class MemoryRunStore implements RunCoordinatorStore {
       generation: 0,
       nextAttemptAt: null,
       checkpointId: null,
+      // A seeded row is a legacy one (no recorded start) unless the test
+      // says otherwise; `create` records the start like the SQL store.
+      startCheckpointId: null,
+      startRecorded: false,
       lastSeq: 0,
       partialText: null,
       messageId: null,
@@ -88,6 +93,8 @@ class MemoryRunStore implements RunCoordinatorStore {
       status: input.status,
       request: input.request,
       checkpointId: input.checkpointId,
+      startCheckpointId: input.checkpointId,
+      startRecorded: true,
       taskRunId: input.taskRunId ?? null,
       instanceId: input.instanceId,
     });
@@ -107,7 +114,12 @@ class MemoryRunStore implements RunCoordinatorStore {
     const defined = Object.fromEntries(
       Object.entries(patch).filter(([, v]) => v !== undefined),
     );
-    this.rows.set(runId, { ...row, ...defined, updatedAt: this.iso() });
+    this.rows.set(runId, {
+      ...row,
+      ...defined,
+      ...(patch.startCheckpointId !== undefined ? { startRecorded: true } : {}),
+      updatedAt: this.iso(),
+    });
   }
 
   async listActive(): Promise<RunRecord[]> {
@@ -151,6 +163,8 @@ interface Attempt {
   live: LiveRun;
   resumed: boolean;
   finish: (outcome: RunOutcome) => void;
+  /** The attempt throws (an internal fault, or a deferral). */
+  fail: (error: unknown) => void;
 }
 
 function harness(overrides: Partial<RunDurabilityConfig> = {}) {
@@ -170,8 +184,8 @@ function harness(overrides: Partial<RunDurabilityConfig> = {}) {
     // Each attempt is scripted by the test: it runs until `finish` is called
     // or the run's abort signal fires (then it reports `aborted`).
     runAttempt: (live, resumed) =>
-      new Promise<RunOutcome>((resolve) => {
-        attempts.push({ live, resumed, finish: resolve });
+      new Promise<RunOutcome>((resolve, reject) => {
+        attempts.push({ live, resumed, finish: resolve, fail: reject });
         live.abort.signal.addEventListener('abort', () =>
           resolve({ status: 'aborted', text: live.continuation ?? '' }),
         );
@@ -545,5 +559,180 @@ it('persists the final channel reply for cross-service receipt polling', async (
     status: 'finished',
     partialText: 'The complete answer',
     messageId: 'message-1',
+  });
+});
+
+describe('deferred attempts', () => {
+  it('reschedules a deferred fresh attempt with the backoff, keeps the session queue waiting, and retries it fresh', async () => {
+    const h = harness();
+    const a = await h.begin('a', 'enqueue');
+    h.attempts[0]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    expect(await h.store.get('a')).toMatchObject({
+      status: 'recovering',
+      attempts: 1,
+      nextAttemptAt: T0 + 5_000,
+      error: null,
+    });
+    expect(h.alarms).toContain(T0 + 5_000);
+    expect(h.ended).toEqual([]);
+    const b = await h.begin('b', 'enqueue');
+    expect(b.queued).toBe(true);
+    await h.runs.resumeDue(T0 + 4_999);
+    expect(h.attempts).toHaveLength(1);
+    const seen: RunFrame[] = [];
+    a.live.buffer.subscribe((f) => seen.push(f));
+    await h.runs.resumeDue(T0 + 5_000);
+    expect(h.attempts).toHaveLength(2);
+    expect(h.attempts[1]!.live.runId).toBe('a');
+    expect(h.attempts[1]!.resumed).toBe(false);
+    expect(seen).toEqual([]);
+    h.attempts[1]!.finish({ status: 'finished', text: 'Answer' });
+    expect((await a.live.done).status).toBe('finished');
+    await settled();
+    expect(h.attempts.map((x) => x.live.runId)).toEqual(['a', 'a', 'b']);
+  });
+
+  it('keeps a deferred recovery attempt a resume', async () => {
+    const h = harness();
+    // Started from cp0; the graph has checkpointed (cp1) since.
+    h.store.seed({
+      runId: 'r1',
+      checkpointId: 'cp1',
+      startCheckpointId: 'cp0',
+      startRecorded: true,
+    });
+    await h.runs.recoverOrphans();
+    await h.runs.resumeDue(T0 + 5_000);
+    expect(h.attempts[0]!.resumed).toBe(true);
+    h.attempts[0]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    expect(await h.store.get('r1')).toMatchObject({
+      status: 'recovering',
+      attempts: 2,
+      nextAttemptAt: T0 + 15_000,
+    });
+    await h.runs.resumeDue(T0 + 15_000);
+    expect(h.attempts[1]!.resumed).toBe(true);
+  });
+
+  it('fails the run once deferrals exhaust the recovery cap', async () => {
+    const h = harness({ recoveryAttempts: 1 });
+    const { live } = await h.begin('a');
+    h.attempts[0]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    expect((await h.store.get('a'))?.status).toBe('recovering');
+    await h.runs.resumeDue(T0 + 5_000);
+    h.attempts[1]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    const outcome = await live.done;
+    await settled();
+    expect(outcome.status).toBe('failed');
+    expect(await h.store.get('a')).toMatchObject({
+      status: 'failed',
+      error: 'Auth Hub unavailable',
+    });
+    expect(h.ended.map((e) => e.outcome.status)).toEqual(['failed']);
+  });
+
+  it('fails the run at once for any other attempt error', async () => {
+    const h = harness();
+    const { live } = await h.begin('a');
+    h.attempts[0]!.fail(new Error('Channel binding is inactive'));
+    expect((await live.done).status).toBe('failed');
+    await settled();
+    expect(await h.store.get('a')).toMatchObject({
+      status: 'failed',
+      error: 'Channel binding is inactive',
+    });
+    expect(h.attempts).toHaveLength(1);
+  });
+});
+
+describe('fresh or resumed recovery attempts', () => {
+  it('recovers a deferred run FRESH after its object restarts before the retry', async () => {
+    const before = harness();
+    await before.begin('a', 'enqueue');
+    before.attempts[0]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    const row = await before.store.get('a');
+    expect(row).toMatchObject({
+      status: 'recovering',
+      startCheckpointId: 'cp1',
+      startRecorded: true,
+    });
+    // The restart: a new instance over the same rows; the graph never
+    // checkpointed the run (the session is still at cp1).
+    const after = harness();
+    after.store.seed({ ...row!, runId: 'a' });
+    await after.runs.recoverOrphans();
+    expect(await after.store.get('a')).toMatchObject({
+      status: 'recovering',
+      attempts: 2,
+      nextAttemptAt: T0 + 15_000,
+    });
+    const live = after.runs.get('a')!;
+    const seen: RunFrame[] = [];
+    live.buffer.subscribe((f) => seen.push(f));
+    await after.runs.resumeDue(T0 + 15_000);
+    expect(after.attempts).toHaveLength(1);
+    expect(after.attempts[0]!.resumed).toBe(false);
+    expect(after.attempts[0]!.live.continuation).toBeNull();
+    expect(seen).toEqual([]);
+    after.attempts[0]!.finish({ status: 'finished', text: 'Answer' });
+    expect((await live.done).status).toBe('finished');
+  });
+
+  it('resumes a run reset after its first checkpoint, with its continuation', async () => {
+    const h = harness();
+    h.store.seed({
+      runId: 'r1',
+      checkpointId: 'cp0',
+      startCheckpointId: 'cp0',
+      startRecorded: true,
+    });
+    h.store.pack('r1', [
+      { seq: 1, event: 'run', data: { runId: 'r1' } },
+      { seq: 2, event: 'message', data: { content: 'Hello' } },
+    ]);
+    h.setCheckpoint('cp1');
+    await h.runs.recoverOrphans();
+    const seen: RunFrame[] = [];
+    h.runs.get('r1')!.buffer.subscribe((f) => seen.push(f));
+    await h.runs.resumeDue(T0 + 5_000);
+    expect(h.attempts[0]!.resumed).toBe(true);
+    expect(h.attempts[0]!.live.continuation).toBe('Hello');
+    expect(seen[0]).toMatchObject({
+      event: 'run',
+      data: { runId: 'r1', resumed: true, partialLength: 5 },
+    });
+  });
+
+  it('still closes a run that never progresses once the cap is spent', async () => {
+    const h = harness({ recoveryAttempts: 2 });
+    const { live } = await h.begin('a');
+    h.attempts[0]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    await h.runs.resumeDue(T0 + 5_000);
+    expect(h.attempts[1]!.resumed).toBe(false);
+    h.attempts[1]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    await settled();
+    expect((await h.store.get('a'))?.attempts).toBe(2);
+    await h.runs.resumeDue(T0 + 20_000);
+    expect(h.attempts[2]!.resumed).toBe(false);
+    h.attempts[2]!.fail(new RunAttemptDeferred('Auth Hub unavailable'));
+    expect((await live.done).status).toBe('failed');
+    // After a restart the spent cap closes the run without another attempt.
+    const restarted = harness({ recoveryAttempts: 2 });
+    restarted.store.seed({
+      runId: 'b',
+      attempts: 2,
+      checkpointId: 'cp1',
+      startCheckpointId: 'cp1',
+      startRecorded: true,
+    });
+    await restarted.runs.recoverOrphans();
+    await settled();
+    expect((await restarted.store.get('b'))?.status).toBe('interrupted');
+    expect(restarted.attempts).toHaveLength(0);
   });
 });

@@ -1,9 +1,13 @@
 import { ChannelTurns } from '../channels/turns';
-import { assertActiveChannelBinding } from '../channels/auth';
+import {
+  assertActiveChannelBinding,
+  assertChannelAttemptAllowed,
+} from '../channels/auth';
 import {
   ChannelError,
   channelRequestHash,
   channelOrigin,
+  requireChannelDelegation,
   type ChannelTurnInput,
   type ChannelTurnOutcome,
 } from '../channels/contract';
@@ -1316,6 +1320,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
             throw new ChannelError(409, 'Companion room must be encrypted');
         },
+        requireDelegation: async (identity) =>
+          requireChannelDelegation(
+            !!this.delegations.get(identity.userDid)?.raw,
+          ),
         getRun: (runId) => this.runStore!.get(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
         begin: async (runId, request) => {
@@ -2156,6 +2164,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         await this.ctx.storage.delete(contextStatsKey(sessionId));
         this.markDirty();
       }
+      // A channel binding that pointed at the session opens a new one on
+      // its next message instead of failing the session check for ever.
+      if (await this.channelTurns!.forgetSession(sessionId)) this.markDirty();
       return deleted;
     }
 
@@ -3386,7 +3397,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const req = stored.turn;
       if (req.client === 'channel') {
         await this.ctx.storage.sync();
-        await assertActiveChannelBinding(req.identity, this.env);
+        await assertChannelAttemptAllowed(req.identity, this.env);
+        requireChannelDelegation(
+          !!this.delegations.get(req.identity.userDid)?.raw,
+        );
       }
       const {
         agent,
@@ -3509,7 +3523,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<void> {
       if (record.client === 'channel' && outcome.status === 'finished') {
         const stored = JSON.parse(record.request) as StoredRunRequest;
-        await this.replayToRoom(stored.turn, outcome.text, 'oracle');
+        // Without the handle (a reset dropped it mid-run) the next poll of
+        // the request delivers the reply instead.
+        await this.channelTurns?.deliverReply(
+          stored.turn,
+          record.runId,
+          outcome.text,
+        );
       }
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;

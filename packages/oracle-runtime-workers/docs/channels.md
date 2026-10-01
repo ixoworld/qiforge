@@ -25,6 +25,14 @@ The validator checks both signatures, the exact two-member chain, the resource, 
 
 Auth Hub receives `POST /api/internal/channels/validate-binding` with the dedicated `x-channels-service-key` header. The body contains `userDid`, `bindingId`, `bindingRevision`, `provider`, and `oracleDid`. Only `{active:true}` allows admission. The check runs again before a queued or recovered attempt executes. An unavailable validator fails closed.
 
+At admission, an unavailable validator returns `503` and nothing is recorded. Before an attempt, the two outcomes differ. An inactive binding ends the run as `failed`. An unavailable or unconfigured validator defers the attempt: the run becomes `recovering` and is retried on the recovery backoff (`RUN_RECOVERY_DELAYS_MS`, default 5 s, 15 s, 30 s, 60 s). It fails only once `RUN_RECOVERY_ATTEMPTS` deferrals are spent. Whether a retry resumes or starts fresh is derived from the run row, so it holds across an object restart. Each run records the session checkpoint it started from (`start_checkpoint_id`, set at begin and again when a queued run is dequeued). A recovery attempt resumes only when the session's checkpoint has advanced since then, meaning the graph persisted part of the run. It then continues with the reply text so far. Otherwise the graph never saw the input, and the attempt runs fresh with it, without a `resumed` frame. Every retry, fresh or resumed, counts against the recovery cap. Rows written before the column existed always resume, as before. An unreadable checkpoint counts as "not advanced", the same as in the recovery-progress check.
+
+## Tool authority
+
+A channel turn runs with the user's full stored delegation to this oracle: the same delegation, and therefore the same tool authority, as a Matrix turn in the Companion room. This is a product decision. The channel grant itself never becomes tool authority, and a channel request that carries a delegation is refused with `403`.
+
+A channel cannot recover a missing delegation. The `delegation_required` re-authorization prompt is posted only for Matrix turns. A new channel turn for a user with no stored delegation is therefore refused before it is recorded as a run. The response is `409` with `Companion delegation required: the user must authorize this oracle again`. The gateway should tell the user to open the Companion and authorize it. Retrying the same request ID after re-authorization admits it. A run already admitted keeps answering polls after the delegation is revoked. If the delegation is gone when a queued or recovered attempt starts, the run ends as `failed`.
+
 ## Request
 
 ```json
@@ -39,7 +47,7 @@ Auth Hub receives `POST /api/internal/channels/validate-binding` with the dedica
 }
 ```
 
-`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted Companion room. Subsequent messages reuse the binding's session. Topics, attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
+`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted Companion room. Subsequent messages reuse the binding's session. Deleting that session releases the binding: its next message opens a new session. A request that still names the deleted session returns `404`. Topics, attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
 ## Responses and retries
 
@@ -51,18 +59,20 @@ Polling repeats the original POST body exactly. A fresh UCAN invocation can auth
 
 The tuple `(userDid, bindingId, requestId)` identifies one durable run. Concurrent submissions and requests after object restarts reuse it. A different request body under that tuple returns `409`. An aborted, failed, or interrupted run remains terminal. Retrying it never starts a replacement model or tool execution.
 
-Completed channel runs follow the ordinary seven-day run retention: database boot removes their request, answer, segments, and tool marks. The same transaction retains only a run ID and terminal status tombstone. The receipt keeps the binding ID, request ID, body hash, run ID, and session ID inside the user-scoped database. No message text enters the receipt or tombstone. An identical request after pruning returns `410`; a changed body still returns `409`. Neither response permits a replacement execution. The canonical session and Matrix transcript keep their existing retention policy.
+Completed channel runs follow the ordinary seven-day run retention: database boot removes their request, answer, segments, and tool marks. The same transaction retains only a run ID and terminal status tombstone. Until then, the receipt keeps the binding ID, request ID, body hash, run ID, session ID, and whether the reply was mirrored, inside the user-scoped database. The same boot removes the receipt of every tombstoned run. No message text enters the receipt or tombstone. Any request for a pruned run returns `410`, whatever its body, and writes no new receipt. The response never permits a replacement execution. The canonical session and Matrix transcript keep their existing retention policy.
+
+Storage growth: one tombstone row (run ID and status, under 100 bytes) remains for every channel request that started a run. Tombstones are never pruned, because they are what refuses a replay. A receipt whose request never started a run is not pruned either. This covers a request refused for its session or a missing delegation and never retried. Tombstones grow with message volume, at most about 10 MB per 100,000 messages per user.
 
 ## Matrix continuity
 
-The session marker uses a deterministic transaction ID for the binding. Message mirrors use deterministic transaction IDs for the user, binding, request, and author. A lost response therefore reuses the original Matrix event.
+The session marker uses a deterministic transaction ID for the binding and the request that opens the session. Message mirrors use deterministic transaction IDs for the user, binding, request, and author. A lost response therefore reuses the original Matrix event.
 
-The user message is mirrored before model execution. A finished response is returned only after its assistant mirror succeeds. Polling retries a failed mirror without repeating the model run. Both mirrors use the existing gateway's encrypted timeline event path. The completed run also schedules its assistant mirror immediately, without waiting for the next poll.
+The user message is mirrored before model execution. The completed run mirrors its assistant reply immediately, without waiting for the next poll, and records the delivery in the request's receipt. A finished response is returned only after its assistant mirror succeeded. A poll retries a mirror that failed without repeating the model run, and never resends a recorded one. Both mirrors use the existing gateway's encrypted timeline event path.
 
 The `org.ixo.qi.origin` content contains only `v`, `transport`, `binding_id`, and `remote_ref`. This metadata is inside the encrypted event. It contains no phone number, raw message ID, contact ID, or profile name. Human messages also expose the same envelope through `metadata` in both session-history APIs.
 
 ## Validation limits
 
-The focused workerd tests exercise real UCAN signatures, negative authorization cases, concurrent duplicate admission, SQLite close and reopen, an abrupt Durable Object abort immediately after admission, session reuse, ownership rejection, and required mirror failures. Existing run coordinator tests cover enqueue order. These tests do not contact a live model, Auth Hub, WhatsApp, or Matrix homeserver.
+The focused workerd tests exercise real UCAN signatures, negative authorization cases, concurrent duplicate admission, SQLite close and reopen, an abrupt Durable Object abort immediately after admission, session reuse, ownership rejection, and required mirror failures. They also cover a session released by its deletion, a reply mirrored once across the run end and repeated polls, the missing-delegation refusal, and receipt pruning. A channel run driven by the run coordinator over the real SQLite store keeps its reply. Run coordinator tests cover enqueue order and deferred attempts. These tests do not contact a live model, Auth Hub, WhatsApp, or Matrix homeserver.
 
 Companion's `feat/workers-runtime` deployment must adopt the released runtime and configure these bindings. Live onboarding, revocation, encrypted Matrix event inspection, and provider delivery remain deployment acceptance checks.

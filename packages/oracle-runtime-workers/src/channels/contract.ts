@@ -76,6 +76,19 @@ export class ChannelError extends Error {
   }
 }
 
+/**
+ * A channel turn runs under the user's stored delegation to this oracle,
+ * like a Matrix turn. Without one there is no tool authority to run under;
+ * the turn is refused with an explicit error instead of running degraded.
+ */
+export function requireChannelDelegation(present: boolean): void {
+  if (!present)
+    throw new ChannelError(
+      409,
+      'Companion delegation required: the user must authorize this oracle again',
+    );
+}
+
 export async function channelRequestHash(raw: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     'SHA-256',

@@ -5,9 +5,13 @@
  */
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
+import type { RunSummary } from './contracts';
 import type { PackedSegment } from './run-buffer';
+import { RunCoordinator } from './run-coordinator';
+import { runSummaryOf } from './run-request';
 import {
   RunStore,
+  runDurabilityConfig,
   type RunRecord,
   type ToolMark,
   type WriteClaimRecord,
@@ -63,6 +67,65 @@ export class RunStoreTestDO extends DurableObject {
 
   async wasChannelRunPruned(runId: string): Promise<boolean> {
     return (await this.runStore()).wasChannelRunPruned(runId);
+  }
+
+  /**
+   * Begin a run through a `RunCoordinator` over this SQLite store, let its
+   * one attempt finish with `reply`, and report what the coordinator handed
+   * `onRunEnded` and what the row holds afterwards.
+   */
+  async coordinateRun(input: {
+    runId: string;
+    client: RunRecord['client'];
+    reply: string;
+  }): Promise<{
+    endedClient: RunRecord['client'];
+    stored: RunRecord | undefined;
+    summary: RunSummary | undefined;
+  }> {
+    const store = await this.runStore();
+    let ended!: (record: RunRecord) => void;
+    const endedRecord = new Promise<RunRecord>((resolve) => {
+      ended = resolve;
+    });
+    const runs = new RunCoordinator({
+      store,
+      config: runDurabilityConfig({}),
+      instanceId: 'coordinator-test',
+      log: {
+        log: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      now: () => this.nowMs,
+      requestAlarm: () => undefined,
+      runAttempt: async () => ({
+        status: 'finished',
+        text: input.reply,
+        messageId: `msg-${input.runId}`,
+      }),
+      checkpointIdOf: async () => null,
+      onRunEnded: async (record) => ended(record),
+    });
+    await runs.begin({
+      runId: input.runId,
+      sessionId: `$session-${input.runId}`,
+      requestId: `req-${input.runId}`,
+      client: input.client,
+      request: '{}',
+      multitask: 'enqueue',
+    });
+    const record = await endedRecord;
+    const stored = await store.get(input.runId);
+    return {
+      endedClient: record.client,
+      stored,
+      summary: stored ? runSummaryOf(stored) : undefined,
+    };
+  }
+
+  async listRecent(): Promise<RunRecord[]> {
+    return (await this.runStore()).listRecent();
   }
 
   async update(

@@ -392,27 +392,40 @@ async function main(): Promise<void> {
     pass(
       'Duplicate channel turn creates one canonical session message with exact provenance',
     );
-    await until(
+    // Both mirrors of the turn (the user's message, then the reply) are sent
+    // by the oracle with the same origin; only the reply proves the run's
+    // answer reached the room. The user mirror's body is `**You:**\n<text>`.
+    const mirrors = await until(
       async () => {
+        const found = { user: false, assistant: false };
         const events = mx.getRoom(roomId)?.getLiveTimeline().getEvents() ?? [];
         for (const event of events) {
           await mx.decryptEventIfNeeded(event);
           const content = event.getContent();
           if (
-            event.getWireType() === 'm.room.encrypted' &&
-            event.getSender() === value('CHANNEL_E2E_ORACLE_MATRIX_USER_ID') &&
-            content['org.ixo.qi.origin']?.remote_ref ===
+            event.getWireType() !== 'm.room.encrypted' ||
+            event.getSender() !== value('CHANNEL_E2E_ORACLE_MATRIX_USER_ID') ||
+            content['org.ixo.qi.origin']?.remote_ref !==
               human[0]?.metadata?.['org.ixo.qi.origin']?.remote_ref
           )
-            return true;
+            continue;
+          const body: unknown = content.body;
+          if (typeof body !== 'string') continue;
+          if (body.startsWith('**You:**')) {
+            assert.ok(body.includes(text), 'User mirror carries the message');
+            found.user = true;
+          } else if (body.trim() && !body.includes(text)) {
+            found.assistant = true;
+          }
         }
-        return false;
+        return found;
       },
-      Boolean,
-      'decrypted canonical Matrix provenance',
+      (found) => found.user && found.assistant,
+      'decrypted canonical Matrix provenance of the user message and the reply',
     );
+    assert.ok(mirrors.assistant);
     pass(
-      'Real Matrix E2EE event decrypts with the expected trusted oracle sender and origin',
+      'Real Matrix E2EE user and assistant events decrypt with the expected trusted oracle sender and origin',
     );
     await confirm(
       'Verify the response arrived in WhatsApp. Open Qi.Space and verify the same DID, Matrix account, Companion room and channel-created session are visible.',

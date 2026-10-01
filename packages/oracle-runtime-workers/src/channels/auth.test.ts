@@ -10,9 +10,12 @@ import {
 import {
   authenticateChannel,
   assertActiveChannelBinding,
+  assertChannelAttemptAllowed,
   ChannelInvoke,
 } from './auth';
+import { RunAttemptDeferred } from '../do/run-coordinator';
 import {
+  ChannelError,
   channelRequestHash,
   ChannelTurnBody,
   readChannelBody,
@@ -306,6 +309,36 @@ describe('active channel binding', () => {
       await expect(
         assertActiveChannelBinding(identity, config),
       ).rejects.toThrow('unavailable');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('defers an attempt while Auth Hub is unavailable and ends it once the binding is revoked', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('busy', { status: 503 }))
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce(Response.json({ active: false }))
+        .mockResolvedValueOnce(Response.json({ active: true })),
+    );
+    try {
+      // A 503 response, then a network failure.
+      for (let transient = 0; transient < 2; transient += 1)
+        await expect(
+          assertChannelAttemptAllowed(identity, config),
+        ).rejects.toBeInstanceOf(RunAttemptDeferred);
+      const revoked = await assertChannelAttemptAllowed(identity, config).catch(
+        (error: unknown) => error,
+      );
+      expect(revoked).toBeInstanceOf(ChannelError);
+      expect(revoked).not.toBeInstanceOf(RunAttemptDeferred);
+      expect(revoked).toMatchObject({ status: 403 });
+      await expect(
+        assertChannelAttemptAllowed(identity, config),
+      ).resolves.toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
     }

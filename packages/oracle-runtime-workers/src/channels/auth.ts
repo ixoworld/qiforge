@@ -10,6 +10,7 @@ import {
 } from '@ixo/ucan';
 import { z } from 'zod';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
+import { RunAttemptDeferred } from '../do/run-coordinator';
 import {
   ChannelError,
   type ChannelTurnInput,
@@ -219,4 +220,24 @@ export async function assertActiveChannelBinding(
     throw new ChannelError(503, 'Invalid channel binding validation response');
   if (!parsed.data.active)
     throw new ChannelError(403, 'Channel binding is inactive');
+}
+
+/**
+ * The binding check before a channel attempt executes (a queued run being
+ * dequeued, a recovery attempt). An inactive binding (403) ends the run. An
+ * unavailable or unconfigured validator (503) defers the attempt to the run
+ * coordinator's recovery backoff: nothing has executed, and one Auth Hub
+ * outage must not lose the user's message.
+ */
+export async function assertChannelAttemptAllowed(
+  identity: TurnIdentity,
+  env: Parameters<typeof assertActiveChannelBinding>[1],
+): Promise<void> {
+  try {
+    await assertActiveChannelBinding(identity, env);
+  } catch (error) {
+    if (error instanceof ChannelError && error.status === 503)
+      throw new RunAttemptDeferred(error.message, { cause: error });
+    throw error;
+  }
 }

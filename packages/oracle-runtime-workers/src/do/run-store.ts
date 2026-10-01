@@ -67,6 +67,15 @@ export interface RunRecord {
   nextAttemptAt: number | null;
   /** Checkpoint id observed when the run (or its last attempt) started. */
   checkpointId: string | null;
+  /**
+   * Checkpoint id of the session when the run began executing (at begin, or
+   * when it was dequeued) — before the graph wrote the run's input. Unlike
+   * `checkpointId` it is never moved by a recovery, so it answers whether
+   * the graph ever persisted anything for this run (`runHasCheckpointed`).
+   */
+  startCheckpointId: string | null;
+  /** `startCheckpointId` was recorded (rows written before it existed: false). */
+  startRecorded: boolean;
   /** Highest frame sequence packed into a segment. */
   lastSeq: number;
   /** The reply so far, kept when the run ends without a committed reply. */
@@ -173,6 +182,32 @@ export function runDurabilityConfig(
   };
 }
 
+/** The session's checkpoint moved on from `since` (an unreadable checkpoint, `null`, never counts). */
+export function checkpointAdvanced(
+  since: string | null,
+  currentCheckpointId: string | null,
+): boolean {
+  return currentCheckpointId !== null && currentCheckpointId !== since;
+}
+
+/**
+ * Whether the graph persisted anything for this run, judged by the same
+ * comparison as `decideRecovery`'s progress, against the checkpoint the run
+ * started from. `true` → the next attempt resumes from the checkpoint;
+ * `false` → the graph never saw the input, so the attempt runs fresh with it.
+ * A row without a recorded start (written before it was stored) resumes, as
+ * every recovery did then.
+ */
+export function runHasCheckpointed(
+  run: Pick<RunRecord, 'startCheckpointId' | 'startRecorded'>,
+  currentCheckpointId: string | null,
+): boolean {
+  return (
+    !run.startRecorded ||
+    checkpointAdvanced(run.startCheckpointId, currentCheckpointId)
+  );
+}
+
 export type RecoveryDecision =
   | { action: 'schedule'; at: number; attempts: number }
   | { action: 'interrupt'; attempts: number };
@@ -189,8 +224,7 @@ export function decideRecovery(
   now: number,
   config: Pick<RunDurabilityConfig, 'recoveryAttempts' | 'recoveryDelaysMs'>,
 ): RecoveryDecision {
-  const progressed =
-    currentCheckpointId !== null && currentCheckpointId !== run.checkpointId;
+  const progressed = checkpointAdvanced(run.checkpointId, currentCheckpointId);
   const spent = progressed ? 0 : run.attempts;
   if (spent >= config.recoveryAttempts)
     return { action: 'interrupt', attempts: spent };
@@ -212,6 +246,8 @@ type RunRow = {
   generation: number;
   next_attempt_at: number | null;
   checkpoint_id: string | null;
+  start_checkpoint_id: string | null;
+  start_recorded: number;
   last_seq: number;
   partial_text: string | null;
   message_id: string | null;
@@ -248,14 +284,17 @@ type SegmentRow = {
 } & Record<string, string | number | null>;
 
 const RUN_COLUMNS =
-  'run_id, session_id, request_id, client, status, started_at, updated_at, request, attempts, generation, next_attempt_at, checkpoint_id, last_seq, partial_text, message_id, error, task_run_id, instance_id, usage';
+  'run_id, session_id, request_id, client, status, started_at, updated_at, request, attempts, generation, next_attempt_at, checkpoint_id, start_checkpoint_id, start_recorded, last_seq, partial_text, message_id, error, task_run_id, instance_id, usage';
 
 function toRecord(row: RunRow): RunRecord {
   return {
     runId: row.run_id,
     sessionId: row.session_id,
     requestId: row.request_id,
-    client: row.client === 'matrix' ? 'matrix' : 'portal',
+    client:
+      row.client === 'matrix' || row.client === 'channel'
+        ? row.client
+        : 'portal',
     status: row.status as RunStatus,
     startedAt: row.started_at,
     updatedAt: row.updated_at,
@@ -265,6 +304,8 @@ function toRecord(row: RunRow): RunRecord {
     nextAttemptAt:
       row.next_attempt_at === null ? null : Number(row.next_attempt_at),
     checkpointId: row.checkpoint_id,
+    startCheckpointId: row.start_checkpoint_id,
+    startRecorded: Number(row.start_recorded) === 1,
     lastSeq: Number(row.last_seq),
     partialText: row.partial_text,
     messageId: row.message_id,
@@ -348,6 +389,14 @@ export class RunStore {
       );
     if (!columns.some((c) => c.name === 'usage'))
       await this.db.run(`ALTER TABLE turn_runs ADD COLUMN usage TEXT`);
+    if (!columns.some((c) => c.name === 'start_checkpoint_id'))
+      await this.db.run(
+        `ALTER TABLE turn_runs ADD COLUMN start_checkpoint_id TEXT`,
+      );
+    if (!columns.some((c) => c.name === 'start_recorded'))
+      await this.db.run(
+        `ALTER TABLE turn_runs ADD COLUMN start_recorded INTEGER NOT NULL DEFAULT 0`,
+      );
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_turn_runs_session ON turn_runs(session_id, started_at)`,
     );
@@ -415,6 +464,17 @@ export class RunStore {
         ]);
       });
     }
+    // A channel receipt (channels/turns.ts) outlives its run only until the
+    // run is tombstoned: from then on the tombstone alone refuses a replay
+    // (410), so the receipt row is dropped. The table exists once the object
+    // has served a channel turn.
+    const receipts = await this.db.get<{ name: string }>(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_requests'`,
+    );
+    if (receipts)
+      await this.db.run(
+        `DELETE FROM channel_requests WHERE run_id IN (SELECT run_id FROM channel_run_tombstones)`,
+      );
   }
 
   async wasChannelRunPruned(runId: string): Promise<boolean> {
@@ -446,7 +506,7 @@ export class RunStore {
     const at = this.iso();
     await this.db.run(
       `INSERT INTO turn_runs (${RUN_COLUMNS})
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, 0, NULL, NULL, NULL, ?, ?, NULL)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, 1, 0, NULL, NULL, NULL, ?, ?, NULL)`,
       [
         input.runId,
         input.sessionId,
@@ -456,6 +516,7 @@ export class RunStore {
         at,
         at,
         input.request,
+        input.checkpointId,
         input.checkpointId,
         input.taskRunId ?? null,
         input.instanceId,
@@ -535,6 +596,7 @@ export class RunStore {
         | 'generation'
         | 'nextAttemptAt'
         | 'checkpointId'
+        | 'startCheckpointId'
         | 'lastSeq'
         | 'partialText'
         | 'messageId'
@@ -554,6 +616,7 @@ export class RunStore {
       generation: 'generation',
       nextAttemptAt: 'next_attempt_at',
       checkpointId: 'checkpoint_id',
+      startCheckpointId: 'start_checkpoint_id',
       lastSeq: 'last_seq',
       partialText: 'partial_text',
       messageId: 'message_id',
@@ -567,6 +630,8 @@ export class RunStore {
       sets.push(`${column[key]} = ?`);
       params.push(value);
     }
+    // Writing the start checkpoint records it (a row from before the column).
+    if (patch.startCheckpointId !== undefined) sets.push('start_recorded = 1');
     params.push(runId);
     await this.db.run(
       `UPDATE turn_runs SET ${sets.join(', ')} WHERE run_id = ?`,
