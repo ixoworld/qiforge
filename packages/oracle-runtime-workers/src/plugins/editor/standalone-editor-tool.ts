@@ -18,6 +18,10 @@ import { z } from 'zod';
 
 import { filterForwardedMessages } from '../../core/subagent-as-tool';
 import { tool as pluginTool } from '../../plugin-api/tool-helper';
+import {
+  canAccessToolPlane,
+  requireToolPlane,
+} from '../../plugin-api/tool-plane';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
 import { createContentTools } from './content-tools';
 import { buildAppConfig, EDITOR_AGENT_TOOL_NAME } from './editor-agent';
@@ -84,23 +88,37 @@ function lastMessageContent(messages: BaseMessage[]): string {
 export interface CreateStandaloneEditorToolOptions {
   /** Editor config built when the plugin's request tools are resolved. */
   toolsConfig: BlocknoteToolsConfig;
+  /** The contributing plugin: names an admin content tool's capability. */
+  pluginName: string;
 }
 
 /**
  * Bridge the content `PluginTool`s into LangChain tools for the inner agent,
  * reusing the outer request's `RuntimeContext` rather than rebuilding one.
+ * The handlers are called here, not through `wrapPluginTool`, so the plane
+ * check it applies is applied here too: an admin content tool the user's
+ * delegation does not grant is not bound, and the call re-checks it.
  */
 function toStructuredTools(
   tools: PluginTool[],
   ctx: RuntimeContext,
+  pluginName: string,
 ): StructuredTool[] {
-  return tools.map((t) =>
-    lcTool(async (args) => t.handler(args, ctx), {
-      name: t.name,
-      description: t.description,
-      schema: t.schema,
-    }),
-  );
+  return tools
+    .filter((t) => canAccessToolPlane(ctx, pluginName, t))
+    .map((t) =>
+      lcTool(
+        async (args) => {
+          requireToolPlane(ctx, pluginName, t);
+          return t.handler(args, ctx);
+        },
+        {
+          name: t.name,
+          description: t.description,
+          schema: t.schema,
+        },
+      ),
+    );
 }
 
 /** The document the client reports as open, when there is one. */
@@ -145,7 +163,11 @@ export function createStandaloneEditorTool(
             value: roomId,
           }),
         });
-        const boundTools = toStructuredTools(contentTools, ctx);
+        const boundTools = toStructuredTools(
+          contentTools,
+          ctx,
+          opts.pluginName,
+        );
 
         const agent = createAgent({
           model: ctx.llm.get('subagent'),

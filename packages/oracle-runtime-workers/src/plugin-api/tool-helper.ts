@@ -18,9 +18,10 @@ export interface ToolHelperOptions {
    */
   visibility?: PluginTool['visibility'];
   /**
-   * Privilege plane. Defaults to `orchestration`; use `admin` only for
-   * authority, credential, host/security, or similarly privileged lifecycle
-   * operations that require an explicit UCAN delegation.
+   * Privilege plane. Defaults to `orchestration`; `admin` marks a tool the
+   * user must explicitly delegate (`adminToolCapability`) before the model
+   * may see or run it — authority, credential or similar lifecycle
+   * operations. See `PluginTool.plane`.
    */
   plane?: PluginTool['plane'];
   /**

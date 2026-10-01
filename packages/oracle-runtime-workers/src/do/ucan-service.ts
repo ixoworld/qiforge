@@ -122,6 +122,22 @@ export async function readDelegation(
   };
 }
 
+/**
+ * The delegation a turn runs under: the one the request carried, else the
+ * user's stored one (a Matrix turn carries none), with the capabilities it
+ * grants (`withCapabilities`). Every capability check of the turn reads it:
+ * `requires`, admin-plane tools, the plugins' own mints. Without a UCAN
+ * service it carries no capabilities and grants nothing.
+ */
+export async function resolveTurnDelegation(
+  requestDelegation: string | undefined,
+  storedDelegation: string | undefined,
+  ucan: Pick<WorkersUcanService, 'withCapabilities'> | null,
+): Promise<UcanDelegation> {
+  const raw = requestDelegation ?? storedDelegation ?? '';
+  return ucan ? ucan.withCapabilities(raw) : { raw };
+}
+
 /** Upper bound on a delegated invocation's lifetime (mirrors the Node runtime). */
 const MAX_INVOCATION_TTL_SECONDS = 60 * 60;
 /** Parsed capability lists kept per raw delegation (the owner store asks per request). */

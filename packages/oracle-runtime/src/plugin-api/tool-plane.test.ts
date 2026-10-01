@@ -26,8 +26,7 @@ describe('tool privilege planes', () => {
       ucan: {
         ...base.ucan,
         hasCapability: (resource, action) =>
-          resource === capability.resource &&
-          action === capability.action
+          resource === capability.resource && action === capability.action
             ? false
             : base.ucan.hasCapability(resource, action),
         requireCapability,

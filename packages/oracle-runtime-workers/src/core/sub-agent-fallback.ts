@@ -62,7 +62,9 @@ export interface CollectSubAgentsInput {
   /**
    * Optional pre-collected sub-agent list. When provided, the registry is not
    * queried — callers that need to filter the entries collect from the
-   * registry themselves, apply the filter, and pass the result here.
+   * registry themselves, apply the filter, and pass the result here. The main
+   * agent passes `resolveTurnToolAccess`'s: admin tools the delegation does
+   * not grant already cut from each `tools` and `forwardTools`.
    */
   subAgents?: RegisteredSubAgent[];
 }
@@ -75,6 +77,7 @@ export interface CollectSubAgentsInput {
  * `'subagent'`) is resolved via the ambient LLM adapter.
  */
 function defaultToAgentSpec(
+  pluginName: string,
   subAgent: PluginSubAgent,
   buildCtx: PluginContext,
   ambient: AmbientServices,
@@ -95,10 +98,14 @@ function defaultToAgentSpec(
     ? subAgent.tools
     : subAgent.tools(buildCtx);
 
+  // `pluginName` names an inner admin tool's capability; the wrapper checks
+  // it again at call time (the main agent's build already left out the inner
+  // tools the delegation does not reach, see `resolveTurnToolAccess`).
   const tools: StructuredTool[] = pluginTools.map((t) =>
     wrapPluginTool(t, {
       ambient,
       state,
+      pluginName,
       sharedFactory,
       fallbackContext,
       ...(resultCap ? { resultCap } : {}),
@@ -167,6 +174,7 @@ export async function collectSubAgentsWithFallback(
         const spec = toAgentSpec
           ? toAgentSpec(subAgent, buildCtx, ambient, state)
           : defaultToAgentSpec(
+              pluginName,
               subAgent,
               buildCtx,
               ambient,

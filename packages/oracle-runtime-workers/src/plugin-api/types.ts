@@ -910,10 +910,12 @@ export interface PluginTool {
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
   /**
-   * Privilege plane. `orchestration` is the default. `admin` tools are
-   * hidden from discovery/binding unless the acting principal carries the
-   * tool-specific UCAN capability, and the same capability is checked again
-   * at invocation.
+   * Privilege plane. `orchestration` is the default. An `admin` tool exists
+   * for a turn only when the user's delegation to the oracle grants
+   * `adminToolCapability(pluginName, name)`: otherwise it is never bound or
+   * listed, and the capability is checked again right before the handler.
+   * That grant is the user's consent, not operator authority — a user can
+   * issue it for themselves.
    */
   plane?: ToolPlane;
   /**

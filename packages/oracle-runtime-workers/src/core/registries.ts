@@ -9,9 +9,7 @@ import type {
   PluginTool,
   RuntimeContext,
   SharedAccessors,
-  ToolPlane,
 } from '../plugin-api/types';
-import { toolPlaneOf } from '../plugin-api/tool-plane';
 import {
   mergeManifestOverride,
   validateExamplesAgainstTools,
@@ -85,7 +83,6 @@ export interface ToolSummary {
   pluginName: string;
   name: string;
   description: string;
-  plane: ToolPlane;
   origin: 'boot' | 'request';
 }
 
@@ -202,7 +199,6 @@ export class ToolRegistry {
       pluginName,
       name: tool.name,
       description: tool.description,
-      plane: toolPlaneOf(tool),
       origin,
     }));
     return out;
@@ -215,7 +211,6 @@ export class ToolRegistry {
       pluginName,
       name: tool.name,
       description: tool.description,
-      plane: toolPlaneOf(tool),
       origin,
     }));
   }
@@ -241,10 +236,10 @@ export class ToolRegistry {
    */
   toolSummariesForPlugin(
     pluginName: string,
-  ): Array<{ name: string; description: string; plane: ToolPlane }> {
+  ): Array<{ name: string; description: string }> {
     return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map(({ name, description, plane }) => ({ name, description, plane }));
+      .map(({ name, description }) => ({ name, description }));
   }
 
   /**

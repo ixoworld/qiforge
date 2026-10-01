@@ -16,11 +16,13 @@ export type { DefineOraclePluginInput } from './define-plugin';
 export { tool } from './tool-helper';
 export {
   ADMIN_TOOL_ACTION,
-  ADMIN_TOOL_RESOURCE_PREFIX,
+  ADMIN_TOOL_RESOURCE,
   adminToolCapability,
+  adminToolResource,
   canAccessToolPlane,
   requireToolPlane,
   toolPlaneOf,
+  toolPlaneRequirement,
 } from './tool-plane';
 export type { ToolHelperOptions } from './tool-helper';
 export { UcanMintUnavailableError } from './ucan-errors';

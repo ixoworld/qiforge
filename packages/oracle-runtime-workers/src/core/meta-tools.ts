@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { Command } from '@langchain/langgraph';
 import { ToolMessage } from '@langchain/core/messages';
 import { tool } from '../plugin-api/tool-helper';
-import { canAccessToolPlane } from '../plugin-api/tool-plane';
 import type { PluginManifest, PluginTool } from '../plugin-api/types';
 import {
   describeRequirements,
@@ -10,7 +9,17 @@ import {
   type CapabilityRequirement,
 } from './manifest';
 import type { ManifestRegistry, ToolRegistry } from './registries';
+import { withoutWithheldExamples, type TurnToolAccess } from './tool-access';
 import { acquireToolLock } from './utils';
+
+/**
+ * The part of the turn's `resolveTurnToolAccess` result the meta-tools read:
+ * computed once per build from the same delegation their `ctx` carries.
+ */
+export type MetaToolAccess = Pick<
+  TurnToolAccess<never>,
+  'withheldToolNames' | 'hiddenPlugins'
+>;
 
 // ── list_capabilities ───────────────────────────────────────────────────────
 
@@ -45,11 +54,13 @@ interface CapabilityListing {
  *
  * Returns one entry per loaded plugin, with a `loaded` flag that combines
  * the boot-time always-on plugins (`visibility === 'always'`) with the set
- * of plugins the agent has explicitly loaded for this thread.
+ * of plugins the agent has explicitly loaded for this thread. A plugin left
+ * with nothing by the turn's tool planes (`access.hiddenPlugins`) is not
+ * listed at all; one whose `requires` are unmet is listed as `unavailable`.
  */
 export function buildListCapabilitiesTool(
   manifestRegistry: ManifestRegistry,
-  toolRegistry: ToolRegistry,
+  access: MetaToolAccess,
 ): PluginTool {
   return tool(
     async (args, ctx) => {
@@ -66,13 +77,7 @@ export function buildListCapabilitiesTool(
         if (visibility === 'silent' && !includeSilent) continue;
         if (visibility === 'on-demand' && !includeOnDemand) continue;
 
-        const knownTools = toolRegistry.toolSummariesForPlugin(pluginName);
-        if (
-          knownTools.length > 0 &&
-          !knownTools.some((candidate) => canAccessToolPlane(ctx, candidate))
-        ) {
-          continue;
-        }
+        if (access.hiddenPlugins.has(pluginName)) continue;
 
         const missing = unmetRequirements(manifest, ctx.ucan.hasCapability);
         out.push({
@@ -142,8 +147,9 @@ interface LoadCapabilityResult extends PluginManifest {
  * cannot be invoked in parallel — concurrent calls throw immediately.
  *
  * Behavior per name:
- *  - Unknown plugin → throws, instructing the agent to call
- *    `list_capabilities` first.
+ *  - Unknown plugin, or one the turn's tool planes left with nothing
+ *    (`access.hiddenPlugins`, answered exactly like an unknown one) →
+ *    throws, instructing the agent to call `list_capabilities` first.
  *  - `silent` plugin → throws (silent plugins are not agent-loadable).
  *  - Plugin whose `requires` the user's delegation does not grant →
  *    included in the result with `refused` (what is missing) and not
@@ -151,6 +157,9 @@ interface LoadCapabilityResult extends PluginManifest {
  *  - Plugin already loaded, or visibility is `always` → included in result
  *    with `alreadyAvailable: true` (no state change for that plugin).
  *  - Otherwise → added to the `loadedPlugins` state update.
+ *
+ * The tool list and `examples` leave out the tools the turn withholds
+ * (`access.withheldToolNames`).
  *
  * Return value:
  *  - If all requested plugins were already available: returns the result
@@ -162,6 +171,7 @@ interface LoadCapabilityResult extends PluginManifest {
 export function buildLoadCapabilityTool(
   manifestRegistry: ManifestRegistry,
   toolRegistry: ToolRegistry,
+  access: MetaToolAccess,
 ): PluginTool {
   return tool(
     async (args, ctx) => {
@@ -177,7 +187,7 @@ export function buildLoadCapabilityTool(
             .collect()
             .find((m) => m.pluginName === name);
 
-          if (!entry) {
+          if (!entry || access.hiddenPlugins.has(name)) {
             throw new Error(
               `Capability "${name}" does not exist. Call list_capabilities first to discover available plugins.`,
             );
@@ -208,7 +218,7 @@ export function buildLoadCapabilityTool(
 
           const tools: ToolDetail[] = toolRegistry
             .toolSummariesForPlugin(name)
-            .filter((candidate) => canAccessToolPlane(ctx, candidate))
+            .filter((t) => !access.withheldToolNames.has(t.name))
             .map((t) => ({
               name: t.name,
               description: t.description,
@@ -218,7 +228,14 @@ export function buildLoadCapabilityTool(
           const alwaysVisible = entry.manifest.visibility === 'always';
           const alreadyAvailable = alreadyLoaded || alwaysVisible;
 
-          results.push({ ...entry.manifest, alreadyAvailable, tools });
+          results.push({
+            ...withoutWithheldExamples(
+              entry.manifest,
+              access.withheldToolNames,
+            ),
+            alreadyAvailable,
+            tools,
+          });
 
           if (!alreadyAvailable) {
             newToLoad.push(name);
@@ -265,6 +282,8 @@ export function buildLoadCapabilityTool(
 export interface BuildMetaToolsOptions {
   manifestRegistry: ManifestRegistry;
   toolRegistry: ToolRegistry;
+  /** The turn's tool-plane result (`resolveTurnToolAccess`). */
+  toolAccess: MetaToolAccess;
 }
 
 /**
@@ -276,9 +295,9 @@ export interface BuildMetaToolsOptions {
  *  - `list_capabilities` — list every visible plugin with status flags.
  */
 export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
-  const { manifestRegistry, toolRegistry } = opts;
+  const { manifestRegistry, toolRegistry, toolAccess } = opts;
   return [
-    buildLoadCapabilityTool(manifestRegistry, toolRegistry),
-    buildListCapabilitiesTool(manifestRegistry, toolRegistry),
+    buildLoadCapabilityTool(manifestRegistry, toolRegistry, toolAccess),
+    buildListCapabilitiesTool(manifestRegistry, toolAccess),
   ];
 }

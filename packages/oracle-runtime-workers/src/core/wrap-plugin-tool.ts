@@ -2,7 +2,7 @@ import { Command } from '@langchain/langgraph';
 import { capToolResult, type ResultCapConfig } from './middlewares/result-cap';
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
-import { requireToolPlane } from '../plugin-api/tool-plane';
+import { requireToolPlane, toolPlaneOf } from '../plugin-api/tool-plane';
 import type {
   PluginTool,
   RuntimeContext,
@@ -24,6 +24,12 @@ export interface WrapPluginToolOptions {
   ambient: AmbientServices;
   /** Snapshot of the graph state for the in-flight build. */
   state: RuntimeStateInput;
+  /**
+   * The contributing plugin. It names an admin tool's capability
+   * (`adminToolResource`), so an admin tool cannot be wrapped without it;
+   * runtime tools (the meta-tools) omit it.
+   */
+  pluginName?: string;
   /** Plugin manifest title used to auto-prefix the description. */
   pluginTitle?: string;
   /**
@@ -77,6 +83,11 @@ export function resolveRunConfig(
  *
  * The agent-facing description is auto-prefixed with the plugin's
  * `manifest.title` so the agent always knows which plugin a tool belongs to.
+ *
+ * An admin-plane tool is checked against the call's delegation right before
+ * its handler runs (`requireToolPlane`), whatever discovery and binding
+ * decided: a host that binds it without the turn's filtering still cannot
+ * run it for a user whose delegation does not grant it.
  */
 export function wrapPluginTool(
   pluginTool: PluginTool,
@@ -85,11 +96,17 @@ export function wrapPluginTool(
   const {
     ambient,
     state,
+    pluginName,
     pluginTitle,
     sharedFactory,
     fallbackContext,
     resultCap,
   } = options;
+  if (toolPlaneOf(pluginTool) === 'admin' && pluginName === undefined) {
+    throw new Error(
+      `wrapPluginTool: admin tool "${pluginTool.name}" needs \`pluginName\` — its capability is named by plugin and tool.`,
+    );
+  }
   const description = pluginTitle
     ? `[${pluginTitle}] ${pluginTool.description}`
     : pluginTool.description;
@@ -105,7 +122,8 @@ export function wrapPluginTool(
         state,
         sharedFactory,
       );
-      requireToolPlane(ctx, pluginTool);
+      if (pluginName !== undefined)
+        requireToolPlane(ctx, pluginName, pluginTool);
       const output = await pluginTool.handler(args, ctx);
       if (!resultCap || output instanceof Command || output == null)
         return output;

@@ -43,6 +43,13 @@ export interface CapabilityGateMiddlewareOptions {
    * their visibility, loaded or preloaded.
    */
   unmetRequirements?: ReadonlyMap<string, readonly CapabilityRequirement[]>;
+  /**
+   * Tool names the turn withholds (`resolveTurnToolAccess`): admin tools the
+   * user's delegation does not grant, never bound. A call naming one is
+   * refused without saying what it is, and not as a load refusal: loading
+   * cannot make it available.
+   */
+  withheldToolNames?: ReadonlySet<string>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -116,7 +123,11 @@ export const createCapabilityGateMiddleware = (
         // `unknown`. Narrow at runtime; unknown-named tools pass through.
         const name = typeof t.name === 'string' ? t.name : undefined;
         if (!name) return true;
-        return unmetFor(name) === null && gatingPlugin(name, loaded) === null;
+        return (
+          options.withheldToolNames?.has(name) !== true &&
+          unmetFor(name) === null &&
+          gatingPlugin(name, loaded) === null
+        );
       });
 
       if (filtered.length !== request.tools.length) {
@@ -136,6 +147,17 @@ export const createCapabilityGateMiddleware = (
     // from before either), and the model is told to call again.
     wrapToolCall: (request, handler) => {
       const name = request.toolCall.name;
+      if (options.withheldToolNames?.has(name)) {
+        logger.warn(
+          `[CapabilityGateMiddleware] refused a call to ${name}: an admin tool the user's delegation does not grant`,
+        );
+        return new ToolMessage({
+          content: `Tool "${name}" is not available in this conversation, so the call was not run.`,
+          tool_call_id: request.toolCall.id ?? '',
+          name,
+          status: 'error',
+        });
+      }
       const unmet = unmetFor(name);
       if (unmet) {
         logger.warn(
