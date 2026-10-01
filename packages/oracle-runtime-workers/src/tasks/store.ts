@@ -16,9 +16,14 @@
  * `<=` comparisons stay numeric. No statement binds more than 13 parameters
  * (DO SQL caps at 100) and nothing uses LIKE.
  */
-import { taskExecutionProfile } from '../core/execution-profile';
+import {
+  isTaskExecutionProfile,
+  TASK_EXECUTION_PROFILES,
+  taskExecutionProfile,
+} from '../core/execution-profile';
 import type { DoSqliteDatabase, SqlParam } from '../sqlite/database';
 import type {
+  Logger,
   OracleTaskRecord,
   OracleTaskSchedule,
   OracleTaskStatus,
@@ -162,6 +167,16 @@ const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
   delivery_room_id, execution_profile`;
 
+/**
+ * Rows this runtime may load: no execution profile (an ordinary task) or one
+ * it knows. A row written by a newer runtime with a profile unknown here is
+ * left untouched in the file and never loaded, scheduled or run — it must
+ * not execute with this runtime's ordinary tool set, and one such row must
+ * not stall every other task. Turns on its session are refused
+ * (`unsupportedProfileOf`).
+ */
+const KNOWN_PROFILE_SQL = `(execution_profile IS NULL OR execution_profile IN (${TASK_EXECUTION_PROFILES.map(() => '?').join(', ')}))`;
+
 function isTaskStatus(value: string): value is OracleTaskStatus {
   return (TASK_STATUSES as readonly string[]).includes(value);
 }
@@ -254,7 +269,22 @@ function recordParams(record: TaskRecord): SqlParam[] {
 export class TasksStore {
   private setupPromise: Promise<void> | undefined;
 
-  constructor(readonly db: DoSqliteDatabase) {}
+  constructor(
+    readonly db: DoSqliteDatabase,
+    private readonly log: Pick<Logger, 'warn'>,
+  ) {}
+
+  private loadable(row: TaskRow): boolean {
+    if (
+      row.execution_profile === null ||
+      isTaskExecutionProfile(row.execution_profile)
+    )
+      return true;
+    this.log.warn(
+      `[tasks] task ${row.id} has an execution profile this runtime does not support ('${row.execution_profile}'); it is skipped`,
+    );
+    return false;
+  }
 
   /** Create both tables + indexes. Idempotent, cached like `SessionsStore`. */
   setup(): Promise<void> {
@@ -357,16 +387,32 @@ export class TasksStore {
       `SELECT ${TASK_COLUMNS} FROM tasks WHERE id = ?`,
       [id],
     );
-    return row === undefined ? null : rowToRecord(row);
+    return row === undefined || !this.loadable(row) ? null : rowToRecord(row);
   }
 
-  /** Every task, oldest first (stable listing for tools). */
+  /**
+   * The raw profile of a task row this runtime cannot load (see
+   * `KNOWN_PROFILE_SQL`); undefined when the row is loadable or absent.
+   */
+  async unsupportedProfileOf(id: string): Promise<string | undefined> {
+    await this.setup();
+    const row = await this.db.get<{ execution_profile: string | null }>(
+      `SELECT execution_profile FROM tasks WHERE id = ?`,
+      [id],
+    );
+    const profile = row?.execution_profile ?? null;
+    return profile === null || isTaskExecutionProfile(profile)
+      ? undefined
+      : profile;
+  }
+
+  /** Every loadable task, oldest first (stable listing for tools). */
   async list(): Promise<TaskRecord[]> {
     await this.setup();
     const rows = await this.db.exec<TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM tasks ORDER BY created_at, id`,
     );
-    return rows.map(rowToRecord);
+    return rows.filter((row) => this.loadable(row)).map(rowToRecord);
   }
 
   /** Live tasks count toward the per-user cap: active or paused. */
@@ -378,24 +424,27 @@ export class TasksStore {
     return row?.n ?? 0;
   }
 
-  /** Earliest pending deadline (ms epoch) over active tasks, or null. */
+  /** Earliest pending deadline (ms epoch) over active loadable tasks, or null. */
   async minNextRunAt(): Promise<number | null> {
     await this.setup();
     const row = await this.db.get<{ next: number | bigint | null }>(
-      `SELECT MIN(next_run_at) AS next FROM tasks WHERE status = 'active' AND next_run_at IS NOT NULL`,
+      `SELECT MIN(next_run_at) AS next FROM tasks
+       WHERE status = 'active' AND next_run_at IS NOT NULL AND ${KNOWN_PROFILE_SQL}`,
+      [...TASK_EXECUTION_PROFILES],
     );
     if (row === undefined || row.next === null) return null;
     return Number(row.next);
   }
 
-  /** Active tasks whose next run is due at or before `nowMs`, earliest first. */
+  /** Active loadable tasks whose next run is due at or before `nowMs`, earliest first. */
   async due(nowMs: number): Promise<TaskRecord[]> {
     await this.setup();
     const rows = await this.db.exec<TaskRow>(
       `SELECT ${TASK_COLUMNS} FROM tasks
        WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?
+         AND ${KNOWN_PROFILE_SQL}
        ORDER BY next_run_at, id`,
-      [nowMs],
+      [nowMs, ...TASK_EXECUTION_PROFILES],
     );
     return rows.map(rowToRecord);
   }

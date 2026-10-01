@@ -13,7 +13,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { OracleTaskInput, OracleTaskRecord } from '../plugin-api/types';
 import type { TurnRequest } from '../do/contracts';
-import { DoSqliteDatabase } from '../sqlite/database';
+import { DoSqliteDatabase, type SqlParam } from '../sqlite/database';
 import { createTaskScheduler, type TaskScheduler } from './scheduler';
 import {
   TasksStore,
@@ -81,8 +81,33 @@ export class TasksTestDO extends DurableObject {
     if (this.scheduler) return;
     this.initOpts = opts;
     this.db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
-    this.store = new TasksStore(this.db);
+    this.store = new TasksStore(this.db, console);
     this.scheduler = await this.buildScheduler(opts);
+  }
+
+  /**
+   * `init` over a file that already holds `statements` — an older schema
+   * with its rows, as a user file written by an earlier runtime would.
+   */
+  async initWith(
+    statements: Array<{ sql: string; params?: SqlParam[] }>,
+  ): Promise<void> {
+    if (this.scheduler) throw new Error('already initialised');
+    this.db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
+    for (const statement of statements)
+      await this.db.run(statement.sql, statement.params ?? []);
+    this.store = new TasksStore(this.db, console);
+    this.scheduler = await this.buildScheduler(this.initOpts);
+  }
+
+  /** Write a row the way something other than the surface would (another runtime, a host adapter). */
+  async runSql(sql: string, params: SqlParam[] = []): Promise<void> {
+    if (!this.db) throw new Error('call init() first');
+    await this.db.run(sql, params);
+  }
+
+  async isRestrictedSession(sessionId: string): Promise<boolean> {
+    return this.ready().isRestrictedSession(sessionId);
   }
 
   /**

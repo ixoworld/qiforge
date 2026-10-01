@@ -390,6 +390,68 @@ describe('task tools', () => {
     expect(fix.consecutiveFailures).toBe(2);
     expect(String(fix.instruction)).toMatch(/update_task/);
   });
+
+  it('never hands a restricted task’s source or result to an ordinary turn', async () => {
+    const surface = new FakeSurface();
+    const restricted = surface.seed(
+      makeRecord(
+        {
+          title: 'Brief',
+          intent: 'AUTHORIZED SOURCE TEXT',
+          schedule: { kind: 'once', at: '2027-01-01T00:00:00.000Z' },
+        },
+        {
+          id: 'task_brief_0000001a',
+          executionProfile: 'supplied-context-markdown',
+          consecutiveFailures: 1,
+          lastRunAt: '2026-08-26T00:00:00.000Z',
+          lastResult: {
+            ok: false,
+            summary: 'GENERATED RESULT TEXT',
+            at: '2026-08-26T00:00:00.000Z',
+          },
+        },
+      ),
+    );
+
+    const listed = asRecord(
+      await toolByName('list_my_tasks').handler({}, ctxWith(surface)),
+    );
+    if (!Array.isArray(listed.tasks)) throw new Error('expected tasks array');
+    expect(listed.tasks.map(asRecord)[0]).toMatchObject({
+      taskId: restricted.id,
+      restricted: true,
+      executionProfile: 'supplied-context-markdown',
+    });
+
+    const got = asRecord(
+      await toolByName('get_task').handler(
+        { taskId: restricted.id },
+        ctxWith(surface),
+      ),
+    );
+    expect(got).toMatchObject({
+      ok: true,
+      restricted: true,
+      lastResult: { ok: false, at: '2026-08-26T00:00:00.000Z' },
+      consecutiveFailures: 1,
+    });
+    expect(got).not.toHaveProperty('intent');
+    expect(JSON.stringify(got)).not.toMatch(
+      /AUTHORIZED SOURCE|GENERATED RESULT/,
+    );
+
+    const fix = asRecord(
+      await toolByName('suggest_spec_fix').handler(
+        { taskId: restricted.id },
+        ctxWith(surface),
+      ),
+    );
+    expect(fix.ok).toBe(false);
+    expect(JSON.stringify(fix)).not.toMatch(
+      /AUTHORIZED SOURCE|GENERATED RESULT/,
+    );
+  });
 });
 
 describe('approval gate', () => {

@@ -1034,3 +1034,249 @@ describe('closed supplied-context task policy', () => {
     expect(await s.profileError(request)).toMatch(/no longer active/);
   });
 });
+
+describe('restricted task policy around the turn', () => {
+  async function restrictedTask(
+    s: DurableObjectStub<TasksTestDO>,
+    title = 'Brief',
+  ) {
+    return s.create({
+      title,
+      intent: 'Authorized source text',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+      executionProfile: 'supplied-context-markdown',
+    });
+  }
+
+  function runMessage(task: { id: string; title: string; intent: string }) {
+    return `[Scheduled task run — "${task.title}" (${task.id})]\nYou are executing a scheduled background task for the user. No user is present in this turn: do the work now and reply with the final result only — your reply is delivered to their chat room as the task result.\n\nTask instructions:\n${task.intent}`;
+  }
+
+  async function restrictedRequest(s: DurableObjectStub<TasksTestDO>) {
+    const task = await restrictedTask(s);
+    const taskRunId = await s.injectOpenRun({
+      taskId: task.id,
+      state: 'running',
+    });
+    return {
+      task,
+      request: {
+        identity: { userDid: 'did:ixo:taskstestuser' },
+        sessionId: `${TASK_SESSION_PREFIX}${task.id}`,
+        message: runMessage(task),
+        client: 'matrix' as const,
+        requestId: 'request',
+        taskRunId,
+        executionProfile: 'supplied-context-markdown' as const,
+      },
+    };
+  }
+
+  it('refuses a request that differs from the persisted task in any input', async () => {
+    const s = stub('restricted-inputs');
+    await s.init();
+    const { request } = await restrictedRequest(s);
+    expect(await s.profileError(request)).toBe('');
+    expect(
+      await s.profileError({ ...request, message: `${request.message}!` }),
+    ).toMatch(/authorized input/);
+    expect(
+      await s.profileError({
+        ...request,
+        identity: { userDid: 'did:ixo:someoneelse' },
+      }),
+    ).toMatch(/authorized input/);
+    expect(
+      await s.profileError({
+        ...request,
+        attachments: [
+          {
+            mxcUri: 'mxc://example.org/a',
+            filename: 'a.png',
+            mimetype: 'image/png',
+          },
+        ],
+      }),
+    ).toMatch(/plain text only/);
+    expect(
+      await s.profileError({
+        ...request,
+        metadata: JSON.stringify({ editorRoomId: '!r' }),
+      }),
+    ).toMatch(/plain text only/);
+  });
+
+  it("refuses an ordinary turn on a restricted task's session", async () => {
+    const s = stub('restricted-session-ordinary-turn');
+    await s.init();
+    const { request } = await restrictedRequest(s);
+    const ordinary = {
+      identity: request.identity,
+      sessionId: request.sessionId,
+      message: 'What did the source say?',
+      client: 'portal' as const,
+      requestId: 'ordinary',
+    };
+    expect(await s.profileError(ordinary)).toMatch(/persisted run/);
+    expect(await s.isRestrictedSession(request.sessionId)).toBe(true);
+  });
+
+  it('re-checks the one-shot, no-approval policy on rows written without create()', async () => {
+    const s = stub('restricted-policy-recheck');
+    await s.init();
+    const { task, request } = await restrictedRequest(s);
+    await s.runSql('UPDATE tasks SET schedule_json = ? WHERE id = ?', [
+      JSON.stringify({ kind: 'cron', cron: '0 7 * * *', timezone: 'UTC' }),
+      task.id,
+    ]);
+    expect(await s.profileError(request)).toMatch(/one-shot/);
+    await s.runSql(
+      "UPDATE tasks SET schedule_json = ?, approval = 'before-action' WHERE id = ?",
+      [JSON.stringify(task.schedule), task.id],
+    );
+    expect(await s.profileError(request)).toMatch(/one-shot/);
+  });
+
+  it('cannot be paused or resumed, but can be cancelled', async () => {
+    const s = stub('restricted-lifecycle');
+    await s.init();
+    const task = await restrictedTask(s);
+    expect(await s.errorOf({ kind: 'pause', id: task.id })).toMatch(
+      /cannot be paused or resumed/,
+    );
+    expect(await s.errorOf({ kind: 'resume', id: task.id })).toMatch(
+      /cannot be paused or resumed/,
+    );
+    expect((await s.get(task.id))?.status).toBe('active');
+    expect((await s.cancel(task.id)).status).toBe('cancelled');
+  });
+
+  it('delivers the result once to the main oracle room', async () => {
+    const s = stub('restricted-delivery');
+    await s.init();
+    await s.setTurnBehavior('ok', '# Brief');
+    const task = await restrictedTask(s);
+    await s.tick(Date.parse(task.nextRunAt!));
+    const sent = await s.sentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ roomId: TEST_ROOM_ID });
+    expect(sent[0]?.body).toContain('# Brief');
+    expect((await s.get(task.id))?.status).toBe('completed');
+  });
+});
+
+describe('ordinary task runs and the run ledger', () => {
+  it('refuses a recovered ordinary turn whose task run is already closed', async () => {
+    const s = stub('ordinary-closed-run');
+    await s.init();
+    const task = await s.create({
+      title: 'Hourly',
+      intent: 'Check the feed',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    const taskRunId = await s.injectOpenRun({
+      taskId: task.id,
+      state: 'running',
+    });
+    const request = {
+      identity: { userDid: 'did:ixo:taskstestuser' },
+      sessionId: `${TASK_SESSION_PREFIX}${task.id}`,
+      message: 'anything',
+      client: 'matrix' as const,
+      requestId: 'request',
+      taskRunId,
+    };
+    // An open row: the original or recovered turn runs.
+    expect(await s.profileError(request)).toBe('');
+    // The row is closed (reported to the user as interrupted): the result
+    // could no longer be delivered, so the turn is not run again.
+    await s.failRecoveredRun(taskRunId, 'interrupted');
+    expect(await s.profileError(request)).toMatch(/persisted run/);
+    // Without a task run an ordinary task session stays usable.
+    expect(await s.profileError({ ...request, taskRunId: undefined })).toBe('');
+    expect(await s.isRestrictedSession(request.sessionId)).toBe(false);
+  });
+});
+
+describe('task rows from other runtimes', () => {
+  it('migrates a pre-profile tasks table: existing rows load as ordinary tasks', async () => {
+    const s = stub('legacy-tasks-table');
+    const now = new Date().toISOString();
+    const at = inOneMinute();
+    await s.initWith([
+      {
+        sql: `CREATE TABLE tasks (
+          id TEXT PRIMARY KEY, title TEXT NOT NULL, spec TEXT NOT NULL,
+          schedule_json TEXT NOT NULL, status TEXT NOT NULL, approval TEXT NOT NULL,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, next_run_at INTEGER,
+          last_run_at TEXT, last_result_json TEXT,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0, pending_approval_at TEXT
+        )`,
+      },
+      {
+        sql: `INSERT INTO tasks (id, title, spec, schedule_json, status, approval,
+          created_at, updated_at, next_run_at, consecutive_failures)
+          VALUES (?, ?, ?, ?, 'active', 'never', ?, ?, ?, 0)`,
+        params: [
+          'task_legacy_0000001a',
+          'Legacy',
+          '---\nid: task_legacy_0000001a\n---\nLegacy intent\n',
+          JSON.stringify({ kind: 'once', at }),
+          now,
+          now,
+          Date.parse(at),
+        ],
+      },
+    ]);
+    const [legacy] = await s.list();
+    expect(legacy).toMatchObject({ id: 'task_legacy_0000001a' });
+    expect(legacy?.executionProfile).toBeUndefined();
+    await s.tick(Date.parse(at));
+    expect(await s.turnRequests()).toMatchObject([
+      { sessionId: 'task:task_legacy_0000001a' },
+    ]);
+    expect((await s.turnRequests())[0]?.executionProfile).toBeUndefined();
+  });
+
+  it('skips a row with an unknown execution profile and keeps every other task working', async () => {
+    const s = stub('unknown-profile');
+    await s.init();
+    const future = await s.create({
+      title: 'Future',
+      intent: 'Written by a newer runtime',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    const ordinary = await s.create({
+      title: 'Ordinary',
+      intent: 'Check the feed',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    await s.runSql(
+      "UPDATE tasks SET execution_profile = 'future-profile' WHERE id = ?",
+      [future.id],
+    );
+    expect((await s.list()).map((t) => t.id)).toEqual([ordinary.id]);
+    expect(await s.get(future.id)).toBeNull();
+    expect(await s.get(ordinary.id)).not.toBeNull();
+    expect(await s.nextWakeAt()).toBe(Date.parse(ordinary.nextRunAt!));
+    await s.tick(Date.parse(future.nextRunAt!) + 1_000);
+    expect((await s.turnRequests()).map((r) => r.sessionId)).toEqual([
+      `${TASK_SESSION_PREFIX}${ordinary.id}`,
+    ]);
+    const futureSession = `${TASK_SESSION_PREFIX}${future.id}`;
+    expect(await s.isRestrictedSession(futureSession)).toBe(true);
+    expect(
+      await s.profileError({
+        identity: { userDid: 'did:ixo:taskstestuser' },
+        sessionId: futureSession,
+        message: 'anything',
+        client: 'portal',
+        requestId: 'request',
+      }),
+    ).toMatch(/does not support/);
+  });
+});
