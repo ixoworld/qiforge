@@ -133,7 +133,9 @@ export class EditorPlugin extends OraclePlugin {
       // the import, so only the first turn in an isolate pays for it.
       const { createStandaloneEditorTool } =
         await import('./standalone-editor-tool');
-      return [createStandaloneEditorTool({ toolsConfig })];
+      return [
+        createStandaloneEditorTool({ toolsConfig, pluginName: this.name }),
+      ];
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       rtCtx.logger.error(`[editor] failed to build standalone tool: ${detail}`);

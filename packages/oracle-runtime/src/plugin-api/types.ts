@@ -621,6 +621,8 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   toolCallId?: string;
 }
 
+export type ToolPlane = 'orchestration' | 'admin';
+
 export interface PluginTool {
   name: string;
   description: string;
@@ -628,6 +630,13 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Privilege plane. `orchestration` is the default. `admin` tools are
+   * hidden from discovery/binding unless the acting principal carries the
+   * tool-specific UCAN capability, and the same capability is checked again
+   * at invocation.
+   */
+  plane?: ToolPlane;
   /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work

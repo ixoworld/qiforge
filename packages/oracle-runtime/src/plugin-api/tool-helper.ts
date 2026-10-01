@@ -18,6 +18,12 @@ export interface ToolHelperOptions {
    */
   visibility?: PluginTool['visibility'];
   /**
+   * Privilege plane. Defaults to `orchestration`; use `admin` only for
+   * authority, credential, host/security, or similarly privileged lifecycle
+   * operations that require an explicit UCAN delegation.
+   */
+  plane?: PluginTool['plane'];
+  /**
    * Billing gate. `'contracted'` binds the tool only while the turn runs
    * inside an active work engagement (`ctx.commerce.mode === 'work'`).
    */
@@ -48,7 +54,7 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility, billing } = options;
+  const { name, description, schema, visibility, plane, billing } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -73,6 +79,9 @@ export function tool(
   };
   if (visibility !== undefined) {
     pluginTool.visibility = visibility;
+  }
+  if (plane !== undefined) {
+    pluginTool.plane = plane;
   }
   if (billing !== undefined) {
     pluginTool.billing = billing;
