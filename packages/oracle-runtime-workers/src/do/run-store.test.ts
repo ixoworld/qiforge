@@ -141,6 +141,40 @@ describe('RunStore', () => {
     expect(await s.columnsOf('turn_runs')).toContain('generation');
     await s.update('old', { generation: 2 });
     expect((await s.get('old'))?.generation).toBe(2);
+    // A legacy row has no recorded start (its recoveries resume, as before);
+    // writing the start (a dequeue) records it.
+    expect(await s.get('old')).toMatchObject({
+      startCheckpointId: null,
+      startRecorded: false,
+    });
+    await s.update('old', { startCheckpointId: 'cp-dequeue' });
+    expect(await s.get('old')).toMatchObject({
+      startCheckpointId: 'cp-dequeue',
+      startRecorded: true,
+    });
+  });
+
+  it('records the checkpoint a run starts from and keeps it across recovery rebases', async () => {
+    const s = stub('runs-start-checkpoint');
+    await s.create({
+      runId: 'r-start',
+      sessionId: 'sess',
+      requestId: 'req',
+      client: 'channel',
+      status: 'running',
+      request: '{}',
+      checkpointId: 'cp-begin',
+      instanceId: 'i1',
+    });
+    await s.update('r-start', {
+      status: 'recovering',
+      checkpointId: 'cp-later',
+    });
+    expect(await s.get('r-start')).toMatchObject({
+      checkpointId: 'cp-later',
+      startCheckpointId: 'cp-begin',
+      startRecorded: true,
+    });
   });
 
   it('orders a session’s work: running before recovering before queued, queued oldest first', async () => {
@@ -346,5 +380,106 @@ describe('RunStore', () => {
     expect(await s.get('old')).toBeUndefined();
     expect(await s.rowCount('turn_tool_marks')).toBe(0);
     expect(await s.rowCount('turn_run_segments')).toBe(0);
+  });
+});
+
+it('prunes channel payloads and retains only a terminal tombstone', async () => {
+  const s = stub('channel-retention');
+  await s.setNow(T0);
+  await s.create({
+    runId: 'channel-original',
+    sessionId: '$session',
+    requestId: 'wa:one',
+    client: 'channel',
+    status: 'running',
+    request: '{"message":"Private channel prompt"}',
+    checkpointId: null,
+    instanceId: 'first',
+  });
+  await s.appendSegment('channel-original', {
+    seqFrom: 1,
+    seqTo: 1,
+    payload: '["Private response fragment"]',
+  });
+  await s.startMark({
+    runId: 'channel-original',
+    toolCallId: 'channel-tool',
+    toolName: 'lookup',
+    effect: 'read',
+  });
+  await s.update('channel-original', {
+    status: 'finished',
+    partialText: 'Stored answer',
+  });
+  await s.setNow(T0 + RUN_RETENTION_MS + 1000);
+  await s.reopen();
+  expect(await s.get('channel-original')).toBeUndefined();
+  expect(await s.wasChannelRunPruned('channel-original')).toBe(true);
+  expect(await s.columnsOf('channel_run_tombstones')).toEqual([
+    'run_id',
+    'status',
+  ]);
+  expect(await s.rowCount('turn_tool_marks')).toBe(0);
+  expect(await s.rowCount('turn_run_segments')).toBe(0);
+});
+
+describe('channel runs over the SQLite store', () => {
+  it('reads a channel row back as a channel run in every lookup', async () => {
+    const s = stub('channel-client-reads');
+    await s.setNow(T0);
+    await s.create({
+      runId: 'channel-read',
+      sessionId: '$session',
+      requestId: 'wa:read',
+      client: 'channel',
+      status: 'queued',
+      request: '{}',
+      checkpointId: null,
+      instanceId: 'i1',
+    });
+    expect((await s.get('channel-read'))?.client).toBe('channel');
+    expect((await s.activeForSession('$session'))?.client).toBe('channel');
+    expect((await s.listActive()).map((r) => r.client)).toEqual(['channel']);
+    expect((await s.queuedForSession('$session'))[0]?.client).toBe('channel');
+    expect((await s.listRecent())[0]?.client).toBe('channel');
+  });
+
+  it('keeps the finished reply and hands onRunEnded a channel record when the coordinator drives the run', async () => {
+    const s = stub('channel-coordinated');
+    await s.setNow(T0);
+    const result = await s.coordinateRun({
+      runId: 'channel-run',
+      client: 'channel',
+      reply: 'Here is your plan',
+    });
+    expect(result.endedClient).toBe('channel');
+    expect(result.stored).toMatchObject({
+      client: 'channel',
+      status: 'finished',
+      partialText: 'Here is your plan',
+      messageId: 'msg-channel-run',
+    });
+    expect(result.summary).toMatchObject({
+      runId: 'channel-run',
+      client: 'channel',
+      status: 'finished',
+    });
+  });
+
+  it('still drops the reply text of a finished portal run', async () => {
+    const s = stub('portal-coordinated');
+    await s.setNow(T0);
+    const result = await s.coordinateRun({
+      runId: 'portal-run',
+      client: 'portal',
+      reply: 'Portal reply',
+    });
+    expect(result.endedClient).toBe('portal');
+    expect(result.stored).toMatchObject({
+      client: 'portal',
+      status: 'finished',
+      partialText: null,
+    });
+    expect(result.summary?.client).toBe('portal');
   });
 });
