@@ -4,9 +4,21 @@
 
 **Build verified AI agents with blockchain identity, encrypted communication, and a growing library of skills — your oracle is a `main.ts` plus the plugins you want.**
 
-QiForge is a plugin-based framework for building **Agentic Oracles** on the [IXO network](https://www.ixo.world/). Each oracle is an autonomous AI agent with a verified on-chain identity, private encrypted storage for every user, and the ability to discover and execute new skills at runtime — without redeployment. The runtime ships as **`@ixo/oracle-runtime`**; you ship the thin app on top.
+QiForge is a plugin-based framework for building **Agentic Oracles** on the [IXO network](https://www.ixo.world/). Each oracle is an autonomous AI agent with a verified on-chain identity, private encrypted storage for every user, and the ability to discover and execute new skills at runtime — without redeployment. The runtime ships as **`@ixo/oracle-runtime-workers`** (Cloudflare Workers); you ship the thin Worker on top.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE.txt)
+
+---
+
+> # ⚠️ The Node runtime is DEPRECATED
+>
+> **All QiForge development and every deployed oracle use the Cloudflare Workers runtime:**
+>
+> - **Runtime:** [`packages/oracle-runtime-workers`](./packages/oracle-runtime-workers) — `@ixo/oracle-runtime-workers`
+> - **Reference app and test suites:** [`apps/qiforge-workers-example`](./apps/qiforge-workers-example)
+> - **Maintainer docs:** [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/)
+>
+> The Node runtime — [`packages/oracle-runtime`](./packages/oracle-runtime) (`@ixo/oracle-runtime`, NestJS) and its reference app [`apps/qiforge-example`](./apps/qiforge-example) — is **no longer developed**. It stays in the repository only so existing forks keep building. Do not add features, parity work or fixes there; port them to the Workers runtime instead. The Node-centric sections below are kept for those forks.
 
 ---
 
@@ -137,19 +149,26 @@ Publish a new skill to the registry and every oracle can use it immediately — 
 ## Repository Layout
 
 ```
-packages/oracle-runtime/    → the framework (@ixo/oracle-runtime): bootstrap,
-                              plugin API, registries, graph, modules, 15 plugins
-apps/qiforge-example/       → reference oracle — copy this to start
-apps/app/                   → legacy monolith (being removed)
+packages/oracle-runtime-workers/ → THE runtime (@ixo/oracle-runtime-workers):
+                                   Hono shell + UserOracleDO + MatrixGatewayDO,
+                                   plugin API, bundled plugins, docs/
+apps/qiforge-workers-example/    → reference Worker — copy this to start; the
+                                   harness e2e, durable-run, context and Matrix
+                                   drills live in its test/
 packages/
-  @ixo/matrix               → Matrix client, encrypted room management
-  @ixo/events               → SSE/WebSocket event streaming
+  @ixo/common               → shared contracts (bounded semantic Decisions, …)
+  @ixo/ucan                 → UCAN delegations, invocations, validation
   @ixo/oracles-chain-client → blockchain ops, claims, payments
   @ixo/oracles-client-sdk   → React SDK (useChat() hook)
-  @ixo/sqlite-saver         → per-user conversation persistence
+  @ixo/matrix               → Matrix client, encrypted room management
+
+DEPRECATED (kept building, no longer developed):
+packages/oracle-runtime/    → the Node runtime (@ixo/oracle-runtime, NestJS)
+apps/qiforge-example/       → its reference oracle
+packages/sqlite-saver, @ixo/events → Node-runtime persistence and streaming
 ```
 
-Internal architecture docs live in [`docs/`](./docs/); the design spec is [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md).
+Workers runtime docs live in [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/) (architecture, configuration, operations, testing, Node parity). The older [`docs/`](./docs/) tree and [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md) describe the deprecated Node runtime.
 
 ---
 
@@ -162,30 +181,33 @@ pnpm test             # Run unit tests
 pnpm lint             # Lint (must pass before commit)
 pnpm format           # Format code
 
-# In apps/qiforge-example
-pnpm dev              # Run the reference oracle in watch mode
-pnpm test:integration # Integration tests (real services)
+# Workers runtime (packages/oracle-runtime-workers)
+pnpm --filter @ixo/oracle-runtime-workers typecheck
+pnpm --filter @ixo/oracle-runtime-workers test:core   # plain-Node suites
+pnpm --filter @ixo/oracle-runtime-workers test        # inside workerd
+
+# In apps/qiforge-workers-example
+pnpm dev              # wrangler dev
+pnpm test:e2e         # against the local ixo testing harness + a real LLM
 ```
 
-**Prerequisites:** Node.js 22+, pnpm 10+, [IXO Mobile App](https://apps.apple.com/app/ixo/id1560307060), [OpenRouter API key](https://openrouter.ai/keys)
+**Prerequisites:** Node.js 22+, pnpm 11+, [OpenRouter API key](https://openrouter.ai/keys), and for the e2e suites the [ixo testing harness](https://github.com/ixoworld/ixo-testing-harness).
 
-Testing comes in three tiers: unit tests against a faked runtime (`createTestRuntime` — no servers, no LLM), integration tests against real upstreams, and full end-to-end tests booting the real app.
+Testing layers are described in [`packages/oracle-runtime-workers/docs/testing.md`](./packages/oracle-runtime-workers/docs/testing.md): unit tests (plain Node and inside workerd), harness end-to-end drills, the devnet feature matrix and load tests.
 
 ---
 
 ## Deployment
 
-Anywhere Node 22+ runs, an oracle runs. The included `Dockerfile` and `fly.toml` work out of the box:
+An oracle is one Worker deployment with two Durable Object bindings and a handful of secrets:
 
 ```bash
-# Fly.io
-flyctl launch && flyctl deploy
-
-# Docker
-docker build -t my-oracle . && docker compose up -d
+cd apps/qiforge-workers-example
+cp .dev.vars.example .dev.vars   # fill in identity, Matrix and LLM secrets
+pnpm exec wrangler deploy
 ```
 
-Requirements: a reachable Matrix homeserver, a persistent volume for encrypted storage, and Redis only if you enable the credits plugin. Graceful shutdown syncs state to Matrix before restart.
+See [`packages/oracle-runtime-workers/docs/configuration.md`](./packages/oracle-runtime-workers/docs/configuration.md) and [`operations.md`](./packages/oracle-runtime-workers/docs/operations.md). The `Dockerfile` and `fly.toml` at the repository root belong to the deprecated Node runtime.
 
 ---
 
@@ -193,7 +215,7 @@ Requirements: a reachable Matrix homeserver, a persistent volume for encrypted s
 
 - **Tasks plugin** — background jobs (placeholder today; clean rebuild planned)
 - **Calls plugin** — voice/video (placeholder, deferred)
-- **1.0 hardening** — production-grade logger, CLI polish, docs refresh, retiring `apps/app/`
+- **1.0 hardening** — production-grade logger, CLI polish, docs refresh, retiring the deprecated Node runtime
 - **Growing skill registry** — publish yours at [ai-skills](https://github.com/ixoworld/ai-skills)
 
 ---
