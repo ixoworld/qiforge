@@ -1,3 +1,4 @@
+import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
   DecisionEvaluateOptions,
@@ -816,6 +817,7 @@ export type OracleTaskSchedule =
 
 /** Stored task record (persisted in the user's own database → owner file). */
 export interface OracleTaskRecord {
+  executionProfile?: TaskExecutionProfile;
   id: string;
   title: string;
   /** Markdown intent body — what the agent should do each run. */
@@ -838,6 +840,8 @@ export interface OracleTaskRecord {
 }
 
 export interface OracleTaskInput {
+  /** Host-only closed execution profile; never exposed by model task tools. */
+  executionProfile?: TaskExecutionProfile;
   title: string;
   intent: string;
   schedule: OracleTaskSchedule;

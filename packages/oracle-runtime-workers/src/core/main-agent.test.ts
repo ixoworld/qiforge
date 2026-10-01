@@ -1160,3 +1160,82 @@ describe('createMainAgent tool execution', () => {
     expect(calls.read).toBe(1);
   }, 15_000);
 });
+
+describe('supplied-context Markdown execution', () => {
+  function closedArgs(model: BaseChatModel, checkpointer = new MemorySaver()) {
+    const core = bootCore();
+    return {
+      executionProfile: 'supplied-context-markdown' as const,
+      registries: new Proxy(core.registries, {
+        get() {
+          throw new Error('Restricted execution accessed a plugin registry');
+        },
+      }),
+      identity: core.identity,
+      config: core.validatedEnv,
+      requestCtx,
+      ambient: ambientFor(core, { get: () => model }),
+      availablePlugins: core.availablePlugins,
+      state: {
+        userContext: { secret: 'PRIVATE_CONTEXT' },
+        loadedPlugins: ['portal'],
+      },
+      checkpointer,
+      hooks: {
+        getRoomTitle: async () => {
+          throw new Error('Read room context');
+        },
+        middlewares: [
+          {
+            name: 'ForbiddenHostHook',
+            beforeModel: () => {
+              throw new Error('Ran host hook');
+            },
+          },
+        ],
+      },
+    };
+  }
+
+  it('runs the real graph without collecting plugins or exposing personal context', async () => {
+    const built = await createMainAgent(
+      closedArgs(
+        new FakeListChatModel({
+          responses: ['# Brief\nSupplied evidence only.'],
+        }),
+      ),
+    );
+    expect(built.boundToolNames).toEqual([]);
+    expect(built.systemPrompt).not.toContain('PRIVATE_CONTEXT');
+    expect(built.systemPrompt).not.toContain('French');
+    const result = await built.agent.invoke(
+      { messages: [new HumanMessage('Write a brief from this source.')] },
+      {
+        configurable: { thread_id: 'task:closed' },
+        context: built.context,
+      },
+    );
+    expect(result.messages.at(-1)?.content).toBe(
+      '# Brief\nSupplied evidence only.',
+    );
+  });
+
+  it('rejects model-emitted tools before handlers and retains the restriction on recovery', async () => {
+    const saver = new MemorySaver();
+    const model = new FakeToolCallingModel({
+      toolCalls: [[{ name: 'send_payment', args: {}, id: 'call-1' }]],
+    });
+    const built = await createMainAgent(closedArgs(model, saver));
+    const config = {
+      configurable: { thread_id: 'task:tool-denied' },
+      context: built.context,
+    };
+    await expect(
+      built.agent.invoke({ messages: [new HumanMessage('Do work')] }, config),
+    ).rejects.toThrow('Tools are forbidden');
+    const recovered = await createMainAgent(closedArgs(model, saver));
+    await expect(recovered.agent.invoke(null, config)).rejects.toThrow(
+      'Tools are forbidden',
+    );
+  });
+});
