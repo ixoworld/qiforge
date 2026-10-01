@@ -852,7 +852,11 @@ async function main(): Promise<void> {
         const sid = await client.createSession();
         const token = `T-${tag()}`;
         const stepStartedAt = Date.now();
-        const at = new Date(Date.now() + 25_000).toISOString();
+        // The scheduling turn (preview_task + create_task) and a possible
+        // confirmation turn take tens of seconds each; create_task refuses a
+        // timestamp that has already passed by the time it runs.
+        const horizonMs = 90_000;
+        const at = new Date(Date.now() + horizonMs).toISOString();
         const ask = await client.stream(
           sid,
           `Use preview_task then create_task (no need to ask me, I confirm now) to schedule a ONE-TIME task at ${at} titled "Drill ${token}" whose intent is: "Call the tool drill_slow_write with token ${token} and ms 12000, then report the receipt it returned." No dedicated room, approval never.`,
@@ -892,15 +896,30 @@ async function main(): Promise<void> {
                   Date.parse(m.startedAt) >= stepStartedAt,
               ),
           );
-        await waitFor(
-          async () =>
-            recorder
-              ? recorder.starts(token) >= 1
-              : taskRunOfThisStep(await runsStatus()) !== undefined,
-          90_000,
-          'the task run to reach the write tool',
-          500,
-        );
+        try {
+          await waitFor(
+            async () =>
+              recorder
+                ? recorder.starts(token) >= 1
+                : taskRunOfThisStep(await runsStatus()) !== undefined,
+            horizonMs + 60_000,
+            'the task run to reach the write tool',
+            500,
+          );
+        } catch (err) {
+          // Say what the scheduler and the run store hold, so a miss can be
+          // told apart: no task, a task scheduled elsewhere, or a task turn
+          // that never called the tool.
+          const tasks = await fetch(`${oracle.url}/debug/tasks`, {
+            headers: client.headers(),
+          }).then((r) => r.text());
+          const runs = await fetch(`${oracle.url}/debug/runs`, {
+            headers: client.headers(),
+          }).then((r) => r.text());
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)}\n  scheduled at ${at}\n  /debug/tasks: ${tasks}\n  /debug/runs: ${runs}`,
+          );
+        }
         await pause(1000);
         await resetObject();
         let taskRun: RunDebug | undefined;
