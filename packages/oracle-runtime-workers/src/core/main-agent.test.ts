@@ -420,6 +420,280 @@ describe('createMainAgent', () => {
     expect(checkpointedLoadedPlugins(await agent.getState(config))).toEqual([]);
   });
 
+  it('runs an identical write once per turn, whether repeated in a later step or in the same response', async () => {
+    let writes = 0;
+    let scrolls = 0;
+    const notes = makePlugin({
+      name: 'notes',
+      manifest: makeManifest({
+        title: 'Notes',
+        summary: 'Records notes.',
+        visibility: 'always',
+      }),
+      getTools: () => [
+        makeTool('record_note', {
+          handler: async () => {
+            writes += 1;
+            return `recorded #${writes}`;
+          },
+        }),
+        // A UI step: the same arguments again is a new action.
+        makeTool('scroll_page', {
+          repeatable: true,
+          handler: async () => {
+            scrolls += 1;
+            return `scrolled ${scrolls}`;
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), notes]);
+    await core.warm();
+    const note = (id: string) => ({
+      name: 'record_note',
+      args: { text: 'buy milk' },
+      id,
+    });
+
+    const run = async (
+      script: Script,
+      threadId: string,
+      env: Record<string, unknown> = {},
+    ) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: { ...core.validatedEnv, ...env },
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Note: buy milk.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+
+    const later = await run([[note('c1')], [note('c2')], []], 'cap-later');
+    expect(String(later.get('c1')?.content)).toBe('recorded #1');
+    expect(later.get('c2')?.status).toBe('error');
+    expect(String(later.get('c2')?.content)).toContain(
+      'would repeat its effect',
+    );
+    expect(writes).toBe(1);
+
+    const sameStep = await run([[note('d1'), note('d2')], []], 'cap-same');
+    expect(String(sameStep.get('d1')?.content)).toBe('recorded #2');
+    expect(sameStep.get('d2')?.status).toBe('error');
+    expect(writes).toBe(2);
+
+    // A repeatable tool (a write by name) runs again with the same arguments.
+    const scroll = (id: string) => ({
+      name: 'scroll_page',
+      args: { direction: 'down' },
+      id,
+    });
+    const scrolled = await run(
+      [[scroll('e1')], [scroll('e2')], []],
+      'cap-repeatable',
+    );
+    expect(String(scrolled.get('e2')?.content)).toBe('scrolled 2');
+    expect(scrolls).toBe(2);
+
+    // TURN_MAX_IDENTICAL_WRITES raises the write cap.
+    const raised = await run([[note('f1')], [note('f2')], []], 'cap-env', {
+      TURN_MAX_IDENTICAL_WRITES: 2,
+    });
+    expect(String(raised.get('f2')?.content)).toBe('recorded #4');
+    expect(writes).toBe(4);
+  });
+
+  it('refuses to run an on-demand tool the model calls before its capability is loaded', async () => {
+    let probeRuns = 0;
+    const probe = makePlugin({
+      name: 'probe',
+      manifest: makeManifest({
+        title: 'Probe',
+        summary: 'Counts its runs.',
+        visibility: 'on-demand',
+      }),
+      getTools: () => [
+        makeTool('probe_run', {
+          handler: async () => {
+            probeRuns += 1;
+            return 'probe ran';
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), probe]);
+    await core.warm();
+
+    const run = async (script: Script, threadId: string) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx,
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Run the probe.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+    const loadProbe = (id: string) => ({
+      name: 'load_capability',
+      args: { names: ['probe'] },
+      id,
+    });
+
+    // Called by name while hidden: refused and never run; after the load
+    // step the same tool runs.
+    const direct = await run(
+      [
+        [{ name: 'probe_run', args: {}, id: 'c1' }],
+        [loadProbe('c2')],
+        [{ name: 'probe_run', args: {}, id: 'c3' }],
+        [],
+      ],
+      'gate-direct',
+    );
+    expect(direct.get('c1')?.status).toBe('error');
+    expect(String(direct.get('c1')?.content)).toContain(
+      'belongs to the "probe" capability, which is not loaded',
+    );
+    expect(String(direct.get('c3')?.content)).toBe('probe ran');
+    expect(probeRuns).toBe(1);
+
+    // A load in the same model response does not unlock the call beside
+    // it: both run on the state from before either.
+    const sameStep = await run(
+      [
+        [loadProbe('c1'), { name: 'probe_run', args: {}, id: 'c2' }],
+        [{ name: 'probe_run', args: {}, id: 'c3' }],
+        [],
+      ],
+      'gate-same-step',
+    );
+    expect(sameStep.get('c2')?.status).toBe('error');
+    expect(String(sameStep.get('c3')?.content)).toBe('probe ran');
+    expect(probeRuns).toBe(2);
+  });
+
+  it("keeps a plugin the user's delegation does not grant out of reach: load refused, tools never run", async () => {
+    const VAULT = { resource: 'ixo:vault', action: 'vault/read' };
+    const runs = { files: 0, vault: 0 };
+    const files = makePlugin({
+      name: 'files',
+      manifest: makeManifest({
+        title: 'Files',
+        summary: 'Personal files.',
+        visibility: 'on-demand',
+        requires: [VAULT],
+      }),
+      getTools: () => [
+        makeTool('files_read', {
+          handler: async () => {
+            runs.files += 1;
+            return 'files read';
+          },
+        }),
+      ],
+    });
+    const vault = makePlugin({
+      name: 'vault',
+      manifest: makeManifest({
+        title: 'Vault',
+        summary: 'Always-on vault.',
+        visibility: 'always',
+        requires: [VAULT],
+      }),
+      getTools: () => [
+        makeTool('vault_read', {
+          handler: async () => {
+            runs.vault += 1;
+            return 'vault read';
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), files, vault]);
+    await core.warm();
+
+    const script: Script = [
+      [{ name: 'load_capability', args: { names: ['files'] }, id: 'c1' }],
+      [
+        { name: 'files_read', args: {}, id: 'c2' },
+        { name: 'vault_read', args: {}, id: 'c3' },
+      ],
+      [],
+    ];
+    const run = async (
+      capabilities: Array<{ resource: string; action: string }>,
+      threadId: string,
+    ) => {
+      const { agent } = await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: {
+          ...requestCtx,
+          user: {
+            ...requestCtx.user,
+            ucanDelegation: { raw: 'ucan', capabilities },
+          },
+        },
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+      const result = (await agent.invoke(
+        { messages: [new HumanMessage('Read my files.')] },
+        { configurable: { thread_id: threadId } },
+      )) as { messages: BaseMessage[] };
+      return new Map(
+        toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+      );
+    };
+
+    const refused = await run(
+      [{ resource: 'ixo:oracle', action: '*' }],
+      'requires-refused',
+    );
+    const [load] = JSON.parse(String(refused.get('c1')?.content)) as Array<{
+      refused?: { reason: string };
+    }>;
+    expect(load?.refused?.reason).toContain('`vault/read` on `ixo:vault`');
+    for (const id of ['c2', 'c3']) {
+      expect(refused.get(id)?.status).toBe('error');
+      expect(String(refused.get(id)?.content)).toContain(
+        "the user's authorization for this oracle does not grant it",
+      );
+    }
+    expect(runs).toEqual({ files: 0, vault: 0 });
+
+    const granted = await run(
+      [{ resource: 'ixo:vault', action: 'vault/*' }],
+      'requires-granted',
+    );
+    expect(String(granted.get('c2')?.content)).toBe('files read');
+    expect(String(granted.get('c3')?.content)).toBe('vault read');
+    expect(runs).toEqual({ files: 1, vault: 1 });
+  });
+
   it('renders the "Browser tools this turn" block from state.browserTools, with the load line until portal is loaded', async () => {
     const core = bootCore([new PortalPlugin(), new SkillsPlugin()]);
     await core.warm();
@@ -509,6 +783,9 @@ describe('createMainAgent', () => {
     const result = (await agent.invoke(
       {
         messages: [new HumanMessage('Do I need a jacket in Berlin tomorrow?')],
+        // The thread has weather loaded: the graph state says so as well as
+        // the build-time state (the gate checks the graph's at tool-call time).
+        loadedPlugins: ['weather'],
       },
       { configurable: { thread_id: 'sess-2' } },
     )) as { messages: BaseMessage[] };

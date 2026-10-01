@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { OraclePlugin, type PluginEnv } from '../../plugin-api/oracle-plugin';
+import { MEMORY_CAPABILITY } from '../delegated-capabilities';
 import type {
   MergedConfig,
   PluginManifest,
@@ -42,6 +43,7 @@ const manifest: PluginManifest = {
   category: 'memory',
   visibility: 'always',
   stability: 'stable',
+  requires: [MEMORY_CAPABILITY],
 };
 
 export interface MemoryPluginOptions {
