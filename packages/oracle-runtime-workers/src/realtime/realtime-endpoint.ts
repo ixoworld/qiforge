@@ -435,6 +435,12 @@ export class RealtimeEndpoint {
       this.refuse(ws, 'Unauthorized: token does not belong to the routed user');
       return;
     }
+    if (outcome.auth.via === 'delegation')
+      // The shell logs the same line per HTTP request: operators find the
+      // clients that still need UCAN_ALLOW_BARE_DELEGATION_AUTH by it.
+      this.deps.logger.warn(
+        `[auth] socket CONNECT ${meta.sessionId}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
+      );
     if (
       !(await this.deps.sessionExists(outcome.auth.userDid, meta.sessionId))
     ) {

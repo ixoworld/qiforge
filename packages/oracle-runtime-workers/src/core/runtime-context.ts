@@ -99,7 +99,11 @@ export interface LlmAdapter {
 
 /** The delegation shape the capability checks read. */
 export type DelegationLike =
-  | { capabilities?: ReadonlyArray<{ resource: string; action: string }> }
+  | {
+      capabilities?: ReadonlyArray<{ resource: string; action: string }>;
+      /** Unix seconds; at or past it the delegation grants nothing. */
+      expiration?: number;
+    }
   | undefined;
 
 /** UCAN adapter — capability checks and downstream invocation minting. */
@@ -587,13 +591,19 @@ export function resourceCovers(granted: string, required: string): boolean {
 /**
  * Pure capability check over a delegation's declared capabilities: some
  * grant must cover both the resource (`resourceCovers`) and the action
- * (`abilityCovers`).
+ * (`abilityCovers`). A delegation whose `expiration` has passed grants
+ * nothing, checked against the clock on every call.
  */
 export function delegationHasCapability(
   delegation: DelegationLike,
   resource: string,
   action: string,
 ): boolean {
+  if (
+    delegation?.expiration !== undefined &&
+    delegation.expiration * 1000 <= Date.now()
+  )
+    return false;
   const caps = delegation?.capabilities ?? [];
   return caps.some(
     (cap) =>

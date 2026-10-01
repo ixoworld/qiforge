@@ -123,6 +123,39 @@ describe('bare delegation (no invocation)', () => {
         .allowBareDelegation,
     ).toBe(true);
   });
+
+  it('reads an invocation only beside X-Auth-Type: ucan, the header the client SDK always sends with it', async () => {
+    // `@ixo/oracles-client-sdk` sets `Authorization: Bearer <invocation>`
+    // and `X-Auth-Type: ucan` together on every request path (the provider's
+    // authed request, `authHeaders` of the chat hook) and passes the
+    // invocation in the socket CONNECT packet, which the user object turns
+    // into the same pair. A Bearer without the header is some other scheme's
+    // token, so the request is as good as one with no invocation.
+    const user = await generateKeypair();
+    const invocation = await invocationFrom(user.signer);
+    const delegation = await delegationFrom(user.signer, nowSeconds() + 3600);
+    expect(
+      await authenticate(
+        new Headers({
+          authorization: `Bearer ${invocation}`,
+          'x-ucan-delegation': delegation,
+        }),
+        CFG,
+      ),
+    ).toEqual({ ok: false, status: 401, error: INVOCATION_REQUIRED_ERROR });
+    const withHeader = await authenticate(
+      new Headers({
+        authorization: `Bearer ${invocation}`,
+        'x-auth-type': 'ucan',
+        'x-ucan-delegation': delegation,
+      }),
+      CFG,
+    );
+    expect(withHeader).toMatchObject({
+      ok: true,
+      auth: { userDid: user.did, via: 'invocation', delegation },
+    });
+  });
 });
 
 describe('delegation header', () => {

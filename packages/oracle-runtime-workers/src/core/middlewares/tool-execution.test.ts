@@ -81,6 +81,14 @@ describe('isUncertainOutcome', () => {
     expect(isUncertainOutcome(new TypeError('fetch failed'))).toBe(true);
     expect(
       isUncertainOutcome(
+        Object.assign(new Error('read failed'), { code: 'ECONNRESET' }),
+      ),
+    ).toBe(true);
+    expect(isUncertainOutcome(new Error('Network connection lost.'))).toBe(
+      true,
+    );
+    expect(
+      isUncertainOutcome(
         Object.assign(new Error('Bad Gateway'), { status: 502 }),
       ),
     ).toBe(true);
@@ -93,6 +101,14 @@ describe('isUncertainOutcome', () => {
 
   it('is false for a failure the service reported', () => {
     expect(isUncertainOutcome(new Error('invalid recipient'))).toBe(false);
+    // Definite refusals that merely contain a transport-sounding word.
+    expect(isUncertainOutcome(new Error("network 'base' not supported"))).toBe(
+      false,
+    );
+    expect(isUncertainOutcome(new Error('invalid timeout: -1'))).toBe(false);
+    expect(isUncertainOutcome(new Error('payment aborted by the user'))).toBe(
+      false,
+    );
     expect(
       isUncertainOutcome(
         Object.assign(new Error('Unauthorized'), { status: 401 }),
@@ -137,7 +153,7 @@ describe('uncertainResultReason', () => {
           }),
         ),
       ),
-    ).toBe('timeout');
+    ).toBe('flush_timeout');
     expect(
       uncertainResultReason(
         result(JSON.stringify({ successful: false, error: 'Bad Gateway' })),
@@ -154,6 +170,57 @@ describe('uncertainResultReason', () => {
     expect(
       uncertainResultReason(result('socket hang up while sending', 'error')),
     ).toBe('socket hang up');
+    expect(
+      uncertainResultReason(result('Error: upstream answered HTTP 503')),
+    ).toBe('HTTP 503');
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: { name: 'TimeoutError', message: 'deadline' },
+          }),
+        ),
+      ),
+    ).toBe('TimeoutError');
+  });
+
+  it('is null for a definite refusal that merely contains a transport-sounding word', () => {
+    // A write whose claim stayed for one of these would refuse the next
+    // identical write as outcome-unknown although nothing happened.
+    expect(
+      uncertainResultReason(
+        result("Error: network 'base' not supported", 'error'),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: "network 'base' not supported; use 'ixo'",
+          }),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(result('Error: invalid timeout value', 'error')),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result('Failed: the transfer was aborted by the user', 'error'),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            success: false,
+            error: 'status 400: bad network id',
+          }),
+        ),
+      ),
+    ).toBeNull();
   });
 
   it('is null for a success and for a failure the service reported', () => {

@@ -48,9 +48,14 @@ user's delegation to the oracle. A manifest may declare `requires: [{
 resource, action }]`, the UCAN capabilities that delegation must grant. The
 turn's `ctx.user.ucanDelegation` carries the capabilities parsed from the
 token (the request's, else the user's stored one;
-`WorkersUcanService.withCapabilities`), and `ctx.ucan.hasCapability` checks
-them: a grant covers a required pair when its resource is `*`, the same, or a
-parent (`ixo:filesystem` covers `ixo:filesystem/.oracles`, never the reverse)
+`WorkersUcanService.withCapabilities`) and its expiry, and
+`ctx.ucan.hasCapability` checks them. Validity is decided at use, never
+cached: a delegation that has expired (or is not valid yet) grants nothing,
+compared with the clock when the turn's delegation is built and again at
+every check, so a stored delegation that lapses while the object stays warm
+stops satisfying `requires` from that moment. Otherwise a grant covers a
+required pair when its resource is `*`, the same, or a parent
+(`ixo:filesystem` covers `ixo:filesystem/.oracles`, never the reverse)
 and its ability is `*`, the same, or a namespace wildcard (`fs/*` covers
 `fs/read`). While a requirement is unmet, `load_capability` does not load the
 plugin and returns it with `refused` (what is missing, and a reason for the

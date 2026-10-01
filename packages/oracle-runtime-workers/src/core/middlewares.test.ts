@@ -6,6 +6,7 @@ import {
 } from '@langchain/core/messages';
 import type { ToolCall } from '@langchain/core/messages/tool';
 import { describe, expect, it, vi } from 'vitest';
+import { ATTACHMENT_VIEW_SOURCE } from '../attachments/retention';
 import type { PluginManifest } from '../plugin-api/types';
 import {
   createCapabilityGateMiddleware,
@@ -592,6 +593,43 @@ describe('createToolRepetitionGuardMiddleware', () => {
           ])
         ).ran,
       ).toBe(true);
+    });
+
+    it('a re-attachment view_attachment injects mid-turn does not open a turn: the identical write is still refused', async () => {
+      const { wrap } = guard();
+      const args = { to: 'alice', text: 'the report' };
+      const history = [
+        new HumanMessage('email alice the report'),
+        ...ran('send_message', args, 'sent, id m-1'),
+        ...ran('view_attachment', { ref: '$file' }, 'Re-attached "r.pdf"'),
+        new HumanMessage({
+          content:
+            'Re-attached "r.pdf" (application/pdf) from earlier in this conversation.',
+          additional_kwargs: { lc_source: ATTACHMENT_VIEW_SOURCE },
+        }),
+      ];
+      const again = await call(wrap, 'send_message', args, history);
+      expect(again.ran).toBe(false);
+      expect(String(again.result.content)).toContain('would repeat its effect');
+      // The failed-call memory survives it as well.
+      const failedThenViewed = [
+        new HumanMessage('write it'),
+        ...priorFailure({ path: '/workspace/tmp/x.js', content: 'x' }),
+        new HumanMessage({
+          content: 'Re-attached "x.png" (image/png).',
+          additional_kwargs: { lc_source: ATTACHMENT_VIEW_SOURCE },
+        }),
+      ];
+      expect(
+        (
+          await call(
+            wrap,
+            'write_file',
+            { path: '/workspace/tmp/x.js', content: 'x' },
+            failedThenViewed,
+          )
+        ).ran,
+      ).toBe(false);
     });
 
     it('allows five identical reads per turn, then refuses the sixth', async () => {

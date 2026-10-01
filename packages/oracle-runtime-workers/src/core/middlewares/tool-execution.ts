@@ -92,9 +92,44 @@ export function uncertainWriteToolResult(toolName: string): string {
   return `An identical ${toolName} call was started earlier and its outcome is unknown (it was interrupted or its connection dropped), so it was NOT run again: running it twice could repeat its effect. Verify with a read-only call whether it already happened and tell the user; only repeat it if they confirm.`;
 }
 
-/** Failure text that says nothing about whether the side effect happened. */
-const UNCERTAIN_TEXT =
-  /fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|timed? ?out|aborted|internal server error|bad gateway|service unavailable|gateway time-?out/i;
+/**
+ * Transport error codes (Node / undici `code`s; workerd only has them in the
+ * message) and the editor's unconfirmed save. Any of them can follow a
+ * request that reached the service, so none proves the effect did not happen.
+ */
+const UNCERTAIN_CODES =
+  'ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)|flush_timeout';
+const UNCERTAIN_CODE = new RegExp(`^(?:${UNCERTAIN_CODES})$`, 'i');
+
+/**
+ * Failure text that says nothing about whether the side effect happened,
+ * anchored to how such a failure is reported — never a bare word a definite
+ * refusal can contain ("network 'base' not supported", "invalid timeout",
+ * "payment aborted by the user"):
+ *  - an error code above, as a whole word;
+ *  - a transport failure's own message: undici's `fetch failed`, `socket
+ *    hang up`, workerd's `Network connection lost`, `network error`;
+ *  - a deadline: `timed out`, `timeout exceeded` / `timeout of <n>`, the
+ *    `TimeoutError` / `AbortError` names, DOMException's "operation was
+ *    aborted";
+ *  - a 5xx: its status (`HTTP 503`, `status 502`, `status code: 500`) or
+ *    its reason phrase.
+ */
+const UNCERTAIN_TEXT = new RegExp(
+  [
+    `\\b(?:${UNCERTAIN_CODES})\\b`,
+    '\\bfetch failed\\b',
+    '\\bsocket hang up\\b',
+    '\\bnetwork (?:error|connection (?:was )?lost)\\b',
+    '\\btimed out\\b',
+    '\\btimeout (?:exceeded|of \\d)',
+    '\\b(?:TimeoutError|AbortError)\\b',
+    '\\boperation was aborted\\b',
+    '\\b(?:HTTP|status(?: code)?):? ?5\\d\\d\\b',
+    '\\b(?:internal server error|bad gateway|service unavailable|gateway time-?out)\\b',
+  ].join('|'),
+  'i',
+);
 
 const isServerStatus = (status: unknown): boolean =>
   typeof status === 'number' && status >= 500 && status <= 599;
@@ -112,6 +147,12 @@ export function isUncertainOutcome(
   if (isHarnessLimitError(error)) return true;
   if (!(error instanceof Error)) return false;
   if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
+  if (
+    'code' in error &&
+    typeof error.code === 'string' &&
+    UNCERTAIN_CODE.test(error.code)
+  )
+    return true;
   const status =
     'status' in error && typeof error.status === 'number'
       ? error.status
@@ -162,11 +203,11 @@ function reportedFailure(
     else if (isRecord(value)) {
       if (isServerStatus(value.status) || isServerStatus(value.statusCode))
         serverStatus = true;
-      for (const key of ['message', 'code', 'reason', 'detail'])
+      for (const key of ['message', 'code', 'name', 'reason', 'detail'])
         collect(value[key]);
     }
   };
-  for (const key of ['error', 'message', 'reason', 'code', 'detail'])
+  for (const key of ['error', 'message', 'reason', 'code', 'name', 'detail'])
     collect(body[key]);
   return { text: parts.join(' '), serverStatus };
 }

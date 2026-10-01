@@ -79,7 +79,9 @@ export interface IngestDeps {
    * The Matrix server name the user's DID document registers, lowercased;
    * null when it is not known. Synchronous like `canonicalAlias`: the gateway
    * resolves it before the offer. A message whose attributed identity was
-   * minted on any other server is dropped (`'foreign'`).
+   * minted on any other server is dropped (`'foreign'`); with no known server
+   * there is no verdict (`'unverified'`) and the gateway keeps the message
+   * for a later attempt.
    */
   userServerName(userDid: string): string | null;
   /**
@@ -199,6 +201,13 @@ export function threadRootIdOf(
   return msg.threadRootId ?? msg.eventId;
 }
 
+export type OfferOutcome =
+  | 'queued'
+  | 'unverified'
+  | 'empty'
+  | 'unmapped'
+  | 'foreign';
+
 export class IngestPipeline {
   private readonly pending = new Map<string, Pending>();
   private readonly debounceMs: number;
@@ -208,10 +217,11 @@ export class IngestPipeline {
   }
 
   /**
-   * Offer a decrypted message. Returns the reason it was dropped, or
-   * `'queued'` when it entered the debounce buffer.
+   * Offer a decrypted message. Returns the reason it was dropped, `'queued'`
+   * when it entered the debounce buffer, or `'unverified'` when the sender's
+   * registered homeserver is not known — neither queued nor dropped.
    */
-  offer(msg: InboundMessage): 'queued' | 'empty' | 'unmapped' | 'foreign' {
+  offer(msg: InboundMessage): OfferOutcome {
     if (!msg.body.trim() && !msg.attachment) return 'empty';
     const attribution = attributeUser({
       alias: this.deps.canonicalAlias(msg.roomId),
@@ -221,7 +231,8 @@ export class IngestPipeline {
     if (!attribution) return 'unmapped';
     const { userDid } = attribution;
     const registered = this.deps.userServerName(userDid);
-    if (!registered || attribution.server !== registered) return 'foreign';
+    if (!registered) return 'unverified';
+    if (attribution.server !== registered) return 'foreign';
 
     // Per speaker as well as per thread: two members typing in one thread of
     // a group room are two turns, each in its own user's object.

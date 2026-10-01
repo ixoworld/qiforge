@@ -11,6 +11,8 @@ import type { AuthOutcome } from '../shell/auth';
 import { RealtimeEndpoint, type RealtimeStatus } from './realtime-endpoint';
 
 export const TEST_GOOD_TOKEN = 'good-token';
+/** A CONNECT carrying only this delegation authenticates as the bare-delegation fallback does. */
+export const TEST_BARE_DELEGATION = 'bare-delegation';
 export const TEST_USER_DID = 'did:ixo:realtimeuser';
 export const TEST_MISSING_SESSION = 'missing-session';
 
@@ -38,6 +40,8 @@ export class RealtimeTestDO extends DurableObject {
 
   private readonly drained: Array<{ sessionId: string; userDid: string }> = [];
 
+  private readonly warnings: string[] = [];
+
   private get realtime(): RealtimeEndpoint {
     this.endpoint ??= new RealtimeEndpoint({
       ctx: this.ctx,
@@ -51,16 +55,30 @@ export class RealtimeTestDO extends DurableObject {
         Promise.resolve(
           auth.invocation === TEST_GOOD_TOKEN
             ? { ok: true, auth: { userDid: TEST_USER_DID, via: 'invocation' } }
-            : {
-                ok: false,
-                status: 401,
-                error: 'Invalid UCAN invocation: nope',
-              },
+            : !auth.invocation && auth.ucanDelegation === TEST_BARE_DELEGATION
+              ? {
+                  ok: true,
+                  auth: {
+                    userDid: TEST_USER_DID,
+                    delegation: TEST_BARE_DELEGATION,
+                    via: 'delegation',
+                  },
+                }
+              : {
+                  ok: false,
+                  status: 401,
+                  error: 'Invalid UCAN invocation: nope',
+                },
         ),
       sessionExists: (_userDid, sessionId) =>
         Promise.resolve(sessionId !== TEST_MISSING_SESSION),
       router: this.router,
-      logger: { log: () => undefined, warn: () => undefined },
+      logger: {
+        log: () => undefined,
+        warn: (msg: string) => {
+          this.warnings.push(msg);
+        },
+      },
     });
     return this.endpoint;
   }
@@ -151,6 +169,11 @@ export class RealtimeTestDO extends DurableObject {
   /** The alarm requests the endpoint made (next heartbeat deadlines). */
   async alarmRequests(): Promise<number[]> {
     return [...this.requestedAlarms];
+  }
+
+  /** Every warning the endpoint logged, in order. */
+  async loggedWarnings(): Promise<string[]> {
+    return [...this.warnings];
   }
 
   /** Sessions whose last authenticated socket went away, in order. */

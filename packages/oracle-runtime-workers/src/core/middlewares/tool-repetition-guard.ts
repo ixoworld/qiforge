@@ -5,6 +5,7 @@ import {
   ToolMessage,
 } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
+import { isAttachmentViewMessage } from '../../attachments/retention';
 import type { Logger } from '../../plugin-api/types';
 import { NOOP_LOGGER } from '../utils';
 import { isCapabilityGateRefusal } from './capability-gate';
@@ -71,8 +72,9 @@ export interface ToolRepetitionGuardMiddlewareOptions {
  * error and tells the model to change tools/args instead.
  *
  * A turn starts at the latest human message (the user's, or a sub-agent's
- * task). A failure from an earlier turn never blocks: the user may have
- * fixed its cause and asked again ("I granted access, try again").
+ * task) — not at a human message a tool injects mid-turn (see `turnStart`).
+ * A failure from an earlier turn never blocks: the user may have fixed its
+ * cause and asked again ("I granted access, try again").
  *
  * It also caps identical calls that SUCCEEDED in the turn: a write may run
  * once per turn with the same arguments (again would repeat its effect —
@@ -241,8 +243,12 @@ function stepCallsBefore(
 
 /**
  * Index of the message that opens the current turn: the latest human
- * message, other than the summary the summarizer writes in place of the
- * condensed history (it starts no turn). 0 when there is none.
+ * message, other than the human messages the runtime writes itself — the
+ * summary the summarizer puts in place of the condensed history, and the
+ * re-attachment `view_attachment` appends after its tool result. Neither is
+ * the user speaking; counting the re-attachment would reset the turn's
+ * write cap and failed-call memory in the middle of the turn. 0 when there
+ * is none.
  */
 export function turnStart(messages: readonly BaseMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -250,7 +256,8 @@ export function turnStart(messages: readonly BaseMessage[]): number {
     if (
       message &&
       HumanMessage.isInstance(message) &&
-      !isSummarizationMessage(message)
+      !isSummarizationMessage(message) &&
+      !isAttachmentViewMessage(message)
     )
       return i;
   }

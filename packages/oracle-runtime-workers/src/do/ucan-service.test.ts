@@ -12,7 +12,18 @@ import {
   signerFromMnemonic,
 } from '@ixo/ucan';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Command } from '@langchain/langgraph';
+import { buildLoadCapabilityTool } from '../core/meta-tools';
+import { ManifestRegistry, ToolRegistry } from '../core/registries';
 import { createNoopAmbient } from '../core/runtime-context';
+import {
+  makeBuildCtx,
+  makeManifest,
+  makePlugin,
+  makeRunConfig,
+  makeRuntimeContext,
+  makeTool,
+} from '../core/test-fixtures';
 import { createUcanAdapter } from './ambient';
 import { WorkersUcanService } from './ucan-service';
 
@@ -25,7 +36,9 @@ const ORACLE_DID = 'did:ixo:entity:testoracle0000000000000001';
 const USER_DID = 'did:ixo:entity:testuser000000000000000001';
 const SERVICE_DID = 'did:web:memory.example.com';
 
-async function userDelegationCar(): Promise<string> {
+async function userDelegationCar(
+  expiration = Math.floor(Date.now() / 1000) + 3600,
+): Promise<string> {
   const { signer } = await signerFromMnemonic(
     USER_MNEMONIC,
     USER_DID as `did:ixo:${string}`,
@@ -34,7 +47,7 @@ async function userDelegationCar(): Promise<string> {
     issuer: signer,
     audience: ORACLE_DID,
     capabilities: [{ can: 'memory/*', with: 'ixo:memory' }],
-    expiration: Math.floor(Date.now() / 1000) + 3600,
+    expiration,
   });
   return serializeDelegation(delegation);
 }
@@ -122,11 +135,158 @@ describe('WorkersUcanService.withCapabilities', () => {
     );
   });
 
+  describe('a delegation that lapses while the object stays warm', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('grants while valid and nothing once expired, at every call and at every check', async () => {
+      const expiration = Math.floor(Date.now() / 1000) + 1;
+      const car = await userDelegationCar(expiration);
+      const svc = service();
+      const ucan = createUcanAdapter(svc, () => undefined);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(expiration * 1000 - 500);
+
+      const live = await svc.withCapabilities(car);
+      expect(live.expiration).toBe(expiration);
+      expect(live.capabilities).toEqual([
+        { resource: 'ixo:memory', action: 'memory/*' },
+      ]);
+      expect(ucan.hasCapability(live, 'ixo:memory', 'memory/read')).toBe(true);
+
+      vi.setSystemTime(expiration * 1000 + 1);
+      // The turn that started before the lapse stops granting at the lapse…
+      expect(ucan.hasCapability(live, 'ixo:memory', 'memory/read')).toBe(false);
+      // …and the next turn's delegation (same token, parse cached) grants nothing.
+      const lapsed = await svc.withCapabilities(car);
+      expect(lapsed.capabilities).toEqual([]);
+      expect(ucan.hasCapability(lapsed, 'ixo:memory', 'memory/read')).toBe(
+        false,
+      );
+    });
+
+    it('load_capability refuses a plugin that requires what the lapsed delegation granted', async () => {
+      const expiration = Math.floor(Date.now() / 1000) + 1;
+      const car = await userDelegationCar(expiration);
+      const svc = service();
+      vi.useFakeTimers({ toFake: ['Date'] });
+      const REQUIRES = [{ resource: 'ixo:memory', action: 'memory/read' }];
+      const manifests = new ManifestRegistry();
+      const tools = new ToolRegistry();
+      const plugin = makePlugin({
+        name: 'notes',
+        manifest: makeManifest({
+          title: 'Notes',
+          visibility: 'on-demand',
+          requires: REQUIRES,
+        }),
+        getTools: () => [makeTool('read_notes')],
+      });
+      manifests.register(plugin);
+      tools.register(plugin);
+      await tools.collect(makeBuildCtx());
+      const load = buildLoadCapabilityTool(manifests, tools);
+      const turn = async () => {
+        const run = makeRunConfig();
+        return load.handler(
+          { names: ['notes'] },
+          makeRuntimeContext(
+            { loadedPlugins: new Set<string>(), toolCallId: 'call-1' },
+            {
+              runConfig: {
+                context: {
+                  ...run.context,
+                  user: {
+                    ...run.context.user,
+                    ucanDelegation: await svc.withCapabilities(car),
+                  },
+                },
+              },
+            },
+          ),
+        );
+      };
+
+      vi.setSystemTime(expiration * 1000 - 500);
+      expect(await turn()).toBeInstanceOf(Command);
+
+      vi.setSystemTime(expiration * 1000 + 1);
+      const refused = await turn();
+      expect(typeof refused).toBe('string');
+      const [notes] = JSON.parse(String(refused)) as Array<{
+        refused?: { missing: unknown };
+      }>;
+      expect(notes?.refused?.missing).toEqual(REQUIRES);
+    });
+  });
+
   it('grants nothing for a missing or unreadable token', async () => {
     expect(await service().withCapabilities('')).toEqual({ raw: '' });
     expect(await service().withCapabilities('not-a-delegation')).toEqual({
       raw: 'not-a-delegation',
       capabilities: [],
     });
+  });
+});
+
+describe('WorkersUcanService.getServiceDelegation', () => {
+  const STORE = 'https://ucan-store.example.com';
+  const fetchSpy = vi.fn<typeof fetch>();
+  let realFetch: typeof fetch;
+
+  beforeEach(() => {
+    realFetch = globalThis.fetch;
+    fetchSpy.mockReset();
+    globalThis.fetch = fetchSpy;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  /** The store's did.json, then its delegation listing with one row per grant. */
+  function storeHolds(grants: Array<{ can: string; with: string }>): void {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith('/.well-known/did.json'))
+        return Response.json({ id: 'did:web:ucan-store.example.com' });
+      return Response.json({
+        delegations: grants.map((grant, i) => ({
+          token: `token-${i}`,
+          capabilities: [grant],
+          expiresAt: null,
+          lifecycleState: 'active',
+        })),
+      });
+    });
+  }
+
+  const ask = () =>
+    new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    }).getServiceDelegation(USER_DID, {
+      storeUrl: STORE,
+      resource: 'ixo:filesystem',
+      requiredAbility: 'fs/read',
+    });
+
+  it('never takes a sibling that only shares the prefix, or a narrower grant, for the resource asked for', async () => {
+    storeHolds([
+      { can: 'fs/*', with: 'ixo:filesystemX' },
+      { can: 'fs/*', with: 'ixo:filesystem/did:ixo:entity:abc' },
+    ]);
+    expect(await ask()).toEqual({ error: 'no-delegation' });
+  });
+
+  it('takes the grant that covers the resource and the ability', async () => {
+    storeHolds([
+      { can: 'fs/*', with: 'ixo:filesystem/did:ixo:entity:abc' },
+      { can: 'fs/write', with: 'ixo:filesystem' },
+      { can: 'fs/*', with: 'ixo:filesystem' },
+    ]);
+    expect(await ask()).toEqual({ token: 'token-2', with: 'ixo:filesystem' });
+    storeHolds([{ can: '*', with: '*' }]);
+    expect(await ask()).toEqual({ token: 'token-0', with: '*' });
   });
 });

@@ -199,9 +199,18 @@ describe('IngestPipeline', () => {
     pipeline.clear();
   });
 
-  it('drops the message when the registered homeserver is unknown', () => {
-    const { pipeline } = harness({ userServerName: () => null });
-    expect(pipeline.offer(msg())).toBe('foreign');
+  it('gives no verdict when the registered homeserver is unknown: neither queued nor foreign', async () => {
+    // The gateway's lookup could not reach Blocksync and had nothing cached
+    // (`lookupUserServerName` throws): a user registered on another server
+    // must not be dropped as foreign for it.
+    const { pipeline, turns } = harness({ userServerName: () => null });
+    expect(
+      pipeline.offer(msg({ sender: '@did-ixo-ixo1user:devmx.ixo.earth' })),
+    ).toBe('unverified');
+    expect(pipeline.offer(msg())).toBe('unverified');
+    expect(pipeline.pendingCount).toBe(0);
+    await sleep(60);
+    expect(turns).toEqual([]);
   });
 
   it('two speakers in one thread are two turns, each in their own user object', async () => {

@@ -60,6 +60,13 @@ export interface UcanDelegation {
   readonly issuer?: string;
   readonly audience?: string;
   readonly capabilities?: ReadonlyArray<{ resource: string; action: string }>;
+  /**
+   * When the delegation stops granting anything (Unix seconds; the earliest
+   * expiry across its proof chain). Capability checks compare it with the
+   * clock at every check, so a delegation that lapses mid-turn grants
+   * nothing from then on.
+   */
+  readonly expiration?: number;
 }
 
 /** Per-room secret index. */
