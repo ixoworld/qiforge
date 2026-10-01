@@ -426,10 +426,22 @@ async function main(): Promise<void> {
         runIdPromise,
         finished.then((r) => r.runId),
       ]);
+      // A stream that ends before the awaited event (a turn that failed
+      // before its tool call, say) must fail the step, not park it forever.
+      const hitOrEnd = Promise.race([
+        hit,
+        finished.then((r) => {
+          if (hitOnce) return;
+          const err = events.find((e) => e.event === 'error');
+          throw new Error(
+            `stream ended before the awaited event (status ${r.status}, ${events.length} events${err ? `, error: ${JSON.stringify(err.data).slice(0, 300)}` : ''}${r.error ? `, ${r.error instanceof Error ? r.error.message : String(r.error)}` : ''})`,
+          );
+        }),
+      ]);
       return {
         runId,
         events,
-        hit,
+        hit: hitOrEnd,
         stop: () => ac.abort(),
         finished,
         lastSeq: () => events.reduce((m, e) => Math.max(m, e.id ?? 0), 0),
