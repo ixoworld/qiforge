@@ -419,6 +419,7 @@ describe('IxoVfsOwnerStore.save', () => {
     const vfs = fakeVfs({
       seed: [{ path: STATE_PATH, body: new Uint8Array([1, 2, 3]) }],
     });
+    const seededId = vfs.at(STATE_PATH)[0]!.id;
     const data = sqliteBytes(70_000, 3);
     const store = makeStore(vfs.fetchImpl);
     await store.save(snapshotOfBytes(data));
@@ -431,6 +432,9 @@ describe('IxoVfsOwnerStore.save', () => {
     expect(vfs.calls.some((c) => c.startsWith('PUT'))).toBe(false);
     const files = vfs.at(STATE_PATH);
     expect(files).toHaveLength(1);
+    // Replaced, not updated in place: the file at the path is the moved
+    // temp upload, so it carries a new id.
+    expect(files[0]!.id).not.toBe(seededId);
     expect(sameBytes(await gunzip(files[0]!.body), data)).toBe(true);
     expect(vfs.files.size).toBe(1);
     // head() sees the new file.

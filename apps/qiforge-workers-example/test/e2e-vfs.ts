@@ -16,7 +16,8 @@
  *      `/.oracles/<oracleDid>/state.db.gz` — verified AS THE USER with their
  *      own key — and its gunzipped bytes are a SQLite database;
  *   4. a working-copy reset reloads FROM VFS and the memory survives;
- *   5. a follow-up flush UPDATES the same VFS file (version bump);
+ *   5. a follow-up flush REPLACES the VFS file atomically (temp upload →
+ *      delete → move; never a PUT, so the VFS version cap is never reached);
  *   6. nothing was written to Matrix for this user (no user↔oracle room);
  *   7. a user with NO deposited delegation still gets a working oracle
  *      (legacy/no-VFS boot path does not hard-fail).
@@ -225,25 +226,51 @@ async function main(): Promise<void> {
       assert.match(r.text, /42/, `memory lost after reset: "${r.text}"`);
     });
 
-    // ---------------------------------------------------------- update path
-    await step('a follow-up flush UPDATES the same VFS file', async () => {
-      const res = await fetch(`${oracle.url}/debug/storage/flush`, {
-        method: 'POST',
-        headers: client.headers(),
-      });
-      const body = (await res.json()) as { uploaded: boolean; etag?: string };
-      assert.equal(res.status, 200, JSON.stringify(body));
-      assert.ok(body.uploaded, JSON.stringify(body));
-      const files = await listOraclesSubtree(user);
-      const now = files.find((f) => f.path === statePath);
-      assert.ok(now, 'state file vanished');
-      assert.equal(now.id, fileV1!.id, 'flush must UPDATE, not re-create');
-      assert.ok(
-        now.version > fileV1!.version,
-        `version did not bump: ${fileV1!.version} → ${now.version}`,
-      );
-      assert.equal(now.contentHash, body.etag, 'updated contentHash == etag');
-    });
+    // ---------------------------------------------------------- replace path
+    await step(
+      'a follow-up flush REPLACES the VFS file atomically',
+      async () => {
+        const res = await fetch(`${oracle.url}/debug/storage/flush`, {
+          method: 'POST',
+          headers: client.headers(),
+        });
+        const body = (await res.json()) as { uploaded: boolean; etag?: string };
+        assert.equal(res.status, 200, JSON.stringify(body));
+        assert.ok(body.uploaded, JSON.stringify(body));
+        const files = await listOraclesSubtree(user);
+        const atPath = files.filter((f) => f.path === statePath);
+        assert.equal(
+          atPath.length,
+          1,
+          `expected exactly one ${statePath}, got ${atPath.length}`,
+        );
+        const now = atPath[0]!;
+        // The owner store never PUTs a new version (the VFS caps versions per
+        // file): it uploads to a temp path, deletes the old file and moves the
+        // temp into place, so the file at the path is a new one.
+        assert.notEqual(
+          now.id,
+          fileV1!.id,
+          'flush must replace the file, not PUT a new version of it',
+        );
+        assert.ok(
+          !files.some((f) => f.id === fileV1!.id),
+          'the previous state file is still listed — orphaned copy',
+        );
+        assert.ok(
+          !files.some((f) => f.path.startsWith(`${statePath}.uploading-`)),
+          `temp upload left behind: ${files.map((f) => f.path).join(', ')}`,
+        );
+        assert.ok(now.hidden, 'replaced file is still flagged hidden');
+        // A turn ran since the first flush, so the exported bytes changed.
+        assert.notEqual(
+          now.contentHash,
+          fileV1!.contentHash,
+          'contentHash unchanged although a turn ran since the first flush',
+        );
+        assert.equal(now.contentHash, body.etag, 'new contentHash == etag');
+      },
+    );
 
     // ---------------------------------------------------------- not in Matrix
     await step(
