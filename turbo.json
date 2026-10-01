@@ -105,7 +105,6 @@
     "WEATHER_DEFAULT_UNITS",
     "ENABLE_PERF_LOGS"
   ],
-
   "tasks": {
     "dev": {
       "cache": false,
@@ -130,6 +129,25 @@
       "outputs": [".next/**", "!.next/cache/**", "dist/**"]
     },
     "test": {},
-    "test:e2e": {}
+    "test:e2e": {},
+    "test:e2e:channels": {
+      "cache": false,
+      "env": [
+        "CHANNEL_E2E_*",
+        "CHANNEL_GATEWAY_URL",
+        "CHANNEL_SERVICE_AUTH_TOKEN",
+        "CHANNEL_STATUS_TOKEN",
+        "CHANNEL_SUBJECT_HMAC_KEY",
+        "AUTH_HUB_URL",
+        "AUTH_HUB_DID",
+        "ORACLE_URL",
+        "ORACLE_DID",
+        "MATRIX_TEST_BASE_URL",
+        "WHATSAPP_APP_SECRET",
+        "WHATSAPP_BUSINESS_ACCOUNT_ID",
+        "WHATSAPP_PHONE_NUMBER_ID",
+        "ACCOUNT_JSON"
+      ]
+    }
   }
 }

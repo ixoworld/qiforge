@@ -13,6 +13,7 @@ import {
   isAttachmentViewMessage,
 } from '../attachments/retention';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
+import { ChannelOrigin } from '../channels/contract';
 import type {
   ThreadMessageAnchor,
   ThreadMessageRow,
@@ -45,6 +46,7 @@ export interface MessageDto {
   isReasoning?: boolean;
   attachment?: AttachmentMeta;
   attachments?: AttachmentMeta[];
+  metadata?: { 'org.ixo.qi.origin': ChannelOrigin };
 }
 
 export interface ListMessagesResponse {
@@ -175,6 +177,10 @@ export async function transformTranscript(
       if (reasoning) dto.reasoning = reasoning;
       if (attachment) dto.attachment = attachment;
       if (attachments?.length) dto.attachments = attachments;
+      if (message.type === 'human') {
+        const origin = ChannelOrigin.safeParse(kw['org.ixo.qi.origin']);
+        if (origin.success) dto.metadata = { 'org.ixo.qi.origin': origin.data };
+      }
       acc.push(dto);
     }
 

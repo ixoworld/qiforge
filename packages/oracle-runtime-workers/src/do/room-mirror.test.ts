@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mirrorTxnId, RoomMirror, type MirrorSend } from './room-mirror';
+import {
+  mirrorTxnId,
+  mirrorEventContent,
+  RoomMirror,
+  type MirrorSend,
+} from './room-mirror';
 
 const transient = () => new Error('Network connection lost');
 const fast = { delaysMs: [1, 1, 1], sleep: async () => undefined };
@@ -153,5 +158,48 @@ describe('RoomMirror', () => {
     expect(sendText).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]?.[0]).toContain('no oracle room');
+  });
+});
+
+describe('channel provenance', () => {
+  it('puts only the provider, binding and HMAC reference inside the message content', () => {
+    const content = mirrorEventContent({
+      ...send('$s', 'Hello', 'fixed'),
+      origin: {
+        provider: 'whatsapp',
+        bindingId: 'chb_one',
+        remoteMessageRef: `hmac:${'a'.repeat(64)}`,
+      },
+    });
+    expect(content).toEqual({
+      msgtype: 'm.text',
+      body: 'Hello',
+      'm.relates_to': {
+        rel_type: 'm.thread',
+        event_id: '$s',
+        is_falling_back: true,
+        'm.in_reply_to': { event_id: '$s' },
+      },
+      'org.ixo.qi.origin': {
+        v: 1,
+        transport: 'whatsapp',
+        binding_id: 'chb_one',
+        remote_ref: `hmac:${'a'.repeat(64)}`,
+      },
+    });
+  });
+
+  it('propagates required mirror failures so a channel reply cannot be marked delivered', async () => {
+    const { mirror, kept } = harness(async () => {
+      throw new Error('M_FORBIDDEN');
+    });
+    const pending = mirror.enqueue(
+      '$s',
+      async () => send('$s', 'answer', 'txn'),
+      'AI response',
+      true,
+    );
+    await expect(pending).rejects.toThrow('M_FORBIDDEN');
+    await Promise.allSettled(kept);
   });
 });

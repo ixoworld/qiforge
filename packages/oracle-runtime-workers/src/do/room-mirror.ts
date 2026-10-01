@@ -1,3 +1,4 @@
+import { channelOrigin } from '../channels/contract';
 /**
  * The room mirror of HTTP chats: every Portal turn is replayed into the
  * user's oracle room as a thread under the session's marker event, the user
@@ -41,6 +42,11 @@ export interface MirrorSend {
   /** The session's marker event — the thread the mirror is posted under. */
   threadId: string;
   txnId: string;
+  origin?: {
+    provider: 'whatsapp';
+    bindingId: string;
+    remoteMessageRef: string;
+  };
 }
 
 export interface RoomMirrorDeps {
@@ -51,6 +57,27 @@ export interface RoomMirrorDeps {
   warn(message: string): void;
   /** Retry policy override (tests shrink the delays). */
   retry?: Pick<RetryGatewayOptions, 'delaysMs' | 'sleep' | 'isTransient'>;
+}
+
+export function mirrorEventContent(send: MirrorSend) {
+  return {
+    msgtype: 'm.text',
+    body: send.body,
+    ...(send.formattedBody
+      ? { format: 'org.matrix.custom.html', formatted_body: send.formattedBody }
+      : {}),
+    'm.relates_to': {
+      rel_type: 'm.thread',
+      event_id: send.threadId,
+      is_falling_back: true,
+      'm.in_reply_to': { event_id: send.threadId },
+    },
+    ...(send.origin
+      ? {
+          'org.ixo.qi.origin': channelOrigin(send.origin),
+        }
+      : {}),
+  };
 }
 
 const errorText = (err: unknown): string =>
@@ -77,12 +104,14 @@ export class RoomMirror {
     sessionId: string,
     prepare: () => Promise<MirrorSend | null>,
     label: string,
+    required = false,
   ): Promise<void> {
     const previous = this.chains.get(sessionId) ?? Promise.resolve();
     const tracked: Promise<void> = previous
       .then(() => prepare())
       .then((send) => (send ? this.send(send, label) : undefined))
       .catch((err: unknown) => {
+        if (required) throw err;
         this.deps.warn(
           `[user-do] Matrix replay (${label}) failed — session=${sessionId}: ${errorText(err)}`,
         );

@@ -19,6 +19,7 @@ import {
 import {
   attemptSeqBase,
   decideRecovery,
+  runHasCheckpointed,
   type RunDurabilityConfig,
   type RunRecord,
   type RunStore,
@@ -32,6 +33,17 @@ export interface RunOutcome {
   messageId?: string;
   toolCalls?: Array<{ name: string; status: 'done' | 'error' }>;
   error?: unknown;
+}
+
+/**
+ * Thrown by `runAttempt` before anything executed, when the attempt cannot
+ * start for a transient reason outside the run (an authority it must consult
+ * is unreachable). The coordinator schedules the same attempt again with the
+ * recovery backoff instead of failing the run; after the recovery cap the
+ * run fails with this error.
+ */
+export class RunAttemptDeferred extends Error {
+  override readonly name = 'RunAttemptDeferred';
 }
 
 export interface LiveRun {
@@ -86,7 +98,7 @@ export interface BeginRunInput {
   runId: string;
   sessionId: string;
   requestId: string;
-  client: 'portal' | 'matrix';
+  client: 'portal' | 'matrix' | 'channel';
   /** JSON the host needs to rebuild the attempt (see `StoredRunRequest`). */
   request: string;
   multitask: 'interrupt' | 'enqueue';
@@ -333,17 +345,58 @@ export class RunCoordinator {
     try {
       outcome = await this.host.runAttempt(live, resumed);
     } catch (error) {
+      if (error instanceof RunAttemptDeferred) {
+        live.attemptInFlight = false;
+        if (await this.defer(live, error)) return;
+      } else {
+        this.host.log.error(
+          `[runs] ${live.runId}: attempt crashed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       outcome = {
         status: 'failed',
         text: live.continuation ?? '',
         error,
       };
-      this.host.log.error(
-        `[runs] ${live.runId}: attempt crashed: ${error instanceof Error ? error.message : String(error)}`,
-      );
     }
     live.attemptInFlight = false;
     await this.finalize(live, outcome);
+  }
+
+  /**
+   * Put a deferred attempt back on the recovery schedule. The attempt did
+   * not touch the checkpoint, so every deferral counts against the recovery
+   * cap; `false` when the cap is spent (or the run was aborted meanwhile)
+   * and the caller fails the run instead.
+   */
+  private async defer(
+    live: LiveRun,
+    error: RunAttemptDeferred,
+  ): Promise<boolean> {
+    if (live.abort.signal.aborted) return false;
+    const decision = decideRecovery(
+      live.record,
+      live.record.checkpointId,
+      this.now(),
+      this.host.config,
+    );
+    if (decision.action === 'interrupt') {
+      this.host.log.warn(
+        `[runs] ${live.runId}: deferred ${decision.attempts} time(s) (${error.message}); failing the run`,
+      );
+      return false;
+    }
+    await this.host.store.update(live.runId, {
+      status: 'recovering',
+      attempts: decision.attempts,
+      nextAttemptAt: decision.at,
+    });
+    live.record = (await this.host.store.get(live.runId)) ?? live.record;
+    this.host.log.warn(
+      `[runs] ${live.runId}: attempt deferred (${error.message}); retry ${decision.attempts} in ${Math.round((decision.at - this.now()) / 1000)} s`,
+    );
+    this.host.requestAlarm(decision.at);
+    return true;
   }
 
   private async finalize(live: LiveRun, outcome: RunOutcome): Promise<void> {
@@ -354,7 +407,9 @@ export class RunCoordinator {
       await live.buffer.close();
       const partialText =
         outcome.status === 'finished'
-          ? null
+          ? live.record.client === 'channel'
+            ? outcome.text
+            : null
           : outcome.text ||
             partialTextOf([
               ...framesOfSegments(await this.host.store.readSegments(runId)),
@@ -402,10 +457,13 @@ export class RunCoordinator {
     for (const run of this.live.values()) {
       if (run.sessionId !== sessionId || run.record.status !== 'queued')
         continue;
+      // The run's input is written from this checkpoint on: its start.
+      const checkpointId = await this.host.checkpointIdOf(sessionId);
       await this.host.store.update(run.runId, {
         status: 'running',
         instanceId: this.host.instanceId,
-        checkpointId: await this.host.checkpointIdOf(sessionId),
+        checkpointId,
+        startCheckpointId: checkpointId,
       });
       run.record = (await this.host.store.get(run.runId)) ?? run.record;
       this.host.log.log(`[runs] ${run.runId}: dequeued for ${sessionId}`);
@@ -484,7 +542,11 @@ export class RunCoordinator {
       });
       const refreshed = (await this.host.store.get(record.runId)) ?? record;
       const live = this.open(refreshed, startSeq);
-      live.continuation = partialTextOf(frames) || null;
+      // A run the graph never checkpointed is retried fresh (resumeDue):
+      // there is no reply to continue from.
+      live.continuation = runHasCheckpointed(record, current)
+        ? partialTextOf(frames) || null
+        : null;
       this.host.log.log(
         `[runs] ${record.runId}: attempt ${decision.attempts} in ${Math.round((decision.at - now) / 1000)} s (${frames.length} frames restored)`,
       );
@@ -509,22 +571,32 @@ export class RunCoordinator {
         nextAttemptAt: null,
       });
       run.record = (await this.host.store.get(run.runId)) ?? run.record;
+      // Resume only when the graph persisted something for this run;
+      // otherwise it never saw the input and the attempt runs fresh with it.
+      // Derived from the stored start checkpoint, so it holds across a
+      // restart (recoverOrphans) as well as for a deferral in this instance.
+      const resumed = runHasCheckpointed(
+        run.record,
+        await this.host.checkpointIdOf(run.sessionId),
+      );
+      if (!resumed) run.continuation = null;
       // `partialLength` is the reply text this attempt continues from (all
       // packed `message` frames). A client that received more than that
       // before the reset truncates to it, so the continuation never
       // duplicates text the runtime lost with the unpacked tail.
-      run.buffer.push('run', {
-        runId: run.runId,
-        sessionId: run.sessionId,
-        requestId: run.requestId,
-        resumed: true,
-        attempt: run.record.attempts,
-        partialLength: run.continuation?.length ?? 0,
-      });
+      if (resumed)
+        run.buffer.push('run', {
+          runId: run.runId,
+          sessionId: run.sessionId,
+          requestId: run.requestId,
+          resumed: true,
+          attempt: run.record.attempts,
+          partialLength: run.continuation?.length ?? 0,
+        });
       this.host.log.log(
-        `[runs] ${run.runId}: resuming (attempt ${run.record.attempts})`,
+        `[runs] ${run.runId}: ${resumed ? 'resuming' : 'retrying'} (attempt ${run.record.attempts})`,
       );
-      void this.startAttempt(run, true);
+      void this.startAttempt(run, resumed);
     }
   }
 

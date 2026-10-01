@@ -2,6 +2,11 @@ import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
+import type {
+  ChannelIdentity,
+  ChannelTurnInput,
+  ChannelTurnOutcome,
+} from '../channels/contract';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
@@ -50,6 +55,10 @@ export interface OracleWorkerEnv {
   UCAN_AUTH_MAX_TTL_SECONDS?: string;
   /** `true` restores the legacy bare-delegation authentication (off by default). */
   UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
+  CHANNEL_SERVICE_DID?: string;
+  AUTH_HUB?: Fetcher;
+  AUTH_HUB_URL?: string;
+  AUTH_HUB_CHANNEL_SERVICE_KEY?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -275,6 +284,7 @@ export type JsonString = string;
 
 /** Who is talking and through which transport. */
 export interface TurnIdentity {
+  channel?: ChannelIdentity;
   /** Validated user DID (from the UCAN signer or the Matrix sender mapping). */
   userDid: string;
   /** `@did-ixo-…:server` when known. */
@@ -288,11 +298,16 @@ export interface TurnIdentity {
 
 /** Request the shell / gateway sends to `UserOracleDO` to run one turn. */
 export interface TurnRequest {
+  channel?: {
+    provider: 'whatsapp';
+    bindingId: string;
+    remoteMessageRef: string;
+  };
   executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
   sessionId: string;
   message: string;
-  client: 'portal' | 'matrix';
+  client: 'portal' | 'matrix' | 'channel';
   /** Matrix room the turn arrived in (Matrix turns) or the user's DM room. */
   roomId?: string;
   /** Thread root when the user replied inside a thread. */
@@ -384,7 +399,7 @@ export interface RunSummary {
   runId: string;
   sessionId: string;
   requestId: string;
-  client: 'portal' | 'matrix';
+  client: 'portal' | 'matrix' | 'channel';
   status:
     | 'queued'
     | 'running'
@@ -571,6 +586,11 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     operationId: string,
     command: TopicDeliverableCommand,
   ): Promise<TopicDeliverableResult>;
+  channelTurn(
+    identity: TurnIdentity,
+    input: ChannelTurnInput,
+    requestHash: string,
+  ): Promise<ChannelTurnOutcome>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**
