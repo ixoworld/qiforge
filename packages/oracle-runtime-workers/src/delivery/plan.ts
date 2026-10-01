@@ -5,7 +5,9 @@
  *
  *  - every model step with text is delivered in order, not only the last
  *    one; a short line of narration before a tool call ("Checking your
- *    calendar.") is dropped, because the typing indicator already says so;
+ *    calendar.") is dropped when a later step speaks to the user, because
+ *    the typing indicator already says so — a step whose short text is the
+ *    whole answer ("Your flight is 9:40." + a memory save) keeps it;
  *  - each step goes through the shaper, which may spill it to an artefact;
  *  - a `create_artifact` call becomes its message, the link, its question.
  */
@@ -16,7 +18,7 @@ import {
 } from '@langchain/core/messages';
 import { contentToText } from '../do/transcript';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
-import { shapeStep, type SpillShape } from './shaper';
+import { isBlank, shapeStep, type SpillShape } from './shaper';
 import type {
   ArtifactRef,
   ChatLimits,
@@ -84,12 +86,13 @@ export function isNarration(text: string): boolean {
  * What a resumed run still has to deliver of `continuation`, the text it
  * streamed before the reset. That text starts with the steps the checkpoint
  * kept, verbatim, and those steps are in `steps` already; the rest was cut
- * off mid-step and belongs in front of the first step after them.
+ * off mid-step and belongs in front of the first step after them, or after
+ * the last step when the checkpoint kept every step.
  */
 function pendingContinuation(
   continuation: string,
   steps: readonly TurnStep[],
-): { text: string; step: number } {
+): { text: string; step: number; after: boolean } {
   let rest = continuation;
   let step = 0;
   for (const { text } of steps) {
@@ -98,12 +101,15 @@ function pendingContinuation(
     rest = trimmed.slice(text.length);
     step++;
   }
-  return { text: rest, step: Math.min(step, steps.length - 1) };
+  return step < steps.length
+    ? { text: rest, step, after: false }
+    : { text: rest, step: steps.length - 1, after: true };
 }
 
 /**
  * The plan before any artefact exists: spills are still drafts. `continuation`
- * is the text a run had streamed before a reset (see `pendingContinuation`).
+ * is the text a run had streamed before a reset (see `pendingContinuation`);
+ * a run with no step of its own delivers it alone.
  */
 export function draftReplyPlan(input: {
   steps: TurnStep[];
@@ -113,15 +119,40 @@ export function draftReplyPlan(input: {
   canSpill: boolean;
 }): DraftPart[] {
   const parts: DraftPart[] = [];
-  const pending = input.continuation
-    ? pendingContinuation(input.continuation, input.steps)
-    : null;
-  input.steps.forEach((step, i) => {
-    const text =
-      pending && i === pending.step && pending.text.trim()
-        ? `${pending.text}${step.text}`.trim()
-        : step.text;
-    if (text && !(step.toolCalls.length > 0 && isNarration(text))) {
+  const steps =
+    input.steps.length > 0 || !input.continuation
+      ? input.steps
+      : [{ text: input.continuation.trim(), toolCalls: [] }];
+  const pending =
+    input.continuation && input.steps.length > 0
+      ? pendingContinuation(input.continuation, input.steps)
+      : null;
+  const texts = steps.map((step, i) => {
+    if (!pending || i !== pending.step || isBlank(pending.text))
+      return step.text;
+    return (
+      pending.after
+        ? `${step.text}${pending.text}`
+        : `${pending.text}${step.text}`
+    ).trim();
+  });
+  // Whether the reply goes on after a step's text: a later step with text,
+  // or a `create_artifact` call (its message follows, even in the same step).
+  // Only then is a short line before a tool call narration to drop.
+  const createsArtifact = steps.map((step) =>
+    step.toolCalls.some((call) => call.name === CREATE_ARTIFACT_TOOL),
+  );
+  const saysMore: boolean[] = [];
+  let later = false;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    saysMore[i] = later || createsArtifact[i] === true;
+    later ||= !isBlank(texts[i] ?? '') || createsArtifact[i] === true;
+  }
+  steps.forEach((step, i) => {
+    const text = texts[i] ?? '';
+    const narration =
+      step.toolCalls.length > 0 && saysMore[i] === true && isNarration(text);
+    if (!isBlank(text) && !narration) {
       const shape = shapeStep(text, input.limits, input.canSpill);
       if (shape.kind === 'messages')
         parts.push(
@@ -232,7 +263,12 @@ export async function materializeReplyPlan(
         );
     }
   }
-  const capped = capParts(parts, options.limits);
+  // A part that would look empty (only whitespace or zero-width characters)
+  // is never sent.
+  const capped = capParts(
+    parts.filter((part) => part.kind !== 'text' || !isBlank(part.text)),
+    options.limits,
+  );
   return {
     v: 1,
     parts: capped.map(

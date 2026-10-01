@@ -155,6 +155,33 @@ describe('shapeStep', () => {
     ).toEqual(['Use this one\nwhen a < b and c > d holds.']);
   });
 
+  it('keeps angle brackets in inline code, code blocks and generic types', () => {
+    expect(
+      messagesOf(
+        'Wrap it in `<div>` and return `Promise<string>`, or a Promise<string> <b>now</b>.',
+      ),
+    ).toEqual([
+      'Wrap it in `<div>` and return `Promise<string>`, or a Promise<string> now.',
+    ]);
+    expect(
+      messagesOf('- render `<span>` here <i>first</i>\n- then <br> next'),
+    ).toEqual(['- render `<span>` here first\n- then \n next']);
+    const fenced = '```html\n<div class="x">hi</div>\n```';
+    expect(messagesOf(`Example:\n\n${fenced}`)).toEqual([
+      `Example:\n\n${fenced}`,
+    ]);
+  });
+
+  it('writes reference links inline, since their definitions are not sent', () => {
+    expect(
+      messagesOf(
+        'Read the [setup guide][1] and [FAQ].\n\n[1]: https://docs.test/setup "Setup"\n[FAQ]: https://docs.test/faq',
+      ),
+    ).toEqual([
+      'Read the [setup guide](https://docs.test/setup "Setup") and [FAQ](https://docs.test/faq).',
+    ]);
+  });
+
   it('titles a spill that opens with a table generically', () => {
     const table = `| A | B |\n|---|---|\n| 1 | 2 |`;
     const shape = shapeStep(table, whatsappLimits(), true);

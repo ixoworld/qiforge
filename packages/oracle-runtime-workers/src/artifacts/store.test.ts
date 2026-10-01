@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
-import { artifactLink, artifactLinkConfig } from './config';
+import { describe, expect, it, vi } from 'vitest';
+import { artifactLink, artifactStorageConfig } from './config';
 import { openArtifact } from './crypto';
 import { artifactDataResponse, artifactPageResponse } from './routes';
 import { artifactIdFor } from './store';
@@ -132,6 +132,38 @@ describe('ArtifactStore', () => {
     expect(await s.deleteForSession('s-1')).toBe(0);
   });
 
+  it('keeps stored artefacts readable, revocable and deleted with their session after the public origin is removed', async () => {
+    const s = stub('artifacts-origin-removed');
+    const kept = await artifactIdFor('run-9', 'call-1');
+    const revoked = await artifactIdFor('run-9', 'call-2');
+    const doomed = await artifactIdFor('run-9', 'call-3');
+    await s.create({ artifactId: kept, title: 'A', content: 'a' });
+    await s.create({ artifactId: revoked, title: 'B', content: 'b' });
+    await s.create({
+      artifactId: doomed,
+      title: 'C',
+      content: 'c',
+      sessionId: 's-gone',
+    });
+    await s.configure({ publicUrl: null });
+
+    expect(await s.canShare()).toBe(false);
+    const read = await s.get(kept);
+    expect(read).toMatchObject({ content: 'a', revoked: false });
+    expect(read?.ref.url).toBeUndefined();
+    expect(await s.revoke(revoked)).toBe(true);
+    expect(await env.ARTIFACT_TEST.get(`art/${revoked}`)).toBeNull();
+    expect(await s.deleteForSession('s-gone')).toBe(1);
+    expect(await env.ARTIFACT_TEST.get(`art/${doomed}`)).toBeNull();
+    expect(
+      await s.createError({
+        artifactId: await artifactIdFor('run-9', 'call-4'),
+        title: 'D',
+        content: 'd',
+      }),
+    ).toMatch(/ORACLE_PUBLIC_URL/);
+  });
+
   it('links through a shared viewer with the source and key in the fragment', async () => {
     const s = stub('artifacts-viewer');
     await s.configure({ viewerUrl: 'https://portal.qi.space/artefact?x=1#y' });
@@ -147,37 +179,60 @@ describe('ArtifactStore', () => {
   });
 });
 
-describe('artifact link config', () => {
-  it('is off without a bucket or a usable public origin', () => {
+describe('artifact storage config', () => {
+  it('is off without a bucket, and says so when a public origin is set', () => {
+    const warn = vi.fn();
     expect(
-      artifactLinkConfig({ ORACLE_PUBLIC_URL: 'https://oracle.test' }),
+      artifactStorageConfig({ ORACLE_PUBLIC_URL: 'https://oracle.test' }, warn),
     ).toBeNull();
-    expect(
-      artifactLinkConfig({
-        ARTIFACT_BUCKET: env.ARTIFACT_TEST,
-        ORACLE_PUBLIC_URL: 'ftp://x',
-      }),
-    ).toBeNull();
-    expect(
-      artifactLinkConfig({
-        ARTIFACT_BUCKET: env.ARTIFACT_TEST,
-        ORACLE_PUBLIC_URL: 'http://evil.test',
-      }),
-    ).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('no ARTIFACT_BUCKET is bound'),
+    );
   });
 
-  it('defaults links to 30 days and never lets them outlive a year', () => {
-    const config = artifactLinkConfig({
+  it('keeps the bucket without links, and warns, when the public origin is missing or insecure', () => {
+    for (const ORACLE_PUBLIC_URL of [
+      undefined,
+      'ftp://x',
+      'http://evil.test',
+    ]) {
+      const warn = vi.fn();
+      const config = artifactStorageConfig(
+        { ARTIFACT_BUCKET: env.ARTIFACT_TEST, ORACLE_PUBLIC_URL },
+        warn,
+      );
+      expect(config?.bucket).toBe(env.ARTIFACT_TEST);
+      expect(config?.links).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('defaults links to 30 days and warns about a lifetime outside 1 to 365 days', () => {
+    const config = artifactStorageConfig({
       ARTIFACT_BUCKET: env.ARTIFACT_TEST,
       ORACLE_PUBLIC_URL: 'https://oracle.test/some/path',
     });
-    expect(config?.publicUrl).toBe('https://oracle.test');
+    expect(config?.links).toEqual({ publicUrl: 'https://oracle.test' });
     expect(config?.ttlMs).toBe(30 * 24 * 60 * 60 * 1000);
+    const warn = vi.fn();
     expect(
-      artifactLinkConfig({
+      artifactStorageConfig(
+        {
+          ARTIFACT_BUCKET: env.ARTIFACT_TEST,
+          ORACLE_PUBLIC_URL: 'https://oracle.test',
+          ARTIFACT_LINK_TTL_DAYS: '100000',
+        },
+        warn,
+      )?.ttlMs,
+    ).toBe(30 * 24 * 60 * 60 * 1000);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('ARTIFACT_LINK_TTL_DAYS'),
+    );
+    expect(
+      artifactStorageConfig({
         ARTIFACT_BUCKET: env.ARTIFACT_TEST,
         ORACLE_PUBLIC_URL: 'https://oracle.test',
-        ARTIFACT_LINK_TTL_DAYS: '100000',
+        ARTIFACT_LINK_TTL_DAYS: '365',
       })?.ttlMs,
     ).toBe(365 * 24 * 60 * 60 * 1000);
     expect(

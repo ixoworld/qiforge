@@ -46,8 +46,9 @@ function linkLabel(title: string): string {
 }
 
 /**
- * The plan as one Markdown message: what the canonical transcript, the
- * Companion room mirror and gateways that predate plans receive.
+ * The plan as one Markdown message: what the Companion room mirror of a
+ * channel turn and gateways that predate plans receive. Never stored as a
+ * run's text, which stays the model's own.
  */
 export function planText(plan: { parts: readonly ReplyContent[] }): string {
   return plan.parts

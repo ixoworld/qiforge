@@ -53,7 +53,10 @@ export type DeliveryProfile =
 export interface ArtifactRef {
   artifactId: string;
   title: string;
-  /** Viewer link. Its decryption key sits after `#` and never reaches a server. */
+  /**
+   * Viewer link. Its decryption key sits after `#`, so R2 and the viewer host
+   * never receive it; the oracle stores it with the user's data.
+   */
   url: string;
   mime: 'text/markdown';
   bytes: number;

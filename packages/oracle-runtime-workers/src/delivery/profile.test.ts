@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveDeliveryProfile } from './profile';
+import { deliveryConfigWithEnv, resolveDeliveryProfile } from './profile';
 import { renderSurfaceSection } from './prompt';
 
 const whatsapp = {
@@ -28,21 +28,66 @@ describe('resolveDeliveryProfile', () => {
     });
   });
 
-  it('gives Matrix rooms the chat style by default, and tighter limits in group rooms', () => {
-    expect(resolveDeliveryProfile({ client: 'matrix' })).toMatchObject({
+  it('keeps Matrix rooms on one message per reply unless the chat style is turned on', () => {
+    expect(resolveDeliveryProfile({ client: 'matrix' })).toEqual({
+      kind: 'stream',
+    });
+    expect(
+      resolveDeliveryProfile({ client: 'matrix' }, { matrixChat: false }),
+    ).toEqual({ kind: 'stream' });
+    expect(
+      resolveDeliveryProfile({ client: 'matrix' }, { matrixChat: true }),
+    ).toMatchObject({
       kind: 'chat',
       surface: 'matrix',
       limits: { maxBubbles: 3, maxPartsPerRun: 5 },
     });
     expect(
-      resolveDeliveryProfile({ client: 'matrix', roomKind: 'group' }),
+      resolveDeliveryProfile(
+        { client: 'matrix', roomKind: 'group' },
+        { matrixChat: true },
+      ),
     ).toMatchObject({ limits: { maxBubbles: 2, maxPartsPerRun: 3 } });
   });
 
-  it('lets an oracle opt Matrix rooms out and override limits per surface', () => {
+  it('lets MATRIX_CHAT_DELIVERY decide the Matrix chat style when it is set', () => {
+    expect(deliveryConfigWithEnv(undefined, undefined).matrixChat).toBe(false);
+    expect(deliveryConfigWithEnv({ matrixChat: true }, undefined)).toEqual({
+      matrixChat: true,
+    });
+    expect(deliveryConfigWithEnv(undefined, 'true').matrixChat).toBe(true);
     expect(
-      resolveDeliveryProfile({ client: 'matrix' }, { matrixChat: false }),
+      deliveryConfigWithEnv(
+        { matrixChat: true, limits: { matrix: { maxBubbles: 2 } } },
+        'false',
+      ),
+    ).toEqual({ matrixChat: false, limits: { matrix: { maxBubbles: 2 } } });
+  });
+
+  it('streams scheduled task runs on every surface, so a stored result keeps its whole text', () => {
+    const config = { matrixChat: true };
+    expect(
+      resolveDeliveryProfile(
+        { client: 'matrix', taskRunId: 'run-1', sessionId: 'task:t1' },
+        config,
+      ),
     ).toEqual({ kind: 'stream' });
+    // A recovered task run is recognised by its session as well.
+    expect(
+      resolveDeliveryProfile(
+        { client: 'matrix', sessionId: 'task:t1' },
+        config,
+      ),
+    ).toEqual({ kind: 'stream' });
+    expect(resolveDeliveryProfile({ ...whatsapp, taskRunId: 'run-2' })).toEqual(
+      { kind: 'stream' },
+    );
+    expect(
+      resolveDeliveryProfile({ client: 'matrix', sessionId: '$root' }, config),
+    ).toMatchObject({ kind: 'chat' });
+  });
+
+  it('lets an oracle override limits per surface', () => {
     expect(
       resolveDeliveryProfile(whatsapp, {
         limits: { whatsapp: { maxBubbles: 2 } },

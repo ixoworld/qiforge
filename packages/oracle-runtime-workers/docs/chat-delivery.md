@@ -3,7 +3,9 @@
 Portal turns stream Markdown into a rich view, unchanged. Turns that arrive from a chat app get a chat reply instead:
 
 - turns from IXO Channels (`client: 'channel'`: WhatsApp now, Telegram and Slack later);
-- turns from Matrix rooms (`client: 'matrix'`), which includes third-party oracles used from the Portal's rooms.
+- turns from Matrix rooms (`client: 'matrix'`), which includes third-party oracles used from the Portal's rooms, when the chat style is turned on for rooms (`MATRIX_CHAT_DELIVERY=true` or `delivery.matrixChat: true`; off by default).
+
+Scheduled task runs never get a chat reply, whichever room they report to: their result is stored and read later, so it keeps the model's whole text.
 
 A chat reply is a few short messages. Anything long becomes a document the user opens in a browser (an **artefact**), linked from the messages. The design and its reasoning are in [`specs/chat-native-delivery.md`](../../../specs/chat-native-delivery.md). This page covers what the runtime does.
 
@@ -21,13 +23,16 @@ graph LR
 
 `resolveDeliveryProfile` (`src/delivery/profile.ts`) picks a profile for each turn:
 
-| Turn                        | Profile                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------- |
-| Portal HTTP                 | `stream`: no surface section, no plan                                           |
-| `POST /channels/turn`       | `chat` for `channel.provider` (`whatsapp`, `telegram`, `slack`), else `generic` |
-| Matrix room, direct         | `chat` `matrix`                                                                 |
-| Matrix room, group          | `chat` `matrix`, at most 2 messages per step and 3 parts per reply              |
-| Matrix, `matrixChat: false` | `stream`: the whole reply as one formatted message                              |
+| Turn                                                       | Profile                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Portal HTTP                                                | `stream`: no surface section, no plan                                           |
+| Scheduled task run (`taskRunId` set, or a `task:` session) | `stream`, on every surface                                                      |
+| `POST /channels/turn`                                      | `chat` for `channel.provider` (`whatsapp`, `telegram`, `slack`), else `generic` |
+| Matrix room (default)                                      | `stream`: the whole reply as one plain message, as before chat delivery         |
+| Matrix room, direct, chat style on                         | `chat` `matrix`                                                                 |
+| Matrix room, group, chat style on                          | `chat` `matrix`, at most 2 messages per step and 3 parts per reply              |
+
+The chat style for Matrix rooms is off unless `MATRIX_CHAT_DELIVERY=true` (per deployment, on the script that runs `UserOracleDO`) or `delivery.matrixChat: true` (in code). The variable wins when it is set, so `MATRIX_CHAT_DELIVERY=false` turns it off again for one deployment.
 
 The limits are character counts, set well below each provider's hard limit. The gateways enforce the hard limits again:
 
@@ -52,8 +57,8 @@ createOracleWorker({
     name: 'My Oracle',
     // …
     delivery: {
-      // Matrix rooms reply like the Portal: one message per turn.
-      matrixChat: false,
+      // Matrix rooms reply in chat style too (off by default).
+      matrixChat: true,
       // Per-surface overrides of the limits above.
       limits: { whatsapp: { maxBubbles: 3 } },
     },
@@ -90,24 +95,27 @@ type ReplyPart =
 
 The plan is built once, when the run finishes, from the turn's AI messages (`src/delivery/plan.ts`). The checkpoint keeps what the model wrote; only the delivery changes.
 
-1. **Narration is dropped.** Text of 200 characters or less that precedes a tool call ("Checking your calendar.") says nothing once the answer arrives. Longer text before a tool call is content and is kept.
+1. **Narration is dropped.** Text of 200 characters or less written with a tool call ("Checking your calendar.") says nothing once the answer arrives, so it goes when a later step has text or a `create_artifact` call follows. When nothing follows it ("Your flight is 9:40, gate B12." with a `memory_save`), it is the answer and is kept. Longer text before a tool call is always content.
 2. **`create_artifact` becomes three parts:** its message, the artefact, and its optional follow-up question.
 3. **Every other step goes through the shaper** (`src/delivery/shaper.ts`):
    - It splits the text into messages on paragraph, line and sentence boundaries, and keeps each message under `bubbleMax`.
-   - It turns headings into bold lines, strips HTML, and keeps a lead-in ending in `:` together with the list that follows it.
+   - It turns headings into bold lines and keeps a lead-in ending in `:` together with the list that follows it.
+   - It reduces raw HTML the lexer found (HTML elements and comments; `<br>` becomes a line break) to its text. Inline code and code blocks stay verbatim, and angle brackets that are not HTML elements (`Promise<string>`) stay.
+   - It writes reference links (`[guide][1]`) inline, because their definitions are not delivered.
+   - A part that is only whitespace or zero-width characters is never sent.
    - A step that is too long, holds a table, long code or a long list, or needs more than `maxBubbles` messages is **spilled**: the full text becomes an artefact. The step's messages become a lead (a list preview, or the first paragraph), the link, and the step's closing question, if it had one.
 4. **The plan is capped** at `maxPartsPerRun`. The shortest adjacent pair of text parts merges, as long as the result fits `bubbleMax`. If that is not enough, a spill's lead and closing question go, since its artefact holds both; the reply's last part stays as long as possible. Text found nowhere else is never dropped, so a reply with several documents, or a long reply without artefact storage, can stay over the cap.
-5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them.
+5. **A resumed run** puts back the text it had streamed before the reset, minus the steps the checkpoint kept, in front of the first step after them, or after the last step when the checkpoint kept every step. A resumed run with no step of its own delivers that text alone.
 
 Part ids are `p1`…`pn`. The plan is stored in `turn_run_plans` with the run, and pruned with it after the seven-day run retention. A re-poll, a replayed Matrix event or a recovered run therefore gets the same plan and the same artefact links. If an artefact can't be stored, its step is sent as plain messages and the run still finishes.
 
-The turn's `text` is the plan rendered as one Markdown message, with artefacts as links (`planText`). It serves gateways that predate plans, the Matrix mirror of a channel turn, and task deliveries.
+The turn's `text` (the run record, `TurnResult.text`, the Matrix turn ledger's `reply_text`) is always the model's own text, on every surface; the plan sits next to it (`plan`, `reply_plan`). The plan rendered as one Markdown message, with artefacts as links (`planText`), is what the Companion room mirror of a channel turn shows (once per run, recorded in the channel receipt) and what a finished `/channels/turn` response carries as `text` for gateways that predate plans.
 
 ## Artefacts
 
 ### Creation
 
-- **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage is configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` and an optional `followUp`.
+- **`create_artifact`** (`src/artifacts/tool.ts`) is bound only on chat turns, and only when storage and a public origin are configured. It takes `title`, `content` (Markdown, up to 200,000 characters), `message` and an optional `followUp`.
   - It is a **return-direct** tool: the run ends after it, with no second model call.
   - LangChain ends a step only when the step's _last_ tool call is return-direct. When the model calls it together with other tools, an `afterModel` hook (`src/core/middlewares/return-direct-first.ts`) moves it first, so the run continues and the model sees every result.
 - **Spills** are artefacts the shaper creates from a long step.
@@ -121,7 +129,13 @@ Ids are deterministic: the first 128 bits of `sha256("artifact\0" + runId + "\0"
 | Canonical | `artifacts` table in the user's SQLite     | Exported with the rest of the working copy to the user's VFS file, so the user owns it.                               |
 | Share     | R2 `art/<artifactId>` in `ARTIFACT_BUCKET` | AES-256-GCM ciphertext of `{v, title, mime, content, createdAt}`, 12-byte IV first. Custom metadata `expiresAt` only. |
 
-The key is 256 random bits. It is stored in the user's row and travels only in the link's fragment. The operator's bucket never holds plaintext.
+The key is 256 random bits, generated in the user's Durable Object. R2 holds only ciphertext, and a viewer host (the built-in page's or a shared one) receives the key only in the fragment, which browsers do not send. The **operator holds the key**: it sits in plaintext in the user's database and so in everything derived from it:
+
+- the `artifacts.share_key` column and the link in the run's stored plan (`turn_run_plans`), the Matrix turn ledger (`matrix_turns.reply_plan`) and the Matrix events posted to the room;
+- the `create_artifact` tool result (a `ToolMessage` in the checkpoint), which is sent to the model provider on later turns of the session;
+- the `/channels/turn` response, so the IXO Channels gateway and the chat provider (WhatsApp, …) see the link.
+
+Anyone who can read the user's database, the model provider's request logs or the chat can open the document until its link expires or is revoked.
 
 ### Links and the viewer
 
@@ -153,6 +167,8 @@ Link unfurlers (WhatsApp, Telegram, Slack, Matrix URL previews) fetch the path, 
 - Links expire after `ARTIFACT_LINK_TTL_DAYS` (default 30). The data route refuses an expired object. Add an R2 lifecycle rule on `art/` to remove share copies nobody opened, as described in [configuration](configuration.md#chat-delivery-and-artefacts).
 - `DELETE /artifacts/:id` (authenticated, the owner only) deletes the share copy. The canonical copy stays. `GET /artifacts/:id` returns the canonical copy, with `url` only while the link works.
 - Deleting a session deletes its artefacts: the share copies first, then the rows. If the R2 delete fails, the rows stay, and the links still expire on schedule.
+- Revoking or deleting a channel binding does **not** revoke the artefact links already sent through it. Revoke them one by one with `DELETE /artifacts/:id`, or delete the session.
+- Owner reads, revocation and the session cleanup need only the bucket binding. Removing `ORACLE_PUBLIC_URL` stops new artefacts (and `GET /artifacts/:id` returns no `url`), but the stored ones stay readable, revocable and deleted with their session. Removing the `ARTIFACT_BUCKET` binding itself leaves the R2 copies to expire on their own: the links stop working only once the link expires or the lifecycle rule removes the object.
 
 ### Link policy
 
@@ -161,5 +177,6 @@ A link is **a bearer link: anyone who has it can open the document until it expi
 ## Delivery by surface
 
 - **IXO Channels.** A finished `/channels/turn` response carries `plan` next to `text` ([channels](channels.md#reply-plans)). The gateway renders each part in provider syntax, paces the parts, and delivers each one exactly once, keyed by `(userDid, bindingId, requestId, partId)`.
-- **Matrix rooms.** The gateway posts one `m.text` event per part in the thread, rendered to HTML like the room replays (`src/matrix/reply-parts.ts`). An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works. A `stream` reply, where `matrixChat` is `false`, is one message, now with `formattedBody`.
+- **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through. An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
+- **Matrix rooms, chat style off (the default).** One plain `m.text` with the reply text and no `formatted_body`, byte for byte what the runtime sent before chat delivery.
 - **Portal.** Unchanged: SSE frames, no plan.

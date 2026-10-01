@@ -223,7 +223,7 @@ What protects the document:
 - The oracle's bucket holds only ciphertext. The readable copy lives in the user's own database.
 - The link expires. The user can revoke it (`DELETE /artifacts/:id`). Deleting the conversation deletes its documents.
 
-What it does not protect against: anyone the link is forwarded to, or who sees it, can read the document until it expires or is revoked.
+What it does not protect against: anyone the link is forwarded to, or who sees it, can read the document until it expires or is revoked. The operator holds the key: it is generated in the oracle and stored with the user's data, in the chat history the model provider receives, and in the response to the channel gateway, so it is shielded from R2 and the viewer host, not from the oracle operator or the chat provider. Revoking a channel binding does not revoke links already sent.
 
 Why we chose this: chat users open links on their phones, often in an in-app browser where they are not signed in to Qi.Space. Requiring a sign-in would break the main use.
 

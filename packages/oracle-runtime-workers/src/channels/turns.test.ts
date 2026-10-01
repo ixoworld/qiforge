@@ -183,6 +183,32 @@ describe('durable channel requests', () => {
     expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
   });
 
+  it("mirrors a chat run's Reply Plan once, as the channel user received it, and keeps the model's text in the run", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-plan-once');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Short answer.' },
+        { partId: 'p2', kind: 'text', text: 'Want more?' },
+      ],
+    };
+    await stub.finish(first.result.runId, plan, '## Answer\n\nShort answer.');
+    await stub.deliverReply(first.result.runId);
+    expect(await stub.mirroredReply()).toBe('Short answer.\n\nWant more?');
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { text: 'Short answer.\n\nWant more?', plan },
+    });
+    await stub.reopen();
+    await stub.submit(message);
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+    expect((await stub.run(first.result.runId))?.partialText).toBe(
+      '## Answer\n\nShort answer.',
+    );
+  });
+
   it('delivers the reply on the first poll when the run end did not, then never again', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('reply-on-poll');
     const first = await stub.submit(message);

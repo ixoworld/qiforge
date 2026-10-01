@@ -450,7 +450,8 @@ export interface OracleConfig {
   /**
    * Chat delivery (WhatsApp through IXO Channels, Matrix rooms): replies
    * arrive as short messages with long content moved to artefacts. Matrix
-   * rooms use it unless `matrixChat` is `false`.
+   * rooms use it only with `matrixChat: true` (or `MATRIX_CHAT_DELIVERY=true`,
+   * which wins when set); otherwise a room reply stays one message.
    */
   delivery?: DeliveryConfig;
 }

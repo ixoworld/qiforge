@@ -1,11 +1,13 @@
 import type { TurnRequest } from '../do/contracts';
+import { TASK_SESSION_PREFIX } from '../tasks/scheduler';
 import type { ChatLimits, DeliveryProfile } from './types';
 
 /**
  * `OracleConfig.delivery`: per-oracle tuning of chat delivery. Matrix room
- * turns use the chat style unless `matrixChat` is `false`; `limits`
- * overrides the defaults below per surface (`whatsapp`, `telegram`,
- * `slack`, `matrix`, `generic`).
+ * turns use the chat style only when `matrixChat` is `true` (off by default;
+ * `MATRIX_CHAT_DELIVERY` sets it per deployment); `limits` overrides the
+ * defaults below per surface (`whatsapp`, `telegram`, `slack`, `matrix`,
+ * `generic`).
  */
 export interface DeliveryConfig {
   matrixChat?: boolean;
@@ -94,13 +96,41 @@ const LABELS: Readonly<Record<string, string>> = {
   generic: 'a chat app',
 };
 
-/** The delivery profile of one turn, from where it came in. */
+/**
+ * `OracleConfig.delivery` with the deployment's `MATRIX_CHAT_DELIVERY` applied:
+ * the variable, when set, decides whether Matrix rooms use the chat style.
+ */
+export function deliveryConfigWithEnv(
+  config: DeliveryConfig | undefined,
+  matrixChatEnv: string | undefined,
+): DeliveryConfig {
+  return {
+    ...config,
+    matrixChat:
+      matrixChatEnv === 'true' || matrixChatEnv === 'false'
+        ? matrixChatEnv === 'true'
+        : config?.matrixChat === true,
+  };
+}
+
+/**
+ * The delivery profile of one turn, from where it came in. A scheduled task
+ * run streams whatever room it reports to: its result is stored and read
+ * later, so it keeps the model's whole text instead of a chat rendering with
+ * expiring links.
+ */
 export function resolveDeliveryProfile(
-  turn: Pick<TurnRequest, 'client' | 'channel' | 'roomKind'>,
+  turn: Pick<TurnRequest, 'client' | 'channel' | 'roomKind'> &
+    Partial<Pick<TurnRequest, 'sessionId' | 'taskRunId'>>,
   config: DeliveryConfig = {},
 ): DeliveryProfile {
   if (turn.client === 'portal') return { kind: 'stream' };
-  if (turn.client === 'matrix' && config.matrixChat === false)
+  if (
+    turn.taskRunId !== undefined ||
+    turn.sessionId?.startsWith(TASK_SESSION_PREFIX)
+  )
+    return { kind: 'stream' };
+  if (turn.client === 'matrix' && config.matrixChat !== true)
     return { kind: 'stream' };
   const surface =
     turn.client === 'matrix'

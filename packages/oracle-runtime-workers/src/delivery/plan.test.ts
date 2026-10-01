@@ -101,6 +101,39 @@ describe('draftReplyPlan', () => {
     ]);
   });
 
+  it('keeps a short answer written alongside a tool call when nothing follows it', () => {
+    const plan = draftReplyPlan({
+      steps: [
+        {
+          text: 'Your flight is 9:40, gate B12.',
+          toolCalls: [{ id: 'c1', name: 'memory_save', args: {} }],
+        },
+        { text: '', toolCalls: [] },
+      ],
+      toolResults: new Map(),
+      limits: limits(),
+      canSpill: true,
+    });
+    expect(plan).toEqual([
+      { kind: 'text', text: 'Your flight is 9:40, gate B12.' },
+    ]);
+    // With a later reply, the same line is narration and goes.
+    expect(
+      draftReplyPlan({
+        steps: [
+          {
+            text: 'Your flight is 9:40, gate B12.',
+            toolCalls: [{ id: 'c1', name: 'memory_save', args: {} }],
+          },
+          { text: 'Saved it.', toolCalls: [] },
+        ],
+        toolResults: new Map(),
+        limits: limits(),
+        canSpill: true,
+      }),
+    ).toEqual([{ kind: 'text', text: 'Saved it.' }]);
+  });
+
   it('turns a create_artifact call into its message, the link and its question', () => {
     const plan = draftReplyPlan({
       steps: [
@@ -196,6 +229,41 @@ describe('draftReplyPlan', () => {
         kind: 'text',
         text: 'You have 14 meetings this week, and the deck is due Wednesday.',
       },
+    ]);
+  });
+
+  it('puts the text left after every kept step behind the last step, not in front of it', () => {
+    const kept = 'Two things first: the offsite moved to Friday.';
+    const plan = draftReplyPlan({
+      steps: [
+        {
+          text: kept,
+          toolCalls: [{ id: 'call-1', name: 'calendar_list', args: {} }],
+        },
+      ],
+      toolResults: new Map(),
+      continuation: `${kept} And Sam is out on Monday.`,
+      limits: limits(),
+      canSpill: true,
+    });
+    expect(plan).toEqual([
+      {
+        kind: 'text',
+        text: `${kept} And Sam is out on Monday.`,
+      },
+    ]);
+  });
+
+  it('delivers the text from before a reset when the resumed run produced no step', () => {
+    const plan = draftReplyPlan({
+      steps: [],
+      toolResults: new Map(),
+      continuation: 'You have 14 meetings this week.',
+      limits: limits(),
+      canSpill: true,
+    });
+    expect(plan).toEqual([
+      { kind: 'text', text: 'You have 14 meetings this week.' },
     ]);
   });
 
@@ -340,6 +408,24 @@ describe('materializeReplyPlan', () => {
       createSpill: async () => REF,
     });
     expect(plan.parts).toHaveLength(4);
+  });
+  it('never sends a part that is only whitespace or zero-width characters', async () => {
+    const plan = await materializeReplyPlan(
+      [
+        { kind: 'text', text: '\u200B\u200C \uFEFF' },
+        { kind: 'text', text: 'Done.' },
+      ],
+      { limits: limits(), createSpill: vi.fn() },
+    );
+    expect(plan.parts).toEqual([{ partId: 'p1', kind: 'text', text: 'Done.' }]);
+    expect(
+      draftReplyPlan({
+        steps: [{ text: '\u200B', toolCalls: [] }],
+        toolResults: new Map(),
+        limits: limits(),
+        canSpill: true,
+      }),
+    ).toEqual([]);
   });
 });
 

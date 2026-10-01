@@ -148,8 +148,9 @@ export interface OracleWorkerEnv {
   /**
    * Artefacts (chat delivery): long replies on chat surfaces become documents
    * behind a link. The R2 bucket holds only ciphertext share copies; absent
-   * bucket or public origin = artefacts off, and long replies are split into
-   * messages instead.
+   * bucket = artefacts off; a bucket without a public origin keeps stored
+   * artefacts readable and revocable but makes no new ones. Long replies are
+   * then split into messages instead.
    */
   ARTIFACT_BUCKET?: R2Bucket;
   /** The oracle Worker's public origin; artefact links point at `/a/:id` under it. */
@@ -479,7 +480,7 @@ export interface RunsStatus {
 export interface TurnResult {
   sessionId: string;
   requestId: string;
-  /** Final assistant text (on a chat surface: the plan as one message). */
+  /** The model's final text, on every surface (never a chat rendering). */
   text: string;
   /** Chat-surface turns: the Reply Plan (JSON) to deliver part by part. */
   plan?: JsonString;

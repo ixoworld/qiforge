@@ -6,14 +6,14 @@
 
 **Decisions taken on the proposal:**
 
-| Question                          | Decision                                                                                                                                    |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| WhatsApp eligibility              | Provider rendering stays behind the gateway adapter, so Telegram, Slack and Matrix never depend on it.                                      |
-| Who can open an artefact link     | Anyone with the link, until it expires (30 days by default). The repository README records the decision and recommends reviewing it.        |
-| Where the viewer lives            | A shared Qi.Space page (`ARTIFACT_VIEWER_URL`). The runtime's built-in page at `/a/:id` works without it.                                   |
-| Progress lines                    | None. The typing indicator is the liveness signal.                                                                                          |
-| Matrix rooms                      | Chat style by default. Third-party oracles are used through Matrix rooms in the Portal. `OracleConfig.delivery.matrixChat: false` opts out. |
-| Empty channel replies (finding 9) | Fixed separately, outside this work.                                                                                                        |
+| Question                          | Decision                                                                                                                                                                                                        |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WhatsApp eligibility              | Provider rendering stays behind the gateway adapter, so Telegram, Slack and Matrix never depend on it.                                                                                                          |
+| Who can open an artefact link     | Anyone with the link, until it expires (30 days by default). The repository README records the decision and recommends reviewing it.                                                                            |
+| Where the viewer lives            | A shared Qi.Space page (`ARTIFACT_VIEWER_URL`). The runtime's built-in page at `/a/:id` works without it.                                                                                                       |
+| Progress lines                    | None. The typing indicator is the liveness signal.                                                                                                                                                              |
+| Matrix rooms                      | Chat style opt-in (`MATRIX_CHAT_DELIVERY=true` or `OracleConfig.delivery.matrixChat: true`); off, a room reply is one plain message as before. Third-party oracles are used through Matrix rooms in the Portal. |
+| Empty channel replies (finding 9) | Fixed separately, outside this work.                                                                                                                                                                            |
 
 ---
 
@@ -56,7 +56,7 @@ Finding 9 blocks any live channel acceptance run and should be fixed first. The 
 2. **Write for the surface, then enforce it deterministically.** The model is told where it is speaking. A cheap, deterministic shaper guarantees the contract whatever the model does. By default, no extra LLM call is made to shape a reply.
 3. **Semantics in QiForge, syntax at the edge.** QiForge decides the messages and the artefacts. The gateway decides provider syntax, UI primitives, pacing and whether a send is allowed at all. The policy kernel stays in the gateway, per its spec §14: "The Companion must never decide whether a channel operation is legally or operationally permitted."
 4. **Exactly-once per part.** The `(userDid, bindingId, requestId)` idempotency extends to `(…, partId)`. It is still better to lose a message than to send a duplicate.
-5. **Private by default.** Artefact links are safe against link unfurlers. No plaintext is stored on operator infrastructure. The canonical copy belongs to the user.
+5. **Private by default.** Artefact links are safe against link unfurlers. No plaintext is stored in R2; the operator still holds each share key (see the runtime's `docs/chat-delivery.md`). The canonical copy belongs to the user.
 6. **The Portal's streaming is untouched.** Its SSE streaming, frames and tools do not change. The Portal gains only the shared artefact viewer.
 
 ---
@@ -121,7 +121,7 @@ export interface ChatLimits {
 }
 ```
 
-These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; a count must be a whole number of at least 1, or the default stays. `OracleConfig.delivery.matrixChat: false` gives Matrix rooms the `stream` profile. Artefacts are available on every chat surface whenever artefact storage is configured.
+These are the defaults. An oracle overrides them per surface in `OracleConfig.delivery.limits`; a count must be a whole number of at least 1, or the default stays. Matrix rooms get the `stream` profile unless `MATRIX_CHAT_DELIVERY=true` or `OracleConfig.delivery.matrixChat: true`, and scheduled task runs always do. Artefacts are available on every chat surface whenever artefact storage is configured.
 
 | Field                    | `whatsapp`  | `telegram`  | `slack`       | `matrix`      | `generic`   |
 | ------------------------ | ----------- | ----------- | ------------- | ------------- | ----------- |
@@ -366,16 +366,16 @@ Later adapters use the same parts:
 
 ### 8.2 Matrix rooms
 
-Matrix rooms get the chat profile by default. This is how third-party oracles are used from the Portal.
+Matrix rooms get the chat profile when it is turned on (`MATRIX_CHAT_DELIVERY=true`); it is off by default so a deployment without artefact storage does not turn a long reply into many events. This is how third-party oracles are used from the Portal.
 
 - `MatrixGatewayDO` posts one `m.text` per part in the thread.
-  - Each is rendered to HTML with `formatReplay`, which fixes finding 6.
+  - Each is rendered to HTML with raw HTML from the model escaped, which fixes finding 6 for chat-style rooms.
   - An artefact part is its title and an "Open document" link.
   - Transaction IDs are `reply-<eventId>-<partId>`, so the homeserver still deduplicates a replay.
 - There are no progress parts. The typing notification and the `work_status` card show liveness.
 - `MatrixTurnLedger` stores the plan with the reply, so a replayed turn re-delivers the same parts.
-- A `stream` reply (with `matrixChat: false`) is one message, now with `formattedBody` too.
-- Task deliveries post the plan's text as one message. A long digest becomes its lead, the artefact link and its question.
+- A `stream` reply (the default, chat style off) is one plain message without `formattedBody`, exactly as before.
+- Task runs keep the `stream` profile, so a task delivery posts the model's whole text and a stored result never depends on an expiring link.
 - An `org.ixo.qi.artifact` content key, which would let Qi.Space render a card, is later.
 
 ### 8.3 Portal / Qi.Space

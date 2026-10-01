@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { ReplyPart } from '../delivery/types';
 import { replyTxnId } from './inbox-store';
-import { replyPartContent, replyPartTxnId } from './reply-parts';
+import {
+  replyPartContent,
+  replyPartTxnId,
+  roomReplyMessages,
+} from './reply-parts';
 
 describe('Matrix reply parts', () => {
   it('renders a text part as HTML with no name prefix', () => {
@@ -36,15 +39,37 @@ describe('Matrix reply parts', () => {
   });
 
   it('gives each part of a turn its own stable transaction id', () => {
-    const part = (partId: string): ReplyPart => ({
-      partId,
-      kind: 'text',
-      text: 'x',
-    });
-    const first = replyPartTxnId('$ev/1+x', part('p1'));
+    const first = replyPartTxnId('$ev/1+x', 'p1');
     expect(first).toBe('reply-$ev_1-x-p1');
-    expect(replyPartTxnId('$ev/1+x', part('p1'))).toBe(first);
-    expect(replyPartTxnId('$ev/1+x', part('p2'))).not.toBe(first);
+    expect(replyPartTxnId('$ev/1+x', 'p1')).toBe(first);
+    expect(replyPartTxnId('$ev/1+x', 'p2')).not.toBe(first);
     expect(first).not.toBe(replyTxnId('$ev/1+x'));
+  });
+
+  it('posts a reply without a plan as the plain text alone, as before chat delivery', () => {
+    const text = 'Use `<div>` or <b>bold</b>.\n\n<script>alert(1)</script>';
+    expect(roomReplyMessages({ text })).toEqual([{ body: text }]);
+    expect(roomReplyMessages({ text: '  \n' })).toEqual([]);
+  });
+
+  it('escapes raw HTML from the model in a chat part instead of passing it through', () => {
+    const plan = JSON.stringify({
+      v: 1,
+      parts: [
+        {
+          partId: 'p1',
+          kind: 'text',
+          text: 'Hi <img src=x onerror=alert(1)> and `<div>`.\n\n<script>alert(1)</script>',
+        },
+      ],
+    });
+    const [message] = roomReplyMessages({ text: 'ignored', plan });
+    expect(message?.partId).toBe('p1');
+    expect(message?.formattedBody).not.toMatch(/<img|<script/);
+    expect(message?.formattedBody).toContain(
+      '&lt;img src=x onerror=alert(1)&gt;',
+    );
+    expect(message?.formattedBody).toContain('&lt;script&gt;');
+    expect(message?.formattedBody).toContain('<code>&lt;div&gt;</code>');
   });
 });

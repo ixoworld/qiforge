@@ -10,7 +10,7 @@
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { ArtifactRef } from '../delivery/types';
-import { artifactLink, type ArtifactLinkConfig } from './config';
+import { artifactLink, type ArtifactStorageConfig } from './config';
 import { newShareKey, sealArtifact } from './crypto';
 
 export const ARTIFACT_ID_RE = /^[0-9a-f]{32}$/;
@@ -47,7 +47,8 @@ type ArtifactRow = {
 } & Record<string, string | number | null>;
 
 export interface StoredArtifact {
-  ref: ArtifactRef;
+  /** `url` is absent while no public origin is configured. */
+  ref: Omit<ArtifactRef, 'url'> & { url?: string };
   sessionId: string;
   content: string;
   createdAt: string;
@@ -68,9 +69,14 @@ export class ArtifactStore {
 
   constructor(
     private readonly db: DoSqliteDatabase,
-    private readonly config: ArtifactLinkConfig,
+    private readonly config: ArtifactStorageConfig,
     private readonly now: () => number = () => Date.now(),
   ) {}
+
+  /** Whether new artefacts can be created: a public origin for their links is set. */
+  get canShare(): boolean {
+    return this.config.links !== null;
+  }
 
   setup(): Promise<void> {
     this.setupPromise ??= this.db
@@ -98,11 +104,14 @@ export class ArtifactStore {
     return this.setupPromise;
   }
 
-  private refOf(row: ArtifactRow): ArtifactRef {
+  private refOf(row: ArtifactRow): StoredArtifact['ref'] {
+    const links = this.config.links;
     return {
       artifactId: row.artifact_id,
       title: row.title,
-      url: artifactLink(this.config, row.artifact_id, row.share_key),
+      ...(links
+        ? { url: artifactLink(links, row.artifact_id, row.share_key) }
+        : {}),
       mime: 'text/markdown',
       bytes: Number(row.bytes),
       expiresAt: row.expires_at,
@@ -126,6 +135,11 @@ export class ArtifactStore {
     title: string;
     content: string;
   }): Promise<ArtifactRef> {
+    const links = this.config.links;
+    if (!links)
+      throw new Error(
+        'artifacts: no public origin (ORACLE_PUBLIC_URL) for share links',
+      );
     await this.setup();
     const createdAt = new Date(this.now());
     await this.db.run(
@@ -166,7 +180,10 @@ export class ArtifactStore {
         [row.artifact_id],
       );
     }
-    return this.refOf(row);
+    return {
+      ...this.refOf(row),
+      url: artifactLink(links, row.artifact_id, row.share_key),
+    };
   }
 
   async get(artifactId: string): Promise<StoredArtifact | undefined> {

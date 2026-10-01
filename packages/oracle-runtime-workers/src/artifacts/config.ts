@@ -10,13 +10,24 @@ export const MAX_ARTIFACT_TTL_DAYS = 365;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export interface ArtifactLinkConfig {
-  bucket: R2Bucket;
+/** Where share links point: the oracle's `/a/:id`, or a shared viewer page. */
+export interface ArtifactLinkBase {
   /** The oracle Worker's public origin; share copies are served under `/a/`. */
   publicUrl: string;
   /** A shared viewer page (Qi.Space). Unset → the oracle's own `/a/:id` page. */
   viewerUrl?: string;
+}
+
+/**
+ * Artefact storage. `links` is null while no usable public origin is set:
+ * no new artefact is created then, but the ones already stored stay
+ * readable, revocable and deleted with their session, because the bucket
+ * still holds their share copies.
+ */
+export interface ArtifactStorageConfig {
+  bucket: R2Bucket;
   ttlMs: number;
+  links: ArtifactLinkBase | null;
 }
 
 type ArtifactEnv = Pick<
@@ -27,36 +38,78 @@ type ArtifactEnv = Pick<
   | 'ARTIFACT_LINK_TTL_DAYS'
 >;
 
-function parsedUrl(raw: string | undefined): URL | null {
-  if (!raw) return null;
+function isLocalHost(url: URL): boolean {
+  return url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+}
+
+/** https, or http on localhost: a link carries its decryption key. */
+export function isSecureUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
-    const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
-    if (url.protocol !== 'https:' && !(local && url.protocol === 'http:'))
-      return null;
-    return url;
+    return (
+      url.protocol === 'https:' ||
+      (url.protocol === 'http:' && isLocalHost(url))
+    );
   } catch {
-    return null;
+    return false;
   }
 }
 
-/** Null when artefacts are off: no bucket bound, or no public origin set. */
-export function artifactLinkConfig(
+/**
+ * Null when no bucket is bound. The env schema (`src/core/env.ts`) rejects a
+ * malformed or insecure URL and an out-of-range TTL at boot; anything that
+ * still reaches here unusable is reported through `warn`, never dropped
+ * silently.
+ */
+export function artifactStorageConfig(
   env: ArtifactEnv,
-): ArtifactLinkConfig | null {
-  const publicUrl = parsedUrl(env.ORACLE_PUBLIC_URL);
-  if (!env.ARTIFACT_BUCKET || !publicUrl) return null;
-  const viewer = parsedUrl(env.ARTIFACT_VIEWER_URL);
-  const days = Number(env.ARTIFACT_LINK_TTL_DAYS);
-  return {
-    bucket: env.ARTIFACT_BUCKET,
-    publicUrl: publicUrl.origin,
-    ...(viewer ? { viewerUrl: `${viewer.origin}${viewer.pathname}` } : {}),
-    ttlMs:
-      (Number.isInteger(days) && days > 0
-        ? Math.min(days, MAX_ARTIFACT_TTL_DAYS)
-        : DEFAULT_ARTIFACT_TTL_DAYS) * DAY_MS,
-  };
+  warn: (message: string) => void = () => undefined,
+): ArtifactStorageConfig | null {
+  const bucket = env.ARTIFACT_BUCKET;
+  if (!bucket) {
+    if (env.ORACLE_PUBLIC_URL)
+      warn(
+        '[artifacts] ORACLE_PUBLIC_URL is set but no ARTIFACT_BUCKET is bound: artefacts are off',
+      );
+    return null;
+  }
+  let links: ArtifactLinkBase | null = null;
+  if (!env.ORACLE_PUBLIC_URL)
+    warn(
+      '[artifacts] ARTIFACT_BUCKET is bound but ORACLE_PUBLIC_URL is not set: no new artefacts; stored ones stay readable and revocable',
+    );
+  else if (!isSecureUrl(env.ORACLE_PUBLIC_URL))
+    warn(
+      `[artifacts] ORACLE_PUBLIC_URL must be an https URL (http only on localhost), got ${JSON.stringify(env.ORACLE_PUBLIC_URL)}: no new artefacts; stored ones stay readable and revocable`,
+    );
+  else {
+    const viewerRaw = env.ARTIFACT_VIEWER_URL;
+    const viewer =
+      viewerRaw && isSecureUrl(viewerRaw) ? new URL(viewerRaw) : null;
+    if (viewerRaw && !viewer)
+      warn(
+        `[artifacts] ARTIFACT_VIEWER_URL must be an https URL (http only on localhost), got ${JSON.stringify(viewerRaw)}: links use the oracle's own viewer`,
+      );
+    links = {
+      publicUrl: new URL(env.ORACLE_PUBLIC_URL).origin,
+      ...(viewer ? { viewerUrl: `${viewer.origin}${viewer.pathname}` } : {}),
+    };
+  }
+  let days = DEFAULT_ARTIFACT_TTL_DAYS;
+  if (env.ARTIFACT_LINK_TTL_DAYS !== undefined) {
+    const parsed = Number(env.ARTIFACT_LINK_TTL_DAYS);
+    if (
+      Number.isInteger(parsed) &&
+      parsed >= 1 &&
+      parsed <= MAX_ARTIFACT_TTL_DAYS
+    )
+      days = parsed;
+    else
+      warn(
+        `[artifacts] ARTIFACT_LINK_TTL_DAYS must be a whole number from 1 to ${MAX_ARTIFACT_TTL_DAYS}, got ${JSON.stringify(env.ARTIFACT_LINK_TTL_DAYS)}: links last ${DEFAULT_ARTIFACT_TTL_DAYS} days`,
+      );
+  }
+  return { bucket, ttlMs: days * DAY_MS, links };
 }
 
 /**
@@ -65,7 +118,7 @@ export function artifactLinkConfig(
  * server learns nothing either.
  */
 export function artifactLink(
-  config: Pick<ArtifactLinkConfig, 'publicUrl' | 'viewerUrl'>,
+  config: ArtifactLinkBase,
   artifactId: string,
   key: string,
 ): string {

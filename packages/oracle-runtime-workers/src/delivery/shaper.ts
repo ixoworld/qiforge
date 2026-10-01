@@ -41,11 +41,101 @@ const sentenceSegmenter = new Intl.Segmenter(undefined, {
   granularity: 'sentence',
 });
 
-/** Real tags only: `a < b and c > d` is left alone. */
-function stripHtmlTags(text: string): string {
-  return text
+/**
+ * HTML elements a model mixes into Markdown. Anything else in angle brackets
+ * (`Promise<string>`, `<name>` placeholders) is text and stays.
+ */
+const HTML_ELEMENTS = new Set(
+  (
+    'a abbr address article aside b bdi bdo blockquote body br button ' +
+    'caption center cite code col colgroup dd del details dfn div dl dt ' +
+    'em figcaption figure font footer form h1 h2 h3 h4 h5 h6 head ' +
+    'header hr html i iframe img input ins kbd label li main mark nav ' +
+    'ol p picture pre q s samp script section select small source span ' +
+    'strike strong style sub summary sup table tbody td textarea tfoot ' +
+    'th thead tr tt u ul var video wbr'
+  ).split(' '),
+);
+
+/**
+ * Raw HTML → its text: HTML elements' tags and comments removed, `<br>` a
+ * line break. Only ever applied to what the lexer read as raw HTML, never to
+ * code. `a < b and c > d` is left alone.
+ */
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/?[a-zA-Z][a-zA-Z0-9-]*(\s[^<>]*)?\/?>/g, '');
+    .replace(
+      /<\/?([a-zA-Z][a-zA-Z0-9-]*)(\s[^<>]*)?\/?>/g,
+      (tag, name: string) => (HTML_ELEMENTS.has(name.toLowerCase()) ? '' : tag),
+    );
+}
+
+/** Characters that render as nothing: whitespace and zero-width marks. */
+const INVISIBLE = /[\s\u200B-\u200D\u2060\uFEFF]/g;
+
+/** True when a message would look empty: only whitespace or zero-width characters. */
+export function isBlank(text: string): boolean {
+  return text.replace(INVISIBLE, '') === '';
+}
+
+function childTokens(token: Token): Token[] {
+  if (isList(token)) return token.items;
+  return 'tokens' in token && Array.isArray(token.tokens) ? token.tokens : [];
+}
+
+const isLinkOrImage = (t: Token): t is Tokens.Link | Tokens.Image =>
+  t.type === 'link' || t.type === 'image';
+
+/** `[text][ref]`, `[text][]` or `[ref]`, inline: its definition is not delivered. */
+function referenceLinkInline(token: Token): string | null {
+  if (!isLinkOrImage(token) || token.raw.endsWith(')')) return null;
+  const image = token.type === 'image';
+  if (!token.raw.startsWith(image ? '![' : '[')) return null;
+  const title = token.title ? ` "${token.title.replace(/"/g, '\\"')}"` : '';
+  return `${image ? '!' : ''}[${token.text}](${token.href}${title})`;
+}
+
+/**
+ * A block's Markdown for chat: `token.raw` with raw HTML reduced to its text
+ * and reference links written inline (their definitions are not delivered).
+ * Code spans and code blocks stay verbatim, so `` `<div>` `` survives.
+ */
+function chatMarkdown(token: Token): string {
+  const raw = token.raw;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  let cursor = 0;
+  const locate = (part: string): number => {
+    const at = part ? raw.indexOf(part, cursor) : -1;
+    if (at >= 0) cursor = at + part.length;
+    return at;
+  };
+  const visit = (node: Token): void => {
+    if (node.type === 'code' || node.type === 'codespan') {
+      locate(node.raw);
+      return;
+    }
+    const inline = referenceLinkInline(node);
+    const replacement = node.type === 'html' ? stripHtmlTags(node.raw) : inline;
+    if (replacement !== null) {
+      const at = locate(node.raw);
+      if (at >= 0)
+        edits.push({ start: at, end: at + node.raw.length, text: replacement });
+      return;
+    }
+    const children = childTokens(node);
+    if (children.length === 0) locate(node.raw);
+    else for (const child of children) visit(child);
+  };
+  for (const child of childTokens(token)) visit(child);
+  let out = '';
+  let from = 0;
+  for (const edit of edits) {
+    out += raw.slice(from, edit.start) + edit.text;
+    from = edit.end;
+  }
+  return out + raw.slice(from);
 }
 
 function plainText(text: string): string {
@@ -77,7 +167,7 @@ function toBlocks(markdown: string, limits: ChatLimits): Block[] {
       const text = plainText(token.text);
       if (text) blocks.push({ kind: 'heading', md: `**${text}**`, token });
     } else if (isList(token)) {
-      blocks.push({ kind: 'list', md: token.raw.trim(), token });
+      blocks.push({ kind: 'list', md: chatMarkdown(token).trim(), token });
     } else if (isCode(token)) {
       blocks.push({ kind: 'code', md: token.raw.trim(), token });
     } else if (isTable(token)) {
@@ -87,12 +177,12 @@ function toBlocks(markdown: string, limits: ChatLimits): Block[] {
         token,
       });
     } else if (token.type === 'blockquote') {
-      blocks.push({ kind: 'quote', md: token.raw.trim(), token });
+      blocks.push({ kind: 'quote', md: chatMarkdown(token).trim(), token });
     } else {
       const md = (
-        isHtml(token) ? stripHtmlTags(token.text) : stripHtmlTags(token.raw)
+        isHtml(token) ? stripHtmlTags(token.text) : chatMarkdown(token)
       ).trim();
-      if (md) blocks.push({ kind: 'paragraph', md, token });
+      if (!isBlank(md)) blocks.push({ kind: 'paragraph', md, token });
     }
   }
   return blocks;
@@ -122,7 +212,7 @@ function packPieces(
     } else current = piece;
   }
   if (current) out.push(current);
-  return out.map((s) => s.trim()).filter(Boolean);
+  return out.map((s) => s.trim()).filter((s) => !isBlank(s));
 }
 
 /** Split at the largest boundary that works: paragraph, line, sentence, word. */

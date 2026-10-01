@@ -250,7 +250,7 @@ import {
 } from '../core/middlewares/context-guard';
 import { fetchOpenRouterContextLengths } from '../core/openrouter-pricing';
 import { ResultStore, resultStoreKnobs } from './result-store';
-import { artifactLinkConfig } from '../artifacts/config';
+import { artifactStorageConfig } from '../artifacts/config';
 import {
   ArtifactStore,
   artifactIdFor,
@@ -263,7 +263,7 @@ import {
   materializeReplyPlan,
   turnSteps,
 } from '../delivery/plan';
-import { parseReplyPlan, planText } from '../delivery/schema';
+import { parseReplyPlan } from '../delivery/schema';
 import type { DeliveryProfile, ReplyPlan } from '../delivery/types';
 import { formatReplay } from '../matrix/replay-format';
 import { retryGateway } from './gateway-retry';
@@ -639,7 +639,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     );
     /** Whole tool results the result cap saved (docs/plans/context-budgets.md). */
     private resultStore: ResultStore | null = null;
-    /** Chat delivery's artefacts; null when no bucket or public origin is configured. */
+    /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
     /**
      * Per-model context windows; learned limits persist in this object's KV
@@ -1288,7 +1288,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       await this.resultStore.setup();
-      const artifactConfig = artifactLinkConfig(this.env);
+      // The store exists whenever the bucket is bound, so artefacts made
+      // earlier stay readable, revocable and deleted with their session after
+      // the public origin is removed; only new ones need it.
+      const artifactConfig = artifactStorageConfig(this.env, (message) =>
+        console.warn(message),
+      );
       if (artifactConfig) {
         this.artifacts = new ArtifactStore(liveDb, artifactConfig);
         await this.artifacts.setup();
@@ -2212,7 +2217,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const stored = await this.artifacts?.get(artifactId);
       if (!stored) return null;
       const { url, ...ref } = stored.ref;
-      const live = !stored.revoked && Date.parse(ref.expiresAt) > Date.now();
+      const live =
+        url !== undefined &&
+        !stored.revoked &&
+        Date.parse(ref.expiresAt) > Date.now();
       return {
         ...ref,
         ...(live ? { url } : {}),
@@ -2673,7 +2681,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         return {
           sessionId: req.sessionId,
           requestId: req.requestId,
-          text: record.partialText || (plan ? planText(plan) : ''),
+          text: record.partialText ?? '',
           ...(plan ? { plan: JSON.stringify(plan) } : {}),
           ...(record.messageId ? { messageId: record.messageId } : {}),
           toolCalls: [],
@@ -3553,16 +3561,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             })),
           );
         const messageId = completed ? lastAiMessageId(capture) : undefined;
-        // A chat surface gets its reply as a plan: the canonical text is the
-        // plan as one message (the continuation is already inside it).
+        // A chat surface also gets its reply as a plan. `text` stays the
+        // model's own text on every surface: stored results (task runs, the
+        // run record, the Matrix ledger) never hold a chat rendering whose
+        // links expire.
         const plan =
           completed && delivery.kind === 'chat'
             ? await this.replyPlanOf(live, req, capture, delivery)
             : undefined;
-        const text = plan
-          ? planText(plan)
-          : (live.continuation ?? '') +
-            (completed ? lastAiText(capture) : outcome.fullText);
+        const text =
+          (live.continuation ?? '') +
+          (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
             outcome.status === 'completed'
@@ -3596,7 +3605,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       capture: BaseMessage[],
       delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
     ): Promise<ReplyPlan> {
-      const artifacts = this.artifacts;
+      const artifacts = this.artifacts?.canShare ? this.artifacts : null;
       const { steps, toolResults } = turnSteps(capture);
       const draft = draftReplyPlan({
         steps,
@@ -4412,7 +4421,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // may hand long content to `create_artifact` (bound only when artefact
       // storage is configured). The Portal streams as it always has.
       const delivery = resolveDeliveryProfile(req, core.delivery);
-      const artifacts = delivery.kind === 'chat' ? this.artifacts : null;
+      const artifacts =
+        delivery.kind === 'chat' && this.artifacts?.canShare
+          ? this.artifacts
+          : null;
       const turnTools = artifacts
         ? [
             {

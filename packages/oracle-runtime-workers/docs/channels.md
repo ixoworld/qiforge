@@ -65,7 +65,7 @@ Storage growth: one tombstone row (run ID and status, under 100 bytes) remains f
 
 ## Reply Plans
 
-A finished turn also carries `plan`, the reply as the ordered parts to deliver. `text` stays the whole reply as one Markdown message, with artefacts as links, for gateways that predate plans. A gateway that reads `plan` ignores `text`.
+A finished turn also carries `plan`, the reply as the ordered parts to deliver. `text` is then the plan as one Markdown message, with artefacts as links, for gateways that predate plans (without a plan it is the model's reply). A gateway that reads `plan` ignores `text`. The Companion room mirror shows the same rendering, posted once per run. The run record itself keeps the model's own text.
 
 ```json
 {

@@ -97,10 +97,7 @@ import {
   lookupUserServerName,
   type UserServerNameLookup,
 } from './user-homeserver';
-import { parseReplyPlan } from '../delivery/schema';
-import type { ReplyPlan } from '../delivery/types';
-import { replyPartContent, replyPartTxnId } from './reply-parts';
-import { formatReplay } from './replay-format';
+import { replyPartTxnId, roomReplyMessages } from './reply-parts';
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_TIMEOUT_MS = 30_000;
@@ -669,27 +666,30 @@ export class MatrixGatewayDO
           'info',
           `turn ${requestId}: reply served from the user object's ledger (turn had already finished)`,
         );
-      const plan = parseReplyPlan(result.plan);
-      if (plan && plan.parts.length > 0) {
-        await this.sendReplyPlan(turn, plan);
-      } else if (result.text.trim()) {
-        // The transaction id is derived from the event id, so this reply is
-        // deduplicated by the homeserver if a previous incarnation already
-        // sent it before it died (see inbox-store.ts).
-        // Always inside the thread: the reply to a bare message opens the
-        // thread on it (Node's listener bridge does the same).
-        await this.sendText(turn.roomId, result.text, {
-          threadId: turn.threadId,
-          formattedBody: formatReplay({
-            message: result.text,
-            isOracle: true,
-            disablePrefix: true,
-          }).formattedBody,
-          ...(turn.eventIds[0] ? { txnId: replyTxnId(turn.eventIds[0]) } : {}),
-        });
-      } else {
+      const messages = roomReplyMessages(result);
+      if (messages.length === 0)
         this.log('info', `turn ${requestId}: empty reply, nothing sent`);
-      }
+      // Transaction ids are derived from the event id (one per plan part), so
+      // a reply is deduplicated by the homeserver if a previous incarnation
+      // already sent it before it died (see inbox-store.ts). Always inside the
+      // thread: the reply to a bare message opens the thread on it (Node's
+      // listener bridge does the same).
+      const eventId = turn.eventIds[0];
+      for (const message of messages)
+        await this.sendText(turn.roomId, message.body, {
+          threadId: turn.threadId,
+          ...(message.formattedBody
+            ? { formattedBody: message.formattedBody }
+            : {}),
+          ...(eventId
+            ? {
+                txnId:
+                  message.partId !== undefined
+                    ? replyPartTxnId(eventId, message.partId)
+                    : replyTxnId(eventId),
+              }
+            : {}),
+        });
       // The reply is in the durable outbox (or there is none): the turn
       // has ended, the inbox row has done its job.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
@@ -738,26 +738,6 @@ export class MatrixGatewayDO
             err,
           ),
         );
-    }
-  }
-
-  /**
-   * A chat-style reply (chat delivery): each part is its own message in the
-   * thread, in order, through the durable outbox. Part transaction ids are
-   * derived from the event id, so a replay after a reset posts nothing twice.
-   */
-  private async sendReplyPlan(
-    turn: IngestTurn,
-    plan: ReplyPlan,
-  ): Promise<void> {
-    const eventId = turn.eventIds[0];
-    for (const part of plan.parts) {
-      const { body, formattedBody } = replyPartContent(part);
-      await this.sendText(turn.roomId, body, {
-        threadId: turn.threadId,
-        formattedBody,
-        ...(eventId ? { txnId: replyPartTxnId(eventId, part) } : {}),
-      });
     }
   }
 
