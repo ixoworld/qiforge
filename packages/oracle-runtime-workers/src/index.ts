@@ -103,6 +103,12 @@ export {
   type ResolveLangsmithTracingArgs,
 } from './core/llm';
 
+// --- task adapters -----------------------------------------------------------
+export {
+  agentWakeFromTaskRecord,
+  portableWorkFromTaskRecord,
+} from './tasks/spec';
+
 // --- per-room JWE secrets ---------------------------------------------------
 export { decryptJwe, encryptJwe, parseJwk, type JWK } from './secrets/jwe';
 export { decryptWithPin } from './secrets/pin-cipher';
