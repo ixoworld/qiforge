@@ -7,3 +7,7 @@ pnpm-lock.yaml
 
 # devnet test accounts (gitignored, local only)
 apps/qiforge-workers-example/test/.devnet-accounts/
+apps/qiforge-workers-example/test/.accounts.json
+
+# local git worktrees
+.claude/

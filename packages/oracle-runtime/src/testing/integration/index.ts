@@ -1,4 +1,9 @@
 /**
+ * DEPRECATED — `@ixo/oracle-runtime/testing/integration` belongs to the Node
+ * runtime, which is no longer developed. Integration coverage for the Workers
+ * runtime lives in `apps/qiforge-workers-example/test/` (harness e2e drills);
+ * see `packages/oracle-runtime-workers/docs/testing.md`.
+ *
  * Public surface for `@ixo/oracle-runtime/testing/integration`.
  *
  * Five exports total — anything else would be over-abstraction (see spec §6).

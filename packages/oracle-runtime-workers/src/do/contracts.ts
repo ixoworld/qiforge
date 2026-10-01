@@ -42,6 +42,8 @@ export interface OracleWorkerEnv {
   /** Blocksync GraphQL endpoint used to resolve `did:ixo` verification keys. */
   BLOCKSYNC_GRAPHQL_URL: string;
   UCAN_AUTH_MAX_TTL_SECONDS?: string;
+  /** `true` restores the legacy bare-delegation authentication (off by default). */
+  UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: string;
@@ -170,6 +172,9 @@ export interface OracleWorkerEnv {
   TURN_MAX_TOKENS?: string;
   TURN_MAX_TOOL_CALLS?: string;
   TURN_TIMEOUT_MS?: string;
+  /** Repetition guard: identical successful writes (default 1) and reads (5) per turn. */
+  TURN_MAX_IDENTICAL_WRITES?: string;
+  TURN_MAX_IDENTICAL_READS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;

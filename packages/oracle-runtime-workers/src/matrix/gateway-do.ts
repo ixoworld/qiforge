@@ -57,6 +57,7 @@ import {
   SIGNING_MNEMONIC_STATE_TYPE,
 } from '../secrets/signing-mnemonic';
 import {
+  attributeUser,
   IngestPipeline,
   userDidFromRoomAlias,
   type InboundAttachment,
@@ -75,6 +76,7 @@ import {
   MAX_TURN_REPLAYS,
   planInboxReplay,
   replyTxnId,
+  settleOfferedRow,
   updateInboxThread,
 } from './inbox-store';
 import {
@@ -90,7 +92,11 @@ import {
   resolveReplyChainRoot,
   ThreadRootCache,
 } from './reply-chain';
-import { fetchUserMatrixServerName } from './user-homeserver';
+import {
+  type CachedUserServerName,
+  lookupUserServerName,
+  type UserServerNameLookup,
+} from './user-homeserver';
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_TIMEOUT_MS = 30_000;
@@ -98,6 +104,13 @@ const TYPING_TIMEOUT_MS = 30_000;
 const ALIAS_CACHE_TTL_MS = 30 * 60_000;
 /** User DID → Matrix server name (from the DID document via Blocksync). */
 const HOMESERVER_CACHE_TTL_MS = 6 * 60 * 60_000;
+/**
+ * A live message whose sender's homeserver could not be looked up stays in
+ * the inbox and is replayed on its own after this delay (each replay is
+ * charged to the row, so a long Blocksync outage ends in the "try again"
+ * notice, not a silent drop).
+ */
+const SENDER_CHECK_RETRY_MS = 60_000;
 /**
  * A room created by a user seconds ago may not have delivered its invite
  * through sync yet when the user's object asks for its state; within this
@@ -158,11 +171,6 @@ interface StoredDevice {
 interface AliasCacheEntry {
   roomId: string;
   alias: string;
-  at: number;
-}
-
-interface HomeserverCacheEntry {
-  serverName: string;
   at: number;
 }
 
@@ -242,6 +250,11 @@ export class MatrixGatewayDO
   private ingest: IngestPipeline | null = null;
   /** `m.room.canonical_alias` per room (null = none), read once per instance. */
   private readonly roomAliases = new Map<string, string | null>();
+  /**
+   * User DID → registered Matrix server name (lowercased), refreshed before
+   * every offer from `userServerName` so the pipeline can check it synchronously.
+   */
+  private readonly userServers = new Map<string, string>();
   /** Quote-reply chain → thread root memo (see reply-chain.ts). */
   private readonly threadRoots = new ThreadRootCache();
   private readonly turnGate = new Semaphore(
@@ -255,6 +268,9 @@ export class MatrixGatewayDO
   /** Event ids of turns running in this instance (a graceful restart must not replay them). */
   private readonly inFlightEvents = new Set<string>();
   private inboxReplayRunning = false;
+  /** Inbox rows whose sender check had no verdict, waiting for `unverifiedRetry`. */
+  private readonly unverifiedEvents = new Set<string>();
+  private unverifiedRetry: ReturnType<typeof setTimeout> | null = null;
   /** Group rooms: the gate and the per-room channel memory (see group-chat.ts). */
   private groupChatService: GroupChatService | null = null;
 
@@ -348,6 +364,7 @@ export class MatrixGatewayDO
       oracleDid: cfg.oracleRoomDid,
       botUserId: cfg.userId,
       canonicalAlias: (roomId) => this.roomAliases.get(roomId) ?? null,
+      userServerName: (userDid) => this.userServers.get(userDid) ?? null,
       dispatch: (turn) => this.dispatchTurn(turn),
       onError: (err, context) =>
         this.log('error', `ingest failed (${context})`, err),
@@ -387,9 +404,10 @@ export class MatrixGatewayDO
     // message back if the instance dies before its reply is in the outbox.
     const sql = this.inboxSql();
     insertInboxRow(sql, inbound, Date.now());
-    // Resolved before the offer so the pipeline's synchronous alias lookup
-    // (room alias → user DID) can answer from the memo.
+    // Resolved before the offer so the pipeline's synchronous lookups (room
+    // alias → user DID, user DID → registered homeserver) answer from memos.
     await this.canonicalAliasOf(message.roomId);
+    await this.resolveSenderServer(inbound);
     const threadRootId = await this.threadRootFor(
       eventId,
       message.roomId,
@@ -403,14 +421,66 @@ export class MatrixGatewayDO
     this.offerInbound(inbound);
   }
 
-  /** Feed a message into the ingest pipeline; a message it will not turn into a turn leaves the inbox at once. */
+  /**
+   * Feed a message into the ingest pipeline. A message it will not turn into
+   * a turn leaves the inbox at once; one whose sender could not be checked
+   * stays there and is replayed after `SENDER_CHECK_RETRY_MS`.
+   */
   private offerInbound(inbound: InboundMessage): void {
     const outcome = this.ingestPipeline().offer(inbound);
-    if (outcome !== 'queued') {
-      deleteInboxRows(this.inboxSql(), [inbound.eventId]);
+    const row = settleOfferedRow(this.inboxSql(), inbound.eventId, outcome);
+    if (outcome === 'unverified') {
       this.log(
-        'debug',
-        `ingest dropped ${inbound.eventId} in ${inbound.roomId}: ${outcome}`,
+        'warn',
+        `ingest: no homeserver verdict for ${inbound.sender}; keeping ${inbound.eventId} in ${inbound.roomId} for a replay`,
+      );
+      this.retryUnverifiedLater(inbound.eventId);
+    } else if (row === 'deleted') {
+      this.log(
+        // A DID-shaped identity from a server that is not the DID's own is
+        // someone presenting a DID they do not control.
+        outcome === 'foreign' ? 'warn' : 'debug',
+        `ingest dropped ${inbound.eventId} in ${inbound.roomId} from ${inbound.sender}: ${outcome}`,
+      );
+    }
+  }
+
+  /** Replay the unverified rows once `SENDER_CHECK_RETRY_MS` has passed (one timer for all of them). */
+  private retryUnverifiedLater(eventId: string): void {
+    this.unverifiedEvents.add(eventId);
+    if (this.unverifiedRetry) return;
+    this.unverifiedRetry = setTimeout(() => {
+      this.unverifiedRetry = null;
+      const only = new Set(this.unverifiedEvents);
+      this.unverifiedEvents.clear();
+      this.scheduleInboxReplay(only);
+    }, SENDER_CHECK_RETRY_MS);
+  }
+
+  /**
+   * Look up the registered homeserver of the user a message is attributed
+   * to, for the pipeline's sender check. A DID document that names no
+   * homeserver answers the oracle's own server. A Blocksync failure answers
+   * the last cached server even when it has expired; with nothing cached the
+   * memo is cleared, so the pipeline gives no verdict (`'unverified'`) and
+   * the message stays in the inbox instead of being dropped as foreign.
+   */
+  private async resolveSenderServer(inbound: InboundMessage): Promise<void> {
+    const attribution = attributeUser({
+      alias: this.roomAliases.get(inbound.roomId) ?? null,
+      sender: inbound.sender,
+      oracleDid: this.cfg().oracleRoomDid,
+    });
+    if (!attribution) return;
+    try {
+      const { serverName } = await this.lookupUserServer(attribution.userDid);
+      this.userServers.set(attribution.userDid, serverName.toLowerCase());
+    } catch (err) {
+      this.userServers.delete(attribution.userDid);
+      this.log(
+        'warn',
+        `could not resolve ${attribution.userDid}'s homeserver from Blocksync and nothing is cached; ${inbound.eventId} waits for a replay`,
+        err,
       );
     }
   }
@@ -711,10 +781,16 @@ export class MatrixGatewayDO
     this.scheduleInboxReplay();
   }
 
-  private scheduleInboxReplay(): void {
-    if (this.inboxReplayRunning) return;
+  /** `only`: replay just these rows (the unverified-sender retry); omitted, every row. */
+  private scheduleInboxReplay(only?: ReadonlySet<string>): void {
+    if (this.inboxReplayRunning) {
+      // A full replay already listed every row; a targeted one may not have,
+      // so the rows asked for here wait for the next retry.
+      if (only) for (const id of only) this.retryUnverifiedLater(id);
+      return;
+    }
     this.inboxReplayRunning = true;
-    void this.replayInbox()
+    void this.replayInbox(only)
       .catch((err: unknown) => this.log('error', 'inbox replay failed', err))
       .finally(() => {
         this.inboxReplayRunning = false;
@@ -728,9 +804,11 @@ export class MatrixGatewayDO
    * object decides what a replay means for it (`matrix-turn-ledger.ts`):
    * stored reply, attach to the running turn, or refuse — never a second run.
    */
-  private async replayInbox(): Promise<void> {
+  private async replayInbox(only?: ReadonlySet<string>): Promise<void> {
     const sql = this.inboxSql();
-    const rows = listInboxRows(sql);
+    const rows = listInboxRows(sql).filter(
+      (row) => !only || only.has(row.eventId),
+    );
     if (rows.length === 0) return;
     const plan = planInboxReplay(rows, {
       inFlight: this.inFlightEvents,
@@ -767,6 +845,10 @@ export class MatrixGatewayDO
         this.log('warn', `inbox: alias lookup failed for ${row.roomId}`, err);
       }
       const inbound = inboundOfRow(row);
+      // A failed homeserver lookup leaves no verdict: the offer answers
+      // 'unverified' and the row stays for the next replay (its attempts
+      // were bumped above).
+      await this.resolveSenderServer(inbound);
       const threadRootId = await this.threadRootForRow(row);
       if (threadRootId !== inbound.threadRootId) {
         inbound.threadRootId = threadRootId;
@@ -796,6 +878,9 @@ export class MatrixGatewayDO
     // A debounce buffer firing after the stop would send through
     // `startedClient()`, which restarts the bot.
     this.ingest?.clear();
+    if (this.unverifiedRetry) clearTimeout(this.unverifiedRetry);
+    this.unverifiedRetry = null;
+    this.unverifiedEvents.clear();
     await super.stop();
   }
 
@@ -803,36 +888,56 @@ export class MatrixGatewayDO
   // Rooms
   // -------------------------------------------------------------------------
 
-  private async userServerName(userDid: string): Promise<string> {
+  /**
+   * The user's registered homeserver (`lookupUserServerName`: a 6 h cache
+   * over Blocksync, an expired entry when Blocksync fails). Throws when
+   * Blocksync fails and nothing was ever cached.
+   */
+  private async lookupUserServer(
+    userDid: string,
+  ): Promise<UserServerNameLookup> {
     const cfg = this.cfg();
     const cacheKey = `hs:${userDid}`;
-    const cached = await this.ctx.storage.get<HomeserverCacheEntry>(cacheKey);
-    if (cached && Date.now() - cached.at < HOMESERVER_CACHE_TTL_MS) {
-      return cached.serverName;
-    }
-    const blocksync = this.env.BLOCKSYNC_GRAPHQL_URL;
-    if (!blocksync) return cfg.serverName;
-    try {
-      const resolved = await fetchUserMatrixServerName(blocksync, userDid);
-      if (!resolved) return cfg.serverName;
-      await this.ctx.storage.put(cacheKey, {
-        serverName: resolved,
-        at: Date.now(),
-      } satisfies HomeserverCacheEntry);
-      if (resolved !== cfg.serverName) {
-        this.log(
-          'info',
-          `user ${userDid} lives on ${resolved} (oracle is on ${cfg.serverName}); room alias uses the user's server`,
-        );
-      }
-      return resolved;
-    } catch (err) {
+    const lookup = await lookupUserServerName(userDid, {
+      blocksyncGraphqlUrl: this.env.BLOCKSYNC_GRAPHQL_URL,
+      defaultServerName: cfg.serverName,
+      ttlMs: HOMESERVER_CACHE_TTL_MS,
+      readCache: () => this.ctx.storage.get<CachedUserServerName>(cacheKey),
+      writeCache: (_did, entry) => this.ctx.storage.put(cacheKey, entry),
+    });
+    if (lookup.source === 'stale')
       this.log(
         'warn',
-        `could not resolve ${userDid}'s homeserver from Blocksync; using ${cfg.serverName}`,
+        `could not refresh ${userDid}'s homeserver from Blocksync; using the expired cached ${lookup.serverName}`,
+        lookup.error,
+      );
+    else if (
+      lookup.source === 'blocksync' &&
+      lookup.serverName !== cfg.serverName
+    )
+      this.log(
+        'info',
+        `user ${userDid} lives on ${lookup.serverName} (oracle is on ${cfg.serverName}); room alias uses the user's server`,
+      );
+    return lookup;
+  }
+
+  /**
+   * The server half of the user's room alias. When the lookup has no answer
+   * the alias is tried on the oracle's own server — a wrong guess only
+   * misses the room — unlike the sender check, which gives no verdict then.
+   */
+  private async userServerName(userDid: string): Promise<string> {
+    try {
+      return (await this.lookupUserServer(userDid)).serverName;
+    } catch (err) {
+      const fallback = this.cfg().serverName;
+      this.log(
+        'warn',
+        `could not resolve ${userDid}'s homeserver from Blocksync; using ${fallback} for the room alias`,
         err,
       );
-      return cfg.serverName;
+      return fallback;
     }
   }
 

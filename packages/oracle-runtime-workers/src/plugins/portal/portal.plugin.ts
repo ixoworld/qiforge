@@ -178,6 +178,8 @@ export function buildBrowserTool(
       name: descriptor.name,
       description: descriptor.description,
       schema,
+      // A browser step (scroll, page, click) repeated is a new step.
+      repeatable: true,
     },
   );
 }

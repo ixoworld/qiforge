@@ -55,7 +55,8 @@ graph LR
   exported on a debounced alarm and re-imported on a cold boot. The oracle
   reaches it with the one delegation the user deposits for it
   (`POST /delegation`), which must carry `ixo:filesystem/.oracles` next to
-  the plugin grants — see [architecture](docs/architecture.md#self-sovereign-storage).
+  the plugin grants and must expire (a delegation with no expiry is refused)
+  — see [architecture](docs/architecture.md#self-sovereign-storage).
 - **Two scripts in production.** The gateway runs in its own Worker script
   so its memory footprint never competes with user objects; the scripts
   talk over cross-script Durable Object bindings.

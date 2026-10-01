@@ -531,11 +531,33 @@ becomes a turn (`src/matrix/group-chat.ts`):
 
 ### Rooms and aliases
 
+- **Who a room message belongs to.** A DID-shaped sender
+  (`@did-ixo-…:server`) is that DID; a non-DID sender in a user↔oracle
+  room is the room's owner, named by its canonical alias. Either way the
+  server the identity came from (the sender's, or the alias's) must be the
+  user's registered homeserver: the MatrixHomeServer service of their DID
+  document, resolved through Blocksync and cached six hours. Anyone can
+  register `@did-ixo-<someone>` on a server of their own, so a message
+  whose server does not match is dropped before any user object is woken
+  (`ingest dropped … : foreign`, a warning). A DID document that names no
+  homeserver falls back to the oracle's own server (`MATRIX_HOMESERVER_NAME`,
+  else the bot's): senders on it are accepted, senders anywhere else are
+  not. A Blocksync that cannot be reached is no verdict: the last cached
+  server is used even when its six hours are up (a registration rarely
+  moves; a stale entry is logged `using the expired cached …`), and with
+  nothing cached the message is neither dropped nor run — its inbox row
+  stays (`ingest: no homeserver verdict for … keeping …`, a warning) and it
+  is replayed 60 s later, and again on the next start. Each replay is
+  charged to the row, so an outage longer than its replays ends in the "try
+  again" notice, never a silent drop. Two members writing in one thread of
+  a group room are two turns, each in its own user object.
 - The user ↔ oracle room alias is
   `#<userDid>_<oracleENTITYDid>:<the USER's homeserver>` — the entity DID
   (`ORACLE_ENTITY_DID`), not the account DID, and the user's homeserver from
   their DID document's MatrixHomeServer service (resolved through Blocksync,
-  cached six hours), exactly as the Node runtime builds it. A decoupled
+  cached six hours; when Blocksync fails, the expired cached server, else
+  the oracle's own — a wrong guess there only misses the room), exactly as
+  the Node runtime builds it. A decoupled
   deployment (users on one homeserver, the bot on another) resolves nothing
   otherwise. Room ids are cached per user for 30 minutes.
 - Room state right after an invite: `getRoomState` answers a 403 (not yet a
@@ -598,7 +620,12 @@ becomes a turn (`src/matrix/group-chat.ts`):
 - **Idle eviction.** After five days without contact (`IDLE_EVICT_MS`) the
   working copy is wiped — only after a flush and a check that the upstream
   copy is current (generation + hash); otherwise it stays and the check
-  repeats. `GET /debug/storage` shows `writeGeneration` /
+  repeats. A request can arrive while that check awaits (the hash reads the
+  whole file, from R2 for tiered pages), so idleness is read again after it
+  (last access, dirty flag, runs, a flush in flight); activity keeps the
+  copy (`became active during the idle check`). The object drops its handles
+  before the wipe starts, and a request arriving during the wipe waits for
+  it and boots afresh from the owner copy (`src/do/idle-eviction.ts`). `GET /debug/storage` shows `writeGeneration` /
   `uploadedGeneration`, `dirty`, `nextFlushAt` (the deadline, absent when
   clean), `lastFlushAt`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
   `indexingInFlight`, `flushInFlight` and the alarm.
@@ -635,7 +662,12 @@ copy removed`; `legacyCleared` in `/debug/storage`).
   and a failed VFS write after the import keeps the working copy dirty and
   retried every 10 min while the object serves the imported history. The
   boot log reads `imported N bytes from legacy Matrix media` followed by
-  `migrated N bytes from legacy Matrix media to vfs (<etag>)`.
+  `migrated N bytes from legacy Matrix media to vfs (<etag>)`. When the VFS
+  holds no file, a legacy read that fails (Matrix unreachable, a forbidden
+  or failed media download) fails the boot like any owner-copy load, and the
+  next request retries; it never starts an empty history. Only a legacy
+  copy proven unusable (its whole header arrived and is not SQLite) counts
+  as absent, logged at error as `legacy Matrix copy is unusable`.
 
 ## Realtime channel
 
@@ -645,7 +677,11 @@ missed interval + timeout (240 s), then the object hibernates again. A wake
 that is only due for the heartbeat re-arms without opening the database.
 Sockets and their ping/pong bookkeeping live on the socket attachments and
 are re-adopted from `ctx.getWebSockets()` on every wake. Pending browser
-calls do not survive a restart (neither does the turn that made them). A
+calls do not survive a restart (neither does the turn that made them).
+A socket joins only a session of the user its CONNECT token proves, and a
+`tool_result` / `action_call_result` settles a call only when it arrives on
+a socket of the session the call was made for; a `sessionId` in the result
+payload is ignored. A
 dead connection is noticed by either side after up to four minutes; the
 client SDK's reconnect then restores it. `socket.io-client` must use
 `transports: ['websocket']`.
@@ -709,16 +745,17 @@ that can handle the requested parameters` is the memory engine's own
 
 ## Runbook
 
-| Symptom                                                                                 | Check                                                                                                           | Action                                                                                                                            |
-| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `/matrix/status` `instanceId` changes without a `planned recycle` log line              | Cloudflare analytics `exceededMemory`; `sendQueue.inFlight` at the time                                         | Lower `MATRIX_SEND_CONCURRENCY` / `MATRIX_TURN_CONCURRENCY`; check `cryptoStoreTransactions` stays a handful.                     |
-| `oneTimeKeys.uploads` climbing continuously, `One time key … already exists` in the log | `deviceRotations`                                                                                               | The SDK rotates by itself; if it loops, `POST /debug/matrix/rotate-device` once and prune stale devices.                          |
-| Sends stall, `sendQueue.durableRows` grows, `null pointer passed to rust` in the log    | `GET /debug/matrix/outbox` for rows with a bad thread id or high attempts                                       | The watchdog drops the row after three attempts; nothing to do unless the same row keeps coming back — then find who produced it. |
-| `GET /sessions` empty for a migrated user, `HISTORICAL_MESSAGE_NO_KEY_BACKUP`           | `keyBackupVersion`, `secretStorageUnlocked`                                                                     | Provision the key backup and `MATRIX_RECOVERY_PHRASE` (see configuration → first-time setup).                                     |
-| Page edits fail with `401 Invalid access token`                                         | Device list of the bot account                                                                                  | The plugins device was deleted; the gateway re-logs it in on the next use — do not delete `identity:bot-client`'s device again.   |
-| A user object never unloads (`instanceUptimeMs` grows while idle)                       | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).     |
-| Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                              | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                         |
-| `Network connection lost` on a gateway RPC                                              | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                      |
+| Symptom                                                                                                   | Check                                                                                                           | Action                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/matrix/status` `instanceId` changes without a `planned recycle` log line                                | Cloudflare analytics `exceededMemory`; `sendQueue.inFlight` at the time                                         | Lower `MATRIX_SEND_CONCURRENCY` / `MATRIX_TURN_CONCURRENCY`; check `cryptoStoreTransactions` stays a handful.                                        |
+| `oneTimeKeys.uploads` climbing continuously, `One time key … already exists` in the log                   | `deviceRotations`                                                                                               | The SDK rotates by itself; if it loops, `POST /debug/matrix/rotate-device` once and prune stale devices.                                             |
+| Sends stall, `sendQueue.durableRows` grows, `null pointer passed to rust` in the log                      | `GET /debug/matrix/outbox` for rows with a bad thread id or high attempts                                       | The watchdog drops the row after three attempts; nothing to do unless the same row keeps coming back — then find who produced it.                    |
+| `GET /sessions` empty for a migrated user, `HISTORICAL_MESSAGE_NO_KEY_BACKUP`                             | `keyBackupVersion`, `secretStorageUnlocked`                                                                     | Provision the key backup and `MATRIX_RECOVERY_PHRASE` (see configuration → first-time setup).                                                        |
+| Page edits fail with `401 Invalid access token`                                                           | Device list of the bot account                                                                                  | The plugins device was deleted; the gateway re-logs it in on the next use — do not delete `identity:bot-client`'s device again.                      |
+| A user object never unloads (`instanceUptimeMs` grows while idle)                                         | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).                        |
+| Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                                                | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                                            |
+| A plugin with `requires` is refused although the user authorized it; `[UCAN] the delegation expired at …` | `GET /debug/delegation` (the stored delegation's expiry)                                                        | Validity is checked at use: an expired stored delegation grants nothing even while the object stays warm. The user re-authorizes (a new delegation). |
+| `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                                         |
 
 ## Write claims and turn usage
 
@@ -730,7 +767,18 @@ run and session that started it, when, and a state. Never the arguments.
 - A returned outcome — success, or a failure the service reported (a 4xx,
   a validation error) — releases the row.
 - An abort, the turn deadline, a dropped connection or a 5xx keeps it
-  (`pending`).
+  (`pending`) — thrown, or returned by a tool that catches its failures
+  (an error-status result, a JSON `ok`/`success`/`successful: false`,
+  `isError` or `error` body, or text opening with `Error` / `Failed`, whose
+  cause is a timeout, a transport failure or a server error:
+  `[tool-execution] <tool>: returned a failure that leaves its outcome
+unknown (…)`). The cause is read from how such failures are reported — a
+  transport error code (`ECONNRESET`, `ETIMEDOUT`, `UND_ERR_…`), `fetch
+failed`, `socket hang up`, `Network connection lost`, `timed out`, an
+  `AbortError` / `TimeoutError` name, the editor's `flush_timeout`, a 5xx
+  status or reason phrase — never a bare word, so a refusal such as
+  `network 'base' not supported` releases the row. A returned failure of
+  any other kind is a reported one.
 - An identical write attempted while a row stands is not run. The model
   gets an error tool message asking it to verify with a read and tell the
   user; the row becomes `warned` and is owned by that run, which stays

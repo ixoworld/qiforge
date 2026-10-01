@@ -36,7 +36,9 @@ re-asked with a fabricated "authorization override".
    ledger). Before a write runs, the SHA-256 of its tool name and canonical
    arguments is claimed. A returned outcome — success or a failure the
    service reported — releases the claim. An abort, the deadline, a dropped
-   connection or a 5xx keeps it. An identical call while a claim stands is
+   connection or a 5xx keeps it, whether thrown or returned by a tool that
+   catches its own failures (an error-shaped result whose message is one of
+   those; `uncertainResultReason`). An identical call while a claim stands is
    answered with an error tool message telling the model to verify with a
    read and ask the user (the claim becomes `warned`, owned by that run);
    the same turn stays blocked, a later turn that asks again runs it. Claims

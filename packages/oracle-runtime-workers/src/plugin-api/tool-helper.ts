@@ -22,6 +22,8 @@ export interface ToolHelperOptions {
    * turn resumes after a reset); omitted or `'write'` otherwise.
    */
   effect?: PluginTool['effect'];
+  /** Same arguments again is a new action (a UI step); see `PluginTool.repeatable`. */
+  repeatable?: PluginTool['repeatable'];
   /**
    * Billing gate marker, kept for source compatibility with the Node
    * runtime's plugin contract. The Workers runtime has no commerce lane, so
@@ -54,7 +56,8 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility, billing, effect } = options;
+  const { name, description, schema, visibility, billing, effect, repeatable } =
+    options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -85,6 +88,9 @@ export function tool(
   }
   if (effect !== undefined) {
     pluginTool.effect = effect;
+  }
+  if (repeatable !== undefined) {
+    pluginTool.repeatable = repeatable;
   }
   return pluginTool;
 }

@@ -55,7 +55,7 @@
     "hono": "^4.13.4",
     "jose": "^6.0.0",
     "langchain": "1.4.2",
-    "langsmith": "^0.5.26",
+    "langsmith": "^0.6.0",
     "linkedom": "^0.18.12",
     "marked": "^16.4.0",
     "matrix-js-sdk": "^42.2.0",

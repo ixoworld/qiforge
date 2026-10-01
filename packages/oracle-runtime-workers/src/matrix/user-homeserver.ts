@@ -104,3 +104,93 @@ export async function fetchUserMatrixServerName(
     : [];
   return matrixServerNameFromServices(services);
 }
+
+/** A resolved server name as the gateway caches it (`hs:<did>` in its storage). */
+export interface CachedUserServerName {
+  serverName: string;
+  /** When Blocksync answered (epoch ms). */
+  at: number;
+}
+
+/**
+ * Where a `lookupUserServerName` answer came from:
+ * - `cache` — a cached Blocksync answer younger than the TTL;
+ * - `blocksync` — Blocksync answered just now (and the answer was cached);
+ * - `stale` — Blocksync failed and an EXPIRED cached answer was used;
+ * - `unregistered` — the DID document names no homeserver: the default;
+ * - `unconfigured` — no Blocksync URL is configured: the default.
+ */
+export type UserServerNameSource =
+  | 'cache'
+  | 'blocksync'
+  | 'stale'
+  | 'unregistered'
+  | 'unconfigured';
+
+export interface UserServerNameLookup {
+  serverName: string;
+  source: UserServerNameSource;
+  /** The Blocksync failure a `stale` answer stands in for. */
+  error?: unknown;
+}
+
+export interface UserServerNameLookupDeps {
+  blocksyncGraphqlUrl: string | undefined;
+  /** The answer for a DID that names no homeserver (the oracle's own server). */
+  defaultServerName: string;
+  /** How long a Blocksync answer is served from the cache without asking again. */
+  ttlMs: number;
+  readCache(userDid: string): Promise<CachedUserServerName | undefined>;
+  writeCache(userDid: string, entry: CachedUserServerName): Promise<void>;
+  now?: () => number;
+  fetchImpl?: typeof fetch;
+}
+
+/** Blocksync could not be asked and nothing was ever cached: there is no answer to give. */
+export class UserServerNameUnavailableError extends Error {
+  constructor(userDid: string, cause: unknown) {
+    super(
+      `could not resolve ${userDid}'s homeserver from Blocksync and nothing is cached`,
+      { cause },
+    );
+    this.name = 'UserServerNameUnavailableError';
+  }
+}
+
+/**
+ * The server a user's DID document registers, through a TTL cache over
+ * Blocksync. A failed Blocksync request is not an answer: it is served from
+ * the cached entry even when that has expired — a homeserver registration
+ * rarely changes, while treating the failure as "the oracle's own server"
+ * would make every user registered elsewhere look foreign for as long as
+ * Blocksync is down. With nothing cached it throws
+ * `UserServerNameUnavailableError`, and each caller decides: the sender check
+ * gives no verdict, the room-alias lookup falls back to the oracle's server.
+ */
+export async function lookupUserServerName(
+  userDid: string,
+  deps: UserServerNameLookupDeps,
+): Promise<UserServerNameLookup> {
+  const now = deps.now ?? Date.now;
+  const cached = await deps.readCache(userDid);
+  if (cached && now() - cached.at < deps.ttlMs)
+    return { serverName: cached.serverName, source: 'cache' };
+  if (!deps.blocksyncGraphqlUrl)
+    return { serverName: deps.defaultServerName, source: 'unconfigured' };
+  let resolved: string | null;
+  try {
+    resolved = await fetchUserMatrixServerName(
+      deps.blocksyncGraphqlUrl,
+      userDid,
+      deps.fetchImpl,
+    );
+  } catch (err) {
+    if (cached)
+      return { serverName: cached.serverName, source: 'stale', error: err };
+    throw new UserServerNameUnavailableError(userDid, err);
+  }
+  if (!resolved)
+    return { serverName: deps.defaultServerName, source: 'unregistered' };
+  await deps.writeCache(userDid, { serverName: resolved, at: now() });
+  return { serverName: resolved, source: 'blocksync' };
+}
