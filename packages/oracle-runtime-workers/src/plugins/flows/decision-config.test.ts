@@ -18,15 +18,20 @@ describe('explicit condition configuration', () => {
       ]);
     }
   });
-  it('does not silently add a source to stored legacy conditions', () => {
+  it('reads an untagged stored condition with the runtime-output interpretation', () => {
     const legacy = {
       fromStep: 'a',
       field: 'answer',
       is: 'equals' as const,
       value: true,
     };
-    expect(parseConditionsProp(buildConditionsProp([legacy]))).toEqual([
-      legacy,
+    const tagged = buildConditionsProp([
+      { ...legacy, source: 'runtime_output' },
+    ]);
+    const stored = tagged.replace('"source":"runtime_output",', '');
+    expect(stored).not.toContain('"source"');
+    expect(parseConditionsProp(stored)).toEqual([
+      { ...legacy, source: 'runtime_output' },
     ]);
   });
   it('keeps semantic gates separate and versioned', () => {

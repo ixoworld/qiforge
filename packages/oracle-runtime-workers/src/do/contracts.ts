@@ -175,6 +175,8 @@ export interface OracleWorkerEnv {
   /** Repetition guard: identical successful writes (default 1) and reads (5) per turn. */
   TURN_MAX_IDENTICAL_WRITES?: string;
   TURN_MAX_IDENTICAL_READS?: string;
+  /** Time limit per request-admission handler in ms (default 2000). */
+  REQUEST_ADMISSION_TIMEOUT_MS?: string;
   /** Durable-run knobs (docs/plans/durable-runs.md); see `runDurabilityConfig`. */
   RUN_KEEPALIVE_MS?: string;
   RUN_SEGMENT_FLUSH_MS?: string;

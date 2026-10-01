@@ -204,7 +204,7 @@ export function buildConditionsProp(conditions: Condition[]): string {
       name: `Condition from ${c.fromStep}`,
       sourceBlockId: stepIdToBlockId(c.fromStep),
       sourceBlockType: 'action',
-      ...(c.source ? { source: c.source } : {}),
+      source: c.source,
       rule: {
         type: 'property_value',
         property: c.field,
@@ -244,10 +244,12 @@ export function parseConditionsProp(
     const friendlyOp = EVALUATOR_TO_OP[String(rule.operator)];
     if (!friendlyOp) continue;
     out.push({
-      ...(entry.source === 'configured_input' ||
-      entry.source === 'runtime_output'
-        ? { source: entry.source }
-        : {}),
+      // An untagged stored condition is evaluated against runtime output, so
+      // it reads as one and round-trips through update_step unchanged in meaning.
+      source:
+        entry.source === 'configured_input'
+          ? 'configured_input'
+          : 'runtime_output',
       fromStep: resolveStep(sourceBlockId),
       field: String(rule.property),
       is: friendlyOp,

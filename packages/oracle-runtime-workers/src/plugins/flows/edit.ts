@@ -70,7 +70,7 @@ export function setStepConditions(
 export function setStepSemanticGate(
   doc: YDoc,
   stepId: string,
-  gate: FlowStep['semanticGate'],
+  gate: FlowStep['semanticGate'] | null,
 ): void {
   setStepExecutionProps(doc, stepId, {
     semanticGate: gate ? JSON.stringify(gate) : '',

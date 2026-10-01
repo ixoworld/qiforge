@@ -134,6 +134,7 @@ describe('translator: conditions (the silent-failure guard)', () => {
     'writes operator %s as the evaluator string %s',
     (friendly, evaluator) => {
       const condition: Condition = {
+        source: 'runtime_output',
         fromStep: 'a',
         field: 'decision',
         is: friendly,
@@ -152,6 +153,7 @@ describe('translator: conditions (the silent-failure guard)', () => {
 
   it('round-trips a condition through build/parse', () => {
     const condition: Condition = {
+      source: 'configured_input',
       fromStep: 'approve',
       field: 'status',
       is: 'equals',

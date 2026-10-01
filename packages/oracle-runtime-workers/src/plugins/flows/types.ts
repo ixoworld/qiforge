@@ -191,10 +191,7 @@ export const flowSpecSchema = z.object({
   steps: z.array(flowStepSchema),
 });
 
-export type Condition = Omit<z.infer<typeof conditionSchema>, 'source'> & {
-  /** Missing only on stored legacy conditions; the runner preserves runtime-output semantics. */
-  source?: 'configured_input' | 'runtime_output';
-};
+export type Condition = z.infer<typeof conditionSchema>;
 export type FlowStep = z.infer<typeof flowStepSchema>;
 export type FlowSpecInput = z.infer<typeof flowSpecSchema>;
 
@@ -222,11 +219,7 @@ export interface StepStatus {
 }
 
 /** A step as returned by read tools: the authored shape plus its read-only status. */
-export type FlowStepRead = Omit<FlowStep, 'runWhen' | 'conditions'> & {
-  runWhen?: Condition;
-  conditions?: Condition[];
-  status?: StepStatus;
-};
+export type FlowStepRead = FlowStep & { status?: StepStatus };
 
 /** A flow as returned by read tools. */
 export interface FlowSpecRead {

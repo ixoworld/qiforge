@@ -47,6 +47,7 @@ import { flowSpecToBaseUcan } from '../translator';
 import {
   flowSpecSchema,
   flowStepSchema,
+  semanticGateSchema,
   type Condition,
   type FlowSpecInput,
   type FlowStep,
@@ -361,13 +362,19 @@ const connectSchema = z.object({
   toStep: z.string().min(1),
   input: z.string().min(1),
 });
-const stepPatchSchema = flowStepSchema.partial().extend({
+export const stepPatchSchema = flowStepSchema.partial().extend({
   phase: z
     .string()
     .min(1)
     .nullable()
     .optional()
     .describe('Set the step phase, or use null to clear an existing phase.'),
+  semanticGate: semanticGateSchema
+    .nullable()
+    .optional()
+    .describe(
+      'Set the additional semantic gate, or use null to clear an existing gate.',
+    ),
 });
 const updateStepSchema = z.object({
   ...base,
@@ -516,7 +523,7 @@ export function buildAuthoringTools(
         description:
           "Update any subset of a step's settings in one call (phase, execution boundary, required skills, inputs, conditions, schedule, assignee, confirmation, " +
           'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
-          'clear an onEvent auto-trigger. Set phase to null to clear an existing phase.',
+          'clear an onEvent auto-trigger. Set phase or semanticGate to null to clear it.',
         schema: updateStepSchema,
       },
     ),

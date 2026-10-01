@@ -1,19 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
-import { admitRequest, admissionMetadata } from './request-admission';
+import { z } from 'zod';
+import {
+  RequestAdmissionError,
+  admissionConfig,
+  admitRequest,
+  admissionMetadata,
+} from './request-admission';
 import { makePlugin, makeBuildCtx, makeRunConfig } from './test-fixtures';
 import { buildRuntimeContext, createNoopAmbient } from './runtime-context';
 import { MiddlewareRegistry } from './registries';
 import type { RequestAdmissionContext } from '../plugin-api/request-admission';
 
-function context(did: string): RequestAdmissionContext {
+function context(did: string): Omit<RequestAdmissionContext, 'config'> {
   return {
-    config: {},
     user: { did, matrixUserId: '', ucanDelegation: { raw: '' } },
     session: { id: did, requestId: did, client: 'portal' },
     message: '/status',
     signal: new AbortController().signal,
   };
 }
+
+const options = { env: {}, timeoutMs: 1_000, warn: () => undefined };
 
 describe('request admission', () => {
   it('isolates concurrent users and stops after the first handler', async () => {
@@ -30,7 +37,9 @@ describe('request admission', () => {
       makePlugin({ name: 'fallback', getRequestAdmission: fallback }),
     ];
     const results = await Promise.all(
-      ['alice', 'bob'].map((did) => admitRequest(plugins, context(did))),
+      ['alice', 'bob'].map((did) =>
+        admitRequest(plugins, context(did), options),
+      ),
     );
     expect(results).toEqual([
       { kind: 'handled', text: 'alice', title: 'Status' },
@@ -50,8 +59,9 @@ describe('request admission', () => {
           }),
         ],
         context('alice'),
+        options,
       ),
-    ).rejects.toThrow('denied');
+    ).rejects.toThrow(RequestAdmissionError);
   });
   it('rejects late success after cancellation', async () => {
     const abort = new AbortController();
@@ -67,8 +77,76 @@ describe('request admission', () => {
           }),
         ],
         { ...context('alice'), signal: abort.signal },
+        options,
       ),
     ).rejects.toThrow('cancelled');
+  });
+  it('treats a handler that exceeds its time limit as pass and asks the next one', async () => {
+    const warn = vi.fn();
+    const seen: AbortSignal[] = [];
+    const result = await admitRequest(
+      [
+        makePlugin({
+          name: 'slow',
+          getRequestAdmission: (ctx) => {
+            seen.push(ctx.signal);
+            return new Promise(() => undefined);
+          },
+        }),
+        makePlugin({
+          name: 'fast',
+          getRequestAdmission: () => ({
+            kind: 'handled',
+            text: 'Status',
+            title: 'Status',
+          }),
+        }),
+      ],
+      context('alice'),
+      { env: {}, timeoutMs: 20, warn },
+    );
+    expect(result).toEqual({
+      kind: 'handled',
+      text: 'Status',
+      title: 'Status',
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('slow timed out after 20 ms'),
+    );
+    expect(seen[0]?.aborted).toBe(true);
+  });
+  it('hands each handler its own config keys and no core credentials', async () => {
+    const env = {
+      ORACLE_DID: 'did:ixo:oracle',
+      OPEN_ROUTER_API_KEY: 'sk-provider',
+      MATRIX_ORACLE_ADMIN_PASSWORD: 'bot-password',
+      MATRIX_RECOVERY_PHRASE: 'recovery',
+      CLOUDFLARE_API_TOKEN: 'cf-token',
+      STATUS_URL: 'https://status.example',
+      OTHER_API_KEY: 'other-secret',
+    };
+    const seen = vi.fn(() => ({ kind: 'pass' as const }));
+    const plugin = makePlugin({
+      name: 'status',
+      configSchema: z.object({ STATUS_URL: z.string() }),
+      getRequestAdmission: seen,
+    });
+    await admitRequest([plugin], context('alice'), {
+      env,
+      timeoutMs: 1_000,
+      warn: () => undefined,
+    });
+    expect(seen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: {
+          ORACLE_DID: 'did:ixo:oracle',
+          STATUS_URL: 'https://status.example',
+        },
+      }),
+    );
+    expect(admissionConfig(env, plugin)).not.toHaveProperty(
+      'OPEN_ROUTER_API_KEY',
+    );
   });
   it('bounds and validates optional metadata', () => {
     expect(admissionMetadata('{"flowId":"a"}')).toEqual({ flowId: 'a' });
