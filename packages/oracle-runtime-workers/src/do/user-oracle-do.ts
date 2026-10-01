@@ -61,6 +61,7 @@ import {
   type CapabilityRouter,
 } from '../core/capability-router';
 import { createMainAgent } from '../core/main-agent';
+import { bootHiddenPlugins } from '../core/tool-access';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
@@ -253,7 +254,7 @@ import {
   type TranscriptPageOptions,
 } from './transcript';
 import { evictIdleWorkingCopy } from './idle-eviction';
-import { WorkersUcanService } from './ucan-service';
+import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
 
 const DB_FILE = 'oracle.db';
@@ -769,19 +770,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
     }
 
-    /**
-     * The delegation a turn runs under: the one this request carried, else
-     * the user's stored one (a Matrix turn carries none), with the
-     * capabilities it grants.
-     */
+    /** The delegation a turn runs under (`resolveTurnDelegation`). */
     private async turnDelegation(
       identity: TurnIdentity,
     ): Promise<UcanDelegation> {
-      const raw =
-        identity.ucanDelegation ??
-        this.delegations.get(identity.userDid)?.raw ??
-        '';
-      return this.ucan ? this.ucan.withCapabilities(raw) : { raw };
+      return resolveTurnDelegation(
+        identity.ucanDelegation,
+        this.delegations.get(identity.userDid)?.raw,
+        this.ucan,
+      );
     }
 
     /** Idempotent boot: bind user, open SQLite (importing the owner copy on a cold object). */
@@ -4072,12 +4069,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             client: req.client,
             env: langsmithEnvFromWorkerEnv(this.env),
           });
+      // The delegation the whole turn reads: the router's candidates here,
+      // every capability check of the build and its tools below.
+      const ucanDelegation = await this.turnDelegation(req.identity);
       const preloadedPlugins =
         !suppliedContextOnly && this.capabilityRouter
           ? await this.capabilityRouter({
               mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
               manifests: core.registries.manifests.collect(),
               loaded: priorLoaded,
+              hidden: await bootHiddenPlugins({
+                registries: core.registries,
+                buildCtx: core.buildCtx(),
+                has: (resource, action) =>
+                  ambient.ucan.hasCapability(ucanDelegation, resource, action),
+              }),
               text: body.message,
               requestId: req.requestId,
               signal: abortController.signal,
@@ -4252,7 +4258,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               req.identity.matrixUserId ??
               (await this.resolveMatrixUserId(req.identity.userDid)) ??
               '',
-            ucanDelegation: await this.turnDelegation(req.identity),
+            ucanDelegation,
             timezone: req.identity.timezone,
             currentTime: new Date().toISOString(),
           },

@@ -39,6 +39,11 @@ export interface CapabilityRouteTurn {
   manifests: readonly RegisteredManifest[];
   /** Plugins the thread has already loaded (the checkpointed channel). */
   loaded: ReadonlySet<string>;
+  /**
+   * Plugins the user's delegation leaves with nothing to use (all of their
+   * tools admin-plane and not granted): never offered to the router.
+   */
+  hidden?: ReadonlySet<string>;
   /** The user's message text for this turn. */
   text: string;
   requestId: string;
@@ -71,18 +76,21 @@ export function capabilityRouterMode(value: unknown): CapabilityRouterMode {
 /**
  * The manifests the router may choose from: effectively on-demand plugins the
  * thread has not loaded yet. `always` plugins are already bound and `silent`
- * ones are never surfaced, so predicting them is pointless.
+ * ones are never surfaced, so predicting them is pointless; a `hidden` one
+ * (no tool the user's delegation reaches) is not even named to the router.
  */
 export function routableCandidates(
   manifests: readonly RegisteredManifest[],
   loaded: ReadonlySet<string>,
+  hidden: ReadonlySet<string> = NOTHING,
 ): RoutableCapability[] {
   return toRoutableCapabilities(
     manifests
       .filter(
         ({ pluginName, manifest }) =>
           (manifest.visibility ?? 'on-demand') === 'on-demand' &&
-          !loaded.has(pluginName),
+          !loaded.has(pluginName) &&
+          !hidden.has(pluginName),
       )
       .map(({ pluginName, manifest }) => ({
         name: pluginName,
@@ -148,7 +156,11 @@ export function createCapabilityRouter(
     if (turn.mode === 'off') return NOTHING;
     const text = turn.text.trim();
     if (!text) return NOTHING;
-    const capabilities = routableCandidates(turn.manifests, turn.loaded);
+    const capabilities = routableCandidates(
+      turn.manifests,
+      turn.loaded,
+      turn.hidden,
+    );
     if (capabilities.length === 0) return NOTHING;
 
     // The turn is prepared from a checkpoint read without its messages, so

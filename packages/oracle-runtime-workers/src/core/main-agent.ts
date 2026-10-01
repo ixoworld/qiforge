@@ -67,6 +67,7 @@ import { toolEffectOf } from './middlewares/tool-marks';
 import { isHarnessLimitError } from './turn-budget';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
 import { computeSubAgentToolName } from './subagent-as-tool';
+import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
 
 import { taskExecutionProfile } from './execution-profile';
@@ -285,10 +286,50 @@ export async function createMainAgent(
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
   // slower of the two — not their sum — gates the build.
-  const [allTools, subAgentEntries] = await Promise.all([
+  const [collectedTools, collectedSubAgents] = await Promise.all([
     registries.tools.collect(buildCtx, rtCtx),
     registries.subAgents.collect(buildCtx, rtCtx),
   ]);
+  // The user's delegation decides what the model may see, by one rule: a
+  // manifest's `requires` per plugin (below), a tool's plane per tool here.
+  const hasCapability = (resource: string, action: string): boolean =>
+    ambient.ucan.hasCapability(
+      requestCtx.user.ucanDelegation,
+      resource,
+      action,
+    );
+  // Admin-plane tools the delegation does not grant are dropped before
+  // anything is selected or bound, from sub-agents too; a plugin left with
+  // nothing is hidden (`hiddenPlugins`).
+  const toolAccess = resolveTurnToolAccess({
+    tools: collectedTools,
+    subAgents: collectedSubAgents,
+    buildCtx,
+    has: hasCapability,
+    logger: ambient.logger,
+  });
+  const allTools = toolAccess.tools;
+  const subAgentEntries = toolAccess.subAgents;
+  if (toolAccess.withheldToolNames.size > 0)
+    ambient.logger.log(
+      `[main-agent] admin tools withheld from ${requestCtx.user.did} (delegation does not grant them): ${[...toolAccess.withheldToolNames].join(', ')}`,
+    );
+  // The router predicts before the tools are collected (see
+  // `routableCandidates`): its preload of a plugin left with nothing is void,
+  // for the gate and for what handlers see as loaded.
+  const turnPreloads = preloadedPlugins
+    ? new Set(
+        [...preloadedPlugins].filter(
+          (pluginName) => !toolAccess.hiddenPlugins.has(pluginName),
+        ),
+      )
+    : undefined;
+  for (const pluginName of preloadedPlugins ?? [])
+    if (
+      !turnPreloads?.has(pluginName) &&
+      !(state.loadedPlugins ?? []).includes(pluginName)
+    )
+      loadedSet.delete(pluginName);
 
   // The per-turn tool-surface line. Request tools are named in full (there
   // are only a handful and they are the ones that vary turn to turn); the
@@ -308,13 +349,7 @@ export async function createMainAgent(
   // the gate hides and refuses their tools, the prompt leaves them out.
   const unmetRequirements = new Map<string, CapabilityRequirement[]>();
   for (const { pluginName, manifest } of manifestEntries) {
-    const missing = unmetManifestRequirements(manifest, (resource, action) =>
-      ambient.ucan.hasCapability(
-        requestCtx.user.ucanDelegation,
-        resource,
-        action,
-      ),
-    );
+    const missing = unmetManifestRequirements(manifest, hasCapability);
     if (missing.length > 0) unmetRequirements.set(pluginName, missing);
   }
   if (unmetRequirements.size > 0)
@@ -341,6 +376,7 @@ export async function createMainAgent(
     ...buildMetaTools({
       manifestRegistry: registries.manifests,
       toolRegistry: registries.tools,
+      toolAccess,
     }),
     // Pages through tool results the result cap saved whole (result-cap.ts);
     // its chunks stay well under the cap so a page is never capped itself.
@@ -366,6 +402,7 @@ export async function createMainAgent(
     wrapPluginTool(entry.tool, {
       ambient,
       state: wrapState,
+      pluginName: entry.pluginName,
       pluginTitle: titleByPlugin.get(entry.pluginName),
       sharedFactory,
       fallbackContext,
@@ -533,8 +570,9 @@ export async function createMainAgent(
     createCapabilityGateMiddleware({
       pluginByToolName,
       visibilityByToolName,
-      preloadedPlugins,
+      preloadedPlugins: turnPreloads,
       unmetRequirements,
+      withheldToolNames: toolAccess.withheldToolNames,
       logger: ambient.logger,
     }),
     createToolValidationMiddleware({
@@ -626,11 +664,19 @@ export async function createMainAgent(
     ambient.logger.log(`[context] ${describeBudget(contextBudget)}`);
 
   // ── 7. Prompt composition ───────────────────────────────────────────────
-  // An always-on plugin the user may not use is left out of the prompt too.
-  const eagerEntries: Tier1Entry[] = manifestEntries.filter(
-    ({ pluginName, manifest }) =>
-      manifest.visibility === 'always' && !unmetRequirements.has(pluginName),
-  );
+  // An always-on plugin the user may not use is left out of the prompt too,
+  // and no example teaches a tool the turn withholds.
+  const eagerEntries: Tier1Entry[] = manifestEntries
+    .filter(
+      ({ pluginName, manifest }) =>
+        manifest.visibility === 'always' &&
+        !unmetRequirements.has(pluginName) &&
+        !toolAccess.hiddenPlugins.has(pluginName),
+    )
+    .map(({ pluginName, manifest }) => ({
+      pluginName,
+      manifest: withoutWithheldExamples(manifest, toolAccess.withheldToolNames),
+    }));
   const tier1 = renderTier1({ manifests: eagerEntries });
   for (const warning of tier1.warnings) ambient.logger.warn(warning);
 

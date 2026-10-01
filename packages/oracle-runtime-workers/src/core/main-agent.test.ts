@@ -25,6 +25,7 @@ import {
   makeEnv,
   makeManifest,
   makePlugin,
+  makeSubAgent,
   makeTool,
 } from './test-fixtures';
 import { createToolExecutionMiddleware } from './middlewares/tool-execution';
@@ -1159,6 +1160,227 @@ describe('createMainAgent tool execution', () => {
     );
     expect(calls.read).toBe(1);
   }, 15_000);
+});
+
+describe('createMainAgent admin-plane tools', () => {
+  const ADMIN_ROOT = {
+    resource: 'ixo:qiforge:admin-tool',
+    action: 'admin-tool/invoke',
+  };
+
+  /** `requestCtx` whose delegation (as `withCapabilities` parses it) grants `capabilities`. */
+  const granting = (
+    capabilities: Array<{ resource: string; action: string }>,
+  ) => ({
+    ...requestCtx,
+    user: {
+      ...requestCtx.user,
+      ucanDelegation: { raw: 'ucan', capabilities },
+    },
+  });
+
+  it('binds only the admin tools the delegation grants, and the prompt never shows the rest', async () => {
+    const runs = { grant: 0, rotate: 0 };
+    const authority = makePlugin({
+      name: 'authority',
+      manifest: makeManifest({
+        title: 'Authority',
+        summary: 'Grants delegated authority.',
+        visibility: 'always',
+        examples: [{ user: 'Let Bob sign for me', tool: 'grant_authority' }],
+      }),
+      getTools: () => [
+        makeTool('grant_authority', {
+          plane: 'admin',
+          handler: async () => {
+            runs.grant += 1;
+            return 'granted';
+          },
+        }),
+      ],
+    });
+    const keys = makePlugin({
+      name: 'keys',
+      manifest: makeManifest({
+        title: 'Keys',
+        summary: 'Signing keys.',
+        visibility: 'always',
+        examples: [
+          { user: 'Rotate my key', tool: 'rotate_key' },
+          { user: 'Which keys do I have?', tool: 'list_keys' },
+        ],
+      }),
+      getTools: () => [
+        makeTool('list_keys'),
+        makeTool('rotate_key', {
+          plane: 'admin',
+          handler: async () => {
+            runs.rotate += 1;
+            return 'rotated';
+          },
+        }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), authority, keys]);
+    await core.warm();
+    const build = (
+      capabilities: Array<{ resource: string; action: string }>,
+      script: Script = [],
+    ) =>
+      createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({ main: script })),
+        requestCtx: granting(capabilities),
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+
+    const denied = await build(
+      [
+        {
+          resource: 'ixo:qiforge:admin-tool/keys/rotate_key_all',
+          action: 'admin-tool/invoke',
+        },
+      ],
+      [
+        [
+          { name: 'rotate_key', args: {}, id: 'c1' },
+          { name: 'grant_authority', args: {}, id: 'c2' },
+        ],
+        [],
+      ],
+    );
+    expect(denied.boundToolNames).toContain('list_keys');
+    expect(denied.boundToolNames).not.toContain('rotate_key');
+    expect(denied.boundToolNames).not.toContain('grant_authority');
+    // A plugin left with nothing is out of the prompt; a mixed one stays,
+    // and neither teaches the withheld tool by example.
+    expect(denied.systemPrompt).not.toContain('**authority**');
+    expect(denied.systemPrompt).toContain('- **keys** — Signing keys.');
+    expect(denied.systemPrompt).toContain('list_keys()');
+    expect(denied.systemPrompt).not.toContain('rotate_key');
+    expect(denied.systemPrompt).not.toContain('grant_authority');
+
+    // Named anyway (a stale thread, injected text): refused by the gate,
+    // without saying what the tool is, and never run.
+    const result = (await denied.agent.invoke(
+      { messages: [new HumanMessage('Rotate my key.')] },
+      { configurable: { thread_id: 'admin-denied' } },
+    )) as { messages: BaseMessage[] };
+    expect(toolMessages(result.messages)).toHaveLength(2);
+    for (const message of toolMessages(result.messages)) {
+      expect(message.status).toBe('error');
+      expect(String(message.content)).toContain(
+        'is not available in this conversation',
+      );
+    }
+    expect(runs).toEqual({ grant: 0, rotate: 0 });
+
+    const granted = await build(
+      [ADMIN_ROOT],
+      [
+        [
+          { name: 'rotate_key', args: {}, id: 'c1' },
+          { name: 'grant_authority', args: {}, id: 'c2' },
+        ],
+        [],
+      ],
+    );
+    expect(granted.boundToolNames).toEqual(
+      expect.arrayContaining(['list_keys', 'rotate_key', 'grant_authority']),
+    );
+    expect(granted.systemPrompt).toContain('- **authority** — ');
+    await granted.agent.invoke(
+      { messages: [new HumanMessage('Rotate my key.')] },
+      { configurable: { thread_id: 'admin-granted' } },
+    );
+    expect(runs).toEqual({ grant: 1, rotate: 1 });
+  });
+
+  it("cuts a sub-agent's admin tools, and hides a sub-agent (and plugin) left with none", async () => {
+    const runs = { status: 0, reset: 0, purge: 0 };
+    const counted = (key: keyof typeof runs, plane?: 'admin') =>
+      makeTool(key === 'status' ? 'ops_status' : `ops_${key}`, {
+        ...(plane ? { plane } : {}),
+        handler: async () => {
+          runs[key] += 1;
+          return `${key} done`;
+        },
+      });
+    const ops = makePlugin({
+      name: 'ops',
+      manifest: makeManifest({ title: 'Ops', visibility: 'on-demand' }),
+      getSubAgents: () => [
+        makeSubAgent('Ops Agent', {
+          tools: [counted('status'), counted('reset', 'admin')],
+          forwardTools: ['ops_status', 'ops_reset'],
+        }),
+      ],
+    });
+    const purger = makePlugin({
+      name: 'purger',
+      manifest: makeManifest({ title: 'Purger', visibility: 'on-demand' }),
+      getSubAgents: () => [
+        makeSubAgent('Purge Agent', { tools: [counted('purge', 'admin')] }),
+      ],
+    });
+    const core = bootCore([new WeatherPlugin(), ops, purger]);
+    await core.warm();
+
+    const { agent, boundToolNames } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'list_capabilities', args: {}, id: 'm1' }],
+            [
+              {
+                name: 'call_ops_agent',
+                args: { task: 'Reset ops.' },
+                id: 'm2',
+              },
+            ],
+            [],
+          ],
+          subagent: [
+            [
+              { name: 'ops_reset', args: {}, id: 's1' },
+              { name: 'ops_status', args: {}, id: 's2' },
+            ],
+            [],
+          ],
+        }),
+      ),
+      requestCtx: granting([]),
+      state: { loadedPlugins: ['ops'] },
+      checkpointer: new MemorySaver(),
+    });
+    expect(boundToolNames).toContain('call_ops_agent');
+    expect(boundToolNames).not.toContain('call_purge_agent');
+
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Reset ops.')], loadedPlugins: ['ops'] },
+      { configurable: { thread_id: 'admin-subagent' } },
+    )) as { messages: BaseMessage[] };
+    const messages = toolMessages(result.messages);
+    const listed = JSON.parse(
+      String(messages.find((m) => m.tool_call_id === 'm1')?.content),
+    ) as Array<{ name: string }>;
+    expect(listed.map((e) => e.name)).not.toContain('purger');
+    expect(listed.map((e) => e.name)).toContain('ops');
+    // The inner admin tool was never bound (and is not forwarded); the
+    // orchestration one ran and was.
+    expect(runs).toEqual({ status: 1, reset: 0, purge: 0 });
+    expect(messages.map((m) => m.name)).not.toContain('ops_reset');
+    expect(messages.map((m) => m.name)).toContain('ops_status');
+  });
 });
 
 describe('supplied-context Markdown execution', () => {

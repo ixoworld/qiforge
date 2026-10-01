@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { tool } from '../plugin-api/tool-helper.js';
+import { canAccessToolPlane } from '../plugin-api/tool-plane.js';
 import type { PluginManifest, PluginTool } from '../plugin-api/types.js';
 import type { ManifestRegistry } from '../registries/manifest-registry.js';
+import type { ToolRegistry } from '../registries/tool-registry.js';
 
 /**
  * Schema accepted by `list_capabilities`.
@@ -34,6 +36,7 @@ interface CapabilityListing {
  */
 export function buildListCapabilitiesTool(
   manifestRegistry: ManifestRegistry,
+  toolRegistry: ToolRegistry,
 ): PluginTool {
   return tool(
     async (args, ctx) => {
@@ -49,6 +52,14 @@ export function buildListCapabilitiesTool(
 
         if (visibility === 'silent' && !includeSilent) continue;
         if (visibility === 'on-demand' && !includeOnDemand) continue;
+
+        const knownTools = toolRegistry.toolSummariesForPlugin(pluginName);
+        if (
+          knownTools.length > 0 &&
+          !knownTools.some((candidate) => canAccessToolPlane(ctx, candidate))
+        ) {
+          continue;
+        }
 
         out.push({
           name: pluginName,

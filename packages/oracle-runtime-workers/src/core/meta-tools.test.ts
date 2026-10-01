@@ -6,6 +6,7 @@ import {
   buildListCapabilitiesTool,
   buildLoadCapabilityTool,
   buildMetaTools,
+  type MetaToolAccess,
 } from './meta-tools';
 import { ManifestRegistry, ToolRegistry } from './registries';
 import {
@@ -16,6 +17,7 @@ import {
   makeRuntimeContext,
   makeTool,
 } from './test-fixtures';
+import { resolveTurnToolAccess } from './tool-access';
 import { acquireToolLock } from './utils';
 
 interface Listing {
@@ -34,6 +36,34 @@ interface LoadResult extends PluginManifest {
     missing: { resource: string; action: string }[];
     reason: string;
   };
+}
+
+/** A turn whose tool planes withhold nothing. */
+const OPEN: MetaToolAccess = {
+  withheldToolNames: new Set(),
+  hiddenPlugins: new Set(),
+};
+
+/** A turn whose delegation grants exactly `capabilities`. */
+function grantedContext(
+  capabilities: { resource: string; action: string }[],
+  loadedPlugins: string[] = [],
+) {
+  const run = makeRunConfig();
+  return makeRuntimeContext(
+    { loadedPlugins: new Set(loadedPlugins), toolCallId: 'call-1' },
+    {
+      runConfig: {
+        context: {
+          ...run.context,
+          user: {
+            ...run.context.user,
+            ucanDelegation: { raw: 'delegation', capabilities },
+          },
+        },
+      },
+    },
+  );
 }
 
 async function buildRegistries() {
@@ -82,9 +112,11 @@ describe('buildMetaTools', () => {
   it('returns load_capability then list_capabilities', async () => {
     const { manifests, tools } = await buildRegistries();
     expect(
-      buildMetaTools({ manifestRegistry: manifests, toolRegistry: tools }).map(
-        (t) => t.name,
-      ),
+      buildMetaTools({
+        manifestRegistry: manifests,
+        toolRegistry: tools,
+        toolAccess: OPEN,
+      }).map((t) => t.name),
     ).toEqual(['load_capability', 'list_capabilities']);
   });
 });
@@ -92,7 +124,7 @@ describe('buildMetaTools', () => {
 describe('list_capabilities', () => {
   it('lists always + on-demand (not silent) as JSON with loaded flags', async () => {
     const { manifests } = await buildRegistries();
-    const tool = buildListCapabilitiesTool(manifests);
+    const tool = buildListCapabilitiesTool(manifests, OPEN);
 
     const raw = await tool.handler(
       {},
@@ -125,7 +157,7 @@ describe('list_capabilities', () => {
 describe('load_capability', () => {
   it('returns a Command with loadedPlugins + a ToolMessage carrying the manifest and tools', async () => {
     const { manifests, tools } = await buildRegistries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
 
     const result = await load.handler(
       { names: ['weather', 'memory'] },
@@ -157,7 +189,7 @@ describe('load_capability', () => {
 
   it('returns the result array as JSON text when everything was already available', async () => {
     const { manifests, tools } = await buildRegistries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     const result = await load.handler(
       { names: ['weather'] },
       makeRuntimeContext({ loadedPlugins: new Set(['weather']) }),
@@ -169,7 +201,7 @@ describe('load_capability', () => {
 
   it('rejects unknown and silent capabilities, and concurrent calls per session', async () => {
     const { manifests, tools } = await buildRegistries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     await expect(
       load.handler({ names: ['nope'] }, makeRuntimeContext()),
     ).rejects.toThrow(/list_capabilities/);
@@ -218,31 +250,9 @@ describe("plugins the user's authorization does not cover", () => {
     return { manifests, tools };
   }
 
-  /** A turn whose delegation grants exactly `capabilities`. */
-  function grantedContext(
-    capabilities: { resource: string; action: string }[],
-    loadedPlugins: string[] = [],
-  ) {
-    const run = makeRunConfig();
-    return makeRuntimeContext(
-      { loadedPlugins: new Set(loadedPlugins), toolCallId: 'call-1' },
-      {
-        runConfig: {
-          context: {
-            ...run.context,
-            user: {
-              ...run.context.user,
-              ucanDelegation: { raw: 'delegation', capabilities },
-            },
-          },
-        },
-      },
-    );
-  }
-
   it('load_capability refuses the plugin, names what is missing, and still loads the rest of the batch', async () => {
     const { manifests, tools } = await registries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     const result = await load.handler(
       { names: ['files', 'weather'] },
       grantedContext([{ resource: 'ixo:oracle', action: '*' }]),
@@ -269,7 +279,7 @@ describe("plugins the user's authorization does not cover", () => {
 
   it('load_capability refuses without a state update when nothing else was asked for', async () => {
     const { manifests, tools } = await registries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     const result = await load.handler({ names: ['files'] }, grantedContext([]));
     expect(typeof result).toBe('string');
     const parsed = JSON.parse(result as string) as LoadResult[];
@@ -278,7 +288,7 @@ describe("plugins the user's authorization does not cover", () => {
 
   it('load_capability loads the plugin once the delegation grants it, directly or through a parent grant', async () => {
     const { manifests, tools } = await registries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     for (const grant of [
       { resource: 'ixo:filesystem', action: 'fs/read' },
       { resource: 'ixo:filesystem', action: 'fs/*' },
@@ -299,7 +309,7 @@ describe("plugins the user's authorization does not cover", () => {
 
   it('a narrower grant does not stand in for the resource the plugin requires', async () => {
     const { manifests, tools } = await registries();
-    const load = buildLoadCapabilityTool(manifests, tools);
+    const load = buildLoadCapabilityTool(manifests, tools, OPEN);
     const result = await load.handler(
       { names: ['files'] },
       grantedContext([
@@ -313,7 +323,7 @@ describe("plugins the user's authorization does not cover", () => {
 
   it('list_capabilities marks the plugin unavailable and not loaded, even if an earlier turn loaded it', async () => {
     const { manifests } = await registries();
-    const list = buildListCapabilitiesTool(manifests);
+    const list = buildListCapabilitiesTool(manifests, OPEN);
     const out = JSON.parse(
       (await list.handler(
         {},
@@ -340,5 +350,133 @@ describe("plugins the user's authorization does not cover", () => {
     const files = granted.find((e) => e.name === 'files');
     expect(files?.loaded).toBe(true);
     expect(files?.unavailable).toBeUndefined();
+  });
+});
+
+describe('admin-plane tools', () => {
+  const admin = (plugin: string, tool: string) => ({
+    resource: `ixo:qiforge:admin-tool/${plugin}/${tool}`,
+    action: 'admin-tool/invoke',
+  });
+
+  async function setup() {
+    const manifests = new ManifestRegistry();
+    const tools = new ToolRegistry();
+    const authority = makePlugin({
+      name: 'authority',
+      manifest: makeManifest({
+        title: 'Authority',
+        visibility: 'on-demand',
+        examples: [{ user: 'Grant Bob access', tool: 'grant_authority' }],
+      }),
+      getTools: () => [makeTool('grant_authority', { plane: 'admin' })],
+    });
+    const keys = makePlugin({
+      name: 'keys',
+      manifest: makeManifest({
+        title: 'Keys',
+        visibility: 'on-demand',
+        examples: [
+          { user: 'Rotate my key', tool: 'rotate_key' },
+          { user: 'Which keys do I have?', tool: 'list_keys' },
+        ],
+      }),
+      getTools: () => [
+        makeTool('list_keys'),
+        makeTool('rotate_key', { plane: 'admin' }),
+      ],
+    });
+    for (const p of [authority, keys]) {
+      manifests.register(p);
+      tools.register(p);
+    }
+    const collected = await tools.collect(makeBuildCtx());
+    return { manifests, tools, collected };
+  }
+
+  /** The turn's context and the access `createMainAgent` derives from its delegation. */
+  function turn(
+    collected: Awaited<ReturnType<typeof setup>>['collected'],
+    capabilities: { resource: string; action: string }[],
+  ) {
+    const ctx = grantedContext(capabilities);
+    const access = resolveTurnToolAccess({
+      tools: collected,
+      subAgents: [],
+      buildCtx: makeBuildCtx(),
+      has: ctx.ucan.hasCapability,
+      logger: ctx.logger,
+    });
+    return { ctx, access };
+  }
+
+  it('list_capabilities hides a plugin whose tools are all ungranted admin tools, never as unavailable', async () => {
+    const { manifests, collected } = await setup();
+    const { ctx, access } = turn(collected, []);
+    const out = JSON.parse(
+      (await buildListCapabilitiesTool(manifests, access).handler(
+        {},
+        ctx,
+      )) as string,
+    ) as Listing[];
+    expect(out.map((e) => e.name)).toEqual(['keys']);
+    expect(out[0]?.unavailable).toBeUndefined();
+
+    const granted = turn(collected, [admin('authority', 'grant_authority')]);
+    const listed = JSON.parse(
+      (await buildListCapabilitiesTool(manifests, granted.access).handler(
+        {},
+        granted.ctx,
+      )) as string,
+    ) as Listing[];
+    expect(listed.map((e) => e.name).sort()).toEqual(['authority', 'keys']);
+  });
+
+  it('load_capability refuses a hidden plugin as unknown and loads nothing', async () => {
+    const { manifests, tools, collected } = await setup();
+    const { ctx, access } = turn(collected, []);
+    await expect(
+      buildLoadCapabilityTool(manifests, tools, access).handler(
+        { names: ['keys', 'authority'] },
+        ctx,
+      ),
+    ).rejects.toThrow('Capability "authority" does not exist');
+  });
+
+  it('load_capability loads a mixed plugin with only the granted descriptors and examples', async () => {
+    const { manifests, tools, collected } = await setup();
+    const denied = turn(collected, []);
+    const result = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+      denied.access,
+    ).handler({ names: ['keys'] }, denied.ctx);
+    const update = (result as Command).update as {
+      loadedPlugins: string[];
+      messages: ToolMessage[];
+    };
+    expect(update.loadedPlugins).toEqual(['keys']);
+    const [keys] = JSON.parse(
+      String(update.messages[0]?.content),
+    ) as LoadResult[];
+    expect(keys?.tools.map((t) => t.name)).toEqual(['list_keys']);
+    expect(keys?.examples?.map((e) => e.tool)).toEqual(['list_keys']);
+
+    // A grant on the plugin's admin root covers its admin tools.
+    const granted = turn(collected, [
+      { resource: 'ixo:qiforge:admin-tool/keys', action: 'admin-tool/invoke' },
+    ]);
+    const loaded = await buildLoadCapabilityTool(
+      manifests,
+      tools,
+      granted.access,
+    ).handler({ names: ['keys'] }, granted.ctx);
+    const [all] = JSON.parse(
+      String(
+        ((loaded as Command).update as { messages: ToolMessage[] }).messages[0]
+          ?.content,
+      ),
+    ) as LoadResult[];
+    expect(all?.tools.map((t) => t.name)).toEqual(['list_keys', 'rotate_key']);
   });
 });

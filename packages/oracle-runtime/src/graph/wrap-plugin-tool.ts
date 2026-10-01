@@ -1,6 +1,7 @@
 import { tool } from '@langchain/core/tools';
 import type { StructuredTool } from 'langchain';
 import type { PluginTool } from '../plugin-api/types.js';
+import { requireToolPlane } from '../plugin-api/tool-plane.js';
 import type { AmbientServices } from '../runtime-context/ambient.js';
 import {
   buildRuntimeContext,
@@ -50,6 +51,7 @@ export function wrapPluginTool(
         ambient,
         state,
       );
+      requireToolPlane(ctx, pluginTool);
       return pluginTool.handler(args, ctx);
     },
     {

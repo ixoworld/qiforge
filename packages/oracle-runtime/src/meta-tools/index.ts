@@ -30,7 +30,7 @@ export function buildMetaTools(opts: BuildMetaToolsOptions): PluginTool[] {
   const { manifestRegistry, toolRegistry } = opts;
   return [
     buildLoadCapabilityTool(manifestRegistry, toolRegistry),
-    buildListCapabilitiesTool(manifestRegistry),
+    buildListCapabilitiesTool(manifestRegistry, toolRegistry),
   ];
 }
 
