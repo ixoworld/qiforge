@@ -1,3 +1,7 @@
+import type {
+  TopicDeliverableRequest,
+  TopicDeliverableResult,
+} from './topic-deliverables';
 /**
  * Test-only Durable Object driving the task scheduler against a REAL
  * `DoSqliteDatabase` (wa-sqlite over DO storage) inside workerd. Bound as
@@ -33,7 +37,12 @@ export interface SentMessage {
  * gateway restart (retried by the scheduler), `fail-transient-once` only for
  * the next call, `fail` is a hard error (never retried).
  */
-export type SendMode = 'ok' | 'fail-transient' | 'fail-transient-once' | 'fail';
+export type SendMode =
+  | 'ok'
+  | 'fail-transient'
+  | 'fail-transient-once'
+  | 'fail'
+  | 'hang';
 
 export interface CreatedRoom {
   roomId: string;
@@ -67,6 +76,10 @@ export class TasksTestDO extends DurableObject {
   private roomCreation: 'ok' | 'fail' = 'ok';
   private turns: TurnRequest[] = [];
   private alarms: number[] = [];
+  private alarmMode: 'ok' | 'fail' | 'hang' = 'ok';
+  private hangingAlarms: Array<() => void> = [];
+  private aborted: Array<{ sessionId: string; status: string | undefined }> =
+    [];
   private turnMode: 'ok' | 'fail' | 'empty' | 'hang' = 'ok';
   private turnText = 'task run output';
   private roomAvailable = true;
@@ -75,6 +88,7 @@ export class TasksTestDO extends DurableObject {
   private sendFailures = 0;
   /** Resolvers of hanging turns (`turnMode = 'hang'`), released by `releaseTurns()`. */
   private hanging: Array<() => void> = [];
+  private hangingSends: Array<() => void> = [];
   private initOpts: TasksTestInit = {};
 
   async init(opts: TasksTestInit = {}): Promise<void> {
@@ -159,6 +173,10 @@ export class TasksTestDO extends DurableObject {
             body,
             ...(opts?.txnId ? { txnId: opts.txnId } : {}),
           });
+          if (this.sendMode === 'hang')
+            return new Promise<string>((resolve) =>
+              this.hangingSends.push(() => resolve(`$evt-${++this.eventSeq}`)),
+            );
           return Promise.resolve(`$evt-${++this.eventSeq}`);
         },
         resolveUserRoom: () =>
@@ -186,8 +204,21 @@ export class TasksTestDO extends DurableObject {
         }
         return Promise.resolve(result);
       },
-      requestAlarm: (at: number) => {
+      abortTurn: async (sessionId) => {
+        this.aborted.push({
+          sessionId,
+          status: (await this.store?.get(sessionId.slice(5)))?.status,
+        });
+        return true;
+      },
+      requestAlarm: async (at: number) => {
         this.alarms.push(at);
+        if (this.alarmMode === 'fail')
+          throw new Error('Alarm storage unavailable');
+        if (this.alarmMode === 'hang')
+          await new Promise<void>((resolve) =>
+            this.hangingAlarms.push(resolve),
+          );
       },
       turnRunLive: (taskRunId: string) => liveTurnRuns.has(taskRunId),
       log: console,
@@ -209,6 +240,45 @@ export class TasksTestDO extends DurableObject {
 
   // ── surface passthroughs ─────────────────────────────────────────────────
 
+  async setAlarmMode(mode: 'ok' | 'fail' | 'hang'): Promise<void> {
+    this.alarmMode = mode;
+  }
+  async releaseAlarms(): Promise<void> {
+    for (const resolve of this.hangingAlarms.splice(0)) resolve();
+  }
+  async startTopicError(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<string> {
+    try {
+      await this.ready().startTopicDeliverable(operationId, request);
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async startTopic(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    return this.ready().startTopicDeliverable(operationId, request);
+  }
+  async readTopic(operationId: string): Promise<TopicDeliverableResult> {
+    return this.ready().readTopicDeliverable(operationId);
+  }
+  async cancelTopic(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    return this.ready().cancelTopicDeliverable(operationId, request);
+  }
+  async abortedTurns(): Promise<
+    Array<{ sessionId: string; status: string | undefined }>
+  > {
+    return this.aborted;
+  }
+
   async preview(
     input: OracleTaskInput,
   ): Promise<{ ok: boolean; nextRuns: string[]; problems: string[] }> {
@@ -221,6 +291,12 @@ export class TasksTestDO extends DurableObject {
 
   async list(): Promise<OracleTaskRecord[]> {
     return this.ready().surface.list();
+  }
+
+  /** Every loadable task row, including the ones the surface hides. */
+  async storedTasks(): Promise<OracleTaskRecord[]> {
+    if (!this.store) throw new Error('call init() first');
+    return this.store.list();
   }
 
   async get(id: string): Promise<OracleTaskRecord | null> {
@@ -327,6 +403,10 @@ export class TasksTestDO extends DurableObject {
     const n = this.hanging.length;
     for (const release of this.hanging.splice(0)) release();
     return n;
+  }
+
+  async releaseSends(): Promise<void> {
+    for (const release of this.hangingSends.splice(0)) release();
   }
 
   async setSendBehavior(mode: SendMode): Promise<void> {

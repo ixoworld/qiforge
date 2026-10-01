@@ -1,4 +1,8 @@
 import type {
+  TopicDeliverableCommand,
+  TopicDeliverableResult,
+} from '../tasks/topic-deliverables';
+import type {
   ChannelIdentity,
   ChannelTurnInput,
   ChannelTurnOutcome,
@@ -34,6 +38,7 @@ import type { OwnedArtifact } from '../artifacts/store';
 
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
+  TOPIC_DELIVERABLES_ENABLED?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -593,6 +598,11 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  topicDeliverable(
+    identity: TurnIdentity,
+    operationId: string,
+    command: TopicDeliverableCommand,
+  ): Promise<TopicDeliverableResult>;
   channelTurn(
     identity: TurnIdentity,
     input: ChannelTurnInput,

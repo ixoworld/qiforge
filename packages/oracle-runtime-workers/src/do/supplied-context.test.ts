@@ -42,6 +42,8 @@ function restrictedObject(
     env?: Record<string, unknown>;
     withScheduler?: boolean;
     sessions?: SessionRow[];
+    /** Runs while the turn is prepared (inside the awaited context-window lookup). */
+    duringPrepare?: () => void;
   } = {},
 ) {
   const forbidden = vi.fn((): never => {
@@ -53,10 +55,13 @@ function restrictedObject(
     env: makeEnv(),
   });
   const platformGet = vi.spyOn(core.llm, 'get');
-  const llmGet = vi.fn(
-    (_role: ModelRole, _params?: unknown) =>
-      new FakeListChatModel({ responses: ['# Brief'] }),
-  );
+  const models: FakeListChatModel[] = [];
+  const llmGet = vi.fn((_role: ModelRole, _params?: unknown) => {
+    // A second response so a call moves the model's cursor (`i`) off 0.
+    const model = new FakeListChatModel({ responses: ['# Brief', '# Again'] });
+    models.push(model);
+    return model;
+  });
   const ambient = createNoopAmbient({
     config: core.validatedEnv,
     identity: core.identity,
@@ -122,11 +127,14 @@ function restrictedObject(
     sessions,
     taskScheduler: opts.withScheduler === false ? null : scheduler,
     contextWindows: {
-      resolve: async () => ({
-        model: 'test',
-        tokens: 100000,
-        origin: 'default',
-      }),
+      resolve: async () => {
+        opts.duringPrepare?.();
+        return {
+          model: 'test',
+          tokens: 100000,
+          origin: 'default',
+        };
+      },
     },
     aborts: new Map(),
     shadowRoutes: new Map(),
@@ -151,6 +159,7 @@ function restrictedObject(
     call,
     forbidden,
     llmGet,
+    models,
     platformGet,
     sessions,
     scheduler,
@@ -245,6 +254,32 @@ describe('a complete supplied-context run', () => {
   });
 });
 
+describe('a supplied-context run cancelled while it is prepared', () => {
+  it('never calls the model when the abort lands after the profile check', async () => {
+    const abort = new AbortController();
+    // A task cancel arriving while the turn awaits its preparation I/O:
+    // the profile check already passed, the run's signal is aborted.
+    const o = restrictedObject({ duringPrepare: () => abort.abort() });
+    const live = {
+      runId: 'run',
+      sessionId: TASK_SESSION,
+      requestId: taskRequest.requestId,
+      record: { request: JSON.stringify(storedRunRequest(taskRequest)) },
+      buffer: { isClosed: false, push: vi.fn() },
+      abort,
+      continuation: null,
+    };
+    const outcome = await o.call('runAttempt', live, false);
+    expect(o.scheduler.assertTurnProfile).toHaveBeenCalledWith(taskRequest);
+    expect(outcome).toMatchObject({ status: 'aborted', text: '' });
+    expect(o.models.map((model) => model.i)).toEqual(o.models.map(() => 0));
+    expect(live.buffer.push).toHaveBeenCalledWith('done', {
+      runId: 'run',
+      aborted: true,
+    });
+  });
+});
+
 describe('session-history indexing around task runs', () => {
   it('indexes the latest conversation, never a task-run session', async () => {
     const earlier = new Date(Date.now() - 60_000).toISOString();
@@ -266,5 +301,74 @@ describe('session-history indexing around task runs', () => {
     // The realtime drain and session deletion go through the same gate.
     await o.call('scheduleHistoryIndexing', TASK_SESSION);
     expect(o.indexed.mock.calls).toEqual([['s_chat']]);
+  });
+});
+
+describe('task Start alarm persistence', () => {
+  it('returns the production storage promise and propagates a failed arm', async () => {
+    const core = createRuntimeCore({
+      config: { name: 'Test', org: 'Test', description: 'Test' },
+      plugins: [],
+      env: makeEnv(),
+    });
+    const Oracle = createUserOracleDO({ core: () => core });
+    const arm = Reflect.get(Oracle.prototype, 'requestAlarm');
+    let release: (() => void) | undefined;
+    const storage = {
+      getAlarm: vi.fn(async () => null),
+      setAlarm: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      ),
+    };
+    const host = { ctx: { storage }, alarmArm: Promise.resolve() };
+    const pending = Reflect.apply(arm, host, [123]);
+    if (!(pending instanceof Promise))
+      throw new Error('Alarm arm must be awaitable');
+    let resolved = false;
+    void pending.then(() => {
+      resolved = true;
+    });
+    await expect.poll(() => storage.setAlarm.mock.calls.length).toBe(1);
+    expect(resolved).toBe(false);
+    release?.();
+    await pending;
+    expect(resolved).toBe(true);
+    storage.setAlarm.mockRejectedValueOnce(new Error('Storage failed'));
+    await expect(Reflect.apply(arm, host, [123])).rejects.toThrow(
+      'Storage failed',
+    );
+  });
+  it('serializes concurrent arms so a later deadline cannot overwrite Start', async () => {
+    const core = createRuntimeCore({
+      config: { name: 'Test', org: 'Test', description: 'Test' },
+      plugins: [],
+      env: makeEnv(),
+    });
+    const Oracle = createUserOracleDO({ core: () => core });
+    const arm = Reflect.get(Oracle.prototype, 'requestAlarm');
+    let existing: number | null = null;
+    const storage = {
+      getAlarm: vi.fn(async () => existing),
+      setAlarm: vi.fn(async (at: number) => {
+        await Promise.resolve();
+        existing = at;
+      }),
+    };
+    const host = { ctx: { storage }, alarmArm: Promise.resolve() };
+    await Promise.all([
+      Reflect.apply(arm, host, [100]),
+      Reflect.apply(arm, host, [200]),
+    ]);
+    expect(existing).toBe(100);
+    expect(storage.setAlarm.mock.calls).toEqual([[100]]);
+    storage.setAlarm.mockRejectedValueOnce(new Error('Storage failed'));
+    await expect(Reflect.apply(arm, host, [50])).rejects.toThrow(
+      'Storage failed',
+    );
+    await Reflect.apply(arm, host, [50]);
+    expect(existing).toBe(50);
   });
 });

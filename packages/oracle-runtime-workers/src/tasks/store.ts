@@ -13,9 +13,12 @@
  * intent body, see `spec.ts`); the sibling columns are the query index the
  * scheduler reads (`MIN(next_run_at)`, due scans). Timestamps in `*_at` TEXT
  * columns are ISO strings; `next_run_at` is INTEGER ms-epoch so MIN() and
- * `<=` comparisons stay numeric. No statement binds more than 13 parameters
- * (DO SQL caps at 100) and nothing uses LIKE.
+ * `<=` comparisons stay numeric.
  */
+import {
+  TopicDeliverableRequestSchema,
+  type TopicDeliverableRequest,
+} from './topic-deliverables';
 import {
   isTaskExecutionProfile,
   TASK_EXECUTION_PROFILES,
@@ -43,6 +46,8 @@ import {
  */
 export interface TaskRecord extends OracleTaskRecord {
   pendingApprovalAt?: string;
+  topicOperationId?: string;
+  topicRequest?: TopicDeliverableRequest;
 }
 
 /**
@@ -127,6 +132,8 @@ type TaskRow = {
   pending_approval_at: string | null;
   delivery_room_id: string | null;
   execution_profile: string | null;
+  topic_operation_id: string | null;
+  topic_request_json: string | null;
 };
 
 type RunRow = {
@@ -156,6 +163,7 @@ type OpenRunRow = {
 /** Columns added after the first release; added to existing files on setup. */
 const RUN_COLUMN_UPGRADES: ReadonlyArray<readonly [string, string]> = [
   ['state', 'TEXT'],
+  ['completed_at', 'TEXT'],
   ['txn_id', 'TEXT'],
   ['room_id', 'TEXT'],
   ['result_text', 'TEXT'],
@@ -165,7 +173,7 @@ const RUN_COLUMN_UPGRADES: ReadonlyArray<readonly [string, string]> = [
 
 const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_at,
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
-  delivery_room_id, execution_profile`;
+  delivery_room_id, execution_profile, topic_operation_id, topic_request_json`;
 
 /**
  * Rows this runtime may load: no execution profile (an ordinary task) or one
@@ -244,6 +252,12 @@ function rowToRecord(row: TaskRow): TaskRecord {
   if (row.delivery_room_id !== null) {
     record.deliveryRoomId = row.delivery_room_id;
   }
+  if (row.topic_operation_id !== null && row.topic_request_json !== null) {
+    record.topicOperationId = row.topic_operation_id;
+    record.topicRequest = TopicDeliverableRequestSchema.parse(
+      JSON.parse(row.topic_request_json),
+    );
+  }
   return record;
 }
 
@@ -263,6 +277,8 @@ function recordParams(record: TaskRecord): SqlParam[] {
     record.pendingApprovalAt ?? null,
     record.deliveryRoomId ?? null,
     record.executionProfile ?? null,
+    record.topicOperationId ?? null,
+    record.topicRequest ? JSON.stringify(record.topicRequest) : null,
   ];
 }
 
@@ -317,6 +333,13 @@ export class TasksStore {
     const columns = await this.db.exec<{ name: string }>(
       `PRAGMA table_info(tasks)`,
     );
+    for (const name of ['topic_operation_id', 'topic_request_json']) {
+      if (!columns.some((c) => c.name === name))
+        await this.db.run(`ALTER TABLE tasks ADD COLUMN ${name} TEXT`);
+    }
+    await this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_topic_operation ON tasks(topic_operation_id) WHERE topic_operation_id IS NOT NULL`,
+    );
     if (!columns.some((c) => c.name === 'execution_profile')) {
       await this.db.run(`ALTER TABLE tasks ADD COLUMN execution_profile TEXT`);
     }
@@ -360,7 +383,7 @@ export class TasksStore {
   async insert(record: TaskRecord): Promise<void> {
     await this.setup();
     await this.db.run(
-      `INSERT INTO tasks (${TASK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO tasks (${TASK_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [record.id, ...recordParams(record)],
     );
   }
@@ -372,9 +395,9 @@ export class TasksStore {
       `UPDATE tasks SET title = ?, spec = ?, schedule_json = ?, status = ?, approval = ?,
          created_at = ?, updated_at = ?, next_run_at = ?, last_run_at = ?,
          last_result_json = ?, consecutive_failures = ?, pending_approval_at = ?,
-         delivery_room_id = ?, execution_profile = ?
-       WHERE id = ?`,
-      [...recordParams(record), record.id],
+         delivery_room_id = ?, execution_profile = ?, topic_operation_id = ?, topic_request_json = ?
+       WHERE id = ? AND (topic_operation_id IS NULL OR status != 'cancelled' OR ? = 'cancelled')`,
+      [...recordParams(record), record.id, record.status],
     );
     if (changes === 0) {
       throw new Error(`task ${record.id} not found`);
@@ -404,6 +427,31 @@ export class TasksStore {
     return profile === null || isTaskExecutionProfile(profile)
       ? undefined
       : profile;
+  }
+
+  async getTopicOperation(operationId: string): Promise<TaskRecord | null> {
+    await this.setup();
+    const row = await this.db.get<TaskRow>(
+      `SELECT ${TASK_COLUMNS} FROM tasks WHERE topic_operation_id = ?`,
+      [operationId],
+    );
+    return row === undefined || !this.loadable(row) ? null : rowToRecord(row);
+  }
+
+  async topicRun(taskId: string): Promise<
+    | {
+        run_id: string;
+        state: string | null;
+        result_text: string | null;
+        completed_at: string | null;
+      }
+    | undefined
+  > {
+    await this.setup();
+    return this.db.get(
+      `SELECT run_id, state, result_text, completed_at FROM task_runs WHERE task_id = ? ORDER BY started_at DESC, run_id DESC LIMIT 1`,
+      [taskId],
+    );
   }
 
   /** Every loadable task, oldest first (stable listing for tools). */
@@ -495,6 +543,7 @@ export class TasksStore {
       roomId?: string;
       resultText?: string;
       finishedAt?: string;
+      completedAt?: string;
       ok?: boolean;
       detail?: string;
       attempts?: number;
@@ -515,6 +564,10 @@ export class TasksStore {
     if (patch.resultText !== undefined) {
       sets.push('result_text = ?');
       params.push(patch.resultText);
+    }
+    if (patch.completedAt !== undefined) {
+      sets.push('completed_at = ?');
+      params.push(patch.completedAt);
     }
     if (patch.finishedAt !== undefined) {
       sets.push('finished_at = ?');

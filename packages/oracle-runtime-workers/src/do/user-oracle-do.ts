@@ -29,6 +29,12 @@ import {
  * A Durable Object is single-threaded, which replaces the Node runtime's
  * per-user ref-counting, busy timeouts and cron locks outright.
  */
+import {
+  TopicOperationId,
+  TopicDeliverableRequestSchema,
+  type TopicDeliverableCommand,
+  type TopicDeliverableResult,
+} from '../tasks/topic-deliverables';
 import { DurableObject } from 'cloudflare:workers';
 import {
   AIMessage,
@@ -1336,7 +1342,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         config: this.runConfig,
         instanceId: this.instanceId,
         log: console,
-        requestAlarm: (at) => this.requestAlarm(at),
+        requestAlarm: (at) => this.ctx.waitUntil(this.requestAlarm(at)),
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
@@ -1423,6 +1429,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         matrixUserId: await this.resolveMatrixUserId(userDid),
         gateway: this.gateway,
         runTurn: (req) => this.runTurn(req),
+        abortTurn: (sessionId) => this.abortTurn(sessionId),
         requestAlarm: (at) => this.requestAlarm(at),
         turnRunLive: (taskRunId) => Boolean(this.runs?.byTaskRunId(taskRunId)),
         log: console,
@@ -1431,7 +1438,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       if (this.taskScheduler) {
         const next = await this.taskScheduler.nextWakeAt().catch(() => null);
-        if (next !== null) this.requestAlarm(Math.max(next, Date.now() + 1000));
+        if (next !== null)
+          await this.requestAlarm(Math.max(next, Date.now() + 1000));
       }
 
       // Runs a previous incarnation left in flight: schedule their recovery
@@ -1448,7 +1456,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // imported from the Node runtime arrive with uncompressed blobs.
       this.compactDone ??=
         (await this.ctx.storage.get<boolean>(META_COMPACT_DONE)) ?? false;
-      if (!this.compactDone) this.requestAlarm(Date.now() + 3000);
+      if (!this.compactDone) await this.requestAlarm(Date.now() + 3000);
 
       // Provider selection: `core.llm` is the OpenRouter adapter built from
       // the validated base env; `LLM_PROVIDER=nebius` (read from the raw
@@ -1704,7 +1712,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         typeof existing === 'number' && existing <= at ? existing : at;
       if (deadline !== existing)
         await this.ctx.storage.put(META_FLUSH_AT, deadline);
-      this.requestAlarm(deadline);
+      await this.requestAlarm(deadline);
     }
 
     /**
@@ -1713,16 +1721,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      */
     private async scheduleFlushRetry(at: number): Promise<void> {
       await this.ctx.storage.put(META_FLUSH_AT, at);
-      this.requestAlarm(at);
+      await this.requestAlarm(at);
     }
 
+    private alarmArm: Promise<void> = Promise.resolve();
+
     /** Arm the object's single alarm no later than `at` (multiplexed). */
-    private requestAlarm(at: number): void {
-      void this.ctx.storage.getAlarm().then((existing) => {
-        if (existing === null || existing > at)
-          return this.ctx.storage.setAlarm(at);
-        return undefined;
-      });
+    private requestAlarm(at: number): Promise<void> {
+      this.alarmArm = this.alarmArm
+        .catch(() => {})
+        .then(async () => {
+          const existing = await this.ctx.storage.getAlarm();
+          if (existing === null || existing > at)
+            await this.ctx.storage.setAlarm(at);
+        });
+      return this.alarmArm;
     }
 
     /**
@@ -1756,7 +1769,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         keepAliveAt === null &&
         (recoveryAt === null || recoveryAt > wakeAt + 1000)
       ) {
-        await this.ctx.storage.setAlarm(
+        await this.requestAlarm(
           Math.min(nextPingAt, housekeepingAt, recoveryAt ?? Infinity),
         );
         return;
@@ -1777,7 +1790,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
             // State exists but could not be opened — retry soon instead of
             // falling through to a schedulerless re-arm.
-            await this.ctx.storage.setAlarm(Date.now() + 60_000);
+            await this.requestAlarm(Date.now() + 60_000);
             return;
           }
         }
@@ -1923,8 +1936,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (outcome === 'evicted') {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
           // An attached (idle) socket still needs its heartbeat rounds.
-          if (nextPingAt !== null) await this.ctx.storage.setAlarm(nextPingAt);
-          else await this.ctx.storage.deleteAlarm();
+          if (nextPingAt !== null) await this.requestAlarm(nextPingAt);
+          // A request that waited on the wipe has booted the object afresh
+          // and armed its own deadlines (a task Start's run): keep them.
+          else if (this.initPromise === null)
+            await this.ctx.storage.deleteAlarm();
           return;
         }
         if (outcome === 'not-current') {
@@ -1941,7 +1957,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       deadlines.push(now + IDLE_EVICT_MS);
       const housekeeping = Math.min(...deadlines);
       await this.ctx.storage.put(META_HOUSEKEEPING_AT, housekeeping);
-      await this.ctx.storage.setAlarm(
+      await this.requestAlarm(
         nextPingAt === null ? housekeeping : Math.min(housekeeping, nextPingAt),
       );
     }
@@ -2981,7 +2997,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       ) {
         const at = Date.now() + FLUSH_DEBOUNCE_MS;
         await this.ctx.storage.put(META_FLUSH_AT, at);
-        this.requestAlarm(at);
+        await this.requestAlarm(at);
         return;
       }
       this.dirty = false;
@@ -3148,6 +3164,49 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
+    async topicDeliverable(
+      identity: TurnIdentity,
+      operationId: string,
+      command: TopicDeliverableCommand,
+    ): Promise<TopicDeliverableResult> {
+      if (this.env.TOPIC_DELIVERABLES_ENABLED !== 'true')
+        return { ok: false, status: 404, message: 'Not found.' };
+      TopicOperationId.parse(operationId);
+      // Like every request: waits out an idle eviction in progress and
+      // records the access, so the idle tick re-reads this as activity.
+      await this.ready(identity);
+      const scheduler = this.taskScheduler;
+      const db = this.db;
+      if (!scheduler || !db) throw new Error('Task scheduler unavailable');
+      // Start and cancel write the task row outside any turn; nothing else
+      // would schedule their upload (and an unmarked write keeps the owner
+      // copy "not current", which blocks eviction for good). A write that
+      // committed before a later step threw (the alarm arm) counts too.
+      const execute = (): Promise<TopicDeliverableResult> => {
+        switch (command.action) {
+          case 'start':
+            return scheduler.startTopicDeliverable(
+              operationId,
+              TopicDeliverableRequestSchema.parse(command.request),
+            );
+          case 'read':
+            return scheduler.readTopicDeliverable(operationId);
+          case 'cancel':
+            return scheduler.cancelTopicDeliverable(
+              operationId,
+              TopicDeliverableRequestSchema.parse(command.request),
+            );
+        }
+      };
+      const generation = db.writeGeneration;
+      try {
+        return await execute();
+      } finally {
+        if (this.db === db && db.writeGeneration !== generation)
+          this.markDirty();
+      }
+    }
+
     async tasksStatus(userDid?: string): Promise<{
       now: number;
       alarm: number | null;
@@ -3233,7 +3292,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         },
         router: this.events,
         logger: console,
-        requestAlarm: (at) => this.requestAlarm(at),
+        requestAlarm: (at) => this.ctx.waitUntil(this.requestAlarm(at)),
         // Node indexes a session into the memory engine when its last socket
         // disconnects (`WsService.removeClientConnection`); same trigger here.
         onSessionDrained: (sessionId) =>

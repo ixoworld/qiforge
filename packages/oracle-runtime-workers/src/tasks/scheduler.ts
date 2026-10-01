@@ -26,6 +26,13 @@
  * (driven by the `resolve_task_approval` tool) triggers or drops the actual
  * run.
  */
+import {
+  deliverableIntent,
+  markdownDigest,
+  type TopicDeliverableRequest,
+  type TopicDeliverableResult,
+  type TopicDeliverableSnapshot,
+} from './topic-deliverables';
 import type {
   Logger,
   OracleTaskInput,
@@ -108,8 +115,9 @@ export interface TaskSchedulerHost {
   gateway: TaskGateway;
   /** Run one agent turn in this user's object (same entry the HTTP shell uses). */
   runTurn: (req: TurnRequest) => Promise<TurnResult>;
+  abortTurn?: (sessionId: string) => Promise<boolean>;
   /** Ask the object to re-arm its alarm no later than `at` (ms epoch). */
-  requestAlarm: (at: number) => void;
+  requestAlarm: (at: number) => void | Promise<void>;
   /**
    * Whether the durable turn run of a task run (`TurnRequest.taskRunId`) is
    * still live in the object — recovering or executing — so an open
@@ -143,6 +151,15 @@ export interface TaskScheduler {
    * restricted. Derived from the task row, never from a request.
    */
   isRestrictedSession(sessionId: string): Promise<boolean>;
+  startTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult>;
+  readTopicDeliverable(operationId: string): Promise<TopicDeliverableResult>;
+  cancelTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult>;
   /** Earliest pending deadline (ms epoch), or null when nothing is scheduled. */
   nextWakeAt(): Promise<number | null>;
   /** Run everything that is due. Must be safe to call spuriously. */
@@ -258,6 +275,9 @@ function assertLifecycleMutable(task: TaskRecord): void {
   }
 }
 
+const TOPIC_TASK_CANCEL_ERROR =
+  "This task is a Topic deliverable; cancel it through its owner's Topic deliverable cancel route (POST /topic-deliverables/:operationId/cancel).";
+
 function errorMessage(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, ERROR_MAX);
 }
@@ -296,18 +316,193 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.deliveryRetryDelaysMs = host.deliveryRetryDelaysMs;
     this.deliveryRoundBackoffMs =
       host.deliveryRoundBackoffMs ?? DEFAULT_DELIVERY_ROUND_BACKOFF_MS;
+    // Topic deliverables live in the same table but belong to their owner's
+    // signed API: the plugin surface neither lists nor shows them, and its
+    // cancel refuses them (the dedicated cancel also aborts a running turn
+    // and keeps the operation's binding). Pause/resume/update are refused
+    // for every task with an execution profile, Topic ones included.
     this.surface = {
       preview: (input) => this.preview(input),
       create: (input) => this.create(input),
-      list: () => this.store.list(),
-      get: (id) => this.store.get(id),
+      list: async () =>
+        (await this.store.list()).filter((task) => !task.topicOperationId),
+      get: async (id) => {
+        const task = await this.store.get(id);
+        return task?.topicOperationId ? null : task;
+      },
       update: (id, patch) => this.update(id, patch),
       pause: (id) => this.pause(id),
       resume: (id) => this.resume(id),
-      cancel: (id) => this.cancel(id),
+      cancel: async (id) => {
+        if ((await this.load(id)).topicOperationId)
+          throw new Error(TOPIC_TASK_CANCEL_ERROR);
+        return this.cancel(id);
+      },
       resolveApproval: (taskId, decision, note) =>
         this.resolveApproval(taskId, decision, note),
     };
+  }
+
+  private newTopicTask(
+    operationId: string,
+    request: TopicDeliverableRequest,
+    status: 'active' | 'cancelled',
+  ): TaskRecord {
+    const now = new Date().toISOString();
+    return {
+      id: newTaskId(request.title),
+      title: request.title,
+      intent: deliverableIntent(request),
+      executionProfile: 'supplied-context-markdown',
+      schedule: { kind: 'once', at: now },
+      approval: 'never',
+      status,
+      createdAt: now,
+      updatedAt: now,
+      ...(status === 'active' ? { nextRunAt: now } : {}),
+      consecutiveFailures: 0,
+      topicOperationId: operationId,
+      topicRequest: request,
+    };
+  }
+
+  async startTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    const created = await this.host.db.transaction(async () => {
+      const existing = await this.store.getTopicOperation(operationId);
+      if (existing) {
+        if (JSON.stringify(existing.topicRequest) !== JSON.stringify(request)) {
+          return {
+            ok: false,
+            status: 409,
+            message: 'This operation is already bound to different input.',
+          } as const;
+        }
+        return { ok: true, task: existing } as const;
+      }
+      if ((await this.store.countLive()) >= this.maxTasksPerUser) {
+        return {
+          ok: false,
+          status: 429,
+          message: 'Too many active tasks.',
+        } as const;
+      }
+      const task = this.newTopicTask(operationId, request, 'active');
+      await this.store.insert(task);
+      return { ok: true, task } as const;
+    });
+    if (!created.ok) return created;
+    if (created.task.nextRunAt)
+      await this.host.requestAlarm(Date.parse(created.task.nextRunAt));
+    return this.readTopicDeliverable(operationId);
+  }
+
+  async readTopicDeliverable(
+    operationId: string,
+  ): Promise<TopicDeliverableResult> {
+    const { task, run } = await this.host.db.transaction(async () => {
+      const task = await this.store.getTopicOperation(operationId);
+      return {
+        task,
+        run: task ? await this.store.topicRun(task.id) : undefined,
+      };
+    });
+    if (
+      !task?.topicRequest ||
+      task.executionProfile !== 'supplied-context-markdown'
+    ) {
+      return { ok: false, status: 404, message: 'Deliverable not found.' };
+    }
+    const snapshot: TopicDeliverableSnapshot = {
+      operationId,
+      taskId: task.id,
+      topic: task.topicRequest.topic,
+      status: 'queued',
+      ...(run ? { runId: run.run_id } : {}),
+    };
+    if (
+      run?.result_text &&
+      run.completed_at &&
+      ['delivering', 'delivered', 'failed'].includes(run.state ?? '')
+    ) {
+      snapshot.status = 'ready';
+      snapshot.output = {
+        markdown: run.result_text,
+        sha256: await markdownDigest(run.result_text),
+        completedAt: run.completed_at,
+      };
+      snapshot.delivery =
+        run.state === 'delivered'
+          ? 'delivered'
+          : run.state === 'failed'
+            ? 'failed'
+            : 'pending';
+    } else if (run?.state === 'running') {
+      snapshot.status = 'working';
+    } else if (run?.state === 'interrupted') {
+      snapshot.status = 'interrupted';
+    } else if (run) {
+      // The attempt ended without a result (turn error, empty output).
+      snapshot.status = 'failed';
+    } else if (task.status === 'paused') {
+      // Not reachable through any API (pause is refused for Topic tasks),
+      // but a row written that way is reported as it is, not as a failure.
+      snapshot.status = 'paused';
+    } else if (task.status !== 'active') {
+      // `failed` (bookkeeping stopped it) or a `completed` row without its
+      // delivered run: either way there is no result to return.
+      snapshot.status = 'failed';
+    }
+    if (task.status === 'cancelled') {
+      snapshot.status =
+        run?.state === 'running' &&
+        (this.hasActiveRun(task.id) || this.host.turnRunLive?.(run.run_id))
+          ? 'stopping'
+          : 'cancelled';
+    }
+    return { ok: true, snapshot };
+  }
+
+  async cancelTopicDeliverable(
+    operationId: string,
+    request: TopicDeliverableRequest,
+  ): Promise<TopicDeliverableResult> {
+    const cancelled = await this.host.db.transaction(async () => {
+      const existing = await this.store.getTopicOperation(operationId);
+      if (!existing) {
+        const task = this.newTopicTask(operationId, request, 'cancelled');
+        await this.store.insert(task);
+        return { ok: true, task } as const;
+      }
+      if (JSON.stringify(existing.topicRequest) !== JSON.stringify(request)) {
+        return {
+          ok: false,
+          status: 409,
+          message: 'This operation is already bound to different input.',
+        } as const;
+      }
+      // Execution finished (its result is stored, even while delivery is
+      // still being retried): the result is final, cancel has nothing left
+      // to stop and delivery continues. A repeated cancel stays idempotent.
+      if (
+        existing.status === 'completed' ||
+        (existing.status !== 'cancelled' &&
+          (await this.store.topicRun(existing.id))?.completed_at)
+      ) {
+        return {
+          ok: false,
+          status: 409,
+          message: 'Execution already finished; its result is final.',
+        } as const;
+      }
+      await this.cancel(existing.id);
+      return { ok: true, task: existing } as const;
+    });
+    if (!cancelled.ok) return cancelled;
+    await this.host.abortTurn?.(`${TASK_SESSION_PREFIX}${cancelled.task.id}`);
+    return this.readTopicDeliverable(operationId);
   }
 
   // ── alarm client ─────────────────────────────────────────────────────────
@@ -376,6 +571,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         state: 'delivering',
         ...(roomId ? { roomId } : {}),
         resultText: trimmed,
+        completedAt: new Date().toISOString(),
       });
     });
     const refreshed = (await this.store.get(task.id)) ?? task;
@@ -457,7 +653,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       }
     }
     const next = await this.nextWakeAt();
-    if (next !== null) this.host.requestAlarm(Math.max(next, now + 1000));
+    if (next !== null) await this.host.requestAlarm(Math.max(next, now + 1000));
   }
 
   /**
@@ -679,7 +875,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       if (roomId) record.deliveryRoomId = roomId;
     }
     await this.store.insert(record);
-    this.host.requestAlarm(nextMs);
+    await this.host.requestAlarm(nextMs);
     this.host.log.log(
       `[tasks] created ${record.id} — ${summarizeSchedule(record.schedule)}; next run ${record.nextRunAt}`,
     );
@@ -758,7 +954,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     }
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
-    if (nextMs !== null) this.host.requestAlarm(nextMs);
+    if (nextMs !== null) await this.host.requestAlarm(nextMs);
     return task;
   }
 
@@ -800,7 +996,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     delete task.pendingApprovalAt;
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
-    this.host.requestAlarm(nextMs);
+    await this.host.requestAlarm(nextMs);
     return task;
   }
 
@@ -983,6 +1179,12 @@ class AlarmTaskScheduler implements TaskScheduler {
   ): Promise<void> {
     let task = taskAtFire;
     const approvalRun = task.approval === 'before-action';
+    // A Topic deliverable's turn never uses a room (the restricted turn
+    // leaves no room trail) and its product is the stored result, read
+    // through the owner API: run first, deliver afterwards, best-effort
+    // (`deliverOrDefer` resolves the room and retries in rounds). An
+    // ordinary task's turn runs in its delivery room, so that comes first.
+    const topic = task.topicOperationId !== undefined;
     const startedAt = new Date(nowMs).toISOString();
     const runId = crypto.randomUUID();
     const txnId = `task-${runId}`;
@@ -991,8 +1193,9 @@ class AlarmTaskScheduler implements TaskScheduler {
     try {
       await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
       this.activeRuns.set(runId, task.id);
-      const roomId = await this.resolveDeliveryRoom(task);
-      if (!roomId) throw new Error('Could not resolve a delivery room');
+      const roomId = topic ? undefined : await this.resolveDeliveryRoom(task);
+      if (!topic && !roomId)
+        throw new Error('Could not resolve a delivery room');
       const result = await this.host.runTurn({
         identity: {
           userDid: this.host.userDid,
@@ -1003,7 +1206,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         sessionId: `${TASK_SESSION_PREFIX}${task.id}`,
         message: buildRunMessage(task, opts.approvalNote),
         client: 'matrix',
-        roomId,
+        ...(roomId ? { roomId } : {}),
         requestId: crypto.randomUUID(),
         // Links the durable turn run to this task run: a reset mid-turn is
         // recovered and delivered by the object instead of closed.
@@ -1052,8 +1255,9 @@ class AlarmTaskScheduler implements TaskScheduler {
         await this.store.save(task);
         await this.store.updateRun(runId, {
           state: 'delivering',
-          roomId,
+          ...(roomId ? { roomId } : {}),
           resultText: text,
+          completedAt: new Date().toISOString(),
         });
       });
       open = {
@@ -1062,7 +1266,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         startedAt,
         state: 'delivering',
         txnId,
-        roomId,
+        ...(roomId ? { roomId } : {}),
         resultText: text,
         attempts: 0,
       };
@@ -1138,7 +1342,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         ] ?? 60_000;
       const retryAt = Math.max(nowMs, Date.now()) + pause;
       await this.store.updateRun(run.runId, { attempts, retryAt });
-      this.host.requestAlarm(retryAt);
+      await this.host.requestAlarm(retryAt);
       this.host.log.warn(
         `[tasks] run ${run.runId} of ${task.id}: delivery round ${attempts} failed (${errorMessage(err)}); next round at ${new Date(retryAt).toISOString()}`,
       );
@@ -1148,18 +1352,18 @@ class AlarmTaskScheduler implements TaskScheduler {
     const finishedAt = new Date().toISOString();
     // Delivered. Bookkeeping goes onto the task as it is NOW (a pause or
     // cancel during the send must stand); only an active one-shot completes.
-    const current = (await this.store.get(task.id)) ?? task;
-    current.lastRunAt = run.startedAt;
-    current.lastResult = {
-      ok: true,
-      summary: text.slice(0, RESULT_SUMMARY_MAX),
-      at: finishedAt,
-    };
-    current.consecutiveFailures = 0;
-    if (current.schedule.kind === 'once' && current.status === 'active')
-      current.status = 'completed';
-    current.updatedAt = finishedAt;
     await this.host.db.transaction(async () => {
+      const current = (await this.store.get(task.id)) ?? task;
+      current.lastRunAt = run.startedAt;
+      current.lastResult = {
+        ok: true,
+        summary: text.slice(0, RESULT_SUMMARY_MAX),
+        at: finishedAt,
+      };
+      current.consecutiveFailures = 0;
+      if (current.schedule.kind === 'once' && current.status === 'active')
+        current.status = 'completed';
+      current.updatedAt = finishedAt;
       await this.store.save(current);
       await this.store.updateRun(run.runId, {
         state: 'delivered',

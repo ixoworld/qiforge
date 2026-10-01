@@ -607,3 +607,109 @@ and an object stops hibernating or a request dies with an opaque error.
   waited sends retry with the same transaction id (`src/do/gateway-retry.ts`).
 - **DO SQL** allows at most 100 bound parameters per statement and dislikes
   `LIKE` patterns; wa-sqlite's heap never shrinks (~16 MiB steady state).
+
+### Topic deliverable API
+
+`TOPIC_DELIVERABLES_ENABLED=true` enables an owner-only pilot API. It is off
+by default. Every route requires a signed UCAN invocation using the existing
+`*` capability on `ixo:oracle`. A delegation alone is insufficient. The
+validated signer selects the user's Durable Object. Topic, room, thread and
+attempt identifiers are correlation data, never publication authority.
+
+- `PUT /topic-deliverables/:operationId` starts or recovers one operation.
+- `GET /topic-deliverables/:operationId` reads its persisted result without
+  starting a model turn.
+- `POST /topic-deliverables/:operationId/cancel` persists cancellation before
+  aborting the isolated task session. It also records cancellation when Start
+  has not arrived. Once execution has finished — the result is stored and
+  `output.completedAt` is set, even while delivery is still being retried —
+  cancel returns `409`: the result is final and delivery continues.
+
+Both Start and cancellation require the body `{ topic: { id, roomId, threadId, attemptId }, title, goal,
+instructions, sources: [{ label, text }] }`. Unknown properties are rejected.
+Operation IDs contain 1–128 ASCII letters, digits, hyphens or underscores.
+The body limit is 128 KiB. Source text is supplied inline, with at most 12
+sources and 32,000 characters per source. Titles are limited to 120 characters,
+goals to 4,000, instructions to 16,000, and IDs and source labels to 255.
+
+The existing task row stores the unique operation ID and the validated request
+in the same transaction. The request is frozen as the JSON serialization of
+the parsed body: keys in schema order (whatever order the client sent), array
+order kept, strings compared byte for byte with no Unicode normalization — the
+same text in another normalization form is different input. An identical retry
+returns that task, including
+after a lost response or restart. Different input for the same ID returns `409`.
+Cancellation and Start bind the same validated request. Cancellation can insert
+a cancelled task before Start, even when active task capacity is full. It does
+not schedule an alarm or consume active capacity. A delayed identical Start
+returns the cancelled task. Conflicting input returns `409` for either command.
+Start acknowledges active work only after its alarm is armed. A failed arm keeps the
+bound task, so an identical retry repairs scheduling without another task.
+A new revision requires a new operation and attempt ID. The existing task cap
+returns `429` for a new task; it does not prevent retrying an existing operation.
+The server sets the one-shot schedule. No new room is created. The restricted
+`supplied-context-markdown` profile executes through the existing scheduler,
+durable turn coordinator and run ledger. The turn runs without a room; once
+its result is stored, it is delivered to the user's main oracle room
+best-effort, in the scheduler's delivery rounds (five, with growing pauses,
+resolving the room again each round). A gateway that is unavailable at the
+alarm therefore delays only the delivery, never the result. Portal remains
+responsible for authorized publication into a Topic.
+
+**One operation ID is one attempt**: at most one model turn ever runs for it.
+A reset of the object mid-turn is the same attempt — the durable run
+recovers it from its checkpoint and its result is stored as usual. A turn
+that ends without a result (a model or provider error, empty output, a turn
+the object could not recover) leaves the deliverable `failed` (`interrupted`
+for an unrecoverable reset) for good; nothing retries it. A transient model
+error is not retried either: the client starts a new operation (and attempt)
+ID. Delivery retries are separate and never re-run the turn.
+
+The generic task surface (`ctx.tasks`, and through it `list_my_tasks`,
+`get_task`, `cancel_task` …) does not list or show Topic tasks. Its cancel
+refuses them and names the dedicated route — only that route also aborts a
+running turn and keeps the operation's binding. Pause, resume and edits are
+refused for every task with an execution profile, Topic tasks included.
+
+Responses contain `{ operationId, taskId, topic, status, runId?, output?,
+delivery? }`. Status is `queued`, `working`, `ready`, `stopping`, `cancelled`,
+`failed`, `interrupted` or `paused` (only for a row paused outside this API;
+pause is refused here). A persisted output contains the full `markdown`, its
+lowercase 64-character hexadecimal SHA-256 in `sha256`, and `completedAt`, saved
+when execution produced the result. Delivery is independently `pending`,
+`delivered` or `failed`. A failed delivery does not erase completed work: the
+status stays `ready`.
+
+Cancellation is accepted only before execution finished, so a cancelled
+deliverable has no output. It persists first, then aborts: a cancel that lands
+before the turn's profile check (`assertTurnProfile`, the first step of the
+turn, after the durable run is registered) makes that check refuse the turn;
+a later one aborts the registered run, and an aborted run never starts a model
+call. Late output produced after cancellation is dropped.
+Consumers must require `status === 'ready'` before offering the artifact for
+human acceptance. This API never accepts work or completes a Topic itself.
+
+Owner copy and idle eviction: Start and cancel write the user's database
+outside any turn, so the RPC marks the working copy dirty after every write
+(reads excluded); the flush uploads it and the object can evict afterwards.
+The RPC goes through the same `ready()` as every request — it waits for an
+idle eviction in progress and records the access — and the dirty mark keeps
+the idle tick's re-check (`stillIdle`) from wiping a Start that landed while
+the owner copy was being verified. An eviction that finishes while a request
+boots the object afresh leaves the alarms that boot armed in place.
+
+Known limits:
+
+- Authentication is the shell's UCAN invocation with the existing `*`
+  capability on `ixo:oracle`. The invocation is not bound to the method, path
+  or body, and it works as a short-lived bearer token: its verdict is cached
+  per isolate until it expires and replay tracking is per isolate, never
+  global (`src/shell/auth.ts`). Anyone holding a captured
+  invocation can, until it expires (`UCAN_AUTH_MAX_TTL_SECONDS`, default
+  900 s), read the deliverable's Markdown and issue Start or cancel for the
+  same owner.
+- These tests use real workerd and SQLite with a scripted model and Matrix
+  gateway, and the object-level tests run the real `UserOracleDO` methods over
+  fakes; they do not prove a deployed model run, a real idle-eviction race or
+  a signed-in Portal journey. Activation also requires a deployed runtime
+  containing this API and a pinned, published Topic recipe in Portal.
