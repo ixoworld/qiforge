@@ -275,6 +275,9 @@ function assertLifecycleMutable(task: TaskRecord): void {
   }
 }
 
+const TOPIC_TASK_CANCEL_ERROR =
+  "This task is a Topic deliverable; cancel it through its owner's Topic deliverable cancel route (POST /topic-deliverables/:operationId/cancel).";
+
 function errorMessage(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).slice(0, ERROR_MAX);
 }
@@ -313,15 +316,28 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.deliveryRetryDelaysMs = host.deliveryRetryDelaysMs;
     this.deliveryRoundBackoffMs =
       host.deliveryRoundBackoffMs ?? DEFAULT_DELIVERY_ROUND_BACKOFF_MS;
+    // Topic deliverables live in the same table but belong to their owner's
+    // signed API: the plugin surface neither lists nor shows them, and its
+    // cancel refuses them (the dedicated cancel also aborts a running turn
+    // and keeps the operation's binding). Pause/resume/update are refused
+    // for every task with an execution profile, Topic ones included.
     this.surface = {
       preview: (input) => this.preview(input),
       create: (input) => this.create(input),
-      list: () => this.store.list(),
-      get: (id) => this.store.get(id),
+      list: async () =>
+        (await this.store.list()).filter((task) => !task.topicOperationId),
+      get: async (id) => {
+        const task = await this.store.get(id);
+        return task?.topicOperationId ? null : task;
+      },
       update: (id, patch) => this.update(id, patch),
       pause: (id) => this.pause(id),
       resume: (id) => this.resume(id),
-      cancel: (id) => this.cancel(id),
+      cancel: async (id) => {
+        if ((await this.load(id)).topicOperationId)
+          throw new Error(TOPIC_TASK_CANCEL_ERROR);
+        return this.cancel(id);
+      },
       resolveApproval: (taskId, decision, note) =>
         this.resolveApproval(taskId, decision, note),
     };
@@ -427,7 +443,16 @@ class AlarmTaskScheduler implements TaskScheduler {
       snapshot.status = 'working';
     } else if (run?.state === 'interrupted') {
       snapshot.status = 'interrupted';
-    } else if (run || task.status !== 'active') {
+    } else if (run) {
+      // The attempt ended without a result (turn error, empty output).
+      snapshot.status = 'failed';
+    } else if (task.status === 'paused') {
+      // Not reachable through any API (pause is refused for Topic tasks),
+      // but a row written that way is reported as it is, not as a failure.
+      snapshot.status = 'paused';
+    } else if (task.status !== 'active') {
+      // `failed` (bookkeeping stopped it) or a `completed` row without its
+      // delivered run: either way there is no result to return.
       snapshot.status = 'failed';
     }
     if (task.status === 'cancelled') {
@@ -458,11 +483,18 @@ class AlarmTaskScheduler implements TaskScheduler {
           message: 'This operation is already bound to different input.',
         } as const;
       }
-      if (existing.status === 'completed') {
+      // Execution finished (its result is stored, even while delivery is
+      // still being retried): the result is final, cancel has nothing left
+      // to stop and delivery continues. A repeated cancel stays idempotent.
+      if (
+        existing.status === 'completed' ||
+        (existing.status !== 'cancelled' &&
+          (await this.store.topicRun(existing.id))?.completed_at)
+      ) {
         return {
           ok: false,
           status: 409,
-          message: 'Already completed; execution cannot be cancelled.',
+          message: 'Execution already finished; its result is final.',
         } as const;
       }
       await this.cancel(existing.id);
@@ -1147,6 +1179,12 @@ class AlarmTaskScheduler implements TaskScheduler {
   ): Promise<void> {
     let task = taskAtFire;
     const approvalRun = task.approval === 'before-action';
+    // A Topic deliverable's turn never uses a room (the restricted turn
+    // leaves no room trail) and its product is the stored result, read
+    // through the owner API: run first, deliver afterwards, best-effort
+    // (`deliverOrDefer` resolves the room and retries in rounds). An
+    // ordinary task's turn runs in its delivery room, so that comes first.
+    const topic = task.topicOperationId !== undefined;
     const startedAt = new Date(nowMs).toISOString();
     const runId = crypto.randomUUID();
     const txnId = `task-${runId}`;
@@ -1155,8 +1193,9 @@ class AlarmTaskScheduler implements TaskScheduler {
     try {
       await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
       this.activeRuns.set(runId, task.id);
-      const roomId = await this.resolveDeliveryRoom(task);
-      if (!roomId) throw new Error('Could not resolve a delivery room');
+      const roomId = topic ? undefined : await this.resolveDeliveryRoom(task);
+      if (!topic && !roomId)
+        throw new Error('Could not resolve a delivery room');
       const result = await this.host.runTurn({
         identity: {
           userDid: this.host.userDid,
@@ -1167,7 +1206,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         sessionId: `${TASK_SESSION_PREFIX}${task.id}`,
         message: buildRunMessage(task, opts.approvalNote),
         client: 'matrix',
-        roomId,
+        ...(roomId ? { roomId } : {}),
         requestId: crypto.randomUUID(),
         // Links the durable turn run to this task run: a reset mid-turn is
         // recovered and delivered by the object instead of closed.
@@ -1216,7 +1255,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         await this.store.save(task);
         await this.store.updateRun(runId, {
           state: 'delivering',
-          roomId,
+          ...(roomId ? { roomId } : {}),
           resultText: text,
           completedAt: new Date().toISOString(),
         });
@@ -1227,7 +1266,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         startedAt,
         state: 'delivering',
         txnId,
-        roomId,
+        ...(roomId ? { roomId } : {}),
         resultText: text,
         attempts: 0,
       };

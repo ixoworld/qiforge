@@ -64,33 +64,45 @@ function fixture(enabled = 'true') {
 }
 
 describe('Topic deliverable HTTP authority boundary', () => {
-  it('requires a signed invocation on every route before selecting any user object', async () => {
-    const { delegation } = await credentials();
-    const f = fixture();
-    for (const [method, path] of [
-      ['PUT', '/topic-deliverables/op'],
-      ['GET', '/topic-deliverables/op'],
-      ['POST', '/topic-deliverables/op/cancel'],
-    ]) {
-      const res = await f.app.request(
-        path!,
-        {
-          method,
-          headers: {
-            'x-ucan-delegation': delegation,
-            'content-type': 'application/json',
+  it.each([
+    // Default shell: a bare delegation never authenticates at all.
+    ['', /^UCAN invocation required/],
+    // Legacy fallback on: the shell accepts it, the Topic routes still do not.
+    ['true', /^A signed invocation is required\.$/],
+  ])(
+    'requires a signed invocation on every route before selecting any user object (bare-delegation fallback %j)',
+    async (allowBare, message) => {
+      const { delegation } = await credentials();
+      const f = fixture();
+      const bindings = {
+        ...f.bindings,
+        UCAN_ALLOW_BARE_DELEGATION_AUTH: allowBare,
+      };
+      for (const [method, path] of [
+        ['PUT', '/topic-deliverables/op'],
+        ['GET', '/topic-deliverables/op'],
+        ['POST', '/topic-deliverables/op/cancel'],
+      ]) {
+        const res = await f.app.request(
+          path!,
+          {
+            method,
+            headers: {
+              'x-ucan-delegation': delegation,
+              'content-type': 'application/json',
+            },
+            ...(method !== 'GET' ? { body: JSON.stringify(request) } : {}),
           },
-          ...(method !== 'GET' ? { body: JSON.stringify(request) } : {}),
-        },
-        f.bindings,
-      );
-      expect(res.status).toBe(401);
-      expect(await res.json()).toEqual({
-        message: 'A signed invocation is required.',
-      });
-    }
-    expect(f.get).not.toHaveBeenCalled();
-  });
+          bindings,
+        );
+        expect(res.status).toBe(401);
+        expect(await res.json()).toMatchObject({
+          message: expect.stringMatching(message),
+        });
+      }
+      expect(f.get).not.toHaveBeenCalled();
+    },
+  );
 
   it('routes solely to the signed owner and rejects caller-selected authority and oversized input', async () => {
     const { invocation, did } = await credentials();

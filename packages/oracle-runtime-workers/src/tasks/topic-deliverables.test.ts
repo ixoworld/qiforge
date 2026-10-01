@@ -37,7 +37,7 @@ describe('Topic deliverables on the existing scheduler', () => {
     expect(new Set(results.map((result) => snapshot(result).taskId)).size).toBe(
       1,
     );
-    expect(await s.list()).toHaveLength(1);
+    expect(await s.storedTasks()).toHaveLength(1);
     expect(await s.turnRequests()).toHaveLength(0);
     await s.simulateReset();
     expect(snapshot(await s.startTopic('operation', request)).taskId).toBe(
@@ -76,7 +76,9 @@ describe('Topic deliverables on the existing scheduler', () => {
       await s.cancelTopic('operation', { ...request, goal: 'Changed' }),
     ).toMatchObject({ ok: false, status: 409 });
     expect(await s.turnRequests()).toHaveLength(0);
-    const task = (await s.list()).find((task) => task.id === cancelled.taskId);
+    const task = (await s.storedTasks()).find(
+      (task) => task.id === cancelled.taskId,
+    );
     expect(task?.status).toBe('cancelled');
     expect(task).not.toHaveProperty('nextRunAt');
   });
@@ -145,7 +147,7 @@ describe('Topic deliverables on the existing scheduler', () => {
     expect(snapshot(await s.startTopic('operation', request)).taskId).toBe(
       original.taskId,
     );
-    expect(await s.list()).toHaveLength(2);
+    expect(await s.storedTasks()).toHaveLength(2);
     expect(await s.turnRequests()).toHaveLength(0);
   });
 
@@ -172,8 +174,9 @@ describe('Topic deliverables on the existing scheduler', () => {
     expect(turns[0]).toMatchObject({
       executionProfile: 'supplied-context-markdown',
       sessionId: `task:${queued.taskId}`,
-      roomId: '!tasks-test-room:example.org',
     });
+    // The restricted turn runs without a room; only delivery resolves one.
+    expect(turns[0]).not.toHaveProperty('roomId');
     await s.simulateReset();
     await s.setSendBehavior('ok');
     await s.tick(Date.now() + 10_000);
@@ -183,6 +186,9 @@ describe('Topic deliverables on the existing scheduler', () => {
       output: ready.output,
     });
     expect(await s.turnRequests()).toHaveLength(1);
+    expect((await s.sentMessages()).map((m) => m.roomId)).toEqual([
+      '!tasks-test-room:example.org',
+    ]);
   });
 
   it('persists cancellation before aborting and drops late output', async () => {
@@ -213,39 +219,46 @@ describe('Topic deliverables on the existing scheduler', () => {
     expect(await s.turnRequests()).toHaveLength(1);
   });
 
-  it('keeps historical stored output when cancelled during delivery without calling it ready', async () => {
+  it('refuses cancellation once execution finished while delivery is still retrying', async () => {
     const s = stub('cancel-delivery');
     await s.init();
     await s.setSendBehavior('fail');
     await s.startTopic('operation', request);
     await s.tick(Date.now() + 1000);
     const prior = snapshot(await s.readTopic('operation'));
-    const cancelled = snapshot(await s.cancelTopic('operation', request));
-    expect(cancelled).toMatchObject({
-      status: 'cancelled',
-      output: prior.output,
-      delivery: 'pending',
+    expect(prior).toMatchObject({ status: 'ready', delivery: 'pending' });
+    expect(await s.cancelTopic('operation', request)).toMatchObject({
+      ok: false,
+      status: 409,
     });
+    expect(snapshot(await s.readTopic('operation'))).toEqual(prior);
+    // Delivery continues after the refused cancel.
     await s.simulateReset();
+    await s.setSendBehavior('ok');
     await s.tick(Date.now() + 10_000);
-    expect(snapshot(await s.readTopic('operation')).status).toBe('cancelled');
+    expect(snapshot(await s.readTopic('operation'))).toMatchObject({
+      status: 'ready',
+      delivery: 'delivered',
+      output: prior.output,
+    });
     expect(await s.turnRequests()).toHaveLength(1);
   });
 
-  it('does not resurrect cancellation when an in-flight delivery is acknowledged', async () => {
+  it('refuses cancellation while the finished result is being sent and completes the delivery', async () => {
     const s = stub('cancel-send');
     await s.init();
     await s.setSendBehavior('hang');
     await s.startTopic('operation', request);
     const tick = s.tick(Date.now() + 1000);
     await expect.poll(async () => (await s.sentMessages()).length).toBe(1);
-    expect(snapshot(await s.cancelTopic('operation', request)).status).toBe(
-      'cancelled',
-    );
+    expect(await s.cancelTopic('operation', request)).toMatchObject({
+      ok: false,
+      status: 409,
+    });
     await s.releaseSends();
     await tick;
     expect(snapshot(await s.readTopic('operation'))).toMatchObject({
-      status: 'cancelled',
+      status: 'ready',
       delivery: 'delivered',
       output: { markdown: 'task run output' },
     });
@@ -288,5 +301,112 @@ describe('Topic deliverables on the existing scheduler', () => {
       ok: false,
       status: 404,
     });
+  });
+
+  it('keeps Topic deliverables out of the generic task surface: hidden, and never paused, edited or cancelled through it', async () => {
+    const s = stub('generic-surface');
+    await s.init();
+    const ordinary = await s.create({
+      title: 'Ordinary',
+      intent: 'Do it once.',
+      schedule: {
+        kind: 'once',
+        at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+    });
+    const queued = snapshot(await s.startTopic('operation', request));
+    expect((await s.list()).map((task) => task.id)).toEqual([ordinary.id]);
+    expect(await s.get(queued.taskId)).toBeNull();
+    expect(await s.get(ordinary.id)).toMatchObject({ id: ordinary.id });
+    expect(await s.errorOf({ kind: 'pause', id: queued.taskId })).toMatch(
+      /cannot be paused or resumed/,
+    );
+    expect(await s.errorOf({ kind: 'resume', id: queued.taskId })).toMatch(
+      /cannot be paused or resumed/,
+    );
+    expect(
+      await s.errorOf({
+        kind: 'update',
+        id: queued.taskId,
+        patch: { title: 'Edited' },
+      }),
+    ).toMatch(/immutable/);
+    expect(await s.errorOf({ kind: 'cancel', id: queued.taskId })).toMatch(
+      /Topic deliverable cancel route/,
+    );
+    expect(snapshot(await s.readTopic('operation')).status).toBe('queued');
+    await s.tick(Date.now() + 1000);
+    expect(snapshot(await s.readTopic('operation')).status).toBe('ready');
+    expect(await s.abortedTurns()).toEqual([]);
+  });
+
+  it('reports a paused or failed Topic row as it is, not as a run failure', async () => {
+    const s = stub('read-mapping');
+    await s.init();
+    const paused = snapshot(await s.startTopic('paused', request));
+    const failed = snapshot(await s.startTopic('failed', request));
+    // Neither state is reachable through the API: a row written elsewhere.
+    await s.runSql(
+      `UPDATE tasks SET status = 'paused', next_run_at = NULL WHERE id = ?`,
+      [paused.taskId],
+    );
+    await s.runSql(
+      `UPDATE tasks SET status = 'failed', next_run_at = NULL WHERE id = ?`,
+      [failed.taskId],
+    );
+    expect(snapshot(await s.readTopic('paused')).status).toBe('paused');
+    expect(snapshot(await s.readTopic('failed')).status).toBe('failed');
+  });
+
+  it('completes the deliverable when the gateway is unavailable at the alarm and delivers it later', async () => {
+    const s = stub('gateway-down');
+    await s.init();
+    await s.setRoomAvailable(false);
+    await s.startTopic('operation', request);
+    await s.tick(Date.now() + 1000);
+    const ready = snapshot(await s.readTopic('operation'));
+    expect(ready).toMatchObject({
+      status: 'ready',
+      delivery: 'pending',
+      output: { markdown: 'task run output' },
+    });
+    expect(await s.turnRequests()).toHaveLength(1);
+    expect(await s.sentMessages()).toHaveLength(0);
+    await s.setRoomAvailable(true);
+    await s.tick(Date.now() + 10_000);
+    expect(snapshot(await s.readTopic('operation'))).toMatchObject({
+      status: 'ready',
+      delivery: 'delivered',
+      output: ready.output,
+    });
+    expect((await s.sentMessages()).map((m) => m.roomId)).toEqual([
+      '!tasks-test-room:example.org',
+    ]);
+    expect(await s.turnRequests()).toHaveLength(1);
+  });
+
+  it('refuses the turn of a deliverable cancelled before the turn reached its profile check', async () => {
+    const s = stub('cancel-before-turn');
+    await s.init();
+    await s.setTurnBehavior('hang');
+    await s.startTopic('operation', request);
+    const tick = s.tick(Date.now() + 1000);
+    await expect.poll(async () => (await s.turnRequests()).length).toBe(1);
+    const [turn] = await s.turnRequests();
+    if (!turn) throw new Error('no turn request');
+    // The object runs this check first when the turn starts (`prepareTurn`),
+    // after the durable run is registered for abort: a cancel before it is
+    // refused here, one after it aborts the registered run.
+    expect(await s.profileError(turn)).toBe('');
+    expect(snapshot(await s.cancelTopic('operation', request)).status).toBe(
+      'stopping',
+    );
+    expect(await s.profileError(turn)).toBe('Task is no longer active');
+    await s.releaseTurns();
+    await tick;
+    expect(snapshot(await s.readTopic('operation'))).toMatchObject({
+      status: 'cancelled',
+    });
+    expect(snapshot(await s.readTopic('operation')).output).toBeUndefined();
   });
 });

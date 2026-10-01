@@ -194,12 +194,13 @@ tool, and the capability router's Decision is its own trace with the turn's
 
 ### Ops and misc
 
-| Variable                  | Meaning                                                                                                                |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `SLACK_ALERT_WEBHOOK_URL` | Slack incoming webhook (secret): one alert per whole-GB watermark as a user's working copy grows toward the 10 GB cap. |
-| `ORACLE_DEBUG_ROUTES`     | `'true'` enables the authenticated `/debug/*` operator routes. Leave off in production.                                |
-| `LOG_LEVEL`               | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                         |
-| `CORS_ORIGIN`             | Default `*`.                                                                                                           |
+| Variable                     | Meaning                                                                                                                                                                                                                                                        |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SLACK_ALERT_WEBHOOK_URL`    | Slack incoming webhook (secret): one alert per whole-GB watermark as a user's working copy grows toward the 10 GB cap.                                                                                                                                         |
+| `ORACLE_DEBUG_ROUTES`        | `'true'` enables the authenticated `/debug/*` operator routes. Leave off in production.                                                                                                                                                                        |
+| `TOPIC_DELIVERABLES_ENABLED` | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on. |
+| `LOG_LEVEL`                  | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                 |
+| `CORS_ORIGIN`                | Default `*`.                                                                                                                                                                                                                                                   |
 
 ## First-time setup of an oracle
 

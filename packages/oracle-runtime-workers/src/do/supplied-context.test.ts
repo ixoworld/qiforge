@@ -42,6 +42,8 @@ function restrictedObject(
     env?: Record<string, unknown>;
     withScheduler?: boolean;
     sessions?: SessionRow[];
+    /** Runs while the turn is prepared (inside the awaited context-window lookup). */
+    duringPrepare?: () => void;
   } = {},
 ) {
   const forbidden = vi.fn((): never => {
@@ -53,10 +55,13 @@ function restrictedObject(
     env: makeEnv(),
   });
   const platformGet = vi.spyOn(core.llm, 'get');
-  const llmGet = vi.fn(
-    (_role: ModelRole, _params?: unknown) =>
-      new FakeListChatModel({ responses: ['# Brief'] }),
-  );
+  const models: FakeListChatModel[] = [];
+  const llmGet = vi.fn((_role: ModelRole, _params?: unknown) => {
+    // A second response so a call moves the model's cursor (`i`) off 0.
+    const model = new FakeListChatModel({ responses: ['# Brief', '# Again'] });
+    models.push(model);
+    return model;
+  });
   const ambient = createNoopAmbient({
     config: core.validatedEnv,
     identity: core.identity,
@@ -122,11 +127,14 @@ function restrictedObject(
     sessions,
     taskScheduler: opts.withScheduler === false ? null : scheduler,
     contextWindows: {
-      resolve: async () => ({
-        model: 'test',
-        tokens: 100000,
-        origin: 'default',
-      }),
+      resolve: async () => {
+        opts.duringPrepare?.();
+        return {
+          model: 'test',
+          tokens: 100000,
+          origin: 'default',
+        };
+      },
     },
     aborts: new Map(),
     shadowRoutes: new Map(),
@@ -151,6 +159,7 @@ function restrictedObject(
     call,
     forbidden,
     llmGet,
+    models,
     platformGet,
     sessions,
     scheduler,
@@ -242,6 +251,32 @@ describe('a complete supplied-context run', () => {
         usage: expect.stringContaining('"modelCalls":1'),
       }),
     );
+  });
+});
+
+describe('a supplied-context run cancelled while it is prepared', () => {
+  it('never calls the model when the abort lands after the profile check', async () => {
+    const abort = new AbortController();
+    // A task cancel arriving while the turn awaits its preparation I/O:
+    // the profile check already passed, the run's signal is aborted.
+    const o = restrictedObject({ duringPrepare: () => abort.abort() });
+    const live = {
+      runId: 'run',
+      sessionId: TASK_SESSION,
+      requestId: taskRequest.requestId,
+      record: { request: JSON.stringify(storedRunRequest(taskRequest)) },
+      buffer: { isClosed: false, push: vi.fn() },
+      abort,
+      continuation: null,
+    };
+    const outcome = await o.call('runAttempt', live, false);
+    expect(o.scheduler.assertTurnProfile).toHaveBeenCalledWith(taskRequest);
+    expect(outcome).toMatchObject({ status: 'aborted', text: '' });
+    expect(o.models.map((model) => model.i)).toEqual(o.models.map(() => 0));
+    expect(live.buffer.push).toHaveBeenCalledWith('done', {
+      runId: 'run',
+      aborted: true,
+    });
   });
 });
 

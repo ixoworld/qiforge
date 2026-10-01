@@ -32,6 +32,7 @@ export interface TopicDeliverableSnapshot {
   status:
     | 'queued'
     | 'working'
+    | 'paused'
     | 'ready'
     | 'stopping'
     | 'cancelled'

@@ -1800,7 +1800,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           await this.ctx.storage.delete(META_HOUSEKEEPING_AT);
           // An attached (idle) socket still needs its heartbeat rounds.
           if (nextPingAt !== null) await this.requestAlarm(nextPingAt);
-          else await this.ctx.storage.deleteAlarm();
+          // A request that waited on the wipe has booted the object afresh
+          // and armed its own deadlines (a task Start's run): keep them.
+          else if (this.initPromise === null)
+            await this.ctx.storage.deleteAlarm();
           return;
         }
         if (outcome === 'not-current') {
@@ -2952,21 +2955,38 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (this.env.TOPIC_DELIVERABLES_ENABLED !== 'true')
         return { ok: false, status: 404, message: 'Not found.' };
       TopicOperationId.parse(operationId);
+      // Like every request: waits out an idle eviction in progress and
+      // records the access, so the idle tick re-reads this as activity.
       await this.ready(identity);
-      if (!this.taskScheduler) throw new Error('Task scheduler unavailable');
-      switch (command.action) {
-        case 'start':
-          return this.taskScheduler.startTopicDeliverable(
-            operationId,
-            TopicDeliverableRequestSchema.parse(command.request),
-          );
-        case 'read':
-          return this.taskScheduler.readTopicDeliverable(operationId);
-        case 'cancel':
-          return this.taskScheduler.cancelTopicDeliverable(
-            operationId,
-            TopicDeliverableRequestSchema.parse(command.request),
-          );
+      const scheduler = this.taskScheduler;
+      const db = this.db;
+      if (!scheduler || !db) throw new Error('Task scheduler unavailable');
+      // Start and cancel write the task row outside any turn; nothing else
+      // would schedule their upload (and an unmarked write keeps the owner
+      // copy "not current", which blocks eviction for good). A write that
+      // committed before a later step threw (the alarm arm) counts too.
+      const execute = (): Promise<TopicDeliverableResult> => {
+        switch (command.action) {
+          case 'start':
+            return scheduler.startTopicDeliverable(
+              operationId,
+              TopicDeliverableRequestSchema.parse(command.request),
+            );
+          case 'read':
+            return scheduler.readTopicDeliverable(operationId);
+          case 'cancel':
+            return scheduler.cancelTopicDeliverable(
+              operationId,
+              TopicDeliverableRequestSchema.parse(command.request),
+            );
+        }
+      };
+      const generation = db.writeGeneration;
+      try {
+        return await execute();
+      } finally {
+        if (this.db === db && db.writeGeneration !== generation)
+          this.markDirty();
       }
     }
 

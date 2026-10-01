@@ -293,6 +293,12 @@ export class TasksTestDO extends DurableObject {
     return this.ready().surface.list();
   }
 
+  /** Every loadable task row, including the ones the surface hides. */
+  async storedTasks(): Promise<OracleTaskRecord[]> {
+    if (!this.store) throw new Error('call init() first');
+    return this.store.list();
+  }
+
   async get(id: string): Promise<OracleTaskRecord | null> {
     return this.ready().surface.get(id);
   }
