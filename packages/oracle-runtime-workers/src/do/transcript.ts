@@ -14,6 +14,8 @@ import {
 } from '../attachments/retention';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
 import { ChannelOrigin } from '../channels/contract';
+import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
+import { planText } from '../delivery/schema';
 import type {
   ThreadMessageAnchor,
   ThreadMessageRow,
@@ -199,6 +201,16 @@ export async function transformTranscript(
       );
       const el = idx !== -1 ? acc[idx] : undefined;
       if (el) {
+        // A chat reply that ended in `create_artifact` wrote no text of its
+        // own: list what the user received, the message, link and question.
+        const call = el.toolCalls?.find((t) => t.id === toolCallId);
+        if (call?.name === CREATE_ARTIFACT_TOOL && !el.content.trim())
+          el.content = planText({
+            parts: createArtifactParts(
+              call.args,
+              contentToText(toolMsg.content),
+            ),
+          });
         el.toolCalls = el.toolCalls?.map((t) =>
           t.id === toolCallId
             ? {

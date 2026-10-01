@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
+import { isSecureUrl, MAX_ARTIFACT_TTL_DAYS } from '../artifacts/config';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -32,6 +33,11 @@ import { NOOP_LOGGER } from './utils';
  * env override.
  */
 export const TURN_RECURSION_LIMIT_DEFAULT = 600;
+
+/** An https URL, or http on localhost / 127.0.0.1 (local harness). */
+const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
+  message: 'must be an https URL (http only on localhost)',
+});
 
 export const baseEnvSchema = z.object({
   // --- identity -----------------------------------------------------------
@@ -193,6 +199,28 @@ export const baseEnvSchema = z.object({
   CONTEXT_KEEP_MESSAGES: z.string().optional(),
   TOOL_RESULT_TTL_HOURS: z.string().optional(),
   TOOL_RESULT_R2_MIN_BYTES: z.string().optional(),
+
+  // --- chat delivery (docs/chat-delivery.md) -------------------------------
+  /**
+   * `true` gives Matrix room turns the chat style (several short messages,
+   * long content as artefacts); unset keeps `OracleConfig.delivery.matrixChat`,
+   * which defaults to one message per reply.
+   */
+  MATRIX_CHAT_DELIVERY: z.enum(['true', 'false']).optional(),
+  /**
+   * Artefact links (the bucket is a binding, `ARTIFACT_BUCKET`): the oracle's
+   * public origin, an optional shared viewer page, and the link lifetime in
+   * days. Links carry the decryption key, so both URLs must be https (http
+   * only on localhost).
+   */
+  ORACLE_PUBLIC_URL: secureUrlSchema.optional(),
+  ARTIFACT_VIEWER_URL: secureUrlSchema.optional(),
+  ARTIFACT_LINK_TTL_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_ARTIFACT_TTL_DAYS)
+    .optional(),
 
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
