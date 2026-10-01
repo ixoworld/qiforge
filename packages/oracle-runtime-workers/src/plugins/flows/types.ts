@@ -27,6 +27,11 @@ export const CONDITION_OPERATORS = [
 ] as const;
 
 export const conditionSchema = z.object({
+  source: z
+    .enum(['configured_input', 'runtime_output'])
+    .describe(
+      'Read authored inputs or successful runtime output. Required for newly authored conditions.',
+    ),
   fromStep: z
     .string()
     .describe('Id of the upstream step whose value is checked.'),
@@ -37,6 +42,16 @@ export const conditionSchema = z.object({
     .optional()
     .describe('Value to compare against (omit for isEmpty/isNotEmpty).'),
 });
+
+export const semanticGateSchema = z
+  .object({
+    version: z.literal(1),
+    decision: z.literal('flow.gate.semantic'),
+    criterion: z.string().min(1).max(4000),
+    rubric: z.string().min(1).max(4000),
+    inputFields: z.array(z.string().min(1).max(512)).min(1).max(50),
+  })
+  .strict();
 
 export const hookSchema = z.object({
   type: z.enum(['sendEmail', 'addLinkedEntity', 'sendMatrixDM']),
@@ -114,12 +129,17 @@ export const flowStepSchema = z.object({
   runWhen: conditionSchema
     .optional()
     .describe(
-      'Gate this step on an upstream value (static configuration only).',
+      'Gate this step on an upstream configured input or runtime output.',
     ),
   conditions: z
     .array(conditionSchema)
     .optional()
     .describe('Multiple activation gates (all must pass).'),
+  semanticGate: semanticGateSchema
+    .optional()
+    .describe(
+      'Additional versioned semantic gate; cannot override deterministic conditions or authority.',
+    ),
   onEvent: onEventSchema
     .optional()
     .describe(

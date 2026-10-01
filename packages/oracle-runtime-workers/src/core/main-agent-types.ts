@@ -1,3 +1,4 @@
+import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { ContextBudget } from './context-budget';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import type { ResultCapConfig } from './middlewares/result-cap';
@@ -130,6 +131,7 @@ export interface MainAgentHooks {
 }
 
 export interface MainAgentArgs {
+  executionProfile?: TaskExecutionProfile;
   registries: MainAgentRegistries;
   identity: OracleIdentity;
   config: MergedConfig;

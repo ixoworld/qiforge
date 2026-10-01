@@ -16,6 +16,60 @@ graph LR
 
 ## The objects
 
+### Supplied-context tasks
+
+A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
+when it creates a task through `ctx.tasks`. The task must run once with
+`approval: 'never'`. The adapter must obtain authorization for the supplied
+text before creation. This profile does not provide an authorization UI or
+an HTTP task endpoint.
+
+The scheduler persists the profile in the task row and its Markdown spec.
+It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
+Before original or resumed execution, the runtime checks the owner, task,
+run, session, profile and exact task input. The profile and task inputs
+cannot change. A revision requires a new task.
+
+The agent binds no tools and rejects model-emitted tool calls. Preparation
+excludes personal preferences, memory, plugin hooks, page context, attachment
+processing and capability routing. Model selection, token and time budgets,
+checkpoints and delivery recovery continue to use the existing runtime.
+The output is generated text, not proof that the user's goal was achieved
+or that a reviewer accepted it.
+
+The scheduler re-checks the policy on every original and recovered turn, not
+only at creation: a row that is not one-shot with `approval: 'never'` is
+refused, however it was written. A turn without the profile on a restricted
+task's `task:<id>` session is refused as well.
+
+Around the turn, the profile is read from the task row (never from a
+request) and keeps the source and result inside the turn:
+
+- No session title. The `task:<id>` session keeps its placeholder title; the
+  `session-title` model (the platform adapter, outside the turn's metered
+  model and budget) is never called.
+- No memory indexing. No task-run session is sent to the memory engine —
+  not on the next session create, not on a realtime drain, not on delete.
+  The next session create indexes the user's latest conversation instead.
+- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
+  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
+  own env-driven tracer is outside this switch: it attaches only when
+  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
+  that runs restricted tasks must not rely on that variable being hidden.
+- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
+  `get_task` returns metadata only (no intent, no result text) and
+  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
+  only cancelled.
+
+A task row whose profile this runtime does not know (written by a newer
+runtime) is skipped: it is never listed, scheduled or run, the other tasks
+keep working, and any turn on its session is refused.
+
+Before rolling back to a runtime that predates this profile, cancel or drain
+all restricted tasks. An older scheduler ignores the new profile column
+and can execute a pending restricted task with its ordinary tool set; it
+also titles, indexes and traces task sessions as ordinary ones.
+
 ### `UserOracleDO` — one per user DID
 
 Holds the user's SQLite database (LangGraph checkpoints, sessions, the full
@@ -80,6 +134,55 @@ the model is told why. The rest declare nothing: the vfs plugin proves
 through its own `ixo:filesystem` delegation from the UCAN store, skills
 fall back to public capsules without `ixo:skills`, and the others call no
 UCAN-guarded service.
+
+**Admin-plane tools.** A tool is on the `orchestration` plane unless its
+author marks it `plane: 'admin'` (`tool(handler, { …, plane: 'admin' })`).
+An admin tool is the tool-level counterpart of `requires`: it needs
+`admin-tool/invoke` on `ixo:qiforge:admin-tool/<pluginName>/<toolName>`
+(`adminToolCapability`, `src/plugin-api/tool-plane.ts`), checked against the
+same turn delegation by the same matcher (`delegationHasCapability`). Under
+the parent rule a grant on `ixo:qiforge:admin-tool/<pluginName>` covers
+every admin tool of that plugin, `ixo:qiforge:admin-tool` every admin tool,
+`*` everything; `admin-tool/*` or `*` covers the ability. The ability is
+namespaced because a UCAN ability must be `*` or `<ns>/<name>`: `@ixo/ucan`
+refuses to issue a bare `invoke`. Plugin and tool names may not contain `/`
+(the resource would be ambiguous), and two plugins' tools of the same name
+are different resources.
+
+What the delegation does not grant is not there for the model: the turn
+build (`resolveTurnToolAccess`, `src/core/tool-access.ts`) drops ungranted
+admin tools before anything is selected or bound, cuts them from every
+sub-agent's `tools` and `forwardTools` (a sub-agent left with none is not
+bound as `call_<sub-agent>`; one declared without tools is), and removes
+manifest `examples` naming a withheld tool from the Tier-1 prompt and the
+`load_capability` result. A plugin that contributed tools or sub-agents and
+is left with none is treated like one whose `requires` are unmet — out of
+the prompt, refused by `load_capability` (which answers exactly as for an
+unknown name and loads nothing), void as a router preload — except that it
+is hidden outright: `list_capabilities` never lists it, not even as
+`unavailable`, and the capability router is not offered it. A call naming a
+withheld tool is refused by the gate ("not available in this
+conversation", logged `refused a call to <tool>: an admin tool …`), and
+`wrapPluginTool` checks the capability once more right before the handler
+(`requireToolPlane`), so a host that binds an admin tool past the turn's
+filtering still cannot run it; the editor's inner content agent, which calls
+its tools' handlers directly, applies the same check. The router decides
+before the turn's request-time tools are collected, so it judges from the
+boot-time tools (`bootHiddenPlugins`): it may skip a plugin that only its
+request-time tools would make usable, and a preload of a plugin the build
+then hides is dropped.
+
+The delegation every one of these checks reads is the one the **user**
+issued to the oracle (the request's, or on a Matrix turn the stored one;
+`resolveTurnDelegation`). An admin grant therefore records the user's
+consent: the user explicitly delegates `admin-tool/invoke` on that resource
+to this oracle for their own turns. It is not operator or host authority —
+any user can issue such a grant to the oracle for themselves, so an admin
+tool must not act beyond what that user may already do. Whether an admin
+grant must also chain to an operator or controller is not decided; nothing
+checks it today. The plane is also distinct from `visibility` (discovery),
+`effect` (replay after a reset) and consequence approval (a Decision or
+action guard still applies to an admin tool's real-world effect).
 
 **Capability router.** Loading a plugin with `load_capability` costs a
 model round trip. With `CAPABILITY_ROUTER=on` the turn build

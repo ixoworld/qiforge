@@ -24,8 +24,9 @@ import {
   makeRuntimeContext,
   makeTool,
 } from '../core/test-fixtures';
+import { adminToolCapability } from '../plugin-api/tool-plane';
 import { createUcanAdapter } from './ambient';
-import { WorkersUcanService } from './ucan-service';
+import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
 
 // Deterministic BIP39 test vector — never a real account.
 const ORACLE_MNEMONIC =
@@ -186,7 +187,10 @@ describe('WorkersUcanService.withCapabilities', () => {
       manifests.register(plugin);
       tools.register(plugin);
       await tools.collect(makeBuildCtx());
-      const load = buildLoadCapabilityTool(manifests, tools);
+      const load = buildLoadCapabilityTool(manifests, tools, {
+        withheldToolNames: new Set(),
+        hiddenPlugins: new Set(),
+      });
       const turn = async () => {
         const run = makeRunConfig();
         return load.handler(
@@ -227,6 +231,66 @@ describe('WorkersUcanService.withCapabilities', () => {
       raw: 'not-a-delegation',
       capabilities: [],
     });
+  });
+});
+
+describe('resolveTurnDelegation', () => {
+  const service = () => new WorkersUcanService({ oracleDid: ORACLE_DID });
+  const rotateKey = adminToolCapability('keys', 'rotate_key');
+
+  /** The user's own delegation to the oracle, granting `capabilities`. */
+  async function userGrants(
+    capabilities: Array<{
+      can: `${string}/${string}`;
+      with: `${string}:${string}`;
+    }>,
+  ): Promise<string> {
+    const { signer } = await signerFromMnemonic(
+      USER_MNEMONIC,
+      USER_DID as `did:ixo:${string}`,
+    );
+    return serializeDelegation(
+      await createDelegation({
+        issuer: signer,
+        audience: ORACLE_DID,
+        capabilities,
+        expiration: Math.floor(Date.now() / 1000) + 3600,
+      }),
+    );
+  }
+
+  it('a header-less (Matrix) turn checks admin tools against the stored delegation', async () => {
+    const svc = service();
+    const ucan = createUcanAdapter(svc, () => undefined);
+    const stored = await userGrants([
+      { can: 'admin-tool/invoke', with: 'ixo:qiforge:admin-tool/keys' },
+    ]);
+
+    const matrixTurn = await resolveTurnDelegation(undefined, stored, svc);
+    expect(matrixTurn.raw).toBe(stored);
+    expect(
+      ucan.hasCapability(matrixTurn, rotateKey.resource, rotateKey.action),
+    ).toBe(true);
+
+    // A request's own delegation wins over the stored one.
+    const httpTurn = await resolveTurnDelegation(
+      await userGrants([{ can: 'memory/*', with: 'ixo:memory' }]),
+      stored,
+      svc,
+    );
+    expect(
+      ucan.hasCapability(httpTurn, rotateKey.resource, rotateKey.action),
+    ).toBe(false);
+
+    // Nothing stored, nothing sent, or no UCAN service: nothing granted.
+    for (const nothing of [
+      await resolveTurnDelegation(undefined, undefined, svc),
+      await resolveTurnDelegation(undefined, stored, null),
+    ]) {
+      expect(
+        ucan.hasCapability(nothing, rotateKey.resource, rotateKey.action),
+      ).toBe(false);
+    }
   });
 });
 

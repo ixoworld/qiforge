@@ -15,8 +15,15 @@ import {
   shadowAgreement,
   type CapabilityRouteTurn,
 } from './capability-router';
-import type { RegisteredManifest } from './registries';
-import { makeManifest } from './test-fixtures';
+import { createRegistries, type RegisteredManifest } from './registries';
+import { delegationHasCapability } from './runtime-context';
+import {
+  makeBuildCtx,
+  makeManifest,
+  makePlugin,
+  makeTool,
+} from './test-fixtures';
+import { bootHiddenPlugins } from './tool-access';
 
 const MESSAGE = 'Will it rain in Cairo tomorrow?';
 
@@ -147,6 +154,42 @@ describe('routableCandidates', () => {
         new Set([...loaded, 'weather', 'payments']),
       ),
     ).toEqual([]);
+  });
+
+  it('never names a plugin whose tools are all admin tools the delegation does not grant', async () => {
+    const registries = createRegistries();
+    const payments = makePlugin({
+      name: 'payments',
+      manifest: makeManifest({ title: 'Payments', visibility: 'on-demand' }),
+      getTools: () => [makeTool('refund', { plane: 'admin' })],
+    });
+    registries.tools.register(payments);
+    registries.subAgents.register(payments);
+    const hidden = (
+      capabilities: Array<{ resource: string; action: string }>,
+    ) =>
+      bootHiddenPlugins({
+        registries,
+        buildCtx: makeBuildCtx(),
+        has: (resource, action) =>
+          delegationHasCapability({ capabilities }, resource, action),
+      });
+
+    const denied = await hidden([]);
+    expect(denied).toEqual(new Set(['payments']));
+    expect(
+      routableCandidates(manifests, loaded, denied).map((c) => c.name),
+    ).toEqual(['weather']);
+
+    const granted = await hidden([
+      {
+        resource: 'ixo:qiforge:admin-tool/payments/refund',
+        action: 'admin-tool/invoke',
+      },
+    ]);
+    expect(
+      routableCandidates(manifests, loaded, granted).map((c) => c.name),
+    ).toEqual(CANDIDATE_NAMES);
   });
 });
 

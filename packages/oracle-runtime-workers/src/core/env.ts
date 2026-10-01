@@ -147,6 +147,16 @@ export const baseEnvSchema = z.object({
    */
   TURN_MAX_IDENTICAL_WRITES: z.coerce.number().int().positive().default(1),
   TURN_MAX_IDENTICAL_READS: z.coerce.number().int().positive().default(5),
+  /**
+   * Time limit per plugin `getRequestAdmission` handler (ms). A handler that
+   * has not answered by then counts as `pass` and the turn goes on to the
+   * next handler or the agent. See docs/architecture/request-admission.md.
+   */
+  REQUEST_ADMISSION_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(2_000),
 
   // --- decisions ----------------------------------------------------------
   // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,

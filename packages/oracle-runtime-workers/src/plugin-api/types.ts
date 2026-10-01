@@ -1,3 +1,4 @@
+import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
   DecisionEvaluateOptions,
@@ -835,6 +836,7 @@ export type OracleTaskSchedule =
 
 /** Stored task record (persisted in the user's own database → owner file). */
 export interface OracleTaskRecord {
+  executionProfile?: TaskExecutionProfile;
   id: string;
   title: string;
   /** Markdown intent body — what the agent should do each run. */
@@ -857,6 +859,8 @@ export interface OracleTaskRecord {
 }
 
 export interface OracleTaskInput {
+  /** Host-only closed execution profile; never exposed by model task tools. */
+  executionProfile?: TaskExecutionProfile;
   title: string;
   intent: string;
   schedule: OracleTaskSchedule;
@@ -919,6 +923,8 @@ export interface OracleTasksSurface {
   ): Promise<{ resolved: boolean }>;
 }
 
+export type ToolPlane = 'orchestration' | 'admin';
+
 export interface PluginTool {
   name: string;
   description: string;
@@ -926,6 +932,15 @@ export interface PluginTool {
   handler: (args: unknown, ctx: RuntimeContext) => Promise<unknown>;
   /** Override visibility — by default inherits from the plugin's `manifest.visibility`. */
   visibility?: 'always' | 'on-demand' | 'silent';
+  /**
+   * Privilege plane. `orchestration` is the default. An `admin` tool exists
+   * for a turn only when the user's delegation to the oracle grants
+   * `adminToolCapability(pluginName, name)`: otherwise it is never bound or
+   * listed, and the capability is checked again right before the handler.
+   * That grant is the user's consent, not operator authority — a user can
+   * issue it for themselves.
+   */
+  plane?: ToolPlane;
   /**
    * Whether calling the tool changes anything outside the conversation.
    * `'read'` tools may be executed again when a turn is resumed after a

@@ -72,6 +72,14 @@ function requireTasks(ctx: RuntimeContext): OracleTasksSurface | null {
   return ctx.tasks ?? null;
 }
 
+/**
+ * A host-created supplied-context task: its intent is the authorized source
+ * text and its result was produced from it alone. Neither enters an ordinary
+ * conversation, and the task is one immutable attempt (cancel only).
+ */
+const RESTRICTED_TASK_NOTE =
+  'Restricted supplied-context task: its source text and result are not available in this conversation, and it cannot be edited, paused or resumed — only cancelled.';
+
 function summarizeRecord(record: OracleTaskRecord): Record<string, unknown> {
   const pendingApprovalAt = pendingApprovalOf(record);
   return {
@@ -83,6 +91,10 @@ function summarizeRecord(record: OracleTaskRecord): Record<string, unknown> {
     approval: record.approval,
     ...(pendingApprovalAt !== undefined && {
       awaitingApprovalSince: pendingApprovalAt,
+    }),
+    ...(record.executionProfile && {
+      restricted: true,
+      executionProfile: record.executionProfile,
     }),
   };
 }
@@ -234,6 +246,18 @@ function getTask(): PluginTool {
       try {
         const record = await tasks.get(taskId);
         if (!record) return { ok: false, error: 'Task not found.' };
+        if (record.executionProfile) {
+          return {
+            ok: true,
+            ...summarizeRecord(record),
+            lastRunAt: record.lastRunAt ?? null,
+            lastResult: record.lastResult
+              ? { ok: record.lastResult.ok, at: record.lastResult.at }
+              : null,
+            consecutiveFailures: record.consecutiveFailures,
+            note: RESTRICTED_TASK_NOTE,
+          };
+        }
         return {
           ok: true,
           ...summarizeRecord(record),
@@ -381,6 +405,8 @@ function suggestSpecFix(): PluginTool {
       try {
         const record = await tasks.get(taskId);
         if (!record) return { ok: false, error: 'Task not found.' };
+        if (record.executionProfile)
+          return { ok: false, error: RESTRICTED_TASK_NOTE };
         const lastFailure =
           record.lastResult && !record.lastResult.ok
             ? record.lastResult

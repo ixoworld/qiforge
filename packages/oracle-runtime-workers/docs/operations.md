@@ -410,6 +410,23 @@ What the user sees is plain language only — "could not be completed",
 (what the task tools relay) says the same; the technical reason is in the
 log line and the run row's `detail`.
 
+A turn that names a task run (`taskRunId`, original or recovered) runs only
+while that run's row is still open on the task's own session. Once the row
+is closed — reported as interrupted, or its result dropped — the recovered
+turn attempt fails instead of executing again: its result could no longer be
+delivered and its tools would only run a second time.
+
+Supplied-context tasks (see
+[architecture](architecture.md#supplied-context-tasks)) are one-shot,
+immutable attempts: `pause` / `resume` / `update` are refused, `cancel`
+works, and the task tools show metadata only. Their `task:<id>` session is
+never titled by the title model, never indexed into the memory engine and
+never traced to LangSmith. A task row whose `execution_profile` this runtime
+does not know is skipped with a `[tasks] task … has an execution profile
+this runtime does not support` warning on each read (it is not in
+`GET /debug/tasks` either); roll forward, or cancel such tasks from the
+newer runtime before rolling back.
+
 A send the crypto WASM cannot encrypt does not fail cleanly: the machine
 panics, later crypto calls throw `null pointer passed to rust`, and the
 stuck send would hold a gate slot forever. The SDK's 45 s send watchdog
@@ -699,7 +716,9 @@ way. `message` / `done` chunks stay SSE-only.
 Background work is bounded: the session-history indexer runs under
 `ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s
 timeout on the memory-engine request; a failed session is retried on the
-next session create because its watermark did not move.
+next session create because its watermark did not move. Task-run sessions
+(`task:<id>`) are never indexed: a session create indexes the user's most
+recent conversation, skipping task runs.
 
 ## ChatGPT-subscription lane needs a proxy
 
@@ -757,6 +776,7 @@ that can handle the requested parameters` is the memory engine's own
 | A user object never unloads (`instanceUptimeMs` grows while idle)                                         | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).                        |
 | Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                                                | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                                            |
 | A plugin with `requires` is refused although the user authorized it; `[UCAN] the delegation expired at …` | `GET /debug/delegation` (the stored delegation's expiry)                                                        | Validity is checked at use: an expired stored delegation grants nothing even while the object stays warm. The user re-authorizes (a new delegation). |
+| An admin tool (or its whole plugin) is missing for a user; `[main-agent] admin tools withheld from <did>` | `GET /debug/delegation`; the grants the user issued                                                             | Expected without the grant: the user delegates `admin-tool/invoke` on `ixo:qiforge:admin-tool/<plugin>[/<tool>]` (architecture → Admin-plane tools). |
 | `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                                         |
 
 ## Write claims and turn usage
