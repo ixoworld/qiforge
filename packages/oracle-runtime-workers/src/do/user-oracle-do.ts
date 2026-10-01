@@ -50,6 +50,7 @@ import {
   langsmithEnvFromWorkerEnv,
   llmEnvFromWorkerEnv,
   resolveLangsmithTracing,
+  type LangsmithTracingDecision,
   type OpenRouterLlmAdapter,
   DEFAULT_MODEL_ID,
 } from '../core/llm';
@@ -1927,8 +1928,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const sessions = this.sessions!;
       // Like the Node runtime: creating a session sends the MOST RECENT
       // previous session's transcript to the memory engine, in the
-      // background — the new session never waits on it.
-      const { sessions: recent } = await sessions.listSessions(undefined, 1, 0);
+      // background — the new session never waits on it. Task runs are not
+      // conversations and are never indexed (`scheduleHistoryIndexing`).
+      const { sessions: recent } = await sessions.listSessions(
+        undefined,
+        1,
+        0,
+        TASK_SESSION_PREFIX,
+      );
       const previous = recent[0];
       if (previous) this.scheduleHistoryIndexing(previous.sessionId);
       let sessionId = o.sessionId;
@@ -2032,7 +2039,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // The rows are gone once this RPC returns, so capture the transcript
       // now and let the background indexer read the snapshot.
       const doomed = await this.sessions!.getSession(sessionId);
-      if (doomed) {
+      if (doomed && !sessionId.startsWith(TASK_SESSION_PREFIX)) {
         this.historySnapshots.set(sessionId, {
           session: doomed,
           messages: await this.historyMessages(sessionId),
@@ -2073,8 +2080,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * seeded from the row's `lastProcessedCount` for files migrated from Node;
      * `touchSession` is not used because it bumps `last_updated_at` and
      * would reorder the session list.
+     *
+     * Task-run sessions (`task:<id>`) are never indexed: a run's transcript
+     * is the task's instructions and its result, not something the user
+     * said, and a supplied-context task's source text must not become
+     * long-term memory that ordinary, tool-enabled turns can retrieve.
      */
     private scheduleHistoryIndexing(sessionId: string): void {
+      if (sessionId.startsWith(TASK_SESSION_PREFIX)) return;
       const ambient = this.ambient;
       const userDid = this.userDid;
       if (!ambient || !this.sessions || !userDid) return;
@@ -3798,6 +3811,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         continuation: string | null;
       },
     ) {
+      if (req.executionProfile && !this.taskScheduler)
+        throw new Error('Task scheduler unavailable');
+      await this.taskScheduler?.assertTurnProfile(req);
+      const suppliedContextOnly =
+        req.executionProfile === 'supplied-context-markdown';
+      if (
+        suppliedContextOnly &&
+        (body.attachments?.length ||
+          body.tools?.length ||
+          body.agActions?.length)
+      ) {
+        throw new Error('Supplied-context task accepts plain text only');
+      }
       const core = this.core;
       const baseAmbient = this.ambient!;
       const saver = this.saver!;
@@ -3910,15 +3936,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // memory engine rejects calls that carry no `x-room-id` (as a generic
       // "invalid token"). Matrix-ingress turns bring the room; HTTP turns
       // take it from the session row or resolve the user↔oracle room alias.
-      const sessionRoomId =
-        req.roomId ??
-        (await sessions.getSession(req.sessionId))?.roomId ??
-        (
-          await this.gateway
-            .resolveUserRoom(req.identity.userDid)
-            .catch(() => null)
-        )?.roomId;
-      if (!sessionRoomId) {
+      const sessionRoomId = suppliedContextOnly
+        ? undefined
+        : (req.roomId ??
+          (await sessions.getSession(req.sessionId))?.roomId ??
+          (
+            await this.gateway
+              .resolveUserRoom(req.identity.userDid)
+              .catch(() => null)
+          )?.roomId);
+      if (!suppliedContextOnly && !sessionRoomId) {
         console.warn(
           `[user-do] no oracle room resolved for ${req.identity.userDid}; room-scoped plugins (memory) will be unavailable this turn`,
         );
@@ -3941,7 +3968,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // on turn 1, exactly like the Node AgentBuilder. Best-effort: a
       // preferences read failure never fails the turn.
       const userPreferences =
-        sessionRoomId && this.preferences
+        !suppliedContextOnly && sessionRoomId && this.preferences
           ? await this.preferences.get(sessionRoomId).catch((err: unknown) => {
               console.warn(
                 `[user-do] could not load user preferences for ${sessionRoomId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -3995,14 +4022,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       abortController.signal.addEventListener('abort', () => {
         void this.runTurnDisposables(turnDisposables);
       });
-      const attachmentAccess = await this.attachmentViewSurface({
-        sessionId: req.sessionId,
-        roomId: sessionRoomId,
-        model: attachmentModel,
-        ambientLlm: baseAmbient.llm,
-        platform: core.llm,
-        signal: abortController.signal,
-      });
+      const attachmentAccess = suppliedContextOnly
+        ? undefined
+        : await this.attachmentViewSurface({
+            sessionId: req.sessionId,
+            roomId: sessionRoomId,
+            model: attachmentModel,
+            ambientLlm: baseAmbient.llm,
+            platform: core.llm,
+            signal: abortController.signal,
+          });
 
       const existing = await saver.getTupleWithoutMessages({
         configurable: { thread_id: req.sessionId },
@@ -4010,8 +4039,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const priorState = existing?.checkpoint.channel_values ?? {};
       // Request metadata (editor room, space, session run, entity) → state,
       // by the Node agent-builder's rules (see turn-metadata.ts).
-      const meta = parseTurnMetadata(req.metadata);
-      const priorMeta = priorMetadataState(priorState);
+      const meta = parseTurnMetadata(
+        suppliedContextOnly ? undefined : req.metadata,
+      );
+      const priorMeta = priorMetadataState(
+        suppliedContextOnly ? {} : priorState,
+      );
 
       // Capability router: predict the on-demand plugin this message needs
       // and preload it for THIS turn only. `on` is awaited here, ahead of the
@@ -4027,55 +4060,66 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // allowlist gate. Metadata is attached unconditionally (inert without a
       // tracer); the explicit tracer only when this turn is traced (global
       // switch or per-DID allowlist — see `resolveLangsmithTracing`).
-      const tracing = resolveLangsmithTracing({
-        userDid: req.identity.userDid,
-        client: req.client,
-        env: langsmithEnvFromWorkerEnv(this.env),
-      });
+      // A supplied-context turn is never traced: its source and output stay
+      // off third-party services whatever the tracing switches say.
+      const tracing: LangsmithTracingDecision = suppliedContextOnly
+        ? { metadata: {} }
+        : resolveLangsmithTracing({
+            userDid: req.identity.userDid,
+            client: req.client,
+            env: langsmithEnvFromWorkerEnv(this.env),
+          });
       // The delegation the whole turn reads: the router's candidates here,
       // every capability check of the build and its tools below.
       const ucanDelegation = await this.turnDelegation(req.identity);
-      const preloadedPlugins = this.capabilityRouter
-        ? await this.capabilityRouter({
-            mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
-            manifests: core.registries.manifests.collect(),
-            loaded: priorLoaded,
-            hidden: await bootHiddenPlugins({
-              registries: core.registries,
-              buildCtx: core.buildCtx(),
-              has: (resource, action) =>
-                ambient.ucan.hasCapability(ucanDelegation, resource, action),
-            }),
-            text: body.message,
-            requestId: req.requestId,
-            signal: abortController.signal,
-            trace: {
-              ...(tracing.callbacks && { callbacks: tracing.callbacks }),
-              // `thread_id` matches the graph run's, so LangSmith's thread
-              // view groups the router span with the turn.
-              metadata: {
-                ...tracing.metadata,
-                thread_id: req.sessionId,
-                request_id: req.requestId,
-              },
-            },
-            onShadowVerdict: (wouldPreload) =>
-              this.shadowRoutes.set(req.sessionId, {
-                requestId: req.requestId,
-                priorLoaded,
-                wouldPreload,
+      const preloadedPlugins =
+        !suppliedContextOnly && this.capabilityRouter
+          ? await this.capabilityRouter({
+              mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
+              manifests: core.registries.manifests.collect(),
+              loaded: priorLoaded,
+              hidden: await bootHiddenPlugins({
+                registries: core.registries,
+                buildCtx: core.buildCtx(),
+                has: (resource, action) =>
+                  ambient.ucan.hasCapability(ucanDelegation, resource, action),
               }),
-          })
-        : undefined;
+              text: body.message,
+              requestId: req.requestId,
+              signal: abortController.signal,
+              trace: {
+                ...(tracing.callbacks && { callbacks: tracing.callbacks }),
+                // `thread_id` matches the graph run's, so LangSmith's thread
+                // view groups the router span with the turn.
+                metadata: {
+                  ...tracing.metadata,
+                  thread_id: req.sessionId,
+                  request_id: req.requestId,
+                },
+              },
+              onShadowVerdict: (wouldPreload) =>
+                this.shadowRoutes.set(req.sessionId, {
+                  requestId: req.requestId,
+                  priorLoaded,
+                  wouldPreload,
+                }),
+            })
+          : undefined;
 
       // Host page-context / safety-guardrail hooks, resolved against this
       // object's ambient services (see `OracleWorkerHooks`).
-      const hostRoomTitle = opts.hooks?.getRoomTitle;
-      const hostSafetyModel = opts.hooks?.safetyModel;
+      const hostRoomTitle = suppliedContextOnly
+        ? undefined
+        : opts.hooks?.getRoomTitle;
+      const hostSafetyModel = suppliedContextOnly
+        ? undefined
+        : opts.hooks?.safetyModel;
 
       // The client-declared tool surface: this body's, else the thread's
       // checkpointed one (run-request.ts).
-      const surface = clientSurfaceFor(body, priorState);
+      const surface = suppliedContextOnly
+        ? clientSurfaceFor({}, {})
+        : clientSurfaceFor(body, priorState);
 
       // Write-ahead tool marks + the resume policy (tool-marks.ts). The
       // effect map is filled from the build below; the closure reads it at
@@ -4159,6 +4203,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const capMiddleware = createResultCapMiddleware(resultCap);
 
       const built = await createMainAgent({
+        executionProfile: req.executionProfile,
         registries: core.registries,
         identity: core.identity,
         config: core.validatedEnv,
@@ -4226,7 +4271,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           model: effectiveModel,
         },
         state: {
-          ...priorState,
+          ...(suppliedContextOnly ? {} : priorState),
           userPreferences,
           ...metadataBuildState(meta, priorMeta),
           // The client-declared surface: the portal and AG-UI plugins turn
@@ -4409,7 +4454,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);
-      if (row && (!row.title || row.title === UNTITLED_SESSION)) {
+      // The title model is the platform adapter, outside the turn's metered
+      // model and budget: a supplied-context task's source and result never
+      // reach it.
+      if (
+        row &&
+        (!row.title || row.title === UNTITLED_SESSION) &&
+        !(await this.isRestrictedTaskSession(sessionId))
+      ) {
         const title = await this.generateTitle(messages).catch(() => null);
         if (title)
           await sessions.setTitle(sessionId, title, { onlyIfUntitled: true });
@@ -4424,6 +4476,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[user-do] tier access record failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
+    }
+
+    /**
+     * Whether a session belongs to a supplied-context task, read from the
+     * task row (never from the request). A task session with no scheduler to
+     * read the row from is treated as restricted.
+     */
+    private async isRestrictedTaskSession(sessionId: string): Promise<boolean> {
+      if (!sessionId.startsWith(TASK_SESSION_PREFIX)) return false;
+      return this.taskScheduler
+        ? this.taskScheduler.isRestrictedSession(sessionId)
+        : true;
     }
 
     /**

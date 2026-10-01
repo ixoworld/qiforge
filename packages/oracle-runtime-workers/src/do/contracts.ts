@@ -1,3 +1,4 @@
+import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { TurnUsage } from '../core/turn-budget';
@@ -280,6 +281,7 @@ export interface TurnIdentity {
 
 /** Request the shell / gateway sends to `UserOracleDO` to run one turn. */
 export interface TurnRequest {
+  executionProfile?: TaskExecutionProfile;
   identity: TurnIdentity;
   sessionId: string;
   message: string;

@@ -16,6 +16,60 @@ graph LR
 
 ## The objects
 
+### Supplied-context tasks
+
+A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
+when it creates a task through `ctx.tasks`. The task must run once with
+`approval: 'never'`. The adapter must obtain authorization for the supplied
+text before creation. This profile does not provide an authorization UI or
+an HTTP task endpoint.
+
+The scheduler persists the profile in the task row and its Markdown spec.
+It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
+Before original or resumed execution, the runtime checks the owner, task,
+run, session, profile and exact task input. The profile and task inputs
+cannot change. A revision requires a new task.
+
+The agent binds no tools and rejects model-emitted tool calls. Preparation
+excludes personal preferences, memory, plugin hooks, page context, attachment
+processing and capability routing. Model selection, token and time budgets,
+checkpoints and delivery recovery continue to use the existing runtime.
+The output is generated text, not proof that the user's goal was achieved
+or that a reviewer accepted it.
+
+The scheduler re-checks the policy on every original and recovered turn, not
+only at creation: a row that is not one-shot with `approval: 'never'` is
+refused, however it was written. A turn without the profile on a restricted
+task's `task:<id>` session is refused as well.
+
+Around the turn, the profile is read from the task row (never from a
+request) and keeps the source and result inside the turn:
+
+- No session title. The `task:<id>` session keeps its placeholder title; the
+  `session-title` model (the platform adapter, outside the turn's metered
+  model and budget) is never called.
+- No memory indexing. No task-run session is sent to the memory engine —
+  not on the next session create, not on a realtime drain, not on delete.
+  The next session create indexes the user's latest conversation instead.
+- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
+  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
+  own env-driven tracer is outside this switch: it attaches only when
+  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
+  that runs restricted tasks must not rely on that variable being hidden.
+- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
+  `get_task` returns metadata only (no intent, no result text) and
+  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
+  only cancelled.
+
+A task row whose profile this runtime does not know (written by a newer
+runtime) is skipped: it is never listed, scheduled or run, the other tasks
+keep working, and any turn on its session is refused.
+
+Before rolling back to a runtime that predates this profile, cancel or drain
+all restricted tasks. An older scheduler ignores the new profile column
+and can execute a pending restricted task with its ordinary tool set; it
+also titles, indexes and traces task sessions as ordinary ones.
+
 ### `UserOracleDO` — one per user DID
 
 Holds the user's SQLite database (LangGraph checkpoints, sessions, the full
