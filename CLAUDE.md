@@ -4,14 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-QiForge — a plugin-based framework for building Agentic Oracles on the IXO network. The runtime ships as `@ixo/oracle-runtime`; oracles are thin apps that call `createOracleApp({ config, plugins, nestModules })`.
+QiForge — a plugin-based framework for building Agentic Oracles on the IXO network. The runtime ships as `@ixo/oracle-runtime-workers` and runs on Cloudflare Workers; an oracle is a thin Worker that calls `createOracleWorker({ config, plugins })` and exports the two Durable Object classes.
 
-Active codebase:
+**Active codebase (the only place new work goes):**
 
-- `packages/oracle-runtime/` — the framework (bootstrap, registries, graph, modules, 14 bundled plugins).
-- `apps/qiforge-example/` — reference oracle wiring the bundled plugin set + a custom Weather plugin. Use as the canonical "how a fork is built".
+- `packages/oracle-runtime-workers/` — the runtime: Hono shell, `UserOracleDO` (one per user DID: SQLite in WASM over DO storage, the LangGraph turn, durable runs, tasks, owner-copy persistence), `MatrixGatewayDO` (E2EE Matrix ingress on `@ixo/matrix-bot-workers-sdk`), the plugin API and the bundled plugins.
+- `apps/qiforge-workers-example/` — the reference Worker and every local/devnet test drill. Use as the canonical "how an oracle is built".
+- `packages/common/` (`@ixo/common`, shared contracts such as bounded semantic Decisions), `packages/ucan/` (`@ixo/ucan`), `packages/oracles-client-sdk/` (React SDK).
 
-`apps/app/` is legacy and being removed (TASK-32). Do not touch prompts, tools, or middlewares there. Scope edits to the runtime package and the example app.
+### ⚠️ The Node runtime is DEPRECATED — do not work on it
+
+`packages/oracle-runtime/` (`@ixo/oracle-runtime`, NestJS), `apps/qiforge-example/` and `packages/sqlite-saver/` are **no longer developed**. Nobody deploys them; every companion and oracle runs the Workers runtime. They stay in the repo only so the published package keeps building for old forks.
+
+- Do not add features, "Node parity", refactors or tests there. A PR that touches both runtimes only needs its Workers half; drop or leave the Node half untouched.
+- Do not read the Node code to learn how the runtime works — read `packages/oracle-runtime-workers/docs/` and the Workers source. `packages/oracle-runtime-workers/docs/node-parity.md` records the behaviours that intentionally differ.
+- Only touch it when a security advisory forces a dependency bump or when `pnpm build` / `pnpm lint` on main would otherwise break.
 
 ## Build & development commands
 
@@ -24,14 +31,22 @@ pnpm lint             # Lint (must pass before commit)
 pnpm format           # Prettier format
 pnpm format:check     # CI uses this — checks without writing
 
-# From apps/qiforge-example - oracle dev workflow
-pnpm dev                  # tsx watch src/main.ts
-pnpm start                # node dist/main.js
-pnpm test:integration     # vitest --mode int
+# Workers runtime — what the "Workers harness" CI job runs
+pnpm --filter @ixo/ucan --filter "@ixo/common..." build   # the runtime resolves these through dist
+pnpm --filter @ixo/oracle-runtime-workers typecheck
+pnpm --filter @ixo/oracle-runtime-workers test:core        # plain-Node suites (vitest.core.config.ts)
+pnpm --filter @ixo/oracle-runtime-workers test             # inside workerd (@cloudflare/vitest-pool-workers)
+pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts
 
-# Run tests for a single package
-pnpm test --filter @ixo/oracle-runtime
+# From apps/qiforge-workers-example — against the local ixo testing harness
+# (~/dev/ixo/testing-harness, Synapse ixo.test :34008, Blocksync :34582) and a real LLM
+pnpm dev                  # wrangler dev
+pnpm test:e2e             # auth, streaming, tools, owner copy, E2EE Matrix, resets, tasks
+pnpm test:e2e:durable     # durable runs; test:e2e:context, :threads, :group, :transcript, :vfs, :tier, :mcp
+STEP_FILTER='^regex' pnpm test:e2e   # one step or a group while iterating
 ```
+
+Run the targeted layer while iterating and the full matrix once at the end — `packages/oracle-runtime-workers/docs/testing.md` lists every suite and what it proves. `wrangler dev` does not forward the worker's `console.log` to the parent process; e2e assertions use the debug routes, never log lines.
 
 ### Pre-commit checklist
 
@@ -40,67 +55,58 @@ pnpm lint
 pnpm format
 ```
 
-CI runs `pnpm lint` and `pnpm format:check` — both must pass.
+CI runs `pnpm build`, `pnpm lint` and `pnpm format:check` ("Build and Lint") plus the Workers harness job above — all must pass.
 
 ## Architecture
 
 ### Monorepo structure
 
-- **`packages/oracle-runtime/`** — `@ixo/oracle-runtime`, the framework. Bootstrap (`createOracleApp`), agent build, graph, modules (Sessions, Messages, WS, Secrets, UCAN, Auth, Subscription, Throttler, Health, Matrix checkpointer), 14 bundled plugins.
-- **`apps/qiforge-example/`** — reference oracle.
-- **`apps/app/`** — legacy monolith, being removed.
-- **`packages/`** — other shared packages (`@ixo/events`, `@ixo/matrix`, `@ixo/sqlite-saver`, `@ixo/oracles-chain-client`, `@ixo/oracles-client-sdk`, etc.).
+- **`packages/oracle-runtime-workers/`** — `@ixo/oracle-runtime-workers`, the runtime. `src/shell` (Hono app + UCAN auth), `src/do` (`UserOracleDO`, run coordinator, owner-copy flush, idle eviction), `src/matrix` (`MatrixGatewayDO`, ingest, inbox, group chats), `src/core` (main agent, middlewares, meta-tools, context budgets, capability router), `src/plugin-api`, `src/plugins`, `src/tasks`, `src/sqlite`, `src/owner-store`, `src/llm` (BYO providers), `src/realtime` (socket.io), `src/attachments`, `src/secrets`.
+- **`apps/qiforge-workers-example/`** — reference Worker; `wrangler.jsonc` (single script, local harness), `wrangler.devnet.jsonc` + `wrangler.gateway.devnet.jsonc` (two scripts), `test/` (harness e2e drills, `devnet-features.ts`, load tests).
+- **`packages/`** — shared packages (`@ixo/common`, `@ixo/ucan`, `@ixo/matrix`, `@ixo/oracles-chain-client`, `@ixo/oracles-client-sdk`, etc.).
+- **Deprecated:** `packages/oracle-runtime/`, `apps/qiforge-example/`, `packages/sqlite-saver/`, `packages/events/` (Node runtime — see above).
 
 ### How the runtime works
 
-A fork's `main.ts` calls `createOracleApp(opts)`. The runtime:
+One Worker deployment = one oracle (optionally split into an oracle script and a gateway script, see `docs/architecture.md#two-worker-scripts-the-gateway-split`).
 
-1. Resolves the plugin set (bundled + user plugins, with `features` toggles and `autoDetect`).
-2. Topologically sorts by `dependsOn`.
-3. Validates every plugin manifest.
-4. Composes the env schema from base + every plugin's `configSchema`; validates `process.env`.
-5. Populates seven registries (tools, sub-agents, middlewares, decisions, manifests, configSchema, sharedState).
-6. Builds `RuntimeAppModule` with the runtime's always-on modules + plugin Nest modules + user Nest modules.
-7. Bootstraps NestJS.
-8. Schedules Matrix init in the background.
-9. Returns an `OracleApp` whose `listen()` starts HTTP.
+- The Hono shell authenticates every request with a UCAN invocation proved by the user's delegation to the oracle (`src/shell/auth.ts`) and forwards it to the `UserOracleDO` of the proven DID.
+- `UserOracleDO` holds the user's SQLite database (LangGraph checkpoints, sessions, transcript) in DO storage through wa-sqlite, builds the turn (`src/core/main-agent.ts`: cached registries + request-time hooks, prompt composer, capability gate, always-on middlewares), runs it as a durable run (`src/do/run-coordinator.ts`: restart-safe, re-joinable with a cursor, tool effect marks) and streams SSE straight from the object.
+- `MatrixGatewayDO` syncs the oracle's Matrix account (E2EE via `@ixo/matrix-bot-workers-sdk`), debounces room messages into turns (`src/matrix/ingest.ts`, durable inbox) and dispatches them to user objects; a thread root is a session id.
+- The user's database is exported as an encrypted owner copy to the user's VFS (or Matrix media on the legacy path) on a daily deadline, re-imported on a cold start; idle objects are evicted after the flush.
+- Plugins are the same `OraclePlugin` classes as before: tools, sub-agents, middlewares, manifest, `configSchema`; on-demand plugins are hidden by the capability gate until `load_capability` (or the capability router) admits them.
 
-Per request:
+### Specs and plans
 
-- `AuthHeaderMiddleware` validates the UCAN delegation.
-- `MessagesController` builds a per-request `RuntimeContext` and calls `createMainAgent`.
-- `createMainAgent` reads cached registries plus runs request-time hooks (`getRequestTools`, `getRequestSubAgents`), composes the prompt, wraps tools/sub-agents, and returns a compiled LangChain agent.
-- LangGraph runs the turn; the checkpointer persists state per user.
-
-Single new state field: `loadedPlugins` — populated by the `load_capability` meta-tool, monotonic per thread.
-
-### Spec and tasks
-
-- `specs/ORA-219-plugin-based-runtime.md` — the design.
-- `specs/tasks/README.md` — task index with status table and dependency graph.
-- `docs/spec-and-roadmap/` — pointers + follow-ups (the logger replacement, the tasks plugin rebuild, the calls plugin).
+- `packages/oracle-runtime-workers/docs/` — architecture, configuration, operations, testing, load tests, node-parity.
+- `docs/plans/` — design notes for the larger Workers changes (durable runs, context budgets, transcript paging, workers-harness-hardening).
+- `specs/ORA-219-plugin-based-runtime.md` — the original plugin-runtime design (Node era; the plugin model still applies).
 
 ## Key file paths
 
-| What                   | Path                                                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `createOracleApp`      | `packages/oracle-runtime/src/bootstrap/create-oracle-app.ts`                                                          |
-| Plugin loader          | `packages/oracle-runtime/src/bootstrap/plugin-loader.ts`                                                              |
-| Schema composer        | `packages/oracle-runtime/src/bootstrap/schema-composer.ts`                                                            |
-| Base env schema        | `packages/oracle-runtime/src/config/base-env-schema.ts`                                                               |
-| `OraclePlugin` class   | `packages/oracle-runtime/src/plugin-api/oracle-plugin.ts`                                                             |
-| Public types           | `packages/oracle-runtime/src/plugin-api/types.ts`                                                                     |
-| Meta-tools             | `packages/oracle-runtime/src/meta-tools/` (load-capability, list-capabilities)                                        |
-| Always-on middlewares  | `packages/oracle-runtime/src/graph/middlewares/`                                                                      |
-| Six registries         | `packages/oracle-runtime/src/registries/`                                                                             |
-| Bundled plugins        | `packages/oracle-runtime/src/plugins/` (14 dirs)                                                                      |
-| Bundled plugin index   | `packages/oracle-runtime/src/plugins/index.ts` (`BUNDLED_PLUGINS`)                                                    |
-| Always-on Nest modules | `packages/oracle-runtime/src/modules/` (sessions, messages, ws, secrets, ucan, auth, subscription, throttler, health) |
-| Matrix checkpointer    | `packages/oracle-runtime/src/matrix/checkpointer/`                                                                    |
-| Test harness           | `packages/oracle-runtime/src/testing/create-test-runtime.ts`                                                          |
-| Reference oracle       | `apps/qiforge-example/src/main.ts`                                                                                    |
-| Reference plugin       | `apps/qiforge-example/src/plugins/weather/weather.plugin.ts`                                                          |
-| Weather walkthrough    | `apps/qiforge-example/WEATHER-PLUGIN.md`                                                                              |
+| What                       | Path                                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------------- |
+| `createOracleWorker`       | `packages/oracle-runtime-workers/src/index.ts`                                                    |
+| Gateway entry              | `packages/oracle-runtime-workers/src/gateway-worker.ts`                                           |
+| HTTP shell + routes        | `packages/oracle-runtime-workers/src/shell/app.ts`                                                |
+| UCAN authentication        | `packages/oracle-runtime-workers/src/shell/auth.ts`                                               |
+| `UserOracleDO`             | `packages/oracle-runtime-workers/src/do/user-oracle-do.ts`                                        |
+| Durable runs               | `packages/oracle-runtime-workers/src/do/run-coordinator.ts`, `run-store.ts`                       |
+| `MatrixGatewayDO` + ingest | `packages/oracle-runtime-workers/src/matrix/gateway-do.ts`, `ingest.ts`                           |
+| Main agent build           | `packages/oracle-runtime-workers/src/core/main-agent.ts`                                          |
+| Always-on middlewares      | `packages/oracle-runtime-workers/src/core/middlewares/`                                           |
+| Meta-tools                 | `packages/oracle-runtime-workers/src/core/meta-tools.ts`                                          |
+| Env schema                 | `packages/oracle-runtime-workers/src/core/env.ts`                                                 |
+| `OraclePlugin` + types     | `packages/oracle-runtime-workers/src/plugin-api/oracle-plugin.ts`, `types.ts`                     |
+| Bundled plugins            | `packages/oracle-runtime-workers/src/plugins/` (`index.ts` lists them)                            |
+| Tasks scheduler            | `packages/oracle-runtime-workers/src/tasks/scheduler.ts`                                          |
+| SQLite over DO storage     | `packages/oracle-runtime-workers/src/sqlite/`                                                     |
+| Owner copy (VFS / Matrix)  | `packages/oracle-runtime-workers/src/owner-store/`                                                |
+| Unit test bindings         | `packages/oracle-runtime-workers/test/wrangler.test.jsonc`, `test/worker.ts`                      |
+| Reference Worker           | `apps/qiforge-workers-example/src/index.ts`                                                       |
+| Harness e2e + drills       | `apps/qiforge-workers-example/test/` (`lib/oracle.ts` boots `wrangler dev`, `lib/harness.ts`)     |
+| Devnet feature matrix      | `apps/qiforge-workers-example/test/devnet-features.ts`                                            |
+| Plugin walkthrough         | `apps/qiforge-example/WEATHER-PLUGIN.md` (Node-era text; the plugin class is runtime-independent) |
 
 ## Documentation
 
@@ -108,15 +114,13 @@ Two doc surfaces. Don't duplicate between them — link.
 
 ### Public docs (developers building oracles)
 
-Lives in `/Users/yousef/ixo-docs/build-an-oracle/` (Mintlify). Audience: oracle developers using `@ixo/oracle-runtime`. Covers concepts, the plugin API, the bundled plugin catalog, env vars, CLI, testing, deployment.
+Lives in `/Users/yousef/ixo-docs/build-an-oracle/` (Mintlify). Audience: oracle developers. Covers concepts, the plugin API, the bundled plugin catalog, env vars, CLI, testing, deployment.
 
-When you change the public API surface (anything in `packages/oracle-runtime/src/plugin-api/`, `bootstrap/`, the manifest schema, env vars), update the relevant page in `build-an-oracle/`.
+When you change the public API surface (anything in `packages/oracle-runtime-workers/src/plugin-api/`, the manifest schema, env vars, HTTP routes), update the relevant page in `build-an-oracle/`.
 
 ### Internal docs (framework maintainers)
 
-Lives in `docs/` in this repo. Audience: people growing the framework. Covers runtime architecture (loader, composer, registries, modules, Matrix/checkpointer), how to add bundled plugins / modules / state fields / meta-tools, code conventions, testing strategy, CI.
-
-When you change runtime internals (bootstrap flow, modules, the graph builder, meta-tools), update the relevant page under `docs/architecture/` or `docs/contributing/`.
+Lives in `packages/oracle-runtime-workers/docs/`. When you change runtime internals, update the matching page there in the same PR (`configuration.md` for env vars and bindings, `operations.md` for behaviour operators see, `testing.md` for new suites, `node-parity.md` for an intentional divergence from the Node runtime). The older `docs/` tree at the repo root describes the deprecated Node runtime and is frozen.
 
 ## Diagrams
 
@@ -135,9 +139,9 @@ Supported types: `graph LR` / `graph TD`, `sequenceDiagram`, `stateDiagram-v2`.
 When a user asks "how do I …?" or anything about building, deploying, configuring, or using oracles:
 
 1. **Check the public docs first** — `/Users/yousef/ixo-docs/build-an-oracle/`. That's the single source of truth for developer-facing guidance.
-2. **Check the example app** — `apps/qiforge-example/` (`main.ts`, the weather plugin, `WEATHER-PLUGIN.md`) is the canonical reference implementation.
-3. **Check internal docs** — `docs/` covers framework internals if the question goes deeper than the public docs.
-4. **Then check the code** — `packages/oracle-runtime/src/` is the authoritative behaviour.
+2. **Check the example Worker** — `apps/qiforge-workers-example/` (`src/index.ts`, the wrangler configs, `test/`) is the canonical reference implementation.
+3. **Check the runtime docs** — `packages/oracle-runtime-workers/docs/` covers the internals if the question goes deeper than the public docs.
+4. **Then check the code** — `packages/oracle-runtime-workers/src/` is the authoritative behaviour.
 5. **Be autonomous** — when you can do the work (edit files, run commands), do it rather than just telling the user how.
 
 ## Memory rules (binding)
@@ -152,7 +156,7 @@ These rules apply to every contribution. They're documented in detail in the per
 - **No loosening test assertions to mask failures.** Two test-side retry attempts max per failing test; then stop and ask. Don't edit plugin code to make tests pass — plugin source is presumed-working production code.
 - **Don't reinvent standard tools.** Use `test.skipIf` / `setupFiles: ['dotenv/config']` / `langchainMatchers` directly — no wrappers.
 - **Integration tests must throw on missing env, not skip silently.** No `describe.skipIf(skipReason)` for env gates.
-- **Active codebase scope.** `packages/oracle-runtime/` and `apps/qiforge-example/`. Don't edit prompts/tools/middlewares in legacy `apps/app/`.
+- **Active codebase scope.** `packages/oracle-runtime-workers/` and `apps/qiforge-workers-example/`. The Node runtime (`packages/oracle-runtime/`, `apps/qiforge-example/`) is deprecated — don't edit it.
 - **Share one Tier B session across tests** in a `describe`; mint per-test only when isolation is the test's whole point.
 - **Stop-and-report between subagent waves.** When delegating multi-task plans, halt after each wave for review; verify subagent claims about external APIs before accepting.
 - **Self-check while coding.** Every task does a redundancy / dead-code / bad-practice sweep before reporting done. Quantity of tests ≠ quality of code.
