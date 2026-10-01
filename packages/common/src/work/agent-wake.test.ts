@@ -59,4 +59,29 @@ describe('AgentWakeSchema', () => {
       }),
     ).toThrow();
   });
+
+  it.each([
+    ['principal that is not a DID', { principal: 'alice' }],
+    ['occurredAt that is not an ISO datetime', { occurredAt: 'yesterday' }],
+    ['empty reason', { reason: '' }],
+    ['notifyOnly false', { notifyOnly: false }],
+    ['unknown key', { extra: true }],
+  ])('rejects %s', (_name, override) => {
+    expect(() => AgentWakeSchema.parse({ ...wake, ...override })).toThrow();
+  });
+
+  it.each(['received', 'duplicate', 'superseded'])(
+    'accepts acknowledgement status %s',
+    (status) => {
+      expect(
+        AgentWakeAcknowledgementSchema.parse({
+          version: 1,
+          wakeId: wake.wakeId,
+          principal: wake.principal,
+          receivedAt: '2026-09-30T07:00:01.000Z',
+          status,
+        }).status,
+      ).toBe(status);
+    },
+  );
 });

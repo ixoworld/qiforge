@@ -1,4 +1,5 @@
 export {
+  PORTABLE_WORK_RESERVED_CONFIGURATION_KEYS,
   PortableWorkDefinitionSchema,
   PortableWorkScalarSchema,
   type PortableWorkDefinition,

@@ -8,7 +8,12 @@
  * to the queryable index columns, so the owner file stays self-describing and
  * portable.
  */
-import type { AgentWake, PortableWorkDefinition } from '@ixo/common';
+import {
+  AgentWakeSchema,
+  PortableWorkDefinitionSchema,
+  type AgentWake,
+  type PortableWorkDefinition,
+} from '@ixo/common/work';
 import matter from 'gray-matter';
 import { z } from 'zod';
 import type { OracleTaskRecord, OracleTaskSchedule } from '../plugin-api/types';
@@ -128,27 +133,31 @@ export function specIntentOf(markdown: string): string {
 /**
  * Extract the inert, reusable definition of a task. Owner, schedule,
  * approvals, credentials and execution state are intentionally excluded.
+ * Throws a `ZodError` when the record does not form a valid definition (for
+ * example an empty title or intent).
  */
 export function portableWorkFromTaskRecord(
   record: OracleTaskRecord,
 ): PortableWorkDefinition {
-  return {
+  return PortableWorkDefinitionSchema.parse({
     version: 1,
     title: record.title,
     intent: record.intent,
-  };
+  });
 }
 
 /**
  * Describe one scheduled occurrence as a notify-only pointer. The Durable
  * Object scheduler still re-reads current state before executing the run.
+ * Throws a `ZodError` when the principal is not a DID or `occurredAt` is not
+ * an ISO datetime, so a malformed wake never leaves the adapter.
  */
 export function agentWakeFromTaskRecord(
   record: OracleTaskRecord,
   principal: string,
   occurredAt: string,
 ): AgentWake {
-  return {
+  return AgentWakeSchema.parse({
     version: 1,
     wakeId: `task:${record.id}@${occurredAt}`,
     principal,
@@ -159,5 +168,5 @@ export function agentWakeFromTaskRecord(
     reason: 'scheduled-run',
     occurredAt,
     notifyOnly: true,
-  };
+  });
 }

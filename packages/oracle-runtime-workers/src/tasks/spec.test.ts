@@ -1,6 +1,7 @@
 /**
  * Task spec markdown — gray-matter frontmatter round-trip and id minting.
  */
+import { agentWakeDedupeKey } from '@ixo/common/work';
 import { describe, expect, it } from 'vitest';
 import type { OracleTaskRecord } from '../plugin-api/types';
 import {
@@ -108,5 +109,31 @@ describe('task spec markdown', () => {
     });
     expect(wake).not.toHaveProperty('intent');
     expect(wake).not.toHaveProperty('approval');
+  });
+
+  it('derives the wake dedupe key from principal and wake id', () => {
+    const at = '2026-01-15T07:00:00.000Z';
+    const wake = agentWakeFromTaskRecord(record(), 'did:ixo:alice', at);
+    expect(agentWakeDedupeKey(wake)).toBe(
+      `did:ixo:alice\u0000task:task_morning-brief_0a1b2c3d@${at}`,
+    );
+    expect(
+      agentWakeDedupeKey(
+        agentWakeFromTaskRecord(record(), 'did:ixo:alice', at),
+      ),
+    ).toBe(agentWakeDedupeKey(wake));
+  });
+
+  it('refuses to emit a malformed wake', () => {
+    const at = '2026-01-15T07:00:00.000Z';
+    expect(() => agentWakeFromTaskRecord(record(), 'alice', at)).toThrow();
+    expect(() =>
+      agentWakeFromTaskRecord(record(), 'did:ixo:alice', 'tomorrow'),
+    ).toThrow();
+  });
+
+  it('refuses to export portable work without a title or intent', () => {
+    expect(() => portableWorkFromTaskRecord(record({ title: '' }))).toThrow();
+    expect(() => portableWorkFromTaskRecord(record({ intent: '' }))).toThrow();
   });
 });
