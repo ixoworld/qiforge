@@ -549,6 +549,7 @@ export async function createOracleApp(
           // `CACHE_CHECKPOINTER_SAVER` is on (the build calls this hook twice
           // per turn), otherwise builds a fresh one — same as before.
           const saver = await checkpointSync.getUserCheckpointer(userDid);
+          // CI can install two @langchain/core copies, so the two saver types differ there.
           return saver as unknown as BaseCheckpointSaver;
         },
       }

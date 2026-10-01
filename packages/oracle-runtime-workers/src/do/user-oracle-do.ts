@@ -67,6 +67,15 @@ import {
   type CapabilityRouter,
 } from '../core/capability-router';
 import { createMainAgent } from '../core/main-agent';
+import {
+  REQUEST_ADMISSION_TIMEOUT_MS_DEFAULT,
+  admitRequest,
+  admissionMetadata,
+} from '../core/request-admission';
+import type {
+  RequestAdmissionResult,
+  RequestDisposition,
+} from '../plugin-api/request-admission';
 import { bootHiddenPlugins } from '../core/tool-access';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
@@ -262,6 +271,28 @@ import {
 import { evictIdleWorkingCopy } from './idle-eviction';
 import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
+
+/**
+ * Whether a turn is offered to the plugins' admission handlers. Not for a
+ * turn with attachments, a scheduled task run, or a Matrix group room: a
+ * direct read is posted into the room, so one user's authorized read would
+ * be shown to every member.
+ */
+function admissionApplies(req: TurnRequest): boolean {
+  return (
+    !req.attachments?.length &&
+    !req.taskRunId &&
+    !req.sessionId.startsWith(TASK_SESSION_PREFIX) &&
+    req.roomKind !== 'group'
+  );
+}
+
+function admissionTimeoutMs(env: Record<string, unknown>): number {
+  const ms = env.REQUEST_ADMISSION_TIMEOUT_MS;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms > 0
+    ? ms
+    : REQUEST_ADMISSION_TIMEOUT_MS_DEFAULT;
+}
 
 const DB_FILE = 'oracle.db';
 /**
@@ -3352,6 +3383,90 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<RunOutcome> {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
+      // An attempt that starts from `admitting` never reached the agent (the
+      // previous incarnation stopped during admission), so the user's message
+      // is not in the graph: the agent runs with its input, not from the
+      // checkpoint.
+      const freshInput = !resumed || stored.disposition?.kind === 'admitting';
+      let announced = resumed;
+      const announce = (): void => {
+        if (announced) return;
+        announced = true;
+        live.buffer.push('run', {
+          runId: live.runId,
+          sessionId: req.sessionId,
+          requestId: req.requestId,
+        });
+      };
+      if (!stored.disposition && !resumed) {
+        stored.disposition = { kind: 'admitting' };
+        const request = JSON.stringify(stored);
+        await this.runStore!.update(live.runId, { request });
+        live.record.request = request;
+      }
+      if (!stored.disposition || stored.disposition.kind === 'admitting') {
+        let admission: RequestAdmissionResult = { kind: 'pass' };
+        try {
+          if (stored.disposition?.kind === 'admitting' && admissionApplies(req))
+            admission = await admitRequest(
+              this.core.plugins,
+              {
+                user: {
+                  did: req.identity.userDid,
+                  matrixUserId: req.identity.matrixUserId ?? '',
+                  ucanDelegation: { raw: req.identity.ucanDelegation ?? '' },
+                  timezone: req.identity.timezone,
+                  currentTime: new Date().toISOString(),
+                },
+                session: {
+                  id: req.sessionId,
+                  client: req.client,
+                  requestId: req.requestId,
+                  roomId:
+                    req.roomId ??
+                    (await this.sessions!.getSession(req.sessionId))?.roomId,
+                  ...(req.roomKind ? { roomKind: req.roomKind } : {}),
+                  ...(req.eventId ? { eventId: req.eventId } : {}),
+                  ...(req.threadId ? { threadId: req.threadId } : {}),
+                },
+                message: req.message,
+                metadata: admissionMetadata(req.metadata),
+                signal: live.abort.signal,
+              },
+              {
+                env: this.core.validatedEnv,
+                timeoutMs: admissionTimeoutMs(this.core.validatedEnv),
+                warn: (m) => console.warn(`[user-do] ${m}`),
+              },
+            );
+        } catch (error) {
+          return this.refuseTurn(live, req, error, announce, 'admission');
+        }
+        stored.disposition =
+          admission.kind === 'handled'
+            ? {
+                kind: 'direct-read',
+                text: admission.text,
+                title: admission.title,
+                messageId: `direct:${req.sessionId}:${req.requestId}:ai`,
+              }
+            : { kind: 'agent' };
+        const request = JSON.stringify(stored);
+        await this.runStore!.update(live.runId, { request });
+        live.record.request = request;
+      }
+      if (stored.disposition.kind === 'direct-read') {
+        try {
+          return await this.runDirectRead(
+            live,
+            req,
+            stored.disposition,
+            announce,
+          );
+        } catch (error) {
+          return this.refuseTurn(live, req, error, announce, 'direct read');
+        }
+      }
       const {
         agent,
         stateInput,
@@ -3368,13 +3483,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           model: req.model,
           tools: stored.tools,
           agActions: stored.agActions,
-          ...(resumed ? {} : { attachments: req.attachments }),
+          ...(freshInput ? { attachments: req.attachments } : {}),
         },
         {
           runId: live.runId,
           abortController: live.abort,
-          resumed,
-          continuation: resumed ? live.continuation : null,
+          resumed: !freshInput,
+          continuation: freshInput ? null : live.continuation,
         },
       );
       const sessionId = req.sessionId;
@@ -3391,7 +3506,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           sessionId,
           requestId: req.requestId,
         });
-      const events = agent.streamEvents(resumed ? null : stateInput, {
+      const events = agent.streamEvents(freshInput ? stateInput : null, {
         ...config,
         version: 'v2',
       });
@@ -3451,6 +3566,128 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (this.aborts.get(sessionId) === live.abort)
           this.aborts.delete(sessionId);
       }
+    }
+
+    private async runDirectRead(
+      live: LiveRun,
+      req: TurnRequest,
+      disposition: Extract<RequestDisposition, { kind: 'direct-read' }>,
+      announce: () => void,
+    ): Promise<RunOutcome> {
+      live.abort.signal.throwIfAborted();
+      announce();
+      const sessions = this.sessions!;
+      if (
+        req.client === 'matrix' &&
+        !(await sessions.getSession(req.sessionId))
+      ) {
+        await sessions.createSession({
+          sessionId: req.sessionId,
+          roomId: req.roomId,
+          oracleName: this.core.identity.name,
+          oracleDid: this.env.ORACLE_DID,
+          oracleEntityDid: this.core.identity.entityDid,
+        });
+      }
+      const kwargs = {
+        timestamp: new Date().toISOString(),
+        oracleName: this.core.identity.name,
+        msgFromMatrixRoom: req.client === 'matrix',
+        ...(req.client === 'matrix'
+          ? {
+              senderDid: req.identity.userDid,
+              senderMatrixUserId: req.identity.matrixUserId,
+              senderDisplayName: req.senderDisplayName ?? req.identity.userDid,
+              threadId: req.sessionId,
+              eventId: req.eventId,
+            }
+          : {}),
+      };
+      const messages = [
+        new HumanMessage({
+          id: `direct:${req.sessionId}:${req.requestId}:human`,
+          content:
+            req.client === 'matrix' && req.roomKind === 'group'
+              ? prefixSpeaker(
+                  req.message,
+                  req.senderDisplayName ??
+                    req.identity.matrixUserId ??
+                    req.identity.userDid,
+                )
+              : req.message,
+          additional_kwargs: kwargs,
+        }),
+        new AIMessage({
+          id: disposition.messageId,
+          content: disposition.text,
+          additional_kwargs: {
+            timestamp: kwargs.timestamp,
+            oracleName: kwargs.oracleName,
+            msgFromMatrixRoom: kwargs.msgFromMatrixRoom,
+          },
+        }),
+      ];
+      await this.saver!.appendTurnMessages(req.sessionId, messages);
+      // An abort that lands now ends the run as `aborted`; the reply stays
+      // in the transcript (the Matrix mirror and the title are skipped).
+      live.abort.signal.throwIfAborted();
+      await this.afterTurn(req.sessionId, messages, disposition);
+      this.replayToRoom(req, disposition.text, 'oracle');
+      const delivered = live.continuation ?? '';
+      const content = disposition.text.startsWith(delivered)
+        ? disposition.text.slice(delivered.length)
+        : disposition.text;
+      if (content)
+        live.buffer.push('message', { content, timestamp: kwargs.timestamp });
+      live.buffer.push('done', {
+        runId: live.runId,
+        messageId: disposition.messageId,
+      });
+      return {
+        status: 'finished',
+        text: disposition.text,
+        messageId: disposition.messageId,
+        toolCalls: [],
+      };
+    }
+
+    /**
+     * End a turn whose admission or direct read did not complete. The client
+     * gets the same terminal frames as a failed agent turn (`error`, then
+     * `done`) or, after a user abort or a superseding message, `done` with
+     * `aborted`. The handler's own message goes to the log only.
+     */
+    private refuseTurn(
+      live: LiveRun,
+      req: TurnRequest,
+      error: unknown,
+      announce: () => void,
+      stage: 'admission' | 'direct read',
+    ): RunOutcome {
+      announce();
+      if (live.abort.signal.aborted) {
+        live.buffer.push('done', { runId: live.runId, aborted: true });
+        return { status: 'aborted', text: live.continuation ?? '' };
+      }
+      console.error(
+        `[user-do] turn ${req.requestId}: ${stage} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      live.buffer.push('error', {
+        error: 'This request could not be answered. Please try again.',
+        kind: 'request_admission',
+        source: 'platform',
+        retryable: true,
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        runId: live.runId,
+        timestamp: new Date().toISOString(),
+      });
+      live.buffer.push('done', { runId: live.runId, failed: true });
+      return {
+        status: 'failed',
+        text: live.continuation ?? '',
+        error: new Error(`request ${stage} failed`),
+      };
     }
 
     /** Latest checkpoint id of a session — recovery's progress marker. */
@@ -4501,6 +4738,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private async afterTurn(
       sessionId: string,
       messages: BaseMessage[],
+      disposition: RequestDisposition = { kind: 'agent' },
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
@@ -4511,17 +4749,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         },
       );
-      await this.compareShadowRoute(sessionId);
+      if (disposition.kind === 'agent')
+        await this.compareShadowRoute(sessionId);
       const row = await sessions.getSession(sessionId);
       // The title model is the platform adapter, outside the turn's metered
       // model and budget: a supplied-context task's source and result never
-      // reach it.
+      // reach it. A direct read brings its own deterministic title.
       if (
         row &&
         (!row.title || row.title === UNTITLED_SESSION) &&
         !(await this.isRestrictedTaskSession(sessionId))
       ) {
-        const title = await this.generateTitle(messages).catch(() => null);
+        const title =
+          disposition.kind === 'direct-read'
+            ? disposition.title
+            : await this.generateTitle(messages).catch(() => null);
         if (title)
           await sessions.setTitle(sessionId, title, { onlyIfUntitled: true });
       }

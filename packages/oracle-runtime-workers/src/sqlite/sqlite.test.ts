@@ -5,6 +5,12 @@
  * `nodejs_compat`. See `vitest.config.ts` / `test/wrangler.test.jsonc`.
  */
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
+import {
+  END,
+  START,
+  MessagesAnnotation,
+  StateGraph,
+} from '@langchain/langgraph';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import {
   type Checkpoint,
@@ -226,6 +232,67 @@ describe('DoSqliteDatabase over DO storage', () => {
 });
 
 describe('SqliteSaver (LangGraph checkpointer) inside a Durable Object', () => {
+  it('persists direct turns idempotently without dropping graph state or history', async () => {
+    await runInDurableObject(stub('saver-direct'), async (_instance, state) => {
+      const db = await DoSqliteDatabase.open(state, 'direct.db');
+      const saver = new SqliteSaver(db);
+      const messages = [
+        new HumanMessage({ id: 'read-human', content: 'Status' }),
+        new AIMessage({ id: 'read-ai', content: 'Waiting' }),
+      ];
+      await saver.appendTurnMessages('fresh', messages);
+      await saver.appendTurnMessages('fresh', messages);
+      expect(await saver.listThreadMessages('fresh')).toHaveLength(2);
+      const checkpoint = emptyCheckpoint();
+      checkpoint.channel_values = {
+        loadedPlugins: ['flows'],
+        messages: Array.from(
+          { length: 25 },
+          (_, n) =>
+            new HumanMessage({ id: `history-${n}`, content: 'Prior turn' }),
+        ),
+      };
+      await saver.put({ configurable: { thread_id: 'long' } }, checkpoint, {
+        source: 'update',
+        step: 1,
+        parents: {},
+      });
+      await saver.appendTurnMessages('long', [
+        new HumanMessage({ id: 'long-read-human', content: 'Status' }),
+        new AIMessage({ id: 'long-read-ai', content: 'Waiting' }),
+      ]);
+      const loaded = await saver.getTuple({
+        configurable: { thread_id: 'long' },
+      });
+      expect(loaded?.checkpoint.channel_values.loadedPlugins).toEqual([
+        'flows',
+      ]);
+      expect(loaded?.checkpoint.channel_values.messages).toHaveLength(27);
+      expect(await saver.listThreadMessages('long')).toHaveLength(27);
+      const graph = new StateGraph(MessagesAnnotation)
+        .addNode('reply', () => ({
+          messages: [new AIMessage({ id: 'next-ai', content: 'Continued' })],
+        }))
+        .addEdge(START, 'reply')
+        .addEdge('reply', END)
+        .compile({ checkpointer: saver });
+      const continued = await graph.invoke(
+        {
+          messages: [
+            new HumanMessage({ id: 'next-human', content: 'Continue' }),
+          ],
+        },
+        { configurable: { thread_id: 'fresh' } },
+      );
+      expect(continued.messages.map((message) => message.id)).toEqual([
+        'read-human',
+        'read-ai',
+        'next-human',
+        'next-ai',
+      ]);
+      await db.close();
+    });
+  });
   const checkpoint1: Checkpoint = {
     v: 1,
     id: uuid6(-1),

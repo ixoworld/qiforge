@@ -320,6 +320,13 @@ goes on. `TURN_RECURSION_LIMIT` remains the separate graph
 guard; raising it does not raise a budget. The context window and reply
 reserve come from the context budget (`MODEL_CONTEXT_TOKENS`, `CONTEXT_*`).
 
+`REQUEST_ADMISSION_TIMEOUT_MS` (default `2000`) is the time limit of each
+plugin `getRequestAdmission` handler, the inference-free step that may answer
+a turn before the agent is built. A handler that has not answered by then is
+treated as `pass` (logged as a warning) and the turn continues with the next
+handler or the agent. See
+[request admission](../../../docs/architecture/request-admission.md).
+
 Tool calls are scheduled per user object: writes one at a time across every
 session, reads up to four at a time, sub-agent dispatches up to four in
 their own lane. A tool is a read when it declares `effect: 'read'`, carries

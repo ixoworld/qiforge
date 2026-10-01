@@ -427,8 +427,6 @@ export interface RegisteredMiddleware {
  * Order is preserved as registration order — the loader applies any
  * dependency-driven topological reordering before registering plugins here.
  *
- * Middlewares are boot-time-only — there's no per-request hook. The
- * registry caches the first `collect(buildCtx)` result.
  */
 export class MiddlewareRegistry {
   private readonly plugins: OraclePlugin[] = [];
@@ -451,6 +449,17 @@ export class MiddlewareRegistry {
     }
     this.bootCache = out;
     return out;
+  }
+
+  async collectRequest(ctx: RuntimeContext): Promise<RegisteredMiddleware[]> {
+    const entries = await Promise.all(
+      this.plugins.map(async (plugin) =>
+        ((await plugin.getRequestMiddlewares?.(ctx)) ?? []).map(
+          (middleware) => ({ pluginName: plugin.name, middleware }),
+        ),
+      ),
+    );
+    return entries.flat();
   }
 
   /** Middlewares have no names, so no collision is possible. */
