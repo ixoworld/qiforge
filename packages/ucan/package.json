@@ -1,7 +1,7 @@
 {
   "name": "@ixo/ucan",
   "description": "UCAN authorization for any service - built on ucanto",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -53,6 +53,11 @@
       "types": "./dist/store/memory.d.ts",
       "import": "./dist/store/memory.js",
       "default": "./dist/store/memory.js"
+    },
+    "./revocation": {
+      "types": "./dist/store/revocation.d.ts",
+      "import": "./dist/store/revocation.js",
+      "default": "./dist/store/revocation.js"
     }
   },
   "devDependencies": {

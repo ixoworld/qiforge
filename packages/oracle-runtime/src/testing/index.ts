@@ -1,3 +1,9 @@
+/**
+ * DEPRECATED — `@ixo/oracle-runtime/testing` belongs to the Node runtime,
+ * which is no longer developed. The Workers runtime
+ * (`@ixo/oracle-runtime-workers`) tests plugins with its own `test:core`
+ * and workerd suites; see `packages/oracle-runtime-workers/docs/testing.md`.
+ */
 export {
   createTestRuntime,
   type CreateTestRuntimeOptions,
@@ -9,6 +15,7 @@ export {
   mockResponse,
   mockMatrix,
   mockLlm,
+  mockDecisionAdapter,
   mockSecrets,
   mockBlobStore,
   mockEmit,
@@ -18,6 +25,7 @@ export {
   type MockResponseInit,
   type MockMatrixOverrides,
   type MockLlmOptions,
+  type MockDecisionOptions,
   type FetchHandler,
 } from './mocks.js';
 

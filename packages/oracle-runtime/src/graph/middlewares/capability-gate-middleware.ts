@@ -24,6 +24,12 @@ export interface CapabilityGateMiddlewareOptions {
    * middleware does not need access to the registries at runtime.
    */
   visibilityByToolName: Map<string, Visibility>;
+  /**
+   * Plugins the capability router preloaded for this turn. Their tools pass
+   * the gate as if the plugin were in `state.loadedPlugins`, but the set is
+   * fixed at build time and never written to state — it lasts one turn.
+   */
+  preloadedPlugins?: ReadonlySet<string>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
@@ -32,9 +38,9 @@ export interface CapabilityGateMiddlewareOptions {
  * Gates on-demand plugin tools (and sub-agents-as-tools) per model call.
  *
  * All plugin tools are bound to the agent at compile time. This middleware
- * runs on every model invocation: it reads `state.loadedPlugins` and trims
- * the request's `tools` array down to what the agent should actually see at
- * this point in the conversation.
+ * runs on every model invocation: it reads `state.loadedPlugins` (plus the
+ * turn's `preloadedPlugins`) and trims the request's `tools` array down to
+ * what the agent should actually see at this point in the conversation.
  *
  * Why a middleware: `createAgent({ tools })` freezes the bound list, so
  * `load_capability` updating state mid-run would otherwise have no effect
@@ -45,6 +51,8 @@ export const createCapabilityGateMiddleware = (
   options: CapabilityGateMiddlewareOptions,
 ): AgentMiddleware => {
   const { pluginByToolName, visibilityByToolName } = options;
+  const preloaded: ReadonlySet<string> =
+    options.preloadedPlugins ?? new Set<string>();
   const logger = options.logger ?? NOOP_LOGGER;
 
   return createMiddleware({
@@ -65,12 +73,15 @@ export const createCapabilityGateMiddleware = (
         if (!plugin) return true;
         const viz = visibilityByToolName.get(name) ?? 'on-demand';
         if (viz === 'always' || viz === 'silent') return true;
-        return loaded.has(plugin);
+        return loaded.has(plugin) || preloaded.has(plugin);
       });
 
       if (filtered.length !== request.tools.length) {
         logger.log?.(
-          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}`,
+          `[CapabilityGateMiddleware] exposed ${filtered.length}/${request.tools.length} tools; loadedPlugins=${Array.from(loaded).join(',') || '∅'}` +
+            (preloaded.size > 0
+              ? ` preloadedPlugins=${Array.from(preloaded).join(',')}`
+              : ''),
         );
       }
 

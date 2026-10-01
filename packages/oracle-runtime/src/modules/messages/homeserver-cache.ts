@@ -1,5 +1,6 @@
 import { getMatrixHomeServerCroppedForDid } from '@ixo/oracles-chain-client';
 import { Injectable } from '@nestjs/common';
+import { sweepExpired } from '../../utils/expiring-map.js';
 
 const TTL_MS = 60 * 60 * 1000;
 
@@ -24,6 +25,7 @@ export class HomeServerCache {
       return cached.homeServer;
     }
     const homeServer = await getMatrixHomeServerCroppedForDid(userDid);
+    sweepExpired(this.cache);
     this.cache.set(userDid, { homeServer, expiresAt: Date.now() + TTL_MS });
     return homeServer;
   }

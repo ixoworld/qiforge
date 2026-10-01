@@ -1,5 +1,18 @@
 # @ixo/oracles-client-sdk
 
+## 1.4.0
+
+### Minor Changes
+
+- Durable runs: `streamRun` re-joins a reply after a dropped connection with its frame cursor, truncates to `partialLength` when a resumed attempt announces itself, and surfaces `partialText` from an early `done`; `useChat().run` (`ChatRunState`), `useSendMessage().resumeRun`, and an automatic re-join of an active run on session load (`GET /sessions/:id/run`). Frames are bound to the chat instance the turn started in, so switching sessions no longer leaks a stream.
+- History paging: `useChat` loads a session one turn-aligned page at a time through `GET /sessions/:id/messages` (`hasEarlier`, `loadEarlier()`, `isLoadingEarlier`, `historyPageSize`), fetches only what a turn added after it, and keeps the newest page first so a remount refetch starts at the latest turns. A runtime without the paged route falls back to the legacy whole transcript. The 100-message store cap is gone.
+- `streamingMode: 'throttled'` (`streamingThrottleMs`, default 50 ms) coalesces streamed chunks into a few renders a second; state changes flush at once, and a hidden tab delivers immediately and flushes on `visibilitychange`. The default `immediate` is unchanged.
+
+### Patch Changes
+
+- Streamed reasoning frames are filed under their own message (`<requestId>-reasoning`) instead of the answer's id, so a reply whose reasoning streams first (the ChatGPT lane) is visible while it streams.
+- `tool_result` acknowledgements carry the session id; `sendMessage` clears a previous error before a new turn; a failed stream carries its `requestId`.
+
 ## 1.0.11
 
 ### Patch Changes

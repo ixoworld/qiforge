@@ -297,6 +297,36 @@ export async function serializeDelegation(
 }
 
 /**
+ * Get the canonical CID of a delegation — the identifier a UCAN revocation
+ * targets.
+ *
+ * A delegation's CID is `CIDv1(dag-cbor, sha2-256)` over its DAG-CBOR encoding,
+ * computed by ucanto when the delegation is created. This helper accepts either
+ * a live Delegation or a serialized base64 CAR (as returned by
+ * `serializeDelegation`, or as stored/transported), and always returns the
+ * canonical base32 string form, so CIDs compare exactly across services.
+ *
+ * @param delegation - A Delegation object or a base64-encoded CAR
+ * @returns The canonical CID string (e.g. `bafyrei...`)
+ *
+ * @example
+ * ```typescript
+ * const delegation = await createDelegation({ issuer, audience, capabilities });
+ * const cid = await getDelegationCid(delegation);
+ * // later: revoke that exact delegation by this cid
+ * ```
+ */
+export async function getDelegationCid(
+  delegation: Delegation | string,
+): Promise<string> {
+  const resolved =
+    typeof delegation === 'string'
+      ? await parseDelegation(delegation)
+      : delegation;
+  return resolved.cid.toString();
+}
+
+/**
  * Parse a serialized delegation from CAR format
  *
  * @param serialized - Base64-encoded CAR data

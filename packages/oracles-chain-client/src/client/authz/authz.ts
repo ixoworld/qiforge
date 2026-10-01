@@ -20,6 +20,25 @@ import {
   validateAuthzConfig,
 } from './types.js';
 
+/**
+ * Default lifetime of a claim intent, in nanoseconds (3 hours).
+ *
+ * When an agent reserves payment for a job, the chain escrows the funds and
+ * holds them for this long. If no claim is submitted before the window closes,
+ * the chain releases the reservation and returns the funds to the payer.
+ *
+ * This is also how long a user stays blocked after abandoning a job: only one
+ * intent can be active at a time for a given agent and claim collection, and
+ * there is no way to cancel one early, so the user cannot start another paid
+ * job with that oracle until the window expires.
+ */
+export const DEFAULT_INTENT_DURATION_NS = (
+  1_000_000_000 *
+  60 *
+  60 *
+  3
+).toString();
+
 export class Authz {
   constructor(
     private readonly config: IAuthzConfig,
@@ -277,6 +296,7 @@ export class Authz {
       claimCollectionId,
       maxAmount,
       agentQuota,
+      intentDurationNs = DEFAULT_INTENT_DURATION_NS,
     } = params;
 
     const message = {
@@ -294,9 +314,7 @@ export class Authz {
                 granteeAddress: oracleAddress,
                 collectionId: claimCollectionId,
                 agentQuota: utils.proto.numberToLong(agentQuota),
-                intentDurationNs: utils.proto.toDuration(
-                  (1000000000 * 60 * 60 * 24 * 30).toString(), // 30 days
-                ), // ms *
+                intentDurationNs: utils.proto.toDuration(intentDurationNs),
                 maxAmount,
 
                 authType:

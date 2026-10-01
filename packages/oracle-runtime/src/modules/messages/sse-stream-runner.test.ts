@@ -632,6 +632,41 @@ describe('SseStreamRunner', () => {
       ]);
     });
 
+    it('Responses-mode chunks (array content) emit reasoning + text events', async () => {
+      const res = new FakeResponse();
+      const responsesChunk = (
+        content: Array<Record<string, unknown>>,
+      ): StreamEvent =>
+        ({
+          event: 'on_chat_model_stream',
+          run_id: 'chat-run',
+          name: 'model',
+          data: { chunk: new AIMessageChunk({ content }) },
+        }) as unknown as StreamEvent;
+      const { input, runner } = makeInput(
+        makeFakeAgent([
+          responsesChunk([
+            { type: 'reasoning', reasoning: 'thinking hard', index: 0 },
+          ]),
+          responsesChunk([{ type: 'text', text: 'the answer', index: 0 }]),
+        ]),
+        res,
+      );
+
+      await runner.run(input);
+
+      const events = eventsFromWrites(res.writes);
+      const reasonings = events.filter((e) => e.event === 'reasoning');
+      expect((reasonings[0]!.data as { reasoning: string }).reasoning).toBe(
+        'thinking hard',
+      );
+      const messages = events.filter((e) => e.event === 'message');
+      expect(messages).toHaveLength(1);
+      expect((messages[0]!.data as { content: string }).content).toBe(
+        'the answer',
+      );
+    });
+
     it('terminal ReasoningEvent(complete=true) + done emitted on clean finish', async () => {
       const res = new FakeResponse();
       const { input, runner } = makeInput(
@@ -771,7 +806,7 @@ describe('SseStreamRunner', () => {
       expect(events.some((e) => e.event === 'done')).toBe(true);
     });
 
-    it('non-abort error caught -> emits error then done', async () => {
+    it('non-abort error caught -> emits classified error then done', async () => {
       const res = new FakeResponse();
       const { input, runner } = makeInput(
         makeThrowingFakeAgent(new Error('boom')),
@@ -785,7 +820,104 @@ describe('SseStreamRunner', () => {
       const doneIdx = events.findIndex((e) => e.event === 'done');
       expect(errIdx).toBeGreaterThanOrEqual(0);
       expect(doneIdx).toBeGreaterThan(errIdx);
-      expect((events[errIdx]!.data as { error: string }).error).toBe('boom');
+      const payload = events[errIdx]!.data as {
+        error: string;
+        kind: string;
+        source: string;
+        detail: string;
+        retryable: boolean;
+      };
+      // The wire message is the friendly classification; the raw SDK text
+      // survives in `detail` for the collapsible details view.
+      expect(payload.kind).toBe('unknown');
+      expect(payload.source).toBe('platform');
+      expect(payload.detail).toBe('boom');
+      expect(payload.retryable).toBe(false);
+      expect(payload.error).toMatch(/Something went wrong/);
+    });
+
+    it('error path closes the thinking indicator before the error event', async () => {
+      const res = new FakeResponse();
+      const { input, runner } = makeInput(
+        makeThrowingFakeAgent(new Error('boom')),
+        res,
+      );
+
+      await runner.run(input);
+
+      const events = eventsFromWrites(res.writes);
+      const completeIdx = events.findIndex(
+        (e) =>
+          e.event === 'reasoning' &&
+          (e.data as { isComplete?: boolean }).isComplete === true,
+      );
+      const errIdx = events.findIndex((e) => e.event === 'error');
+      expect(completeIdx).toBeGreaterThanOrEqual(0);
+      expect(errIdx).toBeGreaterThan(completeIdx);
+    });
+
+    it('attributes model failures to the BYO provider resolved at build time', async () => {
+      const res = new FakeResponse();
+      const providerError = Object.assign(
+        new Error('402 Insufficient Balance'),
+        {
+          status: 402,
+        },
+      );
+      const agentBuilder = {
+        build: vi.fn().mockResolvedValue({
+          agent: makeThrowingFakeAgent(providerError),
+          stateInput: {},
+          langGraphConfig: { version: 'v2' },
+          byoProvider: 'deepseek',
+        }),
+      } as unknown as AgentBuilder;
+      const runner = new SseStreamRunner(agentBuilder);
+      await runner.run({
+        payload: makePayload(),
+        prepared: makePrepared(),
+        inputMessages: [],
+        res: res as unknown as Response,
+        abortControllers: new Map<string, AbortController>(),
+      });
+
+      const events = eventsFromWrites(res.writes);
+      const errEvent = events.find((e) => e.event === 'error');
+      const payload = errEvent!.data as {
+        kind: string;
+        source: string;
+        provider: string;
+        status: number;
+        detail: string;
+      };
+      expect(payload.kind).toBe('billing');
+      expect(payload.source).toBe('byo');
+      expect(payload.provider).toBe('deepseek');
+      expect(payload.status).toBe(402);
+      expect(payload.detail).toBe('402 Insufficient Balance');
+    });
+
+    it('flushes stuck tool spinners when the stream dies mid-turn', async () => {
+      const res = new FakeResponse();
+      const agent: FakeAgent = {
+        async *streamEvents() {
+          yield toolStartEvent('run-stuck', 'searchWeb', { query: 'cats' });
+          throw new Error('boom mid-tool');
+        },
+        async invoke() {
+          return { messages: [] };
+        },
+      };
+      const { input, runner } = makeInput(agent, res);
+
+      await runner.run(input);
+
+      const events = eventsFromWrites(res.writes);
+      const toolEvents = events.filter((e) => e.event === 'tool_call');
+      expect(toolEvents).toHaveLength(2);
+      const flushed = toolEvents[1]!.data as { status: string; output: string };
+      expect(flushed.status).toBe('done');
+      expect(flushed.output).toMatch(/did not complete/);
     });
 
     it('error AFTER res.writableEnded -> emits nothing (no double-end)', async () => {

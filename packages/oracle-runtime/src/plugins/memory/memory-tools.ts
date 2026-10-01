@@ -87,11 +87,20 @@ export function clearMemoryToolDefsCache(): void {
   refreshInFlight.clear();
 }
 
-async function connectAndListTools(
+/**
+ * How long a request's MCP client survives after its last invocation before
+ * being closed. There is no explicit request-end hook on the tool path, so
+ * idle-close is what bounds client lifetime — without it every turn that
+ * touched memory leaked a connected client (transport, sessions, tool set)
+ * for the life of the process.
+ */
+const IDLE_CLIENT_CLOSE_MS = 5 * 60 * 1000;
+
+function createMemoryMcpClient(
   memoryMcpUrl: string,
   headers: Record<string, string>,
-): Promise<UpstreamMcpTool[]> {
-  const client = new MultiServerMCPClient({
+): MultiServerMCPClient {
+  return new MultiServerMCPClient({
     useStandardContentBlocks: true,
     prefixToolNameWithServerName: true,
     mcpServers: {
@@ -109,33 +118,85 @@ async function connectAndListTools(
       },
     },
   });
-  return (await client.getTools()) as unknown as UpstreamMcpTool[];
+}
+
+/**
+ * Connect, snapshot the upstream tool *definitions*, and always close the
+ * client — defs are plain data, so the connection has nothing left to serve.
+ */
+async function listToolDefs(
+  memoryMcpUrl: string,
+  headers: Record<string, string>,
+): Promise<MemoryToolDef[]> {
+  const client = createMemoryMcpClient(memoryMcpUrl, headers);
+  try {
+    const tools = (await client.getTools()) as unknown as UpstreamMcpTool[];
+    return tools.map(({ name, description, schema }) => ({
+      name,
+      description,
+      schema,
+    }));
+  } finally {
+    await client.close().catch(() => undefined);
+  }
 }
 
 /**
  * Bind cached definitions to this request's auth headers. The MCP client is
  * created lazily on the first actual invocation (and shared across the
  * request's memory tools), so turns that never touch memory pay zero
- * Memory-Engine round-trips.
+ * Memory-Engine round-trips. The client is closed after
+ * `IDLE_CLIENT_CLOSE_MS` without an invocation; a later call simply
+ * reconnects.
  */
 function buildLazyUpstreamTools(
   defs: MemoryToolDef[],
   memoryMcpUrl: string,
   headers: Record<string, string>,
 ): UpstreamMcpTool[] {
-  let upstreamByName: Promise<Map<string, UpstreamMcpTool>> | null = null;
-  const connect = (): Promise<Map<string, UpstreamMcpTool>> => {
-    if (!upstreamByName) {
-      upstreamByName = connectAndListTools(memoryMcpUrl, headers).then(
-        (tools) => new Map(tools.map((t) => [t.name, t])),
-      );
+  let connection: Promise<{
+    client: MultiServerMCPClient;
+    byName: Map<string, UpstreamMcpTool>;
+  }> | null = null;
+  let idleTimer: NodeJS.Timeout | null = null;
+
+  const closeConnection = (): void => {
+    const current = connection;
+    connection = null;
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (!current) return;
+    void current.then(({ client }) => client.close()).catch(() => undefined);
+  };
+
+  const scheduleIdleClose = (): void => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(closeConnection, IDLE_CLIENT_CLOSE_MS);
+    idleTimer.unref?.();
+  };
+
+  const connect = (): NonNullable<typeof connection> => {
+    if (!connection) {
+      connection = (async () => {
+        const client = createMemoryMcpClient(memoryMcpUrl, headers);
+        try {
+          const tools =
+            (await client.getTools()) as unknown as UpstreamMcpTool[];
+          return { client, byName: new Map(tools.map((t) => [t.name, t])) };
+        } catch (error) {
+          await client.close().catch(() => undefined);
+          throw error;
+        }
+      })();
       // A failed connect must not poison the rest of the run — clear the
       // memo so a later invocation retries with a fresh client.
-      upstreamByName.catch(() => {
-        upstreamByName = null;
+      connection.catch(() => {
+        connection = null;
       });
     }
-    return upstreamByName;
+    return connection;
   };
 
   return defs.map((def) => ({
@@ -143,14 +204,19 @@ function buildLazyUpstreamTools(
     description: def.description,
     schema: def.schema,
     invoke: async (input: unknown) => {
-      const byName = await connect();
+      const { byName } = await connect();
       const upstream = byName.get(def.name);
       if (!upstream) {
+        scheduleIdleClose();
         throw new Error(
           `Memory Engine no longer exposes "${def.name}" — cached definition is stale, retry shortly.`,
         );
       }
-      return upstream.invoke(input);
+      try {
+        return await upstream.invoke(input);
+      } finally {
+        scheduleIdleClose();
+      }
     },
   }));
 }
@@ -183,14 +249,10 @@ export function createDefaultMemoryMcpFactory(
         !refreshInFlight.has(memoryMcpUrl)
       ) {
         refreshInFlight.add(memoryMcpUrl);
-        void connectAndListTools(memoryMcpUrl, headers)
-          .then((tools) => {
+        void listToolDefs(memoryMcpUrl, headers)
+          .then((defs) => {
             toolDefsCache.set(memoryMcpUrl, {
-              defs: tools.map(({ name, description, schema }) => ({
-                name,
-                description,
-                schema,
-              })),
+              defs,
               expiresAt: Date.now() + TOOL_DEFS_TTL_MS,
             });
           })
@@ -208,16 +270,15 @@ export function createDefaultMemoryMcpFactory(
       return buildLazyUpstreamTools(cached.defs, memoryMcpUrl, headers);
     }
 
-    const tools = await connectAndListTools(memoryMcpUrl, headers);
+    const defs = await listToolDefs(memoryMcpUrl, headers);
     toolDefsCache.set(memoryMcpUrl, {
-      defs: tools.map(({ name, description, schema }) => ({
-        name,
-        description,
-        schema,
-      })),
+      defs,
       expiresAt: Date.now() + TOOL_DEFS_TTL_MS,
     });
-    return tools;
+    // Cold path binds lazy tools too (instead of returning tools tied to the
+    // listing client, which is closed above) — the first actual invocation
+    // reconnects, exactly like the warm path.
+    return buildLazyUpstreamTools(defs, memoryMcpUrl, headers);
   };
 }
 

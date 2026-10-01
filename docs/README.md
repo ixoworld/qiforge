@@ -1,5 +1,12 @@
 # Internal docs — QiForge framework maintainers
 
+> **⚠️ DEPRECATED: these pages describe the Node runtime (`packages/oracle-runtime`), which is no longer developed.**
+> The live runtime is `@ixo/oracle-runtime-workers`; its maintainer docs are in
+> [`packages/oracle-runtime-workers/docs/`](../packages/oracle-runtime-workers/docs/)
+> (architecture, configuration, operations, testing, node-parity). Only
+> `testing/test-harness.md` and the plans under `plans/` are still referenced by
+> Workers work.
+
 This directory is for people **growing the framework**. If you're building an oracle with QiForge (i.e. using the framework, not editing it), read the public docs at `ixo-docs/build-an-oracle/` instead.
 
 The structure mirrors the parts of the codebase a maintainer touches:
@@ -17,6 +24,7 @@ The structure mirrors the parts of the codebase a maintainer touches:
 - **Touching `packages/oracle-runtime/src/plugin-api/`?** → update `architecture/plugin-lifecycle.md`. Public-facing changes also go in `ixo-docs/build-an-oracle/reference/plugin-api.mdx`.
 - **Adding a bundled plugin?** → follow `contributing/adding-a-bundled-plugin.md`. Add a row to `ixo-docs/build-an-oracle/reference/plugin-catalog.mdx`.
 - **Touching `packages/oracle-runtime/src/modules/`?** → update `architecture/modules.md`.
+- **Touching the Matrix commerce lane** (message router, commerce port, in-flight turn registry, `work_status`, component events)? → update `architecture/matrix-commerce.md`.
 - **Adding a graph state field?** → follow `contributing/adding-a-state-field.md`. Document the field in `ixo-docs/build-an-oracle/reference/state-schema.mdx`.
 - **Touching the meta-tools?** → update `architecture/meta-tools-and-discovery.md` and `ixo-docs/build-an-oracle/concepts/meta-tools.mdx`.
 - **Adding a follow-up ticket?** → append to `spec-and-roadmap/follow-ups.md`.

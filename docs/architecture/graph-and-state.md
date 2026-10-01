@@ -91,6 +91,9 @@ The tool's `description` is auto-prefixed with the plugin's `manifest.title` (e.
 
 - **Tier-1 capability block** — alphabetical list of `always` plugins with their `manifest.summary`. Rendered by `ManifestRegistry.renderTier1(eagerPluginNames)`. ~80 tokens per plugin.
 - **Loaded section** — listing of plugins the agent has `load_capability`'d so far in this thread.
+- **Browser tools this turn** — rendered only when the client declared `state.browserTools` (Portal turns). Names the browser-side tools by name and, while the `portal` plugin is still `on-demand` and not in `loadedPlugins`, adds one line telling the model to `load_capability({ names: ['portal'] })` first. Empty on every other turn, so it costs nothing outside the Portal.
+
+The discovery mandate in **Operating principles** is written as three lanes with an explicit division of labour: `search_skills` for packaged skills, `list_capabilities` + one `load_capability` call for server-side plugins and integrations, and the `[Portal]`-prefixed browser tools already in the tool list for anything that happens on the user's screen. Browser tools never appear in the first two lanes' results, which is why the per-turn block above exists.
 
 Other sections (identity, operating mode, user context, time context, user preferences, editor context, Slack formatting, secrets context, Composio context) are framework-owned. Plugins shouldn't try to add free-form prompt content — their interface to the LLM is the manifest plus tool/sub-agent descriptions.
 
@@ -98,13 +101,18 @@ Other sections (identity, operating mode, user context, time context, user prefe
 
 Order is fixed:
 
-1. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
-2. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
-3. `createPageContextMiddleware()` — injects active page context for editor flows.
-4. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails.
-5. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
+1. `createWorkStatusMiddleware()` — outermost. One `work_status` beat per model call (`Thinking…`) and per tool call (the humanized tool name). Pure side effect; a no-op off the Matrix transport.
+2. `createByoHistorySanitizerMiddleware()` — repairs BYO-credential histories (orphaned tool calls/results) before the model sees them.
+3. `createSummarizationMiddleware()` — condenses thread history into a summary + recent tail once it crosses the trigger (20 messages or ~40k tokens; keeps 10). Uses the cheap `routing` model via the same resolver as the main model, so `hooks.resolveModel` covers it. This is what bounds per-thread state: without it, every turn reloads, re-serializes, and re-uploads an ever-growing history. The full transcript stays user-visible — list endpoints read the saver's `messages` table (`listThreadMessages`), not the condensed checkpoint.
+4. `createCapabilityGateMiddleware()` — trims the bound tool list to what `loadedPlugins` allows this model call.
+5. `createToolValidationMiddleware()` — validates tool args against their Zod schemas before invoking.
+6. `createToolRepetitionGuardMiddleware()` — short-circuits a re-issued call that already failed identically this turn.
+7. `toolRetryMiddleware()` — LangChain built-in. One retry on tool validation failure.
+8. `createPageContextMiddleware()` — injects active page context for editor flows. Only when the fork supplies `hooks.getRoomTitle`.
+9. `createSafetyGuardrailMiddleware()` — blocks output that violates the safety guardrails. Only when the fork supplies `hooks.safetyModel`.
+10. ...plugin-contributed middlewares from `MiddlewareRegistry.collect(buildCtx)` in topological order.
 
-All four always-on middlewares ship in `graph/middlewares/`. They're not removable or reorderable.
+Every always-on middleware except `toolRetryMiddleware` (a LangChain built-in) ships in `graph/middlewares/`. They're not removable or reorderable.
 
 ## Read next
 

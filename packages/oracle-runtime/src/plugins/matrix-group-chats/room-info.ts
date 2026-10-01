@@ -1,4 +1,5 @@
 import { MatrixManager } from '@ixo/matrix';
+import { sweepExpired } from '../../utils/expiring-map.js';
 import type { RoomTypeInfo } from './guard.js';
 
 interface CacheEntry {
@@ -27,6 +28,7 @@ export class RoomInfoCache {
       memberCount: fresh.memberCount,
       joinedMemberIds: fresh.joinedMemberIds,
     };
+    sweepExpired(this.entries);
     this.entries.set(roomId, { info, expiresAt: Date.now() + this.ttlMs });
     return info;
   }

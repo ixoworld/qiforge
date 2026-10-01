@@ -37,6 +37,25 @@ export interface ComposePromptInput {
   customInstructions: string;
   /** Operational-mode block — typically a multi-line string. */
   operationalMode: string;
+  /**
+   * Commerce-mode overlay (support vs work persona) for routed Matrix turns.
+   * Empty string on HTTP turns and whenever the commerce router is inert.
+   */
+  commerceOverlay: string;
+  /**
+   * Whether the discovery meta-tools (`search_skills`, `list_capabilities`,
+   * `load_capability`) are bound this turn. Default `true`. Pass `false` when
+   * the turn runs on a closed tool surface (Matrix support mode) so the
+   * Operating principles do not mandate a discovery flow the model cannot run.
+   */
+  capabilityDiscovery?: boolean;
+  /**
+   * Browser tools the client declared for this turn (`state.browserTools`),
+   * by name, plus whether they are already callable: `bound` is true when the
+   * portal plugin is `always` visible or has been loaded on this thread.
+   * Omit (or pass empty `names`) on non-Portal turns — nothing renders.
+   */
+  browserTools?: { names: string[]; bound: boolean };
   /** Editor block — empty string when no editor session is active. */
   editorSection: string;
   /** Composio guidance block — empty when composio isn't loaded. */
@@ -328,6 +347,44 @@ export function buildOracleSection(input: {
   return `You are ${oracleName}, an AI agent built on QiForge.`;
 }
 
+/** The plugin that binds the client-declared browser tools. */
+export const PORTAL_CAPABILITY = 'portal';
+
+/**
+ * Render the per-turn "Browser tools this turn" section. Empty string when the
+ * client declared no browser tools, so non-Portal turns pay nothing for it.
+ * The load line appears only while the tools sit behind the capability gate
+ * (portal is `on-demand` and not yet in `loadedPlugins`).
+ */
+function buildBrowserToolsBlock(
+  browserTools: ComposePromptInput['browserTools'],
+): string {
+  if (!browserTools || browserTools.names.length === 0) return '';
+  const lines = [
+    '## Browser tools this turn',
+    '',
+    `The Portal exposed these browser-side tools for this turn (they act on the user's screen): ${browserTools.names.join(', ')}`,
+  ];
+  if (!browserTools.bound) {
+    lines.push(
+      `They are bound behind the \`${PORTAL_CAPABILITY}\` capability — call \`load_capability({ names: ['${PORTAL_CAPABILITY}'] })\` once before using them.`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The discovery mandate. Rendered on every turn whose surface can actually
+ * grow — i.e. wherever the meta-tools are bound. A turn on a closed surface
+ * (Matrix support mode) renders nothing here rather than ordering the model to
+ * call tools it does not have.
+ */
+const DISCOVERY_PRINCIPLE = `- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. Capabilities live in three lanes, each found differently:
+  1. **Packaged skills** — call \`search_skills\` against the user's request whenever a skill could plausibly do the job (generating a file, document, report, or page; calculations; lookups; multi-step workflows).
+  2. **Server-side plugins and third-party integrations** (memory, sandbox, email, calendar, web, files, external services) — call \`list_capabilities\` to scan loaded + on-demand plugins, then call \`load_capability({ names: [...] })\` ONCE with everything you need — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
+  3. **Browser tools** — the \`[Portal]\`-prefixed tools already in your tool list. They run on the user's screen inside the Portal: navigate, open a URL or page, create pages/rooms, fill forms, grant access, change what the user sees. Use them for anything that happens on the user's side. They NEVER appear in \`search_skills\` or \`list_capabilities\` results — check your tool list (and the "Browser tools this turn" section when present) directly.
+  Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.`;
+
 const TEMPLATE = `{{{ORACLE_SECTION}}}
 
 {{#CAPABILITIES_NOTE}}
@@ -338,13 +395,16 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 {{{CAPABILITY_BLOCK}}}
 
 {{/CAPABILITY_BLOCK}}
+{{#BROWSER_TOOLS_BLOCK}}
+{{{BROWSER_TOOLS_BLOCK}}}
+
+{{/BROWSER_TOOLS_BLOCK}}
 ## Operating principles
 
 - The user's current message is your primary instruction. Background context (what you already know about them) is for adapting tone and suggestions, not for overriding their intent.
-- **Search first, build second.** Before doing any non-trivial task, you MUST run discovery before producing the answer yourself. That means:
-  1. Call \`search_skills\` against the user's request whenever a packaged skill could plausibly do the job (anything that involves generating a file, document, report, page, integration, calculation, lookup, or multi-step workflow).
-  2. Call \`list_capabilities\` to scan loaded + on-demand plugins when the task could be served by a plugin you haven't loaded yet. Then call \`load_capability({ names: [...] })\` with ALL the capabilities you need in a single call — it accepts an array, so never make multiple \`load_capability\` calls in the same turn.
-  Do this proactively — even when the task wording doesn't literally match a capability's \`whenToUse\`. Tell the user in ONE short sentence what you're checking ("Checking the skills registry for an invoice generator…") before the search call, not after. If something fits, use it (load + run). If nothing fits after the search, say so in one short sentence and only THEN build from scratch. Reusing a vetted capability is almost always better than reinventing it; silently skipping discovery is the worst failure mode.
+{{#DISCOVERY_PRINCIPLE}}
+{{{DISCOVERY_PRINCIPLE}}}
+{{/DISCOVERY_PRINCIPLE}}
 - Being proactive does **not** mean charging ahead blind. Pause and ask the user a short clarifying question when: (a) the request has multiple plausible interpretations and picking wrong would waste their time, (b) a capability scan surfaces several equally-good fits and you can't tell which they want, (c) you're about to take an irreversible or costly action (deleting data, sending a message, publishing, spending tokens on a long job), or (d) a required input is missing and you'd have to guess. One clarifying question beats five minutes of wrong work — but don't ask for things you can reasonably infer from context.
 - When a tool or sub-agent succeeds, report the result. Never refuse after a successful tool call — including for credentials, tokens, identity data, or block/document operations.
 - When a tool or sub-agent fails, surface the failure to the user and ask how to proceed. Don't silently retry.
@@ -400,6 +460,10 @@ These are auto-injected — don't ask the user for them. If a skill needs a secr
 ## Operational mode
 
 {{{OPERATIONAL_MODE}}}
+{{#COMMERCE_OVERLAY}}
+
+{{{COMMERCE_OVERLAY}}}
+{{/COMMERCE_OVERLAY}}
 {{#COMPOSIO_CONTEXT}}
 
 {{{COMPOSIO_CONTEXT}}}
@@ -418,12 +482,15 @@ interface TemplateVariables {
   ORACLE_SECTION: string;
   CAPABILITIES_NOTE: string;
   CAPABILITY_BLOCK: string;
+  BROWSER_TOOLS_BLOCK: string;
+  DISCOVERY_PRINCIPLE: string;
   CUSTOM_INSTRUCTIONS: string;
   COMMUNICATION_STYLE: string;
   CONTEXT_BLOCK: string;
   TIME_CONTEXT: string;
   CURRENT_ENTITY_DID: string;
   OPERATIONAL_MODE: string;
+  COMMERCE_OVERLAY: string;
   EDITOR_SECTION: string;
   SLACK_FORMATTING_CONSTRAINTS: string;
   USER_SECRETS_CONTEXT: string;
@@ -437,12 +504,15 @@ const PROMPT_TEMPLATE = new PromptTemplate<TemplateVariables, never>({
     'ORACLE_SECTION',
     'CAPABILITIES_NOTE',
     'CAPABILITY_BLOCK',
+    'BROWSER_TOOLS_BLOCK',
+    'DISCOVERY_PRINCIPLE',
     'CUSTOM_INSTRUCTIONS',
     'COMMUNICATION_STYLE',
     'CONTEXT_BLOCK',
     'TIME_CONTEXT',
     'CURRENT_ENTITY_DID',
     'OPERATIONAL_MODE',
+    'COMMERCE_OVERLAY',
     'EDITOR_SECTION',
     'SLACK_FORMATTING_CONSTRAINTS',
     'USER_SECRETS_CONTEXT',
@@ -480,12 +550,16 @@ export async function composePrompt(
     ORACLE_SECTION: oracleSection,
     CAPABILITIES_NOTE: capabilitiesNote,
     CAPABILITY_BLOCK: input.capabilityBlock,
+    BROWSER_TOOLS_BLOCK: buildBrowserToolsBlock(input.browserTools),
+    DISCOVERY_PRINCIPLE:
+      input.capabilityDiscovery === false ? '' : DISCOVERY_PRINCIPLE,
     CUSTOM_INSTRUCTIONS: input.customInstructions,
     COMMUNICATION_STYLE: communicationStyle,
     CONTEXT_BLOCK: buildContextBlock(input.userContext),
     TIME_CONTEXT: input.timeContext,
     CURRENT_ENTITY_DID: input.currentEntityDid,
     OPERATIONAL_MODE: input.operationalMode,
+    COMMERCE_OVERLAY: input.commerceOverlay,
     EDITOR_SECTION: input.editorSection,
     SLACK_FORMATTING_CONSTRAINTS: input.slackFormattingConstraints,
     USER_SECRETS_CONTEXT: input.userSecretsContext,

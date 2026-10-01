@@ -296,6 +296,7 @@ export function stepToCapability(
   if (nb) cap.nb = nb;
   if (step.title) cap.title = step.title;
   if (step.description) cap.description = step.description;
+  if (step.phase) cap.phase = step.phase;
   const trigger = triggerForStep(step);
   if (trigger) cap.trigger = trigger;
   const ttl = ttlForStep(step);

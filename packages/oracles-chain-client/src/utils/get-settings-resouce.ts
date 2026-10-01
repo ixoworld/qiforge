@@ -44,29 +44,39 @@ function rewriteMatrixMediaUrl(url: string, matrixHomeServer: string): string {
   return `https://${matrixHomeServer}/_matrix/client/v1/media/download/${serverName}/${mediaId}`;
 }
 
-export async function getSettingsResource<T>(
-  settingsResourceParams: TGetSettingsResourceSchema,
+/**
+ * Find one `linkedResource` on a protocol/entity document, or `undefined` when
+ * the entity has no matching entry. Callers that treat a missing resource as an
+ * error (the settings lane) raise it themselves; callers for which "not
+ * published" is a normal state (the agent card) just get `undefined`.
+ *
+ * Returns the resource itself rather than its document so callers can read the
+ * on-chain `proof` — the opaque version string that identifies which revision
+ * of the document they resolved.
+ */
+export async function findLinkedResource(
+  protocolDid: string,
+  matches: (resource: LinkedResource) => boolean,
+): Promise<LinkedResource | undefined> {
+  const protocol = await getEntityByIdCached(protocolDid);
+  if (!protocol) {
+    throw new Error('Protocol not found with did: ' + protocolDid);
+  }
+  const linkedResources = (protocol.linkedResource ?? []) as LinkedResource[];
+  return linkedResources.find(matches);
+}
+
+/**
+ * Fetch a linked resource's document from its `serviceEndpoint`. Matrix-hosted
+ * documents are rewritten onto the caller's homeserver and sent with its access
+ * token — newer Synapse releases refuse anonymous reads on the legacy
+ * `/_matrix/media/…/download` path.
+ */
+export async function fetchLinkedResourceDoc<T>(
+  resource: LinkedResource,
   matrixAccessToken?: string,
   matrixHomeServer?: string,
 ): Promise<T> {
-  const protocol = await getEntityByIdCached(
-    settingsResourceParams.protocolDid,
-  );
-  if (!protocol) {
-    throw new Error(
-      'Protocol not found with did: ' + settingsResourceParams.protocolDid,
-    );
-  }
-  const settingsResource = protocol?.linkedResource as LinkedResource[];
-  const resource = settingsResource.find(
-    (resource) =>
-      resource.id === settingsResourceParams.id ||
-      resource.type === settingsResourceParams.type,
-  );
-  if (!resource) {
-    throw new Error('Resource not found');
-  }
-
   const url = matrixHomeServer
     ? rewriteMatrixMediaUrl(resource.serviceEndpoint, matrixHomeServer)
     : resource.serviceEndpoint;
@@ -80,4 +90,26 @@ export async function getSettingsResource<T>(
   });
   const data = await response.json();
   return data as T;
+}
+
+export async function getSettingsResource<T>(
+  settingsResourceParams: TGetSettingsResourceSchema,
+  matrixAccessToken?: string,
+  matrixHomeServer?: string,
+): Promise<T> {
+  const resource = await findLinkedResource(
+    settingsResourceParams.protocolDid,
+    (candidate) =>
+      candidate.id === settingsResourceParams.id ||
+      candidate.type === settingsResourceParams.type,
+  );
+  if (!resource) {
+    throw new Error('Resource not found');
+  }
+
+  return fetchLinkedResourceDoc<T>(
+    resource,
+    matrixAccessToken,
+    matrixHomeServer,
+  );
 }

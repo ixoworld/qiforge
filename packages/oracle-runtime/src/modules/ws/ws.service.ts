@@ -48,6 +48,13 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
           connections.delete(socket);
         }
       });
+      // A session fully drained of dead sockets here would otherwise keep
+      // its empty Set in the map forever — `removeClientConnection` never
+      // sees sockets that dropped without a disconnect event.
+      if (connections.size === 0) {
+        this.sessionConnections.delete(sessionId);
+        this.logger.log(`Cleaned up drained session: ${sessionId}`);
+      }
     } else {
       this.logger.warn(
         `Attempted to publish to non-existent session: ${sessionId}`,
@@ -114,15 +121,23 @@ export class WsService implements OnModuleInit, OnModuleDestroy {
     return total;
   }
 
+  /**
+   * Kept as a field so `onModuleDestroy` can unsubscribe — `wsEmitter` is a
+   * module-level singleton, so a listener left behind pins the destroyed
+   * service (and its whole connection map) for the life of the process.
+   */
+  private readonly onWsEvent = (event: AllEvents): void => {
+    this.publishToSession(event.payload.sessionId, event);
+  };
+
   onModuleInit(): void {
     this.logger.log('WebSocket service initialized');
-    wsEmitter.on(WS_SERVICE_EVENT_NAME, (event: AllEvents) => {
-      this.publishToSession(event.payload.sessionId, event);
-    });
+    wsEmitter.on(WS_SERVICE_EVENT_NAME, this.onWsEvent);
   }
 
   onModuleDestroy(): void {
     this.logger.log('Cleaning up all WebSocket connections');
+    wsEmitter.off(WS_SERVICE_EVENT_NAME, this.onWsEvent);
     this.sessionConnections.forEach((connections) => {
       connections.forEach((socket) => {
         socket.disconnect();

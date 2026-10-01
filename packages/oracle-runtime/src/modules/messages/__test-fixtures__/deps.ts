@@ -5,8 +5,10 @@ import { type PreparedRequest } from '../request-preparer.js';
 /**
  * Stub for `UserMatrixSqliteSyncService`. Only the methods the chat
  * pipeline touches are present — `markUserActive`/`markUserInactive`
- * (ref-count contract), `getUserDatabase` (initial sync), and
- * `getUserDatabaseNoSync` (cached connection used by `PostMessageSyncer`).
+ * (ref-count contract), `getUserCheckpointer` (initial sync), and
+ * `getUserCheckpointerNoSync` (cached connection used by
+ * `PostMessageSyncer`). The `getUserDatabase*` pair is still stubbed for
+ * `RequestPreparer`, which needs the raw connection rather than a saver.
  */
 export function makeCheckpointSync() {
   return {
@@ -14,6 +16,8 @@ export function makeCheckpointSync() {
     markUserInactive: vi.fn(),
     getUserDatabase: vi.fn(),
     getUserDatabaseNoSync: vi.fn(),
+    getUserCheckpointer: vi.fn(),
+    getUserCheckpointerNoSync: vi.fn(),
   };
 }
 

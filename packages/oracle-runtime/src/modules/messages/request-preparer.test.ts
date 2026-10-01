@@ -220,5 +220,16 @@ describe('RequestPreparer', () => {
       expect(b.requestId).not.toBe(a.requestId);
       expect(a.runnableConfig.configurable.requestId).toBe(a.requestId);
     });
+
+    it('honors a caller-supplied requestId on batch turns (Matrix bridge id)', async () => {
+      const prepared = await preparer.prepare(
+        makePayload({ stream: false, requestId: 'bridge-req-1' }),
+      );
+
+      expect(prepared.requestId).toBe('bridge-req-1');
+      expect(prepared.runnableConfig.configurable.requestId).toBe(
+        'bridge-req-1',
+      );
+    });
   });
 });

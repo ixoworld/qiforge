@@ -75,6 +75,7 @@ function makeRuntimeContext(
     },
     matrix: {
       postToRoom: async () => 'event-id',
+      postEvent: async () => 'event-id',
       getRoomState: async (roomId: string) => ({ roomId, state: [] }),
       getEventById: async (_roomId: string, eventId: string) => ({
         eventId,
@@ -95,6 +96,14 @@ function makeRuntimeContext(
         invocation: 'mock-invocation-car',
       }),
       getServiceDelegation: async () => ({ error: 'no-delegation' as const }),
+    },
+    decisions: {
+      evaluate: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
+      evaluateByName: async () => {
+        throw new Error('decision adapter not configured in fixture');
+      },
     },
     llm: {
       get: () =>

@@ -1,3 +1,4 @@
+import type { DecisionRegistration } from '@ixo/common';
 import type { DynamicModule, Type } from '@nestjs/common';
 import type { z } from 'zod';
 import type {
@@ -49,6 +50,13 @@ export abstract class OraclePlugin {
 
   /** Sub-agents the runtime auto-wraps as tools. */
   getSubAgents?(ctx: PluginContext): PluginSubAgent[];
+
+  /**
+   * Bounded semantic decisions contributed by this plugin. Decisions are
+   * side-effect-free and are never exposed to the generative agent unless a
+   * plugin explicitly wraps one in a tool.
+   */
+  getDecisions?(ctx: PluginContext): DecisionRegistration[];
 
   /**
    * Request-time tool contributions. Called once per `createMainAgent`

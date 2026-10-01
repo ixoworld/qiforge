@@ -23,6 +23,7 @@ interface AmbientServices {
   matrix: MatrixAdapter;
   secrets: SecretsAdapter;
   llm: LlmAdapter;
+  decisions: DecisionEvaluator;
   emit: EmitFactory;
   logger: Logger;
   // ... etc
@@ -79,6 +80,7 @@ export function buildRuntimeContext(
     secrets: bindSecrets(ambient.secrets, runConfig.session.roomId),
     matrix: ambient.matrix,
     ucan: bindUcan(ambient.ucan, runConfig.user.ucanDelegation),
+    decisions: bindDecisions(ambient.decisions, runConfig.abortSignal),
     llm: ambient.llm,
     emit: ambient.emit.forSession(runConfig.session.id),
     logger:
@@ -95,6 +97,7 @@ Most fields are direct references to ambient services. Three are computed per re
 
 - **`secrets`** — bound to the current `roomId` so plugin code doesn't have to pass it on every call.
 - **`ucan`** — bound to the current user's delegation so `requireCapability` / `mintInvocation` operate on the right one.
+- **`decisions`** — bound to the turn abort signal; callers may supply a tighter timeout or signal per evaluation.
 - **`shared`** — built from `SharedStateRegistry` accessors, each invoked with `(stateInput, this)`.
 
 ## RunConfig
@@ -136,6 +139,7 @@ interface RunConfig {
 | `matrix.*`                              | Lazy — round-trip on call.                                                               |
 | `ucan.mintInvocation`                   | Lazy — signs on call (caches per-target).                                                |
 | `ucan.resolveServiceDid`                | Lazy — DID document fetch + cache.                                                       |
+| `decisions.evaluate*`                   | Lazy — provider evaluation on call; bounded by validation + timeout.                     |
 | `llm.get`                               | Lazy — model construction on call.                                                       |
 | `emit.*`                                | Lazy — emits events on the per-session channel on call.                                  |
 | `shared.<key>`                          | Lazy — each access invokes the registered accessor with the latest state.                |
@@ -166,6 +170,7 @@ So the tool handler always sees a fresh `RuntimeContext` — even though the _to
 
 ## Read next
 
+- [Bounded semantic decisions](decisions.md) — decision definitions, validation, and adapters.
 - [Plugin lifecycle](plugin-lifecycle.md) — when contexts are built.
 - [Modules](modules.md) — the Nest services ambient adapters wrap.
 - [Graph and state](graph-and-state.md) — `stateInput` and the agent builder.

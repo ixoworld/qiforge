@@ -1,15 +1,23 @@
 import type { Cache } from '@nestjs/cache-manager';
 import type { ConfigService } from '@nestjs/config';
+import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { HumanMessage, fakeModel } from 'langchain';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UcanService } from '../ucan/ucan.service.js';
 import type {
+  ByoLlmService,
+  ByoTurnState,
+} from '../byo-llm/byo-llm.service.js';
+import type {
   CompiledMainAgent,
   MainAgentArgs,
 } from '../../graph/main-agent-types.js';
+import type { DecisionEvaluation } from '@ixo/common';
+import type { DecisionEvaluator } from '../../decisions/decision-runtime.js';
 import type { OracleIdentity } from '../../plugin-api/types.js';
 import { UserPreferencesService } from '../../plugins/user-preferences/service/user-preferences.service.js';
+import { makeManifest, makePlugin } from '../../registries/test-fixtures.js';
 import {
   ConfigSchemaRegistry,
   ManifestRegistry,
@@ -20,6 +28,7 @@ import {
 } from '../../registries/index.js';
 import type { AmbientServices } from '../../runtime-context/ambient.js';
 import { AgentBuilder, type BuildAgentArgs } from './agent-builder.js';
+import { CapabilityRouter } from './capability-router.js';
 import {
   type AuthUcanDelegation,
   type SendMessageRequest,
@@ -82,6 +91,7 @@ function makeAmbient(): AmbientServices {
     },
     matrix: {
       postToRoom: vi.fn(async () => 'event-id'),
+      postEvent: vi.fn(async () => 'event-id'),
       getRoomState: vi.fn(async (roomId: string) => ({ roomId, state: [] })),
       getEventById: vi.fn(async (_roomId: string, eventId: string) => ({
         eventId,
@@ -176,6 +186,7 @@ interface Harness {
   getDelegationMock: ReturnType<typeof vi.fn>;
   cacheGetMock: ReturnType<typeof vi.fn>;
   cacheSetMock: ReturnType<typeof vi.fn>;
+  byoResolveForTurnMock: ReturnType<typeof vi.fn>;
   bundle: OracleRuntimeBundle;
 }
 
@@ -189,6 +200,11 @@ function buildHarness(
       sessionId: string;
     }) => Promise<Record<string, unknown> | undefined>;
     getDelegationImpl?: (userDid: string) => Promise<string | null>;
+    byoResolveImpl?: (params: {
+      userDid: string;
+      homeServerName: string;
+      requestedModel?: string;
+    }) => Promise<ByoTurnState | null>;
     configValues?: Record<string, unknown>;
   } = {},
 ): Harness {
@@ -231,12 +247,28 @@ function buildHarness(
     set: cacheSetMock,
   } as unknown as Cache;
 
+  const byoResolveForTurnMock = vi.fn(
+    overrides.byoResolveImpl ?? (async () => null),
+  );
+  const byoLlm = {
+    resolveForTurn: byoResolveForTurnMock,
+  } as unknown as ByoLlmService;
+
+  // The real router over the bundle's evaluator — the same lazy resolution the
+  // Nest factory uses — so the tests below exercise the actual seam.
+  const capabilityRouter = new CapabilityRouter({
+    getDecisionEvaluator: () => bundle.ambient.decisions,
+    logger: { log: vi.fn(), warn: vi.fn() },
+  });
+
   const builder = new AgentBuilder(
     bundleHolder as unknown as OracleRuntimeBundleHolder,
     userContextFetcher,
     ucan,
     config,
+    byoLlm,
     cacheManager,
+    capabilityRouter,
   );
 
   return {
@@ -246,6 +278,7 @@ function buildHarness(
     getDelegationMock,
     cacheGetMock,
     cacheSetMock,
+    byoResolveForTurnMock,
     bundle,
   };
 }
@@ -610,6 +643,251 @@ describe('AgentBuilder', () => {
 
       expect(result.langGraphConfig.version).toBe('v2');
       expect(result.langGraphConfig).not.toHaveProperty('signal');
+    });
+
+    it('always attaches user + timing metadata to langGraphConfig, without callbacks when LangSmith is unconfigured', async () => {
+      const { builder } = buildHarness();
+
+      const result = await builder.build(makeArgs());
+
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.user_did).toBe(USER_DID);
+      expect(metadata.client).toBe('portal');
+      expect(typeof metadata.agent_build_duration_ms).toBe('number');
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+    });
+
+    it('attaches a LangChainTracer callback when the user DID is in LANGSMITH_TRACED_DIDS', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_API_KEY: 'ls-key',
+          LANGSMITH_PROJECT: 'test-project',
+          LANGSMITH_TRACED_DIDS: `did:ixo:someone-else,${USER_DID}`,
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      const callbacks = result.langGraphConfig.callbacks as LangChainTracer[];
+      expect(callbacks).toHaveLength(1);
+      expect(callbacks[0]).toBeInstanceOf(LangChainTracer);
+      expect(callbacks[0]?.projectName).toBe('test-project');
+    });
+
+    it('does not attach a tracer for a DID outside the allowlist', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_API_KEY: 'ls-key',
+          LANGSMITH_TRACED_DIDS: 'did:ixo:someone-else',
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+    });
+
+    it('does not attach an explicit tracer when global LANGSMITH_TRACING=true (LangChain auto-attaches)', async () => {
+      const { builder } = buildHarness({
+        configValues: {
+          LANGSMITH_TRACING: 'true',
+          LANGSMITH_API_KEY: 'ls-key',
+        },
+      });
+
+      const result = await builder.build(makeArgs());
+
+      expect(result.langGraphConfig).not.toHaveProperty('callbacks');
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.user_did).toBe(USER_DID);
+    });
+
+    it('carries prepareDurationMs from the prepared request into trace metadata', async () => {
+      const { builder } = buildHarness();
+
+      const result = await builder.build(
+        makeArgs({ prepared: { prepareDurationMs: 77 } }),
+      );
+
+      const metadata = result.langGraphConfig.metadata as Record<
+        string,
+        unknown
+      >;
+      expect(metadata.prepare_duration_ms).toBe(77);
+    });
+  });
+
+  describe('BYO turns', () => {
+    const byoTurn: ByoTurnState = {
+      provider: 'openai',
+      credential: { provider: 'openai', apiKey: 'sk-user' },
+      mainModelId: 'gpt-5.6-terra',
+      byoModelId: 'byo:openai/gpt-5.6-terra',
+    };
+
+    it('skips BYO resolution entirely when an allowed platform model is requested', async () => {
+      const { builder, byoResolveForTurnMock } = buildHarness();
+
+      await builder.build(
+        makeArgs({ payload: { model: 'openai/gpt-5.4-nano' } }),
+      );
+
+      expect(byoResolveForTurnMock).not.toHaveBeenCalled();
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('openai/gpt-5.4-nano');
+      expect(args.requestCtx.byo).toBeUndefined();
+    });
+
+    it('routes a byo: model request through the resolver and marks the turn BYO', async () => {
+      const { builder, byoResolveForTurnMock, bundle } = buildHarness({
+        byoResolveImpl: async () => byoTurn,
+      });
+
+      await builder.build(
+        makeArgs({ payload: { model: 'byo:openai/gpt-5.6-terra' } }),
+      );
+
+      expect(byoResolveForTurnMock).toHaveBeenCalledWith({
+        userDid: USER_DID,
+        homeServerName: HOME_SERVER,
+        requestedModel: 'byo:openai/gpt-5.6-terra',
+      });
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('byo:openai/gpt-5.6-terra');
+      expect(args.requestCtx.byo).toEqual({ provider: 'openai', active: true });
+      expect(args.ambient).not.toBe(bundle.ambient);
+      expect(args.ambient.llm).not.toBe(bundle.ambient.llm);
+    });
+
+    it('falls back to a platform turn when the resolver returns null', async () => {
+      const { builder, bundle } = buildHarness({
+        byoResolveImpl: async () => null,
+      });
+
+      await builder.build(
+        makeArgs({ payload: { model: 'byo:openai/gpt-5.6-terra' } }),
+      );
+
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBeUndefined();
+      expect(args.requestCtx.byo).toBeUndefined();
+      expect(args.ambient).toBe(bundle.ambient);
+    });
+
+    it('resolves BYO with no requested model (Matrix ingress auto-preference)', async () => {
+      const { builder, byoResolveForTurnMock } = buildHarness({
+        byoResolveImpl: async () => byoTurn,
+      });
+
+      await builder.build(makeArgs());
+
+      expect(byoResolveForTurnMock).toHaveBeenCalledWith({
+        userDid: USER_DID,
+        homeServerName: HOME_SERVER,
+        requestedModel: undefined,
+      });
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.model).toBe('byo:openai/gpt-5.6-terra');
+      expect(args.requestCtx.byo).toEqual({ provider: 'openai', active: true });
+    });
+
+    it('degrades to a platform turn when the resolver rejects', async () => {
+      const { builder, bundle } = buildHarness({
+        byoResolveImpl: async () => {
+          throw new Error('matrix down');
+        },
+      });
+
+      await builder.build(makeArgs());
+
+      const args = lastMainAgentArgs();
+      expect(args.requestCtx.byo).toBeUndefined();
+      expect(args.ambient).toBe(bundle.ambient);
+    });
+  });
+
+  describe('capability router', () => {
+    const ROUTED: DecisionEvaluation = {
+      decision: { name: 'runtime.route-capabilities', version: '1.0.0' },
+      provider: 'mock',
+      model: 'mock-model',
+      answers: {
+        needsCapability: { kind: 'boolean', probabilityTrue: 0.95 },
+        capability: {
+          kind: 'choice',
+          value: 'weather',
+          confidence: 0.9,
+          probabilities: { weather: 0.9 },
+        },
+      },
+      latencyMs: 8,
+      evaluatedAt: '2026-09-22T00:00:00.000Z',
+    };
+
+    /** A bundle with one unloaded on-demand plugin and a routing evaluator. */
+    function routableHarness(mode?: 'shadow' | 'on') {
+      const evaluate = vi.fn<DecisionEvaluator['evaluate']>(async () => ROUTED);
+      const decisions: DecisionEvaluator = {
+        evaluate,
+        evaluateByName: vi.fn<DecisionEvaluator['evaluateByName']>(),
+      };
+      const bundle = makeBundle({
+        ambient: { ...makeAmbient(), decisions },
+        ...(mode && { config: { CAPABILITY_ROUTER: mode } }),
+      });
+      bundle.registries.manifests.register(
+        makePlugin({
+          name: 'weather',
+          manifest: makeManifest({
+            title: 'Weather',
+            summary: 'Forecasts for any city.',
+            visibility: 'on-demand',
+          }),
+        }),
+      );
+      return { ...buildHarness({ bundle }), evaluate };
+    }
+
+    it('hands the routed plugin to createMainAgent as preloadedPlugins and keeps it out of graph state', async () => {
+      const { builder, evaluate } = routableHarness('on');
+
+      const result = await builder.build(makeArgs());
+
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      const args = lastMainAgentArgs();
+      expect(args.preloadedPlugins).toEqual(new Set(['weather']));
+      // Neither the build-time state nor the invoke input carries it: the
+      // preload is for this turn, the `loadedPlugins` channel is forever.
+      expect(args.state.loadedPlugins).toBeUndefined();
+      expect(result.stateInput.loadedPlugins).toBeUndefined();
+      expect(result.capabilityRouteShadow).toBeUndefined();
+    });
+
+    it('preloads nothing in shadow mode and returns the comparison handle', async () => {
+      const { builder, evaluate } = routableHarness('shadow');
+
+      const result = await builder.build(makeArgs());
+
+      expect(evaluate).toHaveBeenCalledTimes(1);
+      expect(lastMainAgentArgs().preloadedPlugins).toBeUndefined();
+      expect(result.stateInput.loadedPlugins).toBeUndefined();
+      expect(result.capabilityRouteShadow).toBeDefined();
+    });
+
+    it('never consults the evaluator when CAPABILITY_ROUTER is unset', async () => {
+      const { builder, evaluate } = routableHarness();
+
+      const result = await builder.build(makeArgs());
+
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(lastMainAgentArgs().preloadedPlugins).toBeUndefined();
+      expect(result.capabilityRouteShadow).toBeUndefined();
     });
   });
 });

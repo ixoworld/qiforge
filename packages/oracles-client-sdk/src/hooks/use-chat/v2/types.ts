@@ -66,9 +66,40 @@ export interface IMessage {
 
 export type ChatStatus = 'submitted' | 'streaming' | 'ready' | 'error';
 
+/**
+ * The durable run behind the current (or last) turn — what a chat UI needs
+ * beyond `status` once a runtime can lose the connection or restart
+ * mid-reply and pick the turn up again.
+ */
+export interface ChatRunState {
+  runId: string | null;
+  requestId: string | null;
+  /** The stream dropped and the client is re-joining the run. */
+  reconnecting: boolean;
+  /** Times the runtime restarted and resumed this turn. */
+  resumed: number;
+  /**
+   * How the last run ended: `done` (the reply is complete), `aborted` (the
+   * user stopped it), `interrupted` (the runtime gave up after repeated
+   * restarts; the kept text is shown), `failed`, or `disconnected` (the
+   * client could not re-join; the reply lands in the transcript when the
+   * runtime finishes it).
+   */
+  ended: 'done' | 'aborted' | 'interrupted' | 'failed' | 'disconnected' | null;
+}
+
+export const IDLE_RUN_STATE: ChatRunState = {
+  runId: null,
+  requestId: null,
+  reconnecting: false,
+  resumed: 0,
+  ended: null,
+};
+
 export interface IChatState {
   status: ChatStatus;
   error: Error | undefined;
+  run: ChatRunState;
   messages: IMessage[];
   pushMessage: (message: IMessage) => void;
   replaceMessage: (index: number, message: IMessage) => void;
@@ -77,6 +108,8 @@ export interface IChatState {
   snapshot: <T extends IMessage>(thing: T) => T;
   subscribe: (callback: () => void) => () => void;
 }
+
+export type StreamingMode = 'batched' | 'immediate' | 'throttled';
 
 export interface IChatOptions {
   oracleDid: string;
@@ -88,7 +121,22 @@ export interface IChatOptions {
     baseUrl?: string;
     wsUrl?: string;
   };
-  streamingMode?: 'batched' | 'immediate';
+  /**
+   * How store changes reach React while a reply streams. `immediate` (the
+   * default) renders on every chunk; `batched` groups changes per animation
+   * frame; `throttled` renders at once for the first change and then at most
+   * once per `streamingThrottleMs`, whatever the model's chunk rate — the
+   * right choice for a conversation view with any real render cost.
+   */
+  streamingMode?: StreamingMode;
+  /** The `throttled` window in milliseconds (default 50). */
+  streamingThrottleMs?: number;
+  /**
+   * Turns per history page (default 20). The hook loads the newest page
+   * first and older pages on demand (`loadEarlier`); against a runtime
+   * without paging the whole transcript comes in one page.
+   */
+  historyPageSize?: number;
   /**
    * Model id to answer with, chosen from `useModels()` / `GET /models`. When
    * omitted the oracle's default model is used. Model is a conversation-level

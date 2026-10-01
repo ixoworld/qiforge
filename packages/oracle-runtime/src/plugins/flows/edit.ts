@@ -14,11 +14,7 @@
  */
 import type { Doc as YDoc } from 'yjs';
 import * as Y from 'yjs';
-import {
-  deleteBlock,
-  editBlock,
-  findParentOf,
-} from '../editor/block-actions.js';
+import { deleteBlock, editBlock, findParentOf } from './ydoc-helpers.js';
 import { getActionDef, isEventCapable } from './actions.js';
 import { FlowError } from './errors.js';
 import { readFlowSpec } from './read.js';
@@ -107,6 +103,47 @@ export function setStepConfirmation(
 ): void {
   setStepProps(doc, stepId, {
     requiresConfirmation: requireConfirmation ? 'true' : '',
+  });
+}
+
+/** Update the stable semantic phase stored on the compiled Flow node. */
+export function setStepPhase(
+  doc: YDoc,
+  stepId: string,
+  phase: string | undefined,
+): void {
+  requireStep(doc, stepId);
+  const node = doc.getMap('qi.flow.nodes').get(stepId);
+  if (!(node instanceof Y.Map)) {
+    throw new FlowError('step_not_found', `No step "${stepId}" in this flow.`);
+  }
+  doc.transact(() => {
+    if (phase) node.set('phase', phase);
+    else node.delete('phase');
+  });
+}
+
+/** Persist the human-only versus agent-capable execution boundary. */
+export function setStepExecution(
+  doc: YDoc,
+  stepId: string,
+  execution: 'human-only' | 'agent-capable',
+): void {
+  setStepProps(doc, stepId, {
+    flowAgentExecutionMode:
+      execution === 'human-only' ? 'human-only' : 'saved-input',
+  });
+}
+
+/** Persist governed skill requirements used by Flow Agent actor matching. */
+export function setStepSkills(
+  doc: YDoc,
+  stepId: string,
+  skills: string[],
+): void {
+  setStepProps(doc, stepId, {
+    requiredSkill: skills[0] ?? '',
+    requiredSkills: skills.length > 0 ? JSON.stringify(skills) : '',
   });
 }
 

@@ -55,6 +55,35 @@ export interface CleanAdditionalKwargs {
 }
 
 /**
+ * Flatten a stored reasoning payload to display text. OpenRouter turns store
+ * a plain string; ChatGPT (Responses API) turns store a reasoning item
+ * (`{ id, type, summary, encrypted_content? }`) whose `summary` is an array
+ * of `{ type: 'summary_text', text }` parts. Anything else (e.g. an
+ * encrypted-only item with an empty summary) yields `undefined` — clients
+ * render reasoning as text and must never receive an object.
+ */
+function reasoningToText(reasoning: unknown): string | undefined {
+  if (typeof reasoning === 'string') return reasoning || undefined;
+  if (
+    reasoning &&
+    typeof reasoning === 'object' &&
+    Array.isArray((reasoning as { summary?: unknown }).summary)
+  ) {
+    const text = (reasoning as { summary: unknown[] }).summary
+      .map((part) =>
+        part &&
+        typeof part === 'object' &&
+        typeof (part as { text?: unknown }).text === 'string'
+          ? (part as { text: string }).text
+          : '',
+      )
+      .join('');
+    return text || undefined;
+  }
+  return undefined;
+}
+
+/**
  * Flatten message content to display text. Multimodal human messages (native
  * image/file attachments) carry an array of content blocks — only the text
  * blocks are surfaced; base64 data blocks must never reach the client (the
@@ -102,7 +131,7 @@ export function transformGraphStateMessageToListMessageResponse(
         // Extract reasoning from additional_kwargs
         const additionalKwargs =
           message.additional_kwargs as CleanAdditionalKwargs;
-        const reasoning = additionalKwargs?.reasoning;
+        const reasoning = reasoningToText(additionalKwargs?.reasoning);
 
         // Extract attachment metadata for human messages. Older checkpoints
         // only carry the singular `attachment`; fold it into the array form.

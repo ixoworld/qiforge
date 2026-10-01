@@ -1,7 +1,7 @@
 {
   "name": "@ixo/oracle-runtime",
-  "version": "1.3.9",
-  "description": "Plugin-based runtime for QiForge oracles",
+  "version": "1.98.0",
+  "description": "DEPRECATED — the Node runtime for QiForge oracles is no longer developed. Use @ixo/oracle-runtime-workers (Cloudflare Workers).",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -73,8 +73,8 @@
     "@ixo/sqlite-saver": "workspace:*",
     "@ixo/ucan": "workspace:*",
     "@langchain/core": "1.1.48",
-    "@langchain/langgraph": "1.3.2",
-    "@langchain/mcp-adapters": "1.1.3",
+    "@langchain/langgraph": "1.4.17",
+    "@langchain/mcp-adapters": "1.1.4",
     "@nestjs/bullmq": "^11.0.4",
     "@nestjs/cache-manager": "^3.1.2",
     "@nestjs/common": "^11.1.19",

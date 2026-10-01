@@ -1,4 +1,9 @@
 export {
+  createByoHistorySanitizerMiddleware,
+  type ByoHistorySanitizerMiddlewareOptions,
+} from './byo-history-sanitizer-middleware.js';
+
+export {
   createCapabilityGateMiddleware,
   type CapabilityGateMiddlewareOptions,
 } from './capability-gate-middleware.js';
@@ -25,5 +30,12 @@ export {
 
 export {
   createSummarizationMiddleware,
+  isSummarizationMessage,
+  SUMMARY_PREFIX,
   type SummarizationMiddlewareOptions,
 } from './summarization-middleware.js';
+
+export {
+  createWorkStatusMiddleware,
+  type WorkStatusMiddlewareOptions,
+} from './work-status-middleware.js';

@@ -1,0 +1,48 @@
+diff --git a/dist/connection.cjs b/dist/connection.cjs
+index 1c3282fe684ae1bc968e916df0771018deb2344a..45e84212e67ece3c54acdb6c525872cf70f24117 100644
+--- a/dist/connection.cjs
++++ b/dist/connection.cjs
+@@ -3,6 +3,8 @@ const require_package = require("./package.cjs");
+ let _modelcontextprotocol_sdk_client_sse_js = require("@modelcontextprotocol/sdk/client/sse.js");
+ let _modelcontextprotocol_sdk_client_streamableHttp_js = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
+ let _modelcontextprotocol_sdk_client_index_js = require("@modelcontextprotocol/sdk/client/index.js");
++// ixo patch: see connection.js — Workers forbid the Ajv validator's codegen.
++let _modelcontextprotocol_sdk_validation_cfworker = require("@modelcontextprotocol/sdk/validation/cfworker");
+ let _modelcontextprotocol_sdk_client_stdio_js = require("@modelcontextprotocol/sdk/client/stdio.js");
+ let _modelcontextprotocol_sdk_types_js = require("@modelcontextprotocol/sdk/types.js");
+ //#region src/connection.ts
+@@ -33,7 +35,7 @@ var ConnectionManager = class {
+ 		const mcpClient = new _modelcontextprotocol_sdk_client_index_js.Client({
+ 			name: require_package.name,
+ 			version: require_package.version
+-		});
++		}, { jsonSchemaValidator: new _modelcontextprotocol_sdk_validation_cfworker.CfWorkerJsonSchemaValidator() });
+ 		await mcpClient.connect(transport);
+ 		if (this.#hooks.onMessage) mcpClient.setNotificationHandler(_modelcontextprotocol_sdk_types_js.LoggingMessageNotificationSchema, (notification) => this.#hooks.onMessage?.(notification.params, {
+ 			server: serverName,
+diff --git a/dist/connection.js b/dist/connection.js
+index 8f0f0db7d7efb78cd60547fb6eb47c427f449823..5f68ae5c0131e7778fa819d5ab1e5dc5f7b5365c 100644
+--- a/dist/connection.js
++++ b/dist/connection.js
+@@ -3,6 +3,12 @@ import { name, version } from "./package.js";
+ import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
++// ixo patch: the SDK's default JSON-schema validator (Ajv) compiles schemas
++// with generated code, which Cloudflare Workers forbid ("Code generation from
++// strings disallowed") — loading any tool that declares an outputSchema then
++// throws. The SDK's cfworker provider validates without codegen and works in
++// Node too, so use it everywhere.
++import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
+ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+ import { CancelledNotificationSchema, InitializedNotificationSchema, LoggingMessageNotificationSchema, PromptListChangedNotificationSchema, ResourceListChangedNotificationSchema, ResourceUpdatedNotificationSchema, RootsListChangedNotificationSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+ //#region src/connection.ts
+@@ -33,7 +39,7 @@ var ConnectionManager = class {
+ 		const mcpClient = new Client({
+ 			name,
+ 			version
+-		});
++		}, { jsonSchemaValidator: new CfWorkerJsonSchemaValidator() });
+ 		await mcpClient.connect(transport);
+ 		if (this.#hooks.onMessage) mcpClient.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => this.#hooks.onMessage?.(notification.params, {
+ 			server: serverName,

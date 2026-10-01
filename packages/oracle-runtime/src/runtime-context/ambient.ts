@@ -1,4 +1,5 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import type { DecisionEvaluator } from '../decisions/decision-runtime.js';
 import type {
   ChatOpenAIFields,
   Logger,
@@ -40,6 +41,16 @@ export interface BlobStoreAdapter {
 /** Matrix adapter exposing only scoped operations a plugin should ever need. */
 export interface MatrixAdapter {
   postToRoom(roomId: string, content: unknown): Promise<string>;
+  /**
+   * Post a timeline event with a caller-chosen event type (e.g. the
+   * `ixo.oracle.*` protocol events). `postToRoom` is the `m.room.message`
+   * shorthand; this is the general form. Returns the new event id.
+   */
+  postEvent(
+    roomId: string,
+    eventType: string,
+    content: object,
+  ): Promise<string>;
   getRoomState(roomId: string): Promise<RoomStateSnapshot>;
   getEventById(roomId: string, eventId: string): Promise<MatrixEvent>;
 }
@@ -79,10 +90,9 @@ export interface UcanAdapter {
   resolveServiceDid(serviceUrl: string): Promise<string | null>;
   /**
    * `true` once the oracle has loaded its Ed25519 signing mnemonic at boot.
-   * Plugins that mint downstream invocations (e.g. the editor's
-   * `mint_invocation` tool) gate registration on this — without a signing
-   * key, minting is a no-op and the tool should advertise an error instead
-   * of pretending to work.
+   * Plugins that mint downstream invocations gate tool registration on this —
+   * without a signing key, minting is a no-op and the tool should advertise an
+   * error instead of pretending to work.
    */
   hasSigningKey(): boolean;
   /**
@@ -148,6 +158,8 @@ export interface AmbientServices {
   blobStore: BlobStoreAdapter;
   matrix: MatrixAdapter;
   llm: LlmAdapter;
+  /** Bounded semantic decision runtime. Optional only for legacy/test ambients. */
+  decisions?: DecisionEvaluator;
   emit: EmitAdapter;
   ucan: UcanAdapter;
   logger: Logger;

@@ -1,10 +1,13 @@
 /* eslint-disable no-console */
-import { type AllEvents } from '@ixo/oracles-events/types';
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
 import { useOraclesConfig } from '../use-oracles-config.js';
-import { executeToolAndEmitResult } from './tool-executor.js';
+import {
+  executeBrowserToolCall,
+  executeToolAndEmitResult,
+  type BrowserToolCall,
+} from './tool-executor.js';
 import {
   type ConnectionStatus,
   type IUseWebSocketEventsReturn,
@@ -118,45 +121,22 @@ export function useWebSocketEvents(
         setLastActivity(new Date().toISOString());
       });
 
-      const handleEvent = (event: AllEvents) => {
-        props.handleNewEvent?.(event);
-      };
-
-      newSocket.on(evNames.ToolCall, handleEvent);
-      newSocket.on(evNames.RenderComponent, handleEvent);
-      newSocket.on(
-        evNames.MessageCacheInvalidation,
-        handleInvalidateCacheRef.current ?? (() => {}),
-      );
+      // Every server event is forwarded once, by the `onAny` listener below
+      // (a dedicated `on(...)` per event name on top of it delivered
+      // tool_call / render_component / cache invalidation twice).
 
       if (
         browserToolsRef.current &&
         Object.keys(browserToolsRef.current).length > 0
       ) {
         // Listen for browser tool calls
-        newSocket.on(
-          'browser_tool_call',
-          async (data: {
-            toolCallId: string;
-            toolName: string;
-            args: Record<string, unknown>;
-          }) => {
-            await executeToolAndEmitResult(
-              {
-                socket: newSocket,
-                toolId: data.toolCallId,
-                eventName: 'tool_result',
-              },
-              async () => {
-                const tool = browserToolsRef.current?.[data.toolName];
-                if (!tool) {
-                  throw new Error(`Tool ${data.toolName} not found`);
-                }
-                return await tool.fn(data.args);
-              },
-            );
-          },
-        );
+        newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
+          await executeBrowserToolCall(
+            newSocket,
+            browserToolsRef.current,
+            data,
+          );
+        });
       }
 
       // Listen for AG-UI action calls (always register listener, even if no tools yet)

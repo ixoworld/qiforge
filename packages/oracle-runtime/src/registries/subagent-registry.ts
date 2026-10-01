@@ -26,13 +26,22 @@ export interface RegisteredSubAgent {
 export class SubAgentRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredSubAgent[] | null = null;
-  private collected: RegisteredSubAgent[] | null = null;
+  /**
+   * Names-only snapshot of the most recent `collect()`. Deliberately not the
+   * sub-agent objects — request-time sub-agents close over that request's
+   * context, and retaining them here pinned it between turns. The name-based
+   * diagnostics below are the only consumers.
+   */
+  private collectedNames: Array<{
+    pluginName: string;
+    subAgentName: string;
+  }> | null = null;
 
   /** Add a plugin whose `getSubAgents` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collected = null;
+    this.collectedNames = null;
   }
 
   /**
@@ -84,8 +93,20 @@ export class SubAgentRegistry {
     const boot = this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
     const out = [...boot, ...request];
-    this.collected = out;
+    this.collectedNames = out.map(({ pluginName, subAgent }) => ({
+      pluginName,
+      subAgentName: subAgent.name,
+    }));
     return out;
+  }
+
+  /** Names source: the last full collection, else the boot cache. */
+  private names(): Array<{ pluginName: string; subAgentName: string }> {
+    if (this.collectedNames !== null) return this.collectedNames;
+    return (this.bootCache ?? []).map(({ pluginName, subAgent }) => ({
+      pluginName,
+      subAgentName: subAgent.name,
+    }));
   }
 
   /**
@@ -99,9 +120,9 @@ export class SubAgentRegistry {
    * names returned here match what the agent will actually see.
    */
   subAgentNamesForPlugin(pluginName: string): string[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return this.names()
       .filter((entry) => entry.pluginName === pluginName)
-      .map((entry) => computeSubAgentToolName(entry.subAgent.name));
+      .map((entry) => computeSubAgentToolName(entry.subAgentName));
   }
 
   /**
@@ -109,22 +130,21 @@ export class SubAgentRegistry {
    * message names both plugin names so the boot log points at the conflict.
    */
   assertNoCollisions(): void {
-    const source = this.collected ?? this.bootCache;
-    if (source === null) {
+    if (this.collectedNames === null && this.bootCache === null) {
       throw new Error(
         'SubAgentRegistry.assertNoCollisions called before collect',
       );
     }
     const seen = new Map<string, string>();
     const collisions: string[] = [];
-    for (const { pluginName, subAgent } of source) {
-      const prev = seen.get(subAgent.name);
+    for (const { pluginName, subAgentName } of this.names()) {
+      const prev = seen.get(subAgentName);
       if (prev !== undefined && prev !== pluginName) {
         collisions.push(
-          `Sub-agent "${subAgent.name}" registered by both "${prev}" and "${pluginName}"`,
+          `Sub-agent "${subAgentName}" registered by both "${prev}" and "${pluginName}"`,
         );
       } else if (prev === undefined) {
-        seen.set(subAgent.name, pluginName);
+        seen.set(subAgentName, pluginName);
       }
     }
     if (collisions.length > 0) {

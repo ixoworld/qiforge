@@ -39,12 +39,16 @@ function makeInput(
   overrides: {
     payload?: Partial<SendMessagePayload>;
     inputMessages?: BaseMessage[];
+    abortController?: AbortController;
   } = {},
 ): BatchInvokeInput {
   return {
     payload: makePayload(overrides.payload),
     prepared: makePrepared(),
     inputMessages: overrides.inputMessages ?? [new HumanMessage('hello')],
+    ...(overrides.abortController && {
+      abortController: overrides.abortController,
+    }),
   };
 }
 
@@ -57,9 +61,10 @@ interface Harness {
 
 function build(
   builtAgentOverrides: {
-    invokeResult?: { messages: BaseMessage[] };
+    invokeResult?: { messages: BaseMessage[]; loadedPlugins?: string[] };
     langGraphConfig?: Record<string, unknown>;
     stateInput?: Partial<BuiltAgent['stateInput']>;
+    capabilityRouteShadow?: BuiltAgent['capabilityRouteShadow'];
   } = {},
 ): Harness {
   const abortController = new AbortController();
@@ -82,6 +87,9 @@ function build(
     agent: { invoke } as unknown as BuiltAgent['agent'],
     stateInput: builtAgentOverrides.stateInput ?? {},
     langGraphConfig,
+    ...(builtAgentOverrides.capabilityRouteShadow && {
+      capabilityRouteShadow: builtAgentOverrides.capabilityRouteShadow,
+    }),
   };
 
   const buildFn = vi.fn().mockResolvedValue(builtAgent);
@@ -124,6 +132,49 @@ describe('BatchInvoker', () => {
         context: { user: { did: USER_DID } },
         signal: abortController.signal,
       });
+    });
+  });
+
+  describe('invoke — abort controller', () => {
+    it('hands the per-turn AbortController to agentBuilder.build', async () => {
+      const { svc, build: buildFn } = build();
+      const turnController = new AbortController();
+
+      await svc.invoke(makeInput({ abortController: turnController }));
+
+      expect(buildFn).toHaveBeenCalledTimes(1);
+      expect(buildFn.mock.calls[0]?.[1]).toBe(turnController);
+    });
+
+    it('passes no controller when the input carries none', async () => {
+      const { svc, build: buildFn } = build();
+
+      await svc.invoke(makeInput());
+
+      expect(buildFn.mock.calls[0]?.[1]).toBeUndefined();
+    });
+  });
+
+  describe('invoke — capability router shadow', () => {
+    it('hands the final loadedPlugins to the shadow handle after the run', async () => {
+      const compare = vi.fn();
+      const { svc } = build({
+        invokeResult: {
+          messages: [new AIMessage({ id: 'ai-1', content: 'sunny' })],
+          loadedPlugins: ['weather'],
+        },
+        capabilityRouteShadow: { compare },
+      });
+
+      await svc.invoke(makeInput());
+
+      expect(compare).toHaveBeenCalledWith(['weather']);
+    });
+
+    it('does nothing when the turn carried no shadow handle', async () => {
+      const { svc } = build();
+
+      await expect(svc.invoke(makeInput())).resolves.toBeDefined();
     });
   });
 

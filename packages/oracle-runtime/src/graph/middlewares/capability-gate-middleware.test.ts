@@ -6,6 +6,7 @@ type Visibility = NonNullable<PluginManifest['visibility']>;
 
 function setup(opts?: {
   loadedPlugins?: string[];
+  preloadedPlugins?: ReadonlySet<string>;
   tools?: Array<{ name: string }>;
   pluginByToolName?: Map<string, string>;
   visibilityByToolName?: Map<string, Visibility>;
@@ -29,6 +30,7 @@ function setup(opts?: {
   const mw = createCapabilityGateMiddleware({
     pluginByToolName,
     visibilityByToolName,
+    ...(opts?.preloadedPlugins && { preloadedPlugins: opts.preloadedPlugins }),
   });
   const wrap = mw.wrapModelCall;
   if (!wrap) throw new Error('wrapModelCall missing');
@@ -105,6 +107,25 @@ describe('createCapabilityGateMiddleware', () => {
     await invoke();
     const names = passedToolNames(handler);
     expect(names).toContain('call_portal_agent');
+  });
+
+  it('exposes an on-demand tool whose plugin was preloaded for the turn while loadedPlugins is empty', async () => {
+    const { handler, invoke } = setup({
+      loadedPlugins: [],
+      preloadedPlugins: new Set(['on_demand_plugin']),
+    });
+    await invoke();
+    const names = passedToolNames(handler);
+    expect(names).toContain('on_demand_tool');
+  });
+
+  it('keeps hiding on-demand tools whose plugin was neither loaded nor preloaded', async () => {
+    const { handler, invoke } = setup({
+      loadedPlugins: [],
+      preloadedPlugins: new Set(['on_demand_plugin']),
+    });
+    await invoke();
+    expect(passedToolNames(handler)).not.toContain('call_portal_agent');
   });
 
   it('honours per-tool visibility overrides via visibilityByToolName', async () => {

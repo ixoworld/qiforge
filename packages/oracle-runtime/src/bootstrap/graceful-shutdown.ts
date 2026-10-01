@@ -12,6 +12,8 @@ export interface GracefulShutdownOptions {
 }
 
 const DEFAULT_SIGNALS: NodeJS.Signals[] = ['SIGTERM', 'SIGINT'];
+/** Upper bound on waiting for a user's in-flight turn/sync before uploading. */
+const SHUTDOWN_DRAIN_MS = 30_000;
 
 /**
  * Drain the running Nest app on SIGTERM/SIGINT: upload checkpoints to Matrix,
@@ -28,13 +30,18 @@ export function registerGracefulShutdown(
   const signals = opts.signals ?? DEFAULT_SIGNALS;
 
   const handlers = new Map<NodeJS.Signals, (signal: NodeJS.Signals) => void>();
+  let shuttingDown = false;
 
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     Logger.log(`${signal} received, starting graceful shutdown...`, context);
 
     await runStep('Upload checkpoint to Matrix', async () => {
       const syncService = opts.app.get(UserMatrixSqliteSyncService);
-      await syncService.uploadCheckpointToMatrixStorageTask();
+      // Let each user's in-flight post-turn work finish first: an upload
+      // skips active users, and after shutdown no cron cycle retries them.
+      await syncService.uploadCheckpointToMatrixStorageTask({
+        drainMs: SHUTDOWN_DRAIN_MS,
+      });
     });
 
     await runStep('Stop Nest application', async () => {
@@ -55,6 +62,17 @@ export function registerGracefulShutdown(
 
   for (const signal of signals) {
     const handler = (received: NodeJS.Signals): void => {
+      // Process wrappers (tsx, nodemon, pm2) relay the signal they get, so
+      // the app often sees it twice. A `once` handler would leave the second
+      // delivery to Node's default action — killing us mid-upload.
+      if (shuttingDown) {
+        Logger.log(
+          `${received} received again; shutdown already in progress`,
+          context,
+        );
+        return;
+      }
+      shuttingDown = true;
       shutdown(received).catch((err: unknown) => {
         Logger.error(
           'Error during graceful shutdown',
@@ -65,7 +83,7 @@ export function registerGracefulShutdown(
       });
     };
     handlers.set(signal, handler);
-    process.once(signal, handler);
+    process.on(signal, handler);
   }
 
   // Return a detach function for tests that need to remove the handlers.

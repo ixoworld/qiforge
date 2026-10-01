@@ -75,3 +75,5 @@ checkpoints/
 .data/
 .env
 apps/app
+# local git worktrees used by Claude Code sessions
+.claude/worktrees/

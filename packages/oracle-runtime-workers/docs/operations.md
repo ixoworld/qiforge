@@ -1,0 +1,755 @@
+# Operations
+
+What an operator needs to run an oracle: the routes, what the status fields
+mean, how the gateway and the user objects behave over their lifetime, and
+the runbook for the failures we have seen.
+
+## Routes
+
+Public (UCAN-authenticated unless noted):
+
+| Route                                                                           | Purpose                                                                  |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `GET /health`, `GET /`                                                          | Liveness (no auth).                                                      |
+| `GET /health/matrix`                                                            | 200 when the gateway is running, 503 otherwise; body = `/matrix/status`. |
+| `GET /matrix/status`, `POST /matrix/start`                                      | Gateway status; start the sync loop (idempotent).                        |
+| `GET /models`                                                                   | Priced platform models.                                                  |
+| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                |
+| `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                   |
+| `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                    |
+| `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                         |
+| `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                      |
+| `GET /user-preferences`                                                         | The user's stored preferences.                                           |
+
+Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
+the calling user:
+
+| Route                                                                          | Purpose                                                                                                                                                             |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /debug/storage`, `POST /debug/storage/flush`, `POST /debug/storage/reset` | The caller's working copy: sizes, generations, flush state, chunk cache, the R2 page tier (`tier`); force a flush (an evicted object boots first); wipe and reload. |
+| `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.              |
+| `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.      |
+| `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                               |
+| `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                               |
+| `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                     |
+| `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                             |
+| `POST /debug/matrix/rotate-device`                                             | Log the bot in as a new device (old one retired).                                                                                                                   |
+| `GET /debug/matrix/outbox`                                                     | Pending durable sends without bodies (thread id, sizes, attempts).                                                                                                  |
+| `POST /debug/matrix/event`                                                     | Post `{ type, content, txnId? }` into the caller's own room; the same `txnId` twice returns the same event id. For transaction-id drills.                           |
+| `POST /debug/object/abort`                                                     | Reset the caller's user object the way a platform host drain does (in-flight turns die, storage survives). For reset-safety tests.                                  |
+| `POST /debug/reauth-prompt/reset`                                              | Forget when the last `delegation_required` prompt was posted (the 6 h throttle), so a drill can trigger the next one.                                               |
+| `POST /debug/matrix/abort`                                                     | Reset the gateway object the same way (sync loop and in-flight turns die; outbox, inbox and crypto snapshot survive). For reset-safety tests.                       |
+
+## The gateway
+
+### Lifecycle
+
+The gateway starts lazily on the first request (or `POST /matrix/start`) and
+stays loaded: the SDK's keep-alive alarm holds the object while it is active
+and re-arms itself, and the cron trigger is the safety net. A deploy
+replaces the object; the next request boots the new one. Boot timings on
+devnet (42 rooms): a fresh device 1.2 s (crypto init plus 100 one-time-key
+uploads), a restart that resumes from the persisted sync token 0.23 s.
+
+There is no initial sync. The first start of an account on an object lists
+`/joined_rooms` and syncs with a filter that excludes every room; later
+starts send `since=<token>`. A room that had more events than one sync
+carries is caught up through `/messages` with a durable cursor, so messages
+sent while the gateway was down are answered after the restart (the matrix
+step "gateway restart: … catch-up" pins it). `MATRIX_BACKFILL_MAX_EVENTS`
+caps that replay per room when an oracle should not answer a long backlog.
+
+### Status fields worth watching
+
+`GET /matrix/status` is the SDK's `BotStatus` plus the gateway's own turn
+bookkeeping:
+
+| Field                                                                                             | Meaning                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `running`, `syncState`, `lastSyncAt`, `syncs`, `syncFailures`                                     | The sync loop. `syncFailures` climbing = homeserver trouble.                                                                                                                                                                                    |
+| `deviceId`, `deviceRotations`, `resumedSync`                                                      | The current device; rotations since the object was created; whether this start resumed from a token.                                                                                                                                            |
+| `instanceId`, `instanceUptimeMs`                                                                  | A changing instance id with a short uptime means the object was killed or redeployed (see below).                                                                                                                                               |
+| `lastStart` (`restoreMs`, `cryptoInitMs`, `syncMs`, `totalMs`)                                    | Timings of the last boot.                                                                                                                                                                                                                       |
+| `joinedRooms`, `invitedRooms`, `hotRooms`, `hotRoomEvictions`                                     | Rooms known; rooms fully built in memory (≤ `MATRIX_HOT_ROOMS`).                                                                                                                                                                                |
+| `cryptoReady`, `secretStorageUnlocked`, `crossSigningReady`, `keyBackupVersion`                   | E2EE state; the backup version must be set for a fresh device to read history.                                                                                                                                                                  |
+| `oneTimeKeys` (`uploads`, `keysUploaded`, `serverCount`)                                          | A healthy client tops up to ~50–100 at boot and then idles; continuous uploads = the runaway described below.                                                                                                                                   |
+| `cryptoStoreBytes`, `cryptoStoreTransactions`, `wasmHeapBytes`                                    | Store size; retained fake-indexeddb transactions (a handful at most); crypto WASM heap.                                                                                                                                                         |
+| `sendQueue` (`inFlight`, `waiting`, `durableRows`, `sendsSinceBoot`)                              | Encryption gate occupancy; outbox rows still pending; sends since this instance booted.                                                                                                                                                         |
+| `sendScheduler` (`queued`, `inFlight`, `rooms`, `sent`, `failed`, `rateLimited`, `effectiveRate`) | The per-room scheduler; `rateLimited` must stay 0 under load.                                                                                                                                                                                   |
+| `catchup` (`rooms`, `gaps`, `queuedEvents`, `activeRooms`), `backfilledEvents`                    | Catch-up work outstanding / done.                                                                                                                                                                                                               |
+| `turns` (`inFlight`, `waiting`), `ingestPending`                                                  | Room turns running in user objects; debounce buffers about to become turns.                                                                                                                                                                     |
+| `keepAlive` (`fuseMs`, `holding`, `fuseRearmsSinceBoot`, `fuseRearmFailuresSinceBoot`)            | The keep-alive fuse (`MATRIX_KEEPALIVE_FUSE_MS`): re-arm failures climbing means the alarm could not be kept ahead of a host drain.                                                                                                             |
+| `unexpectedResets`, `lastUnexpectedReset`                                                         | Starts that followed a reset without a clean `stop()` (a deploy, an eviction, the isolate over 128 MB), with the previous instance's id and last liveness stamp.                                                                                |
+| `interruptedFlushes`                                                                              | Crypto-store snapshot flushes a reset cut short (the next flush repeats them); `0` on a healthy object.                                                                                                                                         |
+| `syncShrinks`, `pagesRefused`, `oversizedEvents`, `oversizedDecrypts`                             | Memory guards firing: `/sync` responses over `MATRIX_SYNC_BYTES_CAP`, catch-up pages over `MATRIX_PAGE_BYTES_CAP`, events skipped because they alone exceed the page cap, events refused by `MATRIX_MAX_DECRYPT_BYTES`. All `0` on a quiet bot. |
+| `backupBulkRestore` (`version`, `total`, `imported`, `skipped`)                                   | Only with `MATRIX_BACKUP_BULK_RESTORE=true`: the first start imports the backup, later starts report `skipped: 'already-restored'`.                                                                                                             |
+| `lastError`                                                                                       | The last start or sync error, if any.                                                                                                                                                                                                           |
+
+### Sends: scheduling, outbox, poison rows
+
+Outgoing messages go through the SDK's `PrioritySendScheduler`: one FIFO per
+room, rooms in parallel (`MATRIX_SEND_CONCURRENCY`), `interactive` (session
+markers, room replies, notices) before `background` (HTTP-turn replays), a
+token bucket at the homeserver's per-sender limit (`MATRIX_SEND_RATE_PER_SECOND`,
+`MATRIX_SEND_BURST`), 429s honoured with `retry_after_ms` and an adaptive
+back-off. An encryption gate ahead of the scheduler bounds how many events
+are being encrypted at once (memory). Configuring the rate is described in
+[configuration](configuration.md#the-bots-send-rate).
+
+Every send that is not consumed synchronously by its caller — replays, room
+replies, notices, task deliveries — is written to the SQLite `send_queue`
+table before it is scheduled and deleted on acknowledgement; on boot the
+survivors are re-issued with their original transaction id, so a send whose
+response was lost is deduplicated by the homeserver, never repeated. Rows
+are never aged out: an outage of any length only delays them. Session
+markers are the exception — their event id becomes the session id, so they
+are not replayed; the user object retries the marker with the same
+transaction id for ~30 s (`src/do/gateway-retry.ts`) instead, and if every
+attempt fails the create fails.
+
+### Best-effort room posts
+
+Three posts the user object makes are best-effort by design (Node fires and
+forgets them too): the room mirror of every HTTP turn (the user message and
+the reply, threaded under the session's marker), the `ixo.action.log` audit
+event of every browser tool / AG-UI action, and the `delegation_required`
+prompt a Matrix turn posts when the user has no usable delegation. On Workers
+the gateway object is replaced on every deploy and can be drained mid-turn,
+so each of these is now retried across a restart for ~30 s
+(`src/do/gateway-retry.ts`) and kept alive past the request under
+`waitUntil`. The mirror is serialised per session and sent with the
+transaction id `replay-<session>-<request>-<u|o>`, so a response lost to a
+reset is deduplicated by the homeserver and a reply never overtakes the
+message it answers (`src/do/room-mirror.ts`). The two custom events are sent
+under a transaction id minted once per post and kept for the life of the
+retry loop (`sendEvent` takes one since `@ixo/matrix-bot-workers-sdk` 0.4.0),
+so a response lost between the homeserver's ack and the reply to the gateway
+is deduplicated as well — a retried post lands once.
+
+The prompt's 6-hour throttle (`UCAN_REAUTH_PROMPT_THROTTLE_SECONDS`) is
+stamped only after the homeserver accepted the event
+(`src/do/reauth-prompt.ts`); a prompt lost to a restart is therefore posted
+on the user's next message instead of being suppressed for the whole window.
+`POST /debug/reauth-prompt/reset` forgets the stamp for drills.
+
+A turn that dies mid-way (an object reset, a provider error, the user's
+stop) leaves committed checkpoint steps with no dirty mark — the mark is set
+at the end of a turn. On boot the object compares the file's write
+generation with the generation it last uploaded and marks the copy dirty when
+the file moved on (`src/do/boot-dirty.ts`, one batched storage read per
+boot), so the next flush carries those steps and a later reload from the
+system of record cannot drop them. A copy that was never uploaded is left to
+its first completed turn.
+
+### Turns: what is and is not on the wire
+
+Three things the SSE stream (`src/do/sse-stream.ts`) decides per event:
+
+- model events tagged `lc_source: 'summarization'` (the summarization
+  middleware condensing the thread) or `internal` (a sub-agent's inner
+  turn) are dropped — neither their text nor their reasoning is a
+  `message` / `reasoning` frame; only the outermost agent's model output
+  streams;
+- a tool call whose arguments failed the tool's schema comes back from
+  LangChain's `toolRetryMiddleware` as an error `ToolMessage` (not as
+  `on_tool_error`): it is forwarded as `tool_call` with `status: 'error'`
+  and `error: <message>`, and logged as `[tool-retry] tool call rejected by
+the tool schema: …` — grep the tail for it when a model keeps "creating"
+  things that never appear;
+- a tool that threw is `status: 'error'` from `on_tool_error`, as before.
+
+`GET /messages/:id` lists the thread's full history from the saver, not the
+agent's live context: after the summarization middleware condensed the
+context, every earlier message still lists (Node parity) and only the
+summary message itself is hidden. `GET /debug/sessions/:id` reports the
+counts.
+
+### Turns: threads are sessions
+
+A room message is answered inside a thread, never in the main timeline, and
+the thread is the session — the Node runtime's rule, kept exactly:
+
+- A bare message roots a thread at itself; the reply opens the thread and
+  the session id is the message's event id. The next bare message is a new
+  thread and a new session.
+- A message inside a thread continues the thread's session. A quote-reply
+  from a client without native threads (`m.in_reply_to` only) is resolved up
+  the reply chain to its thread root (`src/matrix/reply-chain.ts`; an
+  unreachable ancestor ends the walk at the last event reached, as on Node).
+- A Portal session's id is its marker event, its turns are mirrored into the
+  marker's thread, and a reply typed inside that thread continues the Portal
+  session. An HTTP turn on a room-born session is mirrored into its thread
+  the same way. Nothing is mirrored into the main timeline.
+- `GET /sessions` is scoped to the user's main oracle room (the room the
+  alias names, resolved once per object instance): Portal sessions and the
+  threads opened there. Threads in dedicated task rooms and in any other
+  room the bot answers in stay out of the list, and task runs (`task:<id>`)
+  are hidden wherever they deliver. A user without an oracle room sees every
+  session.
+- An earlier build of this runtime kept a room's main timeline as one
+  session (`matrix:<roomId>`) and keyed threads as `thread:<root>`. On every
+  boot the user object renames `thread:<root>` rows to `<root>` across the
+  session-keyed tables (`src/do/session-id-migration.ts`, `[session-ids] …`
+  log line; a root that already names a session — the Portal session the
+  thread was mirrored from — keeps the old row as it is). `matrix:<roomId>`
+  rows are left alone: their transcript stays readable, new room messages no
+  longer continue them.
+
+### Turns: the inbox
+
+The outbox only exists once a reply exists. Between the SDK marking a room
+message processed and the user object finishing the LLM turn there was
+nothing durable, so a gateway reset in that window (a platform host drain,
+observed nine times in 37 h on a 1,186-room gateway) lost the reply silently.
+The gateway now writes every accepted message to the SQLite `turn_inbox`
+table before anything waits on the network and deletes the row when the turn
+ends: reply written to the outbox, empty reply, superseded, or the "try
+again" notice posted. Every start that brings the bot up re-dispatches the
+surviving rows through the ingest pipeline (`inbox replay: …` log line);
+each replay is charged to the row and a row replayed `MAX_TURN_REPLAYS`
+times gets the notice instead, so a message that kills the instance cannot
+loop. `status.inbox` counts pending rows.
+
+A replay never runs a turn twice. Room replies are sent with the transaction
+id `reply-<event id>`, so a reply the dead incarnation had already handed to
+the outbox or the homeserver is deduplicated server-side. The user object
+keeps a ledger per Matrix event (`matrix_turns` in the user's SQLite):
+an event it already answered returns the stored text without a model call,
+one whose turn is still running attaches to it, and one it lost in a reset
+of its own (tools may have run) is refused with a warning — the gateway posts
+the notice and the user resends, exactly as before this change.
+
+### Turns: durable runs
+
+Every turn — HTTP, Matrix room, scheduled task — is a **run** the user
+object records in its own SQLite before the first model call
+(`turn_runs`), keeps notes on while it executes, and can pick up again
+after a platform reset. The design is in `docs/plans/durable-runs.md`; what
+an operator sees:
+
+- **A run outlives its connection.** A browser that closes the tab does not
+  stop the turn; only `POST /messages/abort` or a superseding message on
+  the same session does (`multitask: 'interrupt'`, the default; with
+  `multitask: 'enqueue'` the new message waits its turn). The reply lands
+  in the transcript either way.
+- **Re-join.** Every SSE frame carries its sequence number as the `id:`
+  field and the first frame is `run` `{ runId }` (also the `x-run-id`
+  response header). `GET /runs/:runId?after=<seq>` replays the frames after
+  the cursor from the packed segments (`turn_run_segments`, one row per
+  ~2 s of output, deleted when the run ends) and stays attached until
+  `done`. `GET /sessions/:id/run` tells a reloading client whether a run is
+  active. The `done` frame carries `runId`, `messageId` and, for a run that
+  ended early, `aborted` / `interrupted` / `failed` and `partialText` — the
+  reply text the runtime kept, which a client shows in place of whatever it
+  had streamed.
+- **What a client does with a resumed attempt.** A recovered attempt is
+  announced with `run` `{ resumed: true, attempt, partialLength }`. The
+  frames of each attempt live in their own sequence space (attempt _n_
+  numbers from _n_ × 2³², `turn_runs.generation`), so a cursor from before
+  the reset — even one pointing at frames that were streamed but never
+  packed — is below everything the new attempt emits and a re-join misses
+  nothing. Those unpacked frames are the one thing a reset loses (at most
+  `RUN_SEGMENT_FLUSH_MS` of text): the model continues from what was
+  packed, so the client cuts the text it shows back to `partialLength`
+  characters before appending the continuation. `@ixo/oracles-client-sdk`
+  does this (`streamRun`, `useChat().run`); a plain SSE consumer that
+  ignores `partialLength` may show a repeated fragment after a restart.
+- **Reset mid-turn.** A reset leaves the row `running`. The next boot — the
+  next request, or the keep-alive alarm the run re-arms every ~15 s —
+  schedules a recovery attempt (5 s, then 15 s, 30 s, 60 s), restores the
+  partial output, and resumes the graph from the last checkpoint with no new
+  input. A checkpoint newer than the one seen at the previous attempt counts
+  as progress and resets the counter; four attempts without progress close
+  the run as `interrupted` with the friendly "try again" notice and the
+  partial text kept on the row. The tail shows `[runs] <id> attempt N in
+S s`, `resuming`, and the terminal `finished|aborted|interrupted|failed`.
+- **Side effects run at most once.** `turn_tool_marks` records every tool
+  call before it executes (`started`) and when it returns (`done`). On a
+  resumed attempt a started, unfinished **write** call is not executed
+  again: the model gets "outcome unknown, verify before repeating".
+  **Read** calls (declared `effect: 'read'` by the plugin, MCP
+  `readOnlyHint`, or the `list_/get_/search_/read_/preview_/…` naming
+  convention) run again. Undeclared tools are writes. A sub-agent's inner
+  tool calls are marked too; the sub-agent call itself is a write.
+- **Task runs.** A scheduled run cut off by a reset is resumed like any
+  other and its result delivered once by the scheduler
+  (`completeRecoveredRun`); it is closed as interrupted only after the
+  recovery cap.
+- **Ordering.** A message sent with `multitask: 'enqueue'` waits behind
+  the session's running turn _and_ behind one that is waiting for its
+  recovery attempt; the session's turns never interleave.
+- **Diagnostics.** `GET /debug/runs` lists recent runs with their marks,
+  segment counts, attempts and the live state — per live run its
+  `generation`, `lastSeq`, `packedSeq` (what a reset would keep) and
+  subscriber count (`ORACLE_DEBUG_ROUTES=true`). `POST /debug/object/abort`
+  resets the object mid-turn; it is what the durable-runs drill uses.
+- **Cost.** Rows written per turn: the run row and one update when it
+  ends; one segment per `RUN_SEGMENT_FLUSH_MS` (2 s) of output plus one per
+  settled tool result (a tool's start frame, the `run`, `router.update` and
+  `error` frames and the text all ride the timer; `done` closes the last
+  pack), each deleted at cutover; one mark and one update per tool call
+  (a re-run read adds an update). A 10 s reply with four tool calls is
+  ~25 rows. Alarms: the keep-alive re-arms the object's single alarm once
+  per ~15 s of active turn (coalesced across runs and multiplexed with the
+  scheduler, tier and idle alarms); the segment timer is in-memory. No
+  loaded-time change: the model wait still happens inside the object.
+
+### Transcript: paging
+
+`GET /sessions/:id/messages?limit=20&before=<cursor>&after=<cursor>` reads a
+session's transcript one turn-aligned page at a time
+(`docs/plans/transcript-paging.md`); `GET /messages/:id` still returns the
+whole transcript for older clients. A turn is a user message with everything
+the agent did until the next one, so a tool result never lands in a different
+page from the reply that called it. Cursors are message ids resolved to their
+row position at query time (rowids move when a checkpoint rewrites the
+thread's rows); an unknown cursor is a 400, an unknown session an empty page,
+`limit` is clamped to 100. `after=` re-sends the turn the cursor split so a
+client can fold the page in by message id. Cost: one indexed range read per
+80 rows plus one lookup per cursor; nothing is written.
+
+### Turns: context budgets
+
+Every context limit of a turn is a fraction of the model's own context
+window, resolved per model (`docs/plans/context-budgets.md`). What an
+operator sees:
+
+- **The window.** `[context] model=… window=N (origin) …` on every turn.
+  `origin` is `override` (`MODEL_CONTEXT_OVERRIDES`), `catalog` (the
+  OpenRouter `/models` listing, BYO-native ids under their vendor prefix),
+  `learned` (a provider's "too long" error named a smaller limit; kept in
+  the object's KV as `ctxwin:<model>`), or `default`
+  (`MODEL_CONTEXT_TOKENS`, 100k). `GET /debug/context?model=<id>` shows the
+  resolution and every derived threshold.
+- **New models.** Nothing to add here: a model listed by OpenRouter gets its
+  window from the catalog at the next refresh (once per isolate-hour). The
+  only manual step for a new selectable model is the runtime's allow-list,
+  `MODEL_CATALOG` in `src/core/llm.ts`; check `origin` on `/debug/context`
+  afterwards, and pin the id in `MODEL_CONTEXT_OVERRIDES` only when it
+  shows `default` (a model OpenRouter does not list).
+- **Summarization** fires at 50% of the window (tokens, chars/4), keeps the
+  last 10 messages, and no longer counts messages (set
+  `CONTEXT_SUMMARIZE_MESSAGES` to add that trigger back). A failed summary
+  keeps the history (`[summarization] summary failed; keeping the full
+history this turn`); it never replaces the conversation with an error.
+- **Capped tool results.** A result above 12% of the window (×4 chars, at
+  most 200,000 chars — `CONTEXT_RESULT_CAP_MAX_CHARS`) is stored whole and
+  the model sees the first 40% and last 60% of the visible budget with a
+  footer naming the saved id; `read_result` pages it back by
+  byte range. `[result-cap] <tool>: N chars > cap …; saved as … (sqlite|r2)`.
+  Results under 1 MB live in `tool_results` in the object's SQLite; larger
+  ones in the tier bucket as `<object id>/results/<id>`. Rows expire after
+  24 h (swept at boot), go with their session, and identical results share
+  one row. Optionally add an R2 lifecycle rule on the `results/` prefix as
+  a belt on top of the sweep.
+- **Pruning under pressure.** Above 35% of the window, tool results outside
+  the kept tail become one-line placeholders (a capped one keeps its
+  handle) and results identical to a later one become back-references —
+  on the request only, never in the checkpoint or the transcript.
+  `[context] over the prune threshold: pruned N tool result(s), ~A → ~B tokens`.
+- **Refusal and recovery.** A request still above 95% of the window (minus
+  the reply reserve) after a hard prune fails with "The conversation no
+  longer fits the model's context window …". A provider overflow lowers the
+  window when the error names a limit (`[context] <model>: window lowered
+A → B`), prunes hard and retries once.
+- **Per-session counters.** `GET /debug/context?session=<id>` adds a
+  `session` block: the working context the latest checkpoint carries into
+  the next request (`contextMessages`, `contextSummaries`,
+  `contextToolMessages`, `contextTokens` — one summary plus the kept tail
+  once the history was condensed, while `threadMessages` counts the
+  transcript rows, which are never condensed) and what the guard did across
+  the session's turns (`prunes`, `hardPrunes`,
+  `prunedResults`, `overflowRetries`, `refusals`, `lastEventAt`; kept in the
+  object's KV as `ctxstats:<session>`, dropped with the session). This is
+  what the context drill asserts on; a deployed oracle has no harness log to
+  read, and `wrangler dev` does not forward the worker's `console.log` lines
+  to a parent process (only `warn`/`error`/`debug`), so never gate a test on
+  a `[context]` or `[summarization]` line.
+- **Cost.** One `/models` fetch per isolate-hour (shared with prices); a KV
+  read per model per boot; one row (or one R2 put plus an index row) per
+  capped result, one delete at expiry. Pruning and guarding write nothing.
+
+### Tasks: the run ledger
+
+A scheduled run used to be invisible to storage until it was over: the
+schedule advanced only after the result was delivered. Durable Object alarms
+are at-least-once, so a user-object reset anywhere inside a run made the
+retried alarm find the task still due and run it again, tools included; and
+a delivery whose RPC response was lost (a gateway reset in the second the
+send takes, or a dropped connection) marked a delivered one-shot `failed`
+with a failure notice next to its result.
+
+Every run now has a row in `task_runs` that moves `running` → `delivering`
+→ `delivered` (three single-row writes per run; the turn's own checkpoints
+cost far more). `running` is written before the turn starts; `delivering`
+stores the result text and advances the schedule in one transaction, before
+the send; `delivered` closes it. The scheduler keeps the run ids it is
+executing in memory, which is what tells a long live run from a dead one —
+memory is per instance and empty after any reset, so a row in `running` or
+`delivering` whose id is not in memory belongs to an incarnation that died.
+On every alarm, before the due scan:
+
+- `delivering` rows are re-sent from the stored result under the run's fixed
+  transaction id `task-<runId>` (server-side dedupe, so a copy the dead
+  incarnation got out is not repeated), with no model call;
+- `running` rows are closed as `interrupted` and never re-run: a one-shot
+  task fails with the notice, a recurring task skips the occurrence and
+  counts one failure toward the stop threshold.
+
+Delivery itself is retried across a gateway restart (`retryGateway`, same
+transaction id). A round that still fails parks the run with `retry_at` and
+re-arms the alarm (1, 2, 4, 8 minutes between rounds); after five rounds the
+task fails. `GET /debug/tasks` lists the open runs; the log lines are
+`[tasks] run … re-delivering`, `… never finished … closing it as
+interrupted`, `… delivery round N failed`.
+
+What the user sees is plain language only — "could not be completed",
+"has been stopped after N unsuccessful runs" — and `lastResult.summary`
+(what the task tools relay) says the same; the technical reason is in the
+log line and the run row's `detail`.
+
+A send the crypto WASM cannot encrypt does not fail cleanly: the machine
+panics, later crypto calls throw `null pointer passed to rust`, and the
+stuck send would hold a gate slot forever. The SDK's 45 s send watchdog
+resets the object, charges one attempt to the row that hung (rows merely
+waiting behind it are untouched) and drops it after three attempts with an
+`outbox: dropping …` line. `GET /debug/matrix/outbox` lists the rows without
+bodies, which is how such rows are found. The one cause we hit — a replay
+threaded on a session id that was not an event id — is closed on both
+sides: `sendText` rejects a thread id that is not an event id, and room
+resolution fails a request instead of minting a local session id on a
+transient error.
+
+### Instance changes, memory, recycle
+
+The gateway shares its isolate's 128 MB with the crypto WASM and every event
+being encrypted, and a crypto WASM's linear memory only grows inside one
+isolate. Two things keep it healthy: the encryption gate plus
+`MATRIX_TURN_CONCURRENCY` bound concurrent encryption sources, and after
+`MATRIX_RECYCLE_AFTER_SENDS` sends (default 300) the SDK recycles the object —
+only when nothing is in flight and no message arrived for 15 s, so nobody
+notices. The log line `planned recycle: N sends since boot` precedes every
+intentional instance change; an instance change without one is a kill worth
+investigating. Cloudflare's GraphQL analytics
+(`durableObjectsInvocationsAdaptiveGroups`, dimension `status`) show
+`exceededMemory` counts per five minutes and are the acceptance check after
+any change to these numbers; a kill is lossless thanks to the outbox and the
+catch-up, but it stalls sends for ~30 s.
+
+### Devices and rotation
+
+- The gateway's own device is logged in with the password and its id is
+  pinned in storage; the token is verified with `/account/whoami` on every
+  boot and re-minted for the same device id when rejected.
+- Plugins that run their own client (editor, flows) use a second, crypto-less
+  device (`identity:bot-client` in gateway storage, display name "QiForge
+  oracle plugins (…)"), minted on first use. Deleting it turns every page
+  edit into `401 Invalid access token` until the gateway re-logs it in.
+- **One-time-key conflicts.** If a restored crypto store is behind the
+  server, every `/keys/upload` fails with `One time key … already exists`,
+  matrix-js-sdk retries forever and all other outgoing requests (room-key
+  shares) queue behind it, so new E2EE sessions silently stop. The SDK's
+  conflict detector then rotates the device: a fresh password login with no
+  `device_id`, the old snapshot discarded, room keys restored from the
+  account backup, the old device drained and logged out. Each rotation costs
+  a fresh boot with a backup restore. `POST /debug/matrix/rotate-device`
+  does it on demand.
+- **Media never sits in the gateway.** Snapshots (the legacy owner copy)
+  and attachments cross the RPC to the user object as streams, as stored:
+  the object decrypts them (`createAttachmentDecryptor`) and enforces the
+  size caps chunk by chunk. The SDK's whole-buffer download decrypted inside
+  the crypto WASM and grew its heap for good (a buffered 10 MiB round trip
+  took it from 7 to 41 MB); the streamed calls keep the gateway's memory
+  flat whatever the file size.
+- **Shared bot account.** Every extra client logged in as the oracle user is
+  a separate device that also answers room messages and that every peer has
+  to encrypt to. Keep the device list short: the gateway device (`deviceId`
+  in `/matrix/status`), the plugins device, and whatever the operator's own
+  tooling needs. Prune with `POST /_matrix/client/v3/delete_devices`
+  (password UIA). `POST /debug/matrix/rotate-device` logs out only the
+  previous device of this runtime.
+- `/login` answers 429 with `retry_after_ms` when many objects log in through
+  the Worker's shared egress addresses; both logins retry three times.
+
+### Rooms: group chats
+
+The bot joins every room it is invited to (the SDK's autojoin, as on Node).
+A room is direct when its canonical alias is a user↔oracle alias of this
+oracle, when its `m.room.create` event carries `is_direct`, or when it has
+≤ 2 joined members; every other room is a group room. The alias rule is
+this runtime's addition to Node's two: a real user↔oracle room holds the
+rooms appservice bot and the memory-engine bot as well (four members on
+devnet), and counting them would have silenced the oracle in the one room
+it must always answer in.
+
+What happens in a group room is the gateway's `MATRIX_GROUP_ROOMS` policy:
+
+- `silent` — **the default**: the bot never speaks in a group room and
+  captures nothing there; no typing indicator, no turn, no user object woken,
+  one `not answered (group-rooms-off)` log line per message. The bot only
+  ever talks in direct rooms: the user↔oracle room and the task rooms it
+  creates. Pick this unless the Node group-chat lane below has been
+  reviewed for the deployment.
+- `gate` — the Node group-chat lane, described next.
+- `answer` — every room is treated as direct (Node without the plugin).
+
+With `gate` the gateway runs the Node group-chat gate before a message
+becomes a turn (`src/matrix/group-chat.ts`):
+
+- It answers a message that mentions the bot (`m.mentions.user_ids`), one
+  that quote-replies a message the bot sent, or one inside a thread the bot
+  answered in within `GROUP_CHAT_ACTIVE_THREAD_TTL_MS` (30 min; the map is
+  in memory and mirrored in the durable `group_bot_threads` table, so a
+  restart forgets nothing). Everything else is ignored: no typing, no turn,
+  no user object woken, one `not answered (ignored)` log line.
+- An answer is skipped (`power-level` in the log) when the bot's power
+  level is below the room's `m.room.message` threshold or
+  `GROUP_CHAT_REQUIRE_POWER_LEVEL`.
+- Every group message, answered or not, is captured into the room's
+  channel memory: a durable per-room buffer (`group_message_buffer`) that is
+  compacted at 20 messages, and just in time before an answer when ≥ 5 are
+  waiting (bounded to 3 s so the reply is not held up), into a summary chunk
+  (`group_memory_chunks`, FTS5-indexed). The summary is produced by the
+  speaker's user object with the platform's small model and the Node
+  prompt (`summarizeGroupMessages`) — the gateway script holds no model
+  keys. A failed summary leaves the batch buffered for the next attempt.
+- The turn the gate lets through carries `roomKind: 'group'` and the
+  speaker's display name (the room's member event, else the profile, else
+  the user id; cached `GROUP_CHAT_ROOM_INFO_TTL_MS`): the user object
+  stores the message as `[DisplayName]: …` with `senderDid` /
+  `senderMatrixUserId` / `senderDisplayName` / `threadId` / `eventId` in
+  the message's `additional_kwargs`, and the `matrix-group-chats` plugin
+  offers `recall_channel_memory`, `search_channel_memory`, `pin_room_fact`
+  and `unpin_room_fact` (all backed by the gateway's tables) — in group
+  rooms only. A room message that names the bot's user id reaches the
+  model as `(USER MENTIONED YOU @AI_AGENT)`, the Node bridge's rewrite.
+- `status.groupChat` counts buffered messages, chunks and facts.
+- A member whose messages the gate lets through still needs a user object
+  that can boot; on a VFS-backed deployment that means a delegation to this
+  oracle. A member without one is answered with the "try again" notice
+  (the turn fails to load an owner copy), exactly as their 1:1 room would.
+
+### Rooms and aliases
+
+- The user ↔ oracle room alias is
+  `#<userDid>_<oracleENTITYDid>:<the USER's homeserver>` — the entity DID
+  (`ORACLE_ENTITY_DID`), not the account DID, and the user's homeserver from
+  their DID document's MatrixHomeServer service (resolved through Blocksync,
+  cached six hours), exactly as the Node runtime builds it. A decoupled
+  deployment (users on one homeserver, the bot on another) resolves nothing
+  otherwise. Room ids are cached per user for 30 minutes.
+- Room state right after an invite: `getRoomState` answers a 403 (not yet a
+  member) by accepting the pending invite and retrying for up to 5 s, so a
+  membership check that lands before the sync loop has joined a just-created
+  page room does not fail closed.
+- Dedicated task rooms are created by the gateway (`createDedicatedRoom`:
+  private, the user invited, a summary posted) for `before-action` tasks,
+  on the `auto` heuristic or `dedicatedRoom: 'yes'`; replies there reach the
+  user's object like the main room. Leave rooms that are finished with
+  rather than letting the bot accumulate hundreds.
+- The memory engine needs `x-room-id` (a generic `invalid_token` otherwise);
+  every turn therefore runs inside the user's oracle room — Matrix turns
+  bring it, HTTP turns take it from the session row or resolve the alias.
+- Replies go into threads, one session per thread
+  ([above](#turns-threads-are-sessions)).
+
+## User objects and the owner copy
+
+- **Boot.** A warm object opens its working copy directly. A cold object (no
+  working copy) loads the user's VFS file, retrying transient failures three
+  times (1 s / 2 s / 4 s); if it still fails, the request fails instead of
+  opening an empty database — an empty start would hide the user's history
+  and, once dirtied, be flushed over the real copy. The shell answers with an
+  honest code (`owner-store/owner-copy-errors.ts`): 503
+  `OWNER_COPY_UNAVAILABLE` (`retryable: true`) for a transient failure; 403
+  `NO_VFS_DELEGATION` when the user's delegation to the oracle (or the lack
+  of one) carries no `ixo:filesystem` capability over `/.oracles`; 403
+  `VFS_AUTH_FAILED` when the VFS rejected the oracle's credentials. Only a successful listing with no file yields an empty
+  working copy.
+- **Never wipe on a failed check.** A `head()` that fails (a VFS error, or the
+  flush's own delete → move window) is UNKNOWN, never a deletion. Even a
+  proven upstream absence never auto-wipes a working copy that holds turns;
+  it is re-uploaded on the next flush. Only a zero-turn copy is dropped; a
+  genuine "forget me" goes through the explicit `remove()` path.
+- **Flush.** The first write after an upload records a deadline 24 h out
+  (`meta:flushAt`, `FLUSH_DEBOUNCE_MS`) and arms the alarm for it; later
+  writes never push it back. The alarm is shared with the realtime
+  heartbeat, the durable-run keep-alive, task runs, compaction and the R2
+  tier, so a wake alone never uploads: the tick consults the deadline
+  (`do/flush-schedule.ts`) and a dirty copy waits until it is due. The only
+  early uploads are the explicit ones (`POST /debug/storage/flush`, a fresh
+  delegation after a "no file-storage grant" failure, the legacy
+  migration, a reset) and the one before an idle eviction. A copy dirtied
+  by an older build with no deadline on disk uploads once, then the
+  debounce applies. A failed upload replaces the deadline with the
+  10-minute retry, so a failing store is retried on that clock and not on
+  every wake. The
+  export pins a snapshot of the chunk VFS and reads it exactly twice: one
+  streamed pass computes the hash (the change gate) and the gzipped length
+  the upload needs (`owner-store/measure.ts`), and, only when the bytes
+  changed, a second pass streams gzip → tus upload in 5 MiB parts (files
+  ≤ 5 MiB in one `POST`) → temp path → `batch/delete` of the old file →
+  `batch/move` into place. Two passes, not three, because with the R2 page
+  tier every pass over a cold file is one R2 GET per 1 MiB segment. Every request is retried 3× (2 s / 5 s / 15 s;
+  parts resume from `HEAD`); a flush that still fails leaves the copy dirty
+  and retries after 10 min, logged at error from the third consecutive
+  failure. Stale `.uploading-` temps are cleaned at the next flush. Nothing
+  is ever written to Matrix media.
+- **Idle eviction.** After five days without contact (`IDLE_EVICT_MS`) the
+  working copy is wiped — only after a flush and a check that the upstream
+  copy is current (generation + hash); otherwise it stays and the check
+  repeats. `GET /debug/storage` shows `writeGeneration` /
+  `uploadedGeneration`, `dirty`, `nextFlushAt` (the deadline, absent when
+  clean), `lastFlushAt`, `flushFailures`, `lastVacuumAt`, `legacyCleared`,
+  `indexingInFlight`, `flushInFlight` and the alarm.
+- **VACUUM** runs on a quiet object (no turn for 10 min, not dirty, no flush
+  in progress, file ≥ 4 MB with > 20 % free pages, at most once per 6 h,
+  2× the file below the 10 GB cap; `src/sqlite/vacuum-policy.ts`) through
+  `VACUUM INTO` a spill file swapped in atomically, so a rebuild of a
+  multi-hundred-MB file needs constant memory.
+- **R2 page tier** (`TIER_BUCKET` bound; [architecture](architecture.md#r2-page-tier)).
+  The housekeeping alarm runs an eviction pass at most every six hours
+  (after the owner-store flush, never over one in flight): chunks untouched
+  for `TIER_EVICT_AFTER_PERIODS` days go to R2 in rewritten 1 MiB segments,
+  at most 64 segments per pass (the rest re-arms in a minute). The log line
+  reads `tier pass for <did>: N chunks → R2 in S segment(s), H hot rows
+(M MB) kept, P segment(s) pending`. `GET /debug/storage` → `tier` shows
+  `hotRows`/`hotBytes`, `coldSegments`/`coldBytes`, the R2 op counters,
+  `coldMisses` / `missResolutions` / `retries` (how often a turn had to
+  fetch), `pendingDeletes` and `lastPassAt`. A `tier segment … missing in
+R2` error means the bucket lost an object the map references — the
+  user's VFS file is intact; `POST /debug/storage/reset` reloads from it.
+  The idle wipe deletes the object's R2 prefix along with the working copy.
+- **Chunk cache.** `CHUNK_CACHE_BYTES` (default 4 MiB) sizes the per-object
+  LRU of clean chunks. Measured on devnet with a 28 MB file, 8 MiB was
+  indistinguishable in turn latency (the LLM round-trip dominates), so the
+  default stays small; `8m` is the knob for unusually large working sets.
+  An idle user object is unloaded by the platform within ~10–15 s of its
+  last request; the next request re-opens the file (~200–400 chunk rows).
+- **Legacy Matrix copies** of migrated users are redacted once the VFS is
+  confirmed to hold the file (`removeLegacyCopy`, logged as `legacy Matrix
+copy removed`; `legacyCleared` in `/debug/storage`).
+  The import itself is streamed (see [architecture](architecture.md#self-sovereign-storage)):
+  decrypt → gunzip → header check → chunk VFS, then the flush to the VFS
+  from a snapshot; a legacy file of any size costs a few chunks of memory,
+  and a failed VFS write after the import keeps the working copy dirty and
+  retried every 10 min while the object serves the imported history. The
+  boot log reads `imported N bytes from legacy Matrix media` followed by
+  `migrated N bytes from legacy Matrix media to vfs (<etag>)`.
+
+## Realtime channel
+
+The engine.io heartbeat runs from the object's alarm, not from a timer: a
+wake every 180 s (`PING_INTERVAL_MS`) sends the ping and closes sockets that
+missed interval + timeout (240 s), then the object hibernates again. A wake
+that is only due for the heartbeat re-arms without opening the database.
+Sockets and their ping/pong bookkeeping live on the socket attachments and
+are re-adopted from `ctx.getWebSockets()` on every wake. Pending browser
+calls do not survive a restart (neither does the turn that made them). A
+dead connection is noticed by either side after up to four minutes; the
+client SDK's reconnect then restores it. `socket.io-client` must use
+`transports: ['websocket']`.
+
+Turn events reach the sockets too, mirrored through the event router's
+taps on the Node runtime's wire: the socket event `event` carrying
+`{ eventName, payload }` (`tool_call`, `render_component`, `router_update`,
+`message_cache_invalidation`, …), which is the envelope the client SDK
+validates before it dispatches. Only `browser_tool_call` and `action_call`
+are sent by name with the raw payload, because the SDK answers them that
+way. `message` / `done` chunks stay SSE-only.
+
+Background work is bounded: the session-history indexer runs under
+`ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s
+timeout on the memory-engine request; a failed session is retried on the
+next session create because its watermark did not move.
+
+## ChatGPT-subscription lane needs a proxy
+
+`chatgpt.com` (the Codex backend the subscription lane talks to) answers
+Cloudflare Workers egress with an HTML 403 before any authentication; the
+API-key providers (OpenAI, Anthropic, Gemini, DeepSeek) and `auth.openai.com`
+(device flow, token refresh) answer normally from a Worker. Without a proxy
+the runtime probes once per 10 min and falls back to the platform model with
+an `unreachable` notice. With one it works: set `BYO_CHATGPT_BACKEND_URL` to
+a transparent proxy on a non-Cloudflare host (optionally gated with
+`BYO_CHATGPT_PROXY_AUTH_TOKEN`, sent as `X-Proxy-Auth`); only the model
+requests of that lane go through it, byte for byte, the OAuth flow stays
+direct.
+
+The devnet deployment uses `ixo-proxy-app` (`ghcr.io/ixoworld/ixo-proxy-server`,
+one container per upstream, `UPSTREAM=https://chatgpt.com/backend-api/codex`,
+no gate) behind nginx on `chatgpt.proxy.ixo.earth` (Vultr host, DNS-only
+record) with `proxy_buffering off` and 10-minute idle timeouts — the limit is
+silence between two chunks, the same 10 minutes the OpenAI client library
+allows before the first byte. The vhost empties every caller-identifying
+request header (`CF-*`, `X-Forwarded-*`, `X-Real-IP`, `True-Client-IP`,
+`Forwarded`, `Via`, `CDN-Loop`): OpenAI's WAF blocks on `CF-Worker` and
+`CF-Connecting-IP`, which Cloudflare stamps on a Worker's outbound requests.
+Proven end to end: device-flow sign-in, a JSON turn answered with a
+Responses-API id, a streaming turn delivering chunks as they are produced.
+
+## Known limits
+
+- The per-DID rate limit (100 requests / 60 s) is the first ceiling a single
+  client hits, not the object.
+- Session creation waits for the marker send, so it scales with the number
+  of simultaneous creators across all users (the one bot's send budget), not
+  with load on one user; see [load tests](load-tests.md).
+- `search_memory_engine` failing with `Error code: 404 — No endpoints found
+that can handle the requested parameters` is the memory engine's own
+  OpenRouter call, not this runtime; recall quality on an account with a
+  long history is the engine's ranking.
+- Optional MCP tool parameters lose their enums before the model sees them
+  (`@langchain/mcp-adapters` simplifies `anyOf: [<real>, null]`);
+  `GET /debug/memory-schema` shows the schema as delivered.
+- Firecrawl: the IXO-hosted server serves Streamable HTTP at `/v2/mcp`;
+  `/mcp` is a plain 404 from the ingress.
+- Crypto snapshots are not transactional with Olm ratchet advances (a hard
+  crash can replay pre-key state — recovered by the conflict detector).
+
+## Runbook
+
+| Symptom                                                                                 | Check                                                                                                           | Action                                                                                                                            |
+| --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `/matrix/status` `instanceId` changes without a `planned recycle` log line              | Cloudflare analytics `exceededMemory`; `sendQueue.inFlight` at the time                                         | Lower `MATRIX_SEND_CONCURRENCY` / `MATRIX_TURN_CONCURRENCY`; check `cryptoStoreTransactions` stays a handful.                     |
+| `oneTimeKeys.uploads` climbing continuously, `One time key … already exists` in the log | `deviceRotations`                                                                                               | The SDK rotates by itself; if it loops, `POST /debug/matrix/rotate-device` once and prune stale devices.                          |
+| Sends stall, `sendQueue.durableRows` grows, `null pointer passed to rust` in the log    | `GET /debug/matrix/outbox` for rows with a bad thread id or high attempts                                       | The watchdog drops the row after three attempts; nothing to do unless the same row keeps coming back — then find who produced it. |
+| `GET /sessions` empty for a migrated user, `HISTORICAL_MESSAGE_NO_KEY_BACKUP`           | `keyBackupVersion`, `secretStorageUnlocked`                                                                     | Provision the key backup and `MATRIX_RECOVERY_PHRASE` (see configuration → first-time setup).                                     |
+| Page edits fail with `401 Invalid access token`                                         | Device list of the bot account                                                                                  | The plugins device was deleted; the gateway re-logs it in on the next use — do not delete `identity:bot-client`'s device again.   |
+| A user object never unloads (`instanceUptimeMs` grows while idle)                       | `GET /debug/realtime` → `pendingTimers`; `activeTurns`, `indexingInFlight`, `flushInFlight` in `/debug/storage` | A leaked timer or an open MCP stream — see the workerd rules in [architecture](architecture.md#rules-of-the-road-on-workerd).     |
+| Requests fail 503 `OWNER_COPY_UNAVAILABLE`                                              | VFS health                                                                                                      | Transient by definition; the client retries. 403 `NO_VFS_DELEGATION` means the user must deposit a grant.                         |
+| `Network connection lost` on a gateway RPC                                              | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                      |
+
+## Write claims and turn usage
+
+`turn_write_claims` (in the user's run ledger, next to `turn_runs` and
+`turn_tool_marks`) holds one row per write whose outcome is not known:
+the SHA-256 of the tool name and canonical arguments, the tool name, the
+run and session that started it, when, and a state. Never the arguments.
+
+- A returned outcome — success, or a failure the service reported (a 4xx,
+  a validation error) — releases the row.
+- An abort, the turn deadline, a dropped connection or a 5xx keeps it
+  (`pending`).
+- An identical write attempted while a row stands is not run. The model
+  gets an error tool message asking it to verify with a read and tell the
+  user; the row becomes `warned` and is owned by that run, which stays
+  blocked. A later turn that asks for the same write again runs it: the
+  user was told and asked again.
+- Rows are per user object (every session of the user) and are dropped
+  with the run retention (7 days) at the next setup.
+
+To inspect, use the existing storage inspection route and read
+`turn_write_claims`. To clear one by hand after reconciling the external
+receipt, delete its row; do not clear rows merely to make a retry pass.
+
+`turn_runs.usage` carries the turn's usage once the run ended: estimated
+and provider-reported tokens, model calls, tool attempts and elapsed time
+(`[harness] turn <requestId> usage: …` in the logs). Estimates, not an
+invoice.
+
+A turn that ends on a budget or deadline shows on the wire as an `error`
+frame with `kind: budget_exhausted` and `retryable: false`, then `done`
+with `failed: true`. The client SDK reports it as a failed run; it never
+resubmits a POST by itself. Before raising a limit, check the run's usage
+and the tool marks for the loop that spent it.

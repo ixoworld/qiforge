@@ -13,6 +13,12 @@ export interface Tier1Input {
   tokenBudget?: number;
   /** Override the tokenizer (mostly for tests). Default: cl100k_base via js-tiktoken. */
   estimateTokens?: (text: string) => number;
+  /**
+   * Whether the meta-tools are bound this turn. Default `true`. Pass `false`
+   * when they are not (Matrix support mode) so the block does not end by
+   * telling the model to call `list_capabilities` / `load_capability`.
+   */
+  capabilityDiscovery?: boolean;
 }
 
 export interface Tier1Output {
@@ -106,6 +112,7 @@ export function renderTier1(input: Tier1Input): Tier1Output {
     );
   }
 
-  const block = `${HEADER}${renderedLines.join('\n\n')}${FOOTER}`;
+  const footer = input.capabilityDiscovery === false ? '' : FOOTER;
+  const block = `${HEADER}${renderedLines.join('\n\n')}${footer}`;
   return { block, tokens, warnings };
 }

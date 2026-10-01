@@ -1,0 +1,12 @@
+{
+  "name": "qiforge-byo-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone live E2E scripts for the BYO-LLM chat paths — auth from a devnet test mnemonic, chat over SSE against a locally-running oracle. Not part of the pnpm workspace: install with `pnpm install --ignore-workspace`.",
+  "dependencies": {
+    "@cosmjs/proto-signing": "^0.34.0",
+    "@ixo/ucan": "2.1.0",
+    "dotenv": "^16.6.1"
+  }
+}

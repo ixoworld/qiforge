@@ -1,3 +1,6 @@
+export { DecisionRegistry } from './decision-registry.js';
+export type { RegisteredDecision } from './decision-registry.js';
+
 export { ToolRegistry } from './tool-registry.js';
 export type { RegisteredTool } from './tool-registry.js';
 

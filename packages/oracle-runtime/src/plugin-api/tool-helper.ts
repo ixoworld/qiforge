@@ -17,6 +17,11 @@ export interface ToolHelperOptions {
    * `manifest.visibility` setting.
    */
   visibility?: PluginTool['visibility'];
+  /**
+   * Billing gate. `'contracted'` binds the tool only while the turn runs
+   * inside an active work engagement (`ctx.commerce.mode === 'work'`).
+   */
+  billing?: PluginTool['billing'];
 }
 
 /**
@@ -43,7 +48,7 @@ export function tool(
   if (!options || typeof options !== 'object') {
     throw new TypeError('tool(handler, options): `options` is required.');
   }
-  const { name, description, schema, visibility } = options;
+  const { name, description, schema, visibility, billing } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
       'tool(handler, options): `options.name` must be a non-empty string.',
@@ -68,6 +73,9 @@ export function tool(
   };
   if (visibility !== undefined) {
     pluginTool.visibility = visibility;
+  }
+  if (billing !== undefined) {
+    pluginTool.billing = billing;
   }
   return pluginTool;
 }

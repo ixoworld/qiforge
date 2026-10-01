@@ -6,9 +6,9 @@ import {
 } from '@ixo/common';
 import { MatrixManager } from '@ixo/matrix';
 import { ReasoningEvent } from '@ixo/oracles-events';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { CommerceContext } from '../../plugin-api/types.js';
 import type { Request, Response } from 'express';
 import { AIMessage, HumanMessage, type BaseMessage } from 'langchain';
 import * as crypto from 'node:crypto';
@@ -26,16 +26,24 @@ import {
   getModelCapabilities,
   isAllowedModel,
 } from '../../llm/index.js';
+import { classifyLlmError } from '../../llm/provider-error.js';
 import { classifyAttachment } from './attachments/classify.js';
 import {
   buildUserMessageContent,
   type NativeAttachment,
 } from './attachments/content-blocks.js';
 import { routeAttachment } from './attachments/route.js';
-import { FileProcessingService } from './file-processing.service.js';
-import { MatrixListenerBridge } from './matrix-listener-bridge.js';
+import {
+  FileProcessingService,
+  MAX_TOTAL_SIZE,
+} from './file-processing.service.js';
+import {
+  MatrixListenerBridge,
+  type MatrixRelatesTo,
+} from './matrix-listener-bridge.js';
 import { PostMessageSyncer } from './post-message-syncer.js';
 import { RequestPreparer } from './request-preparer.js';
+import { isSummarizationMessage } from '../../graph/middlewares/index.js';
 import { SseStreamRunner } from './sse-stream-runner.js';
 import {
   formatSSE,
@@ -86,6 +94,13 @@ export interface SendMessageRequest extends SendMessagePayload {
    */
   ucanDelegation?: AuthUcanDelegation;
   // ── Matrix-listener path metadata ──────────────────────────────────────
+  /**
+   * Per-turn abort controller from the Matrix listener bridge. Its signal is
+   * threaded into the LangGraph invoke config (and so into
+   * `RuntimeContext.abortSignal`) so aborting it cancels the graph run —
+   * mirroring the per-turn controller the SSE path constructs itself.
+   */
+  abortController?: AbortController;
   /** Sender's full Matrix user id (e.g. `@alice:matrix.example`). */
   senderMatrixUserId?: string;
   /** Matrix event id of the latest text event the user sent. */
@@ -93,9 +108,16 @@ export interface SendMessageRequest extends SendMessagePayload {
   /** Raw `m.mentions` payload from the Matrix event, used by group-chat gating. */
   matrixMentions?: { user_ids?: string[] };
   /** Raw `m.relates_to` payload, used to detect reply-to-bot. */
-  matrixRelatesTo?: { 'm.in_reply_to'?: { event_id: string } };
+  matrixRelatesTo?: MatrixRelatesTo;
   /** Room id (mirrors the bridge call) — used for display-name + roomInfo lookups. */
   matrixRoomId?: string;
+  /**
+   * Commerce routing outcome from the Matrix message router (support vs work
+   * persona, engagement, gate failure, cancellation). Threaded through the
+   * agent build into `RuntimeContext.commerce`. Absent on HTTP turns and on
+   * Matrix turns where the router is inert.
+   */
+  commerce?: CommerceContext;
 }
 
 type SendMessageReply = SendMessageResponse;
@@ -139,11 +161,16 @@ export class MessagesService implements OnModuleInit {
         overrideLangchainThreadId: msg.langchainThreadId,
         homeServer: msg.homeServer,
         msgFromMatrixRoom: true,
+        abortController: msg.abortController,
+        // The bridge's per-turn id keeps the work_status card, the runnable
+        // config, and ctx.session.requestId in agreement.
+        requestId: msg.requestId,
         senderMatrixUserId: msg.senderMatrixUserId,
         matrixEventId: msg.eventId,
         matrixMentions: msg.mentions,
         matrixRelatesTo: msg.relatesTo,
         matrixRoomId: msg.roomId,
+        ...(msg.commerce && { commerce: msg.commerce }),
         ...(msg.attachments && { attachments: msg.attachments }),
       }),
     );
@@ -165,15 +192,15 @@ export class MessagesService implements OnModuleInit {
 
     this.checkpointSync.markUserActive(did);
     try {
-      const db = await this.checkpointSync.getUserDatabase(did);
-      const saver = SqliteSaver.fromDatabase(db);
-      const tuple = await saver.getTuple({
-        configurable: { thread_id: sessionId },
-      });
-      const messages =
-        (tuple?.checkpoint?.channel_values?.messages as
-          | BaseMessage[]
-          | undefined) ?? [];
+      const saver = await this.checkpointSync.getUserCheckpointer(did);
+      // Read the full transcript from the messages table rather than the
+      // latest checkpoint: once the summarization middleware condenses graph
+      // state, the checkpoint only holds the summary + recent tail, while
+      // the table keeps every message. The summary message itself is
+      // middleware bookkeeping, not something the user wrote or saw.
+      const messages = (await saver.listThreadMessages(sessionId)).filter(
+        (message) => !isSummarizationMessage(message),
+      );
       return transformGraphStateMessageToListMessageResponse(messages);
     } finally {
       this.checkpointSync.markUserInactive(did);
@@ -262,6 +289,7 @@ export class MessagesService implements OnModuleInit {
         payload: { ...params },
         prepared,
         inputMessages,
+        abortController: params.abortController,
       });
 
       if (!msgFromMatrixRoom) {
@@ -291,9 +319,14 @@ export class MessagesService implements OnModuleInit {
           `Pre-flight failed after SSE flush — session=${params.sessionId}`,
           error instanceof Error ? error.stack : String(error),
         );
+        // Pre-flight failures are infra (session lookup, attachments, agent
+        // build), never a user credential — classify without BYO context so
+        // the payload shape matches the stream path.
         sendSSEError(
           params.res,
           error instanceof Error ? error : 'Something went wrong',
+          classifyLlmError(error),
+          { sessionId: params.sessionId },
         );
         sendSSEDone(params.res);
         if (!params.res.writableEnded) params.res.end();
@@ -382,7 +415,14 @@ export class MessagesService implements OnModuleInit {
 
     // Download + base64 the native attachments. On any failure, fall that one
     // file back to extraction so a bad download never drops the whole message.
+    //
+    // The same cumulative budget the extraction lane enforces applies here:
+    // per-file limits alone let N files hold N × 25MB of buffers plus their
+    // base64 copies in heap at once — and the base64 then lives on in graph
+    // state and the checkpoint DB. Files past the budget fall back to
+    // extraction, whose own budget then produces the clear 400.
     const natives: NativeAttachment[] = [];
+    let nativeBytesTotal = 0;
     for (const attachment of nativeAttachments) {
       try {
         const { buffer, mimetype } =
@@ -390,6 +430,14 @@ export class MessagesService implements OnModuleInit {
             attachment,
             prepared.roomId,
           );
+        if (nativeBytesTotal + buffer.length > MAX_TOTAL_SIZE) {
+          this.logger.warn(
+            `[attachments] native budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB) exceeded at "${attachment.filename}" — falling back to extraction`,
+          );
+          extractAttachments.push(attachment);
+          continue;
+        }
+        nativeBytesTotal += buffer.length;
         const kind = classifyAttachment({
           mimetype,
           filename: attachment.filename,

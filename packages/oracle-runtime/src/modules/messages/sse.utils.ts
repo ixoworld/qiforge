@@ -1,10 +1,16 @@
 import { type AllEvents } from '@ixo/oracles-events';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { type Response } from 'express';
+import {
+  redactOperatorFault,
+  type ClassifiedLlmError,
+} from '../../llm/provider-error.js';
 
 interface SSEContext {
   res: Response;
   abortController?: AbortController;
+  /** Request identity, stamped onto raw events emitted from nested code. */
+  ids?: { sessionId?: string; requestId?: string };
 }
 
 const sseContextStorage = new AsyncLocalStorage<SSEContext>();
@@ -84,12 +90,47 @@ export function sendSSEDone(res: Response): void {
   }
 }
 
-/** Send an error event. */
-export function sendSSEError(res: Response, error: Error | string): void {
+/**
+ * Send an error event. With `classified` set, the payload carries the
+ * structured classification (kind/source/provider/status/retryable) next to
+ * the human-readable `error` message so clients can render provider-aware
+ * feedback instead of the raw SDK text; without it, the legacy
+ * `{error, timestamp}` shape goes out unchanged.
+ *
+ * Every classification passes through `redactOperatorFault` here rather than
+ * at the call sites: this is the one place an LLM failure becomes bytes on a
+ * client's wire, so redacting here means a new caller cannot forget to.
+ */
+export function sendSSEError(
+  res: Response,
+  error: Error | string,
+  classified?: ClassifiedLlmError,
+  ids?: { sessionId?: string; requestId?: string },
+): void {
+  const safe = classified ? redactOperatorFault(classified) : undefined;
   if (!res.writableEnded) {
     res.write(
       formatSSE('error', {
-        error: error instanceof Error ? error.message : error,
+        error: safe
+          ? safe.message
+          : error instanceof Error
+            ? error.message
+            : error,
+        ...(safe && {
+          kind: safe.kind,
+          source: safe.source,
+          ...(safe.provider && { provider: safe.provider }),
+          ...(safe.providerLabel && {
+            providerLabel: safe.providerLabel,
+          }),
+          ...(safe.status !== undefined && {
+            status: safe.status,
+          }),
+          retryable: safe.retryable,
+          detail: safe.detail,
+        }),
+        ...(ids?.sessionId && { sessionId: ids.sessionId }),
+        ...(ids?.requestId && { requestId: ids.requestId }),
         timestamp: new Date().toISOString(),
       }),
     );
@@ -105,8 +146,9 @@ export function runWithSSEContext<T>(
   res: Response,
   callback: () => Promise<T>,
   abortController?: AbortController,
+  ids?: { sessionId?: string; requestId?: string },
 ): Promise<T> {
-  return sseContextStorage.run({ res, abortController }, callback);
+  return sseContextStorage.run({ res, abortController, ids }, callback);
 }
 
 /** Emit an SSE event from anywhere within the active SSE context. */
@@ -114,6 +156,24 @@ export function emitSSEEvent(event: AllEvents): void {
   const context = sseContextStorage.getStore();
   if (context?.res && !context.res.writableEnded) {
     context.res.write(formatSSEEvent(event));
+  }
+}
+
+/**
+ * Emit a raw event/payload pair from within the active SSE context, for
+ * one-off notices that have no event class (e.g. the BYO-fallback warning).
+ * Object payloads are stamped with the context's sessionId/requestId so
+ * clients can attribute the event. No-op outside an SSE request (batch
+ * path, Matrix path).
+ */
+export function emitSSERawEvent(eventName: string, data: unknown): void {
+  const context = sseContextStorage.getStore();
+  if (context?.res && !context.res.writableEnded) {
+    const payload =
+      data && typeof data === 'object' && !Array.isArray(data)
+        ? { ...context.ids, ...(data as Record<string, unknown>) }
+        : data;
+    context.res.write(formatSSE(eventName, payload));
   }
 }
 

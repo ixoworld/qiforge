@@ -1,4 +1,5 @@
 import { MatrixManager } from '@ixo/matrix';
+import { sweepExpired } from '../utils/expiring-map.js';
 
 /**
  * Cached Matrix room-membership guard.
@@ -32,6 +33,7 @@ async function getRoomMembers(
   }
   const info = await MatrixManager.getInstance().getRoomInfo(roomId);
   const members = new Set(info.joinedMemberIds);
+  sweepExpired(cache);
   cache.set(roomId, { members, expiresAt: Date.now() + ttlMs });
   return members;
 }

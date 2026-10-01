@@ -16,6 +16,21 @@ type RoomDescriptor =
   | { type: 'id'; id: string }
   | { type: 'alias'; alias: string };
 
+/**
+ * The oracle cannot see the room at all — it is neither a member nor able to
+ * join it. Distinct from a sync timeout so callers can tell "no access" from
+ * "service is slow".
+ */
+export class RoomNotAccessibleError extends Error {
+  constructor(
+    readonly roomId: string,
+    readonly detail: string,
+  ) {
+    super(`Room ${roomId} not accessible: ${detail}`);
+    this.name = 'RoomNotAccessibleError';
+  }
+}
+
 export interface ProviderInitResult {
   doc: Y.Doc;
   awareness?: unknown;
@@ -35,6 +50,12 @@ export interface ProviderConfig {
   enableAwareness: boolean;
   retryAttempts: number;
   retryDelayMs: number;
+  /** How long matrix-crdt batches Y.Doc updates before sending them. */
+  flushInterval?: number;
+  /** How long to wait before retrying a write the homeserver rejected. */
+  retryIfForbiddenInterval?: number;
+  /** How many rejected writes to retry before giving up (0 = unlimited). */
+  maxForbiddenRetries?: number;
 }
 
 export type MatrixRoomConfig = MatrixRoomById | MatrixRoomByAlias;
@@ -174,9 +195,7 @@ export class MatrixProviderManager {
         } catch (peekError) {
           const errorMsg =
             peekError instanceof Error ? peekError.message : String(peekError);
-          throw new Error(
-            `Room ${roomId} not accessible. Ensure the client has been invited to the room. Error: ${errorMsg}`,
-          );
+          throw new RoomNotAccessibleError(roomId, errorMsg);
         }
       }
     } else {
@@ -217,8 +236,15 @@ export class MatrixProviderManager {
           snapshotInterval: 10,
         },
 
+        // A rejected write is final within one request — room power levels do
+        // not change mid-call — so retry once, fast, instead of matrix-crdt's
+        // default 3 attempts 30s apart. Without this a caller awaiting
+        // `waitForFlush()` before reporting success would block for ~90s.
         writer: {
-          flushInterval: 10,
+          flushInterval: this.cfg.provider.flushInterval ?? 10,
+          retryIfForbiddenInterval:
+            this.cfg.provider.retryIfForbiddenInterval ?? 1_000,
+          maxForbiddenRetries: this.cfg.provider.maxForbiddenRetries ?? 1,
         },
       },
     );

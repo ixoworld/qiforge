@@ -21,6 +21,14 @@ function validateFlowTool(): PluginTool {
   return tool;
 }
 
+function updateStepTool(): PluginTool {
+  const tool = buildAuthoringTools(undefined).find(
+    (t) => t.name === 'update_step',
+  );
+  if (!tool) throw new Error('update_step tool missing');
+  return tool;
+}
+
 async function validate(
   flow: unknown,
 ): Promise<{ ok: boolean; errors: string[] }> {
@@ -135,5 +143,32 @@ describe('update_step patch routing', () => {
     const cleared = readStep(doc, 'r', 'notify');
     expect(cleared?.onEvent).toBeUndefined();
     expect(cleared?.trigger).toBeUndefined();
+  });
+
+  it('routes phase updates and explicit clearing through the friendly FlowSpec patch', () => {
+    const doc = twoStepDoc();
+    applyStepPatch(doc, 'notify', { phase: 'deployment' });
+    expect(readStep(doc, 'r', 'notify')?.phase).toBe('deployment');
+
+    expect(() =>
+      updateStepTool().schema.parse({
+        stepId: 'notify',
+        patch: { phase: null },
+      }),
+    ).not.toThrow();
+    applyStepPatch(doc, 'notify', { phase: null });
+    expect(readStep(doc, 'r', 'notify')?.phase).toBeUndefined();
+  });
+
+  it('routes execution boundaries and governed skill requirements', () => {
+    const doc = twoStepDoc();
+    applyStepPatch(doc, 'notify', {
+      execution: 'agent-capable',
+      skills: ['send-provider-update'],
+    });
+    expect(readStep(doc, 'r', 'notify')).toMatchObject({
+      execution: 'agent-capable',
+      skills: ['send-provider-update'],
+    });
   });
 });

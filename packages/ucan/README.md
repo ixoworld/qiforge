@@ -24,6 +24,7 @@ UCAN is a decentralized authorization system using cryptographically signed toke
 - 🌐 **Multi-DID Support** - `did:key` (native) + `did:ixo` (via blockchain indexer) + `did:web` (via HTTP) + local (in-memory registry)
 - 🚀 **Framework-Agnostic** - Works with Express, Fastify, Hono, NestJS, etc.
 - 🛡️ **Replay Protection** - Built-in invocation store prevents replay attacks
+- ⛔ **Revocation** - Check every delegation in a verified proof chain against a revocation registry, in one batched call
 
 ## Installation
 
@@ -209,12 +210,15 @@ createUCANValidator(options: CreateValidatorOptions): Promise<UCANValidator>
 
 Create a framework-agnostic validator.
 
-| Option            | Type              | Description                           |
-| ----------------- | ----------------- | ------------------------------------- |
-| `serverDid`       | `string`          | Server's DID (any method supported)   |
-| `rootIssuers`     | `string[]`        | DIDs that can self-issue capabilities |
-| `didResolver`     | `DIDKeyResolver`  | Resolver for non-`did:key` DIDs       |
-| `invocationStore` | `InvocationStore` | Custom store for replay protection    |
+| Option              | Type                 | Description                                                               |
+| ------------------- | -------------------- | ------------------------------------------------------------------------- |
+| `serverDid`         | `string`             | Server's DID (any method supported)                                       |
+| `rootIssuers`       | `string[]`           | DIDs that can self-issue capabilities                                     |
+| `didResolver`       | `DIDKeyResolver`     | Resolver for non-`did:key` DIDs                                           |
+| `invocationStore`   | `InvocationStore`    | Custom store for replay protection                                        |
+| `revocationChecker` | `RevocationChecker`  | Check the verified proof chain against a revocation registry (see below)  |
+| `revocationFailure` | `'open' \| 'closed'` | What to do if the checker itself fails. Default `'closed'`                |
+| `requireExpiration` | `boolean`            | Reject tokens with unbounded expiry. Default `false`; recommended in prod |
 
 #### Methods
 
@@ -231,32 +235,88 @@ Create a framework-agnostic validator.
 
 Both methods return a `ValidateResult`:
 
-| Field        | Type                                     | Description                                                                                          |
-| ------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `ok`         | `boolean`                                | Whether validation succeeded                                                                         |
-| `invoker`    | `string`                                 | DID of the invoker/issuer (on success)                                                               |
-| `capability` | `object`                                 | Validated capability with `can`, `with`, and optional `nb` caveats (on success)                      |
-| `expiration` | `number \| undefined`                    | Effective expiration (Unix seconds) — the earliest across the delegation chain. Undefined = never.   |
-| `proofChain` | `string[] \| undefined`                  | Delegation path from root issuer to invoker, e.g. `["did:key:root", "did:key:alice", "did:key:bob"]` |
-| `facts`      | `Record<string, unknown>[] \| undefined` | Facts attached to the invocation/delegation. Undefined if none.                                      |
-| `error`      | `object`                                 | Error with `code` and `message` (on failure)                                                         |
+| Field            | Type                                     | Description                                                                                          |
+| ---------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `ok`             | `boolean`                                | Whether validation succeeded                                                                         |
+| `invoker`        | `string`                                 | DID of the invoker/issuer (on success)                                                               |
+| `capability`     | `object`                                 | Validated capability with `can`, `with`, and optional `nb` caveats (on success)                      |
+| `expiration`     | `number \| undefined`                    | Effective expiration (Unix seconds) — the earliest across the delegation chain. Undefined = never.   |
+| `proofChain`     | `string[] \| undefined`                  | Delegation path from root issuer to invoker, e.g. `["did:key:root", "did:key:alice", "did:key:bob"]` |
+| `proofChainCids` | `string[] \| undefined`                  | Canonical CIDs of the verified chain, parents first (the invocation's own CID is last)               |
+| `facts`          | `Record<string, unknown>[] \| undefined` | Facts attached to the invocation/delegation. Undefined if none.                                      |
+| `error`          | `object`                                 | Error with `code` and `message` (on failure)                                                         |
 
-Error codes: `INVALID_FORMAT`, `INVALID_SIGNATURE`, `UNAUTHORIZED`, `REPLAY`, `EXPIRED`, `CAVEAT_VIOLATION`.
+Error codes: `INVALID_FORMAT`, `INVALID_SIGNATURE`, `UNAUTHORIZED`, `REPLAY`, `EXPIRED`, `CAVEAT_VIOLATION`, `REVOKED`, `REVOCATION_CHECK_FAILED`.
+
+### Revocation
+
+Short TTLs are the first line of defence; revocation is the manual override for a delegation that
+must die before it expires. Following the
+[UCAN revocation spec](https://github.com/ucan-wg/revocation), a revocation targets the **canonical
+CID of one exact delegation** and is **irreversible** — to restore access you issue a _new_
+delegation, never an un-revoke.
+
+Supply a `revocationChecker` and the validator collects the CIDs of the invocation and of every
+delegation in the **cryptographically verified** proof chain, then checks them all in **one**
+batched call. Any hit fails validation with `REVOKED`.
+
+```typescript
+import {
+  createUCANValidator,
+  createUcanStoreRevocationChecker,
+} from '@ixo/ucan';
+
+const validator = await createUCANValidator({
+  serverDid,
+  rootIssuers: ['*'],
+  didResolver,
+  revocationChecker: createUcanStoreRevocationChecker({
+    url: 'https://store.ucan.ixo.earth',
+  }),
+  // 'closed' (default) rejects when revocation status can't be determined.
+  revocationFailure: 'closed',
+});
+```
+
+`createUcanStoreRevocationChecker` queries an `ixo-ucan-store` worker and caches on the grain of
+the spec's guarantees: because revocation is irreversible a **revoked** verdict is cached forever
+(and short-circuits the request entirely), while a **clean** verdict is trusted only for
+`negativeCacheTtlMs` (default 30 s). Options: `url`, `fetchImpl`, `timeoutMs` (1500),
+`negativeCacheTtlMs` (30 000), `maxBatch` (32), `cacheMaxEntries` (10 000).
+
+Any object with a `check(cids: string[]): Promise<string[]>` method works — return the revoked
+subset. `InMemoryRevocationStore` is provided for tests and single-process use:
+
+```typescript
+import { InMemoryRevocationStore } from '@ixo/ucan';
+
+const revocations = new InMemoryRevocationStore();
+revocations.revoke(await getDelegationCid(delegation));
+```
+
+The checker **throwing** means "status unknown" and triggers your `revocationFailure` policy;
+returning an array means the answer is authoritative. The check runs _before_ the replay marker is
+written, so a rejected or unverifiable request never burns an invocation's single-use slot.
 
 ### Client Helpers
 
-| Function                             | Description                       |
-| ------------------------------------ | --------------------------------- |
-| `generateKeypair()`                  | Generate new Ed25519 keypair      |
-| `parseSigner(privateKey, did?)`      | Parse private key into signer     |
-| `signerFromMnemonic(mnemonic, did?)` | Derive signer from BIP39 mnemonic |
-| `createDelegation(options)`          | Create a delegation               |
-| `createInvocation(options)`          | Create an invocation              |
-| `serializeDelegation(delegation)`    | Serialize to base64 CAR           |
-| `serializeInvocation(invocation)`    | Serialize to base64 CAR           |
-| `parseDelegation(serialized)`        | Parse from base64 CAR             |
+| Function                             | Description                               |
+| ------------------------------------ | ----------------------------------------- |
+| `generateKeypair()`                  | Generate new Ed25519 keypair              |
+| `parseSigner(privateKey, did?)`      | Parse private key into signer             |
+| `signerFromMnemonic(mnemonic, did?)` | Derive signer from BIP39 mnemonic         |
+| `createDelegation(options)`          | Create a delegation                       |
+| `createInvocation(options)`          | Create an invocation                      |
+| `serializeDelegation(delegation)`    | Serialize to base64 CAR                   |
+| `serializeInvocation(invocation)`    | Serialize to base64 CAR                   |
+| `parseDelegation(serialized)`        | Parse from base64 CAR                     |
+| `getDelegationCid(delegationOrCar)`  | Canonical CID — what a revocation targets |
 
-> **Note:** Both `createDelegation` and `createInvocation` default to `expiration: Infinity` (never expires) when no expiration is specified. Pass an explicit Unix timestamp (seconds) to set an expiration.
+> **Note:** Both `createDelegation` and `createInvocation` default to `expiration: Infinity` (never expires) when no expiration is specified. Pass an explicit Unix timestamp (seconds) to set an expiration. A never-expiring token can only ever be neutralized by a revocation record that must then be kept forever — set `requireExpiration: true` on production validators to refuse them.
+
+`getDelegationCid` accepts a live `Delegation` **or** its serialized base64 CAR and returns the
+same canonical string either way (`CIDv1(dag-cbor, sha2-256)`, base32 — `bafyrei…`). Keep it after
+minting a delegation so you know what to revoke later.
 
 #### Facts
 

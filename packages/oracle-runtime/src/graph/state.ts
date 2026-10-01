@@ -64,6 +64,12 @@ export const MainAgentGraphState = Annotation.Root({
     reducer: (_, curr) => curr,
   }),
 
+  /** Session run selected in `editorRoomId`; forwarded from request metadata. */
+  sessionRunId: Annotation<string | undefined>({
+    default: () => undefined,
+    reducer: (_, curr) => curr,
+  }),
+
   spaceId: Annotation<string | undefined>({
     default: () => undefined,
     reducer: (_, curr) => curr,

@@ -28,8 +28,11 @@ import {
   setStepConditions,
   setStepConfirmation,
   setStepEventTrigger,
+  setStepExecution,
   setStepInputs,
+  setStepPhase,
   setStepSchedule,
+  setStepSkills,
   setStepTrigger,
   updateFlowMeta,
 } from '../edit.js';
@@ -154,6 +157,25 @@ async function applyAssignments(
   });
 }
 
+/** Apply Flow Agent execution boundaries and governed skill matching metadata. */
+async function applyExecutionPolicy(
+  ctx: RuntimeContext,
+  flowRef: string,
+  matrixClient: MatrixClient | undefined,
+  steps: FlowStep[],
+): Promise<void> {
+  const configured = steps.filter(
+    (step) => step.execution !== undefined || step.skills !== undefined,
+  );
+  if (configured.length === 0) return;
+  await withFlowDoc(ctx, flowRef, matrixClient, async (doc) => {
+    for (const step of configured) {
+      if (step.execution) setStepExecution(doc, step.id, step.execution);
+      if (step.skills) setStepSkills(doc, step.id, step.skills);
+    }
+  });
+}
+
 /** The room id a `create_template_room` browser tool returned. */
 function extractRoomId(result: unknown): string | undefined {
   if (result && typeof result === 'object') {
@@ -266,6 +288,7 @@ function buildCreateTemplateTool(
         });
         await applyConditions(ctx, roomId, matrixClient, flow.steps);
         await applyAssignments(ctx, roomId, matrixClient, flow.steps);
+        await applyExecutionPolicy(ctx, roomId, matrixClient, flow.steps);
 
         return { ok: true, flowRef: roomId };
       } catch (err) {
@@ -334,6 +357,7 @@ function buildAddStepTool(matrixClient: MatrixClient | undefined): PluginTool {
         });
         await applyConditions(ctx, roomId, matrixClient, [step]);
         await applyAssignments(ctx, roomId, matrixClient, [step]);
+        await applyExecutionPolicy(ctx, roomId, matrixClient, [step]);
 
         if (typeof position === 'number') {
           await withFlowDoc(ctx, flowRef, matrixClient, async (doc) =>
@@ -384,17 +408,25 @@ const connectSchema = z.object({
   toStep: z.string().min(1),
   input: z.string().min(1),
 });
+const stepPatchSchema = flowStepSchema.partial().extend({
+  phase: z
+    .string()
+    .min(1)
+    .nullable()
+    .optional()
+    .describe('Set the step phase, or use null to clear an existing phase.'),
+});
 const updateStepSchema = z.object({
   ...base,
   stepId: z.string().min(1),
-  patch: flowStepSchema.partial(),
+  patch: stepPatchSchema,
 });
 
 /** Route an update_step patch to the focused per-block edits. */
 export function applyStepPatch(
   doc: YDoc,
   stepId: string,
-  patch: Partial<FlowStep>,
+  patch: z.infer<typeof stepPatchSchema>,
 ): void {
   if (patch.inputs) setStepInputs(doc, stepId, patch.inputs);
   if (patch.runWhen !== undefined || patch.conditions !== undefined) {
@@ -409,6 +441,11 @@ export function applyStepPatch(
     setStepAssignment(doc, stepId, patch.assignTo);
   if (patch.requireConfirmation !== undefined)
     setStepConfirmation(doc, stepId, patch.requireConfirmation);
+  if (patch.phase !== undefined)
+    setStepPhase(doc, stepId, patch.phase ?? undefined);
+  if (patch.execution !== undefined)
+    setStepExecution(doc, stepId, patch.execution);
+  if (patch.skills !== undefined) setStepSkills(doc, stepId, patch.skills);
   // Both write the same trigger props; onEvent is the more specific intent.
   if (patch.onEvent !== undefined)
     setStepEventTrigger(doc, stepId, patch.onEvent);
@@ -522,9 +559,9 @@ export function buildAuthoringTools(
       {
         name: 'update_step',
         description:
-          "Update any subset of a step's settings in one call (inputs, conditions, schedule, assignee, confirmation, " +
+          "Update any subset of a step's settings in one call (phase, execution boundary, required skills, inputs, conditions, schedule, assignee, confirmation, " +
           'trigger, onEvent). onEvent takes precedence over trigger when both are given; set trigger to "manual" to ' +
-          'clear an onEvent auto-trigger.',
+          'clear an onEvent auto-trigger. Set phase to null to clear an existing phase.',
         schema: updateStepSchema,
       },
     ),

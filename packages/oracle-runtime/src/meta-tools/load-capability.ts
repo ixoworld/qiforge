@@ -84,7 +84,7 @@ export function buildLoadCapabilityTool(
           }
 
           const tools: ToolDetail[] = toolRegistry
-            .toolsForPlugin(name)
+            .toolSummariesForPlugin(name)
             .map((t) => ({
               name: t.name,
               description: t.description,

@@ -108,6 +108,23 @@ describe('SubscriptionMiddleware', () => {
     vi.restoreAllMocks();
   });
 
+  it('bypasses the subscription check entirely for /byo-llm routes', async () => {
+    const cache = { get: vi.fn(), set: vi.fn() };
+    const { middleware } = await bootstrapMiddleware({
+      cache,
+      config: { NETWORK: 'devnet' },
+    });
+    const req = {
+      originalUrl: '/byo-llm/chatgpt/device/start',
+      authData: { did: 'did:ixo:abc', ucanDelegation: VALID_UCAN_DELEGATION },
+    } as unknown as Request;
+    const next = vi.fn();
+    await middleware.use(req, buildResponse(), next as NextFunction);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(cache.get).not.toHaveBeenCalled();
+    expect(mockedGetUserSubscription).not.toHaveBeenCalled();
+  });
+
   it('skips when authData is missing', async () => {
     const cache = { get: vi.fn(), set: vi.fn() };
     const { middleware } = await bootstrapMiddleware({

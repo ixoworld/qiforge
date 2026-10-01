@@ -8,7 +8,6 @@ import {
   type OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { File } from 'node:buffer';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -326,11 +325,18 @@ export class ChannelMemoryService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         const compressed = await gzipAsync(raw);
-        const file = new File([compressed], `${MATRIX_STORAGE_KEY}.db.gz`, {
-          type: 'application/gzip',
-          lastModified: Date.now(),
-        });
-        await uploadMediaToRoom(roomId, file, MATRIX_STORAGE_KEY);
+        await uploadMediaToRoom(
+          roomId,
+          {
+            bytes: compressed,
+            filename: `${MATRIX_STORAGE_KEY}.db.gz`,
+            // Matches the mimetype historically written on these media
+            // events (upload-side it was hardcoded before the payload
+            // carried it).
+            mimetype: 'application/x-sqlite3',
+          },
+          MATRIX_STORAGE_KEY,
+        );
         room.dirty = false;
         room.lastUploadedChecksum = checksum;
         logger.log(

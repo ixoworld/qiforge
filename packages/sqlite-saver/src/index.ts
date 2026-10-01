@@ -78,10 +78,33 @@ interface Migration {
   up: (db: DatabaseType) => void;
 }
 
+export interface SqliteSaverOptions {
+  /**
+   * Newest checkpoints retained per thread after each `put`. LangGraph writes
+   * one checkpoint per super-step and never deletes them, so without a cap a
+   * long-lived thread's `checkpoints`/`writes` tables (and the DB file synced
+   * to Matrix) grow without bound. `0` disables pruning.
+   */
+  maxCheckpointsPerThread?: number;
+}
+
+const DEFAULT_MAX_CHECKPOINTS_PER_THREAD = 20;
+
+/**
+ * Pruning only runs once a thread exceeds the cap by this many checkpoints,
+ * so the two DELETE scans don't run on every super-step.
+ */
+const PRUNE_SLACK = 5;
+
 // In the `SqliteSaver.list` method, we need to sanitize the `options.filter` argument to ensure it only contains keys
 // that are part of the `CheckpointMetadata` type. The lines below ensure that we get compile-time errors if the list
 // of keys that we use is out of sync with the `CheckpointMetadata` type.
-const checkpointMetadataKeys = ['source', 'step', 'parents'] as const;
+const checkpointMetadataKeys = [
+  'source',
+  'step',
+  'parents',
+  'counters_since_delta_snapshot',
+] as const;
 
 type CheckKeys<T, K extends readonly (keyof T)[]> = [K[number]] extends [
   keyof T,
@@ -177,21 +200,45 @@ export class SqliteSaver extends BaseCheckpointSaver {
 
   protected deleteMessagesStmt: Statement;
 
-  constructor(db: DatabaseType, serde?: SerializerProtocol) {
+  protected listThreadMessagesStmt: Statement;
+
+  protected countCheckpointsStmt: Statement;
+
+  protected pruneCheckpointsStmt: Statement;
+
+  protected pruneWritesStmt: Statement;
+
+  protected readonly maxCheckpointsPerThread: number;
+
+  constructor(
+    db: DatabaseType,
+    serde?: SerializerProtocol,
+    options?: SqliteSaverOptions,
+  ) {
     super(serde);
     this.db = db;
     this.isSetup = false;
+    this.maxCheckpointsPerThread =
+      options?.maxCheckpointsPerThread ?? DEFAULT_MAX_CHECKPOINTS_PER_THREAD;
   }
 
-  static fromConnString(connStringOrLocalPath: string): SqliteSaver {
-    return new SqliteSaver(new Database(connStringOrLocalPath));
+  static fromConnString(
+    connStringOrLocalPath: string,
+    options?: SqliteSaverOptions,
+  ): SqliteSaver {
+    return new SqliteSaver(
+      new Database(connStringOrLocalPath),
+      undefined,
+      options,
+    );
   }
 
   static fromDatabase(
     db: DatabaseType,
     serde?: SerializerProtocol,
+    options?: SqliteSaverOptions,
   ): SqliteSaver {
-    return new SqliteSaver(db, serde);
+    return new SqliteSaver(db, serde, options);
   }
 
   close(): void {
@@ -307,6 +354,20 @@ export class SqliteSaver extends BaseCheckpointSaver {
     // Set busy timeout for concurrent access
     this.db.pragma('busy_timeout = 5000');
 
+    // Incremental auto-vacuum lets pruning hand freed pages back to the
+    // filesystem instead of leaving the file at its high-water mark (the
+    // file is what gets gzipped and synced to Matrix, so dead pages are
+    // uploaded forever otherwise). On a brand-new database the pragma binds
+    // immediately because it runs before the first table is created; on an
+    // existing NONE-mode file it only takes effect after a full VACUUM,
+    // which must happen outside the request path.
+    const autoVacuumModeRaw = this.db.pragma('auto_vacuum', {
+      simple: true,
+    });
+    if (typeof autoVacuumModeRaw === 'number' && autoVacuumModeRaw !== 2) {
+      this.db.pragma('auto_vacuum = INCREMENTAL');
+    }
+
     // Create base tables
     this.db.exec(`
 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -409,7 +470,96 @@ ON writes(thread_id, checkpoint_id, channel);
       `DELETE FROM messages WHERE thread_id = ?`,
     );
 
+    this.listThreadMessagesStmt = this.db.prepare(
+      `SELECT message FROM messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC`,
+    );
+
+    this.countCheckpointsStmt = this.db.prepare(
+      `SELECT COUNT(*) as count FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ?`,
+    );
+
+    this.pruneCheckpointsStmt = this.db.prepare(`
+      DELETE FROM checkpoints
+      WHERE thread_id = ? AND checkpoint_ns = ?
+        AND checkpoint_id NOT IN (
+          SELECT checkpoint_id FROM checkpoints
+          WHERE thread_id = ? AND checkpoint_ns = ?
+          ORDER BY checkpoint_id DESC LIMIT ?
+        )
+    `);
+
+    this.pruneWritesStmt = this.db.prepare(`
+      DELETE FROM writes
+      WHERE thread_id = ? AND checkpoint_ns = ?
+        AND checkpoint_id NOT IN (
+          SELECT checkpoint_id FROM checkpoints
+          WHERE thread_id = ? AND checkpoint_ns = ?
+          ORDER BY checkpoint_id DESC LIMIT ?
+        )
+    `);
+
     this.isSetup = true;
+  }
+
+  /**
+   * Every message ever written for a thread, oldest first, independent of
+   * which checkpoint currently references it. `getTuple` only returns the
+   * latest checkpoint's message set — once summarization condenses graph
+   * state, that set is the summary + recent tail, while this listing keeps
+   * the full transcript (rows are keyed by message id and never deleted by
+   * checkpoint pruning).
+   */
+  async listThreadMessages(threadId: string): Promise<BaseMessage[]> {
+    this.setup();
+    const rows = this.listThreadMessagesStmt.all(threadId) as Array<{
+      message: string;
+    }>;
+    const messages: BaseMessage[] = await Promise.all(
+      rows.map(async (row) => {
+        return this.serde.loadsTyped('json', row.message);
+      }),
+    );
+    return messages;
+  }
+
+  /**
+   * Drop checkpoints (and their writes) beyond the newest
+   * `maxCheckpointsPerThread` for a thread. The `messages` table is left
+   * intact — it holds the user-visible transcript. The oldest surviving
+   * checkpoint loses its parent's writes, which only matters for
+   * `pending_sends` reconstruction when time-travelling to that exact
+   * checkpoint — the latest checkpoint (the only one the runtime loads) is
+   * unaffected.
+   */
+  protected pruneThread(threadId: string, checkpointNs: string): void {
+    const keep = this.maxCheckpointsPerThread;
+    if (keep <= 0) return;
+    const { count } = this.countCheckpointsStmt.get(threadId, checkpointNs) as {
+      count: number;
+    };
+    if (count <= keep + PRUNE_SLACK) return;
+    const transaction = this.db.transaction(() => {
+      this.pruneWritesStmt.run(
+        threadId,
+        checkpointNs,
+        threadId,
+        checkpointNs,
+        keep,
+      );
+      this.pruneCheckpointsStmt.run(
+        threadId,
+        checkpointNs,
+        threadId,
+        checkpointNs,
+        keep,
+      );
+    });
+    transaction();
+
+    // Hand freed pages back to the filesystem. No-op on databases whose
+    // file-level mode is still NONE — those are compacted by the sync
+    // service's cron instead.
+    this.db.pragma('incremental_vacuum');
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -809,6 +959,8 @@ ON writes(thread_id, checkpoint_id, channel);
       }
     });
     transaction();
+
+    this.pruneThread(thread_id, checkpoint_ns);
 
     return {
       configurable: {

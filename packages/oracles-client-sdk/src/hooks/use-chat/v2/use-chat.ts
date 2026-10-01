@@ -1,5 +1,5 @@
 'use client';
-import { useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
   type MutableRefObject,
   useCallback,
@@ -13,6 +13,13 @@ import { type IActionTools } from '../../../types/action-tool.type.js';
 import { useOraclesContext } from '../../../providers/oracles-provider/oracles-context.js';
 import { RequestError } from '../../../utils/request.js';
 import {
+  appendTail,
+  DEFAULT_HISTORY_PAGE_SIZE,
+  fetchHistoryPage,
+  flattenPages,
+} from '../../../utils/transcript-pages.js';
+import { type HistoryData, historyQueryOptions } from './history-query.js';
+import {
   type SSEActionCallEventData,
   type SSEErrorEvent,
   type SSEReasoningEventData,
@@ -24,7 +31,13 @@ import { useWebSocketEvents } from '../../use-websocket-events/use-websocket-eve
 import { resolveContent } from '../resolve-content.js';
 import transformToMessagesMap from '../transform-to-messages-map.js';
 import { OracleChat } from './oracle-chat.js';
-import { type AnyEvent, type IChatOptions, type IMessage } from './types.js';
+import { reasoningMessageOf } from './reasoning-message.js';
+import {
+  type AnyEvent,
+  type IChatOptions,
+  type IMessage,
+  IDLE_RUN_STATE,
+} from './types.js';
 import { useSendMessage } from './use-send-message.js';
 
 export function useChat({
@@ -35,6 +48,8 @@ export function useChat({
   browserTools,
   uiComponents,
   streamingMode,
+  streamingThrottleMs,
+  historyPageSize,
   model,
 }: IChatOptions) {
   // Create chat instance with lazy initialization
@@ -55,6 +70,7 @@ export function useChat({
       uiComponents,
       overrides,
       streamingMode,
+      streamingThrottleMs,
     });
   }
 
@@ -77,6 +93,12 @@ export function useChat({
     () => undefined,
   );
 
+  const run = useSyncExternalStore(
+    chatRef.current.subscribe,
+    () => chatRef.current?.run ?? IDLE_RUN_STATE,
+    () => IDLE_RUN_STATE,
+  );
+
   const { refetch: refetchOracleSessions } = useOracleSessions(
     oracleDid,
     overrides,
@@ -89,52 +111,113 @@ export function useChat({
     useOraclesContext();
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
 
-  // React Query for initial data fetch
+  // The history, one turn-aligned page at a time: the newest page first,
+  // older pages on demand (`loadEarlier`), what a turn added through
+  // `revalidate` (transcript-pages.ts, history-query.ts). A runtime without
+  // paging delivers the whole transcript as one page.
+  const pageSize = historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE;
+  const queryClient = useQueryClient();
+  const requestJson = useCallback(
+    <T>(url: string) => authedRequest<T>(url, 'GET', {}, oracleDid),
+    [authedRequest, oracleDid],
+  );
+  const historyOptions = useMemo(
+    () =>
+      historyQueryOptions({
+        oracleDid,
+        sessionId,
+        apiUrl,
+        pageSize,
+        request: requestJson,
+      }),
+    [oracleDid, sessionId, apiUrl, pageSize, requestJson],
+  );
+  const historyKey = historyOptions.queryKey;
   const {
-    data,
+    data: history,
     isLoading,
     error: queryError,
     status: queryStatus,
     refetch: refetchMessages,
-  } = useQuery({
-    queryKey: [oracleDid, 'messages', sessionId],
-    queryFn: async () => {
-      const result = await authedRequest<{
-        messages: IMessage[];
-      }>(`${apiUrl}/messages/${sessionId}`, 'GET', {}, oracleDid);
-
-      // Don't transform here - return raw messages
-      // Transformation will happen in useEffect when agActions is available
-      return result.messages;
-    },
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery({
+    ...historyOptions,
     enabled: Boolean(sessionId && apiUrl),
     retry: false,
   });
+  // Newest page first (history-query.ts).
+  const pages = history?.pages;
 
-  const revalidate = useCallback(async () => {
-    await Promise.all([refetchMessages(), refetchOracleSessions()]);
-  }, [refetchMessages, refetchOracleSessions]);
-
-  // Sync React Query data with OracleChat state when data changes
-  // Transform messages here when agActions is available
-  useEffect(() => {
-    if (data && chatRef.current && queryStatus === 'success') {
-      // Don't overwrite messages if we're currently streaming
-      const currentStatus = chatRef.current.status;
-      if (currentStatus === 'streaming' || currentStatus === 'submitted') {
+  /**
+   * Bring the loaded history up to date after a turn (or a cache
+   * invalidation): fetch what came after the newest loaded row and fold it
+   * into the newest page. Against a runtime without paging, or before the
+   * first page landed, the loaded history is refetched whole.
+   */
+  const fetchNewer = useCallback(async () => {
+    const current = queryClient.getQueryData<HistoryData>(historyKey);
+    const newest = current?.pages[0];
+    if (!apiUrl) return;
+    if (!newest || newest.legacy || !newest.nextCursor) {
+      await refetchMessages();
+      return;
+    }
+    let folded = current.pages;
+    let cursor = newest.nextCursor;
+    // A client that was away for many turns pages forward until it is
+    // current; the bound only guards against a runtime that never says so.
+    for (let round = 0; round < 50; round += 1) {
+      const tail = await fetchHistoryPage<IMessage>(
+        requestJson,
+        apiUrl,
+        sessionId,
+        { limit: pageSize, after: cursor },
+      );
+      if (tail.legacy) {
+        await refetchMessages();
         return;
       }
-
-      const transformedMessages = transformToMessagesMap({
-        messages: data,
-        uiComponents,
-        agActionNames: agActions.map((action) => action.name),
-      });
-
-      const messagesArray = Object.values(transformedMessages);
-      void chatRef.current.setInitialMessages(messagesArray);
+      folded = appendTail(folded, tail);
+      if (!tail.hasNewer || !tail.nextCursor) break;
+      cursor = tail.nextCursor;
     }
-  }, [data, queryStatus, agActions, uiComponents]);
+    queryClient.setQueryData<HistoryData>(historyKey, {
+      ...current,
+      pages: folded,
+    });
+  }, [
+    queryClient,
+    historyKey,
+    refetchMessages,
+    requestJson,
+    apiUrl,
+    sessionId,
+    pageSize,
+  ]);
+
+  const revalidate = useCallback(async () => {
+    await Promise.all([fetchNewer(), refetchOracleSessions()]);
+  }, [fetchNewer, refetchOracleSessions]);
+
+  /** Load the page of turns before the oldest one loaded. */
+  const loadEarlier = useCallback(async () => {
+    if (!hasNextPage || isFetchingNextPage) return;
+    await fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  // Mirror the loaded pages into the chat store (transformed once agActions
+  // are known). The store keeps the turn in flight on top while streaming.
+  useEffect(() => {
+    if (!pages || !chatRef.current || queryStatus !== 'success') return;
+    const transformedMessages = transformToMessagesMap({
+      messages: flattenPages(pages),
+      uiComponents,
+      agActionNames: agActions.map((action) => action.name),
+    });
+    void chatRef.current.setHistory(Object.values(transformedMessages));
+  }, [pages, queryStatus, agActions, uiComponents]);
 
   // Handle tool call events from streaming
   const handleToolCall = useCallback(
@@ -241,23 +324,12 @@ export function useChat({
       reasoningData: SSEReasoningEventData;
       requestId: string;
     }) => {
-      // Use consistent ID for all reasoning chunks from the same request
-
-      // Create reasoning message - upsertEventMessage will handle accumulation
-      const reasoningMessage: IMessage = {
-        id: reasoningData.requestId,
-        type: 'ai',
-        content: reasoningData.reasoning,
-        reasoning:
-          reasoningData.reasoningDetails
-            ?.map((detail) => detail.text)
-            .filter((text) => text && text.trim().length > 0) // Filter out empty text
-            .join('\n') || '', // Safe fallback to empty string
-        isComplete: reasoningData.isComplete,
-        isReasoning: true,
-      };
-
-      await chatRef.current?.upsertEventMessage(reasoningMessage);
+      // One reasoning message per request (its own id, so the answer that
+      // streams next to it is never flagged as reasoning); the store
+      // accumulates the chunks into it.
+      await chatRef.current?.upsertEventMessage(
+        reasoningMessageOf(reasoningData),
+      );
     },
     [],
   );
@@ -266,6 +338,14 @@ export function useChat({
   const handleNewEvent = useCallback(
     (event: AnyEvent) => {
       if (!uiComponents) return;
+      // The turn this chat is streaming itself already files its tool calls
+      // from the stream; the socket mirrors them for other clients of the
+      // session, and a second copy here rendered as a second card.
+      if (
+        event.eventName === 'tool_call' &&
+        chatRef.current?.run.requestId === event.payload.requestId
+      )
+        return;
       // Process immediately when event arrives
       if (event.payload.sessionId === sessionId) {
         const messagePayload: IMessage = {
@@ -301,6 +381,8 @@ export function useChat({
   const {
     sendMessage,
     abortStream,
+    resumeRun,
+    detachStream,
     isSending,
     error: sendMessageError,
   } = useSendMessage({
@@ -319,6 +401,54 @@ export function useChat({
   });
 
   // useLiveEvents removed - all events now come through streaming
+
+  // Switching sessions mid-turn: stop following that turn's stream here (the
+  // runtime keeps running it; coming back re-joins it below) so nothing of
+  // it shows up in the session the user moved to.
+  const currentSessionRef = useRef(sessionId);
+  useEffect(() => {
+    if (currentSessionRef.current !== sessionId) {
+      currentSessionRef.current = sessionId;
+      detachStream();
+    }
+  }, [sessionId, detachStream]);
+
+  // A turn that is still running for this session (the page was reloaded
+  // mid-reply, the runtime is recovering it, or the user left and came back)
+  // is re-joined once the history has loaded, so the reply streams in here
+  // instead of appearing only when the transcript is refetched. Latest
+  // callbacks live in refs: the check runs once per session load and is
+  // never cancelled by a callback identity change.
+  const resumeRunRef = useRef(resumeRun);
+  resumeRunRef.current = resumeRun;
+  const authedRequestRef = useRef(authedRequest);
+  authedRequestRef.current = authedRequest;
+  const resumeCheckedForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (queryStatus !== 'success' || !sessionId || !apiUrl) return;
+    if (resumeCheckedForRef.current === sessionId) return;
+    resumeCheckedForRef.current = sessionId;
+    void (async () => {
+      let active: { runId: string; status: string } | null = null;
+      try {
+        const result = await authedRequestRef.current<{
+          run: { runId: string; status: string } | null;
+        }>(`${apiUrl}/sessions/${sessionId}/run`, 'GET', {}, oracleDid);
+        active = result.run;
+      } catch (err) {
+        // A runtime without durable runs (404) — nothing to re-join.
+        if (!(err instanceof RequestError && err.status === 404))
+          // eslint-disable-next-line no-console -- a silent miss here hides a running turn
+          console.warn('[useChat] could not check for a running turn:', err);
+        return;
+      }
+      if (currentSessionRef.current !== sessionId) return; // moved on
+      if (!active) return;
+      if (!['queued', 'running', 'recovering'].includes(active.status)) return;
+      if (chatRef.current?.status === 'streaming') return;
+      await resumeRunRef.current(active.runId);
+    })();
+  }, [queryStatus, sessionId, apiUrl, oracleDid]);
 
   // Build actionTools from registered AG-UI actions
   const actionTools = useMemo(() => {
@@ -379,6 +509,13 @@ export function useChat({
     sendMessageError,
     isRealTimeConnected: isWebSocketConnected,
     status,
+    /** The durable run behind the current or last turn (re-joins, resumes, how it ended). */
+    run,
     isConfigReady,
+    /** Older turns exist beyond the loaded history. */
+    hasEarlier: Boolean(hasNextPage),
+    /** Load the page of turns before the oldest one shown (no-op when none). */
+    loadEarlier,
+    isLoadingEarlier: isFetchingNextPage,
   };
 }

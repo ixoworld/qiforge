@@ -4,6 +4,7 @@ import type { ReactAgent } from 'langchain';
 import { z } from 'zod';
 import type {
   ChatOpenAIFields,
+  CommerceContext,
   MergedConfig,
   ModelRole,
   OracleIdentity,
@@ -46,9 +47,33 @@ export const mainAgentRequestContextSchema = z.object({
   }),
   /**
    * Per-request model override, already validated against the catalog
-   * allow-list. Absent → the agent uses the default `main` model.
+   * allow-list (or, for `byo:` ids, against the BYO catalog + the user's
+   * connected credential). Absent → the agent uses the default `main` model.
    */
   model: z.string().optional(),
+  /**
+   * Commerce routing outcome produced by the Matrix message router. Shape is
+   * owned by `CommerceContext` (plugin-api); the schema passes it through
+   * unvalidated — it never crosses a trust boundary (bridge → runtime only).
+   *
+   * Present when this turn runs on the user's own credential (BYO). Carries
+   * only non-secret flags — the credential itself lives in the request-scoped
+   * LLM adapter closure and never enters context, state, or traces. Consumed
+   * by the credits middleware to skip deduction on BYO turns.
+   */
+  commerce: z.custom<CommerceContext>().optional(),
+  byo: z
+    .object({
+      provider: z.enum([
+        'chatgpt',
+        'openai',
+        'anthropic',
+        'gemini',
+        'deepseek',
+      ]),
+      active: z.literal(true),
+    })
+    .optional(),
 });
 /** Per-request shape — exposes only what the main-agent build needs. */
 export type MainAgentRequestContext = z.infer<
@@ -96,6 +121,14 @@ export interface MainAgentArgs {
   ambient: AmbientServices;
   state: Partial<TMainAgentGraphState>;
   availablePlugins: ReadonlySet<string>;
+  /**
+   * Plugins the capability router chose for this turn. The capability gate
+   * admits their tools and tool handlers see them in `ctx.loadedPlugins`,
+   * exactly as if they were loaded — but only for this turn: they are never
+   * written to graph state, so the checkpointed `loadedPlugins` channel keeps
+   * growing through `load_capability` alone.
+   */
+  preloadedPlugins?: ReadonlySet<string>;
   hooks?: MainAgentHooks;
 }
 

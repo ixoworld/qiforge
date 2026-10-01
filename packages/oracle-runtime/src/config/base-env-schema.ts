@@ -1,3 +1,7 @@
+import {
+  capabilityRouterEnvShape,
+  decisionProviderEnvShape,
+} from '@ixo/common/ai/decisions';
 import { z } from 'zod';
 
 /**
@@ -10,9 +14,10 @@ import { z } from 'zod';
  * extends onto this base schema at runtime.
  *
  * `LANGSMITH_*` keys are declared here because LangChain auto-wires tracing
- * when they are present in `process.env`; the runtime never reads them
- * directly, but documenting them in the base schema makes them visible to
- * `qiforge env` / inspect tooling.
+ * when they are present in `process.env`. The runtime reads them in exactly
+ * one place — the per-request selective-tracing decision in
+ * `modules/messages/langsmith-tracing.ts`; everything else (client
+ * construction, batching, upload) stays LangChain's own env-driven wiring.
  *
  * Field names match today's `apps/app/src/config.ts` exactly so existing
  * `.env` files keep working without renames.
@@ -75,14 +80,32 @@ export const baseEnvSchema = z.object({
   OPEN_ROUTER_API_KEY: z.string().optional(),
   NEBIUS_API_KEY: z.string().optional(),
 
+  // Bounded semantic Decision provider (`DECISION_PROVIDER`, `DECISION_MODEL`,
+  // Cloudflare credentials). Shared with the Workers runtime; optional so
+  // deployments that do not use Decisions preserve their existing behavior.
+  ...decisionProviderEnvShape,
+
+  // Capability router (`CAPABILITY_ROUTER=off|shadow|on`): the pre-model
+  // Decision that preloads an on-demand plugin's tools for one turn. Shared
+  // with the Workers runtime; consumed by `modules/messages/capability-router.ts`.
+  ...capabilityRouterEnvShape,
+
   /**
    * Default model for new chats — an OpenRouter slug (e.g.
-   * `openai/gpt-5.4-nano`), ideally one returned by `GET /models`. When unset
+   * `openai/gpt-5.6-luna`), ideally one returned by `GET /models`. When unset
    * the runtime uses its built-in default (GPT-5.4 Nano). Lets an operator
    * change the default per deployment without a code change. Only applies to
    * the OpenRouter provider.
    */
   DEFAULT_MODEL: z.string().optional(),
+
+  /**
+   * Model used to name conversations, once per session. Defaults to a small
+   * instruction-following model per provider — override only if a deployment
+   * needs a different one (the namer must follow a short-answer instruction,
+   * so tiny completion models produce poor titles).
+   */
+  SESSION_TITLE_MODEL: z.string().optional(),
 
   /**
    * Markup applied to raw OpenRouter list prices when the catalog is shown to
@@ -106,11 +129,40 @@ export const baseEnvSchema = z.object({
   LANGSMITH_ENDPOINT: z.string().optional(),
 
   /**
+   * Selective tracing: comma-separated allowlist of user DIDs whose chat
+   * turns are traced to LangSmith without enabling the global
+   * `LANGSMITH_TRACING` switch (e.g. `did:ixo:ixo1abc...,did:x:zQ3sh...`).
+   * `*` traces every user. Requires `LANGSMITH_API_KEY`; mutually exclusive
+   * with `LANGSMITH_TRACING=true` — both misconfigurations fail the boot via
+   * `validateLangsmithTracing`. Unset = no selective tracing. Consumed
+   * per-request by `modules/messages/langsmith-tracing.ts`.
+   */
+  LANGSMITH_TRACED_DIDS: z.string().optional(),
+
+  /**
    * Extended-thinking effort for the main model. Lower = faster time-to-first
    * token, at some cost to hard multi-step reasoning. Default `medium`
    * preserves current behaviour; set `low` to trade reasoning depth for latency.
    */
   MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+
+  /**
+   * Bring-your-own-credential LLMs: users connect their own ChatGPT
+   * subscription or provider API keys and their turns run (and are billed)
+   * on their own account. Off by default — enabled only on the personal
+   * companion deployment. Env vars are strings, so only the literal 'true'
+   * enables it (`Boolean('false')` is true).
+   */
+  BYO_LLM_ENABLED: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => v === 'true'),
+
+  /**
+   * OAuth client id used for the ChatGPT subscription connect flow. Defaults
+   * to the Codex public client; override only for testing against a stub.
+   */
+  BYO_CHATGPT_CLIENT_ID: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
@@ -153,5 +205,76 @@ export function validateLlmProviderKey(
         'Set OPEN_ROUTER_API_KEY, or switch LLM_PROVIDER to nebius and set NEBIUS_API_KEY.',
     });
   }
+  return errors;
+}
+
+/**
+ * Cross-field check for the selective-tracing allowlist
+ * (`LANGSMITH_TRACED_DIDS`). Same contract as `validateLlmProviderKey`:
+ * returns structured errors for the boot-error reporter; empty array when
+ * the allowlist is unset.
+ *
+ * Rules (each would otherwise fail silently at request time):
+ *  - The allowlist requires `LANGSMITH_API_KEY` — without it the runtime
+ *    refuses to attach a tracer and the operator would believe tracing is
+ *    on while nothing uploads.
+ *  - The allowlist is mutually exclusive with `LANGSMITH_TRACING=true` —
+ *    the global switch already traces every user, which would make the
+ *    allowlist meaningless without any signal that it is being ignored.
+ *  - Every entry must be `*` or a `did:`-prefixed identifier — catches
+ *    delimiter typos (spaces, semicolons) that would otherwise trace nobody.
+ *
+ * Deliberately does NOT validate the global-mode combination
+ * (`LANGSMITH_TRACING=true` without `LANGSMITH_API_KEY`): LangChain also
+ * honours legacy `LANGCHAIN_*` aliases outside this schema, so rejecting
+ * that pair could break deployments that are actually working.
+ */
+export function validateLangsmithTracing(
+  env: Record<string, unknown>,
+): Array<{ field: string; message: string }> {
+  const raw = env.LANGSMITH_TRACED_DIDS;
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return [];
+  }
+
+  const errors: Array<{ field: string; message: string }> = [];
+
+  const apiKey = env.LANGSMITH_API_KEY;
+  if (typeof apiKey !== 'string' || apiKey.length === 0) {
+    errors.push({
+      field: 'LANGSMITH_API_KEY',
+      message:
+        'LANGSMITH_TRACED_DIDS is set but LANGSMITH_API_KEY is not — selective tracing ' +
+        'would silently upload nothing. Set LANGSMITH_API_KEY or unset LANGSMITH_TRACED_DIDS.',
+    });
+  }
+
+  const globalTracing = env.LANGSMITH_TRACING;
+  if (typeof globalTracing === 'string' && globalTracing.trim() === 'true') {
+    errors.push({
+      field: 'LANGSMITH_TRACED_DIDS',
+      message:
+        'LANGSMITH_TRACED_DIDS and LANGSMITH_TRACING=true are both set. Global tracing ' +
+        'already traces every user, which would silently ignore the allowlist. Unset one: ' +
+        'keep LANGSMITH_TRACING=true to trace everyone, or keep LANGSMITH_TRACED_DIDS to ' +
+        'trace only the listed DIDs.',
+    });
+  }
+
+  const invalidEntries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .filter((entry) => entry !== '*' && !entry.startsWith('did:'));
+  if (invalidEntries.length > 0) {
+    errors.push({
+      field: 'LANGSMITH_TRACED_DIDS',
+      message:
+        `LANGSMITH_TRACED_DIDS contains entries that are neither '*' nor DIDs: ` +
+        `${invalidEntries.join(', ')}. Use a comma-separated list of did:-prefixed ` +
+        `identifiers, or '*' to trace every user.`,
+    });
+  }
+
   return errors;
 }

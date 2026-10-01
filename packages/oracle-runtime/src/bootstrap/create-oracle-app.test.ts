@@ -1,3 +1,4 @@
+import type { DecisionAdapter } from '@ixo/common';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
@@ -219,6 +220,98 @@ describe('createOracleApp — env validation errors', () => {
 
     expect(errors.join('\n')).toMatch(/Plugin 'test-plugin'/);
     expect(errors.join('\n')).toMatch(/TEST_API_KEY/);
+  });
+});
+
+describe('createOracleApp — Decision provider', () => {
+  it('fails boot when cloudflare-jev is selected without credentials', async () => {
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'cloudflare-jev',
+        },
+      }),
+    ).rejects.toThrow(/Env validation failed/);
+  });
+
+  it('boots when cloudflare-jev has the required credentials', async () => {
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'cloudflare-jev',
+          CLOUDFLARE_ACCOUNT_ID: 'account-1',
+          CLOUDFLARE_API_TOKEN: 'token',
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('boots when openrouter-jev reuses the LLM OpenRouter key', async () => {
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'openrouter-jev',
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it('fails boot when openrouter-jev is selected without OPEN_ROUTER_API_KEY', async () => {
+    const errors: string[] = [];
+    const logger = {
+      log: () => undefined,
+      warn: () => undefined,
+      error: (msg: unknown) =>
+        errors.push(typeof msg === 'string' ? msg : JSON.stringify(msg)),
+    };
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          // Nebius as the chat provider so the LLM cross-check passes while the
+          // Decision provider is left without its OpenRouter key.
+          LLM_PROVIDER: 'nebius',
+          NEBIUS_API_KEY: 'nebius-test',
+          OPEN_ROUTER_API_KEY: undefined,
+          DECISION_PROVIDER: 'openrouter-jev',
+        },
+        logger,
+      }),
+    ).rejects.toThrow(/Env validation failed/);
+
+    expect(errors.join('\n')).toMatch(/OPEN_ROUTER_API_KEY/);
+  });
+
+  it('lets an explicit decisionAdapter override incomplete env provider config', async () => {
+    const decisionAdapter: DecisionAdapter = {
+      provider: 'custom',
+      model: 'custom-decision-model',
+      evaluate: vi.fn(async () => ({ answers: {} })),
+    };
+
+    await expect(
+      createOracleApp({
+        ...defaultOpts,
+        plugins: [],
+        env: {
+          ...validBaseEnv,
+          DECISION_PROVIDER: 'cloudflare-jev',
+        },
+        decisionAdapter,
+      }),
+    ).resolves.toBeDefined();
   });
 });
 

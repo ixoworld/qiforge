@@ -11,7 +11,7 @@
 import type { Doc as YDoc } from 'yjs';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { MatrixProviderManager, type AppConfig } from '../editor/provider.js';
-import { buildBlocknoteToolsConfig } from '../editor/blocknote-tools.js';
+import { buildBlocknoteToolsConfig } from '../editor/editor-config.js';
 import { resolveEditorMatrixClient } from '../editor/editor-mx.js';
 import { isUserInRoom } from '../../matrix/room-membership.js';
 import type { RuntimeContext } from '../../plugin-api/types.js';

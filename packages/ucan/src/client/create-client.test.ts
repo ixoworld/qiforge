@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { ed25519 } from '@ucanto/principal';
-import { parseSigner, signerFromMnemonic } from './create-client.js';
+import {
+  createDelegation,
+  generateKeypair,
+  getDelegationCid,
+  parseSigner,
+  serializeDelegation,
+  signerFromMnemonic,
+  type Capability,
+} from './create-client.js';
 
 /**
  * GOLDEN VECTORS — generated with the ORIGINAL @cosmjs/crypto (libsodium) implementation of
@@ -79,5 +87,51 @@ describe('signerFromMnemonic', () => {
     expect(signer.did()).toBe(oracleDid);
     // The underlying key is unchanged — the privateKey still parses to the base did:key.
     expect(privateKey).toBe(GOLDEN_VECTORS[0].privateKey);
+  });
+});
+
+/**
+ * The canonical CID is what a UCAN revocation targets, so a delegator must get
+ * the SAME string whether they hold the live Delegation or only its serialized
+ * form — otherwise a revocation would name a delegation nobody can match.
+ */
+describe('getDelegationCid', () => {
+  async function sampleDelegation() {
+    const issuer = await generateKeypair();
+    const audience = await generateKeypair();
+    return createDelegation({
+      issuer: issuer.signer,
+      audience: audience.did,
+      capabilities: [
+        {
+          can: 'test/read' as Capability['can'],
+          with: 'ixo:resource:123' as Capability['with'],
+        },
+      ],
+      expiration: Math.floor(Date.now() / 1000) + 3600,
+    });
+  }
+
+  it('returns the same cid for a Delegation and for its serialized CAR', async () => {
+    const delegation = await sampleDelegation();
+    const serialized = await serializeDelegation(delegation);
+
+    const fromObject = await getDelegationCid(delegation);
+    const fromCar = await getDelegationCid(serialized);
+
+    expect(fromObject).toBe(delegation.cid.toString());
+    expect(fromCar).toBe(fromObject);
+  });
+
+  it('returns a base32 CIDv1 string', async () => {
+    const cid = await getDelegationCid(await sampleDelegation());
+    // CIDv1 + dag-cbor + sha2-256, base32-encoded => 'bafyrei...'
+    expect(cid).toMatch(/^bafyrei[a-z2-7]+$/);
+  });
+
+  it('gives different cids to different delegations', async () => {
+    const a = await getDelegationCid(await sampleDelegation());
+    const b = await getDelegationCid(await sampleDelegation());
+    expect(a).not.toBe(b);
   });
 });

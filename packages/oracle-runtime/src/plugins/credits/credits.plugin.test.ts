@@ -150,6 +150,44 @@ describe('CreditsPlugin', () => {
     await rt.close();
   });
 
+  it('middleware skips both the balance gate and the deduction on a BYO turn', async () => {
+    const redis = makeRedisStub(0);
+    const plugin = new CreditsPlugin({ redis });
+    const rt = await createTestRuntime({
+      plugins: [plugin],
+      config: { NETWORK: 'devnet', DISABLE_CREDITS: false },
+    });
+
+    const aiMessage = new AIMessageChunk({ content: 'hello' });
+    Object.assign(aiMessage, {
+      usage_metadata: {
+        input_tokens: 100,
+        output_tokens: 200,
+        total_tokens: 300,
+      },
+      response_metadata: {},
+    });
+
+    const result = await rt.invokeMiddleware(
+      'TokenLimiterMiddleware',
+      { messages: [aiMessage] },
+      {
+        context: {
+          ...DEFAULT_RUNTIME_CONTEXT,
+          byo: { provider: 'openai', active: true },
+        },
+      },
+    );
+
+    // Zero balance would normally short-circuit beforeModel; on a BYO turn
+    // the user pays their own provider, so neither hook produces an update
+    // and no deduction reaches Redis.
+    expect(result.before).toBeUndefined();
+    expect(result.after).toBeUndefined();
+    expect(redis.eval).not.toHaveBeenCalled();
+    await rt.close();
+  });
+
   it('middleware skips silently when no Redis client is provided (Redis disabled)', async () => {
     const plugin = new CreditsPlugin(); // no redis → middleware is a no-op
     const rt = await createTestRuntime({

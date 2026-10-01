@@ -34,6 +34,22 @@ function extractUserDid(context: unknown): string | undefined {
   return typeof did === 'string' && did.length > 0 ? did : undefined;
 }
 
+/**
+ * Whether this turn runs on the user's own credential (BYO). Same
+ * narrow-don't-trust read as `extractUserDid`. BYO turns skip both the
+ * balance gate and the deduction: the user pays their provider directly, and
+ * every model call in the turn (except embedding) runs on their credential.
+ */
+function extractByoActive(context: unknown): boolean {
+  if (!context || typeof context !== 'object' || !('byo' in context)) {
+    return false;
+  }
+  const { byo } = context;
+  return Boolean(
+    byo && typeof byo === 'object' && 'active' in byo && byo.active === true,
+  );
+}
+
 interface UsageMetadata {
   input_tokens: number;
   output_tokens: number;
@@ -124,6 +140,11 @@ export const createCreditsMiddleware = (
         return;
       }
 
+      if (extractByoActive(runtime.context)) {
+        logger.debug?.('Credits gate skipped (BYO turn — user-paid inference)');
+        return;
+      }
+
       const userDid = extractUserDid(runtime.context);
       if (!userDid) {
         throw new Error('User DID is required for credit limiting');
@@ -146,6 +167,13 @@ export const createCreditsMiddleware = (
 
     afterModel: async (state, runtime) => {
       if (!limiter) return;
+
+      if (extractByoActive(runtime.context)) {
+        logger.debug?.(
+          'Credits deduction skipped (BYO turn — user-paid inference)',
+        );
+        return;
+      }
 
       try {
         const userDid = extractUserDid(runtime.context);

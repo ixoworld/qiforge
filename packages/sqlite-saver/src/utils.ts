@@ -289,6 +289,12 @@ export interface CleanAdditionalKwargs {
   msgFromMatrixRoom: boolean;
   timestamp: string;
   oracleName: string;
+  /**
+   * Provenance marker set by LangChain middlewares (e.g. `"summarization"`
+   * on the condensed-history message). Preserved so list endpoints can
+   * filter middleware-authored messages out of the user-visible transcript.
+   */
+  lc_source?: string;
   reasoning?: string;
   reasoningDetails?: Array<{
     type: string;
@@ -336,11 +342,21 @@ export function cleanAdditionalKwargs(
       ? rawResponse.choices[0].delta.reasoning_details
       : undefined;
 
-  // Return cleaned additional_kwargs with only essential fields
+  // Return cleaned additional_kwargs with only essential fields.
+  // An existing timestamp is preserved: every checkpoint `put` rewrites every
+  // message row, so stamping "now" here would churn `created_at` on the whole
+  // thread each super-step and destroy the transcript's chronological order.
   const cleanedKwargs: CleanAdditionalKwargs = {
     msgFromMatrixRoom,
-    timestamp: new Date().toISOString(),
+    timestamp:
+      typeof additionalKwargs.timestamp === 'string' &&
+      additionalKwargs.timestamp.length > 0
+        ? additionalKwargs.timestamp
+        : new Date().toISOString(),
     oracleName: process.env.ORACLE_NAME || 'IXO Oracle',
+    ...(typeof additionalKwargs.lc_source === 'string' && {
+      lc_source: additionalKwargs.lc_source,
+    }),
     ...(additionalKwargs.attachment && {
       attachment: additionalKwargs.attachment as AttachmentMeta,
     }),

@@ -3,7 +3,6 @@ import {
   transformGraphStateMessageToListMessageResponse,
   type ChatSession,
 } from '@ixo/common';
-import { SqliteSaver } from '@ixo/sqlite-saver';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { type BaseMessage } from 'langchain';
@@ -41,8 +40,9 @@ export class PostMessageSyncer {
   run(input: PostSyncInput): void {
     void Promise.resolve().then(async () => {
       try {
-        const db = await this.checkpointSync.getUserDatabaseNoSync(input.did);
-        const saver = SqliteSaver.fromDatabase(db);
+        const saver = await this.checkpointSync.getUserCheckpointerNoSync(
+          input.did,
+        );
         const tuple = await saver.getTuple({
           configurable: { thread_id: input.langchainThreadId },
         });
@@ -57,7 +57,12 @@ export class PostMessageSyncer {
           sessionId: input.sessionId,
           oracleName: this.config.getOrThrow('ORACLE_NAME'),
           did: input.did,
-          messages: transformed.messages.map((m) => m.content.toString()),
+          // Roles are carried through: the session title is only meaningful
+          // if the namer can tell the user's ask from the oracle's answer.
+          messages: transformed.messages.map((m) => ({
+            type: m.type,
+            content: m.content.toString(),
+          })),
           oracleDid: this.config.getOrThrow<string>('ORACLE_DID'),
           oracleEntityDid: this.config.getOrThrow('ORACLE_ENTITY_DID'),
           lastProcessedCount: input.targetSession?.lastProcessedCount ?? 0,

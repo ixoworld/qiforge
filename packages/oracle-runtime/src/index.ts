@@ -1,4 +1,54 @@
+/**
+ * DEPRECATED — `@ixo/oracle-runtime` (the Node/NestJS runtime) is no longer
+ * developed. All QiForge development and every deployed oracle use the
+ * Cloudflare Workers runtime, `@ixo/oracle-runtime-workers`
+ * (`packages/oracle-runtime-workers`, reference app
+ * `apps/qiforge-workers-example`). Do not add features, parity work or
+ * fixes here; port them to the Workers runtime. See this package's README.
+ */
 export { createOracleApp } from './bootstrap/index.js';
+export {
+  defineDecision,
+  DEFAULT_DECISION_LIMITS,
+  validateDecisionProviderResult,
+  validateDecisionRequest,
+} from '@ixo/common';
+export type {
+  DecisionAdapter,
+  DecisionAnswer,
+  DecisionDefinition,
+  DecisionEvaluateOptions,
+  DecisionEvaluation,
+  DecisionProviderResult,
+  DecisionQuestion,
+  DecisionRegistration,
+  DecisionRequest,
+} from '@ixo/common';
+export {
+  DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionProviderUnavailableError,
+  DecisionRuntime,
+  UNAVAILABLE_DECISION_EVALUATOR,
+  CloudflareJevDecisionAdapter,
+  DECISION_PROVIDERS,
+  JevDecisionError,
+  OpenRouterJevDecisionAdapter,
+  WorkersAiJevDecisionAdapter,
+  decisionProviderEnvShape,
+  resolveDecisionAdapter,
+} from './decisions/index.js';
+export type {
+  CloudflareJevAdapterOptions,
+  DecisionEvaluator,
+  DecisionProviderConfigIssue,
+  DecisionProviderName,
+  JevProviderName,
+  OpenRouterJevAdapterOptions,
+  ResolveDecisionAdapterOptions,
+  ResolveDecisionAdapterResult,
+  WorkersAiBinding,
+  WorkersAiJevAdapterOptions,
+} from './decisions/index.js';
 export type {
   OracleApp,
   CreateOracleAppOptions,
@@ -6,6 +56,9 @@ export type {
   PluginStatusReport,
   PluginStatusChangeEvent,
 } from './bootstrap/index.js';
+
+export { DecisionRegistry } from './registries/decision-registry.js';
+export type { RegisteredDecision } from './registries/decision-registry.js';
 
 export { OraclePlugin } from './plugin-api/oracle-plugin.js';
 export { defineOraclePlugin } from './plugin-api/define-plugin.js';
@@ -31,6 +84,13 @@ export type {
   SecretIndex,
   RoomStateSnapshot,
   MatrixEvent,
+  CommerceContext,
+  CommerceEngagement,
+  CommerceEngagementStatus,
+  CommerceGateFailure,
+  CommerceGateFailureReason,
+  CommerceInProgressEngagement,
+  CommerceMode,
   UserContextData,
   ReadonlyState,
   SharedAccessors,
@@ -138,6 +198,7 @@ export * from './plugins/firecrawl/index.js';
 export * from './plugins/flows/index.js';
 export * from './plugins/matrix-group-chats/index.js';
 export * from './plugins/memory/index.js';
+export * from './plugins/oracle-payments/index.js';
 export * from './plugins/portal/index.js';
 export * from './plugins/sandbox/index.js';
 export * from './plugins/skills/index.js';

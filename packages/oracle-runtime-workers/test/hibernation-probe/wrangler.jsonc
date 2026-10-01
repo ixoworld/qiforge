@@ -1,0 +1,11 @@
+{
+  "name": "mike-hib-probe",
+  "account_id": "ebfd8f0f0c0c84d40756de873c169c40",
+  "main": "hib-mcp.ts",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "PROBE", "class_name": "HibProbe" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HibProbe"] }],
+}

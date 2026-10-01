@@ -8,6 +8,10 @@ import {
   FILE_PROCESSING_CREDIT_SINK,
   type FileProcessingCreditSink,
 } from './file-processing-credit-sink.port.js';
+import {
+  SANDBOX_OUTPUT_PREFIX,
+  sanitizeAttachmentFilename,
+} from './attachment-archive.js';
 
 interface AiProcessUsage {
   cost?: number;
@@ -21,14 +25,15 @@ interface AiProcessResult {
 }
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB per file
-const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total across all attachments
+// Exported so the native-attachment lane in MessagesService can enforce the
+// same cumulative budget this service applies to the extraction lane.
+export const MAX_TOTAL_SIZE = 50 * 1024 * 1024; // 50MB total across all attachments
 const MAX_TEXT_LENGTH = 50_000;
 const MATRIX_DOWNLOAD_TIMEOUT_MS = 60_000;
 const AI_PROCESS_TIMEOUT_MS = 120_000;
 const MAX_ERROR_BODY_LENGTH = 1024;
 
 const SANDBOX_TRUNCATE_LIMIT = 500;
-const SANDBOX_OUTPUT_PREFIX = '/workspace/output';
 
 const ALLOWED_URI_SCHEMES = /^(mxc|https?):\/\//i;
 const MAX_REDIRECT_COUNT = 5;
@@ -1369,13 +1374,7 @@ export class FileProcessingService {
    * to prevent prompt injection when interpolated into LLM context.
    */
   private sanitizeFilename(filename: string): string {
-    return (
-      filename
-        // eslint-disable-next-line no-control-regex
-        .replace(/[ -]/g, '')
-        .replace(/[[\]]/g, '')
-        .slice(0, 255)
-    );
+    return sanitizeAttachmentFilename(filename);
   }
 
   /**

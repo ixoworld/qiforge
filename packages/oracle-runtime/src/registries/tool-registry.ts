@@ -5,10 +5,37 @@ import type {
   RuntimeContext,
 } from '../plugin-api/types.js';
 
+/** Log prefix for the registry's own diagnostics. */
+const LOG_PREFIX = '[tool-registry]';
+
+/**
+ * Render collected tools as `plugin=[toolA, toolB]; other=[toolC]` — the
+ * diagnostic that answers "which plugin contributed what on this turn".
+ */
+export function formatByPlugin(entries: readonly RegisteredTool[]): string {
+  const byPlugin = new Map<string, string[]>();
+  for (const { pluginName, tool } of entries) {
+    const names = byPlugin.get(pluginName);
+    if (names) names.push(tool.name);
+    else byPlugin.set(pluginName, [tool.name]);
+  }
+  return Array.from(
+    byPlugin,
+    ([name, tools]) => `${name}=[${tools.join(', ')}]`,
+  ).join('; ');
+}
+
 /** A collected tool tagged with the plugin that contributed it. */
 export interface RegisteredTool {
   pluginName: string;
   tool: PluginTool;
+  /**
+   * Which hook produced it — `getTools` (boot, cached for the process) or
+   * `getRequestTools` (recomputed every turn). The per-turn diagnostics need
+   * the split: request tools are the ones that can differ between two
+   * otherwise identical turns.
+   */
+  origin: 'boot' | 'request';
 }
 
 /**
@@ -35,16 +62,32 @@ export interface RegisteredTool {
  * `user.did`, `session.id`, `ucanDelegation`, etc. The cache stores
  * static tool definitions; per-request wrapping is always fresh.
  */
+/** Name/description slice of a collected tool, tagged with its plugin. */
+export interface ToolSummary {
+  pluginName: string;
+  name: string;
+  description: string;
+  origin: 'boot' | 'request';
+}
+
 export class ToolRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredTool[] | null = null;
-  private collected: RegisteredTool[] | null = null;
+  /**
+   * Metadata snapshot of the most recent `collect()`. Deliberately NOT the
+   * tool objects: request-time tools close over that request's
+   * `RuntimeContext` (minted invocations, secrets, connected MCP clients),
+   * and retaining them on this process-wide singleton pinned a full request
+   * graph in memory between turns. The diagnostics this feeds only ever
+   * need names and descriptions.
+   */
+  private collectedMeta: ToolSummary[] | null = null;
 
   /** Add a plugin whose `getTools` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collected = null;
+    this.collectedMeta = null;
   }
 
   /**
@@ -58,7 +101,7 @@ export class ToolRegistry {
       if (!plugin.getTools) continue;
       const tools = await plugin.getTools(buildCtx);
       for (const tool of tools) {
-        out.push({ pluginName: plugin.name, tool });
+        out.push({ pluginName: plugin.name, tool, origin: 'boot' });
       }
     }
     this.bootCache = out;
@@ -73,18 +116,43 @@ export class ToolRegistry {
    * Hooks run concurrently — several of them open network connections
    * (MCP list-tools, secrets reads), so serializing them puts every
    * round-trip on the chat hot path back-to-back. Output order stays
-   * plugin-registration order regardless of which hook resolves first,
-   * and any hook rejection still fails the whole collection.
+   * plugin-registration order regardless of which hook resolves first.
+   *
+   * Failures are isolated PER PLUGIN: a hook that rejects contributes zero
+   * tools and is logged as an error naming the plugin, while every other
+   * plugin's tools still resolve. Sharing one rejection across the whole
+   * fan-out would let a transient upstream blip in one plugin (an MCP server
+   * that timed out, a secrets read that 500'd) silently strip the request
+   * tools of every plugin — and, because the caller awaits this, fail the
+   * turn outright. The runtime degrades the same way for sub-agents.
    */
   async collectRequest(rtCtx: RuntimeContext): Promise<RegisteredTool[]> {
     const perPlugin = await Promise.all(
-      this.plugins.map(async (plugin) => {
+      this.plugins.map(async (plugin): Promise<RegisteredTool[]> => {
         if (!plugin.getRequestTools) return [];
-        const requestTools = await plugin.getRequestTools(rtCtx);
-        return requestTools.map((tool) => ({ pluginName: plugin.name, tool }));
+        try {
+          const requestTools = await plugin.getRequestTools(rtCtx);
+          return requestTools.map((tool) => ({
+            pluginName: plugin.name,
+            tool,
+            origin: 'request' as const,
+          }));
+        } catch (error) {
+          rtCtx.logger.error(
+            `${LOG_PREFIX} plugin "${plugin.name}" getRequestTools failed — it contributes NO tools this turn ` +
+              `(other plugins are unaffected): ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+          );
+          return [];
+        }
       }),
     );
-    return perPlugin.flat();
+    const out = perPlugin.flat();
+    rtCtx.logger.debug?.(
+      `${LOG_PREFIX} request tools by plugin: ${formatByPlugin(out) || '∅'}`,
+    );
+    return out;
   }
 
   /**
@@ -99,15 +167,29 @@ export class ToolRegistry {
     const boot = await this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
     const out = [...boot, ...request];
-    this.collected = out;
+    this.collectedMeta = out.map(({ pluginName, tool, origin }) => ({
+      pluginName,
+      name: tool.name,
+      description: tool.description,
+      origin,
+    }));
     return out;
+  }
+
+  /** Summaries source: the last full collection, else the boot cache. */
+  private summaries(): ToolSummary[] {
+    if (this.collectedMeta !== null) return this.collectedMeta;
+    return (this.bootCache ?? []).map(({ pluginName, tool, origin }) => ({
+      pluginName,
+      name: tool.name,
+      description: tool.description,
+      origin,
+    }));
   }
 
   /** The flat list of tool names produced by the most recent `collect()`. */
   toolNames(): string[] {
-    return (this.collected ?? this.bootCache ?? []).map(
-      (entry) => entry.tool.name,
-    );
+    return this.summaries().map((entry) => entry.name);
   }
 
   /**
@@ -115,19 +197,22 @@ export class ToolRegistry {
    * (or `collectBoot()` if no full collection has happened yet).
    */
   toolNamesForPlugin(pluginName: string): string[] {
-    return (this.collected ?? this.bootCache ?? [])
+    return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map((entry) => entry.tool.name);
+      .map((entry) => entry.name);
   }
 
   /**
-   * The tools contributed by a given plugin in the most recent collection
-   * (boot-only if a full request collection has not yet happened).
+   * Name/description of the tools a given plugin contributed in the most
+   * recent collection (boot-only if a full request collection has not yet
+   * happened). Summaries, not the tool objects — see `collectedMeta`.
    */
-  toolsForPlugin(pluginName: string): PluginTool[] {
-    return (this.collected ?? this.bootCache ?? [])
+  toolSummariesForPlugin(
+    pluginName: string,
+  ): Array<{ name: string; description: string }> {
+    return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
-      .map((entry) => entry.tool);
+      .map(({ name, description }) => ({ name, description }));
   }
 
   /**
@@ -136,20 +221,19 @@ export class ToolRegistry {
    * actual conflict.
    */
   assertNoCollisions(): void {
-    const source = this.collected ?? this.bootCache;
-    if (source === null) {
+    if (this.collectedMeta === null && this.bootCache === null) {
       throw new Error('ToolRegistry.assertNoCollisions called before collect');
     }
     const seen = new Map<string, string>();
     const collisions: string[] = [];
-    for (const { pluginName, tool } of source) {
-      const prev = seen.get(tool.name);
+    for (const { pluginName, name } of this.summaries()) {
+      const prev = seen.get(name);
       if (prev !== undefined && prev !== pluginName) {
         collisions.push(
-          `Tool "${tool.name}" registered by both "${prev}" and "${pluginName}"`,
+          `Tool "${name}" registered by both "${prev}" and "${pluginName}"`,
         );
       } else if (prev === undefined) {
-        seen.set(tool.name, pluginName);
+        seen.set(name, pluginName);
       }
     }
     if (collisions.length > 0) {

@@ -8,6 +8,7 @@ import { EditorPlugin } from './editor/index.js';
 import { FirecrawlPlugin } from './firecrawl/index.js';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats/index.js';
 import { MemoryPlugin } from './memory/index.js';
+import { OraclePaymentsPlugin } from './oracle-payments/index.js';
 import { PortalPlugin } from './portal/index.js';
 import { SandboxPlugin } from './sandbox/index.js';
 import { SkillsPlugin } from './skills/index.js';
@@ -51,6 +52,7 @@ export const callsPlugin = stub('calls', 'Calls');
 export const userPreferencesPlugin = new UserPreferencesPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
 export const vfsPlugin = new VfsPlugin();
+export const oraclePaymentsPlugin = new OraclePaymentsPlugin();
 
 // NOTE: `FlowsPlugin` is intentionally NOT bundled. It is an opt-in capability
 // a fork wires in explicitly (`plugins: [new FlowsPlugin({ matrixClient })]`)
@@ -75,11 +77,9 @@ export const BUNDLED_PLUGINS = [
   skillsPlugin,
   editorPlugin,
   aguiPlugin,
-  slackPlugin,
   tasksPlugin,
-  creditsPlugin,
-  callsPlugin,
   userPreferencesPlugin,
   matrixGroupChatsPlugin,
   vfsPlugin,
+  oraclePaymentsPlugin,
 ] as const satisfies ReadonlyArray<OraclePlugin>;

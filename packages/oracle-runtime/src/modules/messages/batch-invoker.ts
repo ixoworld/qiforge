@@ -16,6 +16,12 @@ export interface BatchInvokeInput {
   };
   prepared: PreparedRequest;
   inputMessages: BaseMessage[];
+  /**
+   * Per-turn abort controller (the Matrix bridge constructs one per flushed
+   * turn). Wired into the invoke config's `signal` so aborting it cancels
+   * the graph run mid-flight.
+   */
+  abortController?: AbortController;
 }
 
 export interface BatchInvokeResult {
@@ -41,10 +47,13 @@ export class BatchInvoker {
   constructor(private readonly agentBuilder: AgentBuilder) {}
 
   async invoke(input: BatchInvokeInput): Promise<BatchInvokeResult> {
-    const { payload, prepared, inputMessages } = input;
+    const { payload, prepared, inputMessages, abortController } = input;
 
-    const { agent, stateInput, langGraphConfig } =
-      await this.agentBuilder.build({ payload, prepared, inputMessages });
+    const { agent, stateInput, langGraphConfig, capabilityRouteShadow } =
+      await this.agentBuilder.build(
+        { payload, prepared, inputMessages },
+        abortController,
+      );
 
     // The shared config from AgentBuilder is tuned for `streamEvents`
     // (`version: 'v2'`, `streamMode: ['updates','messages']`). Passing a
@@ -57,6 +66,10 @@ export class BatchInvoker {
       stateInput,
       invokeConfig,
     );
+    // This path is the one that holds the final state, so it is where the
+    // capability router's shadow prediction can be checked against what the
+    // model actually loaded. Logging only; nothing about the reply changes.
+    capabilityRouteShadow?.compare(result.loadedPlugins);
     const messages = result.messages;
     const lastMessage = messages?.at(-1);
     if (!lastMessage) {
@@ -65,7 +78,9 @@ export class BatchInvoker {
     return {
       message: {
         type: lastMessage.type,
-        content: String(lastMessage.content),
+        // `.text` flattens array-shaped content (Responses-API streams) to
+        // the text blocks; `String()` would render those as [object Object].
+        content: lastMessage.text,
         id: lastMessage.id ?? '',
       },
       sessionId: prepared.sessionId,

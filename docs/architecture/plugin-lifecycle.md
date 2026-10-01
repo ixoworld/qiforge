@@ -21,6 +21,7 @@ These run during the warm pass (boot phase 15) once with a synthetic `pluginName
 | `getTools(ctx)`                    | The tool list — re-used on every request build        |
 | `getSubAgents(ctx)`                | The sub-agent list — re-used on every request build   |
 | `getMiddlewares(ctx)`              | The middleware list — re-used on every request build  |
+| `getDecisions(ctx)`                | Bounded Decision definitions — process-wide registry  |
 | `getSharedState()`                 | The accessor map — wired into the SharedStateRegistry |
 | `configSchema` (field, not a hook) | Merged into the env schema at boot phase 5            |
 
@@ -84,7 +85,7 @@ graph TD
     G --> H[getNestModules]
     H --> I[getAuthExcludedRoutes]
     I --> J[Nest boots]
-    J --> K[Warm caches:<br/>getTools, getSubAgents,<br/>getMiddlewares, getSharedState]
+    J --> K[Warm caches:<br/>getTools, getSubAgents,<br/>getMiddlewares, getDecisions,<br/>getSharedState]
     K --> L[Server listens]
 
     L --> M[Per request:<br/>getRequestTools,<br/>getRequestSubAgents]
@@ -96,7 +97,7 @@ graph TD
 
 `PluginContext` (boot-time) holds only what's known at boot: `config`, `identity`, `availablePlugins`, `logger`. No user, no session.
 
-`RuntimeContext` (per-request) holds the full per-request bag: `user`, `session`, `history`, `secrets`, `matrix`, `ucan`, `llm`, `emit`, `logger`, `abortSignal`, `shared`, `toolCallId`.
+`RuntimeContext` (per-request) holds the full per-request bag: `user`, `session`, `history`, `secrets`, `matrix`, `ucan`, `decisions`, `llm`, `emit`, `logger`, `abortSignal`, `shared`, `toolCallId`.
 
 Tool handlers receive `RuntimeContext` even if their plugin only implements `getTools` (the boot-time hook). The boot/runtime split is about _registration_, not _execution_.
 
@@ -114,6 +115,7 @@ See [runtime-context.md](runtime-context.md) for how `buildRuntimeContext` synth
 | `getTools`, `getRequestTools` throws         | Logged with plugin name, plugin's contribution skipped for the request; rest of build continues. |
 | `getSubAgents`, `getRequestSubAgents` throws | Same — Promise.allSettled in `collectSubAgentsWithFallback`.                                     |
 | `getMiddlewares` throws                      | Same.                                                                                            |
+| `getDecisions` throws                        | Boot fails during the warm Decision registry pass.                                               |
 | Tool handler throws                          | Tool error propagates to the agent loop; LangChain's tool retry handles one retry.               |
 | Middleware hook throws                       | Propagates to the agent loop; surfaces as a turn error.                                          |
 

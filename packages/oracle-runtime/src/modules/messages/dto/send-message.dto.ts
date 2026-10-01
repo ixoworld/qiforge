@@ -179,7 +179,7 @@ export class SendMessageDto {
     description:
       'Optional model id to answer this message with. Must be one of the ids returned by GET /models; an unknown or omitted value falls back to the oracle default model.',
     required: false,
-    example: 'openai/gpt-5.4-nano',
+    example: 'openai/gpt-5.6-luna',
     type: String,
   })
   @IsOptional()
@@ -218,6 +218,7 @@ export class SendMessageDto {
   metadata?: Record<string, unknown> & {
     editorRoomId?: string;
     spaceId?: string;
+    sessionRunId?: string;
   };
 
   @ApiProperty({
@@ -290,6 +291,11 @@ export class SendMessagePayload {
     editorRoomId?: string;
     currentEntityDid?: string;
     spaceId?: string;
+    /**
+     * Session run the client has open in `editorRoomId`. Flow documents keep
+     * per-run state, so tools that write runtime output need the exact run.
+     */
+    sessionRunId?: string;
   };
 
   /**

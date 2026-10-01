@@ -1,0 +1,455 @@
+# Architecture
+
+One Worker deployment = one oracle. Two Durable Object classes do all the
+work; the Worker itself is a thin Hono shell that authenticates a request and
+forwards it to the right object.
+
+```mermaid
+graph LR
+    Client[Portal / SDK / curl] -->|HTTP + SSE, UCAN auth| Shell[Hono shell]
+    Shell -->|per user DID| UserDO[UserOracleDO × N users]
+    Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
+    Gateway -->|decrypted turn| UserDO
+    UserDO -->|reply / media| Gateway
+    UserDO -->|export .db.gz| Owner[User-owned file in the IXO VFS]
+```
+
+## The objects
+
+### `UserOracleDO` — one per user DID
+
+Holds the user's SQLite database (LangGraph checkpoints, sessions, the full
+transcript) in Durable Object storage, opened through wa-sqlite (WASM). The
+file is bounded by DO storage (10 GB), not by isolate memory: SQLite sees
+4 KB pages, storage packs them into 64 KB chunk rows (16 pages per row)
+because DO SQLite bills per row regardless of size — a checkpointer turn
+writes about 5 chunk rows instead of 30–80 page rows.
+
+The object runs the agent turn (LangChain `createAgent`) and streams SSE
+straight from the object. It is single-threaded, which replaces the Node
+runtime's per-user ref-counting, busy-timeouts and cron locks outright.
+
+**Capability router.** On-demand plugin tools are bound at build time but
+hidden by the capability gate until the model calls `load_capability`, which
+costs a model round trip. With `CAPABILITY_ROUTER=on` the turn build
+(`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
+(`src/core/capability-router.ts`) over the user's message and the on-demand
+plugins the thread has not loaded, and hands the routed plugin to
+`createMainAgent` as `preloadedPlugins`. The gate admits its tools and tool
+handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
+never written to the checkpointed `loadedPlugins` channel, which stays the
+monotonic record of what `load_capability` loaded. The router fails open — a
+missing provider, a timeout or a malformed verdict preloads nothing and warns
+`[capability-router] … status=fallback reason=<error name>`; a preload logs
+`[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
+the same evaluation under `waitUntil` without awaiting it, logs
+`[capability-router-shadow] … wouldPreload=[…]`, and after the turn compares
+the prediction with what the turn actually loaded (`agree=<bool>`).
+
+### `MatrixGatewayDO` — one per oracle
+
+A subclass of `MatrixBotDO` from
+[`@ixo/matrix-bot-workers-sdk`](https://www.npmjs.com/package/@ixo/matrix-bot-workers-sdk)
+(`src/matrix/gateway-do.ts`). The SDK owns everything generic about running
+an E2EE Matrix bot on Workers:
+
+- password login and the device identity (the same device survives eviction
+  and restart; a device rotation is the recovery path);
+- E2EE through `@matrix-org/matrix-sdk-crypto-wasm`, with the crypto store
+  persisted into DO storage;
+- its own `/sync` loop under an alarm-driven keep-alive (no initial sync,
+  ever: the first start of an account bootstraps from `/joined_rooms`, later
+  starts resume from the persisted sync token);
+- paced, durable sends: one FIFO per room, a token bucket that mirrors the
+  homeserver's per-sender limit, `interactive` before `background`, an
+  outbox that survives restarts, poison-row eviction after three hung
+  attempts;
+- resumable catch-up of rooms that had events while the bot was down;
+- invite handling, room upgrades, hot-room memory bounds, the idle recycle
+  and the one-time-key conflict detector.
+
+The subclass adds only what is specific to the oracle:
+
+- inbound room messages → user-object turns (`src/matrix/ingest.ts` debounces
+  per thread for 500 ms and builds one turn per burst, with attachments and
+  the thread or quote-reply chain resolved; the thread root is the session
+  id and the reply goes into the thread, as on Node — see
+  [operations](operations.md#turns-threads-are-sessions));
+- a durable turn inbox (`src/matrix/inbox-store.ts`): every accepted room
+  message is written to the gateway's SQLite before anything waits on the
+  network and deleted when its turn has ended, so a gateway reset during the
+  LLM turn re-dispatches the message on the next start instead of losing the
+  reply; replies carry a transaction id derived from the event id, and the
+  user object's turn ledger (`src/do/matrix-turn-ledger.ts`) guarantees a
+  turn never runs twice for one event;
+- user ↔ oracle room resolution from DIDs (alias on the user's own
+  homeserver, see [operations](operations.md#rooms-and-aliases));
+- dedicated `[Task] <title>` rooms;
+- user SQLite snapshots as encrypted room media (`m.ixo.media_upload` +
+  `m.ixo.media_state`, wire-identical to the Node runtime — read-only legacy
+  today);
+- the oracle's P-256 secrets key from its account room;
+- a second, crypto-less password device for plugins that drive a raw
+  matrix-js-sdk client (editor, flows).
+
+### Two Worker scripts: the gateway split
+
+Every Durable Object of one script shares that script's isolate on a given
+server, and an isolate has a 128 MB heap. With the gateway (matrix-js-sdk,
+the crypto WASM, room state) in the same heap as every user object, a user's
+flush or import spike could reset the bot and the bot's footprint counted
+against the user objects' budget. The runtime therefore ships as two
+scripts:
+
+| Script                     | Entry                                                         | Holds                                   | Bundle (devnet)       |
+| -------------------------- | ------------------------------------------------------------- | --------------------------------------- | --------------------- |
+| oracle (`<name>`)          | `createOracleWorker` (`src/index.ts`)                         | Hono shell + `UserOracleDO` × N         | 24 MiB / 5.4 MiB gz   |
+| gateway (`<name>-gateway`) | `createGatewayWorker` (`@ixo/oracle-runtime-workers/gateway`) | `MatrixGatewayDO` × 1 + keep-alive cron | 10.6 MiB / 2.7 MiB gz |
+
+The gateway entry imports nothing from `core/` or `plugins/`, so its bundle
+carries no LangChain, MCP or editor code. The two scripts talk over
+cross-script Durable Object bindings (`script_name`): the oracle's
+`MATRIX_GATEWAY` binding points at the gateway script's class, the gateway's
+`USER_ORACLE` binding points back. RPC is identical either way, so nothing
+inside the objects depends on the layout; the single-script layout
+(`wrangler.jsonc`, used by the local harness) stays supported and
+`createOracleWorker` keeps exporting `MatrixGatewayDO` for it. How to
+migrate a deployment between layouts is in
+[configuration](configuration.md#two-scripts-and-migrations).
+
+## Self-sovereign storage
+
+The Durable Object only ever holds a **working copy**. The durable file the
+user owns is `/.oracles/<oracleDid>/state.db.gz` in the user's IXO VFS — the
+system of record.
+
+- **One delegation, no other grant channel.** Every VFS request is a
+  single-use invocation minted from the delegation the user deposited for
+  this oracle (`POST /delegation`, the `ucan_delegation` room state — the
+  same delegation Matrix turns and every plugin mint from). It must carry
+  `{ can: '*', with: 'ixo:filesystem/.oracles', nb: { hidden: ['/.oracles'] } }`
+  (the whole personal library, `ixo:filesystem`, also qualifies; nothing
+  narrower does, because the store lists `/.oracles`). A delegation without
+  it means the user is "not on VFS": an existing legacy copy still boots
+  from Matrix media and stays in the object until the user re-authorizes,
+  a user with nothing else is refused with 403 `NO_VFS_DELEGATION`.
+  `GET /delegation` reports the stored delegation's `capabilities` so a
+  client can detect an older delegation and re-mint. The UCAN store worker
+  plays no part in the owner copy (the vfs plugin's file tools still read
+  their library-wide grant from it).
+- The user's Matrix room media (`m.ixo.media_upload` + `m.ixo.media_state`)
+  is a **read-only legacy source**: checked once when the VFS has no file
+  yet, migrated into the VFS on first touch, never written again. The
+  migration is streamed end to end: the gateway hands the media across the
+  object boundary as stored (ciphertext plus its `EncryptedFile` fields),
+  the user object decrypts, gunzips and header-checks it chunk by chunk into
+  its working copy, then flushes that copy to the VFS from a snapshot like
+  every other flush — so a Node-era history of any size costs a few chunks
+  of memory (a 50 MB checkpoint used to be materialised three times over in
+  the object and reset its 128 MB isolate on the first Portal open after
+  cutover). Once the VFS is confirmed to hold the file (the first verified
+  flush, or the first boot that loads it from the VFS), the old Matrix copy
+  is redacted so no second copy of the history lingers. `OWNER_STORE=matrix` forces legacy
+  room-media storage for environments without a VFS worker (the local
+  harness only).
+- There is no Matrix fallback for writes: a failed VFS flush keeps the
+  working copy dirty in DO storage (durable, replicated) and retries.
+- Export runs on a debounced alarm after every turn (24 h); a cold object
+  re-imports the file; deleting the file upstream deletes the working copy
+  only when it holds no turns. The exact rules are in
+  [operations → user objects](operations.md#user-objects-and-the-owner-copy).
+- Blobs are gzipped per row (`sqlite/blob-codec.ts`; gzip magic detected on
+  read, so uncompressed legacy rows coexist) and a background compactor
+  rewrites and `VACUUM`s files imported from the Node runtime. Nothing is
+  pruned or summarised. A Node-written `.db` loads here; a compressed file
+  is no longer readable by the Node runtime.
+
+### R2 page tier
+
+With an R2 bucket bound as `TIER_BUCKET`, the working copy is split in two
+(`src/sqlite/page-tier.ts`): the **hot set** stays as 64 KiB chunk rows in
+the object's SQLite exactly as before, and chunks no turn touched for two
+daily periods are moved into immutable **1 MiB segment objects** in R2
+(`<object id>/<file>/<segno>.<gen>`, 16 chunks each) and their rows
+deleted. A small map in the object (`vfs2_tier_segments`: segment → object
+generation + a 16-bit slot mask) says where every chunk lives; a hot row is
+always the truth for the pages it holds. The user's VFS file stays the
+system of record — an export reads hot rows and cold segments alike — so
+the tier changes cost, not ownership, and needs no data migration.
+
+**Opt-in, per script.** The tier exists only when the script binds an R2
+bucket as `TIER_BUCKET`. Without the binding nothing below runs: every
+chunk stays a row in the object's SQLite, no tier table is touched, no R2
+call is made, and the working copy is bounded by Durable Objects' **10 GB
+cap per user**. With it, the object keeps only the hot set and a user's
+history is bounded by R2 (5 TiB per object, no account cap). The switch
+can be flipped later on a live oracle: existing rows are treated as full
+hot chunks and the first pass moves the cold ones out.
+
+What makes it cheap and fast:
+
+- **No R2 call on the hot path.** A turn's working set is hot by
+  definition (it was touched today). Eviction runs from the housekeeping
+  alarm at most every six hours, rewrites whole segments (one PUT, plus one
+  GET when the segment already existed), and deletes the evicted rows in
+  the same storage transaction as the map update — a crash leaves at worst
+  an orphan object, swept later, never a hole.
+- **Cold reads cannot block, so they retry.** The VFS is synchronous. A
+  read of a cold page records a miss and fails the statement with
+  `SQLITE_IOERR`; `DoSqliteDatabase` fetches the missed segments (plus one
+  of read-ahead), pins them in memory for the retry, and re-runs the
+  statement — or rolls back and re-runs the whole transaction, which is
+  why the checkpointer's and stores' callbacks only issue statements. Pins
+  are released into the LRU when the statement or transaction ends; a
+  statement needing more than `TIER_MISS_PIN_BYTES` worth of cold data
+  (32 MiB) fails with a clear error rather than thrashing.
+- **Writes never miss.** SQLite writes reused free-list pages without
+  reading them, so a page written over a cold chunk becomes a **partial
+  row** (`vfs2_chunks.mask` names its valid pages); the missing pages come
+  from the R2 slot when read, and the next eviction merges the row into
+  its segment.
+- **Chunk 0 never moves.** `sqlite3_open_v2` reads the file header before
+  any statement could retry.
+- **Snapshots stay consistent.** The flush pins a snapshot-time copy of the
+  map; a pre-image of a cold chunk is completed from the segment it mapped
+  then, and no object referenced by an open snapshot is deleted.
+- **Truncation, import, VACUUM.** A truncate narrows or drops the affected
+  segments in the same transaction (a regrown file never reads stale
+  bytes); an import or wipe drops the file's map and objects; `VACUUM`
+  pulls every cold chunk home first (`materialize`) because it reads the
+  whole file synchronously.
+
+`GET /debug/storage` reports the tier (`hotRows`, `coldSegments`, R2 op
+counters, misses, retries, `lastPassAt`); `POST /debug/storage/tier-flush`
+runs a pass now (`{ "force": true }` ignores recency). The cost effect is in
+[Running cost at scale](#running-cost-at-scale).
+
+Measured on devnet (2026-09-13, `test/load/tier-devnet.mts`, same build
+with and without the binding): a 49 MB user went from 785 hot rows to 16
+(1 MB) in one forced pass of 11.7 s (50 segment PUTs); after a hard reset
+of the object, small turns took 1.3–3.4 s cold against 1.3–4.0 s hot, the
+transcript read 171 ms against 212 ms, and a recall turn on an old session
+2.4 s against 1.5 s — the whole cold phase needed 3 misses and 3 retries.
+The daily export of a fully cold file reads every segment twice (hash and
+length in one pass, the upload in the second): 98 GETs and 14.8 s for the
+50 segments, against 15.1 s for the same file before the tier. A 2 MB user
+went from 32 rows to 1 in 2 s with no measurable turn difference.
+
+### What fills a user's file
+
+Measured on a devnet user after ~350 sessions / 2,500 messages (26 MB
+working copy, 16.5 MB gzipped in the VFS): LangGraph `writes` 35 %,
+`messages` 27 %, `checkpoints` 21 %, indexes 13 %. Inside `messages`, tool
+outputs are ~90 % of the text, and every message is stored twice (the
+plain-text column the Node schema declares, plus the gzipped blob that is
+the only copy anything reads). Checkpoints are kept at 10 per thread
+(`DEFAULT_MAX_CHECKPOINTS_PER_THREAD`).
+
+Candidates deliberately not done yet, in order of payoff: cap or
+de-duplicate large tool outputs; a full-text index (our wa-sqlite build has
+no FTS5); native DO SQLite instead of the in-isolate WASM engine (removes
+the ~16 MB per-object heap, loses raw-file export); a resume of the turn
+after an isolate reset (the checkpointer already saves every step, but a
+tool mid-flight at the reset would run twice).
+
+## Object lifetime and cost
+
+An object costs by how long it is **loaded**, how much it **stores**, and how
+many rows it **reads and writes**. Cloudflare's SQLite-backed Durable Object
+prices (paid plan, beyond the included quotas): duration $12.50 per million
+GB-s with every loaded object charged at 128 MB; requests $0.15 per million;
+storage $0.20 per GB-month; rows read $0.001 per million; rows written or
+deleted $1.00 per million.
+
+- **Loaded time is the expensive meter.** An object is loaded from the first
+  request until ~10 s after the last one, then unloaded (storage untouched;
+  the next request boots it again, 200–400 chunk rows read). A 5 s turn plus
+  the idle tail is ≈ 2.5 GB-s; a user with 100 turns a day costs ≈ $0.10 a
+  month; an object kept loaded around the clock ≈ $4.15 a month. The gateway
+  is the one intentionally always-loaded object. Anything that keeps a user
+  object awake between messages — a timer, an un-hibernated WebSocket, an
+  open MCP stream — turns a per-turn cost into a per-tab-open cost; see the
+  workerd rules below.
+- **Storage is cheap; wiping is not free.** For a 28 MB working copy,
+  keeping it costs $0.0056 a month; wiping and re-importing it costs ≈
+  $0.0009 per cycle, about five days of storage. Hence `IDLE_EVICT_MS` is
+  five days: a daily user is never wiped, a lapsed one costs nothing after
+  the fifth day.
+- **Concurrency, not sessions, is the memory limit.** Only loaded objects
+  occupy the isolate: with the 4 MiB chunk cache and streamed flush/import a
+  turn holds roughly 10–20 MB, so several turns run concurrently per server.
+
+### Storage cost planning
+
+Resident DO storage is the dominant cost at scale. Idle users cost nothing
+after the idle wipe, **but scheduled tasks count as activity**: a user with
+a recurring task keeps their working copy resident indefinitely. Worked
+example: 10,000 task-holding users × 1 GB resident ≈ $2,000/month; with the
+blob compression the same history is realistically 100–300 MB, ≈
+$200–600/month. Evicting task users between runs does not help — re-import
+costs more in row writes than the storage it saves.
+
+The structural fix is the **R2 page tier** above: hot chunks in the DO,
+the rest in R2 ($0.015/GB-month, ~13× cheaper per byte; the example drops
+to ≈ $150/month plus a hot set of a few MB per user; the 10 GB per-user cap
+disappears). Bind `TIER_BUCKET` to turn it on; nothing migrates. The Slack
+watermark alerts (`SLACK_ALERT_WEBHOOK_URL`, one alert per whole GB from
+1 GB) now watch the hot set only.
+
+### Running cost at scale
+
+What one oracle costs on Cloudflare per month, excluding model tokens and the
+services it calls (Matrix, memory engine, sandbox, VFS). Estimated
+2026-09-12 from the meters above and the measured checkpointer write rate
+(5.2 rows per turn, `chunk-billing.test.ts`), at Workers Paid list prices
+with the plan's included allowances subtracted (10 M Worker requests, 30 M
+CPU-ms, 1 M DO requests, 400 k GB-s, 50 M rows written, 25 B rows read, 5 GB
+SQL storage, 20 M log events).
+
+Assumptions per daily user: 10 turns a day; an object loaded ~40 s per turn
+(the model wait plus the 10 s idle tail); ~12 rows written and ~500 read per
+turn; ~15 shell requests and ~40 console lines per turn; a 100 MB average
+resident working copy.
+
+| Monthly cost line            | What it pays for                                                                                                | 100 users     | 1,000         | 10,000        | 100,000       |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- | ------------- | ------------- | ------------- |
+| Workers Paid base            | the account plan                                                                                                | $5            | $5            | $5            | $5            |
+| DO loaded time, gateway      | one bot object resident around the clock (fixed)                                                                | $0            | $4            | $4            | $4            |
+| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work                                                             | $1            | $14           | $187          | $1,915        |
+| DO requests                  | shell→object calls, gateway RPCs, alarms, pings                                                                 | $0            | $0.4          | $5            | $54           |
+| SQLite rows written          | checkpoints, sessions, tasks, meta                                                                              | $0            | $0            | $0            | $310          |
+| SQLite rows read             | object boots and turn reads                                                                                     | $0            | $0            | $0            | $0            |
+| SQLite storage, tier OFF     | resident working copies, all in the object (100 MB average)                                                     | $1            | $19           | $199          | $1,999        |
+| SQLite storage, tier ON      | the hot set only (~5 MB per user)                                                                               | $0.10         | $1            | $10           | $100          |
+| R2 storage, tier ON          | the cold ~95 MB per user at $0.015/GB-month                                                                     | $0.14         | $1.43         | $14           | $143          |
+| R2 operations, tier ON       | the two-pass daily export (2 GETs per cold segment) + the eviction pass (a GET and a PUT per rewritten segment) | $0.35         | $3.5          | $35           | $351          |
+| Worker requests + CPU        | the HTTP shell, auth, rate limiting                                                                             | $0            | $0            | $13           | $158          |
+| Workers Logs                 | observability events from console output                                                                        | $0            | $0            | $60           | $708          |
+| **Total, tier OFF**          |                                                                                                                 | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
+| **Total, tier ON**           |                                                                                                                 | **~$7**       | **~$29**      | **~$330**     | **~$3,750**   |
+| Per user per month, OFF / ON |                                                                                                                 | $0.07 / $0.07 | $0.04 / $0.03 | $0.05 / $0.03 | $0.05 / $0.04 |
+
+How to read it:
+
+- **Loaded time and storage carry the bill.** Both scale linearly with
+  users; everything else stays inside the allowances until roughly 10,000
+  daily users. Storage is the swing line: at a 1 GB average instead of
+  100 MB the 100,000-user storage line is $20,000.
+- **The gateway is a throughput limit before it is a cost.** Its loaded time
+  is fixed at ≈ $4 whatever the user count, but one object with a
+  3-messages-per-second Matrix send budget cannot mirror the traffic of
+  10,000-plus daily users.
+- **Logs are the avoidable line.** At the current verbosity they are the
+  third-largest cost at scale.
+
+Future improvements, in the order they pay off:
+
+1. **Log volume.** Lower the default `LOG_LEVEL`, keep per-turn diagnostics
+   behind `debug`, and set a `head_sampling_rate` in the observability
+   config. Removes most of the Workers Logs line with no runtime change.
+2. **R2 page tier** — shipped (above). With the hot set in the object and
+   the rest in R2 the storage-related lines fall from $1,999 to ~$594 at
+   100,000 users (the two-pass daily export is now the larger part of it)
+   and the 10 GB per-user cap is gone; bind `TIER_BUCKET` to turn it on.
+   The user's VFS file stays the system of record, so no data migration.
+3. **Gateway sharding.** Split the always-loaded gateway per user cohort (or
+   raise `MATRIX_SEND_RATE_PER_SECOND` with the homeserver's consent) before
+   the mirror traffic of ~10,000 daily users saturates one object.
+4. **Shorter loaded time per turn.** The model wait is billed as loaded
+   time. Long tool chains belong in sub-agents, after-turn work (titles,
+   history indexing) should not extend the tail, and a cheaper routing model
+   for the summariser keeps that call short.
+5. **Resident task holders.** A recurring task keeps its user's working copy
+   resident; once task users are a large share of storage, a lighter
+   representation for idle-but-scheduled users (the R2 tier again, or a
+   task-only object) is the fix.
+6. **Row writes at scale.** They only surface past ~50,000 daily users; the
+   chunked page store already batches 16 pages per row, so the next step is
+   a larger chunk or fewer checkpoints per turn.
+
+### Compared with the Node runtime on Vultr
+
+The same oracle on the Node runtime (`@ixo/oracle-runtime` on a Vultr
+Kubernetes cluster), same assumptions, at Vultr list prices (2026-09):
+Optimized Cloud General Purpose nodes, 8 vCPU / 32 GB at $240 a month
+(smaller sizes at the low end); NVMe block storage $0.10 per GB-month; load
+balancer $10; managed Redis $15–60 (the Node runtime needs it for tasks and
+throttling); VKE control plane free. Sizing: 150 MB of RAM per in-flight
+turn plus the process baseline, peak concurrency 4× the daily average, one
+spare node for HA. Disk: the Node saver stores pages raw, so a user's file
+is ~5× the Workers working copy — 500 MB average. Model tokens and shared
+services are excluded on both sides.
+
+| Monthly cost                                     | 100 users     | 1,000         | 10,000        | 100,000       |
+| ------------------------------------------------ | ------------- | ------------- | ------------- | ------------- |
+| **Cloudflare total** (table above)               | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
+| Vultr nodes (RAM for in-flight turns + HA spare) | $120          | $240          | $720          | $2,640        |
+| Vultr block storage (user SQLite files, NVMe)    | $5            | $50           | $500          | $5,000        |
+| Redis + load balancer                            | $25           | $25           | $70           | $70           |
+| **Vultr total**                                  | **~$150**     | **~$315**     | **~$1,290**   | **~$7,700**   |
+| Per user per month (Cloudflare / Vultr)          | $0.07 / $1.50 | $0.04 / $0.32 | $0.05 / $0.13 | $0.05 / $0.08 |
+
+Cloudflare is cheaper at every scale (these figures keep the R2 page tier
+off; with it on the 100,000-user total is about $3,750), and the gap is
+widest where it matters most for a new oracle:
+
+- **Small scale.** Workers meter per second and per GB, so 100 users cost
+  pocket change. A Node deployment pays for two nodes, a balancer and Redis
+  whether or not anyone chats — unless it rides on spare capacity in a
+  cluster that already exists, which is what the devnet Node companion did.
+- **Large scale.** Both converge on the same two lines. Storage is $2,000
+  against $5,000 because the Workers saver gzips pages and Node stores them
+  raw; compute is $1,900 of loaded time against $2,600 of nodes. HDD block
+  storage at $0.04 per GB would pull the Vultr total to about $4,700, at
+  the cost of slower page reads.
+- **Node needs a redesign before ~10,000 users.** Each user's database lives
+  on one pod's volume, so several pods mean pinning users to pods behind a
+  sharding layer, a 10 TB per-volume ceiling on Vultr, and a Matrix upload
+  cron that scales with users. None of that is in the table; it is the
+  reason the Workers port exists.
+- **Only the Cloudflare number still has cheap moves left.** The R2 page
+  tier takes its storage line from $2,000 to about $150 at 100,000 users
+  and log sampling removes most of the $700 log line. There is no
+  equivalent on the Node side.
+
+Every figure is ±50%; the Vultr numbers in particular depend on how much
+headroom a cluster runs with.
+
+## Rules of the road on workerd
+
+These came out of production incidents and are enforced in code; break one
+and an object stops hibernating or a request dies with an opaque error.
+
+- **No timer may outlive a request.** A pending `setTimeout`/`setInterval`
+  keeps a Durable Object resident and blocks WebSocket hibernation.
+  `@ixo/ucan`'s invocation store used to start an hourly sweep interval per
+  validator; `shell/auth.ts` shares one store per isolate with auto-cleanup
+  off. Tools register cleanups with `RuntimeContext.onTurnEnd`. With debug
+  routes on, `GET /debug/realtime` → `pendingTimers` lists every live timer
+  with its creation stack.
+- **No MCP client may outlive a call.** A streamable-HTTP MCP client keeps a
+  server→client stream open for as long as it exists, which counts as
+  in-flight I/O: the object never hibernates and is billed around the
+  clock. Clients connect, call and close per invocation (memory and sandbox
+  at turn end, firecrawl per call). Never hand the MCP SDK a tool timeout
+  either — its per-request timer pins the object for the whole window;
+  every upstream call races our own always-cleared timer
+  (`src/plugins/mcp-call-timeout.ts`).
+- **Never store the global `fetch`.** workerd rejects `fetch` called with a
+  foreign `this` ("Illegal invocation"). Wrap it:
+  `(input, init) => globalThis.fetch(input, init)`. matrix-js-sdk clients
+  and the BYO reachability probe both went through this.
+- **No code generation from strings.** The MCP SDK's default Ajv validator
+  compiles schemas to code, which workerd forbids; the repo patches
+  `@langchain/mcp-adapters` (`patches/`) to use the cfworker validator.
+  jsdom needs `node:vm`, so the editor plugin aliases it to a linkedom shim.
+- **Typed errors do not cross the DO RPC boundary.** The caller gets a plain
+  `Error` with only the message, so owner-copy failures travel as a JSON
+  envelope in the message (`toRpcError` / `parseOwnerCopyFailure`) and the
+  shell maps them to 403 / 503.
+- **A stub is one incarnation.** After the gateway restarts, calls on a stub
+  created earlier fail with `Network connection lost`; the user object's
+  `gateway` getter is a self-refreshing proxy (`src/do/fresh-stub.ts`) and
+  waited sends retry with the same transaction id (`src/do/gateway-retry.ts`).
+- **DO SQL** allows at most 100 bound parameters per statement and dislikes
+  `LIKE` patterns; wa-sqlite's heap never shrinks (~16 MiB steady state).

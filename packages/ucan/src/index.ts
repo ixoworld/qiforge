@@ -66,6 +66,7 @@ export type {
   DIDKeyResolutionResult,
   DIDKeyResolver,
   InvocationStore,
+  RevocationChecker,
   ValidationResult,
   SerializedInvocation,
 } from './types.js';
@@ -104,6 +105,7 @@ export {
   serializeInvocation,
   serializeDelegation,
   parseDelegation,
+  getDelegationCid,
   type Signer,
   type Delegation,
   type Capability,
@@ -140,7 +142,17 @@ export {
 } from './store/memory.js';
 
 // =============================================================================
+// Revocation (checkers for the validator's revocationChecker option)
+// =============================================================================
+
+export {
+  InMemoryRevocationStore,
+  createUcanStoreRevocationChecker,
+  type UcanStoreRevocationCheckerOptions,
+} from './store/revocation.js';
+
+// =============================================================================
 // Version
 // =============================================================================
 
-export const VERSION = '1.0.0';
+export const VERSION = '2.2.0';

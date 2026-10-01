@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types.js';
 import { makeRuntimeContext } from '../../registries/test-fixtures.js';
+import { SANDBOX_NO_FILE_SENTINEL } from '../sandbox/sandbox-bridge.js';
 import type {
   SandboxMcpClientFactory,
   SandboxMcpTool,
@@ -285,7 +286,7 @@ describe('sandbox_to_vfs', () => {
   it('returns a not-found message when the sandbox file is absent (bare sentinel)', async () => {
     const sandbox = makeSandboxFactory({
       // Bare (non-JSON) stdout — exercises the string fallback.
-      run: async () => '__VFS_NOFILE__\n',
+      run: async () => `${SANDBOX_NO_FILE_SENTINEL}\n`,
     });
     const { fetchImpl, calls } = makeFetch(() => jsonRes(200, {}));
 

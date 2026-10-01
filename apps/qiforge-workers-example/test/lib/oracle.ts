@@ -1,0 +1,294 @@
+/**
+ * Boot the example oracle against the local harness for tests:
+ *   - provisions the bot Matrix account (registration token) and writes
+ *     `.dev.vars` (never committed) from harness constants + the OpenRouter
+ *     key found in `apps/qiforge-example/.env`;
+ *   - starts `wrangler dev` unless `ORACLE_URL` points at a running one;
+ *   - waits for `/health` and for the Matrix gateway to report `running`.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  BLOCKSYNC_GRAPHQL_URL,
+  HARNESS_DIR,
+  MATRIX_BASE_URL,
+  MATRIX_SERVER_NAME,
+  UCAN_STORE_URL,
+  VFS_BASE_URL,
+  ensureOracleAccount,
+  run,
+  waitFor,
+  type HarnessAccount,
+} from './harness';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const APP_DIR = join(HERE, '..', '..');
+export const REPO_ROOT = join(APP_DIR, '..', '..');
+
+/** Filled by `provisionDevVars()` from the oracle's harness account. */
+export let ORACLE_DID = process.env.ORACLE_DID ?? '';
+export let ORACLE_ENTITY_DID = '';
+export let BOT_USER_ID = '';
+export let oracleAccount: HarnessAccount | undefined;
+
+function readDotEnv(path: string): Record<string, string> {
+  if (!existsSync(path)) return {};
+  const out: Record<string, string> = {};
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line);
+    if (!m) continue;
+    let v = m[2] ?? '';
+    if (
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
+    )
+      v = v.slice(1, -1);
+    out[m[1] ?? ''] = v;
+  }
+  return out;
+}
+
+export interface ProvisionedOracle {
+  devVars: Record<string, string>;
+}
+
+export interface ProvisionOptions {
+  /**
+   * Point the oracle at local VFS + UCAN-store workers and select the
+   * DEFAULT owner-store path (the `MigratingOwnerStore`: IXO VFS as system
+   * of record, Matrix media as read-once legacy). Also seats
+   * `ORACLE_SIGNING_MNEMONIC` so the oracle can mint the two-hop UCANs.
+   */
+  vfs?: { vfsBaseUrl?: string; ucanStoreUrl?: string };
+  /**
+   * Seat `ORACLE_SIGNING_MNEMONIC` (the oracle account's chain-registered
+   * ed25519 key) without the VFS worker wiring — for suites that exercise
+   * UCAN minting against other services (e.g. the MCP e2e). Implied by `vfs`.
+   */
+  signing?: boolean;
+  /** Extra `.dev.vars` entries, applied last (e.g. `MEMORY_MCP_URL`). */
+  extra?: Record<string, string>;
+}
+
+export async function provisionDevVars(
+  opts: ProvisionOptions = {},
+): Promise<ProvisionedOracle> {
+  const nodeEnv = readDotEnv(
+    join(REPO_ROOT, 'apps', 'qiforge-example', '.env'),
+  );
+  const existing = readDotEnv(join(APP_DIR, '.dev.vars'));
+  const openRouterKey =
+    process.env.OPEN_ROUTER_API_KEY ??
+    existing.OPEN_ROUTER_API_KEY ??
+    nodeEnv.OPEN_ROUTER_API_KEY;
+  if (!openRouterKey)
+    throw new Error(
+      'OPEN_ROUTER_API_KEY not found (env, .dev.vars, or apps/qiforge-example/.env)',
+    );
+
+  const account = await ensureOracleAccount();
+  oracleAccount = account;
+  ORACLE_DID = account.did;
+  ORACLE_ENTITY_DID = account.did;
+  BOT_USER_ID = account.matrixUserId;
+
+  const devVars: Record<string, string> = {
+    ORACLE_DID,
+    ORACLE_ENTITY_DID,
+    BLOCKSYNC_GRAPHQL_URL,
+    MATRIX_BASE_URL,
+    MATRIX_HOMESERVER_NAME: MATRIX_SERVER_NAME,
+    MATRIX_ORACLE_ADMIN_USER_ID: BOT_USER_ID,
+    MATRIX_ORACLE_ADMIN_PASSWORD: account.matrixPassword,
+    OPEN_ROUTER_API_KEY: openRouterKey,
+    ...((process.env.DEFAULT_MODEL ?? existing.DEFAULT_MODEL)
+      ? {
+          DEFAULT_MODEL:
+            process.env.DEFAULT_MODEL ?? existing.DEFAULT_MODEL ?? '',
+        }
+      : {}),
+    LOG_LEVEL: process.env.ORACLE_LOG_LEVEL ?? 'info',
+    ...(opts.vfs
+      ? {
+          // wrangler.jsonc pins OWNER_STORE=matrix for plain local dev (a
+          // harness without the VFS workers); `.dev.vars` can override a var
+          // but never UNSET one, so 'vfs' is set explicitly here. It selects
+          // the exact same code path as production's default-unset value:
+          // the MigratingOwnerStore (VFS primary, Matrix media legacy).
+          OWNER_STORE: 'vfs',
+          VFS_BASE_URL: opts.vfs.vfsBaseUrl ?? VFS_BASE_URL,
+          UCAN_STORE_URL: opts.vfs.ucanStoreUrl ?? UCAN_STORE_URL,
+          // The oracle account's ed25519 key — registered on its IID, so the
+          // workers validate its self-signed + delegated invocations through
+          // Blocksync exactly as in production.
+          ORACLE_SIGNING_MNEMONIC: account.edSigningMnemonic,
+        }
+      : {}),
+    ...(opts.signing && !opts.vfs
+      ? { ORACLE_SIGNING_MNEMONIC: account.edSigningMnemonic }
+      : {}),
+    ...(opts.extra ?? {}),
+  };
+  writeFileSync(
+    join(APP_DIR, '.dev.vars'),
+    `# generated by test/lib/oracle.ts — local harness only\n` +
+      Object.entries(devVars)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n') +
+      '\n',
+  );
+  return { devVars };
+}
+
+export interface RunningOracle {
+  url: string;
+  stop: () => Promise<void>;
+  logs: () => string;
+}
+
+export async function startOracle(
+  opts: { port?: number; attach?: string } = {},
+): Promise<RunningOracle> {
+  const attach = opts.attach ?? process.env.ORACLE_URL;
+  if (attach) {
+    await waitFor(
+      async () => (await fetch(`${attach}/health`)).ok,
+      30_000,
+      `${attach}/health`,
+    );
+    return { url: attach, stop: async () => {}, logs: () => '' };
+  }
+  const port = opts.port ?? 8787;
+  const url = `http://127.0.0.1:${port}`;
+  let logs = '';
+  const child: ChildProcess = spawn(
+    'pnpm',
+    [
+      'exec',
+      'wrangler',
+      'dev',
+      '--port',
+      String(port),
+      '--ip',
+      '127.0.0.1',
+      '--log-level',
+      'info',
+    ],
+    {
+      cwd: APP_DIR,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, CI: '1', WRANGLER_SEND_METRICS: 'false' },
+    },
+  );
+  const onData = (d: Buffer) => {
+    const s = d.toString();
+    logs += s;
+    if (process.env.ORACLE_VERBOSE) process.stdout.write(s);
+  };
+  child.stdout?.on('data', onData);
+  child.stderr?.on('data', onData);
+  let exited = false;
+  child.on('exit', () => {
+    exited = true;
+  });
+  try {
+    await waitFor(
+      async () => {
+        if (exited)
+          throw new Error(`wrangler dev exited early:\n${logs.slice(-4000)}`);
+        return (await fetch(`${url}/health`)).ok;
+      },
+      120_000,
+      'wrangler dev /health',
+    );
+  } catch (err) {
+    child.kill('SIGTERM');
+    throw new Error(
+      `${err instanceof Error ? err.message : String(err)}\n--- wrangler logs ---\n${logs.slice(-6000)}`,
+    );
+  }
+  return {
+    url,
+    logs: () => logs,
+    stop: () =>
+      new Promise<void>((resolve) => {
+        if (exited) return resolve();
+        child.once('exit', () => resolve());
+        child.kill('SIGTERM');
+        setTimeout(() => {
+          if (!exited) child.kill('SIGKILL');
+          resolve();
+        }, 8_000);
+      }),
+  };
+}
+
+export interface RunningVfsWorkers {
+  vfsUrl: string;
+  ucanStoreUrl: string;
+  stop: () => Promise<void>;
+}
+
+/**
+ * Boot the IXO VFS + UCAN-store workers against the harness via the harness's
+ * own runner (`scripts/vfs-workers.sh` — generated local wrangler configs,
+ * D1 migrations, health + did.json waits). Requires local checkouts with
+ * `pnpm install` run (defaults: ~/dev/ixo/ixo-virtual-filesystem/
+ * ixo-virtual-filesystem and ~/dev/ixo/ixo-ucan-store-worker; override with
+ * VFS_REPO / UCAN_STORE_REPO in the harness `.env.local`).
+ *
+ * Set `VFS_WORKERS_ATTACH=1` to use already-running workers without managing
+ * their lifecycle (they are then NOT stopped on teardown).
+ */
+export async function startVfsWorkers(): Promise<RunningVfsWorkers> {
+  const vfsUrl = VFS_BASE_URL;
+  const ucanStoreUrl = UCAN_STORE_URL;
+  if (process.env.VFS_WORKERS_ATTACH) {
+    for (const url of [vfsUrl, ucanStoreUrl]) {
+      await waitFor(
+        async () => (await fetch(`${url}/health`)).ok,
+        15_000,
+        `${url}/health`,
+      );
+    }
+    return { vfsUrl, ucanStoreUrl, stop: async () => {} };
+  }
+  const script = join(HARNESS_DIR, 'scripts', 'vfs-workers.sh');
+  if (!existsSync(script))
+    throw new Error(
+      `${script} not found — update the ixo-testing-harness checkout (or set IXO_HARNESS_DIR)`,
+    );
+  // `start` blocks until both workers answer /health + /.well-known/did.json.
+  const out = await run('bash', [script, 'start'], HARNESS_DIR, 240_000);
+  if (process.env.ORACLE_VERBOSE) process.stdout.write(out);
+  return {
+    vfsUrl,
+    ucanStoreUrl,
+    stop: async () => {
+      await run('bash', [script, 'stop'], HARNESS_DIR, 60_000).catch(
+        () => undefined,
+      );
+    },
+  };
+}
+
+export async function waitForMatrixGateway(
+  url: string,
+  timeoutMs = 90_000,
+): Promise<Record<string, unknown>> {
+  let last: Record<string, unknown> = {};
+  await fetch(`${url}/matrix/start`, { method: 'POST' }).catch(() => undefined);
+  await waitFor(
+    async () => {
+      const res = await fetch(`${url}/matrix/status`);
+      last = (await res.json()) as Record<string, unknown>;
+      return last.running === true && last.cryptoReady === true;
+    },
+    timeoutMs,
+    `matrix gateway running (last: ${JSON.stringify(last)})`,
+    1000,
+  );
+  return last;
+}

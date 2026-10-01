@@ -1,6 +1,6 @@
 import { type MatrixEvent, MatrixManager } from '@ixo/matrix';
 import { Logger } from '@nestjs/common';
-import { type File } from 'node:buffer';
+import { parseUploadSizeLimit } from './media-config.js';
 
 const logger = new Logger('MatrixUploadUtils');
 
@@ -17,6 +17,14 @@ const EVENTS = {
   MEDIA_UPLOAD: 'm.ixo.media_upload',
   MEDIA: 'm.ixo.media',
 } as const;
+
+/** Message subtypes whose content addresses uploaded bytes. */
+export const MEDIA_MSGTYPES: readonly string[] = [
+  'm.file',
+  'm.image',
+  'm.video',
+  'm.audio',
+];
 
 export type MatrixMediaEvent = MatrixEvent<{
   msgtype: 'm.file';
@@ -36,20 +44,68 @@ export type MatrixMediaEvent = MatrixEvent<{
 }>;
 
 /**
- * Uploads media to a Matrix room
+ * The half of an `m.file` / `m.image` content that points at the uploaded
+ * bytes: a plain `url` in an unencrypted room, an encrypted `file` descriptor
+ * (mxc url + decryption keys) in an encrypted one.
+ */
+export type MatrixMediaSource =
+  | { url: string }
+  | { file: Record<string, unknown> };
+
+/**
+ * Upload raw bytes to the room's media repository, honoring room encryption,
+ * and return the content fragment that addresses them. Spread into any media
+ * event's content — the checkpointer's own media lane and chat-facing file
+ * sends share this one code path.
+ */
+export async function uploadMediaContent(
+  roomId: string,
+  bytes: Buffer,
+): Promise<MatrixMediaSource> {
+  const client = getClient();
+  const isRoomEncrypted = await client.mxClient.crypto.isRoomEncrypted(roomId);
+
+  logger.debug(
+    `Room ${roomId} is ${isRoomEncrypted ? 'encrypted' : 'unencrypted'}, proceeding with ${isRoomEncrypted ? 'encrypted' : 'unencrypted'} upload`,
+  );
+
+  if (!isRoomEncrypted) {
+    const mxc = await client.mxClient.uploadContent(bytes);
+    return { url: mxc };
+  }
+
+  const encrypted = await client.mxClient.crypto.encryptMedia(bytes);
+  const mxc = await client.mxClient.uploadContent(encrypted.buffer);
+  return { file: { url: mxc, ...encrypted.file } };
+}
+
+/** Payload for `uploadMediaToRoom` — raw bytes plus their descriptor. */
+export interface MediaUpload {
+  bytes: Buffer;
+  filename: string;
+  mimetype: string;
+}
+
+/**
+ * Uploads media to a Matrix room.
+ *
+ * Takes the bytes directly (not a `File`): checkpoint uploads can run to
+ * hundreds of MB, and the `File` + `arrayBuffer()` round-trip both callers
+ * used to do materialized two extra full copies of the payload.
+ *
  * @param roomId The room ID to upload the media to
- * @param file The file to upload
+ * @param media The bytes to upload with filename/mimetype metadata
  * @returns Object containing the event ID and CID of the uploaded media
  */
 export async function uploadMediaToRoom(
   roomId: string,
-  file: File, // This is the sqlite file it's .db file
+  media: MediaUpload,
   storageKey: string,
 ): Promise<{ eventId: string; storageKey: string; event: MatrixMediaEvent }> {
   const client = getClient();
 
   logger.debug(
-    `Uploading media to room ${roomId} with storageKey ${storageKey}, file size: ${file.size} bytes`,
+    `Uploading media to room ${roomId} with storageKey ${storageKey}, file size: ${media.bytes.length} bytes`,
   );
 
   // Look up the old media event ID (if any) so we can redact it AFTER the new upload succeeds.
@@ -74,66 +130,28 @@ export async function uploadMediaToRoom(
     );
   }
 
-  // Check if room is encrypted and upload media
-  const isRoomEncrypted = await client.mxClient.crypto.isRoomEncrypted(roomId);
+  const source = await uploadMediaContent(roomId, media.bytes);
+
+  const eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
+    msgtype: 'm.file',
+    body: storageKey,
+    filename: storageKey,
+    cid: storageKey,
+    sender: client.mxClient.getUserId(),
+    info: {
+      mimetype: media.mimetype,
+      size: media.bytes.length,
+    },
+    ...source,
+  });
 
   logger.debug(
-    `Room ${roomId} is ${isRoomEncrypted ? 'encrypted' : 'unencrypted'}, proceeding with ${isRoomEncrypted ? 'encrypted' : 'unencrypted'} upload`,
+    `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
   );
-
-  let event: MatrixMediaEvent;
-  let eventId: string;
-  if (isRoomEncrypted) {
-    // For encrypted rooms
-    logger.debug(`Encrypting media for storageKey ${storageKey}`);
-    const encrypted = await client.mxClient.crypto.encryptMedia(
-      Buffer.from(await file.arrayBuffer()),
-    );
-    logger.debug(`Uploading encrypted content for storageKey ${storageKey}`);
-    const mxc = await client.mxClient.uploadContent(encrypted.buffer);
-    eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
-      msgtype: 'm.file',
-      body: storageKey,
-      filename: storageKey,
-      cid: storageKey,
-      sender: client.mxClient.getUserId(),
-      info: {
-        mimetype: 'application/x-sqlite3',
-        size: file.size,
-      },
-      file: {
-        url: mxc,
-        ...encrypted.file,
-      },
-    });
-
-    logger.debug(
-      `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
-    );
-    event = await client.mxClient.getEvent(roomId, eventId);
-  } else {
-    // For unencrypted rooms
-    logger.debug(`Uploading unencrypted content for storageKey ${storageKey}`);
-    const mxc = await client.mxClient.uploadContent(
-      Buffer.from(await file.arrayBuffer()),
-    );
-    eventId = await client.mxClient.sendEvent(roomId, EVENTS.MEDIA_UPLOAD, {
-      msgtype: 'm.file',
-      body: storageKey,
-      filename: storageKey,
-      cid: storageKey,
-      sender: client.mxClient.getUserId(),
-      info: {
-        mimetype: 'application/x-sqlite3',
-        size: file.size,
-      },
-      url: mxc,
-    });
-    logger.debug(
-      `Media event created with eventId ${eventId} for storageKey ${storageKey}`,
-    );
-    event = await client.mxClient.getEvent(roomId, eventId);
-  }
+  const event: MatrixMediaEvent = await client.mxClient.getEvent(
+    roomId,
+    eventId,
+  );
 
   // Save the media event ID in the room state with storageKey as the key
   logger.debug(
@@ -277,10 +295,7 @@ export async function getMediaFromRoom(
   const event =
     cachedEvent || (await client.mxClient.getEvent(roomId!, eventId!));
 
-  if (
-    !event.content ||
-    !['m.file', 'm.image'].includes(event.content.msgtype)
-  ) {
+  if (!event.content || !MEDIA_MSGTYPES.includes(event.content.msgtype)) {
     throw new Error('Event is not a media event.');
   }
 
@@ -389,4 +404,34 @@ export async function deleteMediaFromRoom(
       `Error deleting media with storageKey ${storageKey}: ${errorMessage}`,
     );
   }
+}
+
+/**
+ * Ask the homeserver for its media upload cap. Tries the spec-current
+ * endpoint first, then the pre-Matrix-1.11 one. Returns undefined when
+ * neither answers usably — callers decide the fallback.
+ */
+export async function fetchMediaUploadSizeLimit(): Promise<number | undefined> {
+  const client = getClient();
+  const endpoints = [
+    '/_matrix/client/v1/media/config',
+    '/_matrix/media/v3/config',
+  ];
+  for (const endpoint of endpoints) {
+    try {
+      const response: unknown = await client.mxClient.doRequest(
+        'GET',
+        endpoint,
+      );
+      const limit = parseUploadSizeLimit(response);
+      if (limit !== undefined) {
+        return limit;
+      }
+    } catch (error) {
+      logger.debug(
+        `Media config lookup failed at ${endpoint}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return undefined;
 }

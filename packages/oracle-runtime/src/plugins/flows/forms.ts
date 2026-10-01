@@ -15,8 +15,8 @@ import {
   getBlockDetail,
   readRuntimeState,
   updateRuntimeState,
-} from '../editor/blocknote-helper.js';
-import { type SurveyElement } from '../editor/survey-helpers.js';
+  type SurveyElement,
+} from './ydoc-helpers.js';
 import { setStepInputs } from './edit.js';
 import { FlowError } from './errors.js';
 import { inferPortType } from './port-types.js';

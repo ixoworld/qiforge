@@ -4,23 +4,25 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { hours } from '@nestjs/throttler';
-import { File } from 'node:buffer';
 import fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { promisify } from 'node:util';
-import { gunzip, gzip } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createGunzip, createGzip } from 'node:zlib';
 
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
 import { SqliteSaver } from '@ixo/sqlite-saver';
 import path from 'path';
 import {
   deleteMediaFromRoom,
+  fetchMediaUploadSizeLimit,
   getMediaFromRoom,
   getMediaFromRoomByStorageKey,
   GetMediaFromRoomByStorageKeyResult,
@@ -29,9 +31,11 @@ import {
 } from './matrix-upload-utils.js';
 import { type BaseSyncArgs } from './type.js';
 import { getBaseEnvConfig as getConfig } from '../../config/base-env-config.js';
-
-const gzipAsync = promisify(gzip);
-const gunzipAsync = promisify(gunzip);
+import {
+  compactSqliteFileIfBloated,
+  snapshotSqliteFile,
+} from './sqlite-compaction.js';
+import { DEFAULT_MEDIA_UPLOAD_SIZE_LIMIT } from './media-config.js';
 
 /**
  * Returns true if the error is permanent (data genuinely unrecoverable),
@@ -70,13 +74,41 @@ const config = getConfig();
 /** Configure a SQLite connection with busy timeout for safe concurrent access */
 /** Configure a SQLite connection with pragmas for safe concurrent access on VPS */
 function configureSqliteConnection(db: DatabaseType): void {
+  // Must run before the first page is allocated, so it has to be the very
+  // first pragma on the connection: `auto_vacuum` only binds when SQLite
+  // creates page 1, which happens on the first write (here, the sessions
+  // table CREATE TABLE that follows). On a brand-new file this sets
+  // incremental mode immediately; on an existing file it's inert until a
+  // VACUUM rebuilds the file (the cron's bloat-triggered compaction) —
+  // never a no-op mistaken for "always safe to call late".
+  db.pragma('auto_vacuum = INCREMENTAL');
   db.pragma('journal_mode = DELETE');
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
 }
+
+/**
+ * Hard ceiling on simultaneously open user connections. Each one holds a
+ * SQLite page cache plus every prepared statement its saver owns, and none of
+ * that is visible to V8 — the heap stays small while RSS climbs, so the
+ * hourly idle sweep alone lets a busy hour push the container into an OOM
+ * kill. Past the ceiling the least-recently-used idle connection is closed.
+ */
+const MAX_CACHED_DB_CONNECTIONS = 100;
+
+/**
+ * Minimum idle time before a connection may be evicted by the size cap.
+ * `isUserActive` already excludes in-flight requests; this is a second guard
+ * so a connection opened moments ago is never closed out from under a caller
+ * that has not yet incremented the ref-count.
+ */
+const EVICTION_GRACE_MS = 60_000;
+
 @Injectable()
-export class UserMatrixSqliteSyncService implements OnModuleInit {
-  private static instance: UserMatrixSqliteSyncService;
+export class UserMatrixSqliteSyncService
+  implements OnModuleInit, OnModuleDestroy
+{
+  private static instance: UserMatrixSqliteSyncService | undefined;
 
   readonly fileEventsDatabase: DatabaseType;
   private constructor() {
@@ -130,6 +162,15 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   >();
 
   private readonly lastUploadedChecksum = new Map<string, string>();
+
+  /**
+   * Live-file checksums whose compressed snapshot exceeded the homeserver
+   * upload cap. Skips re-snapshotting an unchanged doomed file every cron
+   * tick; cleared on the next successful upload or file change.
+   */
+  private readonly oversizedChecksum = new Map<string, string>();
+
+  private uploadSizeLimit: number | undefined;
 
   /**
    * Users whose SQLite checkpoint has been synced from Matrix at least once
@@ -358,12 +399,105 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
 
     // Cache it
+    this.evictIdleConnections();
     this.dbConnectionCache.set(userDid, {
       db,
       lastAccessedAt: Date.now(),
     });
 
     return db;
+  }
+
+  /**
+   * Close least-recently-used idle connections until the cache has room for
+   * one more. Connections serving an in-flight request (`isUserActive`) or
+   * touched within {@link EVICTION_GRACE_MS} are never closed.
+   *
+   * Evicting loses nothing: the database file stays on disk and its entry
+   * stays in `filePathCache`, so the upload cron still backs it up to Matrix.
+   * The next request for that user simply reopens the connection.
+   */
+  private evictIdleConnections(): void {
+    let overflow = this.dbConnectionCache.size - MAX_CACHED_DB_CONNECTIONS + 1;
+    if (overflow <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const evictable = [...this.dbConnectionCache.entries()]
+      .filter(
+        ([userDid, entry]) =>
+          !this.isUserActive(userDid) &&
+          now - entry.lastAccessedAt > EVICTION_GRACE_MS,
+      )
+      .sort(([, a], [, b]) => a.lastAccessedAt - b.lastAccessedAt);
+
+    for (const [userDid, entry] of evictable) {
+      if (overflow <= 0) {
+        break;
+      }
+      try {
+        entry.db.close();
+      } catch (error) {
+        // Busy connection — leave it cached and try a different one.
+        Logger.warn(
+          `Failed to evict database connection for user ${userDid}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        continue;
+      }
+      this.dbConnectionCache.delete(userDid);
+      overflow -= 1;
+    }
+
+    if (overflow > 0) {
+      Logger.warn(
+        `Database connection cache is over its ${MAX_CACHED_DB_CONNECTIONS} ceiling and ${overflow} connection(s) could not be evicted — all remaining connections are active or within the eviction grace period.`,
+      );
+    }
+  }
+
+  /**
+   * Close every SQLite handle the service owns. Without this the connections
+   * outlive the Nest container and are torn down by better-sqlite3's
+   * environment cleanup hook during process exit, which aborts the process
+   * (`RemoveEnvironmentCleanupHook`: no V8 context is entered at that point).
+   *
+   * Runs after `registerGracefulShutdown` has already uploaded checkpoints to
+   * Matrix, so closing here does not skip a backup.
+   */
+  public onModuleDestroy(): void {
+    for (const [userDid, entry] of this.dbConnectionCache.entries()) {
+      try {
+        entry.db.close();
+      } catch (error) {
+        Logger.warn(
+          `Failed to close database connection for user ${userDid} during shutdown: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    this.dbConnectionCache.clear();
+
+    try {
+      this.fileEventsDatabase.close();
+    } catch (error) {
+      Logger.warn(
+        `Failed to close file events database during shutdown: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    // Drop the cached singleton: every handle it owns is now closed, so a
+    // second `createOracleApp` in the same process (the integration harness
+    // boots and closes several) must build a fresh instance rather than
+    // resurrect one whose `fileEventsDatabase` is shut.
+    if (UserMatrixSqliteSyncService.instance === this) {
+      UserMatrixSqliteSyncService.instance = undefined;
+    }
   }
 
   /**
@@ -517,7 +651,15 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     }
 
     // Delete local file + temp files + leftover WAL/SHM/journal files
-    for (const suffix of ['', '.tmp', '-wal', '-shm', '-journal']) {
+    for (const suffix of [
+      '',
+      '.tmp',
+      '.gz.tmp',
+      '.snapshot.tmp',
+      '-wal',
+      '-shm',
+      '-journal',
+    ]) {
       try {
         await fs.unlink(dbPath + suffix);
       } catch {
@@ -575,12 +717,20 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
         }
         if (now - lastAccessedAt > hours(1)) {
           try {
-            // Sync to Matrix before closing
-            await this.uploadCheckpointToMatrixStorage({ userDid });
+            // Sync to Matrix before closing. The connection is closed
+            // regardless of the returned status — even a 'skipped' upload
+            // (oversized file, etc.) still means no request holds the file,
+            // so closing the idle connection is safe either way. Only the
+            // file-cache loop below treats the status as a delete guard.
+            const status = await this.uploadCheckpointToMatrixStorage({
+              userDid,
+            });
             // Close connection (db is already from the loop iteration)
             db.close();
             this.dbConnectionCache.delete(userDid);
-            Logger.log(`Closed idle database connection for user ${userDid}`);
+            Logger.log(
+              `Closed idle database connection for user ${userDid} (backup: ${status})`,
+            );
           } catch (error) {
             Logger.error(
               `Failed to cleanup DB connection for user ${userDid}`,
@@ -602,8 +752,9 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
           continue;
         }
         if (now - lastAccessedAt > hours(1)) {
+          let status: 'uploaded' | 'unchanged' | 'skipped';
           try {
-            await this.uploadCheckpointToMatrixStorage({ userDid });
+            status = await this.uploadCheckpointToMatrixStorage({ userDid });
           } catch (error) {
             Logger.error(
               `Failed to sync checkpoint file to matrix storage for user ${userDid}`,
@@ -613,7 +764,19 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
             continue;
           }
 
-          // sync successful, delete local cache
+          if (status === 'skipped') {
+            // A 'skipped' upload means the local file is NOT known to be
+            // backed up (missing file aside — the earlier existence check
+            // already filtered those out of filePathCache). Deleting the
+            // local folder here would destroy the user's only current data
+            // (e.g. an oversized checkpoint that can never reach Matrix).
+            Logger.warn(
+              `Local checkpoint kept for user ${userDid} — backup not current (upload was skipped), refusing to delete local data`,
+            );
+            continue;
+          }
+
+          // sync successful (uploaded or unchanged), delete local cache
           const userFolder = path.join(
             UserMatrixSqliteSyncService.checkpointsFolder,
             userDid,
@@ -654,6 +817,27 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       UserMatrixSqliteSyncService.instance = new UserMatrixSqliteSyncService();
     }
     return UserMatrixSqliteSyncService.instance;
+  }
+
+  private async getUploadSizeLimit(): Promise<number> {
+    if (this.uploadSizeLimit !== undefined) {
+      return this.uploadSizeLimit;
+    }
+
+    const fetched = await fetchMediaUploadSizeLimit();
+    if (fetched === undefined) {
+      // Do NOT cache the fallback: only a successful discovery is memoized.
+      // If both config endpoints are unreachable now, a later tick retries
+      // discovery instead of being stuck on the 100 MiB default for the
+      // rest of the process lifetime.
+      Logger.warn(
+        `Could not read the homeserver media config — assuming an upload limit of ${bytesToHumanReadable(DEFAULT_MEDIA_UPLOAD_SIZE_LIMIT)}`,
+      );
+      return DEFAULT_MEDIA_UPLOAD_SIZE_LIMIT;
+    }
+
+    this.uploadSizeLimit = fetched;
+    return this.uploadSizeLimit;
   }
 
   /**
@@ -805,59 +989,62 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       return;
     }
 
-    // Decompress the checkpoint
+    // Decompress the checkpoint. Streamed to a temp file so the only full
+    // buffer in memory is the (much smaller) downloaded gzip payload — the
+    // decompressed DB can run to hundreds of MB and used to be held in heap
+    // here in its entirety.
     const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
-    let decompressedBuffer: Buffer;
-    try {
-      decompressedBuffer = await gunzipAsync(userDB.mediaBuffer);
-      Logger.log(
-        `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(userDB.mediaBuffer.length)} -> ${bytesToHumanReadable(decompressedBuffer.length)}`,
-      );
-    } catch (_error) {
-      // Decompression failed — check if the raw buffer is a valid uncompressed SQLite file
-      if (
-        userDB.mediaBuffer.length >= 16 &&
-        userDB.mediaBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
-      ) {
-        Logger.warn(
-          `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
-        );
-        decompressedBuffer = userDB.mediaBuffer;
-      } else {
-        Logger.error(
-          `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${userDB.mediaBuffer.subarray(0, 16).toString('hex')}`,
-        );
-        return;
-      }
-    }
-
-    // Validate decompressed data is a valid SQLite file
-    if (
-      decompressedBuffer.length < 16 ||
-      !decompressedBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
-    ) {
-      Logger.error(
-        `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${decompressedBuffer.subarray(0, Math.min(16, decompressedBuffer.length)).toString('hex')}`,
-      );
-      return;
-    }
-
-    Logger.debug(
-      `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
-    );
-
-    // Atomic write: write to temp file then rename (rename is atomic on POSIX)
     const tmpPath = checkpointPath + '.tmp';
     try {
-      await fs.writeFile(tmpPath, decompressedBuffer);
+      try {
+        await pipeline(
+          Readable.from(userDB.mediaBuffer),
+          createGunzip(),
+          fsSync.createWriteStream(tmpPath),
+        );
+      } catch (_error) {
+        // Decompression failed — check if the raw buffer is a valid uncompressed SQLite file
+        if (
+          userDB.mediaBuffer.length >= 16 &&
+          userDB.mediaBuffer.subarray(0, 16).equals(SQLITE_MAGIC)
+        ) {
+          Logger.warn(
+            `Checkpoint for user ${userDid} is uncompressed SQLite (legacy format), using as-is`,
+          );
+          await fs.writeFile(tmpPath, userDB.mediaBuffer);
+        } else {
+          Logger.error(
+            `Checkpoint for user ${userDid} is neither valid gzip nor valid SQLite — skipping download to prevent corruption. Raw bytes (first 16): ${userDB.mediaBuffer.subarray(0, 16).toString('hex')}`,
+          );
+          await removeIfExists(tmpPath);
+          return;
+        }
+      }
+
+      // Validate the on-disk result is a valid SQLite file
+      const header = await readFileHeader(tmpPath, 16);
+      if (header.length < 16 || !header.equals(SQLITE_MAGIC)) {
+        Logger.error(
+          `Decompressed checkpoint for user ${userDid} does not have valid SQLite header — skipping to prevent corruption. Header bytes: ${header.toString('hex')}`,
+        );
+        await removeIfExists(tmpPath);
+        return;
+      }
+
+      const { size: decompressedSize } = await fs.stat(tmpPath);
+      Logger.log(
+        `Decompressed checkpoint for user ${userDid}: ${bytesToHumanReadable(userDB.mediaBuffer.length)} -> ${bytesToHumanReadable(decompressedSize)}`,
+      );
+
+      Logger.debug(
+        `Saving checkpoint to local cache for user ${userDid} at ${checkpointPath}`,
+      );
+
+      // Atomic publish: rename is atomic on POSIX
       await fs.rename(tmpPath, checkpointPath);
     } catch (error) {
       // Clean up orphaned temp file on failure
-      try {
-        await fs.unlink(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
+      await removeIfExists(tmpPath);
       throw error;
     }
 
@@ -874,11 +1061,19 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
   }
 
   /**
-   * Sync checkpoint file from local cache to S3.
+   * Sync checkpoint file from local cache to Matrix storage.
    * @param userDid - The user's DID identifier
-   * @returns Promise that resolves when sync is complete
+   * @returns `'uploaded'` when a new snapshot was pushed to Matrix,
+   *   `'unchanged'` when the checkpoint was already backed up (checksum
+   *   match), or `'skipped'` when no upload was attempted at all (no local
+   *   file, an in-flight request holds the file, or the snapshot exceeds the
+   *   homeserver upload cap). Callers must treat `'skipped'` as "the local
+   *   file is not necessarily backed up" — it is not safe to delete local
+   *   state on that result.
    */
-  async uploadCheckpointToMatrixStorage(params: BaseSyncArgs): Promise<void> {
+  async uploadCheckpointToMatrixStorage(
+    params: BaseSyncArgs,
+  ): Promise<'uploaded' | 'unchanged' | 'skipped'> {
     const { userDid } = params;
 
     const storageKey =
@@ -899,7 +1094,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       Logger.warn(
         `Checkpoint file not found for user ${userDid} at ${checkpointPath}`,
       );
-      return;
+      return 'skipped';
     }
 
     // Handle open database connections — don't close if user has active request
@@ -911,7 +1106,7 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
         Logger.debug(
           `Skipping upload for active user ${userDid}, will retry next cycle`,
         );
-        return;
+        return 'skipped';
       } else {
         // No active request — safe to close
         try {
@@ -926,8 +1121,28 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       }
     }
 
-    // Compute checksum via streaming to avoid loading the entire DB into memory.
-    // Streaming reads ~64KB chunks at a time instead of the full file (which can be 100MB+).
+    // One-time migration for databases created before incremental
+    // auto-vacuum: reclaim dead freelist pages while no request holds the
+    // file. Newly created databases never trip the thresholds.
+    if (!this.isUserActive(userDid)) {
+      try {
+        const compaction = compactSqliteFileIfBloated(checkpointPath);
+        if (compaction.compacted) {
+          Logger.log(
+            `Compacted checkpoint for user ${userDid}: ${bytesToHumanReadable(compaction.fileBytesBefore)} -> ${bytesToHumanReadable(compaction.fileBytesAfter)} (${bytesToHumanReadable(compaction.freelistBytes)} of dead pages reclaimed)`,
+          );
+        }
+      } catch (error) {
+        Logger.warn(
+          `Failed to compact checkpoint for user ${userDid}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // Compute checksum via streaming to avoid loading the entire DB into
+    // memory. The checksum is a change detector only — the uploaded bytes
+    // come from a consistent snapshot below, so a torn read here costs at
+    // worst one redundant upload.
     const currentChecksum = await computeFileChecksum(checkpointPath);
     const lastChecksum = this.lastUploadedChecksum.get(storageKey);
 
@@ -935,27 +1150,57 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       Logger.debug(
         `Skipping upload for user ${userDid} — checkpoint unchanged (checksum: ${currentChecksum.substring(0, 12)}...)`,
       );
-      return;
+      return 'unchanged';
     }
 
-    // Only load file into memory when we know the content has changed and needs uploading
-    Logger.debug(
-      `Reading checkpoint file for user ${userDid} from ${checkpointPath}`,
-    );
-    const checkpoint = await fs.readFile(checkpointPath);
-    const originalSize = checkpoint.length;
+    if (currentChecksum === this.oversizedChecksum.get(storageKey)) {
+      Logger.debug(
+        `Skipping upload for user ${userDid} — checkpoint unchanged since it last exceeded the homeserver upload limit`,
+      );
+      return 'skipped';
+    }
 
-    // Compress the database file with gzip before upload
-    const compressedCheckpoint = await gzipAsync(checkpoint);
-    const compressedSize = compressedCheckpoint.length;
-    const compressionRatio = (
-      (1 - compressedSize / originalSize) *
-      100
-    ).toFixed(1);
+    // Snapshot via VACUUM INTO: transactionally consistent even if a request
+    // starts writing mid-upload, and free of dead freelist pages. Then gzip
+    // the snapshot streaming to disk so only the (much smaller) compressed
+    // payload is ever buffered in heap. The size guard runs against the
+    // on-disk gzip output (fs.stat) BEFORE the buffer is read into memory,
+    // so an oversized file never gets its compressed bytes allocated in heap
+    // at all — the `finally` still removes both temp files on every exit,
+    // including the early `return` below.
+    const snapshotPath = checkpointPath + '.snapshot.tmp';
+    const gzTmpPath = checkpointPath + '.gz.tmp';
+    let compressedCheckpoint: Buffer;
+    try {
+      await removeIfExists(snapshotPath);
+      snapshotSqliteFile(checkpointPath, snapshotPath);
+      const { size: snapshotSize } = await fs.stat(snapshotPath);
+      await pipeline(
+        fsSync.createReadStream(snapshotPath),
+        createGzip(),
+        fsSync.createWriteStream(gzTmpPath),
+      );
 
-    Logger.log(
-      `Checkpoint for user ${userDid}: ${bytesToHumanReadable(originalSize)} -> ${bytesToHumanReadable(compressedSize)} (${compressionRatio}% reduction)`,
-    );
+      const { size: compressedSize } = await fs.stat(gzTmpPath);
+      const { size: originalSize } = await fs.stat(checkpointPath);
+      Logger.log(
+        `Checkpoint for user ${userDid}: ${bytesToHumanReadable(originalSize)} on disk, ${bytesToHumanReadable(snapshotSize)} live -> ${bytesToHumanReadable(compressedSize)} compressed`,
+      );
+
+      const uploadSizeLimit = await this.getUploadSizeLimit();
+      if (compressedSize > uploadSizeLimit) {
+        this.oversizedChecksum.set(storageKey, currentChecksum);
+        Logger.error(
+          `Checkpoint for user ${userDid} exceeds the homeserver upload limit (${bytesToHumanReadable(compressedSize)} > ${bytesToHumanReadable(uploadSizeLimit)}) — backup skipped, local file keeps serving. Investigate why this user's live state is so large.`,
+        );
+        return 'skipped';
+      }
+
+      compressedCheckpoint = await fs.readFile(gzTmpPath);
+    } finally {
+      await removeIfExists(snapshotPath);
+      await removeIfExists(gzTmpPath);
+    }
 
     const mxManager = MatrixManager.getInstance();
     const userHomeServer = await getMatrixHomeServerCroppedForDid(userDid);
@@ -974,10 +1219,13 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     );
     const event = await uploadMediaToRoom(
       roomId,
-      new File([compressedCheckpoint], `${storageKey}.db.gz`, {
-        type: 'application/gzip',
-        lastModified: Date.now(),
-      }),
+      {
+        bytes: compressedCheckpoint,
+        filename: `${storageKey}.db.gz`,
+        // Matches the mimetype historically written on checkpoint media
+        // events (it was hardcoded upload-side before the payload carried it).
+        mimetype: 'application/x-sqlite3',
+      },
       storageKey,
     );
     await this.saveFileEventToDB({
@@ -986,26 +1234,59 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       event: event.event,
       contentChecksum: currentChecksum,
     });
+    this.oversizedChecksum.delete(storageKey);
 
     Logger.log(
       `Successfully uploaded checkpoint to Matrix for user ${userDid}`,
     );
+    return 'uploaded';
+  }
+
+  /**
+   * Wait (bounded) for a user's in-flight work to finish. Returns false if the
+   * user is still active at the deadline.
+   */
+  private async waitForUserIdle(
+    userDid: string,
+    deadlineMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + deadlineMs;
+    while (this.isUserActive(userDid)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return true;
   }
 
   // Run at :10, :20, :30, :40, :50 — skips :00 to avoid overlapping with the hourly cleanup cron
   @Cron('0 10,20,30,40,50 * * * *')
-  async uploadCheckpointToMatrixStorageTask(): Promise<void> {
+  async uploadCheckpointToMatrixStorageTask(options?: {
+    /**
+     * Graceful shutdown: how long to wait for each user's in-flight work
+     * (the post-turn session sync, an open stream) to finish before
+     * uploading. Without it a user who was active a moment ago is skipped —
+     * fine for the cron ("next cycle will pick it up"), but on shutdown there
+     * is no next cycle and their last turns never reach the owner copy.
+     */
+    drainMs?: number;
+  }): Promise<void> {
     if (this.cronRunning) {
       Logger.debug('Skipping upload task — another cron task is still running');
       return;
     }
     this.cronRunning = true;
+    const drainMs = options?.drainMs ?? 0;
     try {
       Logger.log(`Uploading checkpoint to Matrix storage task started`);
       // Iterate cached file paths instead of scanning the filesystem —
       // only users with known local checkpoints need uploading.
       for (const userDid of this.filePathCache.keys()) {
         try {
+          if (drainMs > 0 && !(await this.waitForUserIdle(userDid, drainMs))) {
+            Logger.warn(
+              `User ${userDid} still active after ${drainMs}ms drain — their latest checkpoint will NOT be uploaded before shutdown`,
+            );
+          }
           await this.uploadCheckpointToMatrixStorage({ userDid });
         } catch (error) {
           Logger.error(
@@ -1014,15 +1295,12 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
             'File path: ' +
               UserMatrixSqliteSyncService.getUserCheckpointDbPath(userDid),
             'File Size before gzip: ' +
-              bytesToHumanReadable(
-                await fs
-                  .stat(
-                    UserMatrixSqliteSyncService.getUserCheckpointDbPath(
-                      userDid,
-                    ),
-                  )
-                  .then((stats) => stats.size),
-              ),
+              (await fs
+                .stat(
+                  UserMatrixSqliteSyncService.getUserCheckpointDbPath(userDid),
+                )
+                .then((stats) => bytesToHumanReadable(stats.size))
+                .catch(() => 'unknown')),
           );
         }
       }
@@ -1120,6 +1398,9 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
       // Clear file path cache and checksum cache
       this.filePathCache.delete(userDid);
       this.lastUploadedChecksum.delete(key);
+      // Without this, the next request for this user skips the Matrix
+      // re-sync check and lands in corruption recovery on the missing file.
+      this.syncedUsers.delete(userDid);
 
       Logger.log(
         `Successfully deleted storage for user ${userDid} with storageKey ${key}`,
@@ -1150,6 +1431,30 @@ export class UserMatrixSqliteSyncService implements OnModuleInit {
     if (contentChecksum) {
       this.lastUploadedChecksum.set(storageKey, contentChecksum);
     }
+  }
+}
+
+/** Delete a file, ignoring "already gone" and permission noise. */
+async function removeIfExists(filePath: string): Promise<void> {
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // File may not exist, that's fine
+  }
+}
+
+/** Read the first `length` bytes of a file without loading the rest. */
+async function readFileHeader(
+  filePath: string,
+  length: number,
+): Promise<Buffer> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
   }
 }
 
