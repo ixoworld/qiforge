@@ -16,10 +16,15 @@ import {
   MAX_TURN_REPLAYS,
   planInboxReplay,
   replyTxnId,
+  settleOfferedRow,
   updateInboxThread,
   type InboxRow,
 } from './inbox-store';
-import type { InboundMessage } from './ingest';
+import { IngestPipeline, type InboundMessage } from './ingest';
+import {
+  type CachedUserServerName,
+  lookupUserServerName,
+} from './user-homeserver';
 
 function stub(name: string): DurableObjectStub<SqliteTestDO> {
   return env.SQLITE_TEST.get(env.SQLITE_TEST.idFromName(name));
@@ -94,6 +99,125 @@ describe('turn inbox (SQLite)', () => {
       deleteInboxRows(sql, ['$e1', '$e2', '$missing']);
       expect(countInboxRows(sql)).toBe(0);
     });
+  });
+});
+
+/**
+ * The gateway's sender check end to end over the real inbox: the homeserver
+ * lookup (`lookupUserServerName`, Blocksync down), the memo the pipeline reads,
+ * the offer, and what `offerInbound` does with the row.
+ */
+describe('sender check without a homeserver verdict (Blocksync down)', () => {
+  const USER_DID = 'did:ixo:ixo1user';
+  // Registered on another homeserver than the oracle's.
+  const SENDER = '@did-ixo-ixo1user:devmx.ixo.earth';
+  const TTL = 6 * 60 * 60_000;
+  const blocksyncDown: typeof fetch = async () =>
+    new Response('unavailable', { status: 503 });
+
+  /** One gateway step: look the sender's server up, offer, settle the row. */
+  async function offerAndSettle(
+    sql: SqlStorage,
+    cache: Map<string, CachedUserServerName>,
+    inbound: InboundMessage,
+  ) {
+    const memo = new Map<string, string>();
+    try {
+      const { serverName } = await lookupUserServerName(USER_DID, {
+        blocksyncGraphqlUrl: 'https://bs/graphql',
+        defaultServerName: 'ixo.test',
+        ttlMs: TTL,
+        readCache: async (did) => cache.get(did),
+        writeCache: async (did, entry) => {
+          cache.set(did, entry);
+        },
+        fetchImpl: blocksyncDown,
+      });
+      memo.set(USER_DID, serverName);
+    } catch {
+      memo.delete(USER_DID);
+    }
+    const pipeline = new IngestPipeline({
+      oracleDid: 'did:ixo:ixo1oracle',
+      canonicalAlias: () => null,
+      userServerName: (did) => memo.get(did) ?? null,
+      dispatch: async () => undefined,
+    });
+    const outcome = pipeline.offer(inbound);
+    pipeline.clear();
+    return { outcome, row: settleOfferedRow(sql, inbound.eventId, outcome) };
+  }
+
+  it('(a) no cache: a live message keeps its row, and a replay keeps it again for the next one', async () => {
+    await runInDurableObject(
+      stub('inbox-unverified-nocache'),
+      async (_instance, state) => {
+        const sql = state.storage.sql;
+        ensureInboxTable(sql);
+        const cache = new Map<string, CachedUserServerName>();
+        const live = msg('$live', { sender: SENDER });
+        insertInboxRow(sql, live, 1_000);
+
+        // Live delivery.
+        await expect(offerAndSettle(sql, cache, live)).resolves.toEqual({
+          outcome: 'unverified',
+          row: 'kept',
+        });
+        expect(listInboxRows(sql).map((r) => r.eventId)).toEqual(['$live']);
+
+        // Replay: planned, charged, still no verdict, still kept.
+        const plan = planInboxReplay(listInboxRows(sql), {
+          inFlight: new Set(),
+          maxReplays: MAX_TURN_REPLAYS,
+        });
+        expect(plan.replay.map((r) => r.eventId)).toEqual(['$live']);
+        bumpInboxAttempts(sql, ['$live']);
+        await expect(
+          offerAndSettle(sql, cache, inboundOfRow(plan.replay[0]!)),
+        ).resolves.toEqual({ outcome: 'unverified', row: 'kept' });
+        expect(listInboxRows(sql)).toMatchObject([
+          { eventId: '$live', attempts: 1 },
+        ]);
+        expect(
+          planInboxReplay(listInboxRows(sql), {
+            inFlight: new Set(),
+            maxReplays: MAX_TURN_REPLAYS,
+          }).replay.map((r) => r.eventId),
+        ).toEqual(['$live']);
+      },
+    );
+  });
+
+  it('(b) an expired cache entry: the stale server still admits the registered sender, and still refuses a forged one', async () => {
+    await runInDurableObject(
+      stub('inbox-unverified-stale'),
+      async (_instance, state) => {
+        const sql = state.storage.sql;
+        ensureInboxTable(sql);
+        const cache = new Map([
+          [
+            USER_DID,
+            { serverName: 'devmx.ixo.earth', at: Date.now() - TTL - 60_000 },
+          ],
+        ]);
+        const genuine = msg('$genuine', { sender: SENDER });
+        const forged = msg('$forged', {
+          sender: '@did-ixo-ixo1user:evil.example',
+        });
+        insertInboxRow(sql, genuine, 1_000);
+        insertInboxRow(sql, forged, 1_001);
+
+        await expect(offerAndSettle(sql, cache, genuine)).resolves.toEqual({
+          outcome: 'queued',
+          row: 'kept',
+        });
+        await expect(offerAndSettle(sql, cache, forged)).resolves.toEqual({
+          outcome: 'foreign',
+          row: 'deleted',
+        });
+        expect(listInboxRows(sql).map((r) => r.eventId)).toEqual(['$genuine']);
+      },
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { VfsNoDelegationError } from './ixo-vfs-store';
 import { MigratingOwnerStore } from './migrating-store';
 import {
+  assertSqliteStream,
   bytesOfStream,
   snapshotOfBytes,
   streamOfBytes,
@@ -235,6 +236,59 @@ describe('MigratingOwnerStore', () => {
       bytes(7, 7, 7),
     );
     expect(served?.fromLegacy).toBe(true);
+  });
+
+  it('load() propagates a legacy read failure instead of reporting a new user', async () => {
+    const legacy = memStore('matrix');
+    vi.spyOn(legacy.store, 'load').mockRejectedValue(
+      new Error('M_FORBIDDEN: media unavailable'),
+    );
+    const store = new MigratingOwnerStore({
+      primary: memStore('vfs').store,
+      legacy: legacy.store,
+      log: noopLog,
+    });
+    // VFS proves it has no file, but the legacy copy could not be read: the
+    // boot must fail and retry, never start an empty history that a later
+    // flush would make the user's system of record.
+    await expect(store.load()).rejects.toThrow(/M_FORBIDDEN/);
+  });
+
+  it('load() treats only a legacy copy PROVEN not to be SQLite as absent', async () => {
+    const legacyFailing = (bytes: Uint8Array) => {
+      const legacy = memStore('matrix');
+      vi.spyOn(legacy.store, 'load').mockImplementation(async () => ({
+        stream: await assertSqliteStream(
+          streamOfBytes(bytes),
+          'snapshot $junk',
+        ),
+        etag: '$junk',
+      }));
+      return new MigratingOwnerStore({
+        primary: memStore('vfs').store,
+        legacy: legacy.store,
+        log: noopLog,
+      });
+    };
+    // The whole 16-byte header arrived and is not SQLite: no retry can load it.
+    expect(await legacyFailing(new Uint8Array(64).fill(7)).load()).toBeNull();
+    // A short read may be a transfer cut short: it proves nothing.
+    await expect(
+      legacyFailing(new Uint8Array(4).fill(7)).load(),
+    ).rejects.toThrow(/not a SQLite file \(4 header byte/);
+  });
+
+  it('head() propagates a legacy error instead of reporting the file absent', async () => {
+    const legacy = memStore('matrix');
+    vi.spyOn(legacy.store, 'head').mockRejectedValue(
+      new Error('homeserver unavailable'),
+    );
+    const store = new MigratingOwnerStore({
+      primary: memStore('vfs').store,
+      legacy: legacy.store,
+      log: noopLog,
+    });
+    await expect(store.head()).rejects.toThrow(/homeserver unavailable/);
   });
 
   it('remove() clears both copies', async () => {

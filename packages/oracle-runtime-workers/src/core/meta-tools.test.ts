@@ -12,6 +12,7 @@ import {
   makeBuildCtx,
   makeManifest,
   makePlugin,
+  makeRunConfig,
   makeRuntimeContext,
   makeTool,
 } from './test-fixtures';
@@ -23,11 +24,16 @@ interface Listing {
   loaded: boolean;
   tags: string[];
   category?: string;
+  unavailable?: { missing: { resource: string; action: string }[] };
 }
 
 interface LoadResult extends PluginManifest {
   alreadyAvailable: boolean;
   tools: { name: string; description: string }[];
+  refused?: {
+    missing: { resource: string; action: string }[];
+    reason: string;
+  };
 }
 
 async function buildRegistries() {
@@ -149,15 +155,16 @@ describe('load_capability', () => {
     ]);
   });
 
-  it('returns the plain result array when everything was already available', async () => {
+  it('returns the result array as JSON text when everything was already available', async () => {
     const { manifests, tools } = await buildRegistries();
     const load = buildLoadCapabilityTool(manifests, tools);
-    const result = (await load.handler(
+    const result = await load.handler(
       { names: ['weather'] },
       makeRuntimeContext({ loadedPlugins: new Set(['weather']) }),
-    )) as LoadResult[];
-    expect(Array.isArray(result)).toBe(true);
-    expect(result[0]?.alreadyAvailable).toBe(true);
+    );
+    expect(typeof result).toBe('string');
+    const parsed = JSON.parse(result as string) as LoadResult[];
+    expect(parsed[0]?.alreadyAvailable).toBe(true);
   });
 
   it('rejects unknown and silent capabilities, and concurrent calls per session', async () => {
@@ -179,5 +186,159 @@ describe('load_capability', () => {
     } finally {
       release();
     }
+  });
+});
+
+describe("plugins the user's authorization does not cover", () => {
+  const REQUIRES = [{ resource: 'ixo:filesystem', action: 'fs/read' }];
+
+  async function registries() {
+    const manifests = new ManifestRegistry();
+    const tools = new ToolRegistry();
+    const files = makePlugin({
+      name: 'files',
+      manifest: makeManifest({
+        title: 'Files',
+        summary: 'Personal files.',
+        visibility: 'on-demand',
+        requires: REQUIRES,
+      }),
+      getTools: () => [makeTool('read_file')],
+    });
+    const weather = makePlugin({
+      name: 'weather',
+      manifest: makeManifest({ title: 'Weather', visibility: 'on-demand' }),
+      getTools: () => [makeTool('get_current_weather')],
+    });
+    for (const p of [files, weather]) {
+      manifests.register(p);
+      tools.register(p);
+    }
+    await tools.collect(makeBuildCtx());
+    return { manifests, tools };
+  }
+
+  /** A turn whose delegation grants exactly `capabilities`. */
+  function grantedContext(
+    capabilities: { resource: string; action: string }[],
+    loadedPlugins: string[] = [],
+  ) {
+    const run = makeRunConfig();
+    return makeRuntimeContext(
+      { loadedPlugins: new Set(loadedPlugins), toolCallId: 'call-1' },
+      {
+        runConfig: {
+          context: {
+            ...run.context,
+            user: {
+              ...run.context.user,
+              ucanDelegation: { raw: 'delegation', capabilities },
+            },
+          },
+        },
+      },
+    );
+  }
+
+  it('load_capability refuses the plugin, names what is missing, and still loads the rest of the batch', async () => {
+    const { manifests, tools } = await registries();
+    const load = buildLoadCapabilityTool(manifests, tools);
+    const result = await load.handler(
+      { names: ['files', 'weather'] },
+      grantedContext([{ resource: 'ixo:oracle', action: '*' }]),
+    );
+    expect(result).toBeInstanceOf(Command);
+    const update = (result as Command).update as {
+      loadedPlugins: string[];
+      messages: ToolMessage[];
+    };
+    expect(update.loadedPlugins).toEqual(['weather']);
+    const [files, weather] = JSON.parse(
+      String(update.messages[0]?.content),
+    ) as LoadResult[];
+    expect(files).toMatchObject({
+      title: 'Files',
+      alreadyAvailable: false,
+      tools: [],
+      refused: { missing: REQUIRES },
+    });
+    expect(files?.refused?.reason).toContain('`fs/read` on `ixo:filesystem`');
+    expect(weather?.refused).toBeUndefined();
+    expect(weather?.tools.map((t) => t.name)).toEqual(['get_current_weather']);
+  });
+
+  it('load_capability refuses without a state update when nothing else was asked for', async () => {
+    const { manifests, tools } = await registries();
+    const load = buildLoadCapabilityTool(manifests, tools);
+    const result = await load.handler({ names: ['files'] }, grantedContext([]));
+    expect(typeof result).toBe('string');
+    const parsed = JSON.parse(result as string) as LoadResult[];
+    expect(parsed[0]?.refused?.missing).toEqual(REQUIRES);
+  });
+
+  it('load_capability loads the plugin once the delegation grants it, directly or through a parent grant', async () => {
+    const { manifests, tools } = await registries();
+    const load = buildLoadCapabilityTool(manifests, tools);
+    for (const grant of [
+      { resource: 'ixo:filesystem', action: 'fs/read' },
+      { resource: 'ixo:filesystem', action: 'fs/*' },
+      { resource: 'ixo:filesystem', action: '*' },
+      { resource: '*', action: '*' },
+    ]) {
+      const result = await load.handler(
+        { names: ['files'] },
+        grantedContext([grant]),
+      );
+      expect(result).toBeInstanceOf(Command);
+      expect(
+        ((result as Command).update as { loadedPlugins: string[] })
+          .loadedPlugins,
+      ).toEqual(['files']);
+    }
+  });
+
+  it('a narrower grant does not stand in for the resource the plugin requires', async () => {
+    const { manifests, tools } = await registries();
+    const load = buildLoadCapabilityTool(manifests, tools);
+    const result = await load.handler(
+      { names: ['files'] },
+      grantedContext([
+        { resource: 'ixo:filesystem/.oracles', action: 'fs/read' },
+        { resource: 'ixo:filesystem', action: 'fs/write' },
+      ]),
+    );
+    const parsed = JSON.parse(result as string) as LoadResult[];
+    expect(parsed[0]?.refused?.missing).toEqual(REQUIRES);
+  });
+
+  it('list_capabilities marks the plugin unavailable and not loaded, even if an earlier turn loaded it', async () => {
+    const { manifests } = await registries();
+    const list = buildListCapabilitiesTool(manifests);
+    const out = JSON.parse(
+      (await list.handler(
+        {},
+        grantedContext([], ['files', 'weather']),
+      )) as string,
+    ) as Listing[];
+    expect(out.find((e) => e.name === 'files')).toMatchObject({
+      loaded: false,
+      unavailable: { missing: REQUIRES },
+    });
+    const weather = out.find((e) => e.name === 'weather');
+    expect(weather?.loaded).toBe(true);
+    expect(weather?.unavailable).toBeUndefined();
+
+    const granted = JSON.parse(
+      (await list.handler(
+        {},
+        grantedContext(
+          [{ resource: 'ixo:filesystem', action: '*' }],
+          ['files'],
+        ),
+      )) as string,
+    ) as Listing[];
+    const files = granted.find((e) => e.name === 'files');
+    expect(files?.loaded).toBe(true);
+    expect(files?.unavailable).toBeUndefined();
   });
 });

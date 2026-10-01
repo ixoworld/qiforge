@@ -20,7 +20,10 @@ import type {
   RawEventPayload,
   SecretsAdapter,
 } from '../core/runtime-context';
-import type { LlmAdapter } from '../core/runtime-context';
+import {
+  delegationHasCapability,
+  type LlmAdapter,
+} from '../core/runtime-context';
 import type {
   Logger,
   MatrixEvent,
@@ -184,25 +187,12 @@ export function createMatrixAdapter(
   };
 }
 
-function abilityCovers(granted: string, required: string): boolean {
-  if (granted === '*' || granted === required) return true;
-  if (granted.endsWith('/*')) {
-    const ns = granted.slice(0, -2);
-    return required === ns || required.startsWith(`${ns}/`);
-  }
-  return false;
-}
-
 export function createUcanAdapter(
   service: WorkersUcanService,
   delegationFor: (userDid: string) => { raw?: string } | undefined,
 ): AmbientServices['ucan'] {
   const has = (delegation: DelegationLike, resource: string, action: string) =>
-    (delegation?.capabilities ?? []).some(
-      (c) =>
-        (c.resource === resource || c.resource.startsWith(resource)) &&
-        abilityCovers(c.action, action),
-    );
+    delegationHasCapability(delegation, resource, action);
   return {
     hasCapability: has,
     requireCapability: (delegation, resource, action) => {

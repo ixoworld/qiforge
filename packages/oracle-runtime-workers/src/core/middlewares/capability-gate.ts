@@ -1,9 +1,23 @@
+import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import { z } from 'zod';
 import type { Logger, PluginManifest } from '../../plugin-api/types';
+import { describeRequirements, type CapabilityRequirement } from '../manifest';
 import { NOOP_LOGGER } from '../utils';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
+
+/** `response_metadata` key the gate sets on its refusals (never sent to a provider). */
+const REFUSED = 'capabilityGateRefused';
+
+/**
+ * A ToolMessage the gate produced instead of running the tool. The tool never
+ * ran, so it is not a failure: the repetition guard must let the same call
+ * through once the capability is loaded.
+ */
+export function isCapabilityGateRefusal(message: ToolMessage): boolean {
+  return message.response_metadata?.[REFUSED] === true;
+}
 
 export interface CapabilityGateMiddlewareOptions {
   /**
@@ -23,28 +37,68 @@ export interface CapabilityGateMiddlewareOptions {
    * tools pass the gate as if loaded, without touching `state.loadedPlugins`.
    */
   preloadedPlugins?: ReadonlySet<string>;
+  /**
+   * Plugin name → the `manifest.requires` capabilities the user's delegation
+   * does not grant. Such a plugin's tools are hidden and refused whatever
+   * their visibility, loaded or preloaded.
+   */
+  unmetRequirements?: ReadonlyMap<string, readonly CapabilityRequirement[]>;
   /** Optional logger; defaults to a no-op. */
   logger?: Logger;
 }
 
 /**
- * Gates on-demand plugin tools (and sub-agents-as-tools) per model call.
+ * Gates on-demand plugin tools (and sub-agents-as-tools) on both sides of
+ * the model.
  *
- * All plugin tools are bound to the agent at compile time. This middleware
- * runs on every model invocation: it reads `state.loadedPlugins` and trims
- * the request's `tools` array down to what the agent should actually see at
- * this point in the conversation.
+ * All plugin tools are bound to the agent at compile time. On every model
+ * invocation this middleware reads `state.loadedPlugins` and trims the
+ * request's `tools` array down to what the agent should see at this point
+ * in the conversation. Because they are all bound, the tool node would still
+ * run a call to a hidden tool — one named from an earlier thread, guessed,
+ * or planted by injected text — so every tool call is checked against the
+ * same rule before it runs, and a hidden one is answered with an error
+ * instead of executing.
  *
  * Why a middleware: `createAgent({ tools })` freezes the bound list, so
  * `load_capability` updating state mid-run would otherwise have no effect
  * until the next request rebuilt the agent. Filtering inside `wrapModelCall`
  * lets a load decision take effect on the very next LLM call.
+ *
+ * This is capability discovery, not authorization: any non-silent plugin can
+ * be loaded with `load_capability`. What the gate guarantees is that an
+ * on-demand tool runs only after that load (or the turn's preload) is
+ * visible in the thread.
  */
 export const createCapabilityGateMiddleware = (
   options: CapabilityGateMiddlewareOptions,
 ): AgentMiddleware => {
   const { pluginByToolName, visibilityByToolName, preloadedPlugins } = options;
   const logger = options.logger ?? NOOP_LOGGER;
+
+  /** What the user's authorization lacks for `toolName`'s plugin, or null. */
+  const unmetFor = (
+    toolName: string,
+  ): { plugin: string; missing: readonly CapabilityRequirement[] } | null => {
+    const plugin = pluginByToolName.get(toolName);
+    if (!plugin) return null;
+    const missing = options.unmetRequirements?.get(plugin);
+    return missing && missing.length > 0 ? { plugin, missing } : null;
+  };
+
+  /** The plugin that has to be loaded before `toolName` may be seen or run; null when it is open. */
+  const gatingPlugin = (
+    toolName: string,
+    loaded: ReadonlySet<string>,
+  ): string | null => {
+    const plugin = pluginByToolName.get(toolName);
+    if (!plugin) return null;
+    const viz = visibilityByToolName.get(toolName) ?? 'on-demand';
+    if (viz === 'always' || viz === 'silent') return null;
+    if (loaded.has(plugin) || preloadedPlugins?.has(plugin) === true)
+      return null;
+    return plugin;
+  };
 
   return createMiddleware({
     name: 'CapabilityGateMiddleware',
@@ -62,11 +116,7 @@ export const createCapabilityGateMiddleware = (
         // `unknown`. Narrow at runtime; unknown-named tools pass through.
         const name = typeof t.name === 'string' ? t.name : undefined;
         if (!name) return true;
-        const plugin = pluginByToolName.get(name);
-        if (!plugin) return true;
-        const viz = visibilityByToolName.get(name) ?? 'on-demand';
-        if (viz === 'always' || viz === 'silent') return true;
-        return loaded.has(plugin) || preloadedPlugins?.has(plugin) === true;
+        return unmetFor(name) === null && gatingPlugin(name, loaded) === null;
       });
 
       if (filtered.length !== request.tools.length) {
@@ -79,6 +129,44 @@ export const createCapabilityGateMiddleware = (
       }
 
       return handler({ ...request, tools: filtered });
+    },
+    // The state here is the one the tool node runs with, so a load made by
+    // an earlier step of this run counts; a `load_capability` issued in the
+    // same model response as the gated call does not (both run on the state
+    // from before either), and the model is told to call again.
+    wrapToolCall: (request, handler) => {
+      const name = request.toolCall.name;
+      const unmet = unmetFor(name);
+      if (unmet) {
+        logger.warn(
+          `[CapabilityGateMiddleware] refused a call to ${name}: the user's authorization does not grant ${describeRequirements(unmet.missing)} ('${unmet.plugin}' requires it)`,
+        );
+        return new ToolMessage({
+          content:
+            `Tool "${name}" was not run: it belongs to the "${unmet.plugin}" capability, which requires ${describeRequirements(unmet.missing)}, and the user's authorization for this oracle does not grant it. ` +
+            'Tell the user; they can re-authorize the oracle with that permission and ask again.',
+          tool_call_id: request.toolCall.id ?? '',
+          name,
+          status: 'error',
+        });
+      }
+      const plugin = gatingPlugin(
+        name,
+        new Set<string>(request.state.loadedPlugins ?? []),
+      );
+      if (plugin === null) return handler(request);
+      logger.warn(
+        `[CapabilityGateMiddleware] refused a call to ${name}: capability '${plugin}' is not loaded in this thread`,
+      );
+      return new ToolMessage({
+        content:
+          `Tool "${name}" is not available: it belongs to the "${plugin}" capability, which is not loaded in this conversation, so the call was not run. ` +
+          `If the user's request needs it, call load_capability with names ["${plugin}"] first, then call the tool again.`,
+        tool_call_id: request.toolCall.id ?? '',
+        name,
+        status: 'error',
+        response_metadata: { [REFUSED]: true },
+      });
     },
   });
 };

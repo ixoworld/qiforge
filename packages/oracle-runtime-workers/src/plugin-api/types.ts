@@ -61,6 +61,13 @@ export interface UcanDelegation {
   readonly issuer?: string;
   readonly audience?: string;
   readonly capabilities?: ReadonlyArray<{ resource: string; action: string }>;
+  /**
+   * When the delegation stops granting anything (Unix seconds; the earliest
+   * expiry across its proof chain). Capability checks compare it with the
+   * clock at every check, so a delegation that lapses mid-turn grants
+   * nothing from then on.
+   */
+  readonly expiration?: number;
 }
 
 /** Per-room secret index. */
@@ -366,6 +373,16 @@ export interface PluginManifest {
 
   /** Stability hint surfaced to the agent (`experimental` → warning footnote). */
   stability?: 'stable' | 'beta' | 'experimental';
+
+  /**
+   * UCAN capabilities the user's delegation to this oracle must grant before
+   * the plugin may be used by that user (`ctx.ucan.hasCapability` semantics:
+   * the action may be `*`). While one is missing, `load_capability` refuses
+   * the plugin and names what is missing, `list_capabilities` marks it
+   * unavailable, and its tools are neither shown to nor run by the model —
+   * whatever its visibility. Omitted: no requirement.
+   */
+  requires?: ReadonlyArray<{ resource: string; action: string }>;
 }
 
 export interface ManifestExample {
@@ -902,6 +919,14 @@ export interface PluginTool {
    * outcome is unknown. See `core/middlewares/tool-marks.ts`.
    */
   effect?: 'read' | 'write';
+  /**
+   * `true` when calling the tool again with the same arguments is a new,
+   * intended action rather than a repeat — a step in the user's browser
+   * such as scrolling or paging. Within one turn the repetition guard lets
+   * such a tool run up to its read limit (5 identical calls) instead of once;
+   * `effect` still governs retries, write claims and resume.
+   */
+  repeatable?: boolean;
   /**
    * Billing gate. `'contracted'` marks a tool that performs paid contracted
    * work: the runtime binds it only while the turn runs inside an active work

@@ -33,6 +33,10 @@
     "./*": {
       "types": "./dist/*.d.ts",
       "import": "./dist/*.js"
+    },
+    "./work": {
+      "types": "./dist/work/index.d.ts",
+      "import": "./dist/work/index.js"
     }
   },
   "devDependencies": {
