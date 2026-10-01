@@ -7,6 +7,7 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import {
+  TEST_BARE_DELEGATION,
   TEST_GOOD_TOKEN,
   TEST_MISSING_SESSION,
   TEST_USER_DID,
@@ -247,6 +248,28 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     expect((await s.status()).sockets).toBe(0);
   });
 
+  it('logs a CONNECT the bare-delegation fallback authenticated, as the shell does for HTTP; an invocation logs nothing', async () => {
+    const s = stub('bare-delegation-log');
+    const withInvocation = await connect(s);
+    expect(
+      (await s.loggedWarnings()).filter((w) => w.includes('bare delegation')),
+    ).toEqual([]);
+
+    const bare = (await open(s, { sessionId: 's2' })).client!;
+    await bare.next((f) => f.startsWith('0{'), 'OPEN');
+    bare.ws.send(
+      `40${JSON.stringify({ ucanDelegation: TEST_BARE_DELEGATION })}`,
+    );
+    await bare.next(isEvent('connected'), 'connected');
+    expect(
+      (await s.loggedWarnings()).filter((w) => w.includes('bare delegation')),
+    ).toEqual([
+      `[auth] socket CONNECT s2: ${TEST_USER_DID} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
+    ]);
+    withInvocation.ws.close();
+    bare.ws.close();
+  });
+
   it('rejects non-websocket handshakes with the engine.io error shape', async () => {
     const s = stub('bad-handshake');
     const polling = await open(s, {
@@ -402,6 +425,37 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     });
     expect((await s.status()).pendingCalls).toEqual([]);
     c.ws.close(1000, 'bye');
+  });
+
+  it("does not let a socket of another session answer this session's call, whatever sessionId it claims", async () => {
+    const s = stub('cross-session');
+    const own = await connect(s, { sessionId: 'mine' });
+    const other = await connect(s, { sessionId: 'other' });
+
+    const browser = s.callBrowserTool({
+      sessionId: 'mine',
+      toolCallId: 'tc-guess',
+      toolName: 'open_url',
+      args: {},
+      timeoutMs: 5000,
+    });
+    await own.next(isEvent('browser_tool_call'));
+    other.ws.send(
+      '42["tool_result",{"toolCallId":"tc-guess","sessionId":"mine","result":{"forged":true}}]',
+    );
+    // Round-trip a ping on the other socket so its result has been handled.
+    other.ws.send('42["ping"]');
+    await other.next(isEvent('pong'));
+    expect((await s.status()).pendingCalls.map((c) => c.toolCallId)).toEqual([
+      'tc-guess',
+    ]);
+
+    own.ws.send(
+      '42["tool_result",{"toolCallId":"tc-guess","result":{"opened":true}}]',
+    );
+    expect(await browser).toEqual({ ok: true, value: { opened: true } });
+    own.ws.close(1000, 'bye');
+    other.ws.close(1000, 'bye');
   });
 });
 

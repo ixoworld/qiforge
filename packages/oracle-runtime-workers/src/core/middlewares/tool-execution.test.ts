@@ -7,6 +7,7 @@ import {
   createToolExecutionMiddleware,
   isUncertainOutcome,
   operationKey,
+  uncertainResultReason,
   uncertainWriteToolResult,
 } from './tool-execution';
 import { makeClaimStore } from '../test-fixtures';
@@ -80,6 +81,14 @@ describe('isUncertainOutcome', () => {
     expect(isUncertainOutcome(new TypeError('fetch failed'))).toBe(true);
     expect(
       isUncertainOutcome(
+        Object.assign(new Error('read failed'), { code: 'ECONNRESET' }),
+      ),
+    ).toBe(true);
+    expect(isUncertainOutcome(new Error('Network connection lost.'))).toBe(
+      true,
+    );
+    expect(
+      isUncertainOutcome(
         Object.assign(new Error('Bad Gateway'), { status: 502 }),
       ),
     ).toBe(true);
@@ -92,6 +101,14 @@ describe('isUncertainOutcome', () => {
 
   it('is false for a failure the service reported', () => {
     expect(isUncertainOutcome(new Error('invalid recipient'))).toBe(false);
+    // Definite refusals that merely contain a transport-sounding word.
+    expect(isUncertainOutcome(new Error("network 'base' not supported"))).toBe(
+      false,
+    );
+    expect(isUncertainOutcome(new Error('invalid timeout: -1'))).toBe(false);
+    expect(isUncertainOutcome(new Error('payment aborted by the user'))).toBe(
+      false,
+    );
     expect(
       isUncertainOutcome(
         Object.assign(new Error('Unauthorized'), { status: 401 }),
@@ -103,6 +120,139 @@ describe('isUncertainOutcome', () => {
       ),
     ).toBe(false);
     expect(isUncertainOutcome('not an error')).toBe(false);
+  });
+});
+
+describe('uncertainResultReason', () => {
+  const result = (
+    content: string,
+    status: 'success' | 'error' = 'success',
+  ): ToolMessage =>
+    new ToolMessage({ tool_call_id: 'c', name: 'w', content, status });
+
+  it('names the reason when an error-shaped result reports a timeout, a transport failure or a 5xx', () => {
+    // The flows plugin's catch-all around a dropped connection.
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: { code: 'error', message: 'fetch failed' },
+          }),
+        ),
+      ),
+    ).toBe('fetch failed');
+    // The editor's unconfirmed save.
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            code: 'flush_timeout',
+            message: 'The edit could not be confirmed as saved.',
+          }),
+        ),
+      ),
+    ).toBe('flush_timeout');
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ successful: false, error: 'Bad Gateway' })),
+      ),
+    ).toBe('Bad Gateway');
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ error: 'upstream', statusCode: 503 })),
+      ),
+    ).toBe('server error');
+    expect(
+      uncertainResultReason(result('Error: request timed out after 30s')),
+    ).toBe('timed out');
+    expect(
+      uncertainResultReason(result('socket hang up while sending', 'error')),
+    ).toBe('socket hang up');
+    expect(
+      uncertainResultReason(result('Error: upstream answered HTTP 503')),
+    ).toBe('HTTP 503');
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: { name: 'TimeoutError', message: 'deadline' },
+          }),
+        ),
+      ),
+    ).toBe('TimeoutError');
+  });
+
+  it('is null for a definite refusal that merely contains a transport-sounding word', () => {
+    // A write whose claim stayed for one of these would refuse the next
+    // identical write as outcome-unknown although nothing happened.
+    expect(
+      uncertainResultReason(
+        result("Error: network 'base' not supported", 'error'),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: "network 'base' not supported; use 'ixo'",
+          }),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(result('Error: invalid timeout value', 'error')),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result('Failed: the transfer was aborted by the user', 'error'),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            success: false,
+            error: 'status 400: bad network id',
+          }),
+        ),
+      ),
+    ).toBeNull();
+  });
+
+  it('is null for a success and for a failure the service reported', () => {
+    expect(uncertainResultReason(result('ok'))).toBeNull();
+    // Success that happens to mention a timeout.
+    expect(
+      uncertainResultReason(result('Reminder set: timeout in 5 minutes')),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ ok: true, note: 'retried after a timeout' })),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(
+          JSON.stringify({
+            ok: false,
+            error: { code: 'validation_failed', message: 'Step name taken' },
+          }),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ error: 'Not found', status: 404 })),
+      ),
+    ).toBeNull();
+    expect(
+      uncertainResultReason(result('Error: invalid recipient', 'error')),
+    ).toBeNull();
+    expect(uncertainResultReason('not a tool message')).toBeNull();
   });
 });
 
@@ -145,6 +295,55 @@ describe('createToolExecutionMiddleware', () => {
       toolName: 'send_message',
       state: 'pending',
     });
+  });
+
+  it('keeps the claim when the tool returns an uncertain failure instead of throwing it', async () => {
+    const { claims, wrap } = middlewareFor();
+    const dropped = new ToolMessage({
+      tool_call_id: 'call_edit_flow',
+      name: 'edit_flow',
+      content: JSON.stringify({
+        ok: false,
+        error: { code: 'error', message: 'fetch failed' },
+      }),
+    });
+    const out = await wrap(
+      requestFor('edit_flow', { step: 'a' }),
+      async () => dropped,
+    );
+    // The model still sees what the tool said …
+    expect(out).toBe(dropped);
+    // … but the claim stands, so the identical write is not run again.
+    expect(claims.log).toEqual(['claim:edit_flow']);
+    let ran = false;
+    const again = (await wrap(
+      requestFor('edit_flow', { step: 'a' }),
+      async () => {
+        ran = true;
+        return okResult('edit_flow');
+      },
+    )) as ToolMessage;
+    expect(ran).toBe(false);
+    expect(again.status).toBe('error');
+    expect(String(again.content)).toBe(uncertainWriteToolResult('edit_flow'));
+  });
+
+  it('releases the claim when the tool returns a failure the service reported', async () => {
+    const { claims, wrap } = middlewareFor();
+    await wrap(
+      requestFor('edit_flow', { step: 'b' }),
+      async () =>
+        new ToolMessage({
+          tool_call_id: 'call_edit_flow',
+          name: 'edit_flow',
+          content: JSON.stringify({
+            ok: false,
+            error: { code: 'validation_failed', message: 'Step name taken' },
+          }),
+        }),
+    );
+    expect(claims.log).toEqual(['claim:edit_flow', 'release:edit_flow']);
+    expect(claims.rows.size).toBe(0);
   });
 
   it('does not run an identical write while its outcome is unknown, and tells the model', async () => {

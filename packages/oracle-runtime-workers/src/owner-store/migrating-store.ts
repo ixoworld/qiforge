@@ -20,12 +20,13 @@
  *            Matrix copy so no second copy of the user's history lingers.
  */
 import { VfsNoDelegationError } from './ixo-vfs-store';
-import type {
-  FileSnapshot,
-  OwnerCopy,
-  OwnerStore,
-  SaveHints,
-  SaveResult,
+import {
+  NotSqliteFileError,
+  type FileSnapshot,
+  type OwnerCopy,
+  type OwnerStore,
+  type SaveHints,
+  type SaveResult,
 } from './types';
 
 export interface MigratingOwnerStoreOptions {
@@ -77,13 +78,22 @@ export class MigratingOwnerStore implements OwnerStore {
     }
     if (fromVfs) return fromVfs;
 
-    const fromLegacy = await this.legacy.load().catch((err) => {
+    // A legacy read that FAILS is not "no legacy copy": a new, empty working
+    // copy would hide the user's history and, once a turn dirtied it, be
+    // flushed to VFS as their system of record. So the failure propagates
+    // and the boot retries. The one exception is a copy proven unusable (its
+    // whole header arrived and is not SQLite): no retry can load it.
+    let fromLegacy: OwnerCopy | null;
+    try {
+      fromLegacy = await this.legacy.load();
+    } catch (err) {
+      if (!(err instanceof NotSqliteFileError && err.proven)) throw err;
       this.log(
-        'warn',
-        `[owner-store] legacy Matrix load failed: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
+        `[owner-store] legacy Matrix copy is unusable, treating it as absent: ${err.message}`,
       );
-      return null;
-    });
+      fromLegacy = null;
+    }
     if (!fromLegacy) {
       // Without a delegation VFS could not be READ, so "no legacy copy" is
       // not "no file": an existing user whose grant lapsed would otherwise
@@ -146,7 +156,7 @@ export class MigratingOwnerStore implements OwnerStore {
     // Only fall through to legacy when VFS positively has no file.
     const vfs = await this.primary.head();
     if (vfs) return vfs;
-    return this.legacy.head().catch(() => null);
+    return this.legacy.head();
   }
 
   /** The legacy Matrix copy regardless of what VFS holds (see `OwnerStore.loadLegacy`). */

@@ -7,8 +7,10 @@ import { classifyReplyFast } from './internal/middleware.js';
 import { RedisState } from './internal/redis-state.js';
 import { nextRunAtFor, runJobId } from './internal/scheduler.js';
 import {
+  agentWakeFromTaskSpec,
   newTaskId,
   parseSpec,
+  portableWorkFromTaskSpec,
   renderIntentBody,
   renderSpec,
   specHash,
@@ -242,6 +244,35 @@ describe('TaskSpec', () => {
   it('specHash is deterministic and content-sensitive', () => {
     expect(specHash('T', 'body')).toBe(specHash('T', 'body'));
     expect(specHash('T', 'body')).not.toBe(specHash('T', 'other'));
+  });
+
+  it('exports reusable task work without runtime authority or lifecycle state', () => {
+    const portable = portableWorkFromTaskSpec(sampleSpec());
+    expect(portable).toEqual({
+      version: 1,
+      title: 'Morning Brief',
+      intent: sampleSpec().body,
+    });
+    expect(portable).not.toHaveProperty('owner');
+    expect(portable).not.toHaveProperty('approval');
+    expect(portable).not.toHaveProperty('trigger');
+    expect(portable).not.toHaveProperty('delivery');
+  });
+
+  it('creates stable notify-only wakes that point back to authoritative state', () => {
+    const at = '2026-06-11T05:00:00.000Z';
+    const wake = agentWakeFromTaskSpec(sampleSpec(), at);
+    expect(agentWakeFromTaskSpec(sampleSpec(), at)).toEqual(wake);
+    expect(wake).toMatchObject({
+      principal: 'did:ixo:abc',
+      source: 'task',
+      resourceRef:
+        '/users/did:ixo:abc/tasks/task_morning-brief_a1b2c3d4/spec.md',
+      evaluatedThrough: at,
+      notifyOnly: true,
+    });
+    expect(wake).not.toHaveProperty('instructions');
+    expect(wake).not.toHaveProperty('approval');
   });
 });
 

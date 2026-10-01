@@ -16,7 +16,7 @@
  * Cost shape (SQLite-backed Durable Object storage bills rows written and
  * read): one row written on receipt, one delete when the turn ends.
  */
-import type { InboundAttachment, InboundMessage } from './ingest';
+import type { InboundAttachment, InboundMessage, OfferOutcome } from './ingest';
 import { matrixTxnId } from './txn-id';
 
 export interface InboxRow extends InboundMessage {
@@ -101,6 +101,21 @@ export function updateInboxThread(
 export function deleteInboxRows(sql: SqlStorage, eventIds: string[]): void {
   for (const id of eventIds)
     sql.exec(`DELETE FROM turn_inbox WHERE event_id = ?`, id);
+}
+
+/**
+ * The inbox row of a message after its offer: a queued message keeps it until
+ * its turn ends, an unverified one (the sender's homeserver could not be
+ * looked up) keeps it for the next replay, and a dropped one leaves at once.
+ */
+export function settleOfferedRow(
+  sql: SqlStorage,
+  eventId: string,
+  outcome: OfferOutcome,
+): 'kept' | 'deleted' {
+  if (outcome === 'queued' || outcome === 'unverified') return 'kept';
+  deleteInboxRows(sql, [eventId]);
+  return 'deleted';
 }
 
 export function bumpInboxAttempts(sql: SqlStorage, eventIds: string[]): void {
