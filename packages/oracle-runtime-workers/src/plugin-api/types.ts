@@ -9,6 +9,7 @@ import type { BaseMessage } from '@langchain/core/messages';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { UserPreferences } from '../core/state';
 import type { AttachmentViewSurface } from '../attachments/view';
+import type { DeliveryConfig } from '../delivery/profile';
 
 /**
  * Route shape returned by `OraclePlugin.getAuthExcludedRoutes()`. Paths are
@@ -447,6 +448,13 @@ export interface OracleConfig {
   description?: string;
   /** Optional prompt customization (opening, communicationStyle, capabilities). */
   prompt?: OraclePromptConfig;
+  /**
+   * Chat delivery (WhatsApp through IXO Channels, Matrix rooms): replies
+   * arrive as short messages with long content moved to artefacts. Matrix
+   * rooms use it only with `matrixChat: true` (or `MATRIX_CHAT_DELIVERY=true`,
+   * which wins when set); otherwise a room reply stays one message.
+   */
+  delivery?: DeliveryConfig;
 }
 
 /**
@@ -499,6 +507,11 @@ export interface MatrixPostOpts {
   txnId?: string;
 }
 
+/** `ctx.session.surface`: the delivery surface of the turn. */
+export type SessionSurface =
+  | { kind: 'stream' }
+  | { kind: 'chat'; surface: string; label: string };
+
 export interface RuntimeContext<TConfig = MergedConfig> {
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
@@ -518,6 +531,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
     wsId?: string;
     requestId: string;
     roomId?: string;
+    /**
+     * Where the reply lands. `stream` is the Portal; `chat` is a chat app
+     * (WhatsApp through IXO Channels, a Matrix room) where the reply arrives
+     * as short messages. Tools can keep their output compact on `chat`.
+     */
+    surface?: SessionSurface;
   };
 
   /** Read-only view over the graph state's history. */

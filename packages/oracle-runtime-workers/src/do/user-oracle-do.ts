@@ -267,6 +267,21 @@ import {
 } from '../core/middlewares/context-guard';
 import { fetchOpenRouterContextLengths } from '../core/openrouter-pricing';
 import { ResultStore, resultStoreKnobs } from './result-store';
+import { artifactStorageConfig } from '../artifacts/config';
+import {
+  ArtifactStore,
+  artifactIdFor,
+  type OwnedArtifact,
+} from '../artifacts/store';
+import { buildCreateArtifactTool } from '../artifacts/tool';
+import { resolveDeliveryProfile } from '../delivery/profile';
+import {
+  draftReplyPlan,
+  materializeReplyPlan,
+  turnSteps,
+} from '../delivery/plan';
+import { parseReplyPlan } from '../delivery/schema';
+import type { DeliveryProfile, ReplyPlan } from '../delivery/types';
 import { formatReplay } from '../matrix/replay-format';
 import { retryGateway } from './gateway-retry';
 import {
@@ -663,6 +678,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     );
     /** Whole tool results the result cap saved (docs/plans/context-budgets.md). */
     private resultStore: ResultStore | null = null;
+    /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
+    private artifacts: ArtifactStore | null = null;
     /**
      * Per-model context windows; learned limits persist in this object's KV
      * storage (`ctxwin:<model>`), so a provider's rejection is remembered
@@ -1306,6 +1323,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       await this.resultStore.setup();
+      // The store exists whenever the bucket is bound, so artefacts made
+      // earlier stay readable, revocable and deleted with their session after
+      // the public origin is removed; only new ones need it.
+      const artifactConfig = artifactStorageConfig(this.env, (message) =>
+        console.warn(message),
+      );
+      if (artifactConfig) {
+        this.artifacts = new ArtifactStore(liveDb, artifactConfig);
+        await this.artifacts.setup();
+      }
       // Threads opened before the runtime adopted Node's session rule
       // (session id = thread root event id) are renamed to it, once.
       const renamed = await migrateThreadSessionIds(liveDb, console);
@@ -1360,6 +1387,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             !!this.delegations.get(identity.userDid)?.raw,
           ),
         getRun: (runId) => this.runStore!.get(runId),
+        getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
         begin: async (runId, request) => {
           const { live } = await this.runs!.begin({
@@ -2212,6 +2240,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               `[user-do] could not delete the saved tool results of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
             );
           });
+        await this.artifacts
+          ?.deleteForSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the artefacts of ${sessionId}; their links expire on schedule: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
         await this.ctx.storage.delete(contextStatsKey(sessionId));
         this.markDirty();
       }
@@ -2219,6 +2254,43 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // its next message instead of failing the session check for ever.
       if (await this.channelTurns!.forgetSession(sessionId)) this.markDirty();
       return deleted;
+    }
+
+    /**
+     * `GET /artifacts/:id` — the canonical copy, for its owner. `url` is
+     * present only while the share link still works.
+     */
+    async artifact(
+      identity: TurnIdentity,
+      artifactId: string,
+    ): Promise<OwnedArtifact | null> {
+      await this.ready(identity);
+      const stored = await this.artifacts?.get(artifactId);
+      if (!stored) return null;
+      const { url, ...ref } = stored.ref;
+      const live =
+        url !== undefined &&
+        !stored.revoked &&
+        Date.parse(ref.expiresAt) > Date.now();
+      return {
+        ...ref,
+        ...(live ? { url } : {}),
+        sessionId: stored.sessionId,
+        createdAt: stored.createdAt,
+        revoked: stored.revoked,
+        content: stored.content,
+      };
+    }
+
+    /** `DELETE /artifacts/:id` — revoke the share link; the canonical copy stays. */
+    async revokeArtifact(
+      identity: TurnIdentity,
+      artifactId: string,
+    ): Promise<boolean> {
+      await this.ready(identity);
+      const revoked = (await this.artifacts?.revoke(artifactId)) ?? false;
+      if (revoked) this.markDirty();
+      return revoked;
     }
 
     /** The session transcript as the indexer wants it (summarisation bookkeeping removed). */
@@ -2538,6 +2610,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             sessionId: req.sessionId,
             requestId: req.requestId,
             text: existing?.replyText ?? '',
+            ...(existing?.replyPlan ? { plan: existing.replyPlan } : {}),
             toolCalls: [],
             replayed: true,
           };
@@ -2557,7 +2630,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await ledger.start(eventId, req.sessionId, req.requestId);
       const run = this.runTurnOnce(req)
         .then(async (result) => {
-          await ledger.answer(eventId, result.text);
+          await ledger.answer(eventId, result.text, result.plan);
           return result;
         })
         .finally(() => {
@@ -2626,6 +2699,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         sessionId: req.sessionId,
         requestId: req.requestId,
         text: outcome.text,
+        ...(outcome.plan ? { plan: JSON.stringify(outcome.plan) } : {}),
         ...(outcome.messageId !== undefined
           ? { messageId: outcome.messageId }
           : {}),
@@ -2652,6 +2726,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           sessionId: req.sessionId,
           requestId: req.requestId,
           text: outcome.text,
+          ...(outcome.plan ? { plan: JSON.stringify(outcome.plan) } : {}),
           ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
           toolCalls: outcome.toolCalls ?? [],
           replayed: true,
@@ -2659,10 +2734,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       const record = await this.runStore?.getByRequestId(requestId);
       if (record?.status === 'finished') {
+        const plan = parseReplyPlan(await this.runStore!.getPlan(record.runId));
         return {
           sessionId: req.sessionId,
           requestId: req.requestId,
           text: record.partialText ?? '',
+          ...(plan ? { plan: JSON.stringify(plan) } : {}),
           ...(record.messageId ? { messageId: record.messageId } : {}),
           toolCalls: [],
           replayed: true,
@@ -3594,6 +3671,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoNotice,
         byoProvider,
         toolOutputCapChars,
+        delivery,
       } = await this.prepareTurn(
         req,
         {
@@ -3666,8 +3744,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               status: 'done' as const,
             })),
           );
-        const text = completed ? lastAiText(capture) : outcome.fullText;
         const messageId = completed ? lastAiMessageId(capture) : undefined;
+        // A chat surface also gets its reply as a plan. `text` stays the
+        // model's own text on every surface: stored results (task runs, the
+        // run record, the Matrix ledger) never hold a chat rendering whose
+        // links expire.
+        const plan =
+          completed && delivery.kind === 'chat'
+            ? await this.replyPlanOf(live, req, capture, delivery)
+            : undefined;
+        const text =
+          (live.continuation ?? '') +
+          (completed ? lastAiText(capture) : outcome.fullText);
         return {
           status:
             outcome.status === 'completed'
@@ -3675,7 +3763,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               : outcome.status === 'aborted'
                 ? 'aborted'
                 : 'failed',
-          text: (live.continuation ?? '') + text,
+          text,
+          ...(plan ? { plan } : {}),
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
@@ -3686,6 +3775,52 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (this.aborts.get(sessionId) === live.abort)
           this.aborts.delete(sessionId);
       }
+    }
+
+    /**
+     * The Reply Plan of a finished chat-surface run, built once from the
+     * turn's messages and kept with the run (`/channels/turn` polls read it
+     * back). A long step becomes an artefact when storage is configured; an
+     * artefact that fails falls back to plain messages.
+     */
+    private async replyPlanOf(
+      live: LiveRun,
+      req: TurnRequest,
+      capture: BaseMessage[],
+      delivery: Extract<DeliveryProfile, { kind: 'chat' }>,
+    ): Promise<ReplyPlan> {
+      const artifacts = this.artifacts?.canShare ? this.artifacts : null;
+      const { steps, toolResults } = turnSteps(capture);
+      const draft = draftReplyPlan({
+        steps,
+        toolResults,
+        continuation: live.continuation,
+        limits: delivery.limits,
+        canSpill: artifacts !== null,
+      });
+      const plan = await materializeReplyPlan(draft, {
+        limits: delivery.limits,
+        createSpill: async (key, spill) => {
+          if (!artifacts)
+            throw new Error('artifacts: storage is not configured');
+          return artifacts.create({
+            artifactId: await artifactIdFor(live.runId, `spill:${key}`),
+            sessionId: req.sessionId,
+            runId: live.runId,
+            title: spill.title,
+            content: spill.markdown,
+          });
+        },
+        onSpillError: (error) =>
+          console.warn(
+            `[delivery] run ${live.runId}: could not store a long reply as an artefact; sending it as messages: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      });
+      await this.runStore!.setPlan(live.runId, JSON.stringify(plan));
+      console.log(
+        `[delivery] run ${live.runId}: ${delivery.surface} reply in ${plan.parts.length} parts (${plan.parts.filter((p) => p.kind === 'artifact').length} artefacts)`,
+      );
+      return plan;
     }
 
     private async runDirectRead(
@@ -4628,6 +4763,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // inside the wrapper (already under the cap by the time it runs).
       const capMiddleware = createResultCapMiddleware(resultCap);
 
+      // Chat delivery: a channel or Matrix turn replies as short messages and
+      // may hand long content to `create_artifact` (bound only when artefact
+      // storage is configured). The Portal streams as it always has.
+      const delivery = resolveDeliveryProfile(req, core.delivery);
+      const artifacts =
+        delivery.kind === 'chat' && this.artifacts?.canShare
+          ? this.artifacts
+          : null;
+      const turnTools = artifacts
+        ? [
+            {
+              tool: buildCreateArtifactTool(async (input) =>
+                artifacts.create({
+                  artifactId: await artifactIdFor(run.runId, input.source),
+                  sessionId: req.sessionId,
+                  runId: run.runId,
+                  title: input.title,
+                  content: input.content,
+                }),
+              ),
+              returnDirect: true,
+            },
+          ]
+        : [];
+
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
         registries: core.registries,
@@ -4638,6 +4798,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider: byoTurn?.provider,
         contextBudget,
         turnBudget: budget,
+        delivery,
         ambient: {
           ...ambient,
           llm: meteredLlm,
@@ -4657,6 +4818,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // call (main agent and sub-agents alike).
           toolExecution: executionMiddleware,
           resultCap,
+          turnTools,
           onContextOverflow: (error) =>
             this.contextWindows.learnFromError(mainModelId, error, {
               ...(byoTurn ? { byoProvider: byoTurn.provider } : {}),
@@ -4793,6 +4955,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider: byoTurn?.provider,
         turnDisposables,
         toolOutputCapChars: contextBudget.resultCapChars,
+        delivery,
       };
     }
 

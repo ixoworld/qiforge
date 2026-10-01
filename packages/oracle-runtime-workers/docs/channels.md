@@ -63,6 +63,52 @@ Completed channel runs follow the ordinary seven-day run retention: database boo
 
 Storage growth: one tombstone row (run ID and status, under 100 bytes) remains for every channel request that started a run. Tombstones are never pruned, because they are what refuses a replay. A receipt whose request never started a run is not pruned either. This covers a request refused for its session or a missing delegation and never retried. Tombstones grow with message volume, at most about 10 MB per 100,000 messages per user.
 
+## Reply Plans
+
+A finished turn also carries `plan`, the reply as the ordered parts to deliver. `text` is then the plan as one Markdown message, with artefacts as links, for gateways that predate plans (without a plan it is the model's reply). A gateway that reads `plan` ignores `text`. The Companion room mirror shows the same rendering, posted once per run. The run record itself keeps the model's own text.
+
+```json
+{
+  "status": "finished",
+  "text": "Here's the week…",
+  "plan": {
+    "v": 1,
+    "parts": [
+      {
+        "partId": "p1",
+        "kind": "text",
+        "text": "Here's the week. **Wednesday** is the tight one."
+      },
+      {
+        "partId": "p2",
+        "kind": "artifact",
+        "artifact": {
+          "artifactId": "3f9a…",
+          "title": "Week plan",
+          "url": "https://companion.example/a/3f9a…#k=…",
+          "mime": "text/markdown",
+          "bytes": 2140,
+          "expiresAt": "2026-10-25T09:00:00.000Z"
+        }
+      },
+      {
+        "partId": "p3",
+        "kind": "text",
+        "text": "Want me to block the focus time?"
+      }
+    ]
+  }
+}
+```
+
+- **Order and identity.** Parts are delivered in order. `partId` is stable for the run, so `(userDid, bindingId, requestId, partId)` identifies one provider message. A re-poll returns the same plan.
+- **Text is chat Markdown:** `**bold**`, `_italic_`, `~~strike~~`, inline code, fenced code, `-` and `1.` lists, `>` quotes and links. It has no headings, tables or HTML. The gateway maps it to provider syntax. A part fits the profile's `bubbleMax` (1,500 characters on WhatsApp); the gateway still splits at the provider's hard limit and never truncates.
+- **An artefact is a link to a document** the user opens in a browser. Send it as a button or a link with previews off. The title can be up to 120 characters; shorten it where a provider needs less (a WhatsApp CTA header takes 60).
+- **Nothing to send.** An empty `parts`, like an empty `text`, completes delivery without a provider message. `plan` is absent when a run finished without one (a run from before plans); fall back to `text`.
+- **At most `maxPartsPerRun` parts** (6 on WhatsApp). A gateway may still merge adjacent text parts to respect a provider's pacing.
+
+The runtime picks the WhatsApp, Telegram or Slack profile from `provider`, and a generic chat profile for any other provider. See [chat delivery](chat-delivery.md).
+
 ## Matrix continuity
 
 The session marker uses a deterministic transaction ID for the binding and the request that opens the session. Message mirrors use deterministic transaction IDs for the user, binding, request, and author. A lost response therefore reuses the original Matrix event.

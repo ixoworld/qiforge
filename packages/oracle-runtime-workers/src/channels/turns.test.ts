@@ -2,6 +2,7 @@ import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { ChannelTurnsTestDO } from './test-do';
 import type { ChannelTurnInput } from './contract';
+import type { ReplyPlan } from '../delivery/types';
 import { RUN_RETENTION_MS } from '../do/run-store';
 
 declare global {
@@ -55,11 +56,51 @@ describe('durable channel requests', () => {
     expect(await stub.count()).toBe(1);
   });
 
+  it('returns a finished chat run as its Reply Plan, with the whole reply as text', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-plan');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(first.result).not.toHaveProperty('plan');
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Here is the week.' },
+        {
+          partId: 'p2',
+          kind: 'artifact',
+          artifact: {
+            artifactId: 'a'.repeat(32),
+            title: 'Week plan',
+            url: `https://oracle.test/a/${'a'.repeat(32)}#k=key`,
+            mime: 'text/markdown',
+            bytes: 120,
+            expiresAt: '2026-10-25T09:00:00.000Z',
+          },
+        },
+        { partId: 'p3', kind: 'text', text: 'Want me to book the slots?' },
+      ],
+    };
+    await stub.finish(first.result.runId, plan);
+    expect(await stub.submit(message)).toEqual({
+      ok: true,
+      result: {
+        ...first.result,
+        status: 'finished',
+        text: `Here is the week.\n\n[Week plan](https://oracle.test/a/${'a'.repeat(32)}#k=key)\n\nWant me to book the slots?`,
+        messageId: 'message-1',
+        plan,
+      },
+    });
+  });
+
   it('erases expired response payloads without permitting a replay after reset', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('expired-response');
     const first = await stub.submit(message);
     if (!first.ok) throw new Error('Turn rejected');
-    await stub.finish(first.result.runId);
+    await stub.finish(first.result.runId, {
+      v: 1,
+      parts: [{ partId: 'p1', kind: 'text', text: 'One answer' }],
+    });
     await stub.expire(RUN_RETENTION_MS - 1);
     expect(await stub.submit(message)).toMatchObject({
       ok: true,
@@ -70,6 +111,7 @@ describe('durable channel requests', () => {
       turn_runs: 0,
       turn_tool_marks: 0,
       turn_run_segments: 0,
+      turn_run_plans: 0,
       channel_run_tombstones: 1,
       channel_requests: 0,
     };
@@ -139,6 +181,32 @@ describe('durable channel requests', () => {
     await stub.reopen();
     await stub.submit(message);
     expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+  });
+
+  it("mirrors a chat run's Reply Plan once, as the channel user received it, and keeps the model's text in the run", async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('reply-plan-once');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    const plan: ReplyPlan = {
+      v: 1,
+      parts: [
+        { partId: 'p1', kind: 'text', text: 'Short answer.' },
+        { partId: 'p2', kind: 'text', text: 'Want more?' },
+      ],
+    };
+    await stub.finish(first.result.runId, plan, '## Answer\n\nShort answer.');
+    await stub.deliverReply(first.result.runId);
+    expect(await stub.mirroredReply()).toBe('Short answer.\n\nWant more?');
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { text: 'Short answer.\n\nWant more?', plan },
+    });
+    await stub.reopen();
+    await stub.submit(message);
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+    expect((await stub.run(first.result.runId))?.partialText).toBe(
+      '## Answer\n\nShort answer.',
+    );
   });
 
   it('delivers the reply on the first poll when the run end did not, then never again', async () => {

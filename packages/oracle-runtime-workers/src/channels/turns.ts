@@ -1,6 +1,8 @@
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { RunRecord } from '../do/run-store';
 import type { TurnIdentity, TurnRequest } from '../do/contracts';
+import { parseReplyPlan, planText } from '../delivery/schema';
+import type { ReplyPlan } from '../delivery/types';
 import {
   ChannelError,
   channelRequestHash,
@@ -24,6 +26,8 @@ export interface ChannelTurnsHost {
   /** Throws a `ChannelError` when the user has no stored delegation for this oracle. */
   requireDelegation(identity: TurnIdentity): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
+  /** The Reply Plan (JSON) a finished run was built into, if any. */
+  getPlan(runId: string): Promise<string | null>;
   wasPruned(runId: string): Promise<boolean>;
   begin(runId: string, request: TurnRequest): Promise<RunRecord>;
   mirror(
@@ -89,13 +93,26 @@ export class ChannelTurns {
    * Mirror a finished run's reply into the Companion room once: the receipt
    * records the delivery, so later polls of the same request do not send it
    * again. Called when the run ends; a poll retries a delivery that failed.
+   * `text` is the model's reply; a run with a Reply Plan mirrors the plan
+   * instead, as the channel user received it.
    */
   deliverReply(
     request: TurnRequest,
     runId: string,
     text: string,
   ): Promise<void> {
-    return this.serialize(() => this.deliver(request, runId, text));
+    return this.serialize(async () => {
+      await this.deliver(request, runId, await this.reply(runId, text));
+    });
+  }
+
+  /** A finished run's Reply Plan, and the reply as the channel user sees it. */
+  private async reply(
+    runId: string,
+    text: string,
+  ): Promise<{ plan: ReplyPlan | null; rendered: string }> {
+    const plan = parseReplyPlan(await this.host.getPlan(runId));
+    return { plan, rendered: plan ? planText(plan) : text };
   }
 
   /**
@@ -119,7 +136,7 @@ export class ChannelTurns {
   private async deliver(
     request: TurnRequest,
     runId: string,
-    text: string,
+    reply: { rendered: string },
   ): Promise<void> {
     await this.setup();
     const receipt = await this.db.get<{ reply_mirrored: number }>(
@@ -127,7 +144,7 @@ export class ChannelTurns {
       [runId],
     );
     if (Number(receipt?.reply_mirrored ?? 0) === 1) return;
-    await this.host.mirror(request, text, 'oracle');
+    await this.host.mirror(request, reply.rendered, 'oracle');
     await this.db.run(
       'UPDATE channel_requests SET reply_mirrored = 1 WHERE run_id = ?',
       [runId],
@@ -225,17 +242,23 @@ export class ChannelTurns {
       await this.host.mirror(request, request.message, 'user');
       record = await this.host.begin(runId, request);
     }
-    if (record.status === 'finished')
-      await this.deliver(request, runId, record.partialText ?? '');
+    const reply =
+      record.status === 'finished'
+        ? await this.reply(runId, record.partialText ?? '')
+        : null;
+    // The Companion room records the reply the channel user received, once.
+    if (reply) await this.deliver(request, runId, reply);
     return {
       requestId: input.requestId,
       runId,
       sessionId,
       status: record.status,
       ...(record.messageId ? { messageId: record.messageId } : {}),
-      ...(record.status === 'finished'
-        ? { text: record.partialText ?? '' }
-        : {}),
+      // `text` is the whole reply as one message for gateways that predate
+      // plans: the rendered plan when there is one (it carries the artefact
+      // links), else the model's text.
+      ...(reply ? { text: reply.rendered } : {}),
+      ...(reply?.plan ? { plan: reply.plan } : {}),
     };
   }
 }

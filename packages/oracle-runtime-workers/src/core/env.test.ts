@@ -85,6 +85,45 @@ describe('validateEnv', () => {
     );
   });
 
+  it('rejects artefact link settings an operator got wrong instead of falling back', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const fields = (env: Record<string, unknown>) =>
+      validateEnv(schema, makeEnv(env), pluginOwnership).errors.map(
+        (e) => e.field,
+      );
+    expect(
+      fields({
+        ORACLE_PUBLIC_URL: 'http://oracle.example',
+        ARTIFACT_VIEWER_URL: 'not a url',
+        ARTIFACT_LINK_TTL_DAYS: '400',
+        MATRIX_CHAT_DELIVERY: 'yes',
+      }).sort(),
+    ).toEqual([
+      'ARTIFACT_LINK_TTL_DAYS',
+      'ARTIFACT_VIEWER_URL',
+      'MATRIX_CHAT_DELIVERY',
+      'ORACLE_PUBLIC_URL',
+    ]);
+    expect(fields({ ARTIFACT_LINK_TTL_DAYS: '0' })).toEqual([
+      'ARTIFACT_LINK_TTL_DAYS',
+    ]);
+    expect(fields({ ARTIFACT_LINK_TTL_DAYS: '1.5' })).toEqual([
+      'ARTIFACT_LINK_TTL_DAYS',
+    ]);
+    const ok = validateEnv(
+      schema,
+      makeEnv({
+        ORACLE_PUBLIC_URL: 'https://oracle.example',
+        ARTIFACT_VIEWER_URL: 'http://localhost:3000/artifact',
+        ARTIFACT_LINK_TTL_DAYS: '365',
+        MATRIX_CHAT_DELIVERY: 'true',
+      }),
+      pluginOwnership,
+    );
+    expect(ok.valid).toBe(true);
+    expect(ok.config.ARTIFACT_LINK_TTL_DAYS).toBe(365);
+  });
+
   it('attributes each failing field to its owner', () => {
     const weather = makePlugin({
       name: 'weather',

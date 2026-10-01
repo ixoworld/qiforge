@@ -18,6 +18,7 @@ import {
 import { storedRunRequest } from './run-request';
 import { SessionEventRouter } from './ambient';
 import type { TurnRequest } from './contracts';
+import type { DeliveryProfile } from '../delivery/types';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { RequestDisposition } from '../plugin-api/request-admission';
 
@@ -240,6 +241,7 @@ async function withAdmissionHost(
       byoNotice: undefined,
       byoProvider: undefined,
       toolOutputCapChars: 10_000,
+      delivery: { kind: 'stream' } satisfies DeliveryProfile,
     }));
     Object.assign(host, {
       db,

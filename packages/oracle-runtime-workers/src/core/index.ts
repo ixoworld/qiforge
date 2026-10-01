@@ -34,6 +34,10 @@ import {
   type SoftDepGap,
 } from './plugin-loader';
 import { createRegistries, type Registries } from './registries';
+import {
+  type DeliveryConfig,
+  deliveryConfigWithEnv,
+} from '../delivery/profile';
 import { buildPluginContext } from './runtime-context';
 import { NOOP_LOGGER } from './utils';
 
@@ -311,6 +315,8 @@ export interface RuntimeCoreOptions {
  */
 export interface RuntimeCore {
   identity: OracleIdentity;
+  /** `OracleConfig.delivery`: how chat surfaces receive replies. */
+  delivery: DeliveryConfig;
   registries: Registries;
   /** Names of the plugins that loaded, in dependency order. */
   availablePlugins: ReadonlySet<string>;
@@ -605,6 +611,12 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
 
   return {
     identity,
+    delivery: deliveryConfigWithEnv(
+      opts.config.delivery,
+      typeof validated.config.MATRIX_CHAT_DELIVERY === 'string'
+        ? validated.config.MATRIX_CHAT_DELIVERY
+        : undefined,
+    ),
     registries,
     availablePlugins,
     plugins: resolved.loaded,

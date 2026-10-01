@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DoSqliteDatabase } from '../sqlite/database';
 import type { TurnRequest } from '../do/contracts';
-import { RunStore } from '../do/run-store';
+import { RunStore, type RunRecord } from '../do/run-store';
+import type { ReplyPlan } from '../delivery/types';
 import { ChannelTurns } from './turns';
 import {
   channelRequestHash,
@@ -37,6 +38,7 @@ export class ChannelTurnsTestDO extends DurableObject {
           (await this.ctx.storage.get<boolean>('delegation-revoked')) !== true,
         ),
       getRun: (runId) => runs.get(runId),
+      getPlan: (runId) => runs.getPlan(runId),
       wasPruned: (runId) => runs.wasChannelRunPruned(runId),
       begin: async (runId, request) => {
         await runs.create({
@@ -58,12 +60,13 @@ export class ChannelTurnsTestDO extends DurableObject {
         if (!row) throw new Error('Run was not persisted');
         return row;
       },
-      mirror: async (_request, _text, author) => {
+      mirror: async (_request, text, author) => {
         const key = `mirrors:${author}`;
         await this.ctx.storage.put(
           key,
           ((await this.ctx.storage.get<number>(key)) ?? 0) + 1,
         );
+        await this.ctx.storage.put(`mirrored:${author}`, text);
       },
       changed: () => this.ctx.storage.sync(),
     });
@@ -95,11 +98,17 @@ export class ChannelTurnsTestDO extends DurableObject {
     }
   }
 
-  async finish(runId: string): Promise<void> {
+  /** Finish a run as the coordinator does: the model's text, and a plan for a chat run. */
+  async finish(
+    runId: string,
+    plan?: ReplyPlan,
+    text = 'One answer',
+  ): Promise<void> {
     await this.ready();
+    if (plan) await this.runs!.setPlan(runId, JSON.stringify(plan));
     await this.runs!.update(runId, {
       status: 'finished',
-      partialText: 'One answer',
+      partialText: text,
       messageId: 'message-1',
     });
   }
@@ -111,6 +120,16 @@ export class ChannelTurnsTestDO extends DurableObject {
     if (!record) throw new Error('No such run');
     const request: TurnRequest = JSON.parse(record.request);
     await turns.deliverReply(request, runId, record.partialText ?? '');
+  }
+
+  async run(runId: string): Promise<RunRecord | undefined> {
+    await this.ready();
+    return this.runs!.get(runId);
+  }
+
+  /** The text of the last assistant mirror into the Companion room. */
+  async mirroredReply(): Promise<string | undefined> {
+    return this.ctx.storage.get<string>('mirrored:oracle');
   }
 
   async mirrors(): Promise<{ user: number; oracle: number }> {
@@ -152,6 +171,7 @@ export class ChannelTurnsTestDO extends DurableObject {
       'turn_runs',
       'turn_tool_marks',
       'turn_run_segments',
+      'turn_run_plans',
       'channel_run_tombstones',
       'channel_requests',
     ]) {
