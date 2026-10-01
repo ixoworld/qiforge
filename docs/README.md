@@ -1,5 +1,12 @@
 # Internal docs — QiForge framework maintainers
 
+> **⚠️ DEPRECATED: these pages describe the Node runtime (`packages/oracle-runtime`), which is no longer developed.**
+> The live runtime is `@ixo/oracle-runtime-workers`; its maintainer docs are in
+> [`packages/oracle-runtime-workers/docs/`](../packages/oracle-runtime-workers/docs/)
+> (architecture, configuration, operations, testing, node-parity). Only
+> `testing/test-harness.md` and the plans under `plans/` are still referenced by
+> Workers work.
+
 This directory is for people **growing the framework**. If you're building an oracle with QiForge (i.e. using the framework, not editing it), read the public docs at `ixo-docs/build-an-oracle/` instead.
 
 The structure mirrors the parts of the codebase a maintainer touches:
