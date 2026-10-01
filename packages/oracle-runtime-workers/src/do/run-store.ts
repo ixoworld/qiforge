@@ -518,6 +518,7 @@ export class RunStore {
         | 'taskRunId'
         | 'instanceId'
         | 'usage'
+        | 'request'
       >
     >,
   ): Promise<void> {
@@ -525,6 +526,7 @@ export class RunStore {
     const sets: string[] = ['updated_at = ?'];
     const params: Array<string | number | null> = [this.iso()];
     const column: Record<string, string> = {
+      request: 'request',
       status: 'status',
       attempts: 'attempts',
       generation: 'generation',

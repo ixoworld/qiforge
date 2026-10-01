@@ -33,6 +33,17 @@ import type {
   StepState,
   StepStatus,
 } from './types';
+import { semanticGateSchema } from './types';
+
+function parseSemanticGate(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    const gate = semanticGateSchema.safeParse(parsed);
+    return gate.success ? gate.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const STEP_STATES: readonly StepState[] = [
   'idle',
@@ -305,6 +316,9 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
     if (skills.length > 0) step.skills = skills;
     else if (primarySkill) step.skills = [primarySkill];
     if (inputs) step.inputs = inputs;
+    if (typeof props.semanticGate === 'string' && props.semanticGate) {
+      step.semanticGate = parseSemanticGate(props.semanticGate);
+    }
     if (conditions.length === 1 && conditions[0]) step.runWhen = conditions[0];
     else if (conditions.length > 1) step.conditions = conditions;
 

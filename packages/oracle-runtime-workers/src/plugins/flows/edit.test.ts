@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { z } from 'zod';
+import * as Y from 'yjs';
 import { collectAllBlocks, extractBlockProperties } from './ydoc-helpers';
 import { flowSpecToBaseUcan, stepIdToBlockId } from './translator';
 import { readFlowSpec, readStep } from './read';
@@ -7,6 +9,7 @@ import {
   reorderStep,
   setStepAssignment,
   setStepConditions,
+  setStepSemanticGate,
   setStepConfirmation,
   setStepEventTrigger,
   setStepInputs,
@@ -14,9 +17,11 @@ import {
   setStepSchedule,
   setStepExecution,
   setStepSkills,
+  setStepProps,
   setStepTrigger,
   updateFlowMeta,
 } from './edit';
+import { applyStepPatch, stepPatchSchema } from './tools/authoring';
 import {
   hydrateFlowDoc,
   setStepRuntime,
@@ -24,7 +29,7 @@ import {
   someEventCapableActionType,
   someNonEventActionType,
 } from './test-support';
-import type { FlowSpecInput } from './types';
+import type { FlowSpecInput, FlowStepRead } from './types';
 
 function threeStepDoc() {
   const action = someActionType();
@@ -49,6 +54,14 @@ describe('edit: per-block isolation (the core guarantee)', () => {
 
     setStepInputs(doc, 'b', { y: 'changed', extra: '{{a.output.value}}' });
 
+    const compiled = doc.getMap<Y.Map<unknown>>('qi.flow.nodes').get('b')!;
+    expect(compiled.get('inputs')).toBe(
+      JSON.stringify({
+        y: 'changed',
+        extra: { $ref: `${stepIdToBlockId('a')}.output.value` },
+      }),
+    );
+
     const flow = readFlowSpec(doc, 'r')!;
     const byId = Object.fromEntries(flow.steps.map((s) => [s.id, s]));
     expect(byId.a!.inputs).toEqual({ x: 'a-value' });
@@ -63,14 +76,60 @@ describe('edit: per-block isolation (the core guarantee)', () => {
 });
 
 describe('edit: settings round-trip via read', () => {
+  it('preserves a separate semantic gate without changing deterministic conditions', () => {
+    const doc = threeStepDoc();
+    const gate = {
+      version: 1 as const,
+      decision: 'flow.gate.semantic' as const,
+      criterion: 'Meets requirements',
+      rubric: 'Only supplied evidence',
+      inputFields: ['evidence'],
+    };
+    setStepConditions(doc, 'b', [
+      {
+        source: 'configured_input',
+        fromStep: 'a',
+        field: 'x',
+        is: 'equals',
+        value: 'a-value',
+      },
+    ]);
+    setStepSemanticGate(doc, 'b', gate);
+    const compiled = doc.getMap<Y.Map<unknown>>('qi.flow.nodes').get('b')!;
+    expect(compiled.get('semanticGate')).toBe(JSON.stringify(gate));
+    const compiledProps = compiled.get('props');
+    expect(
+      compiledProps instanceof Y.Map ? compiledProps.toJSON() : compiledProps,
+    ).toEqual(expect.objectContaining({ semanticGate: JSON.stringify(gate) }));
+    expect(JSON.parse(String(compiled.get('conditions')))).toEqual(
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ source: 'configured_input' }),
+        ]),
+      }),
+    );
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toEqual(gate);
+    expect(readStep(doc, 'r', 'b')?.runWhen?.source).toBe('configured_input');
+    setStepSemanticGate(doc, 'b', undefined);
+    expect(compiled.get('semanticGate')).toBe('');
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toBeUndefined();
+    expect(readStep(doc, 'r', 'b')?.runWhen?.source).toBe('configured_input');
+  });
   it('conditions are written in the evaluator vocabulary and round-trip', () => {
     const doc = threeStepDoc();
     setStepConditions(doc, 'b', [
-      { fromStep: 'a', field: 'decision', is: 'equals', value: 'approved' },
+      {
+        source: 'runtime_output',
+        fromStep: 'a',
+        field: 'decision',
+        is: 'equals',
+        value: 'approved',
+      },
     ]);
 
     const step = readStep(doc, 'r', 'b')!;
     expect(step.runWhen).toEqual({
+      source: 'runtime_output',
       fromStep: 'a',
       field: 'decision',
       is: 'equals',
@@ -214,7 +273,7 @@ describe('edit: settings round-trip via read', () => {
   it('clearing conditions removes them', () => {
     const doc = threeStepDoc();
     setStepConditions(doc, 'b', [
-      { fromStep: 'a', field: 'x', is: 'isNotEmpty' },
+      { source: 'runtime_output', fromStep: 'a', field: 'x', is: 'isNotEmpty' },
     ]);
     expect(readStep(doc, 'r', 'b')!.runWhen).toBeDefined();
     setStepConditions(doc, 'b', []);
@@ -228,6 +287,67 @@ describe('edit: settings round-trip via read', () => {
     expect(flow.title).toBe('Renamed');
     expect(flow.goal).toBe('new goal');
     expect(flow.steps.map((s) => s.id)).toEqual(['a', 'b', 'c']);
+  });
+});
+
+describe('edit: update_step patches', () => {
+  const gate = {
+    version: 1 as const,
+    decision: 'flow.gate.semantic' as const,
+    criterion: 'Meets requirements',
+    rubric: 'Only supplied evidence',
+    inputFields: ['evidence'],
+  };
+
+  it('clears a semantic gate with null on the block and the compiled node', () => {
+    const doc = threeStepDoc();
+    applyStepPatch(doc, 'b', stepPatchSchema.parse({ semanticGate: gate }));
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toEqual(gate);
+
+    applyStepPatch(doc, 'b', stepPatchSchema.parse({ semanticGate: null }));
+
+    const compiled = doc.getMap<Y.Map<unknown>>('qi.flow.nodes').get('b')!;
+    expect(compiled.get('semanticGate')).toBe('');
+    const compiledProps = compiled.get('props');
+    expect(
+      compiledProps instanceof Y.Map ? compiledProps.toJSON() : compiledProps,
+    ).toEqual(expect.objectContaining({ semanticGate: '' }));
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toBeUndefined();
+  });
+
+  it('keeps a semantic gate when the patch omits it', () => {
+    const doc = threeStepDoc();
+    applyStepPatch(doc, 'b', stepPatchSchema.parse({ semanticGate: gate }));
+    applyStepPatch(doc, 'b', stepPatchSchema.parse({ assignTo: 'did:ixo:x' }));
+    expect(readStep(doc, 'r', 'b')?.semanticGate).toEqual(gate);
+  });
+
+  it('accepts a read step, including an untagged stored condition, as update input', () => {
+    expectTypeOf<FlowStepRead>().toExtend<z.input<typeof stepPatchSchema>>();
+    const doc = threeStepDoc();
+    const legacy = JSON.stringify({
+      enabled: true,
+      mode: 'all_must_pass',
+      conditions: [
+        {
+          id: 'cond_a_x',
+          name: 'Condition from a',
+          sourceBlockId: stepIdToBlockId('a'),
+          sourceBlockType: 'action',
+          rule: {
+            type: 'property_value',
+            property: 'x',
+            operator: 'is_not_empty',
+          },
+          effect: { action: 'enable' },
+        },
+      ],
+    });
+    setStepProps(doc, 'b', { conditions: legacy });
+    const read = readStep(doc, 'r', 'b');
+    expect(read?.runWhen?.source).toBe('runtime_output');
+    const patch = stepPatchSchema.safeParse(read);
+    expect(patch.success).toBe(true);
   });
 });
 
