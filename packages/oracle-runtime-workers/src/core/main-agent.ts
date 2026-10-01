@@ -13,11 +13,17 @@ import type {
 } from '../plugin-api/types';
 import { canAccessToolPlane } from '../plugin-api/tool-plane';
 import type { MainAgentArgs, MainAgentBuildResult } from './main-agent-types';
-import { renderTier1, type Tier1Entry } from './manifest';
+import {
+  renderTier1,
+  unmetRequirements as unmetManifestRequirements,
+  type CapabilityRequirement,
+  type Tier1Entry,
+} from './manifest';
 import { buildMetaTools } from './meta-tools';
 import { buildReadResultTool } from './read-result-tool';
 import { describeBudget } from './context-budget';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
+import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
 import {
   createByoHistorySanitizerMiddleware,
   createCapabilityGateMiddleware,
@@ -244,6 +250,23 @@ export async function createMainAgent(
   );
   const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
+  // Plugins whose `manifest.requires` this user's delegation does not grant:
+  // the gate hides and refuses their tools, the prompt leaves them out.
+  const unmetRequirements = new Map<string, CapabilityRequirement[]>();
+  for (const { pluginName, manifest } of manifestEntries) {
+    const missing = unmetManifestRequirements(manifest, (resource, action) =>
+      ambient.ucan.hasCapability(
+        requestCtx.user.ucanDelegation,
+        resource,
+        action,
+      ),
+    );
+    if (missing.length > 0) unmetRequirements.set(pluginName, missing);
+  }
+  if (unmetRequirements.size > 0)
+    ambient.logger.log(
+      `[main-agent] not usable by ${requestCtx.user.did} (authorization lacks what they require): ${[...unmetRequirements.keys()].join(', ')}`,
+    );
   const titleByPlugin = new Map(
     manifestEntries.map(({ pluginName, manifest }) => [
       pluginName,
@@ -328,6 +351,12 @@ export async function createMainAgent(
   for (const { tool } of allTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
+  // Tools whose identical call is a new action (a browser step), which the
+  // repetition guard caps like a read whatever their effect.
+  const repetitionCaps = repetitionCapsFromEnv(config);
+  const repeatableToolNames = new Set(
+    allTools.filter(({ tool }) => tool.repeatable).map(({ tool }) => tool.name),
+  );
 
   ambient.logger.debug?.(
     `[main-agent] binding summary (all bound; gated at runtime): ` +
@@ -451,13 +480,27 @@ export async function createMainAgent(
       pluginByToolName,
       visibilityByToolName,
       preloadedPlugins,
+      unmetRequirements,
       logger: ambient.logger,
     }),
     createToolValidationMiddleware({
       skipToolNames: hooks?.validationSkipToolNames,
       logger: ambient.logger,
     }),
-    createToolRepetitionGuardMiddleware({ logger: ambient.logger }),
+    // Per turn: an identical failed call is not repeated; an identical
+    // successful write runs once, a read (or a `repeatable` UI step such as
+    // a browser tool) up to five times — `TURN_MAX_IDENTICAL_WRITES` /
+    // `TURN_MAX_IDENTICAL_READS`. Tools the effect map does not know count
+    // as writes, as in `toolEffectOf`.
+    createToolRepetitionGuardMiddleware({
+      logger: ambient.logger,
+      maxIdenticalReads: repetitionCaps.reads,
+      maxIdenticalWrites: repetitionCaps.writes,
+      effectOf: (name) =>
+        repeatableToolNames.has(name)
+          ? 'read'
+          : (toolEffects.get(name) ?? 'write'),
+    }),
     // A thrown tool error becomes an error ToolMessage here, for every
     // tool (the outer instance never retries). A ToolInvocationError is the
     // model's arguments failing the tool's schema: the same call again gives
@@ -535,9 +578,11 @@ export async function createMainAgent(
   const visiblePluginNames = new Set(
     allTools.map(({ pluginName }) => pluginName),
   );
+  // An always-on plugin the user may not use is left out of the prompt too.
   const eagerEntries: Tier1Entry[] = manifestEntries.filter(
     ({ pluginName, manifest }) =>
       manifest.visibility === 'always' &&
+      !unmetRequirements.has(pluginName) &&
       (!collectedPluginNames.has(pluginName) ||
         visiblePluginNames.has(pluginName)),
   );

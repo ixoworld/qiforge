@@ -28,6 +28,8 @@ export interface ToolHelperOptions {
    * turn resumes after a reset); omitted or `'write'` otherwise.
    */
   effect?: PluginTool['effect'];
+  /** Same arguments again is a new action (a UI step); see `PluginTool.repeatable`. */
+  repeatable?: PluginTool['repeatable'];
   /**
    * Billing gate marker, kept for source compatibility with the Node
    * runtime's plugin contract. The Workers runtime has no commerce lane, so
@@ -68,6 +70,7 @@ export function tool(
     plane,
     billing,
     effect,
+    repeatable,
   } = options;
   if (!name || typeof name !== 'string') {
     throw new TypeError(
@@ -102,6 +105,9 @@ export function tool(
   }
   if (effect !== undefined) {
     pluginTool.effect = effect;
+  }
+  if (repeatable !== undefined) {
+    pluginTool.repeatable = repeatable;
   }
   return pluginTool;
 }

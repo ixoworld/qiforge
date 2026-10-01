@@ -11,6 +11,9 @@ ORACLE_ENTITY_DID=did:ixo:entity:oracleexample
 
 # --- auth: did:ixo key resolution ------------------------------------------
 BLOCKSYNC_GRAPHQL_URL=http://localhost:34582/graphql
+# Requests must carry a UCAN invocation; `true` lets a bare x-ucan-delegation
+# authenticate instead (legacy clients only, logged per request).
+# UCAN_ALLOW_BARE_DELEGATION_AUTH=false
 
 # --- matrix -----------------------------------------------------------------
 MATRIX_BASE_URL=http://localhost:34008
@@ -42,3 +45,7 @@ OPEN_ROUTER_API_KEY=
 # TURN_MAX_TOKENS=500000
 # TURN_MAX_TOOL_CALLS=120
 # TURN_TIMEOUT_MS=600000
+# Repetition guard: identical successful calls (same tool, same arguments) one
+# turn may make — a write (default 1) and a read or repeatable UI step (5).
+# TURN_MAX_IDENTICAL_WRITES=1
+# TURN_MAX_IDENTICAL_READS=5

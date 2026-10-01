@@ -38,7 +38,8 @@
  *     `stat()` lists under the short literal `/.oracles` prefix and matches
  *     the exact path client-side.
  */
-import { abilityCovers, type WorkersUcanService } from '../do/ucan-service';
+import { abilityCovers } from '../core/runtime-context';
+import { type WorkersUcanService } from '../do/ucan-service';
 import { isNetworkError, withRetry } from './retry';
 import { tusUpload } from './tus-upload';
 import {

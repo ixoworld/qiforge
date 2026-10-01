@@ -1,3 +1,11 @@
+/**
+ * DEPRECATED — `@ixo/oracle-runtime` (the Node/NestJS runtime) is no longer
+ * developed. All QiForge development and every deployed oracle use the
+ * Cloudflare Workers runtime, `@ixo/oracle-runtime-workers`
+ * (`packages/oracle-runtime-workers`, reference app
+ * `apps/qiforge-workers-example`). Do not add features, parity work or
+ * fixes here; port them to the Workers runtime. See this package's README.
+ */
 export { createOracleApp } from './bootstrap/index.js';
 export {
   defineDecision,

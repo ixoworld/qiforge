@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import type { AgentWake, PortableWorkDefinition } from '@ixo/common';
 import matter from 'gray-matter';
 import { z } from 'zod';
 
@@ -171,4 +172,40 @@ export function specHash(title: string, body: string): string {
     .update(`${title}\n${body}`)
     .digest('hex')
     .slice(0, 16);
+}
+
+/**
+ * Extract the inert, reusable definition of a task. Runtime identity,
+ * scheduling, approval, delivery and execution state deliberately stay out.
+ */
+export function portableWorkFromTaskSpec(
+  spec: TaskSpec,
+): PortableWorkDefinition {
+  return {
+    version: 1,
+    title: spec.frontmatter.title,
+    intent: spec.body,
+  };
+}
+
+/**
+ * Describe one scheduled occurrence as a notify-only pointer. The worker must
+ * re-read the task spec and current authority before acting on this wake.
+ */
+export function agentWakeFromTaskSpec(
+  spec: TaskSpec,
+  occurredAt: string,
+): AgentWake {
+  return {
+    version: 1,
+    wakeId: `task:${spec.frontmatter.id}@${occurredAt}`,
+    principal: spec.frontmatter.owner,
+    source: 'task',
+    resourceRef: specPath(spec.frontmatter.owner, spec.frontmatter.id),
+    observedRevision: specHash(spec.frontmatter.title, spec.body),
+    evaluatedThrough: occurredAt,
+    reason: 'scheduled-run',
+    occurredAt,
+    notifyOnly: true,
+  };
 }
