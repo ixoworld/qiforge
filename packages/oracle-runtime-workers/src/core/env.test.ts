@@ -124,6 +124,30 @@ describe('validateEnv', () => {
     expect(ok.config.ARTIFACT_LINK_TTL_DAYS).toBe(365);
   });
 
+  it('takes an artefact sweep interval of 1 to 168 whole hours, unset by default', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const check = (env: Record<string, unknown>) =>
+      validateEnv(schema, makeEnv(env), pluginOwnership);
+
+    const unset = check({});
+    expect(unset.valid).toBe(true);
+    expect(unset.config.ARTIFACT_SWEEP_INTERVAL_HOURS).toBeUndefined();
+    expect(
+      check({ ARTIFACT_SWEEP_INTERVAL_HOURS: '1' }).config
+        .ARTIFACT_SWEEP_INTERVAL_HOURS,
+    ).toBe(1);
+    expect(
+      check({ ARTIFACT_SWEEP_INTERVAL_HOURS: '168' }).config
+        .ARTIFACT_SWEEP_INTERVAL_HOURS,
+    ).toBe(168);
+    for (const bad of ['0', '169', '1.5', 'daily'])
+      expect(
+        check({ ARTIFACT_SWEEP_INTERVAL_HOURS: bad }).errors.map(
+          (e) => e.field,
+        ),
+      ).toEqual(['ARTIFACT_SWEEP_INTERVAL_HOURS']);
+  });
+
   it('attributes each failing field to its owner', () => {
     const weather = makePlugin({
       name: 'weather',

@@ -8,7 +8,12 @@ export const DEFAULT_ARTIFACT_TTL_DAYS = 30;
 /** Expiry is part of the policy: no setting makes a link permanent. */
 export const MAX_ARTIFACT_TTL_DAYS = 365;
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+/** How often the cron starts a full sweep of expired share copies. */
+export const DEFAULT_ARTIFACT_SWEEP_INTERVAL_HOURS = 24;
+export const MAX_ARTIFACT_SWEEP_INTERVAL_HOURS = 168;
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 
 /** Where share links point: the oracle's `/a/:id`, or a shared viewer page. */
 export interface ArtifactLinkBase {
@@ -110,6 +115,30 @@ export function artifactStorageConfig(
       );
   }
   return { bucket, ttlMs: days * DAY_MS, links };
+}
+
+/**
+ * The interval between full sweeps. The env schema rejects an out-of-range
+ * value at boot; one that still reaches the cron is reported through `warn`
+ * and replaced by the default.
+ */
+export function artifactSweepIntervalMs(
+  env: Pick<OracleWorkerEnv, 'ARTIFACT_SWEEP_INTERVAL_HOURS'>,
+  warn: (message: string) => void = () => undefined,
+): number {
+  const raw = env.ARTIFACT_SWEEP_INTERVAL_HOURS;
+  if (raw === undefined) return DEFAULT_ARTIFACT_SWEEP_INTERVAL_HOURS * HOUR_MS;
+  const hours = Number(raw);
+  if (
+    Number.isInteger(hours) &&
+    hours >= 1 &&
+    hours <= MAX_ARTIFACT_SWEEP_INTERVAL_HOURS
+  )
+    return hours * HOUR_MS;
+  warn(
+    `[artifacts] ARTIFACT_SWEEP_INTERVAL_HOURS must be a whole number from 1 to ${MAX_ARTIFACT_SWEEP_INTERVAL_HOURS}, got ${JSON.stringify(raw)}: sweeping every ${DEFAULT_ARTIFACT_SWEEP_INTERVAL_HOURS} hours`,
+  );
+  return DEFAULT_ARTIFACT_SWEEP_INTERVAL_HOURS * HOUR_MS;
 }
 
 /**

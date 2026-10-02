@@ -30,6 +30,8 @@ import {
 import { MatrixGatewayDO } from './matrix/gateway-do';
 import { createShell, gateway, type PluginRoute } from './shell/app';
 import type { RouteExclusion } from './shell/auth';
+import { artifactSweepIntervalMs } from './artifacts/config';
+import { sweepExpiredArtifacts } from './artifacts/sweep';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -288,7 +290,25 @@ export function createOracleWorker(
     scheduled: async (_event, env) => {
       // Cron safety net: if the gateway's keep-alive loop ever died, this
       // restarts it. Declare a `triggers.crons` entry (e.g. every 5 minutes).
-      await gateway(env).ensureStarted();
+      // A failed keep-alive must not stop the sweep, and is rethrown after it
+      // so the cron invocation still reports the failure.
+      let keepAlive: { error: unknown } | undefined;
+      try {
+        await gateway(env).ensureStarted();
+      } catch (error) {
+        keepAlive = { error };
+      }
+      // The sweep throttles itself to one R2 read per tick between sweeps and
+      // contains its own errors (it logs them and never throws).
+      if (env.ARTIFACT_BUCKET)
+        await sweepExpiredArtifacts({
+          bucket: env.ARTIFACT_BUCKET,
+          intervalMs: artifactSweepIntervalMs(env, (message) =>
+            console.warn(message),
+          ),
+          log: console,
+        });
+      if (keepAlive) throw keepAlive.error;
     },
   };
 }
