@@ -106,3 +106,8 @@ GET /matrix/status   # instanceId unchanged, sendScheduler.failed 0, rateLimited
 config for checking whether an MCP round trip leaves an object resident:
 deploy it with that config, call `/mcp-opt/timeout` vs `/mcp-opt/own`, and
 compare `instanceId` after 45 s idle. Delete the deployed copy afterwards.
+
+
+### Live dictation
+
+`pnpm --filter @ixo/oracle-runtime-workers test:core src/transcription` runs the new isolated protocol, provider, service, socket and billing-adapter suites. These exercise mocked provider/billing boundaries and real session logic; they do not prove a live account supports the model or exercise a deployed charge. See [the live dictation release checklist](transcription.md#verification-and-release-checklist) for the required real Workers/Portal/device and explicitly authorized provider checks before enabling.

@@ -823,3 +823,8 @@ frame with `kind: budget_exhausted` and `retryable: false`, then `done`
 with `failed: true`. The client SDK reports it as a failed run; it never
 resubmits a POST by itself. Before raising a limit, check the run's usage
 and the tool marks for the loop that spent it.
+
+
+## Billable dictation
+
+See [live dictation](transcription.md) for the disabled-by-default rollout, central hold/settlement contract and recovery procedure. `transcription:session` stores only bounded accounting metadata, never audio, text or bearer credentials. A pending event blocks new sessions until its stable transaction is acknowledged. Unknown usage or a permanent receipt conflict enters `reconciliation_required`; investigate the provider usage and central reservation before changing it. Do not automatically charge sample estimates, release uncertain usage, or delete the record to unblock a user. Normal hold expiry does not establish zero provider cost.
