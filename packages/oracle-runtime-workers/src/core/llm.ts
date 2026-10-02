@@ -6,6 +6,7 @@ import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
 import { NOOP_LOGGER } from './utils';
+import { gpt6ResponseOptions, isGpt6ModelId } from './gpt6';
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
 
@@ -82,7 +83,7 @@ export const TIER_DISPLAY: Record<
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   // ── $ Everyday — fast and cheap ─────────────────────────────────────────
   {
-    id: DEFAULT_MODEL_ID,
+    id: 'openai/gpt-5.4-nano',
     label: 'GPT-5.4 Nano',
     family: 'openai',
     tier: 'everyday',
@@ -175,6 +176,34 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     vision: true,
     baselinePrice: { inputPerMillion: 5.0, outputPerMillion: 30.0 },
   },
+  // Candidates are additive; existing mode resolution remains first.
+  {
+    id: 'openai/gpt-6-luna',
+    label: 'GPT-6 Luna',
+    family: 'openai',
+    tier: 'everyday',
+    blurb: 'Fast, economical assistance for focused tasks.',
+    vision: true,
+    baselinePrice: { inputPerMillion: 0.1, outputPerMillion: 0.5 },
+  },
+  {
+    id: 'openai/gpt-6.1-sol',
+    label: 'GPT-6.1 Sol',
+    family: 'openai',
+    tier: 'balanced',
+    blurb: 'Capable reasoning for complex work at a balanced cost.',
+    vision: true,
+    baselinePrice: { inputPerMillion: 2, outputPerMillion: 10 },
+  },
+  {
+    id: 'openai/gpt-6-astra',
+    label: 'GPT-6 Astra',
+    family: 'openai',
+    tier: 'top',
+    blurb: 'Advanced reasoning for the most demanding work.',
+    vision: true,
+    baselinePrice: { inputPerMillion: 10, outputPerMillion: 50 },
+  },
 ];
 
 /** The public, per-model shape returned by a `GET /models` route. */
@@ -240,6 +269,9 @@ export function getDefaultModelId(
 }
 
 const MODEL_INPUT_CAPS: Record<string, ModelInputCapabilities> = {
+  'openai/gpt-6-luna': { image: true, file: true, audio: false, video: false },
+  'openai/gpt-6.1-sol': { image: true, file: true, audio: false, video: false },
+  'openai/gpt-6-astra': { image: true, file: true, audio: false, video: false },
   'openai/gpt-5.4-nano': {
     image: true,
     file: true,
@@ -623,7 +655,7 @@ export function createLlmAdapter(
     )) {
       if (typeof value === 'string') overrideHeaders[key] = value;
     }
-    return new ChatOpenAI({
+    const fields = {
       temperature: 0.8,
       maxRetries: 2,
       apiKey: env.OPEN_ROUTER_API_KEY,
@@ -642,7 +674,10 @@ export function createLlmAdapter(
         reasoning: reasoningKwargs,
         ...asRecord(paramsModelKwargs),
       },
-    });
+    };
+    return new ChatOpenAI(
+      isGpt6ModelId(model) ? gpt6ResponseOptions(model, fields) : fields,
+    );
   };
 
   return {
