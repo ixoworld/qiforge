@@ -1,13 +1,13 @@
 /**
  * ChatGPT-subscription history sanitizer — a port of the Node runtime's
  * `graph/middlewares/byo-history-sanitizer-middleware.ts`, installed on every
- * turn (as on Node); the kwargs normalisation is gated to BYO ChatGPT turns via
- * `runtime.context.byo`.
+ * turn (as on Node); the kwargs normalisation applies to ChatGPT-connected and GPT-6 Responses turns.
  */
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import { NOOP_LOGGER } from '../utils';
+import { isGpt6ModelId } from '../gpt6';
 
 export interface ByoHistorySanitizerMiddlewareOptions {
   /** Optional logger; defaults to a no-op. */
@@ -19,7 +19,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Whether this turn runs on the user's ChatGPT subscription — the only BYO
+ * Whether this turn runs on the user's ChatGPT subscription — a BYO
  * provider on the Responses API, whose input converter chokes on reasoning
  * kwargs written by other providers. Same narrow-don't-trust context read as
  * the credits middleware.
@@ -68,7 +68,7 @@ function stripReasoningBlocks(
  *
  *   - reasoning content blocks are stripped on every turn (see
  *     {@link stripReasoningBlocks});
- *   - on BYO ChatGPT turns, `additional_kwargs.reasoning` must satisfy the
+ *   - on ChatGPT-connected or GPT-6 Responses turns, `additional_kwargs.reasoning` must satisfy the
  *     Responses input converter, which requires `summary` to be an array
  *     whenever a reasoning item is forwarded: a well-formed item passes
  *     through, an item with `encrypted_content` but no `summary` (the shape
@@ -77,7 +77,7 @@ function stripReasoningBlocks(
  *     anything else (e.g. OpenRouter's reasoning shape from platform turns
  *     earlier in the same thread) is dropped from the outbound copy. Other
  *     providers' converters ignore the kwargs, so they are left alone
- *     off-ChatGPT.
+ *     off-Responses.
  *
  * Always returns a new message instance on change — checkpointed state is
  * never mutated. Returns the original instance when nothing needs to change.
@@ -134,7 +134,7 @@ function sanitizeMessage(
  * crash the Responses input converter before the request is sent, and
  * ChatGPT's reasoning content blocks are display residue no provider should
  * be fed back. Block-stripping runs on every turn; kwargs normalization is
- * gated to BYO ChatGPT turns. Untouched messages pass through by reference.
+ * gated to ChatGPT-connected or GPT-6 Responses turns. Untouched messages pass through by reference.
  */
 export const createByoHistorySanitizerMiddleware = (
   options?: ByoHistorySanitizerMiddlewareOptions,
@@ -144,11 +144,15 @@ export const createByoHistorySanitizerMiddleware = (
   return createMiddleware({
     name: 'ByoHistorySanitizerMiddleware',
     wrapModelCall: async (request, handler) => {
-      const chatGptTurn = isByoChatGptTurn(request.runtime.context);
+      const modelId = isRecord(request.model)
+        ? request.model.model
+        : request.model;
+      const responsesTurn =
+        isByoChatGptTurn(request.runtime.context) || isGpt6ModelId(modelId);
 
       let changed = 0;
       const messages = request.messages.map((message) => {
-        const sanitized = sanitizeMessage(message, chatGptTurn);
+        const sanitized = sanitizeMessage(message, responsesTurn);
         if (sanitized !== message) changed += 1;
         return sanitized;
       });

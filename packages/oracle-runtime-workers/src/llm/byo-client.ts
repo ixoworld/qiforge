@@ -16,6 +16,7 @@
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { ChatOpenAI } from '@langchain/openai';
+import { gpt6ResponseOptions, isGpt6ModelId } from '../core/gpt6';
 import type { ChatOpenAIFields, Logger } from '../plugin-api/types';
 import type { ProviderModelRole } from '../core/llm';
 import type { ByoCredential } from './byo-catalog';
@@ -149,7 +150,10 @@ const NOOP: Logger = {
 export function createByoChatModel(
   args: CreateByoChatModelArgs,
 ): BaseChatModel {
-  const { credential, modelId, role, params } = args;
+  const { credential, modelId, role } = args;
+  const params = isGpt6ModelId(modelId)
+    ? gpt6ResponseOptions(modelId, args.params)
+    : args.params;
   const logger = args.logger ?? NOOP;
   const backend = args.chatGptBackend ?? DEFAULT_CHATGPT_BACKEND;
   // Guard/classification roles run cold, generative roles match the platform

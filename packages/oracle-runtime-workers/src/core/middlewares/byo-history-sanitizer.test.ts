@@ -5,6 +5,7 @@ import { createByoHistorySanitizerMiddleware } from './byo-history-sanitizer';
 function setup(opts?: {
   context?: unknown;
   messages?: Array<AIMessage | HumanMessage>;
+  model?: string;
 }) {
   const mw = createByoHistorySanitizerMiddleware();
   const wrap = mw.wrapModelCall;
@@ -19,7 +20,10 @@ function setup(opts?: {
   return {
     handler,
     invoke: () =>
-      wrap({ messages, runtime: { context } } as never, handler as never),
+      wrap(
+        { messages, model: opts?.model, runtime: { context } } as never,
+        handler as never,
+      ),
   };
 }
 
@@ -29,6 +33,22 @@ function passedMessages(handler: ReturnType<typeof vi.fn>): AIMessage[] {
 }
 
 describe('createByoHistorySanitizerMiddleware', () => {
+  it('normalizes foreign reasoning before a managed GPT-6 Responses turn without mutating history', async () => {
+    const message = new AIMessage({
+      content: 'prior answer',
+      additional_kwargs: { reasoning: 'foreign format' },
+    });
+    const { handler, invoke } = setup({
+      context: {},
+      model: 'openai/gpt-6.1-sol',
+      messages: [message],
+    });
+    await invoke();
+    expect(
+      passedMessages(handler)[0]?.additional_kwargs.reasoning,
+    ).toBeUndefined();
+    expect(message.additional_kwargs.reasoning).toBe('foreign format');
+  });
   it('leaves platform turns alone when only reasoning kwargs are present', async () => {
     const contaminated = new AIMessage({
       content: 'hi',
