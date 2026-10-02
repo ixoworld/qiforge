@@ -282,7 +282,7 @@ export class TranscriptionService {
         );
         if (live.abort.signal.aborted)
           throw new TranscriptionError('provider_unavailable');
-        clearTimeout(live.timer ?? null);
+        if (live.timer !== undefined) clearTimeout(live.timer);
         live.openedAt = this.now();
         this.resetIdle(live);
         live.wallTimer = setTimeout(() => {
@@ -361,8 +361,8 @@ export class TranscriptionService {
       live.cancelled ||= cancel;
       if (live.closing) return;
       live.closing = true;
-      clearTimeout(live.timer ?? null);
-      clearTimeout(live.wallTimer ?? null);
+      if (live.timer !== undefined) clearTimeout(live.timer);
+      if (live.wallTimer !== undefined) clearTimeout(live.wallTimer);
       if (!record.audioBytes) {
         await this.pending(record, 0);
         if (!live.cancelled) live.sink.send({ type: 'completed', text: '' });
@@ -558,14 +558,14 @@ export class TranscriptionService {
     return (await this.read())?.retryAt ?? null;
   }
   private resetIdle(live: LiveSession): void {
-    clearTimeout(live.timer ?? null);
+    if (live.timer !== undefined) clearTimeout(live.timer);
     live.timer = setTimeout(() => {
       void this.stop(live.id, true).catch(() => this.emergencyClose(live));
     }, IDLE_TIMEOUT_MS);
   }
   private emergencyClose(live: LiveSession): void {
-    clearTimeout(live.timer ?? null);
-    clearTimeout(live.wallTimer ?? null);
+    if (live.timer !== undefined) clearTimeout(live.timer);
+    if (live.wallTimer !== undefined) clearTimeout(live.wallTimer);
     if (this.live === live) this.live = undefined;
     try {
       live.abort.abort();
