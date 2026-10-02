@@ -1,5 +1,24 @@
 # @ixo/common
 
+## 1.6.0
+
+### Minor Changes
+
+- [#328](https://github.com/ixoworld/qiforge/pull/328) [`dc0950a`](https://github.com/ixoworld/qiforge/commit/dc0950a28ba704af22fe3e127584845bba87b07d) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add provider-neutral PortableWorkDefinition and AgentWake contracts. Task adapters in both runtimes now expose reusable definition-only work and stable notify-only wake envelopes without carrying authority, approvals, credentials, or execution state. Portable definitions reject duplicate list entries and reserved authority, credential and execution-state keys in `configurationDefaults` (exported as `PORTABLE_WORK_RESERVED_CONFIGURATION_KEYS`, matching the Topic Protocol schema), and the Workers adapters validate their output with the schemas before returning it.
+
+### Patch Changes
+
+- [#318](https://github.com/ixoworld/qiforge/pull/318) [`9bb456a`](https://github.com/ixoworld/qiforge/commit/9bb456a87f161d4fd787f91b16ea6cda13226a1c) Thanks [@youssefhany-ixo](https://github.com/youssefhany-ixo)! - Dependency updates. The LangGraph stack moves to `@langchain/langgraph` 1.4.17, `@langchain/langgraph-checkpoint` 1.1.5, `@langchain/langgraph-checkpoint-sqlite` 1.0.4, `@langchain/langgraph-checkpoint-validation` 1.1.1 and `@langchain/mcp-adapters` 1.1.4. Both SQLite checkpoint savers now accept the `counters_since_delta_snapshot` metadata key that `langgraph-checkpoint` 1.1.5 adds for delta channels. Also updates `@tavily/core` 0.7.12, `mammoth` 1.12.3, `@digitalbazaar/http-client` 4.4.0, `@changesets/changelog-github` ^0.7.0, and lockfile-only bumps for `jose`, `@ixo/matrix-crdt`, `@nestjs/swagger` and `vitest`.
+
+- [#323](https://github.com/ixoworld/qiforge/pull/323) [`e40dc1c`](https://github.com/ixoworld/qiforge/commit/e40dc1cfa5efd5c099b424ee10f8c9a30eddbf50) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add authenticated request admission before agent preparation, durable direct-read disposition, deterministic titles, and request-scoped agent middleware. Preserve direct read transcripts and normal SSE and Matrix output without generative preparation. Require explicit sources for newly authored flow conditions and support a separate versioned semantic gate. Combine request and caller Decision cancellation and reject late provider success after cancellation.
+
+  A refused or failed request admission now ends the run with an `error` frame (`kind: request_admission`, generic message) and `done`, and a user abort during admission ends it as `aborted`. Admission handlers receive a config without core credentials or other plugins' keys, the Matrix `roomKind`, `eventId` and `threadId`, and a per-handler time limit (`REQUEST_ADMISSION_TIMEOUT_MS`, default 2000 ms; a timeout counts as `pass`). Matrix group-room turns and scheduled task runs are never offered to admission handlers. A run recovered while its admission was in progress now runs the agent with the user's message instead of an empty graph input. `update_step` clears a semantic gate with `semanticGate: null`. Stored flow conditions without a source are read as `runtime_output`, so a read step is valid update input.
+
+- [#237](https://github.com/ixoworld/qiforge/pull/237) [`3d8ad32`](https://github.com/ixoworld/qiforge/commit/3d8ad32de0a7040595f32298de442cd811bfc4ba) Thanks [@Zach-ixo](https://github.com/Zach-ixo)! - Update LangSmith to the patched 0.6 release line to address CVE-2026-45134.
+
+- Updated dependencies [[`9bb456a`](https://github.com/ixoworld/qiforge/commit/9bb456a87f161d4fd787f91b16ea6cda13226a1c)]:
+  - @ixo/matrix@1.2.34
+
 ## 1.1.0
 
 ### Minor Changes
