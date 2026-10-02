@@ -110,3 +110,5 @@ compare `instanceId` after 45 s idle. Delete the deployed copy afterwards.
 ### Live dictation
 
 `pnpm --filter @ixo/oracle-runtime-workers test:core src/transcription` runs the new isolated protocol, provider, service, socket and billing-adapter suites. These exercise mocked provider/billing boundaries and real session logic; they do not prove a live account supports the model or exercise a deployed charge. See [the live dictation release checklist](transcription.md#verification-and-release-checklist) for the required real Workers/Portal/device and explicitly authorized provider checks before enabling.
+
+Unused-admission cancellation regressions cover origin/identity checks through the Hono shell and internal Durable Object handler, disabled-admission cleanup without provider credentials, stale/newer-session isolation, create/attach/cancel serialization, disconnect during delayed provider startup, durable release retries, and permanent billing failures. Shell tests control the existing authentication module's outcomes; these do not replace the real UCAN authentication and Workers harness suites.

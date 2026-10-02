@@ -12,6 +12,7 @@ import {
 } from '../transcription/service';
 import { openTranscriptionProvider } from '../transcription/provider';
 import { transcriptionSocket } from '../transcription/routes';
+import { cancelTranscriptionReservation } from '../transcription/cancellation';
 import {
   readTranscriptionLimits,
   TranscriptionError,
@@ -3442,6 +3443,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           const userDid = request.headers.get('x-transcription-user');
           if (!userDid)
             return Response.json({ code: 'unauthorized' }, { status: 401 });
+          const cancellation =
+            /^\/transcription\/sessions\/([a-zA-Z0-9_-]{8,80})\/cancel$/.exec(
+              url.pathname,
+            );
+          if (cancellation && request.method === 'POST')
+            return await cancelTranscriptionReservation(
+              request,
+              cancellation[1]!,
+              {
+                env: this.env,
+                store: this.ctx.storage,
+                ready: (identity) => this.ready(identity),
+                service: (journal) =>
+                  this.transcription(journal.userDid, journal),
+              },
+            );
           assertOrigin(
             request.headers.get('origin'),
             readTranscriptionLimits(this.env),

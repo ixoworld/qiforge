@@ -1,6 +1,7 @@
 import {
   assertOrigin,
   readTranscriptionLimits,
+  readTranscriptionOrigins,
   TranscriptionError,
   transcriptionHttpError,
 } from '../transcription/protocol';
@@ -719,6 +720,36 @@ export function createShell(
             'x-identity': JSON.stringify(identity),
             'x-source-invocation': source,
             'x-public-origin': new URL(c.req.url).origin,
+            origin: c.req.header('origin')!,
+          },
+        },
+      );
+    } catch (error) {
+      return transcriptionHttpError(
+        error instanceof TranscriptionError ? error.code : 'unavailable',
+        error instanceof TranscriptionError ? error.status : 503,
+      );
+    }
+  });
+
+  app.post('/transcription/sessions/:sessionId/cancel', async (c) => {
+    try {
+      assertOrigin(c.req.header('origin') ?? null, {
+        allowedOrigins: readTranscriptionOrigins(c.env),
+      });
+      const auth = c.get('auth');
+      if (!auth || auth.via !== 'invocation')
+        return transcriptionHttpError('invocation_required', 401);
+      const sessionId = c.req.param('sessionId');
+      if (!/^[a-zA-Z0-9_-]{8,80}$/.test(sessionId))
+        return transcriptionHttpError('invalid_session', 400);
+      return userStub(c.env, auth.userDid).fetch(
+        `https://user-oracle/transcription/sessions/${sessionId}/cancel`,
+        {
+          method: 'POST',
+          headers: {
+            'x-transcription-user': auth.userDid,
+            'x-identity': JSON.stringify(identityOf(auth, c.req.raw.headers)),
             origin: c.req.header('origin')!,
           },
         },

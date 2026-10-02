@@ -78,7 +78,7 @@ function harness(store = new MemoryStore()) {
       maxDailyAudioMs: 120000,
       allowedOrigins: [origin],
     },
-    connect: vi.fn(async (cb: ProviderCallbacks) => {
+    connect: vi.fn(async (cb: ProviderCallbacks, _signal: AbortSignal) => {
       callbacks = cb;
       return provider;
     }),
@@ -492,4 +492,335 @@ describe('billable transcription session', () => {
     });
     await h.service.stop(s.sessionId, true);
   });
+});
+
+describe('unused admission cancellation', () => {
+  const reserve = (h: ReturnType<typeof harness>) =>
+    h.service.create(
+      'did:ixo:user',
+      'source',
+      origin,
+      'https://oracle.example',
+    );
+
+  it('durably releases before an immediate retry without opening the provider', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    vi.mocked(h.billing.release).mockImplementationOnce(async () => {
+      const journal = await h.journal();
+      expect(journal).toMatchObject({
+        sessionId: session.sessionId,
+        phase: 'pending',
+        durationSeconds: 0,
+        audioBytes: 0,
+        ticketHash: '',
+      });
+      expect(journal?.retryAt).toBeGreaterThan(Date.now());
+      expect(h.schedule).toHaveBeenLastCalledWith(journal?.retryAt);
+    });
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).resolves.toEqual({ cancelled: true });
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).resolves.toEqual({ cancelled: true });
+    expect(h.billing.release).toHaveBeenCalledTimes(1);
+    expect(h.billing.settle).not.toHaveBeenCalled();
+    expect(h.options.connect).not.toHaveBeenCalled();
+    expect(await h.store.get('transcription:daily')).toMatchObject({
+      milliseconds: 0,
+    });
+    const retry = await reserve(h);
+    expect(retry.sessionId).not.toBe(session.sessionId);
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).resolves.toEqual({ cancelled: false });
+    expect((await h.journal())?.sessionId).toBe(retry.sessionId);
+    expect((await h.journal())?.phase).toBe('reserved');
+    expect(h.billing.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot release another user or session, or bypass origin checks on a replay', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    for (const [userDid, sessionId] of [
+      ['did:ixo:other', session.sessionId],
+      ['did:ixo:user', 'missing_session'],
+    ]) {
+      await expect(
+        h.service.cancelReservation(userDid!, sessionId!, origin),
+      ).resolves.toEqual({ cancelled: false });
+    }
+    for (const invalidOrigin of [null, 'https://evil.example']) {
+      await expect(
+        h.service.cancelReservation('did:ixo:user', 'missing', invalidOrigin),
+      ).rejects.toMatchObject({ code: 'origin_forbidden', status: 403 });
+    }
+    h.options.limits.allowedOrigins.push('https://other-portal.example');
+    await expect(
+      h.service.cancelReservation(
+        'did:ixo:user',
+        session.sessionId,
+        'https://other-portal.example',
+      ),
+    ).rejects.toMatchObject({ code: 'origin_forbidden', status: 403 });
+    expect(h.billing.release).not.toHaveBeenCalled();
+    expect((await h.journal())?.phase).toBe('reserved');
+  });
+
+  it('replays a failed release after restart with the same admission and refunds quota once', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    vi.mocked(h.billing.release).mockRejectedValueOnce(new Error('lost reply'));
+    await h.service.cancelReservation(
+      'did:ixo:user',
+      session.sessionId,
+      origin,
+    );
+    const pending = await h.journal();
+    expect(pending?.phase).toBe('pending');
+    expect(pending?.durationSeconds).toBe(0);
+    const reboot = new TranscriptionService(h.options);
+    await reboot.cancelReservation('did:ixo:user', session.sessionId, origin);
+    await reboot.cancelReservation('did:ixo:user', session.sessionId, origin);
+    expect(h.billing.release).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(h.billing.release).mock.calls[1]).toEqual(
+      vi.mocked(h.billing.release).mock.calls[0],
+    );
+    expect((await h.journal())?.phase).toBe('settled');
+    expect(await h.store.get('transcription:daily')).toMatchObject({
+      milliseconds: 0,
+    });
+    expect(h.options.connect).not.toHaveBeenCalled();
+  });
+
+  it('retains failed cancellation for its durable alarm without client replay', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    vi.mocked(h.billing.release).mockRejectedValueOnce(new Error('network'));
+    await h.service.cancelReservation(
+      'did:ixo:user',
+      session.sessionId,
+      origin,
+    );
+    vi.setSystemTime(Date.now() + 61000);
+    await new TranscriptionService(h.options).tick();
+    expect((await h.journal())?.phase).toBe('settled');
+    expect(h.billing.release).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a permanent release failure instead of promising successful cleanup', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    vi.mocked(h.billing.release).mockRejectedValueOnce(
+      new TranscriptionBillingError('BILLING_CONFLICT', 'Conflict', 409, false),
+    );
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).rejects.toMatchObject({
+      code: 'session_or_billing_pending',
+      status: 409,
+    });
+    expect((await h.journal())?.phase).toBe('reconciliation_required');
+    expect((await h.journal())?.retryAt).toBeUndefined();
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).rejects.toMatchObject({ code: 'session_not_cancellable', status: 409 });
+    expect(h.billing.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['journal', 'alarm'])(
+    'never releases before durable %s persistence succeeds',
+    async (failure) => {
+      const h = harness();
+      const session = await reserve(h);
+      if (failure === 'journal')
+        vi.spyOn(h.store, 'put').mockRejectedValueOnce(new Error('storage'));
+      else h.schedule.mockRejectedValueOnce(new Error('storage'));
+      await expect(
+        h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+      ).rejects.toThrow('storage');
+      expect(h.billing.release).not.toHaveBeenCalled();
+      await h.service.cancelReservation(
+        'did:ixo:user',
+        session.sessionId,
+        origin,
+      );
+      expect(h.billing.release).toHaveBeenCalledTimes(1);
+      expect((await h.journal())?.phase).toBe('settled');
+    },
+  );
+
+  it('wins over a queued attach without ever connecting to the provider', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    const cancellation = h.service.cancelReservation(
+      'did:ixo:user',
+      session.sessionId,
+      origin,
+    );
+    const attaching = h.service.attach(
+      session.sessionId,
+      session.ticket,
+      origin,
+      h.sink,
+    );
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    await expect(attaching).rejects.toMatchObject({ code: 'invalid_ticket' });
+    expect(h.options.connect).not.toHaveBeenCalled();
+    expect(h.billing.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot cancel an attach that wins the queue even before it receives audio', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    const attaching = h.service.attach(
+      session.sessionId,
+      session.ticket,
+      origin,
+      h.sink,
+    );
+    const cancellation = h.service.cancelReservation(
+      'did:ixo:user',
+      session.sessionId,
+      origin,
+    );
+    await attaching;
+    await expect(cancellation).rejects.toMatchObject({
+      code: 'session_not_cancellable',
+      status: 409,
+    });
+    expect(h.billing.release).not.toHaveBeenCalled();
+    expect(h.provider.close).not.toHaveBeenCalled();
+    expect((await h.journal())?.phase).toBe('listening');
+  });
+
+  it('cannot skip an in-flight admission or cancel a newer concurrent reservation', async () => {
+    const h = harness();
+    const admitted = vi.mocked(h.billing.admit).getMockImplementation()!;
+    let begin!: (sessionId: string) => void;
+    const admissionStarted = new Promise<string>((resolve) => {
+      begin = resolve;
+    });
+    let finish!: () => void;
+    const admissionReady = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    vi.mocked(h.billing.admit).mockImplementationOnce(async (input) => {
+      begin(input.sessionId);
+      await admissionReady;
+      return admitted(input);
+    });
+    const creating = reserve(h);
+    const sessionId = await admissionStarted;
+    const cancellation = h.service.cancelReservation(
+      'did:ixo:user',
+      sessionId,
+      origin,
+    );
+    const next = reserve(h);
+    finish();
+    await creating;
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    const newer = await next;
+    expect(newer.sessionId).not.toBe(sessionId);
+    expect((await h.journal())?.sessionId).toBe(newer.sessionId);
+    expect((await h.journal())?.phase).toBe('reserved');
+  });
+
+  it('serializes HTTP cancellation behind provider startup and releases once when the matching socket closes', async () => {
+    const h = harness();
+    const session = await reserve(h);
+    let started!: (signal: AbortSignal) => void;
+    const connecting = new Promise<AbortSignal>((resolve) => {
+      started = resolve;
+    });
+    h.options.connect.mockImplementationOnce(
+      (_callbacks, signal) =>
+        new Promise((_resolve, reject) => {
+          started(signal);
+          signal.addEventListener('abort', () => reject(new Error('aborted')));
+        }),
+    );
+    const attaching = h.service.attach(
+      session.sessionId,
+      session.ticket,
+      origin,
+      h.sink,
+    );
+    const attachResult = attaching.catch((error: unknown) => error);
+    const signal = await connecting;
+    await h.service.disconnect(session.sessionId, {
+      send: () => undefined,
+      close: () => undefined,
+    });
+    expect(signal.aborted).toBe(false);
+    const cancellation = h.service.cancelReservation(
+      'did:ixo:user',
+      session.sessionId,
+      origin,
+    );
+    expect(h.billing.release).not.toHaveBeenCalled();
+    const disconnected = h.service.disconnect(session.sessionId, h.sink);
+    await expect(attachResult).resolves.toMatchObject({
+      code: 'provider_unavailable',
+    });
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    await disconnected;
+    expect(signal.aborted).toBe(true);
+    expect(h.billing.release).toHaveBeenCalledTimes(1);
+    expect(h.billing.settle).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+    expect(h.provider.append).not.toHaveBeenCalled();
+    expect((await h.journal())?.phase).toBe('settled');
+  });
+
+  it.each<TranscriptionJournal['phase']>([
+    'reserved',
+    'listening',
+    'finalizing',
+    'pending',
+    'settled',
+    'reconciliation_required',
+  ])('never releases %s accounting that contains audio', async (phase) => {
+    const h = harness();
+    const session = await reserve(h);
+    const journal = (await h.journal())!;
+    await h.store.put(TRANSCRIPTION_JOURNAL_KEY, {
+      ...journal,
+      phase,
+      audioBytes: 48000,
+      durationSeconds: 1,
+    });
+    await expect(
+      h.service.cancelReservation('did:ixo:user', session.sessionId, origin),
+    ).rejects.toMatchObject({ code: 'session_not_cancellable', status: 409 });
+    expect(h.billing.release).not.toHaveBeenCalled();
+    expect(h.billing.settle).not.toHaveBeenCalled();
+    expect((await h.journal())?.phase).toBe(phase);
+  });
+
+  it.each<TranscriptionJournal['phase']>([
+    'listening',
+    'finalizing',
+    'reconciliation_required',
+  ])(
+    'does not reinterpret unattached %s as an unused reservation after restart',
+    async (phase) => {
+      const h = harness();
+      const session = await reserve(h);
+      await h.store.put(TRANSCRIPTION_JOURNAL_KEY, {
+        ...(await h.journal()),
+        phase,
+      });
+      await expect(
+        new TranscriptionService(h.options).cancelReservation(
+          'did:ixo:user',
+          session.sessionId,
+          origin,
+        ),
+      ).rejects.toMatchObject({ code: 'session_not_cancellable', status: 409 });
+      expect(h.billing.release).not.toHaveBeenCalled();
+    },
+  );
 });

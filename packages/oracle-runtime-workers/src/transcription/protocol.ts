@@ -29,27 +29,15 @@ export interface TranscriptionLimits {
   allowedOrigins: string[];
 }
 
-export function readTranscriptionLimits(env: {
-  TRANSCRIPTION_ENABLED?: string;
+/** Cleanup still needs origin validation when new admissions are disabled. */
+export function readTranscriptionOrigins(env: {
   TRANSCRIPTION_ALLOWED_ORIGINS?: string;
-  TRANSCRIPTION_MAX_SECONDS?: string;
-  TRANSCRIPTION_DAILY_SECONDS?: string;
-}): TranscriptionLimits {
-  if (env.TRANSCRIPTION_ENABLED !== 'true')
-    throw new TranscriptionError('disabled', 404);
-  const maxSeconds = Number(env.TRANSCRIPTION_MAX_SECONDS ?? '60');
-  const dailySeconds = Number(env.TRANSCRIPTION_DAILY_SECONDS);
+}): string[] {
   const origins = (env.TRANSCRIPTION_ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   if (
-    !Number.isSafeInteger(maxSeconds) ||
-    maxSeconds < 1 ||
-    maxSeconds > 300 ||
-    !Number.isSafeInteger(dailySeconds) ||
-    dailySeconds < maxSeconds ||
-    dailySeconds > 86400 ||
     !origins.length ||
     origins.some((origin) => {
       try {
@@ -61,6 +49,29 @@ export function readTranscriptionLimits(env: {
     })
   )
     throw new TranscriptionError('not_configured');
+  return origins;
+}
+
+export function readTranscriptionLimits(env: {
+  TRANSCRIPTION_ENABLED?: string;
+  TRANSCRIPTION_ALLOWED_ORIGINS?: string;
+  TRANSCRIPTION_MAX_SECONDS?: string;
+  TRANSCRIPTION_DAILY_SECONDS?: string;
+}): TranscriptionLimits {
+  if (env.TRANSCRIPTION_ENABLED !== 'true')
+    throw new TranscriptionError('disabled', 404);
+  const maxSeconds = Number(env.TRANSCRIPTION_MAX_SECONDS ?? '60');
+  const dailySeconds = Number(env.TRANSCRIPTION_DAILY_SECONDS);
+  const origins = readTranscriptionOrigins(env);
+  if (
+    !Number.isSafeInteger(maxSeconds) ||
+    maxSeconds < 1 ||
+    maxSeconds > 300 ||
+    !Number.isSafeInteger(dailySeconds) ||
+    dailySeconds < maxSeconds ||
+    dailySeconds > 86400
+  )
+    throw new TranscriptionError('not_configured');
   return {
     maxDurationMs: maxSeconds * 1000,
     maxDailyAudioMs: dailySeconds * 1000,
@@ -70,7 +81,7 @@ export function readTranscriptionLimits(env: {
 
 export function assertOrigin(
   origin: string | null,
-  limits: TranscriptionLimits,
+  limits: Pick<TranscriptionLimits, 'allowedOrigins'>,
 ): string {
   if (!origin || !limits.allowedOrigins.includes(origin))
     throw new TranscriptionError('origin_forbidden', 403);

@@ -209,6 +209,54 @@ export class TranscriptionService {
     });
   }
 
+  /** Release only an unused admission; attached sockets own their own stop path. */
+  cancelReservation(
+    userDid: string,
+    sessionId: string,
+    origin: string | null,
+  ): Promise<{ cancelled: boolean }> {
+    return this.exclusive(async () => {
+      assertOrigin(origin, this.options.limits);
+      const record = await this.read();
+      if (
+        !record ||
+        record.sessionId !== sessionId ||
+        record.userDid !== userDid
+      )
+        return { cancelled: false };
+      if (record.origin !== origin)
+        throw new TranscriptionError('origin_forbidden', 403);
+      if (
+        this.live?.id === sessionId ||
+        record.audioBytes !== 0 ||
+        (record.phase !== 'reserved' &&
+          !(
+            (record.phase === 'pending' || record.phase === 'settled') &&
+            record.durationSeconds === 0
+          ))
+      )
+        throw new TranscriptionError('session_not_cancellable', 409);
+      if (record.phase === 'settled') return { cancelled: true };
+      if (record.phase === 'reserved') {
+        record.ticketHash = '';
+        await this.pending(record, 0);
+      } else {
+        // A retry may follow a crash between persisting pending and its alarm.
+        record.retryAt = this.now() + 60_000;
+        await this.write(record);
+        await this.options.schedule(record.retryAt);
+      }
+      await this.settle(record);
+      const result = await this.read();
+      if (
+        result?.phase !== 'settled' &&
+        !(result?.phase === 'pending' && result.retryAt)
+      )
+        throw new TranscriptionError('session_or_billing_pending', 409);
+      return { cancelled: true };
+    });
+  }
+
   attach(
     sessionId: string,
     ticket: string,
