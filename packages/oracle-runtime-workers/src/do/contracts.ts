@@ -165,6 +165,8 @@ export interface OracleWorkerEnv {
   ARTIFACT_VIEWER_URL?: string;
   /** Days an artefact link stays valid (default 30). */
   ARTIFACT_LINK_TTL_DAYS?: string;
+  /** Hours between the cron's sweeps of expired share copies (default 24, 1–168). */
+  ARTIFACT_SWEEP_INTERVAL_HOURS?: string;
   /** IXO VFS worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */
   VFS_BASE_URL?: string;
   /** UCAN store worker base URL when `OWNER_STORE=vfs` (defaults per NETWORK). */

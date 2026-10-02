@@ -6,7 +6,11 @@ import { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
-import { isSecureUrl, MAX_ARTIFACT_TTL_DAYS } from '../artifacts/config';
+import {
+  isSecureUrl,
+  MAX_ARTIFACT_SWEEP_INTERVAL_HOURS,
+  MAX_ARTIFACT_TTL_DAYS,
+} from '../artifacts/config';
 
 /**
  * Tier-0 (core) environment for the Workers runtime. Mirrors
@@ -220,6 +224,17 @@ export const baseEnvSchema = z.object({
     .int()
     .min(1)
     .max(MAX_ARTIFACT_TTL_DAYS)
+    .optional(),
+  /**
+   * Hours between the cron's sweeps of expired share copies in the bucket
+   * (unset = 24). Only runs where `ARTIFACT_BUCKET` is bound and a cron
+   * trigger is declared.
+   */
+  ARTIFACT_SWEEP_INTERVAL_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_ARTIFACT_SWEEP_INTERVAL_HOURS)
     .optional(),
 
   // --- misc ---------------------------------------------------------------

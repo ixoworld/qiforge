@@ -15,8 +15,11 @@ import { newShareKey, sealArtifact } from './crypto';
 
 export const ARTIFACT_ID_RE = /^[0-9a-f]{32}$/;
 
+/** Every share copy lives under this R2 prefix, and nothing else does. */
+export const ARTIFACT_OBJECT_PREFIX = 'art/';
+
 export function artifactObjectKey(artifactId: string): string {
-  return `art/${artifactId}`;
+  return `${ARTIFACT_OBJECT_PREFIX}${artifactId}`;
 }
 
 /** A stable id for (run, source): the tool call id, or a spill's step key. */

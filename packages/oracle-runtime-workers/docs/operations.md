@@ -720,6 +720,51 @@ next session create because its watermark did not move. Task-run sessions
 (`task:<id>`) are never indexed: a session create indexes the user's most
 recent conversation, skipping task runs.
 
+## Artefact sweep
+
+Expired artefact share copies (`art/<id>` in `ARTIFACT_BUCKET`) are deleted
+by the cron tick of the script that binds the bucket (`src/artifacts/sweep.ts`),
+so copies nobody opens again do not stay in the bucket. It needs a cron
+trigger on that script: the single-script layout's `*/5 * * * *` keep-alive
+cron covers it; in a gateway split, give the oracle script its own (the
+example's devnet config uses `0 3 * * *`). The gateway script's cron never
+sweeps. The keep-alive runs first; a failed keep-alive does not stop the
+sweep and still fails the cron invocation afterwards.
+
+- **State.** One JSON object, `artifact-sweep/state` (outside `art/`, so a
+  lifecycle rule on `art/` never removes it):
+  `{ v: 1, sweptAt, cursor }`. `sweptAt` is when the last full sweep ended;
+  `cursor` is set while a sweep is unfinished. A missing or unreadable state
+  counts as "never swept"; deleting it forces a full sweep on the next tick.
+- **Throttle.** A tick with no unfinished sweep and a `sweptAt` younger than
+  `ARTIFACT_SWEEP_INTERVAL_HOURS` (default 24) reads the state and stops.
+  It logs nothing.
+- **Bounded work.** A tick lists at most 20 pages of up to 1,000 objects
+  (`include: ['customMetadata']`, never a per-object read) and deletes the
+  copies whose `expiresAt` has passed, up to 1,000 keys per delete. A copy
+  without a readable `expiresAt` is left alone. A larger bucket is finished
+  over the next ticks from the stored cursor, whatever the interval.
+- **Logs.** One line per tick that did work:
+  `[artifacts] sweep finished: pages=… seen=… deleted=… unknown=… resumed=… elapsedMs=…`
+  (`sweep paused, resumes next tick:` while pages remain). `unknown` counts
+  objects without a readable `expiresAt`; a steady non-zero value means
+  something else writes under `art/`. A failure logs
+  `[artifacts] sweep failed: <error> (…counters)` once, writes no state, and
+  the next tick retries from the last stored cursor. Two overlapping ticks
+  are harmless: the second only re-deletes deleted keys.
+- **Cost.** Per tick between sweeps: one Class B read (the state). Per sweep:
+  one Class A list per page (up to 1,000 objects; R2 may return fewer per
+  page when it includes metadata), one Class A write per tick the sweep
+  spans (one for a bucket under 20,000 objects), one Class B read per tick,
+  and free deletes. With the 5-minute cron that is 288 reads a day plus the
+  daily sweep.
+- **Stuck cursor.** A resume whose first list fails (`sweep failed` with
+  `resumed=true pages=0`) drops the stored cursor and logs
+  `sweep dropped its stored cursor`; the next tick starts a fresh sweep. A
+  transient R2 error at that point costs the same restart. To force a fresh
+  sweep by hand, delete the state object
+  (`wrangler r2 object delete <bucket>/artifact-sweep/state --remote`).
+
 ## ChatGPT-subscription lane needs a proxy
 
 `chatgpt.com` (the Codex backend the subscription lane talks to) answers

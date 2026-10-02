@@ -23,8 +23,9 @@
     "@matrix-org/matrix-sdk-crypto-wasm": "@ixo/matrix-bot-workers-sdk/crypto-wasm-shim",
     "jsdom": "../../packages/oracle-runtime-workers/src/plugins/editor/jsdom-shim.ts",
   },
-  // The gateway keep-alive cron lives in the gateway script.
-  "triggers": { "crons": [] },
+  // The gateway keep-alive cron lives in the gateway script. This daily tick
+  // sweeps expired artefact share copies once ARTIFACT_BUCKET is bound here.
+  "triggers": { "crons": ["0 3 * * *"] },
   // Per-user-DID rate limit (see wrangler.jsonc for rationale).
   "ratelimits": [
     {

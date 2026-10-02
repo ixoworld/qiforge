@@ -164,11 +164,11 @@ Link unfurlers (WhatsApp, Telegram, Slack, Matrix URL previews) fetch the path, 
 
 ### Expiry, revocation, deletion
 
-- Links expire after `ARTIFACT_LINK_TTL_DAYS` (default 30). The data route refuses an expired object. Add an R2 lifecycle rule on `art/` to remove share copies nobody opened, as described in [configuration](configuration.md#chat-delivery-and-artefacts).
+- Links expire after `ARTIFACT_LINK_TTL_DAYS` (default 30). The data route refuses an expired object and deletes it. Copies nobody opens again are deleted by the cron sweep (`src/artifacts/sweep.ts`): every `ARTIFACT_SWEEP_INTERVAL_HOURS` (default 24) it lists `art/` with each object's `expiresAt` and deletes the expired ones, so the bucket needs no lifecycle rule. It runs on the script that binds `ARTIFACT_BUCKET` and needs a cron trigger there; see [configuration](configuration.md#chat-delivery-and-artefacts) and [operations](operations.md#artefact-sweep).
 - `DELETE /artifacts/:id` (authenticated, the owner only) deletes the share copy. The canonical copy stays. `GET /artifacts/:id` returns the canonical copy, with `url` only while the link works.
 - Deleting a session deletes its artefacts: the share copies first, then the rows. If the R2 delete fails, the rows stay, and the links still expire on schedule.
 - Revoking or deleting a channel binding does **not** revoke the artefact links already sent through it. Revoke them one by one with `DELETE /artifacts/:id`, or delete the session.
-- Owner reads, revocation and the session cleanup need only the bucket binding. Removing `ORACLE_PUBLIC_URL` stops new artefacts (and `GET /artifacts/:id` returns no `url`), but the stored ones stay readable, revocable and deleted with their session. Removing the `ARTIFACT_BUCKET` binding itself leaves the R2 copies to expire on their own: the links stop working only once the link expires or the lifecycle rule removes the object.
+- Owner reads, revocation and the session cleanup need only the bucket binding. Removing `ORACLE_PUBLIC_URL` stops new artefacts (and `GET /artifacts/:id` returns no `url`), but the stored ones stay readable, revocable and deleted with their session. Removing the `ARTIFACT_BUCKET` binding itself also stops the sweep: the R2 copies stay in the bucket until an operator's lifecycle rule (if any) removes them, and the links stop working at once, because nothing serves `/a/:id/data` without the binding.
 
 ### Link policy
 
