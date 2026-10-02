@@ -1,4 +1,11 @@
 import {
+  assertOrigin,
+  readTranscriptionLimits,
+  readTranscriptionOrigins,
+  TranscriptionError,
+  transcriptionHttpError,
+} from '../transcription/protocol';
+import {
   authenticateChannel,
   assertActiveChannelBinding,
   channelAuthConfig,
@@ -123,6 +130,43 @@ export function createShell(
     ...BUILTIN_EXCLUSIONS,
     ...(opts.authExcludedRoutes ?? []),
   ];
+
+  // The upgrade is routed before CORS/auth middleware. It grants no provider
+  // access: the user object requires the single-use ticket in the first frame.
+  app.get('/transcription/socket', async (c) => {
+    try {
+      const limits = readTranscriptionLimits(c.env);
+      assertOrigin(c.req.header('origin') ?? null, limits);
+      const userDid = c.req.query('userDid');
+      const sessionId = c.req.query('sessionId');
+      if (
+        !userDid?.startsWith('did:') ||
+        userDid.length > 256 ||
+        !sessionId ||
+        !/^[a-zA-Z0-9_-]{8,80}$/.test(sessionId) ||
+        c.req.header('upgrade')?.toLowerCase() !== 'websocket'
+      )
+        return transcriptionHttpError('invalid_upgrade', 400);
+      if (!c.env.RATE_LIMIT)
+        return transcriptionHttpError('not_configured', 503);
+      const ip = c.req.header('cf-connecting-ip');
+      if (
+        !ip ||
+        !(await c.env.RATE_LIMIT.limit({ key: `transcription:${ip}` })).success
+      )
+        return transcriptionHttpError('rate_limit', 429);
+      const url = new URL(c.req.url);
+      url.host = 'user-oracle';
+      const forwarded = new Request(url, c.req.raw);
+      forwarded.headers.set('x-transcription-user', userDid);
+      return userStub(c.env, userDid).fetch(forwarded);
+    } catch (error) {
+      return transcriptionHttpError(
+        error instanceof TranscriptionError ? error.code : 'unavailable',
+        error instanceof TranscriptionError ? error.status : 403,
+      );
+    }
+  });
 
   // --- realtime (socket.io) --------------------------------------------------
   // Registered before every middleware on purpose: a WebSocket upgrade
@@ -654,6 +698,68 @@ export function createShell(
         );
       });
     return c.json({ ok: true });
+  });
+
+  app.post('/transcription/sessions', async (c) => {
+    try {
+      const limits = readTranscriptionLimits(c.env);
+      assertOrigin(c.req.header('origin') ?? null, limits);
+      const auth = c.get('auth');
+      const source = /^Bearer (.+)$/i.exec(
+        c.req.header('authorization') ?? '',
+      )?.[1];
+      if (auth.via !== 'invocation' || !source || source.length > 65536)
+        return transcriptionHttpError('invocation_required', 401);
+      const identity = identityOf(auth, c.req.raw.headers);
+      return userStub(c.env, auth.userDid).fetch(
+        'https://user-oracle/transcription/sessions',
+        {
+          method: 'POST',
+          headers: {
+            'x-transcription-user': auth.userDid,
+            'x-identity': JSON.stringify(identity),
+            'x-source-invocation': source,
+            'x-public-origin': new URL(c.req.url).origin,
+            origin: c.req.header('origin')!,
+          },
+        },
+      );
+    } catch (error) {
+      return transcriptionHttpError(
+        error instanceof TranscriptionError ? error.code : 'unavailable',
+        error instanceof TranscriptionError ? error.status : 503,
+      );
+    }
+  });
+
+  app.post('/transcription/sessions/:sessionId/cancel', async (c) => {
+    try {
+      assertOrigin(c.req.header('origin') ?? null, {
+        allowedOrigins: readTranscriptionOrigins(c.env),
+      });
+      const auth = c.get('auth');
+      if (!auth || auth.via !== 'invocation')
+        return transcriptionHttpError('invocation_required', 401);
+      const sessionId = c.req.param('sessionId');
+      if (!/^[a-zA-Z0-9_-]{8,80}$/.test(sessionId))
+        return transcriptionHttpError('invalid_session', 400);
+      return userStub(c.env, auth.userDid).fetch(
+        `https://user-oracle/transcription/sessions/${sessionId}/cancel`,
+        {
+          method: 'POST',
+          headers: {
+            'x-transcription-user': auth.userDid,
+            'x-identity': JSON.stringify(identityOf(auth, c.req.raw.headers)),
+            origin: c.req.header('origin')!,
+          },
+        },
+      );
+    } catch (error) {
+      return transcriptionHttpError(
+        error instanceof TranscriptionError ? error.code : 'unavailable',
+        error instanceof TranscriptionError ? error.status : 503,
+      );
+    }
   });
 
   // --- byo-llm (bring-your-own-credential LLMs) --------------------------------

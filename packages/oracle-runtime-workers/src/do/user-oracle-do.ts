@@ -1,3 +1,25 @@
+import { transcriptionRuntimeConfig } from '../transcription/config';
+import {
+  createTranscriptionBilling,
+  TranscriptionBillingError,
+} from '../transcription/billing';
+import {
+  TranscriptionService,
+  TRANSCRIPTION_JOURNAL_KEY,
+  TRANSCRIPTION_INTENT_KEY,
+  type TranscriptionAdmissionIntent,
+  type TranscriptionJournal,
+} from '../transcription/service';
+import { openTranscriptionProvider } from '../transcription/provider';
+import { transcriptionSocket } from '../transcription/routes';
+import { cancelTranscriptionReservation } from '../transcription/cancellation';
+import {
+  readTranscriptionLimits,
+  TranscriptionError,
+  assertOrigin,
+  jsonObject,
+  transcriptionHttpError,
+} from '../transcription/protocol';
 import { ChannelTurns } from '../channels/turns';
 import {
   assertActiveChannelBinding,
@@ -625,6 +647,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private ucan: WorkersUcanService | null = null;
     private secretsService: WorkersSecretsService | null = null;
     private byo: WorkersByoService | null = null;
+    private transcriptionService: TranscriptionService | null = null;
     private userDid: string | null = null;
     private readonly events = new SessionEventRouter();
     /** socket.io endpoint (built on first use; restores hibernated sockets). */
@@ -1749,6 +1772,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // due yet, re-arm and return WITHOUT opening the database — that is
       // what lets a user with an open tab cost a few milliseconds every
       // PING_INTERVAL_MS instead of a resident object.
+      const transcriptionAt = await this.transcriptionAlarm();
       const wakeAt = Date.now();
       const nextPingAt =
         this.ctx.getWebSockets().length > 0 ? this.realtime.pingTick() : null;
@@ -1770,7 +1794,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         (recoveryAt === null || recoveryAt > wakeAt + 1000)
       ) {
         await this.requestAlarm(
-          Math.min(nextPingAt, housekeepingAt, recoveryAt ?? Infinity),
+          Math.min(
+            nextPingAt,
+            housekeepingAt,
+            recoveryAt ?? Infinity,
+            transcriptionAt ?? Infinity,
+          ),
         );
         return;
       }
@@ -1804,7 +1833,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
 
       const now = Date.now();
-      const deadlines: number[] = [];
+      const deadlines: number[] =
+        transcriptionAt === null ? [] : [transcriptionAt];
 
       // Durable runs: start the recovery attempts that are due (the boot
       // above may have just scheduled them), then keep the alarm inside the
@@ -3335,11 +3365,158 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.realtime.onError(ws, error);
     }
 
+    private async transcription(
+      userDid: string,
+      recovery?: TranscriptionJournal,
+    ): Promise<TranscriptionService> {
+      const { apiKey, engineUrl, limits, meter } = transcriptionRuntimeConfig(
+        this.env,
+        recovery,
+      );
+      if (this.transcriptionService) return this.transcriptionService;
+      const billing = createTranscriptionBilling({
+        engineUrl,
+        meter,
+        mintSubmitterInvocation: async () => {
+          await this.ready({ userDid });
+          const minted = await this.ucan?.mintSelfSignedInvocation(engineUrl, {
+            can: '*',
+            with: 'ixo:billing-engine',
+          });
+          if (!minted || 'error' in minted)
+            throw new TranscriptionError('billing_unavailable');
+          return minted.invocation;
+        },
+      });
+      this.transcriptionService = new TranscriptionService({
+        store: this.ctx.storage,
+        billing,
+        limits,
+        connect: (callbacks, signal) => {
+          if (!apiKey)
+            return Promise.reject(new TranscriptionError('not_configured'));
+          return openTranscriptionProvider(apiKey, callbacks, signal);
+        },
+        schedule: (at) => this.requestAlarm(at),
+      });
+      return this.transcriptionService;
+    }
+
+    private async transcriptionAlarm(): Promise<number | null> {
+      const journal = await this.ctx.storage.get<TranscriptionJournal>(
+        TRANSCRIPTION_JOURNAL_KEY,
+      );
+      const intent =
+        await this.ctx.storage.get<TranscriptionAdmissionIntent | null>(
+          TRANSCRIPTION_INTENT_KEY,
+        );
+      let intentAt: number | null = null;
+      if (intent) {
+        if (intent.retryUntil <= Date.now())
+          await this.ctx.storage.put(TRANSCRIPTION_INTENT_KEY, null);
+        else intentAt = intent.retryUntil;
+      }
+      if (
+        !journal ||
+        journal.phase === 'settled' ||
+        journal.phase === 'reconciliation_required'
+      )
+        return intentAt;
+      try {
+        const next = await (
+          await this.transcription(journal.userDid, journal)
+        ).tick();
+        return next === null ? intentAt : Math.min(next, intentAt ?? Infinity);
+      } catch {
+        return Date.now() + 60_000;
+      }
+    }
+
     // ── HTTP surface (used by the shell for streaming turns) ─────────────
 
     override async fetch(request: Request): Promise<Response> {
       this.installDebugTimerTracker();
       const url = new URL(request.url);
+      if (url.pathname.startsWith('/transcription/')) {
+        try {
+          // This header is overwritten by the shell; the DO has no public route.
+          const userDid = request.headers.get('x-transcription-user');
+          if (!userDid)
+            return Response.json({ code: 'unauthorized' }, { status: 401 });
+          const cancellation =
+            /^\/transcription\/sessions\/([a-zA-Z0-9_-]{8,80})\/cancel$/.exec(
+              url.pathname,
+            );
+          if (cancellation && request.method === 'POST')
+            return await cancelTranscriptionReservation(
+              request,
+              cancellation[1]!,
+              {
+                env: this.env,
+                store: this.ctx.storage,
+                ready: (identity) => this.ready(identity),
+                service: (journal) =>
+                  this.transcription(journal.userDid, journal),
+              },
+            );
+          assertOrigin(
+            request.headers.get('origin'),
+            readTranscriptionLimits(this.env),
+          );
+          const service = await this.transcription(userDid);
+          if (
+            url.pathname === '/transcription/socket' &&
+            request.method === 'GET'
+          )
+            return transcriptionSocket(request, service);
+          if (
+            url.pathname === '/transcription/sessions' &&
+            request.method === 'POST'
+          ) {
+            const source = request.headers.get('x-source-invocation');
+            const publicOrigin = request.headers.get('x-public-origin');
+            if (!source || !publicOrigin)
+              return Response.json({ code: 'unauthorized' }, { status: 401 });
+            const routed = jsonObject(
+              request.headers.get('x-identity') ?? '{}',
+            );
+            if (routed.userDid !== userDid)
+              return Response.json({ code: 'unauthorized' }, { status: 401 });
+            await this.ready({
+              userDid,
+              ...(typeof routed.ucanDelegation === 'string'
+                ? { ucanDelegation: routed.ucanDelegation }
+                : {}),
+              ...(typeof routed.ucanDelegationExpiration === 'number'
+                ? { ucanDelegationExpiration: routed.ucanDelegationExpiration }
+                : {}),
+            });
+            const session = await service.create(
+              userDid,
+              source,
+              request.headers.get('origin'),
+              publicOrigin,
+            );
+            return Response.json(session, {
+              status: 201,
+              headers: { 'cache-control': 'no-store' },
+            });
+          }
+          return Response.json({ code: 'not_found' }, { status: 404 });
+        } catch (error) {
+          const status =
+            error instanceof TranscriptionError ||
+            error instanceof TranscriptionBillingError
+              ? error.status
+              : 503;
+          const code =
+            error instanceof TranscriptionError ||
+            error instanceof TranscriptionBillingError
+              ? error.code
+              : 'unavailable';
+          return transcriptionHttpError(code, status);
+        }
+      }
       if (url.pathname.startsWith('/socket.io')) {
         return this.realtime.handleUpgrade(request, url);
       }

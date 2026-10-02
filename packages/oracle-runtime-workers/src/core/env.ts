@@ -44,6 +44,20 @@ const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
 });
 
 export const baseEnvSchema = z.object({
+  // --- billable live dictation (no implicit free or BYO fallback) -------------
+  TRANSCRIPTION_ENABLED: z.enum(['true', 'false']).optional(),
+  TRANSCRIPTION_OPENAI_API_KEY: z.string().min(1).optional(),
+  TRANSCRIPTION_ALLOWED_ORIGINS: z.string().min(1).optional(),
+  TRANSCRIPTION_MAX_SECONDS: z.coerce.number().int().min(1).max(300).optional(),
+  TRANSCRIPTION_DAILY_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86400)
+    .optional(),
+  TRANSCRIPTION_BILLING_METER: z.string().min(1).optional(),
+  BILLING_ENGINE_URL: secureUrlSchema.optional(),
+
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
   /** UCAN audience — the DID users address invocations/delegations to. */
