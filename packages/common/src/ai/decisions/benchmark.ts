@@ -86,7 +86,9 @@ function scoreAnswer(
   latencyMs: number,
 ): { correct: number; confidence: number; brier?: number; latencyMs: number } {
   if (answer.kind === 'boolean') {
-    if (typeof gold !== 'boolean') throw new TypeError('Boolean answer requires boolean gold.');
+    if (typeof gold !== 'boolean') {
+      throw new TypeError('Boolean answer requires boolean gold.');
+    }
     const p = answer.probabilityTrue;
     const y = gold ? 1 : 0;
     return {
@@ -98,8 +100,9 @@ function scoreAnswer(
   }
 
   if (answer.kind === 'choice') {
-    if (typeof gold !== 'string') throw new TypeError('Choice answer requires string gold.');
-    const p = answer.probabilities[gold] ?? 0;
+    if (typeof gold !== 'string') {
+      throw new TypeError('Choice answer requires string gold.');
+    }
     return {
       correct: answer.value === gold ? 1 : 0,
       confidence: Math.max(...Object.values(answer.probabilities)),
