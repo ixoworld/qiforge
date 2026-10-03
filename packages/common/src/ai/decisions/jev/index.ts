@@ -28,3 +28,14 @@ export type {
 
 export { OpenRouterJevDecisionAdapter } from './openrouter.js';
 export type { OpenRouterJevAdapterOptions } from './openrouter.js';
+
+export {
+  DATABRICKS_AI_DECIDE_VERSION,
+  DATABRICKS_OPENJEV_MODEL,
+  DatabricksAiDecideDecisionAdapter,
+  DatabricksSystemOneDecisionAdapter,
+} from './databricks.js';
+export type {
+  DatabricksAiDecideAdapterOptions,
+  DatabricksSystemOneAdapterOptions,
+} from './databricks.js';

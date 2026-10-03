@@ -153,6 +153,14 @@ The result preserves provenance:
   provider: '...',
   model: '...',
   modelVersion: '...',
+  provenance: {
+    apiDialect: 'systemone-v1',
+    requestedModel: '...',
+    returnedModel: '...',
+    modelPinning: 'pinned | mutable | unknown',
+    providerArtifactRef: '...',
+    calibrationProfileRef: '...',
+  },
   answers: { ... },
   latencyMs: 183,
   evaluatedAt: '...',
@@ -250,14 +258,19 @@ is supplied the env credential check is skipped entirely. The env keys are the
 shared `decisionProviderEnvShape`, spread into the Node base env schema:
 
 ```text
-DECISION_PROVIDER=openrouter-jev | cloudflare-jev
-DECISION_MODEL=<optional model override>
+DECISION_PROVIDER=openrouter-jev | cloudflare-jev | databricks-systemone | databricks-ai-decide
+DECISION_MODEL=<optional model/service override>
+DATABRICKS_WORKSPACE_URL=<workspace https URL>
+DATABRICKS_TOKEN=<workspace token>
+DATABRICKS_AI_DECIDE_VERSION=1.0
 ```
 
 | `DECISION_PROVIDER` | Credentials                                                                                                                  |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `openrouter-jev`    | Reuses the existing `OPEN_ROUTER_API_KEY`; nothing else to set.                                                              |
 | `cloudflare-jev`    | On Node: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` (Cloudflare REST API). On Workers: just the `AI` binding, no keys. |
+| `databricks-systemone` | `DATABRICKS_WORKSPACE_URL` + `DATABRICKS_TOKEN`; optional `DECISION_MODEL` selects the Unity Gateway model service. |
+| `databricks-ai-decide` | `DATABRICKS_WORKSPACE_URL` + `DATABRICKS_TOKEN`; optional `DATABRICKS_AI_DECIDE_VERSION` (default `1.0`). |
 
 Leaving `DECISION_PROVIDER` unset leaves Decisions unconfigured. Selecting a
 provider without its credentials fails boot with one reported issue per
@@ -328,6 +341,26 @@ The capability router's Decision and its policy (`decideCapabilityRoute`, the
 0.7 floor) are defined in `@ixo/common/ai/decisions/capability-router.ts` so
 the Node and Workers runtimes preload on identical rules; only the wiring is
 runtime-specific.
+
+## Assurance, calibration, and provider bakeoffs
+
+Provider identity, inference dialect, requested model, returned model, function
+version, and model pinning are separate provenance fields. This matters for
+managed services whose backend model can change without changing the API.
+
+Decision thresholds are policy artifacts, not provider defaults.
+`DecisionCalibrationProfile` versions a threshold together with the Decision,
+provider artifact, validation population and calibration/selective-risk
+metrics. The capability router's existing 0.7 threshold is now explicitly
+published as a `provisional` profile; it is not represented as empirically
+calibrated.
+
+Use `buildSemanticConformanceVariants()` to generate option-permutation,
+opaque-option-id, rubric-paraphrase, no-evidence and missing-question probes.
+Use `runDecisionProviderBakeoff()` for frozen labelled IXO fixtures.
+
+See [Decision provider bakeoff](decision-bakeoff.md) and the
+[Open Decisions assurance profile](../../specs/open-decisions-assurance.md).
 
 ## Read next
 

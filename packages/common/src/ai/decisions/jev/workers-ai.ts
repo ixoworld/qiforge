@@ -36,6 +36,12 @@ export interface WorkersAiJevAdapterOptions {
 export class WorkersAiJevDecisionAdapter implements DecisionAdapter {
   readonly provider = 'cloudflare';
   readonly model: string;
+  readonly capabilities = {
+    apiDialect: 'systemone-v1' as const,
+    primitives: ['boolean', 'choice', 'ordinal'] as const,
+    answerSemantics: 'distribution' as const,
+    modelPinning: 'mutable' as const,
+  };
 
   private readonly ai: WorkersAiBinding;
 
@@ -63,6 +69,16 @@ export class WorkersAiJevDecisionAdapter implements DecisionAdapter {
       );
     }
 
-    return parseJevResult(payload, this.provider);
+    const result = parseJevResult(payload, this.provider);
+    return {
+      ...result,
+      provenance: {
+        apiDialect: 'systemone-v1',
+        requestedModel: this.model,
+        ...(result.modelVersion ? { returnedModel: result.modelVersion } : {}),
+        modelPinning: 'mutable',
+        providerArtifactRef: this.model,
+      },
+    };
   }
 }

@@ -12,7 +12,7 @@ export const JEV_MODEL_CLOUDFLARE = 'typesafe/jev';
 /** Model id accepted by the OpenRouter decisions endpoint. */
 export const JEV_MODEL_OPENROUTER = 'typesafe/jev-1.13';
 
-export type JevProviderName = 'cloudflare' | 'openrouter';
+export type JevProviderName = 'cloudflare' | 'openrouter' | 'databricks';
 
 export interface JevNoulQuestion {
   type: 'noul';

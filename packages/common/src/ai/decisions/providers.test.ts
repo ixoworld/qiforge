@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   CloudflareJevDecisionAdapter,
+  DatabricksAiDecideDecisionAdapter,
+  DatabricksSystemOneDecisionAdapter,
   OpenRouterJevDecisionAdapter,
   WorkersAiJevDecisionAdapter,
   type WorkersAiBinding,
@@ -55,6 +57,48 @@ describe('resolveDecisionAdapter', () => {
     expect(result.issues.map((issue) => issue.field)).toEqual([
       'DECISION_PROVIDER',
     ]);
+  });
+
+  it('requires Databricks workspace and token for Databricks providers', () => {
+    for (const provider of ['databricks-systemone', 'databricks-ai-decide']) {
+      const result = resolveDecisionAdapter({ DECISION_PROVIDER: provider });
+      expect(result.ok).toBe(false);
+      if (result.ok) continue;
+      expect(result.issues.map((issue) => issue.field)).toEqual([
+        'DATABRICKS_WORKSPACE_URL',
+        'DATABRICKS_TOKEN',
+      ]);
+    }
+  });
+
+  it('builds both Databricks assurance classes', () => {
+    const common = {
+      DATABRICKS_WORKSPACE_URL: 'https://example.cloud.databricks.com',
+      DATABRICKS_TOKEN: 'token',
+    };
+    const systemOne = resolveDecisionAdapter({
+      ...common,
+      DECISION_PROVIDER: 'databricks-systemone',
+      DECISION_MODEL: 'system.ai.openjev-qwen35-4b',
+    });
+    expect(systemOne.ok).toBe(true);
+    if (systemOne.ok) {
+      expect(systemOne.adapter).toBeInstanceOf(
+        DatabricksSystemOneDecisionAdapter,
+      );
+    }
+
+    const managed = resolveDecisionAdapter({
+      ...common,
+      DECISION_PROVIDER: 'databricks-ai-decide',
+      DATABRICKS_AI_DECIDE_VERSION: '1.0',
+    });
+    expect(managed.ok).toBe(true);
+    if (managed.ok) {
+      expect(managed.adapter).toBeInstanceOf(
+        DatabricksAiDecideDecisionAdapter,
+      );
+    }
   });
 
   it('requires OPEN_ROUTER_API_KEY for openrouter-jev', () => {

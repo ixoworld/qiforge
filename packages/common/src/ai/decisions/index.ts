@@ -1,3 +1,19 @@
+export {
+  buildSemanticConformanceVariants,
+} from './conformance.js';
+export type {
+  SemanticConformanceVariant,
+  SemanticConformanceVariantKind,
+} from './conformance.js';
+
+export { runDecisionProviderBakeoff } from './benchmark.js';
+export type {
+  DecisionBenchmarkCase,
+  DecisionBenchmarkGold,
+  DecisionBenchmarkMetrics,
+  DecisionBenchmarkResult,
+} from './benchmark.js';
+
 export { defineDecision } from './define-decision.js';
 export type { DefineDecisionOptions } from './define-decision.js';
 
@@ -22,6 +38,10 @@ export type {
 
 export {
   CloudflareJevDecisionAdapter,
+  DATABRICKS_AI_DECIDE_VERSION,
+  DATABRICKS_OPENJEV_MODEL,
+  DatabricksAiDecideDecisionAdapter,
+  DatabricksSystemOneDecisionAdapter,
   JEV_MODEL_CLOUDFLARE,
   JEV_MODEL_OPENROUTER,
   JevDecisionError,
@@ -35,6 +55,8 @@ export {
 } from './jev/index.js';
 export type {
   CloudflareJevAdapterOptions,
+  DatabricksAiDecideAdapterOptions,
+  DatabricksSystemOneAdapterOptions,
   JevChoiceQuestion,
   JevNoulQuestion,
   JevProviderName,
@@ -47,6 +69,7 @@ export type {
 } from './jev/index.js';
 
 export {
+  CAPABILITY_ROUTE_CALIBRATION_PROFILE,
   CAPABILITY_ROUTE_DECISION_NAME,
   CAPABILITY_ROUTE_MIN_CONFIDENCE,
   CAPABILITY_ROUTER_MODES,
@@ -80,11 +103,17 @@ export type {
   ChoiceDecisionAnswer,
   ChoiceDecisionQuestion,
   DecisionAdapter,
+  DecisionCalibrationProfile,
+  DecisionCalibrationPrimitive,
   DecisionAnswer,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionInferenceDialect,
+  DecisionModelPinning,
+  DecisionProviderCapabilities,
   DecisionProviderOptions,
+  DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
   DecisionRegistration,

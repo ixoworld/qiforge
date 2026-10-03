@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CAPABILITY_ROUTE_CALIBRATION_PROFILE,
   CAPABILITY_ROUTE_DECISION_NAME,
   CAPABILITY_ROUTE_MIN_CONFIDENCE,
   capabilityRouteDecision,
@@ -138,6 +139,19 @@ describe('capabilityRouteDecision', () => {
 
   it('carries a tight timeout', () => {
     expect(capabilityRouteDecision.timeoutMs).toBe(2_000);
+  });
+});
+
+describe('capability route calibration profile', () => {
+  it('versions the default threshold without claiming held-out calibration', () => {
+    expect(CAPABILITY_ROUTE_CALIBRATION_PROFILE).toMatchObject({
+      decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+      decisionVersion: '1.0.0',
+      primitive: 'boolean',
+      questionId: 'needsCapability',
+      threshold: CAPABILITY_ROUTE_MIN_CONFIDENCE,
+      status: 'provisional',
+    });
   });
 });
 
