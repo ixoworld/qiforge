@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { defineDecision } from './define-decision.js';
-import type { DecisionEvaluation } from './types.js';
+import type {
+  DecisionCalibrationProfile,
+  DecisionEvaluation,
+} from './types.js';
 
 export const CAPABILITY_ROUTE_DECISION_NAME = 'runtime.route-capabilities';
 
@@ -121,7 +124,25 @@ export const capabilityRouterEnvShape = {
  * probabilities, so operators can tune this from real traffic later instead
  * of guessing per deployment.
  */
-export const CAPABILITY_ROUTE_MIN_CONFIDENCE = 0.7;
+export const CAPABILITY_ROUTE_CALIBRATION_PROFILE: DecisionCalibrationProfile = {
+  id: 'ixo:calibration:runtime.route-capabilities:provisional-v1',
+  version: '1.0.0',
+  status: 'provisional',
+  providerArtifactRef: 'unscoped',
+  decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+  decisionVersion: '1.0.0',
+  primitive: 'boolean',
+  questionId: 'needsCapability',
+  threshold: 0.7,
+  validFrom: '2026-10-03T00:00:00.000Z',
+};
+
+/**
+ * Backward-compatible numeric export. New policy code should retain the
+ * profile reference so a threshold cannot be separated from its provenance.
+ */
+export const CAPABILITY_ROUTE_MIN_CONFIDENCE =
+  CAPABILITY_ROUTE_CALIBRATION_PROFILE.threshold!;
 
 export interface CapabilityRouteVerdict {
   /** Capability names to preload for the turn; at most one today. */
