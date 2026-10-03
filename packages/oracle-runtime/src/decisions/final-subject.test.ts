@@ -77,6 +77,21 @@ describe('Final Decision Subject binding', () => {
     ).toThrow(/sparse holes/);
   });
 
+  it('rejects sparse arrays even when extra enumerable keys hide the key-count mismatch', () => {
+    const sparse = new Array(2) as unknown as string[] & {
+      extra?: boolean;
+    };
+    sparse[1] = 'x';
+    sparse.extra = true;
+
+    expect(() =>
+      canonicalizeFinalDecisionSubject({
+        kind: 'allocation',
+        action: { priority: sparse },
+      }),
+    ).toThrow(/sparse holes/);
+  });
+
   it('digests the execution subject only once before producing the receipt', () => {
     const approved = subject();
     const authority = createDecisionAuthorityReceipt({
