@@ -246,20 +246,40 @@ Middleware frameworks MUST document where mutation is permitted and where final 
 
 ## 8. Adversarial and robustness requirements
 
-For a decision provider or runtime to claim conformance for consequential use, its test suite MUST include:
+Conformance tests are scoped to the capability supplied by the claimed level.
+
+### 8.1 OD-J judgment tests
+
+An OD-J provider or runtime used for consequential judgment MUST test:
 
 1. malformed-provider-output rejection;
-2. option-order permutation tests for finite choice questions;
-3. semantically equivalent paraphrase tests;
-4. adversarial state / prompt-injection tests where untrusted text may enter evidence;
-5. stale-subject tests proving post-approval mutation invalidates authorization;
-6. provider timeout and unavailable-provider behavior;
-7. abstention/escalation behavior at policy boundaries;
-8. provenance preservation;
-9. evidence-minimization checks where sensitive state exists;
-10. middleware-order tests when downstream components can alter actions.
+2. option-order permutation for finite choice questions;
+3. semantically equivalent paraphrases;
+4. adversarial state / prompt injection where untrusted text may enter evidence;
+5. provider timeout and unavailable-provider behavior;
+6. provider/model provenance preservation;
+7. evidence minimization where sensitive state exists.
 
-Where multilingual traffic is in scope, the conformance suite SHOULD include representative language/script robustness tests.
+Where multilingual traffic is in scope, OD-J SHOULD also test representative language/script robustness.
+
+### 8.2 OD-P policy tests
+
+OD-P MUST satisfy OD-J and additionally test:
+
+1. abstention/escalation behavior at declared policy boundaries;
+2. fail-open/fail-closed behavior for unavailable or insufficient evidence;
+3. separation of semantic estimates from stakeholder preferences and authority.
+
+### 8.3 OD-A action tests
+
+OD-A MUST satisfy OD-P and additionally test:
+
+1. stale-subject invalidation after post-approval mutation;
+2. middleware ordering when downstream components can alter actions;
+3. authority failure and revocation behavior;
+4. execution-receipt binding to the exact authorized Final Decision Subject.
+
+An implementation MUST NOT be required to test a layer it does not implement merely to claim a lower conformance level.
 
 ## 9. Open Decisions conformance levels
 
