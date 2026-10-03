@@ -22,6 +22,10 @@ export type {
 
 export {
   CloudflareJevDecisionAdapter,
+  DATABRICKS_AI_DECIDE_VERSION,
+  DATABRICKS_OPENJEV_MODEL,
+  DatabricksAiDecideDecisionAdapter,
+  DatabricksSystemOneDecisionAdapter,
   JEV_MODEL_CLOUDFLARE,
   JEV_MODEL_OPENROUTER,
   JevDecisionError,
@@ -35,6 +39,8 @@ export {
 } from './jev/index.js';
 export type {
   CloudflareJevAdapterOptions,
+  DatabricksAiDecideAdapterOptions,
+  DatabricksSystemOneAdapterOptions,
   JevChoiceQuestion,
   JevNoulQuestion,
   JevProviderName,
@@ -80,11 +86,17 @@ export type {
   ChoiceDecisionAnswer,
   ChoiceDecisionQuestion,
   DecisionAdapter,
+  DecisionCalibrationProfile,
+  DecisionCalibrationPrimitive,
   DecisionAnswer,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionInferenceDialect,
+  DecisionModelPinning,
+  DecisionProviderCapabilities,
   DecisionProviderOptions,
+  DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
   DecisionRegistration,
