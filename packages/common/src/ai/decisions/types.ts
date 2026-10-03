@@ -177,7 +177,7 @@ export interface DecisionEvaluation {
   provider: string;
   model: string;
   modelVersion?: string;
-  provenance: DecisionProviderProvenance;
+  provenance?: DecisionProviderProvenance;
   answers: Record<string, DecisionAnswer>;
   latencyMs: number;
   usage?: DecisionUsage;
