@@ -20,6 +20,12 @@ export {
   DEFAULT_DECISION_TIMEOUT_MS,
   DecisionProviderUnavailableError,
   DecisionRuntime,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
+  digestFinalDecisionSubject,
+  StaleDecisionSubjectError,
   CloudflareJevDecisionAdapter,
   CloudflareJevDecisionError,
   createDecisionAdapterFromConfig,
@@ -27,6 +33,11 @@ export {
 } from './decisions/index.js';
 export type {
   CloudflareJevAdapterOptions,
+  DecisionAuthorityReceipt,
+  DecisionExecutionReceipt,
+  FinalDecisionSubject,
+  FinalDecisionSubjectBinding,
+  FinalDecisionSubjectValue,
   DecisionProviderConfigIssue,
   DecisionProviderName,
 } from './decisions/index.js';

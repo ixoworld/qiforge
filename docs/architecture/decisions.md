@@ -64,6 +64,44 @@ closest to the profile's OD-J conformance level. Final Decision Subject hashing,
 authority receipts, and action-bound execution receipts are follow-on runtime
 work required before QiForge can claim OD-A conformance.
 
+## Final Decision Subject binding
+
+Consequential consumers can bind authority to the exact action that was
+approved and reject any later mutation:
+
+```ts
+const authority = createDecisionAuthorityReceipt({
+  subject: {
+    kind: 'payment',
+    action: paymentInstruction,
+    evidenceRefs,
+    policyRef: 'rubric:pay-v3',
+  },
+  mechanism: 'ucan',
+  reference: ucanCid,
+});
+
+// Immediately before the side effect:
+const execution = createDecisionExecutionReceipt({
+  authority,
+  currentSubject: {
+    kind: 'payment',
+    action: paymentInstruction,
+    evidenceRefs,
+    policyRef: 'rubric:pay-v3',
+  },
+});
+```
+
+The runtime canonicalizes plain JSON as `ixo-json-v1`, hashes it with SHA-256,
+and stores the digest on the authority receipt. Execution recomputes that digest.
+If the action, evidence references, policy, or bound context changed,
+`StaleDecisionSubjectError` is thrown and no execution receipt is produced.
+
+The check belongs immediately before the consequential side effect. Middleware
+or business logic may mutate a draft action earlier, but mutation after authority
+requires the subject to be rebound and authorized again.
+
 ## Question types
 
 QiForge exposes provider-neutral names:
