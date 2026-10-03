@@ -162,6 +162,16 @@ export class DecisionRuntime implements DecisionEvaluator {
         provider: adapter.provider,
         model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
+        provenance:
+          result.provenance ??
+          {
+            apiDialect: 'custom',
+            requestedModel: adapter.model,
+            ...(result.modelVersion
+              ? { returnedModel: result.modelVersion }
+              : {}),
+            modelPinning: 'unknown',
+          },
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
@@ -193,6 +203,8 @@ export class DecisionRuntime implements DecisionEvaluator {
             decision_version: registration.version,
             decision_provider: adapter.provider,
             decision_model: adapter.model,
+            decision_api_dialect:
+              adapter.capabilities?.apiDialect ?? 'custom',
           },
           ...(options?.callbacks !== undefined && {
             callbacks: options.callbacks,
