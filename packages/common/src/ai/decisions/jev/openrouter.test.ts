@@ -92,6 +92,13 @@ describe('OpenRouterJevDecisionAdapter', () => {
           probabilities: { tax: 0.8, none: 0.2 },
         },
       },
+      provenance: {
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev-1.13',
+        returnedModel: 'typesafe/jev-1.13',
+        modelPinning: 'pinned',
+        providerArtifactRef: 'typesafe/jev-1.13',
+      },
       usage: { inputTokens: 50, outputTokens: 5 },
     });
   });
