@@ -27,14 +27,13 @@ describe('runDecisionProviderBakeoff', () => {
     const result = await runDecisionProviderBakeoff(adapter, [
       {
         id: 'yes',
-        state: undefined,
         request: {
           state: { positive: true },
           questions: { yes: { kind: 'boolean', instructions: 'Positive?' } },
         },
         questionId: 'yes',
         gold: true,
-      } as never,
+      },
       {
         id: 'no',
         request: {
