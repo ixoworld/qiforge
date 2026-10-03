@@ -165,11 +165,7 @@ function canonicalizeJson(value: FinalDecisionSubjectValue): string {
       return Object.is(value, -0) ? '0' : JSON.stringify(value);
     case 'object':
       if (Array.isArray(value)) {
-        if (Object.keys(value).length !== value.length) {
-          throw new TypeError(
-            'Final Decision Subject arrays must not contain sparse holes.',
-          );
-        }
+        assertDenseArray(value);
         return `[${value.map((item) => canonicalizeJson(item)).join(',')}]`;
       }
 
@@ -208,13 +204,28 @@ function isSupportedJsonValue(
     return true;
   }
   if (Array.isArray(value)) {
-    if (Object.keys(value).length !== value.length) return false;
+    if (!isDenseArray(value)) return false;
     return value.every(isSupportedJsonValue);
   }
   if (isPlainObject(value)) {
     return Object.values(value).every(isSupportedJsonValue);
   }
   return false;
+}
+
+function assertDenseArray(value: readonly unknown[]): void {
+  if (!isDenseArray(value)) {
+    throw new TypeError(
+      'Final Decision Subject arrays must not contain sparse holes.',
+    );
+  }
+}
+
+function isDenseArray(value: readonly unknown[]): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) return false;
+  }
+  return true;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
