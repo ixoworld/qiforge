@@ -1,3 +1,19 @@
+export {
+  buildSemanticConformanceVariants,
+} from './conformance.js';
+export type {
+  SemanticConformanceVariant,
+  SemanticConformanceVariantKind,
+} from './conformance.js';
+
+export { runDecisionProviderBakeoff } from './benchmark.js';
+export type {
+  DecisionBenchmarkCase,
+  DecisionBenchmarkGold,
+  DecisionBenchmarkMetrics,
+  DecisionBenchmarkResult,
+} from './benchmark.js';
+
 export { defineDecision } from './define-decision.js';
 export type { DefineDecisionOptions } from './define-decision.js';
 
