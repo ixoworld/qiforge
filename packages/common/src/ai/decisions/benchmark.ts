@@ -91,7 +91,7 @@ function scoreAnswer(
     const y = gold ? 1 : 0;
     return {
       correct: (p >= 0.5) === gold ? 1 : 0,
-      confidence: gold ? p : 1 - p,
+      confidence: Math.max(p, 1 - p),
       brier: (p - y) ** 2,
       latencyMs,
     };
