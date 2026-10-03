@@ -71,6 +71,12 @@ describe('DecisionRuntime', () => {
     expect(result.provider).toBe('test-provider');
     expect(result.model).toBe('test-model');
     expect(result.modelVersion).toBe('v1');
+    expect(result.provenance).toEqual({
+      apiDialect: 'custom',
+      requestedModel: 'test-model',
+      returnedModel: 'v1',
+      modelPinning: 'unknown',
+    });
     expect(result.usage).toEqual({ inputTokens: 12 });
     expect(result.answers.yes).toEqual({
       kind: 'boolean',
