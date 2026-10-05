@@ -27,6 +27,7 @@ import {
 } from '../tasks/topic-deliverables';
 import { parseTranscriptPageQuery } from '../do/transcript';
 import { Hono } from 'hono';
+import { routePath } from 'hono/route';
 import { cors } from 'hono/cors';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
 import { parseOwnerCopyFailure } from '../owner-store/owner-copy-errors';
@@ -54,6 +55,13 @@ import {
   artifactPageResponse,
 } from '../artifacts/routes';
 import { ARTIFACT_ID_RE } from '../artifacts/store';
+import { FEEDBACK_BODY_MAX_BYTES } from '../feedback/contract';
+import {
+  feedbackFailure,
+  submitFeedback,
+  withFeedbackCapability,
+  type FeedbackShellOptions,
+} from '../feedback/submit';
 import { z } from 'zod';
 
 const DebugEventBody = z.object({
@@ -89,6 +97,11 @@ export interface ShellOptions {
   listModels?: (env: OracleWorkerEnv) => unknown | Promise<unknown>;
   /** Version banner for `GET /`. */
   banner?: { name: string; description?: string };
+  /**
+   * Anonymous Agent-response feedback (`src/feedback/`). Absent = off: the
+   * route answers 404 and transcripts do not advertise the capability.
+   */
+  feedback?: FeedbackShellOptions | null;
 }
 
 type Variables = { auth: AuthResult };
@@ -298,7 +311,7 @@ export function createShell(
       );
     if (outcome.auth.via === 'delegation')
       console.warn(
-        `[auth] ${c.req.method} ${c.req.path}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
+        `[auth] ${c.req.method} ${loggedRoute(c)}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
       );
     c.set('auth', outcome.auth);
     return next();
@@ -463,10 +476,43 @@ export function createShell(
       identity,
       c.req.param('sessionId'),
     );
-    return new Response(`{"messages":${messages}}`, {
-      headers: { 'content-type': 'application/json' },
-    });
+    return new Response(
+      withFeedbackCapability(`{"messages":${messages}}`, !!opts.feedback),
+      { headers: { 'content-type': 'application/json' } },
+    );
   });
+  // Anonymous feedback on one completed Agent reply (src/feedback/submit.ts).
+  app.post(
+    '/messages/:sessionId/:messageId/feedback',
+    bodyLimit({
+      maxSize: FEEDBACK_BODY_MAX_BYTES,
+      onError: (c) =>
+        c.json({ statusCode: 413, message: 'request entity too large' }, 413),
+    }),
+    async (c) => {
+      if (!opts.feedback) {
+        const off = feedbackFailure(
+          404,
+          'FEEDBACK_DISABLED',
+          'Anonymous feedback is not enabled on this oracle',
+        );
+        return c.json(off.body, off.status);
+      }
+      const identity = identityOf(c.get('auth'), c.req.raw.headers);
+      const result = await submitFeedback({
+        options: opts.feedback,
+        user: userStub(c.env, identity.userDid),
+        identity,
+        sessionId: c.req.param('sessionId'),
+        messageId: c.req.param('messageId'),
+        body: await c.req.json<unknown>().catch(() => undefined),
+        clientIp: c.req.header('cf-connecting-ip'),
+        ipLimiter: c.env.FEEDBACK_RATE_LIMIT ?? c.env.RATE_LIMIT,
+        log: console,
+      });
+      return c.json(result.body, result.status);
+    },
+  );
   // One turn-aligned page of the transcript (docs/plans/transcript-paging.md):
   // the newest `limit` turns, the turns `before=` a cursor, or what came
   // `after=` one. The legacy listing above stays the whole transcript.
@@ -482,7 +528,7 @@ export function createShell(
     );
     if (!page.ok)
       return c.json({ statusCode: page.status, message: page.message }, 400);
-    return new Response(page.json, {
+    return new Response(withFeedbackCapability(page.json, !!opts.feedback), {
       headers: { 'content-type': 'application/json' },
     });
   });
@@ -857,7 +903,7 @@ export function createShell(
     ),
   );
   app.onError((err, c) => {
-    console.error(`[shell] ${c.req.method} ${c.req.path} failed:`, err);
+    console.error(`[shell] ${c.req.method} ${loggedRoute(c)} failed:`, err);
     // A cold boot that could not read the user's owner copy changed nothing.
     // Say precisely why: 503 + retryable for a transient store/VFS failure
     // (the object already retried with backoff), 403 for a missing
@@ -901,6 +947,17 @@ function clientRequestId(rawBody: string): string | null {
     // not JSON — the user object reports the malformed body
   }
   return null;
+}
+
+/**
+ * The route pattern a request matched (`/messages/:sessionId`), never the
+ * concrete path: a path carries session and message ids, and a log line
+ * that pairs them with the caller's DID could tie an anonymous feedback
+ * submission to its author. In a middleware `c.req.routePath` is the
+ * middleware's own `*`, so the handler's pattern (the last match) is used.
+ */
+function loggedRoute(c: Parameters<typeof routePath>[0]): string {
+  return routePath(c, -1) || '(unmatched)';
 }
 
 function identityOf(auth: AuthResult, headers: Headers): TurnIdentity {

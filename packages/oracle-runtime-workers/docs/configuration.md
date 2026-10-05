@@ -238,6 +238,43 @@ tool, and the capability router's Decision is its own trace with the turn's
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (secret) | Only for `cloudflare-jev` **without** the `AI` binding: the account and Workers AI token for the REST API. With `"ai": { "binding": "AI" }` declared in `wrangler.jsonc` the binding is used and neither is needed.                                                                                                                                                                        |
 | `CAPABILITY_ROUTER`                                      | Capability router, the runtime's own Decision (requires a `DECISION_PROVIDER`). `off` (default) never evaluates; `shadow` evaluates off the turn's path and logs `[capability-router-shadow]` verdicts for accuracy measurement; `on` awaits the verdict before the first model call and preloads the predicted on-demand plugin's tools for that turn only. Any failure preloads nothing. |
 
+### Anonymous response feedback
+
+Users can send anonymous free-text feedback about one completed Agent reply
+(`POST /messages/:sessionId/:messageId/feedback`). Each user can give one
+feedback per reply, and it becomes one Linear issue; a retry of the same
+submission never creates a second one. Off unless both the Linear key and the HMAC secret are set; then
+the transcript routes advertise `capabilities.anonymousMessageFeedback` and
+the client SDK shows the control. Setting only one of the two, a secret
+shorter than 32 characters, a malformed id or an insecure API URL fails the
+boot (`Anonymous feedback is half-configured …` / `… configuration is
+invalid …`; the message names keys, never values). Set them on the script
+that serves HTTP (the oracle script in a gateway split). What operators see
+and what is never sent: [operations](operations.md#anonymous-response-feedback).
+
+The runtime reads these keys in the shell. They are kept out of the
+validated config plugins receive as `ctx.config`, and a plugin whose
+`configSchema` declares any `FEEDBACK_` key fails the boot. A plugin HTTP
+route (`getRoutes`) still receives the raw Worker env, which holds these keys
+like every other binding and secret.
+
+| Variable                     | Required        | Meaning                                                                                                                                                        |
+| ---------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FEEDBACK_LINEAR_API_KEY`    | to enable       | Linear API key (secret) able to create issues in the feedback team, sent as `Authorization: <key>`. Use a key restricted to that team.                         |
+| `FEEDBACK_HMAC_SECRET`       | to enable       | At least 32 characters (secret). Derives the user, session, message and IP pseudonyms. Rotating it starts new pseudonyms; old issues can no longer be grouped. |
+| `FEEDBACK_LINEAR_TEAM_ID`    | no              | Linear team id (default Studio, `c781a53a-d432-469f-9c9c-2345a0f8243b`).                                                                                       |
+| `FEEDBACK_LINEAR_PROJECT_ID` | no              | Linear project id (default "User Feedback from Portal", `6c1474a9-620c-4e3c-b443-0263992f3b55`).                                                               |
+| `FEEDBACK_LINEAR_LABEL_IDS`  | no              | Comma-separated Linear label ids for every issue.                                                                                                              |
+| `FEEDBACK_LINEAR_API_URL`    | no              | GraphQL endpoint (default `https://api.linear.app/graphql`; `http` only on localhost — the harness e2e points it at a fake).                                   |
+| `QIFORGE_BUILD_VERSION`      | no              | Release or commit shown as "QiForge build" in the issue (default `unknown`).                                                                                   |
+| `FEEDBACK_RATE_LIMIT`        | no, **binding** | `ratelimits` binding for the per-IP limit, e.g. `{ "name": "FEEDBACK_RATE_LIMIT", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } }`.           |
+
+Without `FEEDBACK_RATE_LIMIT` the per-IP check uses `RATE_LIMIT` under a
+feedback-only key, so it allows that binding's limit (100 a minute in the
+example) per address; declare the dedicated binding to get the Node runtime's
+3 a minute. With neither binding there is no per-IP limit. The per-user limit
+(3 new submissions a minute) is kept in the user's object and needs no binding.
+
 ### Ops and misc
 
 | Variable                     | Meaning                                                                                                                                                                                                                                                        |

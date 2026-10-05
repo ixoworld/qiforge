@@ -298,6 +298,12 @@ import {
   type TranscriptPageOptions,
 } from './transcript';
 import { evictIdleWorkingCopy } from './idle-eviction';
+import { FeedbackMarkers, reserveFeedback } from '../feedback/reservation';
+import type {
+  FeedbackReservation,
+  FeedbackSettlement,
+  FeedbackTarget,
+} from '../feedback/contract';
 import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
 
@@ -736,6 +742,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Room mirrors of HTTP turns, serialised per session and retried across gateway restarts (see room-mirror.ts). */
     private mirror: RoomMirror | null = null;
     private channelTurns: ChannelTurns | null = null;
+    /** Anonymous-feedback idempotency markers and the user's submission limit. */
+    private feedbackMarkers: FeedbackMarkers | null = null;
     /** The oracle room of each session this instance resolved: spares the mirrors a row read per send. */
     private readonly sessionRooms = new Map<string, string>();
     /** The user's main oracle room, once resolved (the session list is scoped to it). */
@@ -1317,6 +1325,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       await this.matrixLedger.setup();
       this.runStore = new RunStore(liveDb);
       await this.runStore.setup();
+      this.feedbackMarkers = new FeedbackMarkers(liveDb);
+      await this.feedbackMarkers.setup();
       this.resultStore = new ResultStore(liveDb, {
         ...(this.env.TIER_BUCKET ? { bucket: this.env.TIER_BUCKET } : {}),
         prefix: this.ctx.id.toString(),
@@ -1555,6 +1565,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.matrixLedger = null;
       this.runStore = null;
       this.channelTurns = null;
+      this.feedbackMarkers = null;
       this.runs = null;
       this.resultStore = null;
       this.sessionRooms.clear();
@@ -2250,6 +2261,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             );
           });
         await this.ctx.storage.delete(contextStatsKey(sessionId));
+        await this.feedbackMarkers!.forgetSession(sessionId);
         this.markDirty();
       }
       // A channel binding that pointed at the session opens a new one on
@@ -2402,6 +2414,57 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       const { messages: dtos } = await transformTranscript(messages);
       return JSON.stringify(dtos);
+    }
+
+    /**
+     * Anonymous feedback, step one (src/feedback/submit.ts): the message must
+     * be a completed Agent reply in this user's own session; then the
+     * idempotency marker and the user's submission limit decide. The shell
+     * holds the feedback text; it never reaches this object.
+     */
+    async reserveMessageFeedback(
+      identity: TurnIdentity,
+      target: FeedbackTarget,
+    ): Promise<FeedbackReservation> {
+      await this.ready(identity);
+      const reservation = await reserveFeedback(
+        {
+          sessionExists: async (sessionId) =>
+            (await this.sessions!.getSession(sessionId)) !== undefined,
+          transcript: async (sessionId) =>
+            (
+              await transformTranscript(
+                (await this.saver!.listThreadMessages(sessionId)).filter(
+                  (m) => !isSummarizationMessage(m),
+                ),
+              )
+            ).messages,
+          // A queued run has not written its user message yet, so it does
+          // not make the latest reply incomplete; a running one has.
+          runActive: async (sessionId) => {
+            const status = (
+              this.runs?.activeForSession(sessionId)?.record ??
+              (await this.runStore?.activeForSession(sessionId))
+            )?.status;
+            return status === 'running' || status === 'recovering';
+          },
+          markers: this.feedbackMarkers!,
+        },
+        target,
+      );
+      if (reservation.kind === 'reserved') this.markDirty();
+      return reservation;
+    }
+
+    /** Anonymous feedback, step two: settle the reservation (`FeedbackMarkers.settle`). */
+    async settleMessageFeedback(
+      identity: TurnIdentity,
+      target: FeedbackTarget,
+      outcome: FeedbackSettlement,
+    ): Promise<void> {
+      await this.ready(identity);
+      await this.feedbackMarkers!.settle(target, outcome);
+      this.markDirty();
     }
 
     async listMessagesPage(

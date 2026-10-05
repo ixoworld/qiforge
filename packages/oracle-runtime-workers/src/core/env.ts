@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
+import { FEEDBACK_ENV_PREFIX } from '../feedback/contract';
 import {
   isSecureUrl,
   MAX_ARTIFACT_SWEEP_INTERVAL_HOURS,
@@ -300,6 +301,12 @@ export function composeEnvSchema(
     if (!plugin.configSchema) continue;
     const shape = plugin.configSchema.shape as Record<string, unknown>;
     for (const key of Object.keys(shape)) {
+      // Runtime-only secrets (the feedback sink's Linear key and pseudonym
+      // secret) must never reach a plugin's `ctx.config`.
+      if (key.startsWith(FEEDBACK_ENV_PREFIX))
+        throw new Error(
+          `Plugin '${plugin.name}' declares env key '${key}': the '${FEEDBACK_ENV_PREFIX}' prefix is reserved for the runtime`,
+        );
       const previous = pluginOwnership.get(key);
       if (previous !== undefined && previous !== plugin.name) {
         logger.warn(
