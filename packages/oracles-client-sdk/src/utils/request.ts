@@ -48,6 +48,8 @@ export const request = async <T>(
         outstandingClaims?: string[];
         message: string;
         statusCode: number;
+        code?: unknown;
+        retryable?: unknown;
       };
 
       throw new RequestError(errorData.message, {
@@ -55,6 +57,12 @@ export const request = async <T>(
         error: errorData.error,
         message: errorData.message,
         outstandingClaims: errorData.outstandingClaims,
+        // Machine-readable reason and retry hint, when the runtime sends them
+        // (e.g. anonymous feedback's `FEEDBACK_IN_FLIGHT`).
+        ...(typeof errorData.code === 'string' && { code: errorData.code }),
+        ...(typeof errorData.retryable === 'boolean' && {
+          retryable: errorData.retryable,
+        }),
       });
     }
 
@@ -75,6 +83,10 @@ export default request;
 class RequestError extends Error {
   status?: number;
   outstandingClaims?: string[];
+  /** The runtime's machine-readable error code, when it sends one. */
+  code?: string;
+  /** Whether repeating the same request can succeed, when the runtime says. */
+  retryable?: boolean;
   [key: string]: unknown;
 
   constructor(message: string, errorProps?: Record<string, unknown>) {

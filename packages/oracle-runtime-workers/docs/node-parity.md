@@ -175,6 +175,28 @@ implementation, and what is deliberately left out.
 
 ## Deliberate divergences
 
+- **Anonymous response feedback.** Ported from the Node implementation
+  proposed in qiforge pull request 224 (never merged into the Node runtime).
+  One feedback per user per Agent reply:
+  the user object keeps a marker per message, a replay of the delivered
+  submission is answered again and other feedback for the message is a
+  `409` (Node accepted any number of submissions, deduplicated per
+  submission id). The Linear marker is the message pseudonym instead of the
+  submission id. The route answers `404` while the feature is off and for a
+  target that is not a completed Agent reply (Node: `503` and `400`), `422`
+  for identifiers in the text (Node: `400`) and `502` when Linear fails
+  (Node: `503`). The per-user limit lives in the user's object; the per-IP
+  limit is a Cloudflare rate-limit binding (see
+  [configuration](configuration.md#anonymous-response-feedback)). The issue
+  names the deployment's default model, not the model of the reply. Every
+  refusal carries a `code` and `retryable` (Node: messages only); a retry
+  of a submission still being delivered is `409 FEEDBACK_IN_FLIGHT`. The
+  screen normalises the text (NFKC, invisible format characters removed)
+  first and no longer takes dates or grouped amounts for phone numbers;
+  `locale` and `portalBuildVersion` accept only a language-region tag and a
+  release or commit shape (Node: any tag-like or build-like string). Linear
+  retries back off on 5xx; only a rate limit waits for Linear's reset
+  headers (Node read them on every failure and so never retried).
 - **POD Creator state.** Node held blueprints and create sessions in process
   memory on the plugin instance (lost on restart); Workers keeps them in the
   user's own SQLite through `ctx.kv`, bounded per user with the same limits,

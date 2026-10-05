@@ -11,3 +11,4 @@ apps/qiforge-workers-example/test/.accounts.json
 
 # local git worktrees
 .claude/
+**/.wrangler/

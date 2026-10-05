@@ -29,6 +29,7 @@
       { "name": "RUN_STORE_TEST", "class_name": "RunStoreTestDO" },
       { "name": "RESULT_STORE_TEST", "class_name": "ResultStoreTestDO" },
       { "name": "ARTIFACT_STORE_TEST", "class_name": "ArtifactStoreTestDO" },
+      { "name": "FEEDBACK_TEST", "class_name": "FeedbackTestDO" },
     ],
   },
   "migrations": [
@@ -40,5 +41,6 @@
     { "tag": "v3", "new_sqlite_classes": ["ResultStoreTestDO"] },
     { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ArtifactStoreTestDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
   ],
 }

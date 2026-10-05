@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from 'react';
 import { type WithRequiredEventProps } from '@ixo/oracles-events/types';
@@ -30,9 +31,14 @@ import { useOraclesConfig } from '../../use-oracles-config.js';
 import { useWebSocketEvents } from '../../use-websocket-events/use-websocket-events.js';
 import { resolveContent } from '../resolve-content.js';
 import transformToMessagesMap from '../transform-to-messages-map.js';
+import {
+  isAnonymousMessageFeedbackCapabilitySupported,
+  submitAnonymousMessageFeedback,
+} from './message-feedback.js';
 import { OracleChat } from './oracle-chat.js';
 import { reasoningMessageOf } from './reasoning-message.js';
 import {
+  type AnonymousMessageFeedbackSubmission,
   type AnyEvent,
   type IChatOptions,
   type IMessage,
@@ -154,6 +160,66 @@ export function useChat({
   });
   // Newest page first (history-query.ts).
   const pages = history?.pages;
+  // The newest page is refetched on every revalidation, so it carries what
+  // the runtime advertises now.
+  const isAnonymousMessageFeedbackSupported =
+    isAnonymousMessageFeedbackCapabilitySupported(pages?.[0]?.capabilities);
+  const [submittingFeedbackMessageId, setSubmittingFeedbackMessageId] =
+    useState<string | null>(null);
+  const [messageFeedbackError, setMessageFeedbackError] =
+    useState<Error | null>(null);
+  useEffect(() => {
+    setSubmittingFeedbackMessageId(null);
+    setMessageFeedbackError(null);
+  }, [sessionId]);
+
+  /**
+   * Send anonymous feedback about one completed Agent reply. Only offered
+   * when the runtime advertises it; the message list is left untouched —
+   * feedback is not message state.
+   */
+  const submitMessageFeedback = useCallback(
+    async (
+      messageId: string,
+      submission: AnonymousMessageFeedbackSubmission,
+    ) => {
+      if (!apiUrl || !sessionId)
+        throw new Error('A configured chat session is required');
+      if (!isAnonymousMessageFeedbackSupported)
+        throw new Error('Message feedback is not supported by this Agent');
+      const target = chatRef.current?.messages.find((m) => m.id === messageId);
+      if (!target || target.type !== 'ai' || target.isComplete === false)
+        throw new Error('Completed Agent message not found');
+      setSubmittingFeedbackMessageId(messageId);
+      setMessageFeedbackError(null);
+      try {
+        return await submitAnonymousMessageFeedback({
+          apiUrl,
+          sessionId,
+          messageId,
+          submission,
+          oracleDid,
+          authedRequest,
+        });
+      } catch (feedbackError) {
+        const normalized =
+          feedbackError instanceof Error
+            ? feedbackError
+            : new Error('Failed to submit message feedback');
+        setMessageFeedbackError(normalized);
+        throw normalized;
+      } finally {
+        setSubmittingFeedbackMessageId(null);
+      }
+    },
+    [
+      apiUrl,
+      sessionId,
+      isAnonymousMessageFeedbackSupported,
+      oracleDid,
+      authedRequest,
+    ],
+  );
 
   /**
    * Bring the loaded history up to date after a turn (or a cache
@@ -523,5 +589,12 @@ export function useChat({
     /** Load the page of turns before the oldest one shown (no-op when none). */
     loadEarlier,
     isLoadingEarlier: isFetchingNextPage,
+    /** Send anonymous feedback on a completed Agent reply (when supported). */
+    submitMessageFeedback,
+    /** The runtime advertises `anonymousMessageFeedback`. */
+    isAnonymousMessageFeedbackSupported,
+    /** The message whose feedback is being sent, if any. */
+    submittingFeedbackMessageId,
+    messageFeedbackError,
   };
 }
