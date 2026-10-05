@@ -10,6 +10,7 @@ export type { DecisionLimits } from './validation.js';
 
 export {
   DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionNotApplicableError,
   DecisionProviderUnavailableError,
   DecisionRuntime,
   UNAVAILABLE_DECISION_EVALUATOR,
@@ -19,6 +20,42 @@ export type {
   DecisionLookup,
   DecisionRuntimeLogger,
 } from './runtime.js';
+
+export {
+  AmbiguousDecisionProviderError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
+  HOST_DECISION_PROVIDER_ID,
+} from './provider-router.js';
+export type {
+  DecisionProviderPolicy,
+  DecisionProviderRegistration,
+  DecisionProviderResolution,
+} from './provider-router.js';
+
+export {
+  StaleDecisionSubjectError,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
+  digestFinalDecisionSubject,
+} from './final-subject.js';
+export type {
+  DecisionAuthorityReceipt,
+  DecisionExecution,
+  DecisionExecutionReceipt,
+  FinalDecisionSubject,
+  FinalDecisionSubjectBinding,
+  FinalDecisionSubjectValue,
+} from './final-subject.js';
+
+export { measureDecisionQuestionIsolation } from './conformance.js';
+export type {
+  DecisionQuestionIsolationObservation,
+  DecisionQuestionIsolationReport,
+} from './conformance.js';
 
 export {
   CloudflareJevDecisionAdapter,
@@ -81,11 +118,17 @@ export type {
   ChoiceDecisionQuestion,
   DecisionAdapter,
   DecisionAnswer,
+  DecisionApplicability,
+  DecisionCalibrationProvenance,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionJudgmentMethod,
+  DecisionJudgmentProvenance,
   DecisionProviderOptions,
+  DecisionProviderProvenance,
   DecisionProviderResult,
+  DecisionProviderSelection,
   DecisionQuestion,
   DecisionRegistration,
   DecisionRequest,

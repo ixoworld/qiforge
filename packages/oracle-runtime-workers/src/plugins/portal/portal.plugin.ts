@@ -23,7 +23,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { logActionToMatrix } from './action-log';
+import { logFrontendAction } from './action-log';
 
 const manifest: PluginManifest = {
   title: 'Portal',
@@ -53,6 +53,20 @@ const manifest: PluginManifest = {
 
 export const BROWSER_TOOL_TIMEOUT_MS = 15_000;
 
+/**
+ * The Portal's Topic write tool. Its commands can take a while to settle in
+ * the browser (several Matrix writes), so it gets a longer window before the
+ * call is reported as an unknown outcome.
+ */
+export const TOPIC_MUTATION_TOOL = 'mutate_topic';
+export const TOPIC_MUTATION_TIMEOUT_MS = 120_000;
+
+export function browserToolTimeoutMs(toolName: string): number {
+  return toolName === TOPIC_MUTATION_TOOL
+    ? TOPIC_MUTATION_TIMEOUT_MS
+    : BROWSER_TOOL_TIMEOUT_MS;
+}
+
 const BROWSER_TOOL_SHAPE = z.object({
   name: z.string(),
   description: z.string(),
@@ -61,12 +75,16 @@ const BROWSER_TOOL_SHAPE = z.object({
 
 const ARGS_RECORD_SHAPE = z.record(z.string(), z.unknown());
 
+/** The client's browser tools; a name declared twice keeps its first descriptor. */
 export function parseBrowserTools(value: unknown): BrowserToolCall[] {
   if (!Array.isArray(value)) return [];
   const out: BrowserToolCall[] = [];
+  const names = new Set<string>();
   for (const entry of value) {
     const parsed = BROWSER_TOOL_SHAPE.safeParse(entry);
-    if (parsed.success) out.push(parsed.data);
+    if (!parsed.success || names.has(parsed.data.name)) continue;
+    names.add(parsed.data.name);
+    out.push(parsed.data);
   }
   return out;
 }
@@ -154,24 +172,20 @@ export function buildBrowserTool(
         descriptor,
         ctx.config,
       );
-      // Node uses `tc-<requestId>`; the suffix keeps two browser tool calls in
-      // one turn from sharing an id (the client echoes it back verbatim).
-      const toolCallId = `tc-${ctx.session.requestId || 'noreq'}-${crypto
-        .randomUUID()
-        .slice(0, 8)}`;
+      // The bridge makes every invocation unique (`tc-<requestId>:<uuid>`).
+      let invocationId: string | undefined;
       const result = await frontend.callBrowserTool({
         sessionId,
-        toolCallId,
+        toolCallId: `tc-${ctx.session.requestId || 'noreq'}`,
         toolName: descriptor.name,
         args,
-        timeoutMs: BROWSER_TOOL_TIMEOUT_MS,
+        timeoutMs: browserToolTimeoutMs(descriptor.name),
+        signal: ctx.abortSignal,
+        onInvocation: (id) => {
+          invocationId = id;
+        },
       });
-      logActionToMatrix(ctx, {
-        name: descriptor.name,
-        args,
-        result,
-        success: true,
-      });
+      logFrontendAction(ctx, { name: descriptor.name, invocationId, result });
       return result;
     },
     {

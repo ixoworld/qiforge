@@ -16,12 +16,20 @@
  *   42["ping"] / 42["status"] / 42["list-events"]
  *     → Node's diagnostic events, same payloads.
  *   42["tool_result",{toolCallId,result,error?}] / 42["action_call_result",…]
- *     → settle the pending browser-tool / AG-UI call with that id, when it
- *       was made for the session this socket authenticated into.
+ *     → settle the browser-tool / AG-UI invocation with that id, when this
+ *       is the socket it was sent to (see "Frontend calls" below).
  *
  * Outbound, every event the runtime emits for a session (`ctx.emit.*`,
- * `browser_tool_call`, `action_call`, …) is fanned out to the session's
+ * `tool_call`, `render_component`, …) is fanned out to the session's
  * authenticated sockets — the router's tap.
+ *
+ * Frontend calls (`ctx.frontend.callBrowserTool` / `callAgAction`) are not
+ * fanned out: each invocation gets its own id, is sent to ONE socket of its
+ * session (the one most recently active), and only that socket's answer
+ * settles it. When the
+ * answer cannot come — deadline, or that socket went — the call resolves
+ * with `FRONTEND_OUTCOME_UNKNOWN` and is never re-sent. See
+ * docs/frontend-bridge.md.
  *
  * Heartbeat: engine.io's server-initiated ping, driven by the OBJECT'S
  * ALARM rather than a timer. A timer would keep the object resident (and
@@ -41,9 +49,12 @@ import type {
   FrontendCallSurface,
 } from '../plugin-api/types';
 import type { RawEventPayload } from '../core/runtime-context';
+import { frontendInvocationId } from '@ixo/common/ai/frontend-bridge';
 import {
+  FRONTEND_CALL_LABEL,
   FrontendCallRegistry,
   type FrontendCallKind,
+  type FrontendResultRejection,
   type PendingFrontendCall,
 } from './frontend-call-registry';
 import { SessionSocketHub, type SocketAttachment } from './session-socket-hub';
@@ -100,11 +111,23 @@ const SERVER_EVENTS = [
 
 /** Socket event every runtime event travels under, carrying `{ eventName, payload }` (Node's wire). */
 const ENVELOPE_EVENT = 'event';
-/** Frontend calls the client SDK listens for by name with the raw payload. */
-const RAW_NAMED_EVENTS: ReadonlySet<string> = new Set([
+/**
+ * Frontend calls: the client SDK listens for them by name with the raw
+ * payload and EXECUTES them, so they reach a socket only as a dispatched
+ * invocation (`call`), never through the fan-out.
+ */
+const FRONTEND_CALL_EVENTS: ReadonlySet<string> = new Set([
   'browser_tool_call',
   'action_call',
 ]);
+
+/** Warning text per rejected result (identifiers only, never the payload). */
+const REJECTION_TEXT: Record<FrontendResultRejection, string> = {
+  'not-issued': 'no such invocation was issued (or its record expired)',
+  'already-settled': 'the invocation already settled (duplicate or late)',
+  'wrong-socket': 'this is not the socket it was sent to',
+  'wrong-kind': 'the invocation is of the other kind',
+};
 
 /** Close codes in the 4000–4999 application range. */
 const CLOSE_UNAUTHORIZED = 4401;
@@ -157,6 +180,8 @@ export interface RealtimeStatus {
   authenticated: number;
   sessions: number;
   pendingCalls: PendingFrontendCall[];
+  /** Finished invocations remembered to reject replays (bounded). */
+  completedCalls: number;
   pingIntervalMs: number;
   pingTimeoutMs: number;
   /** When the next heartbeat round is due (null with no sockets). */
@@ -190,7 +215,7 @@ function readString(
 export class RealtimeEndpoint {
   readonly hub: SessionSocketHub<WebSocket>;
 
-  readonly calls = new FrontendCallRegistry();
+  readonly calls: FrontendCallRegistry;
 
   readonly frontend: FrontendCallSurface;
 
@@ -203,7 +228,11 @@ export class RealtimeEndpoint {
 
   constructor(private readonly deps: RealtimeEndpointDeps) {
     this.now = deps.now ?? (() => Date.now());
-    this.hub = new SessionSocketHub<WebSocket>({ now: this.now });
+    this.calls = new FrontendCallRegistry({ now: this.now });
+    this.hub = new SessionSocketHub<WebSocket>({
+      now: this.now,
+      onDropped: (attachment) => this.executorGone(attachment.sid),
+    });
     const tap: EventSink = {
       emit: (eventName, payload) => this.fanOut(eventName, payload),
     };
@@ -318,6 +347,8 @@ export class RealtimeEndpoint {
           this.drop(ws, CLOSE_UNAUTHORIZED, 'event before CONNECT');
           return;
         }
+        // Client activity picks the tab frontend calls run on.
+        this.hub.noteActivity(ws);
         this.handleEvent(ws, meta, frame.name, frame.args[0]);
         if (frame.ackId !== undefined)
           this.hub.send(ws, encodeAck(frame.ackId));
@@ -352,6 +383,7 @@ export class RealtimeEndpoint {
       authenticated: this.hub.connectionCount(),
       sessions: this.hub.sessionCount(),
       pendingCalls: this.calls.list(),
+      completedCalls: this.calls.completedCount,
       pingIntervalMs: PING_INTERVAL_MS,
       pingTimeoutMs: PING_TIMEOUT_MS,
       nextPingAt: this.nextPingAt(),
@@ -441,9 +473,21 @@ export class RealtimeEndpoint {
       this.deps.logger.warn(
         `[auth] socket CONNECT ${meta.sessionId}: ${outcome.auth.userDid} authenticated with a bare delegation (UCAN_ALLOW_BARE_DELEGATION_AUTH); the client must send a UCAN invocation before the fallback is turned off`,
       );
-    if (
-      !(await this.deps.sessionExists(outcome.auth.userDid, meta.sessionId))
-    ) {
+    let owned: boolean;
+    try {
+      owned = await this.deps.sessionExists(
+        outcome.auth.userDid,
+        meta.sessionId,
+      );
+    } catch (err) {
+      // Ownership that cannot be checked is not granted.
+      this.deps.logger.warn(
+        `[realtime] session check for ${meta.sessionId} failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      this.refuse(ws, 'Unauthorized: session check failed');
+      return;
+    }
+    if (!owned) {
       this.refuse(ws, `Session ${meta.sessionId} not found`);
       return;
     }
@@ -541,23 +585,33 @@ export class RealtimeEndpoint {
   ): void {
     const record = isRecord(data) ? data : {};
     const toolCallId = readString(record, 'toolCallId');
-    if (!toolCallId) {
+    const userDid = meta.userDid;
+    if (!toolCallId || !userDid) {
       this.deps.logger.warn(
         `[realtime] ${kind} result without toolCallId from ${meta.sid}`,
       );
       return;
     }
+    // Routing comes from the socket alone. A client that names another
+    // session is making a claim it cannot make; the result is dropped and
+    // the call keeps waiting for its own socket's answer.
+    const claimed = record.sessionId;
+    if (claimed !== undefined && claimed !== meta.sessionId) {
+      this.deps.logger.warn(
+        `[realtime] ${kind} result for ${toolCallId} rejected: socket ${meta.sid} of session ${meta.sessionId} names session ${typeof claimed === 'string' ? claimed : typeof claimed}`,
+      );
+      return;
+    }
     const error = readString(record, 'error');
-    const settled = this.calls.settle(kind, {
+    const outcome = this.calls.settle(kind, {
       toolCallId,
-      // The socket's own session; a `sessionId` in the payload is ignored.
-      sessionId: meta.sessionId,
+      from: { sid: meta.sid, sessionId: meta.sessionId, userDid },
       result: record.result,
       ...(error ? { error } : {}),
     });
-    if (!settled) {
+    if (!outcome.settled) {
       this.deps.logger.warn(
-        `[realtime] ${kind} result for ${toolCallId} from session ${meta.sessionId} had no pending call there (late, duplicate or another session's)`,
+        `[realtime] ${kind} result for ${toolCallId} from socket ${meta.sid} (session ${meta.sessionId}) rejected: ${REJECTION_TEXT[outcome.reason]}`,
       );
     }
   }
@@ -571,49 +625,100 @@ export class RealtimeEndpoint {
    * SDK's catch-all listener validates exactly that (`payload.sessionId` and
    * `payload.requestId`) and drops a bare payload, while its named
    * `tool_call` / `render_component` listeners crash on one. The two calls
-   * the SDK answers (`browser_tool_call`, `action_call`) are the exception:
-   * it listens for them by name with the raw payload, on both runtimes.
+   * the SDK EXECUTES (`browser_tool_call`, `action_call`) never travel this
+   * way: a frame of theirs here is the SSE stream's mirror of a sub-agent
+   * tool call or a plugin's one-way emit — not an invocation — and a browser
+   * that ran it would act again. Invocations go out through `call`.
    */
   private fanOut(eventName: string, payload: RawEventPayload): void {
     const sessionId =
       typeof payload.sessionId === 'string' ? payload.sessionId : undefined;
-    if (!sessionId) return;
-    if (RAW_NAMED_EVENTS.has(eventName)) {
-      this.hub.emitToSession(sessionId, eventName, payload);
-      return;
-    }
+    if (!sessionId || FRONTEND_CALL_EVENTS.has(eventName)) return;
     this.hub.emitToSession(sessionId, ENVELOPE_EVENT, { eventName, payload });
   }
 
+  /**
+   * One frontend invocation: a fresh id, registered before it is sent (an
+   * immediate answer cannot be missed), sent to the most recently active
+   * authenticated socket of the session (`executorForSession`) and bound to
+   * it. A call that reaches no socket is
+   * a definite failure; one whose answer never comes is an unknown outcome.
+   */
   private call(
     kind: FrontendCallKind,
     eventName: 'browser_tool_call' | 'action_call',
     params: FrontendCallParams,
     defaultTimeoutMs: number,
   ): Promise<unknown> {
-    const timeoutMs = params.timeoutMs ?? defaultTimeoutMs;
-    // Register BEFORE emitting so a synchronous answer cannot be missed.
-    const pending = this.calls.wait(
-      {
-        kind,
-        toolCallId: params.toolCallId,
-        toolName: params.toolName,
-        sessionId: params.sessionId,
-      },
-      { timeoutMs },
-    );
+    const toolCallId = frontendInvocationId(params.toolCallId);
+    const label = FRONTEND_CALL_LABEL[kind];
+    let pending: Promise<unknown>;
+    try {
+      pending = this.calls.open(
+        {
+          kind,
+          toolCallId,
+          toolName: params.toolName,
+          sessionId: params.sessionId,
+        },
+        {
+          timeoutMs: params.timeoutMs ?? defaultTimeoutMs,
+          ...(params.signal ? { signal: params.signal } : {}),
+        },
+      );
+    } catch (err) {
+      return Promise.reject(
+        err instanceof Error ? err : new Error(String(err)),
+      );
+    }
+    // A turn already aborted rejected the call as not sent: send nothing.
+    if (!this.calls.isPending(toolCallId)) return pending;
+    params.onInvocation?.(toolCallId);
     const payload: RawEventPayload = {
       sessionId: params.sessionId,
       requestId: params.toolCallId,
-      toolCallId: params.toolCallId,
+      toolCallId,
       toolName: params.toolName,
       args: params.args,
       ...(kind === 'agui' ? { status: 'isRunning' } : {}),
     };
-    // Through the router: the session's SSE stream sees it too (Node emits
-    // it on the root emitter, which feeds both channels).
-    this.deps.router.emit(eventName, payload);
+    const target = this.hub.executorForSession(params.sessionId);
+    const userDid = target?.attachment.userDid;
+    if (
+      !target ||
+      !userDid ||
+      !this.hub.send(target.socket, encodeEvent(eventName, payload))
+    ) {
+      this.calls.fail(
+        toolCallId,
+        new Error(
+          `${label} ${params.toolName} was not sent: no browser is connected to session ${params.sessionId}`,
+        ),
+      );
+      return pending;
+    }
+    this.calls.dispatched(toolCallId, {
+      sid: target.attachment.sid,
+      sessionId: params.sessionId,
+      userDid,
+    });
+    // A browser tool call is shown on the session's SSE stream too (session
+    // sinks; the socket tap skips frontend calls, see `fanOut`). An AG-UI
+    // invocation is not: the SSE stream already reports the action as an
+    // `action_call` under the model's call id and closes it when the tool
+    // ends, and a second frame under the invocation id would never be
+    // closed — the client would show a card spinning forever.
+    if (kind === 'browser') this.deps.router.emit(eventName, payload);
     return pending;
+  }
+
+  /** The socket `sid` is gone: its invocations end as unknown, never re-sent. */
+  private executorGone(sid: string): void {
+    const ended = this.calls.executorGone(sid);
+    if (ended > 0)
+      this.deps.logger.warn(
+        `[realtime] socket ${sid} went with ${ended} frontend call(s) in flight; reported as unknown outcome, not re-sent`,
+      );
   }
 
   // ── housekeeping ────────────────────────────────────────────────────────
@@ -635,6 +740,7 @@ export class RealtimeEndpoint {
     }
     const attachment = this.hub.get(ws);
     this.hub.remove(ws);
+    if (attachment) this.executorGone(attachment.sid);
     // Only an authenticated socket ever counted for its session; a socket
     // that never passed CONNECT leaves nothing to drain.
     if (attachment?.userDid && !this.hub.hasSession(attachment.sessionId)) {

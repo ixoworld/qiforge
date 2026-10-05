@@ -63,17 +63,51 @@ describe('SessionSocketHub', () => {
     expect(restored.emitToSession('s1', 'ev', null)).toBe(1);
   });
 
-  it('drops sockets whose send throws', () => {
-    const hub = new SessionSocketHub<FakeSocket>();
+  it('drops sockets whose send throws and reports them', () => {
+    const dropped: string[] = [];
+    const hub = new SessionSocketHub<FakeSocket>({
+      onDropped: (attachment) => dropped.push(attachment.sid),
+    });
     const dead = new FakeSocket(true);
     hub.add(dead, meta('s1', 'did:ixo:u'));
     expect(hub.emitToSession('s1', 'ev', 1)).toBe(0);
     expect(hub.size).toBe(0);
+    expect(dropped).toEqual(['sid-s1']);
+  });
+
+  it('runs frontend calls on the most recently active tab, else the one opened last', () => {
+    let t = 10;
+    const hub = new SessionSocketHub<FakeSocket>({ now: () => t });
+    const older = new FakeSocket();
+    const newer = new FakeSocket();
+    const unauthenticated = new FakeSocket();
+    const otherSession = new FakeSocket();
+    hub.add(older, { ...meta('s1', 'did:ixo:u'), sid: 'old', openedAt: 1 });
+    hub.add(newer, { ...meta('s1', 'did:ixo:u'), sid: 'new', openedAt: 2 });
+    hub.add(unauthenticated, { ...meta('s1'), sid: 'anon', openedAt: 3 });
+    hub.add(otherSession, { ...meta('s2', 'did:ixo:u'), openedAt: 4 });
+    // No client activity yet: the tab that connected last.
+    expect(hub.executorForSession('s1')?.socket).toBe(newer);
+    // The older tab is the one the user acted in last.
+    hub.noteActivity(older);
+    expect(hub.executorForSession('s1')?.socket).toBe(older);
+    // Persisted on the attachment, so a wake from hibernation keeps it.
+    expect(
+      (older.deserializeAttachment() as { lastActiveAt?: number }).lastActiveAt,
+    ).toBe(10);
+    t = 20;
+    hub.noteActivity(newer);
+    expect(hub.executorForSession('s1')?.socket).toBe(newer);
+    expect(hub.executorForSession('s3')).toBeUndefined();
   });
 
   it('pings live sockets, closes the ones that stopped answering, and persists the bookkeeping', () => {
     let t = 1;
-    const hub = new SessionSocketHub<FakeSocket>({ now: () => t });
+    const dropped: string[] = [];
+    const hub = new SessionSocketHub<FakeSocket>({
+      now: () => t,
+      onDropped: (attachment) => dropped.push(attachment.sid),
+    });
     const live = new FakeSocket();
     const silent = new FakeSocket();
     hub.add(live, meta('s1', 'did:ixo:u'));
@@ -100,6 +134,7 @@ describe('SessionSocketHub', () => {
     const closed = hub.heartbeat(180_000, 60_000);
     expect(closed).toEqual([silent]);
     expect(silent.closed?.code).toBe(4408);
+    expect(dropped).toEqual(['sid-s1']);
     expect(hub.size).toBe(1);
     expect(live.sent).toEqual(['2', '2']);
     // No sockets → no round due.

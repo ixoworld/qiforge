@@ -1,6 +1,8 @@
 import type {
   ChoiceDecisionAnswer,
   DecisionAnswer,
+  DecisionApplicability,
+  DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
   DecisionRequest,
@@ -32,6 +34,10 @@ export function validateDecisionRequest(
 ): void {
   if (!request || typeof request !== 'object') {
     throw new Error('Decision request must be an object.');
+  }
+
+  if (request.applicability !== undefined) {
+    validateApplicability(request.applicability);
   }
 
   const questionEntries = Object.entries(request.questions ?? {});
@@ -103,10 +109,100 @@ export function validateDecisionProviderResult(
     answers[key] = validateAnswer(key, question, answer);
   }
 
+  if (result.provenance !== undefined) {
+    validateProvenance(result.provenance);
+  }
+
   return {
     ...result,
     answers,
   };
+}
+
+function validateApplicability(applicability: DecisionApplicability): void {
+  if (
+    typeof applicability !== 'object' ||
+    applicability === null ||
+    typeof applicability.applicable !== 'boolean' ||
+    typeof applicability.evidenceComplete !== 'boolean'
+  ) {
+    throw new Error(
+      'Decision applicability must declare boolean applicable and evidenceComplete values.',
+    );
+  }
+  assertOptionalNonEmpty(
+    applicability.reason,
+    'Decision applicability reason must be non-empty when supplied.',
+  );
+}
+
+/**
+ * Provenance is provider output like the answers, so it is checked rather
+ * than trusted: an adapter cannot claim an empty method or a calibration
+ * with impossible metrics.
+ */
+function validateProvenance(provenance: DecisionProviderProvenance): void {
+  const method: unknown = provenance?.method;
+  if (
+    typeof method !== 'object' ||
+    method === null ||
+    !('kind' in method) ||
+    typeof method.kind !== 'string' ||
+    !method.kind.trim()
+  ) {
+    throw new Error('Decision judgment method kind must be non-empty.');
+  }
+  assertOptionalNonEmpty(
+    provenance.method.name,
+    'Decision judgment method name must be non-empty when supplied.',
+  );
+  assertOptionalNonEmpty(
+    provenance.method.artifactRef,
+    'Decision judgment method artifactRef must be non-empty when supplied.',
+  );
+
+  const calibration = provenance.calibration;
+  if (calibration === undefined) return;
+  if (typeof calibration.method !== 'string' || !calibration.method.trim()) {
+    throw new Error('Decision calibration method must be non-empty.');
+  }
+  for (const [name, value] of [
+    ['ece', calibration.ece],
+    ['brier', calibration.brier],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+    ) {
+      throw new Error(
+        `Decision calibration ${name} must be a finite non-negative number.`,
+      );
+    }
+  }
+  for (const [name, value] of [
+    ['artifactRef', calibration.artifactRef],
+    ['workload', calibration.workload],
+    ['version', calibration.version],
+  ] as const) {
+    assertOptionalNonEmpty(
+      value,
+      `Decision calibration ${name} must be non-empty when supplied.`,
+    );
+  }
+  if (
+    calibration.evaluatedAt !== undefined &&
+    (typeof calibration.evaluatedAt !== 'string' ||
+      Number.isNaN(Date.parse(calibration.evaluatedAt)))
+  ) {
+    throw new Error(
+      'Decision calibration evaluatedAt must be a valid timestamp.',
+    );
+  }
+}
+
+function assertOptionalNonEmpty(value: unknown, message: string): void {
+  if (value === undefined) return;
+  if (typeof value !== 'string' || !value.trim()) throw new Error(message);
 }
 
 function validateQuestion(

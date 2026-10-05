@@ -71,6 +71,9 @@ describe('WorkersAiJevDecisionAdapter', () => {
     ]);
     expect(result).toEqual({
       modelVersion: 'jev-1.13.0',
+      provenance: {
+        method: { kind: 'provider-native', name: 'typesafe-system-one' },
+      },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.9 },
         urgency: {
@@ -100,6 +103,25 @@ describe('WorkersAiJevDecisionAdapter', () => {
     expect(result.answers.work).toEqual({
       kind: 'boolean',
       probabilityTrue: 0.9,
+    });
+    // Another model's method is not known, so no method name is claimed.
+    expect(result.provenance).toEqual({ method: { kind: 'provider-native' } });
+  });
+
+  it('returns a fresh provenance object on every call', async () => {
+    const adapter = new WorkersAiJevDecisionAdapter({
+      ai: binding(async () => jevResult),
+    });
+
+    const first = await adapter.evaluate(request);
+    if (!first.provenance) throw new Error('provenance missing');
+    first.provenance.method.name = 'tampered';
+    first.provenance.method.kind = 'calibrated';
+    const second = await adapter.evaluate(request);
+
+    expect(second.provenance).not.toBe(first.provenance);
+    expect(second.provenance).toEqual({
+      method: { kind: 'provider-native', name: 'typesafe-system-one' },
     });
   });
 

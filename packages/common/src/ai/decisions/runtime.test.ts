@@ -2,16 +2,28 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import { RunnableLambda } from '@langchain/core/runnables';
 import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { defineDecision } from './define-decision.js';
 import {
+  AmbiguousDecisionProviderError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
+  HOST_DECISION_PROVIDER_ID,
+} from './provider-router.js';
+import {
+  DecisionNotApplicableError,
   DecisionProviderUnavailableError,
   DecisionRuntime,
   UNAVAILABLE_DECISION_EVALUATOR,
   type DecisionLookup,
 } from './runtime.js';
-import type { DecisionAdapter } from './types.js';
+import type {
+  DecisionAdapter,
+  DecisionApplicability,
+  DecisionRequest,
+} from './types.js';
 
 const decision = defineDecision({
   name: 'test.boolean',
@@ -42,6 +54,20 @@ const routeDecision = defineDecision({
         instructions: 'Which service?',
         options: { tax: 'Tax preparation', none: 'No matching service' },
       },
+    },
+  }),
+});
+
+/** Same question as `decision` under a name no provider route mentions. */
+const routeDecisionYes = defineDecision({
+  name: 'test.unrouted',
+  version: '1.0.0',
+  description: 'An unrouted bounded boolean decision.',
+  inputSchema: z.object({ text: z.string() }),
+  project: ({ text }) => ({
+    state: { text },
+    questions: {
+      yes: { kind: 'boolean', instructions: 'Is this a yes?' },
     },
   }),
 });
@@ -192,6 +218,325 @@ describe('DecisionRuntime', () => {
       ),
     ).rejects.toThrow(/caller cancelled/);
   });
+
+  it('records a bare adapter as the default host provider', async () => {
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+      })),
+    );
+
+    const result = await runtime.evaluate(decision, { text: 'yes' });
+
+    expect(HOST_DECISION_PROVIDER_ID).toBe('host');
+    expect(result.providerId).toBe(HOST_DECISION_PROVIDER_ID);
+    expect(result.providerSelection).toBe('default');
+  });
+});
+
+describe('DecisionRuntime provider routing', () => {
+  function answeringAdapter(provider: string, probabilityTrue: number) {
+    const calls: DecisionRequest[] = [];
+    const adapter: DecisionAdapter = {
+      provider,
+      model: `${provider}-model`,
+      async evaluate(request) {
+        calls.push(request);
+        return { answers: { yes: { kind: 'boolean', probabilityTrue } } };
+      },
+    };
+    return { adapter, calls };
+  }
+
+  it('routes by Decision name, falls back to the default and honours a caller override', async () => {
+    const fallback = answeringAdapter('default', 0.2);
+    const routed = answeringAdapter('routed', 0.8);
+    const override = answeringAdapter('override', 0.95);
+    const runtime = new DecisionRuntime(
+      lookup,
+      new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: 'default-provider', adapter: fallback.adapter },
+          { id: 'routed-provider', adapter: routed.adapter },
+          { id: 'override-provider', adapter: override.adapter },
+        ]),
+        {
+          defaultProviderId: 'default-provider',
+          routes: { 'test.boolean': 'routed-provider' },
+        },
+      ),
+    );
+
+    const viaRoute = await runtime.evaluateByName('test.boolean', {
+      text: 'yes',
+    });
+    expect(viaRoute).toMatchObject({
+      providerId: 'routed-provider',
+      providerSelection: 'decision-route',
+      provider: 'routed',
+      model: 'routed-model',
+      answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+    });
+
+    const viaDefault = await runtime.evaluate(routeDecisionYes, {
+      text: 'yes',
+    });
+    expect(viaDefault).toMatchObject({
+      providerId: 'default-provider',
+      providerSelection: 'default',
+      provider: 'default',
+    });
+
+    const viaOverride = await runtime.evaluateByName(
+      'test.boolean',
+      { text: 'yes' },
+      { providerId: 'override-provider' },
+    );
+    expect(viaOverride).toMatchObject({
+      providerId: 'override-provider',
+      providerSelection: 'caller-override',
+      answers: { yes: { kind: 'boolean', probabilityTrue: 0.95 } },
+    });
+
+    expect(routed.calls).toHaveLength(1);
+    expect(fallback.calls).toHaveLength(1);
+    expect(override.calls).toHaveLength(1);
+  });
+
+  it('refuses an ambiguous configuration without calling any provider', async () => {
+    const a = answeringAdapter('a', 0.5);
+    const b = answeringAdapter('b', 0.5);
+    const runtime = new DecisionRuntime(
+      lookup,
+      new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: 'a', adapter: a.adapter },
+          { id: 'b', adapter: b.adapter },
+        ]),
+      ),
+    );
+
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }),
+    ).rejects.toBeInstanceOf(AmbiguousDecisionProviderError);
+    expect(a.calls).toHaveLength(0);
+    expect(b.calls).toHaveLength(0);
+  });
+
+  it('does not fall back to another provider when the selected one fails', async () => {
+    const healthy = answeringAdapter('healthy', 0.9);
+    const failing: DecisionAdapter = {
+      provider: 'failing',
+      model: 'failing-model',
+      async evaluate() {
+        throw new Error('provider down');
+      },
+    };
+    const runtime = new DecisionRuntime(
+      lookup,
+      new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: 'failing', adapter: failing },
+          { id: 'healthy', adapter: healthy.adapter },
+        ]),
+        { defaultProviderId: 'failing' },
+      ),
+    );
+
+    await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+      /provider down/,
+    );
+    expect(healthy.calls).toHaveLength(0);
+  });
+
+  it('rejects an unknown caller override', async () => {
+    const only = answeringAdapter('only', 0.9);
+    const runtime = new DecisionRuntime(
+      lookup,
+      new DecisionProviderRouter(
+        new DecisionProviderRegistry([{ id: 'only', adapter: only.adapter }]),
+      ),
+    );
+
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }, { providerId: 'other' }),
+    ).rejects.toBeInstanceOf(DecisionProviderNotFoundError);
+    expect(only.calls).toHaveLength(0);
+  });
+
+  it('fails as unavailable over an empty router', async () => {
+    const runtime = new DecisionRuntime(
+      lookup,
+      new DecisionProviderRouter(new DecisionProviderRegistry()),
+    );
+
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }),
+    ).rejects.toBeInstanceOf(DecisionProviderUnavailableError);
+  });
+});
+
+describe('DecisionRuntime applicability', () => {
+  const projectWith = (applicability: DecisionApplicability | undefined) =>
+    defineDecision({
+      name: 'test.applicability',
+      version: '2.1.0',
+      description: 'A decision whose evidence may be unavailable.',
+      inputSchema: z.object({ text: z.string() }),
+      project: ({ text }) => ({
+        state: { text },
+        ...(applicability ? { applicability } : {}),
+        questions: {
+          yes: { kind: 'boolean', instructions: 'Is this a yes?' },
+        },
+      }),
+    });
+
+  it('refuses before provider invocation when evidence is incomplete', async () => {
+    const evaluate = vi.fn<DecisionAdapter['evaluate']>(async () => ({
+      answers: { yes: { kind: 'boolean', probabilityTrue: 0.1 } },
+    }));
+    const runtime = new DecisionRuntime(undefined, stubAdapter(evaluate));
+    const applicability = {
+      applicable: true,
+      evidenceComplete: false,
+      reason: 'Encrypted delegated task is unavailable.',
+    };
+
+    const rejection = runtime.evaluate(projectWith(applicability), {
+      text: 'yes',
+    });
+
+    await expect(rejection).rejects.toBeInstanceOf(DecisionNotApplicableError);
+    await expect(rejection).rejects.toMatchObject({ applicability });
+    await expect(rejection).rejects.toThrow(/Encrypted delegated task/);
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it('refuses an inapplicable Decision even when no provider is configured', async () => {
+    const runtime = new DecisionRuntime();
+
+    await expect(
+      runtime.evaluate(
+        projectWith({ applicable: false, evidenceComplete: true }),
+        { text: 'yes' },
+      ),
+    ).rejects.toThrow(/not applicable to the projected state/);
+  });
+
+  it('records declared applicability, and full applicability when omitted', async () => {
+    const runtime = new DecisionRuntime(
+      undefined,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.7 } },
+      })),
+    );
+
+    const declared = await runtime.evaluate(
+      projectWith({
+        applicable: true,
+        evidenceComplete: true,
+        reason: 'Message text is fully observable.',
+      }),
+      { text: 'yes' },
+    );
+    const omitted = await runtime.evaluate(projectWith(undefined), {
+      text: 'yes',
+    });
+
+    expect(declared.applicability).toEqual({
+      applicable: true,
+      evidenceComplete: true,
+      reason: 'Message text is fully observable.',
+    });
+    expect(omitted.applicability).toEqual({
+      applicable: true,
+      evidenceComplete: true,
+    });
+  });
+});
+
+describe('DecisionRuntime judgment provenance', () => {
+  it('records adapter method and calibration with the question-set version', async () => {
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+        provenance: {
+          method: {
+            kind: 'specialized',
+            name: 'test-head',
+            artifactRef: 'artifact:head-v1',
+          },
+          calibration: {
+            method: 'temperature-scaling',
+            artifactRef: 'artifact:cal-v1',
+            workload: 'test.boolean',
+            version: '1',
+            evaluatedAt: '2026-09-24T00:00:00.000Z',
+            ece: 0.03,
+            brier: 0.11,
+          },
+        },
+      })),
+    );
+
+    const result = await runtime.evaluateByName('test.boolean', {
+      text: 'yes',
+    });
+
+    expect(result.judgment).toEqual({
+      method: {
+        kind: 'specialized',
+        name: 'test-head',
+        artifactRef: 'artifact:head-v1',
+      },
+      calibration: {
+        method: 'temperature-scaling',
+        artifactRef: 'artifact:cal-v1',
+        workload: 'test.boolean',
+        version: '1',
+        evaluatedAt: '2026-09-24T00:00:00.000Z',
+        ece: 0.03,
+        brier: 0.11,
+      },
+      questionSetVersion: '1.0.0',
+    });
+  });
+
+  it('records provider-native without a calibration claim when the adapter declares nothing', async () => {
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+      })),
+    );
+
+    const result = await runtime.evaluate(decision, { text: 'yes' });
+
+    expect(result.judgment).toEqual({
+      method: { kind: 'provider-native' },
+      questionSetVersion: '1.0.0',
+    });
+  });
+
+  it('rejects malformed adapter provenance like any other malformed output', async () => {
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+        provenance: {
+          method: { kind: 'calibrated' },
+          calibration: { method: 'isotonic', ece: -0.1 },
+        },
+      })),
+    );
+
+    await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+      /calibration ece/,
+    );
+  });
 });
 
 interface RecordedRun {
@@ -275,6 +620,8 @@ describe('DecisionRuntime tracing', () => {
       user_did: 'did:test:user',
       decision_name: 'test.boolean',
       decision_version: '1.0.0',
+      decision_provider_id: 'host',
+      decision_provider_selection: 'default',
       decision_provider: 'test-provider',
       decision_model: 'test-model',
     });

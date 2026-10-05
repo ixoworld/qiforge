@@ -15,6 +15,8 @@ export const TEST_GOOD_TOKEN = 'good-token';
 export const TEST_BARE_DELEGATION = 'bare-delegation';
 export const TEST_USER_DID = 'did:ixo:realtimeuser';
 export const TEST_MISSING_SESSION = 'missing-session';
+/** A session whose ownership lookup fails (the user's database is unavailable). */
+export const TEST_BROKEN_SESSION = 'broken-session';
 
 export type CallOutcome =
   | { ok: true; value: unknown }
@@ -41,6 +43,11 @@ export class RealtimeTestDO extends DurableObject {
   private readonly drained: Array<{ sessionId: string; userDid: string }> = [];
 
   private readonly warnings: string[] = [];
+
+  private readonly sseFrames: Array<{
+    eventName: string;
+    payload: Record<string, unknown>;
+  }> = [];
 
   private get realtime(): RealtimeEndpoint {
     this.endpoint ??= new RealtimeEndpoint({
@@ -71,7 +78,9 @@ export class RealtimeTestDO extends DurableObject {
                 },
         ),
       sessionExists: (_userDid, sessionId) =>
-        Promise.resolve(sessionId !== TEST_MISSING_SESSION),
+        sessionId === TEST_BROKEN_SESSION
+          ? Promise.reject(new Error('user database unavailable'))
+          : Promise.resolve(sessionId !== TEST_MISSING_SESSION),
       router: this.router,
       logger: {
         log: () => undefined,
@@ -126,6 +135,45 @@ export class RealtimeTestDO extends DurableObject {
 
   async callAgAction(params: FrontendCallParams): Promise<CallOutcome> {
     return outcomeOf(this.realtime.frontend.callAgAction(params));
+  }
+
+  /**
+   * A browser tool call whose turn aborts — `before` it is made, or right
+   * `after` it was sent (the send is synchronous inside the call). An
+   * AbortSignal cannot cross the RPC boundary, so the controller lives here.
+   */
+  async callBrowserToolAborted(
+    params: FrontendCallParams,
+    when: 'before' | 'after',
+  ): Promise<CallOutcome> {
+    const controller = new AbortController();
+    if (when === 'before') controller.abort();
+    const call = this.realtime.frontend.callBrowserTool({
+      ...params,
+      signal: controller.signal,
+    });
+    if (when === 'after') controller.abort();
+    return outcomeOf(call);
+  }
+
+  /** Record what the session's SSE sinks receive (an in-flight turn's stream). */
+  async watchSse(sessionId: string): Promise<void> {
+    this.router.register(sessionId, {
+      emit: (eventName, payload) => {
+        this.sseFrames.push({ eventName, payload });
+      },
+    });
+  }
+
+  /** Event name and `toolCallId` of each frame the SSE sinks received. */
+  async sseEvents(): Promise<
+    Array<{ eventName: string; toolCallId: string | null }>
+  > {
+    return this.sseFrames.map(({ eventName, payload }) => ({
+      eventName,
+      toolCallId:
+        typeof payload.toolCallId === 'string' ? payload.toolCallId : null,
+    }));
   }
 
   async hasClient(sessionId: string): Promise<boolean> {

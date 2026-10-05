@@ -5,6 +5,7 @@ import type {
   DecisionRequest,
 } from '../types.js';
 import {
+  cloudflareJevProvenance,
   JEV_MODEL_CLOUDFLARE,
   JevDecisionError,
   parseJevResult,
@@ -106,6 +107,9 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
       );
     }
 
-    return parseJevResult(payload, this.provider, response.status);
+    return {
+      ...parseJevResult(payload, this.provider, response.status),
+      provenance: cloudflareJevProvenance(this.model),
+    };
   }
 }

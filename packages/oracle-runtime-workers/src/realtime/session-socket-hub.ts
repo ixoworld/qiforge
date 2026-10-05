@@ -27,6 +27,11 @@ export interface SocketAttachment {
   lastPongAt: number;
   /** Last engine.io ping (`2`) sent; unset until the first heartbeat round. */
   lastPingAt?: number;
+  /**
+   * Last client-originated socket.io event (a result, `ping`, `status`, …);
+   * engine.io pongs do not count — a background tab answers those too.
+   */
+  lastActiveAt?: number;
 }
 
 /** The subset of the Workers `WebSocket` the hub needs (tests use fakes). */
@@ -40,6 +45,11 @@ export interface HubSocket {
 export interface SessionSocketHubOptions {
   logger?: { warn: (message: string) => void };
   now?: () => number;
+  /**
+   * A socket the hub dropped on its own — its send threw, or the heartbeat
+   * timed it out. (`remove` by the owner does not call it.)
+   */
+  onDropped?: (attachment: SocketAttachment) => void;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,9 +84,12 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
 
   private readonly now: () => number;
 
+  private readonly onDropped: (attachment: SocketAttachment) => void;
+
   constructor(options: SessionSocketHubOptions = {}) {
     this.logger = options.logger ?? { warn: () => undefined };
     this.now = options.now ?? (() => Date.now());
+    this.onDropped = options.onDropped ?? (() => undefined);
   }
 
   /** Register a freshly accepted socket and persist its identity on it. */
@@ -155,6 +168,33 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
     return this.forSession(sessionId).length > 0;
   }
 
+  /** A client event arrived on the socket: persist the time (see `executorForSession`). */
+  noteActivity(socket: S): void {
+    if (this.sockets.has(socket))
+      this.update(socket, { lastActiveAt: this.now() });
+  }
+
+  /**
+   * The authenticated socket of `sessionId` a frontend call runs on: the one
+   * with the most recent client event, else the one opened last. The tab the
+   * user acted in last is the likeliest to be in front; the tab that
+   * connected last is often just a background tab that reconnected after a
+   * laptop woke. Ties go to the socket registered later.
+   */
+  executorForSession(
+    sessionId: string,
+  ): { socket: S; attachment: SocketAttachment } | undefined {
+    const recency = (attachment: SocketAttachment): number =>
+      attachment.lastActiveAt ?? attachment.openedAt;
+    let chosen: { socket: S; attachment: SocketAttachment } | undefined;
+    for (const [socket, attachment] of this.sockets) {
+      if (!attachment.userDid || attachment.sessionId !== sessionId) continue;
+      if (!chosen || recency(attachment) >= recency(chosen.attachment))
+        chosen = { socket, attachment };
+    }
+    return chosen;
+  }
+
   /** Fan an event out to every authenticated socket of the session. */
   emitToSession(
     sessionId: string,
@@ -192,6 +232,7 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
           // already gone
         }
         closed.push(socket);
+        this.onDropped(meta);
         continue;
       }
       if (this.trySend(socket, ENGINE_PING))
@@ -242,7 +283,9 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
       this.logger.warn(
         `socket send failed, dropping socket: ${err instanceof Error ? err.message : String(err)}`,
       );
+      const attachment = this.sockets.get(socket);
       this.remove(socket);
+      if (attachment) this.onDropped(attachment);
       return false;
     }
   }

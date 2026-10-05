@@ -193,7 +193,9 @@ plugins the thread has not loaded, and hands the routed plugin to
 handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
 never written to the checkpointed `loadedPlugins` channel, which stays the
 monotonic record of what `load_capability` loaded. The router fails open — a
-missing provider, a timeout or a malformed verdict preloads nothing and warns
+missing provider, an ambiguous multi-provider configuration (no route or
+default for `runtime.route-capabilities`), a timeout or a malformed verdict
+preloads nothing and warns
 `[capability-router] … status=fallback reason=<error name>`; a preload logs
 `[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
 the same evaluation under `waitUntil` without awaiting it, logs
@@ -388,6 +390,23 @@ The daily export of a fully cold file reads every segment twice (hash and
 length in one pass, the upload in the second): 98 GETs and 14.8 s for the
 50 segments, against 15.1 s for the same file before the tier. A 2 MB user
 went from 32 rows to 1 in 2 s with no measurable turn difference.
+
+### Plugin state in the user's file (`ctx.kv`)
+
+A plugin whose state must outlive the in-memory plugin instance — which lives
+per isolate and knows nothing of eviction — writes it through `ctx.kv`
+(`UserKvSurface`): namespaced JSON rows in the `user_kv` table of the user's
+own SQLite file (`src/sqlite/user-kv-store.ts`). The rows travel with the
+owner copy, so they survive eviction and a cold start, and leave with the file.
+Each entry can carry an idle TTL and a per-namespace LRU cap (the semantics of
+an in-memory bounded map); `update` is an atomic read-modify-write inside a
+SQLite transaction. Namespaces are a naming convention, not isolation: every
+plugin sees the same surface and can read or write any namespace. Plugins are
+trusted code the operator chose to load; nothing here protects one plugin's
+rows from another. The POD Creator plugin keeps its blueprints and create
+sessions there ([pod-creator](pod-creator.md)). Hosts without it leave
+`ctx.kv` undefined; `createMemoryUserKv()` (`src/core/user-kv.ts`) is the
+in-memory implementation for tests.
 
 ### What fills a user's file
 

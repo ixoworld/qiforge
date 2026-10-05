@@ -105,8 +105,12 @@ identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
 `DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
 `IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
-the reference. The opt-in wallet-signing plugin's two variables are described
-in [ixo-transaction](ixo-transaction.md#configuration).
+the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
+(default `false`) must be `'true'` before the POD Creator plugin prepares a
+mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
+unset, the create path refuses ([pod-creator](pod-creator.md)); the opt-in
+wallet-signing plugin's variables, including `IXO_TRANSACTION_ALLOW_MAINNET`,
+are described in [ixo-transaction](ixo-transaction.md#configuration).
 
 ### Identity and auth
 
@@ -207,11 +211,22 @@ wrangler r2 bucket lifecycle add <oracle>-artifacts artefact-expiry art/ --expir
 
 ### Decisions
 
-Bounded semantic Decisions (`getDecisions` / `ctx.decisions`, the Node
-runtime's primitive of the same name). Unset = Decisions unconfigured: every
-`ctx.decisions` call rejects with `DecisionProviderUnavailableError`.
-`createOracleWorker({ decisionAdapter })` supplies an adapter directly and
-bypasses these variables.
+Bounded semantic Decisions (`getDecisions` / `ctx.decisions`). The provider
+`DECISION_PROVIDER` selects is registered under that value as its id
+(`cloudflare-jev` / `openrouter-jev`) and is the default provider.
+`createOracleWorker({ decisionProviders, decisionProviderPolicy })` registers
+further host providers beside it and routes Decisions between them
+(`defaultProviderId`, exact per-Decision `routes`); a caller may pick one per
+evaluation with `{ providerId }`. With no provider at all every
+`ctx.decisions` call rejects with `DecisionProviderUnavailableError`; with
+several and neither a route nor a default for a Decision, its evaluation
+rejects with `AmbiguousDecisionProviderError`. A policy naming an unknown
+provider, a duplicate provider id, or `decisionProviders` together with
+`decisionAdapter` fails the boot. `createOracleWorker({ decisionAdapter })`
+supplies a single adapter (provider `host`) and bypasses these variables. A
+Decision whose projection declares its evidence incomplete is refused with
+`DecisionNotApplicableError` before any provider is called. See
+`docs/architecture/decisions.md#choosing-a-provider` at the repo root.
 
 When the turn is traced (see the LangSmith variables), every evaluation is a
 `decision:<name>` span on the turn's tracer: a tool's Decision nests under the
