@@ -110,9 +110,10 @@ const refreshInFlight = new Set<string>();
 
 /**
  * Drop long-expired entries (and, if still over the cap, the
- * soonest-to-expire ones). Runs on every cache write, so in a long-running
- * multi-tenant isolate one-off users' schemas are reclaimed instead of
- * accumulating for the isolate lifetime. Entries get one extra TTL of grace
+ * soonest-to-expire ones). Runs on every cache lookup and write, so in a
+ * long-running multi-tenant isolate one-off users' schemas are reclaimed
+ * instead of accumulating for the isolate lifetime, even when the replacement
+ * session open fails and no write follows. Entries get one extra TTL of grace
  * past expiry — a recently-expired entry is still served stale while its
  * background refresh runs, so reclaiming it immediately would put the
  * session-open round-trip back on that user's next turn.
@@ -307,6 +308,7 @@ export async function createComposioTools(
   };
 
   const cacheKey = defsCacheKey(opts.baseUrl, opts.userId);
+  if (opts.defsCache) pruneDefsCache(opts.defsCache, Date.now());
   const cached = opts.defsCache?.get(cacheKey);
   if (cached) {
     // An expired entry is served as-is (the session meta-toolset only shifts

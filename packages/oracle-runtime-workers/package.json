@@ -33,7 +33,8 @@
     "!src/**/__snapshots__/",
     "!src/**/fixtures/",
     "!src/**/test-do.ts",
-    "!src/core/test-fixtures.ts"
+    "!src/core/test-fixtures.ts",
+    "!src/plugins/pod-creator/test-fixtures.ts"
   ],
   "dependencies": {
     "@blocknote/server-util": "0.29.1",

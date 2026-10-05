@@ -766,6 +766,15 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   preferences?: UserPreferencesSurface;
 
   /**
+   * Host key-value rows in the user's OWN database, for plugin state that
+   * must outlive the in-memory plugin instance (on Workers the user's object
+   * is evicted when idle and restored from the owner copy; rows written here
+   * travel with that copy). Present when the host persists per-user state
+   * (the Workers runtime does); absent elsewhere.
+   */
+  kv?: UserKvSurface;
+
+  /**
    * Host bridge to the user's browser over the realtime (socket.io) channel:
    * browser tools declared by the client (`state.browserTools`) and AG-UI
    * actions (`state.agActions`) are invoked through it and awaited until the
@@ -1016,4 +1025,60 @@ export interface UserPreferencesSurface {
     roomId: string,
     partial: Partial<UserPreferences>,
   ): Promise<UserPreferences>;
+}
+
+/**
+ * Bounds applied by a write to {@link UserKvSurface}. Both are optional; an
+ * entry written without `idleTtlMs` never expires, and a write without
+ * `maxEntries` evicts nothing.
+ */
+export interface UserKvWriteOptions {
+  /**
+   * Idle lifetime: the entry expires once this long passes without a read or
+   * a write of it. Every hit slides the deadline.
+   */
+  idleTtlMs?: number;
+  /**
+   * After the write, drop the namespace's expired entries, then the least
+   * recently used ones until at most this many remain.
+   */
+  maxEntries?: number;
+}
+
+/**
+ * Key-value rows in the user's own database, grouped by namespace (a plugin
+ * uses its own name as the prefix, e.g. `pod-creator/blueprints`). Namespaces
+ * are a naming convention, not isolation: every plugin of the oracle sees the
+ * same surface and can read or write any namespace. Plugins are trusted code
+ * the operator chose to load; do not rely on namespaces to keep a plugin out
+ * of another's rows. Values are
+ * JSON: what goes in is serialised, what comes out is the parsed copy, so a
+ * caller never shares an object with the store. Reads and writes mark an
+ * entry most recently used and slide its idle deadline (LRU + idle TTL, the
+ * semantics of an in-memory bounded map, but durable).
+ */
+export interface UserKvSurface {
+  /** The stored value, or `undefined` when absent or expired. */
+  get(namespace: string, key: string): Promise<unknown>;
+  /** Store a JSON-serialisable value. */
+  set(
+    namespace: string,
+    key: string,
+    value: unknown,
+    options?: UserKvWriteOptions,
+  ): Promise<void>;
+  /**
+   * Atomic read-modify-write: `fn` receives the current value (`undefined`
+   * when absent or expired) and returns the new one; returning `undefined`
+   * deletes the entry. No other write to the store interleaves. `fn` must be
+   * synchronous and free of side effects — the host may run it again when a
+   * storage read has to be retried. Resolves with the value written.
+   */
+  update(
+    namespace: string,
+    key: string,
+    fn: (current: unknown) => unknown,
+    options?: UserKvWriteOptions,
+  ): Promise<unknown>;
+  delete(namespace: string, key: string): Promise<void>;
 }
