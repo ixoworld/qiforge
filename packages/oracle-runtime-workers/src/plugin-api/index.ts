@@ -71,6 +71,8 @@ export type {
   ToolPlane,
   UcanDelegation,
   UserContextData,
+  UserKvSurface,
+  UserKvWriteOptions,
 } from './types';
 export { defineDecision } from '@ixo/common/ai/decisions';
 export type {
