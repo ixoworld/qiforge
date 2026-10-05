@@ -109,6 +109,26 @@ describe('linearFeedbackDescription', () => {
     );
   });
 
+  it('renders the feedback verbatim in a fenced block that the text cannot close', () => {
+    const feedback =
+      '## Safe context\n![beacon](https://evil.example/p.png)\n```\nstill inside\n```\n[link](https://evil.example)';
+    const description = linearFeedbackDescription({ ...issue, feedback });
+    const lines = description.split('\n');
+    const open = lines.indexOf('````text');
+    const close = lines.indexOf('````', open + 1);
+    expect(open).toBeGreaterThan(0);
+    expect(lines.slice(open + 1, close).join('\n')).toBe(feedback);
+    // Outside the fence the document keeps its own three headings; the
+    // injected heading, image and link only exist as text inside it.
+    const outside = [...lines.slice(0, open), ...lines.slice(close + 1)];
+    expect(outside.filter((line) => line.startsWith('## '))).toEqual([
+      '## Feedback',
+      '## Safe context',
+      '## Privacy',
+    ]);
+    expect(outside.join('\n')).not.toContain('evil.example');
+  });
+
   it('cannot break out of the context table', () => {
     const description = linearFeedbackDescription({
       ...issue,

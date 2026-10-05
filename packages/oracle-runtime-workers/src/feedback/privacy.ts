@@ -61,12 +61,20 @@ function looksLikePhone(candidate: string): boolean {
 function containsPhoneNumber(text: string): boolean {
   for (const run of text.matchAll(DIGIT_RUN)) {
     const pieces = run[1]!.split(/\s+/);
-    for (let start = 0; start < pieces.length; start += 1)
+    const digitCounts = pieces.map((p) => p.replace(/\D/g, '').length);
+    for (let start = 0; start < pieces.length; start += 1) {
+      let digits = 0;
       for (let end = start; end < pieces.length; end += 1) {
         // A date is never part of a phone number; wider windows keep it.
         if (ISO_DATE.test(pieces[end]!)) break;
+        // Every piece holds a digit, so a window past the longest possible
+        // number only grows: stop there, which keeps the scan linear in the
+        // run's length instead of quadratic in its pieces.
+        digits += digitCounts[end]!;
+        if (digits > PHONE_DIGITS.max) break;
         if (looksLikePhone(pieces.slice(start, end + 1).join(' '))) return true;
       }
+    }
   }
   return false;
 }

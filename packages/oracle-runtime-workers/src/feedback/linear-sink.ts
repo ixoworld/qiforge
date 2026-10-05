@@ -67,6 +67,22 @@ function tableValue(value: string): string {
 }
 
 /**
+ * The user's text as a fenced block, so Linear renders it verbatim: no
+ * headings, links or images (an image would fetch from a URL the author
+ * chose when a reviewer opens the issue), no fake context table. The fence
+ * is one backtick longer than any run in the text, so the text cannot close
+ * it.
+ */
+function fencedText(text: string): string {
+  const longestRun = Math.max(
+    2,
+    ...Array.from(text.matchAll(/`+/g), (m) => m[0].length),
+  );
+  const fence = '`'.repeat(longestRun + 1);
+  return `${fence}text\n${text}\n${fence}`;
+}
+
+/**
  * How long a RATE-LIMITED response asks us to wait. Linear sends the
  * `X-RateLimit-*-Reset` headers on every response, so they say when the
  * window resets, not when to retry a failure: they are only read for a
@@ -123,7 +139,7 @@ export function linearFeedbackDescription(issue: FeedbackIssue): string {
   return [
     '## Feedback',
     '',
-    issue.feedback,
+    fencedText(issue.feedback),
     '',
     '## Safe context',
     '',

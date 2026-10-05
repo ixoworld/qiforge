@@ -109,3 +109,13 @@ describe('feedbackFingerprint', () => {
     );
   });
 });
+
+describe('screenFeedbackText cost', () => {
+  it('scans a body made of thousands of short digit pieces in bounded time', () => {
+    const text = Array.from({ length: 4000 }, () => '1').join(' ');
+    const started = Date.now();
+    const result = screenFeedbackText(text);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(typeof result.ok).toBe('boolean');
+  });
+});
