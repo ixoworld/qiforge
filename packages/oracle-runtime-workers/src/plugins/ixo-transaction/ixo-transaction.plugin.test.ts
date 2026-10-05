@@ -50,9 +50,11 @@ const TOOL_NAMES = [
   'sign_ixo_transaction',
 ];
 
+const USER_DID = 'did:ixo:user1';
+
 const requestCtx = {
   user: {
-    did: 'did:ixo:user1',
+    did: USER_DID,
     matrixUserId: '@did-ixo-user1:ixo.world',
     ucanDelegation: { raw: 'ucan' },
   },
@@ -95,15 +97,23 @@ function silentBridge() {
     callBrowserTool: () =>
       Promise.reject(new Error('browser tools are not used here')),
     callAgAction: (params) => {
-      const pending = registry.wait(
+      const pending = registry.open(
         {
           kind: 'agui',
           toolCallId: params.toolCallId,
           toolName: params.toolName,
           sessionId: params.sessionId,
         },
-        { timeoutMs: params.timeoutMs ?? 10_000 },
+        {
+          timeoutMs: params.timeoutMs ?? 10_000,
+          ...(params.signal ? { signal: params.signal } : {}),
+        },
       );
+      registry.dispatched(params.toolCallId, {
+        sid: 'sid-portal-tab',
+        sessionId: params.sessionId,
+        userDid: USER_DID,
+      });
       calls.push(params);
       return pending;
     },

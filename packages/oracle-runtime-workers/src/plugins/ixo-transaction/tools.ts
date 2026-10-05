@@ -29,6 +29,7 @@ import {
   type ITrxMsg,
   type TestnetReceipt,
 } from '@ixo/ixo-transaction';
+import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
@@ -86,9 +87,6 @@ export type SignIxoTransactionResult =
     }
   | { status: 'validation_error' | 'unavailable'; error: string };
 
-/** `FrontendCallRegistry`'s rejection when the browser does not answer in time. */
-const BRIDGE_TIMEOUT = /^AG-UI action timeout after \d+ms:/;
-
 /** The client SDK's answer to an `action_call` for an action it has no handler for. */
 const MISSING_HANDLER = `Action tool ${SIGN_TRANSACTION_ACTION_NAME} not found`;
 
@@ -145,6 +143,21 @@ function settledResult(
 ): SignIxoTransactionResult {
   const network = args.network;
   const typeUrl = args.intent.typeUrl;
+  if (outcome.ok && reportsUnknownOutcome(outcome.value)) {
+    // The bridge's own answer when none arrived: the deadline passed, the
+    // socket the request went to is gone, or the turn ended after the
+    // request was sent. The wallet may still have signed.
+    return {
+      status: 'timeout',
+      outcome: 'unknown',
+      network,
+      typeUrl,
+      // `outcome: 'unknown'` is what the tool-execution middleware reads: the
+      // write claim stays and the same draft is not dispatched again in this
+      // thread.
+      error: `The Portal wallet did not answer within ${signTimeoutMs / 1000} s, or its tab disconnected, and the request timed out. The outcome is unknown: the user may still sign it in their wallet. Do not send it again; ask the user whether it went through.`,
+    };
+  }
   if (outcome.ok) {
     // The Portal handler answers with the result contract; anything else is
     // a raw wallet response from a Portal with its own handler.
@@ -188,18 +201,6 @@ function settledResult(
         : {}),
       ...(summary.code !== undefined ? { code: summary.code } : {}),
       ...(summary.height !== undefined ? { height: summary.height } : {}),
-    };
-  }
-  if (BRIDGE_TIMEOUT.test(outcome.error)) {
-    return {
-      status: 'timeout',
-      outcome: 'unknown',
-      network,
-      typeUrl,
-      // "timed out" is what the tool-execution middleware reads as an unknown
-      // outcome: the write claim stays and the same draft is not dispatched
-      // again in this thread.
-      error: `The Portal wallet did not answer within ${signTimeoutMs / 1000} s and the request timed out. The outcome is unknown: the user may still sign it in their wallet. Do not send it again; ask the user whether it went through.`,
     };
   }
   if (outcome.error === MISSING_HANDLER) {
@@ -329,6 +330,7 @@ async function signIxoTransaction(
       toolName: SIGN_TRANSACTION_ACTION_NAME,
       args,
       timeoutMs: options.signTimeoutMs,
+      signal: ctx.abortSignal,
     })
     .then(
       (value) => ({ ok: true as const, value }),

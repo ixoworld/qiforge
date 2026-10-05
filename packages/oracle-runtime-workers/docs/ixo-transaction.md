@@ -91,17 +91,19 @@ paraphrase, is refused.
 | `failed`           | Included in a block but failed (non-zero code); carries the real `transactionHash`, `code`, `height` and the chain's log in `error`.                          |
 | `rejected`         | The call failed without a code or hash and the Portal's error says the user rejected, denied, declined or cancelled.                                          |
 | `error`            | Any other failure without a delivery: a chain mismatch or a refused message in the Portal, a wallet error.                                                    |
-| `timeout`          | No answer within the timeout. `outcome: 'unknown'`: the user may still sign.                                                                                  |
+| `timeout`          | No answer: the timeout passed, the Portal tab's socket dropped, or the turn ended after the request was sent. `outcome: 'unknown'`: the user may still sign.  |
 | `validation_error` | The draft failed validation, the risk gate or the mainnet gate. Nothing was sent.                                                                             |
 | `unavailable`      | No Portal session, no browser connected to it, or the Portal has no signing handler.                                                                          |
 
-`sign_ixo_transaction` is a write. A `timeout` result says the request "timed
-out", which the tool-execution middleware treats as an unknown outcome: the
-claim stays in the run ledger, and an identical signing request in a later turn
-is answered with "outcome unknown, verify first" instead of reaching the wallet
-again. Within one turn the repetition guard already stops an identical second
-call. A result from a socket of another session never settles the call (see
-`FrontendCallRegistry`).
+`sign_ixo_transaction` is a write. A `timeout` result carries
+`outcome: 'unknown'` (the bridge's `FRONTEND_OUTCOME_UNKNOWN` answer, see
+`frontend-bridge.md`), which the tool-execution middleware treats as an unknown
+outcome: the claim stays in the run ledger, and an identical signing request in
+a later turn is answered with "outcome unknown, verify first" instead of
+reaching the wallet again. Within one turn the repetition guard already stops
+an identical second call. The call is bound to the one socket it was sent to;
+a result from any other socket never settles it (see `FrontendCallRegistry`),
+and the turn's abort signal ends it as unknown once it was sent.
 
 `rejected` is only ever read from the Portal's error text when the call failed
 without a code or hash: a delivered-but-failed transaction comes back as a

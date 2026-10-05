@@ -20,11 +20,15 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { FrontendCallRegistry } from '../../realtime/frontend-call-registry';
+import {
+  FrontendCallRegistry,
+  type FrontendExecutor,
+} from '../../realtime/frontend-call-registry';
 import { IxoTransactionPlugin } from './ixo-transaction.plugin';
 import { RECEIPT_NAME_PREFIX, messageDigest } from './receipts';
 
 const SESSION = 'session-1';
+const USER_DID = 'did:ixo:user1';
 const ROOM = '!room:ixo.test';
 const OWNER = 'ixo1qwertyuiopasdfghjklzxcvbnmqwerty12345';
 const TX_HASH = 'A'.repeat(64);
@@ -47,11 +51,19 @@ function retireDraft(extra: Record<string, unknown> = {}) {
   };
 }
 
+/** The socket every call is sent to, as the endpoint binds it after sending. */
+const PORTAL_TAB: FrontendExecutor = {
+  sid: 'sid-portal-tab',
+  sessionId: SESSION,
+  userDid: USER_DID,
+};
+
 /**
  * The realtime endpoint's `frontend` surface without sockets: a call is
  * parked in a real `FrontendCallRegistry` before it is recorded (as
- * `RealtimeEndpoint.call` registers before it emits), and the test answers
- * it the way a socket's `action_call_result` does.
+ * `RealtimeEndpoint.call` registers before it emits), bound to the session's
+ * socket, and the test answers it the way a socket's `action_call_result`
+ * does.
  */
 function fakeBridge(opts: { connected?: boolean } = {}) {
   const registry = new FrontendCallRegistry();
@@ -60,32 +72,36 @@ function fakeBridge(opts: { connected?: boolean } = {}) {
     callBrowserTool: () =>
       Promise.reject(new Error('browser tools are not used here')),
     callAgAction: (params) => {
-      const pending = registry.wait(
+      const pending = registry.open(
         {
           kind: 'agui',
           toolCallId: params.toolCallId,
           toolName: params.toolName,
           sessionId: params.sessionId,
         },
-        { timeoutMs: params.timeoutMs ?? 10_000 },
+        {
+          timeoutMs: params.timeoutMs ?? 10_000,
+          ...(params.signal ? { signal: params.signal } : {}),
+        },
       );
+      registry.dispatched(params.toolCallId, PORTAL_TAB);
       calls.push(params);
       return pending;
     },
     hasClient: (sessionId) => (opts.connected ?? true) && sessionId === SESSION,
   };
-  /** Deliver `action_call_result` for the latest call from a socket of `sessionId`. */
+  /** Deliver `action_call_result` for the latest call from the socket `from`. */
   const answer = (
     payload: { result?: unknown; error?: string },
-    sessionId = SESSION,
+    from: FrontendExecutor = PORTAL_TAB,
   ): boolean => {
     const call = calls.at(-1);
     if (!call) throw new Error('no action call to answer');
     return registry.settle('agui', {
       toolCallId: call.toolCallId,
-      sessionId,
+      from,
       ...payload,
-    });
+    }).settled;
   };
   return { surface, calls, answer, registry };
 }
@@ -116,7 +132,7 @@ function contextWith(
       runConfig: {
         context: {
           user: {
-            did: 'did:ixo:user1',
+            did: USER_DID,
             matrixUserId: '@did-ixo-user1:ixo.world',
             ucanDelegation: { raw: 'test-ucan-delegation' },
           },
@@ -364,6 +380,7 @@ describe('sign_ixo_transaction: the wallet round trip', () => {
         retireDraft({ memo: 'offset 2026' }),
       ),
       timeoutMs: 45_000,
+      signal: expect.any(AbortSignal),
     });
 
     expect(
@@ -510,10 +527,12 @@ describe('sign_ixo_transaction: the wallet round trip', () => {
       typeUrl: '/ixo.token.v1beta1.MsgRetireToken',
       error: expect.stringMatching(/timed out\. The outcome is unknown/),
     });
-    // The runtime's tool-execution middleware keeps the claim on this result
-    // (an identical sign is not dispatched again in the thread) and releases
-    // it on a known outcome.
-    expect(uncertainResultReason(asToolMessage(result))).toBe('timed out');
+    // The runtime's tool-execution middleware reads `outcome: 'unknown'` and
+    // keeps the claim on this result (an identical sign is not dispatched
+    // again in the thread); it releases it on a known outcome.
+    expect(uncertainResultReason(asToolMessage(result))).toBe(
+      'outcome unknown',
+    );
     expect(
       uncertainResultReason(
         asToolMessage({
@@ -537,7 +556,11 @@ describe('sign_ixo_transaction: the wallet round trip', () => {
     expect(
       bridge.answer(
         { result: { success: true, transactionHash: 'F'.repeat(64) } },
-        'session-of-another-tab',
+        {
+          sid: 'sid-other-tab',
+          sessionId: 'session-of-another-tab',
+          userDid: USER_DID,
+        },
       ),
     ).toBe(false);
     expect(bridge.registry.size).toBe(1);
