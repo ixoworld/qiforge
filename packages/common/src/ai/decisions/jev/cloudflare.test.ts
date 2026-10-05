@@ -155,6 +155,13 @@ describe('CloudflareJevDecisionAdapter', () => {
           probabilities: { 0: 0.1, 1: 0.4, 2: 0.5 },
         },
       },
+      provenance: {
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev',
+        returnedModel: 'jev-1.13.0',
+        modelPinning: 'mutable',
+        providerArtifactRef: 'typesafe/jev',
+      },
       usage: { inputTokens: 100, outputTokens: 20 },
     });
   });

@@ -12,10 +12,7 @@ export type DecisionState =
 export interface BooleanDecisionQuestion {
   kind: 'boolean';
   instructions: string;
-  criteria?: {
-    true?: string;
-    false?: string;
-  };
+  criteria?: { true?: string; false?: string };
 }
 
 export interface ChoiceDecisionQuestion {
@@ -54,10 +51,7 @@ export interface ChoiceDecisionAnswer {
 
 export interface OrdinalDecisionAnswer {
   kind: 'ordinal';
-  /**
-   * Continuous position on the declared ordinal scale. For N levels the
-   * valid range is 0..N-1; providers such as Jev may return fractional values.
-   */
+  /** Continuous position on the declared ordinal scale (0..N-1). */
   score: number;
   confidence: number;
   probabilities?: Record<string, number>;
@@ -73,9 +67,67 @@ export interface DecisionUsage {
   outputTokens?: number;
 }
 
+/** External inference protocol, deliberately separate from provider identity. */
+export type DecisionInferenceDialect =
+  | 'systemone-v1'
+  | 'databricks-ai-decide-v1'
+  | 'openai-decisions'
+  | 'native-classifier'
+  | 'custom';
+
+export type DecisionModelPinning = 'pinned' | 'mutable' | 'unknown';
+
+export interface DecisionProviderCapabilities {
+  apiDialect: DecisionInferenceDialect;
+  primitives: readonly DecisionQuestion['kind'][];
+  answerSemantics: 'distribution' | 'score' | 'winner-only' | 'mixed';
+  modelPinning: DecisionModelPinning;
+  /** Optional workload/domain specialization asserted by the provider artifact. */
+  specializationDomain?: string;
+}
+
+export interface DecisionProviderProvenance {
+  apiDialect: DecisionInferenceDialect;
+  /** Model/service requested by IXO. */
+  requestedModel?: string;
+  /** Model identifier actually reported by the backend. */
+  returnedModel?: string;
+  /** API/function version when distinct from the model version. */
+  functionVersion?: string;
+  modelPinning: DecisionModelPinning;
+  /** Immutable or governed provider artifact/service reference. */
+  providerArtifactRef?: string;
+  /** Versioned IXO calibration profile applied by downstream policy. */
+  calibrationProfileRef?: string;
+}
+
+export type DecisionCalibrationPrimitive = 'boolean' | 'choice' | 'ordinal';
+
+export interface DecisionCalibrationProfile {
+  id: string;
+  version: string;
+  status: 'provisional' | 'validated' | 'retired';
+  providerArtifactRef: string;
+  decisionName: string;
+  decisionVersion: string;
+  primitive: DecisionCalibrationPrimitive;
+  questionId: string;
+  validationDatasetRef?: string;
+  targetPopulation?: string;
+  threshold?: number;
+  metrics?: {
+    brier?: number;
+    ece?: number;
+    coverage?: number;
+    selectiveRisk?: number;
+  };
+  validFrom: string;
+}
+
 export interface DecisionProviderResult {
   answers: Record<string, DecisionAnswer>;
   modelVersion?: string;
+  provenance?: DecisionProviderProvenance;
   usage?: DecisionUsage;
 }
 
@@ -86,6 +138,7 @@ export interface DecisionProviderOptions {
 export interface DecisionAdapter {
   readonly provider: string;
   readonly model: string;
+  readonly capabilities?: DecisionProviderCapabilities;
   evaluate(
     request: DecisionRequest,
     options?: DecisionProviderOptions,
@@ -110,33 +163,21 @@ export interface DecisionDefinition<
 export interface DecisionEvaluateOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
-  /**
-   * Callbacks for the evaluation's trace span, typically the turn's LangSmith
-   * tracer. Only needed outside a LangChain run: inside one (a tool, a node)
-   * the span inherits the run's callbacks and nests under it on its own.
-   */
   callbacks?: Callbacks;
-  /** Extra metadata on the trace span, e.g. the user DID and thread id. */
   metadata?: Record<string, unknown>;
 }
 
-/**
- * The tracing half of `DecisionEvaluateOptions`, for callers that forward a
- * turn's tracer to code that evaluates Decisions on its behalf.
- */
 export type DecisionTraceOptions = Pick<
   DecisionEvaluateOptions,
   'callbacks' | 'metadata'
 >;
 
 export interface DecisionEvaluation {
-  decision: {
-    name: string;
-    version: string;
-  };
+  decision: { name: string; version: string };
   provider: string;
   model: string;
   modelVersion?: string;
+  provenance?: DecisionProviderProvenance;
   answers: Record<string, DecisionAnswer>;
   latencyMs: number;
   usage?: DecisionUsage;

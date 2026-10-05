@@ -71,6 +71,13 @@ describe('WorkersAiJevDecisionAdapter', () => {
     ]);
     expect(result).toEqual({
       modelVersion: 'jev-1.13.0',
+      provenance: {
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev',
+        returnedModel: 'jev-1.13.0',
+        modelPinning: 'mutable',
+        providerArtifactRef: 'typesafe/jev',
+      },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.9 },
         urgency: {

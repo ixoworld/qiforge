@@ -26,6 +26,12 @@ export interface OpenRouterJevAdapterOptions {
 export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
   readonly provider = 'openrouter';
   readonly model: string;
+  readonly capabilities = {
+    apiDialect: 'systemone-v1' as const,
+    primitives: ['boolean', 'choice', 'ordinal'] as const,
+    answerSemantics: 'distribution' as const,
+    modelPinning: 'pinned' as const,
+  };
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -95,7 +101,17 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
       );
     }
 
-    return parseJevResult(payload, this.provider, response.status);
+    const result = parseJevResult(payload, this.provider, response.status);
+    return {
+      ...result,
+      provenance: {
+        apiDialect: 'systemone-v1',
+        requestedModel: this.model,
+        ...(result.modelVersion ? { returnedModel: result.modelVersion } : {}),
+        modelPinning: 'pinned',
+        providerArtifactRef: this.model,
+      },
+    };
   }
 }
 
