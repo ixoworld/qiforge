@@ -163,6 +163,26 @@ to render at most a few times a second while a reply streams — the default
 `immediate` renders on every chunk. `historyPageSize` (default 20) sets the
 page.
 
+### Anonymous response feedback
+
+When the runtime advertises it (`capabilities.anonymousMessageFeedback` on
+the transcript), `isAnonymousMessageFeedbackSupported` is true and
+`submitMessageFeedback(messageId, { submissionId, feedback, context })` sends
+anonymous feedback about one completed Agent reply. Generate `submissionId`
+(a UUID v4) once per submission and reuse it on retry; `context` is the
+allowlisted `AnonymousMessageFeedbackContext` (surface, locale, theme, device
+class, viewport bucket, network, optional Portal build). A refusal is a
+`RequestError` whose `code` (`AnonymousMessageFeedbackErrorCode`) and
+`retryable` say what happened: `FEEDBACK_CONTAINS_PERSONAL_DATA` (422, the
+text holds an identifier or secret), `FEEDBACK_ALREADY_SUBMITTED` (409, one
+feedback per reply), and the retryable `FEEDBACK_IN_FLIGHT` (409, this
+submission is still being delivered), `FEEDBACK_RATE_LIMITED` (429) and
+`FEEDBACK_DELIVERY_FAILED` (502) — retry those with the same
+`submissionId`. `submittingFeedbackMessageId` and
+`messageFeedbackError` track the request; the message list is never changed
+or refetched. Against older runtimes the flag is false and the call throws
+before sending anything.
+
 ### Real-time Streaming
 
 Messages stream in real-time with optimized performance:

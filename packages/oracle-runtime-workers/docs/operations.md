@@ -22,6 +22,7 @@ Public (UCAN-authenticated unless noted):
 | `GET /user-preferences`                                                         | The user's stored preferences.                                           |
 | `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.            |
 | `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.              |
+| `POST /messages/:sessionId/:messageId/feedback`                                 | Anonymous feedback on one completed Agent reply (when configured).       |
 
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
@@ -720,6 +721,94 @@ next session create because its watermark did not move. Task-run sessions
 (`task:<id>`) are never indexed: a session create indexes the user's most
 recent conversation, skipping task runs.
 
+## Anonymous response feedback
+
+`POST /messages/:sessionId/:messageId/feedback` turns one user's free-text
+feedback about one completed Agent reply into one Linear issue, in the team
+and project from [configuration](configuration.md#anonymous-response-feedback)
+(default: Studio, "User Feedback from Portal"). With the feature off the route
+answers `404` and the transcripts carry no `capabilities` field, so the
+Portal never shows the control.
+
+Body: `{ submissionId, feedback, context }` — a client UUID v4 reused on
+retry, 1–2000 characters, and the allowlisted context: `surface`, `locale`
+(a language with an optional region only, such as `en`, `en-GB`, `es-419`),
+`theme`, `deviceClass`, `viewportBucket`, `network`, and an optional
+`portalBuildVersion` (a release such as `1.4.0` / `1.5.0-rc.2` /
+`1.4.0+4f2ea36`, or a 7–40 character commit sha). Any other field or shape is
+a `400`.
+
+Every refusal carries `{ statusCode, code, message, retryable }`; the SDK
+copies `code` and `retryable` onto its `RequestError`. `retryable: true`
+means: send the same submission (same `submissionId`) again later.
+
+| Status | `code`                            | Retryable | When                                                                                                                                     |
+| ------ | --------------------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    |                                   |           | Delivered; or a replay of the delivered submission (same `submissionId`, same `submittedAt`, no second issue).                           |
+| 400    | `FEEDBACK_INVALID`                | no        | Body not in the contract.                                                                                                                |
+| 400    | `FEEDBACK_EMPTY`                  | no        | Empty after normalising and trimming.                                                                                                    |
+| 401    |                                   |           | No valid UCAN invocation.                                                                                                                |
+| 404    | `FEEDBACK_DISABLED`               | no        | The feature is off.                                                                                                                      |
+| 404    | `FEEDBACK_TARGET_NOT_FOUND`       | no        | No such session or message in the caller's own database; a user message; a reply of the turn still running or recovering in the session. |
+| 409    | `FEEDBACK_IN_FLIGHT`              | yes       | This same submission is being delivered right now (a client retrying after a timeout).                                                   |
+| 409    | `FEEDBACK_ALREADY_SUBMITTED`      | no        | Different feedback for the message was delivered or is being delivered.                                                                  |
+| 413    |                                   |           | Body over 16 KiB.                                                                                                                        |
+| 422    | `FEEDBACK_CONTAINS_PERSONAL_DATA` | no        | The text holds an email, Matrix id, DID, wallet address, phone number, credential or secret-bearing URL.                                 |
+| 429    | `FEEDBACK_RATE_LIMITED`           | yes       | More than 3 new submissions a minute from the user, or the per-IP limit (see configuration).                                             |
+| 502    | `FEEDBACK_DELIVERY_FAILED`        | yes       | Linear did not confirm the issue after bounded retries; the reservation is released, so the user can send again.                         |
+
+The text is screened after Unicode NFKC normalisation with invisible format
+characters (zero-width spaces and joiners, bidi marks) removed, and that
+normalised text is what is sent. Dates (`2026-10-05`), year ranges and
+grouped amounts (`1 000 000`) are not taken for phone numbers.
+
+The flow: the shell validates and screens the text, then asks the user's
+object to check the target and reserve a marker (`message_feedback_markers`:
+session id, message id, submission id, the submission it took over if any,
+status, timestamps — one row per message, removed with its session; a table
+an older build created gains the newer columns in place when the object
+opens). The
+shell then calls Linear: it looks for an issue whose description holds the
+message's pseudonym and creates one only if there is none, at most three
+attempts each with 250/500 ms backoff. Only a rate limit (HTTP 429 or
+GraphQL `RATELIMITED`) waits for Linear's `X-RateLimit-*-Reset` (epoch ms)
+instead — Linear sends those headers on every response, so they are not a
+retry hint otherwise — and the sink gives up rather than wait more than 2 s.
+
+A reservation the shell never settled (its isolate died) is reclaimed after
+2 minutes. Taken over by the same submission, the pseudonym lookup finds the
+issue it may already have created and the answer is `200`. Taken over by a
+different submission, the issue that exists is the earlier one's: the new
+text is not sent, the marker is settled under the earlier submission, and the
+answer is `409 FEEDBACK_ALREADY_SUBMITTED` — never a `200` for text that went
+nowhere.
+
+**What the issue holds**: a neutral title (`[Agent feedback] <surface> ·
+<UTC time>`), the screened feedback text, the submission id, keyed
+pseudonyms of the user, session and message (`user_<hmac>`, …), the oracle's
+entity DID and name, the deployment's default model and provider, the
+allowlisted context, the QiForge build and the time.
+
+**What never leaves the oracle, and what is never kept**: the prompt, the
+reply, reasoning, tool calls or results, attachments, the user's DID, raw
+session and message ids, the IP address (only its pseudonym keys the rate
+limit), the user agent, URLs, payment data and location. The feedback text
+is held only for the request: it is not written to the user's database or
+the owner copy, and no log line carries it, the DID or the ids. The
+feedback log lines are `[feedback] issue delivered`, `[feedback] an earlier
+submission already delivered the issue`, `[feedback] delivery failed:
+<status/code>` and the settle warnings. The shell's own lines that name a
+caller — the bare-delegation `[auth]` warning and the `[shell] … failed`
+error — log the matched route pattern (`/messages/:sessionId/:messageId/feedback`),
+never the concrete path with its ids.
+
+Pseudonyms are HMAC-SHA256 under `FEEDBACK_HMAC_SECRET`: whoever holds the
+secret and a user's DID can recompute that user's pseudonym, so treat the
+secret like the Linear key. Linking an issue to a user otherwise needs both
+the Linear workspace and Cloudflare's own request logs (Workers Logs and
+Logpush can record the request URL, and with it the raw session and message
+ids, outside the runtime's control).
+
 ## Artefact sweep
 
 Expired artefact share copies (`art/<id>` in `ARTIFACT_BUCKET`) are deleted
@@ -794,6 +883,11 @@ Responses-API id, a streaming turn delivering chunks as they are produced.
 
 - The per-DID rate limit (100 requests / 60 s) is the first ceiling a single
   client hits, not the object.
+- Anonymous feedback: the identifier screen is pattern-based (it catches
+  emails, Matrix ids, DIDs, wallet addresses, phone numbers and credential
+  shapes, not names or street addresses); a user can send one feedback per
+  Agent reply; the per-IP limit uses Cloudflare's rate-limit binding, which
+  counts per Cloudflare location, not globally.
 - Session creation waits for the marker send, so it scales with the number
   of simultaneous creators across all users (the one bot's send budget), not
   with load on one user; see [load tests](load-tests.md).

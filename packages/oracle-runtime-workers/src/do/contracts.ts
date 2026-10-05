@@ -16,6 +16,11 @@ import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 import type { OwnedArtifact } from '../artifacts/store';
+import type {
+  FeedbackReservation,
+  FeedbackSettlement,
+  FeedbackTarget,
+} from '../feedback/contract';
 /**
  * Cross-object contracts for the Workers runtime.
  *
@@ -185,6 +190,30 @@ export interface OracleWorkerEnv {
    * local harness and vitest pool, where the shell degrades to no limiting.
    */
   RATE_LIMIT?: RateLimit;
+  /**
+   * Optional rate-limit binding for anonymous feedback, keyed per client IP
+   * pseudonym (declare it with `simple: { limit: 3, period: 60 }`). Without
+   * it the per-IP check uses `RATE_LIMIT`'s limit under a feedback-only key.
+   */
+  FEEDBACK_RATE_LIMIT?: RateLimit;
+
+  // --- anonymous response feedback (docs/configuration.md) ------------------
+  // Read by the shell only (`src/feedback/config.ts`); never part of the
+  // validated config plugins receive. Off unless the key and secret are set.
+  /** Linear API key allowed to create issues in the feedback team. */
+  FEEDBACK_LINEAR_API_KEY?: string;
+  /** At least 32 characters; derives the user/session/message pseudonyms. */
+  FEEDBACK_HMAC_SECRET?: string;
+  /** Linear team (default: Studio). */
+  FEEDBACK_LINEAR_TEAM_ID?: string;
+  /** Linear project (default: "User Feedback from Portal"). */
+  FEEDBACK_LINEAR_PROJECT_ID?: string;
+  /** Optional comma-separated Linear label ids. */
+  FEEDBACK_LINEAR_LABEL_IDS?: string;
+  /** Linear GraphQL endpoint override (default `https://api.linear.app/graphql`). */
+  FEEDBACK_LINEAR_API_URL?: string;
+  /** Release or commit identifier shown in feedback issues (default `unknown`). */
+  QIFORGE_BUILD_VERSION?: string;
   /**
    * Workers AI binding. Optional: `DECISION_PROVIDER=cloudflare-jev` runs the
    * Jev model through it instead of the account credentials. Declare it with
@@ -649,6 +678,20 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   ): Promise<
     { ok: true; json: JsonString } | { ok: false; status: 400; message: string }
   >;
+  /**
+   * Anonymous feedback (src/feedback/): validate the target message in this
+   * user's database and reserve its idempotency marker. Never sees the text.
+   */
+  reserveMessageFeedback(
+    identity: TurnIdentity,
+    target: FeedbackTarget,
+  ): Promise<FeedbackReservation>;
+  /** Record the delivery, keep the earlier submission's, or release the reservation. */
+  settleMessageFeedback(
+    identity: TurnIdentity,
+    target: FeedbackTarget,
+    outcome: FeedbackSettlement,
+  ): Promise<void>;
   abortTurn(sessionId: string): Promise<boolean>;
   /** The session's active (queued/running/recovering) run, if any. */
   sessionRun(

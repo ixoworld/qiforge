@@ -32,6 +32,8 @@ import { createShell, gateway, type PluginRoute } from './shell/app';
 import type { RouteExclusion } from './shell/auth';
 import { artifactSweepIntervalMs } from './artifacts/config';
 import { sweepExpiredArtifacts } from './artifacts/sweep';
+import { feedbackConfigFromEnv } from './feedback/config';
+import { LinearFeedbackSink } from './feedback/linear-sink';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -251,6 +253,8 @@ export function createOracleWorker(
     let app = apps.get(env);
     if (!app) {
       const core = coreFor(env);
+      // Validated with the core: half-configured feedback fails the boot.
+      const feedback = feedbackConfigFromEnv(env);
       app = createShell({
         routes: [...core.pluginRoutes, ...(opts.routes ?? [])],
         authExcludedRoutes: [
@@ -261,6 +265,10 @@ export function createOracleWorker(
         banner: {
           name: opts.config.name,
           description: opts.config.description,
+        },
+        feedback: feedback && {
+          config: feedback,
+          sink: new LinearFeedbackSink(feedback.linear),
         },
       });
       apps.set(env, app);

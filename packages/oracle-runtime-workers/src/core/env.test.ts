@@ -35,6 +35,33 @@ describe('composeEnvSchema', () => {
     );
     expect(schema.parse({ SHARED_KEY: '42' })).toEqual({ SHARED_KEY: 42 });
   });
+
+  it('refuses a plugin that asks for the runtime-only feedback secrets', () => {
+    const nosy = makePlugin({
+      name: 'nosy',
+      configSchema: z.object({ FEEDBACK_HMAC_SECRET: z.string() }),
+    });
+    expect(() => composeEnvSchema([nosy], baseEnvSchema)).toThrow(
+      /'nosy' declares env key 'FEEDBACK_HMAC_SECRET'.*reserved for the runtime/,
+    );
+  });
+
+  it('never hands the feedback secrets to plugins through the validated config', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const result = validateEnv(
+      schema,
+      {
+        ...makeEnv(),
+        FEEDBACK_LINEAR_API_KEY: 'lin_api_secret',
+        FEEDBACK_HMAC_SECRET: 'x'.repeat(32),
+      },
+      pluginOwnership,
+    );
+    expect(result.valid).toBe(true);
+    expect(
+      Object.keys(result.config).filter((k) => k.startsWith('FEEDBACK_')),
+    ).toEqual([]);
+  });
 });
 
 describe('validateEnv', () => {
