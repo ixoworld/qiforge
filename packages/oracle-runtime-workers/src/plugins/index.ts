@@ -8,6 +8,10 @@
  * A host opts in by spreading `BUNDLED_WORKERS_PLUGINS` into
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are
  * skipped by their `autoDetect`.
+ *
+ * Shipped but opt-in (not in the bundle): `IxoTransactionPlugin`, which asks
+ * the user's Portal wallet to sign chain transactions; an oracle adds
+ * `new IxoTransactionPlugin()` itself.
  */
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import { ComposioPlugin } from './composio';
@@ -37,6 +41,7 @@ export * from './vfs';
 export * from './user-preferences';
 export * from './portal';
 export * from './agui';
+export * from './ixo-transaction';
 export * from './pod-creator';
 
 export const memoryPlugin = new MemoryPlugin();

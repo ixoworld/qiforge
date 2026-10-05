@@ -20,6 +20,7 @@ import {
   setCachedInvocation,
 } from '../../utils/invocation-cache.js';
 import type { AgAction } from '../../hooks/use-ag-action.js';
+import { agentVisibleAgActions, upsertAgAction } from './ag-actions.js';
 import {
   type IOraclesContextProps,
   type IOraclesProviderProps,
@@ -49,8 +50,15 @@ export const OraclesProvider = ({
     throw new Error('initialWallet and transactSignX are required');
   }
 
-  // AG-UI action state management
-  const [agActions, setAgActions] = useState<AgAction[]>([]);
+  // AG-UI action state management: every registered action is executable
+  // over the socket; only the agent-visible ones are offered to the agent.
+  const [registeredAgActions, setRegisteredAgActions] = useState<AgAction[]>(
+    [],
+  );
+  const agActions = useMemo(
+    () => agentVisibleAgActions(registeredAgActions),
+    [registeredAgActions],
+  );
   const agActionHandlers = useRef<
     Map<string, (args: unknown) => Promise<unknown> | unknown>
   >(new Map());
@@ -149,16 +157,7 @@ export const OraclesProvider = ({
       handler: (args: unknown) => Promise<unknown> | unknown,
       render?: (props: Record<string, unknown>) => React.ReactElement | null,
     ) => {
-      setAgActions((prev) => {
-        // Check if action already exists
-        const exists = prev.some((a) => a.name === action.name);
-        if (exists) {
-          // Update existing action
-          return prev.map((a) => (a.name === action.name ? action : a));
-        }
-        // Add new action
-        return [...prev, action];
-      });
+      setRegisteredAgActions((prev) => upsertAgAction(prev, action));
 
       agActionHandlers.current.set(action.name, handler);
       if (render) {
@@ -169,7 +168,7 @@ export const OraclesProvider = ({
   );
 
   const unregisterAgAction = useCallback((name: string) => {
-    setAgActions((prev) => prev.filter((a) => a.name !== name));
+    setRegisteredAgActions((prev) => prev.filter((a) => a.name !== name));
     agActionHandlers.current.delete(name);
     agActionRenders.current.delete(name);
   }, []);
@@ -199,6 +198,7 @@ export const OraclesProvider = ({
       getDelegation,
       getInvocation,
       agActions,
+      registeredAgActions,
       registerAgAction,
       unregisterAgAction,
       executeAgAction,
@@ -211,6 +211,7 @@ export const OraclesProvider = ({
       getDelegation,
       getInvocation,
       agActions,
+      registeredAgActions,
       registerAgAction,
       unregisterAgAction,
       executeAgAction,

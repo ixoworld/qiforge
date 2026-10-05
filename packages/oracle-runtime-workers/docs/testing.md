@@ -13,8 +13,13 @@ iterating and the full matrix once at the end.
   real SQLite with the POD Creator plugin driven across an eviction and an
   owner-copy round trip, the socket.io endpoint over real WebSockets
   (including every [frontend bridge](frontend-bridge.md#tests) invariant),
-  the shell, and the editor and flows plugin suites that must prove the
-  linkedom bridge on the real runtime.
+  the shell, the editor and flows plugin suites that must prove the
+  linkedom bridge on the real runtime, and the ixo-transaction suites
+  (`src/plugins/ixo-transaction/*.test.ts`: tool binding and the capability
+  gate in a real turn, every signing outcome against a fake AG-UI bridge
+  over the real `FrontendCallRegistry`, the timeout keeping the write claim
+  across turns, the chain id on every request, the mainnet receipt check,
+  mainnet off by default).
 - `pnpm test:core` — plain-Node suites (`vitest.core.config.ts`): plugin
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, and the
@@ -63,7 +68,8 @@ reset/reload, E2EE Matrix ingress, scheduled tasks including a dedicated
 room, HTTP and Matrix attachments with payload retention, user preferences,
 the Node room-state envelope, the socket.io channel (handshake, browser tool
 and AG-UI round trips, one executing tab out of two plus the `/health`
-bridge advertisement, `create_page_room` with the CRDT edit replayed),
+bridge advertisement, `sign_ixo_transaction` answered by a recording wallet,
+`create_page_room` with the CRDT edit replayed),
 gateway restarts (catch-up, creates during a restart), the reset-safety
 drills (gateway and user-object hard resets mid-turn) and the reset-leak
 drills (the room mirror under a burst of gateway resets, the dirty mark

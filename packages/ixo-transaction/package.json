@@ -1,0 +1,68 @@
+{
+  "name": "@ixo/ixo-transaction",
+  "version": "0.0.0",
+  "private": false,
+  "description": "Runtime-neutral catalog, intent routing and strict validation for IXO transactions, plus the Portal wallet-signing hook used by the QiForge ixo-transaction plugin",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ixoworld/qiforge.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "default": "./dist/react/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@ixo/impactxclient-sdk": "^3.0.0",
+    "@ixo/oracles-client-sdk": "^1.5.0",
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ixo/impactxclient-sdk": {
+      "optional": true
+    },
+    "@ixo/oracles-client-sdk": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@ixo/impactxclient-sdk": "3.0.0",
+    "@ixo/oracles-client-sdk": "workspace:*",
+    "@ixo/typescript-config": "workspace:*",
+    "@ixo/vitest-config": "workspace:*",
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.2.79",
+    "react": "^18.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

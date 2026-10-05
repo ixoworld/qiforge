@@ -103,12 +103,14 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 `.dev.vars` under `wrangler dev`). The gateway script needs only the
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
-`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`) through the
-same object; each plugin's `configSchema` is the reference. One plugin key
-gates money: `POD_CREATOR_ALLOW_MAINNET` (default `false`) must be `'true'`
-before the POD Creator plugin prepares a mainnet creation batch — with
-`NETWORK` at its `mainnet` default and the flag unset, the create path refuses
-([pod-creator](pod-creator.md)).
+`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
+`IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
+the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
+(default `false`) must be `'true'` before the POD Creator plugin prepares a
+mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
+unset, the create path refuses ([pod-creator](pod-creator.md)); the opt-in
+wallet-signing plugin's variables, including `IXO_TRANSACTION_ALLOW_MAINNET`,
+are described in [ixo-transaction](ixo-transaction.md#configuration).
 
 ### Identity and auth
 

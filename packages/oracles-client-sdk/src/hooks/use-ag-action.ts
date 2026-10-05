@@ -7,6 +7,14 @@ export interface AgActionConfig<TSchema extends z.ZodTypeAny = z.ZodTypeAny> {
   description: string;
   parameters: TSchema;
   handler: (args: z.infer<TSchema>) => Promise<unknown> | unknown;
+  /**
+   * Whether the action is offered to the agent as a tool (sent with each
+   * turn in `agActions`). Default `true`. `false` registers an action the
+   * oracle can still call over the socket from one of its own tools — e.g.
+   * a wallet-signing step reached only through a validating server tool —
+   * but that the model never sees or calls directly.
+   */
+  exposeToAgent?: boolean;
   render?: (props: {
     status?: 'isRunning' | 'done';
     args?: z.infer<TSchema>;
@@ -20,6 +28,11 @@ export interface AgAction {
   description: string;
   parameters: z.ZodTypeAny;
   hasRender: boolean;
+  /**
+   * See `AgActionConfig.exposeToAgent`. Optional so an `AgAction` built
+   * outside `useAgAction` keeps compiling; absent counts as `true`.
+   */
+  exposeToAgent?: boolean;
 }
 
 /**
@@ -78,6 +91,7 @@ export function useAgAction<TSchema extends z.ZodTypeAny>(
       description: config.description,
       parameters: config.parameters,
       hasRender: !!config.render,
+      exposeToAgent: config.exposeToAgent ?? true,
     };
 
     registerAgAction(
