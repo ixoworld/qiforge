@@ -16,6 +16,11 @@ iterating and the full matrix once at the end.
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, and the
   bundled-plugin tests that mock the MCP and Composio SDKs.
+- `src/core/**` suites run in both projects. That is how the Decision tests
+  prove their contract on workerd as well as Node: `src/core/decisions.test.ts`
+  covers provider wiring, routing, provenance and applicability, and
+  `src/core/decision-contract.test.ts` pins the Final Decision Subject digest
+  and runs the isolation probe.
 - `pnpm typecheck`, `pnpm lint`, and `pnpm format:check` at the repo root.
 
 The Matrix gateway has no unit tests here any more: its generic behaviour is
