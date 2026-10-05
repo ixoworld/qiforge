@@ -610,9 +610,9 @@ export class RealtimeEndpoint {
       args: params.args,
       ...(kind === 'agui' ? { status: 'isRunning' } : {}),
     };
-    // Through the router: the session's SSE stream sees it too (Node emits
-    // it on the root emitter, which feeds both channels).
-    this.deps.router.emit(eventName, payload);
+    // Straight to the session's sockets: the SSE stream already shows the
+    // call as the turn's own `tool_call` / `action_call` frame.
+    this.fanOut(eventName, payload);
     return pending;
   }
 

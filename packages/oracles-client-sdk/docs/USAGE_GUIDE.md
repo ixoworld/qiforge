@@ -965,5 +965,3 @@ handler: async (args) => {
 ## Next Steps
 
 - [API Reference](./API_REFERENCE.md) - Complete API documentation
-- [Examples](./EXAMPLES.md) - Practical code examples
-- [Live Agent Guide](./LIVE_AGENT.md) - Voice & video calls

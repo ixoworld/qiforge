@@ -42,6 +42,10 @@ export class RealtimeTestDO extends DurableObject {
 
   private readonly warnings: string[] = [];
 
+  /** What the session sinks (the in-flight turn's SSE stream) received. */
+  private readonly sinkEvents: Array<{ sessionId: string; eventName: string }> =
+    [];
+
   private get realtime(): RealtimeEndpoint {
     this.endpoint ??= new RealtimeEndpoint({
       ctx: this.ctx,
@@ -105,6 +109,21 @@ export class RealtimeTestDO extends DurableObject {
   }
 
   // ── test surface ─────────────────────────────────────────────────────────
+
+  /** Register a session sink, as an in-flight turn's SSE stream does. */
+  async captureSession(sessionId: string): Promise<void> {
+    this.router.register(sessionId, {
+      emit: (eventName) => {
+        this.sinkEvents.push({ sessionId, eventName });
+      },
+    });
+  }
+
+  async sessionSinkEvents(): Promise<
+    Array<{ sessionId: string; eventName: string }>
+  > {
+    return [...this.sinkEvents];
+  }
 
   /** Emit a runtime event the way `ctx.emit.*` does (through the router). */
   async emitForSession(

@@ -143,7 +143,7 @@ function restrictedObject(
     toolScheduler: new ToolScheduler(),
     runStore,
     runs: { touchKeepAlive: vi.fn() },
-    events: { register: vi.fn(), unregister: vi.fn(), emitToTaps: vi.fn() },
+    events: { register: vi.fn(), unregister: vi.fn() },
     historyIndexer: { process: indexed },
     preferences: { get: forbidden },
     capabilityRouter: forbidden,

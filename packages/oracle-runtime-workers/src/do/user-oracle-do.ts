@@ -3718,8 +3718,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           runId: live.runId,
           resumed,
           abortController: live.abort,
-          mirror: (eventName, payload) =>
-            this.events.emitToTaps(eventName, payload),
           agActionNames: new Set((stored.agActions ?? []).map((a) => a.name)),
           byoProvider,
           toolOutputCapChars,

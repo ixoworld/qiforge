@@ -134,8 +134,7 @@ function browserToolNames(
  * (boot cache + request hooks, collected concurrently with per-plugin failure
  * isolation), visibility partition, meta-tools, sub-agents as tools, the
  * fixed middleware order, prompt composition — minus the branches that do not
- * exist on Workers (the commerce lane, Slack, Matrix group chats, and the
- * ChatGPT-subscription history sanitizer). The Matrix `work_status` card
+ * exist on Workers (the commerce lane and Slack). The Matrix `work_status` card
  * driver arrives as a host middleware (`hooks.middlewares`); page context and
  * the safety guardrail install when the host supplies `hooks.getRoomTitle` /
  * `hooks.safetyModel`, exactly as on Node.

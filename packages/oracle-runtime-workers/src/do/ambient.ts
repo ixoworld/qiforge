@@ -73,17 +73,6 @@ export class SessionEventRouter implements EmitAdapter {
     }
     for (const sink of this.taps) sink.emit(eventName, payload);
   }
-
-  /**
-   * Taps only — for frames the in-flight turn's SSE stream already wrote
-   * itself (`tool_call`, `action_call`, `router_update`) and that the
-   * session's sockets must see too, as Node's WebSocket gateway relays them.
-   * Skipping the session sinks keeps the SSE stream from receiving them twice.
-   */
-  emitToTaps(eventName: string, payload: RawEventPayload): void {
-    if (typeof payload.sessionId !== 'string') return;
-    for (const sink of this.taps) sink.emit(eventName, payload);
-  }
 }
 
 const BLOB_ID_RE = /^blob_[0-9a-f]{16}$/;

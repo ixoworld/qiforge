@@ -705,13 +705,13 @@ dead connection is noticed by either side after up to four minutes; the
 client SDK's reconnect then restores it. `socket.io-client` must use
 `transports: ['websocket']`.
 
-Turn events reach the sockets too, mirrored through the event router's
-taps on the Node runtime's wire: the socket event `event` carrying
-`{ eventName, payload }` (`tool_call`, `render_component`, `router_update`,
-`message_cache_invalidation`, …), which is the envelope the client SDK
-validates before it dispatches. Only `browser_tool_call` and `action_call`
-are sent by name with the raw payload, because the SDK answers them that
-way. `message` / `done` chunks stay SSE-only.
+Turn frames are not copied to the sockets. A turn's `tool_call` /
+`action_call` / `router.update` frames travel on its SSE stream only; a
+second tab of the same session re-joins the running turn through
+`GET /sessions/:id/run`. The sockets carry the two frontend calls the SDK
+answers, `browser_tool_call` and `action_call`, sent by name with the raw
+payload and once per call, and any plugin `ctx.emit.*` event in the Node
+envelope (socket event `event` carrying `{ eventName, payload }`).
 
 Background work is bounded: the session-history indexer runs under
 `ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s

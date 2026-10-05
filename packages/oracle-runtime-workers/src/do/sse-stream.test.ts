@@ -3,54 +3,6 @@ import { describe, expect, it } from 'vitest';
 import { HarnessLimitError } from '../core/turn-budget';
 import { createSseTurnStream, isImmediateFrame } from './sse-stream';
 
-async function* fakeEvents(): AsyncGenerator<unknown> {
-  yield {
-    event: 'on_tool_start',
-    run_id: 'run-1',
-    name: 'list_capabilities',
-    data: { input: { input: { includeOnDemand: true } } },
-  };
-  yield {
-    event: 'on_tool_end',
-    run_id: 'run-1',
-    name: 'list_capabilities',
-    data: {
-      output: new ToolMessage({ content: '[]', tool_call_id: 'run-1' }),
-    },
-  };
-  yield {
-    event: 'on_chat_model_stream',
-    run_id: 'run-2',
-    data: { chunk: { content: 'Done.' } },
-  };
-}
-
-describe('createSseTurnStream mirror', () => {
-  it('mirrors tool_call / router_update frames to the session sockets, never message chunks', async () => {
-    const mirrored: Array<{ name: string; payload: Record<string, unknown> }> =
-      [];
-    const stream = createSseTurnStream({
-      events: fakeEvents(),
-      sessionId: 's1',
-      requestId: 'r1',
-      abortController: new AbortController(),
-      mirror: (name, payload) => mirrored.push({ name, payload }),
-    });
-    const sse = await new Response(stream).text();
-    expect(sse).toContain('event: tool_call');
-    const names = mirrored.map((m) => m.name);
-    expect(names).toContain('router_update');
-    expect(names.filter((n) => n === 'tool_call')).toHaveLength(2);
-    expect(names).not.toContain('message');
-    expect(names).not.toContain('done');
-    for (const m of mirrored) expect(m.payload.sessionId).toBe('s1');
-    const done = mirrored.find(
-      (m) => m.name === 'tool_call' && m.payload.status === 'done',
-    );
-    expect(done?.payload.toolName).toBe('list_capabilities');
-  });
-});
-
 async function* failingToolEvents(): AsyncGenerator<unknown> {
   yield {
     event: 'on_tool_start',

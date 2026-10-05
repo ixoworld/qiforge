@@ -59,12 +59,6 @@ export interface TurnFrameProducerInput {
   log?: (msg: string) => void;
   /** BYO provider of this turn, when it ran on the user's own credential. */
   byoProvider?: string;
-  /**
-   * Receives every `tool_call` / `action_call` / `router_update` frame the
-   * stream writes, for the session's realtime sockets (the SSE consumer
-   * already has them). Payloads carry `sessionId`.
-   */
-  mirror?: (eventName: string, payload: Record<string, unknown>) => void;
   /** The `done` frame's `messageId` (the final assistant message), when known. */
   messageIdOf?: () => string | undefined;
   /** Called on every frame — the keep-alive touch. */
@@ -233,13 +227,6 @@ function toText(content: unknown): string {
   return content == null ? '' : JSON.stringify(content);
 }
 
-/** SSE frame name → socket event name (Node's `serverEvents` spelling). */
-const MIRRORED_EVENTS: Record<string, string | undefined> = {
-  tool_call: 'tool_call',
-  action_call: 'action_call',
-  'router.update': 'router_update',
-};
-
 /**
  * Consume one turn's graph events and push its frames into the sink. Runs
  * to the end whether or not anyone is subscribed; `abortController` is the
@@ -277,11 +264,6 @@ export async function runTurnFrames(
       return;
     }
     input.onFrame?.();
-    // Node's WebSocket gateway relays these to the session's sockets as
-    // well; message chunks and `done` stay SSE-only, as there.
-    const mirrored = MIRRORED_EVENTS[eventName];
-    if (mirrored && input.mirror && payload && typeof payload === 'object')
-      input.mirror(mirrored, payload as Record<string, unknown>);
   };
   const doneFrame = (extra: Record<string, unknown> = {}) => {
     const messageId = input.messageIdOf?.();

@@ -427,6 +427,30 @@ describe('RealtimeEndpoint over real WebSockets', () => {
     c.ws.close(1000, 'bye');
   });
 
+  it('delivers an AG-UI action to the socket exactly once and never to the turn stream', async () => {
+    const s = stub('once');
+    await s.captureSession('one');
+    const c = await connect(s, { sessionId: 'one' });
+    const action = s.callAgAction({
+      sessionId: 'one',
+      toolCallId: 'ag_once',
+      toolName: 'render_table',
+      args: {},
+      timeoutMs: 5000,
+    });
+    await c.next((f) => f.includes('"ag_once"'));
+    c.ws.send(
+      '42["action_call_result",{"toolCallId":"ag_once","sessionId":"one","result":{"success":true}}]',
+    );
+    expect(await action).toEqual({ ok: true, value: { success: true } });
+    const deliveries = c.frames.filter(
+      (f) => isEvent('action_call')(f) && f.includes('"ag_once"'),
+    );
+    expect(deliveries).toHaveLength(1);
+    expect(await s.sessionSinkEvents()).toEqual([]);
+    c.ws.close(1000, 'bye');
+  });
+
   it("does not let a socket of another session answer this session's call, whatever sessionId it claims", async () => {
     const s = stub('cross-session');
     const own = await connect(s, { sessionId: 'mine' });

@@ -715,8 +715,6 @@ interface CallOptions {
 }
 ```
 
-See [Live Agent Guide](./LIVE_AGENT.md) for complete documentation.
-
 ---
 
 ## Components

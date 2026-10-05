@@ -108,8 +108,6 @@ function ChatInterface() {
 - **[Usage Guide](./docs/USAGE_GUIDE.md)** - Complete walkthrough with examples
 - **[API Reference](./docs/API_REFERENCE.md)** - Full API documentation
 - **[Tool Calls & Browser Tools](./docs/TOOL_CALLS.md)** - Tool calls and browser-side tools
-- **[Examples](./docs/EXAMPLES.md)** - Practical code examples
-- **[Live Agent](./docs/LIVE_AGENT.md)** - Voice & video calls guide
 
 ## Key Concepts
 
@@ -224,7 +222,6 @@ Licensed under the terms specified in [License.txt](../../License.txt)
 
 - [IXO Website](https://www.ixo.world/)
 - [Documentation](./docs/)
-- [Examples](./docs/EXAMPLES.md)
 - [GitHub Repository](https://github.com/ixoworld/qiforge)
 
 ---
