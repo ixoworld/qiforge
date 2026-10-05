@@ -244,6 +244,8 @@ export type { CompiledTemplate, TemplateValues } from './template';
 
 export * from './middlewares';
 
+export { createMemoryUserKv } from './user-kv';
+
 export {
   EMPTY_SHARED,
   EVENT_NAMES,

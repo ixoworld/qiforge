@@ -104,7 +104,11 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
 `DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`) through the
-same object; each plugin's `configSchema` is the reference.
+same object; each plugin's `configSchema` is the reference. One plugin key
+gates money: `POD_CREATOR_ALLOW_MAINNET` (default `false`) must be `'true'`
+before the POD Creator plugin prepares a mainnet creation batch — with
+`NETWORK` at its `mainnet` default and the flag unset, the create path refuses
+([pod-creator](pod-creator.md)).
 
 ### Identity and auth
 
