@@ -29,6 +29,7 @@ import type {
   MatrixEvent,
   OracleIdentity,
   RoomStateSnapshot,
+  UserKvSurface,
 } from '../plugin-api/types';
 import type { MatrixGatewayObject } from './contracts';
 import { type WorkersUcanService } from './ucan-service';
@@ -230,6 +231,8 @@ export interface CreateAmbientInput {
   /** Host task scheduler surface for this user, when tasks are enabled. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
+  /** `ctx.kv` over the user's working copy (`SqliteUserKv`). */
+  kv?: UserKvSurface;
   /** Host bridge to the user's browser (realtime channel), when terminated here. */
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Per-turn cleanup registry (see `RuntimeContext.onTurnEnd`). */
@@ -262,6 +265,7 @@ export function createAmbientServices(
   return {
     ...(input.tasks ? { tasks: input.tasks } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
+    ...(input.kv ? { kv: input.kv } : {}),
     ...(input.frontend ? { frontend: input.frontend } : {}),
     ...(input.onTurnEnd ? { onTurnEnd: input.onTurnEnd } : {}),
     ...(input.background ? { background: input.background } : {}),
