@@ -1,3 +1,4 @@
+import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
 import { ToolScheduler } from '../tool-scheduler';
@@ -16,13 +17,16 @@ type WrapToolCall = NonNullable<
   ReturnType<typeof createToolExecutionMiddleware>['wrapToolCall']
 >;
 
-function requestFor(name: string, args: Record<string, unknown> = {}) {
+function requestFor(
+  name: string,
+  args: Record<string, unknown> = {},
+): Parameters<WrapToolCall>[0] {
   return {
-    toolCall: { id: `call_${name}`, name, args, type: 'tool_call' as const },
+    toolCall: { id: `call_${name}`, name, args, type: 'tool_call' },
     tool: undefined,
-    state: {},
+    state: { messages: [] },
     runtime: {},
-  } as unknown as Parameters<WrapToolCall>[0];
+  };
 }
 
 const okResult = (name: string) =>
@@ -129,6 +133,28 @@ describe('uncertainResultReason', () => {
     status: 'success' | 'error' = 'success',
   ): ToolMessage =>
     new ToolMessage({ tool_call_id: 'c', name: 'w', content, status });
+
+  it('keeps the claim for a frontend call whose outcome is unknown', () => {
+    // The bridge's deadline / lost-socket result: the browser may have
+    // written, so an identical write must not run again unverified.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify(frontendOutcomeUnknown('tc-req:inv'))),
+      ),
+    ).toBe('outcome unknown');
+    // A client that cannot tell whether its own write landed.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ success: false, outcome: 'unknown' })),
+      ),
+    ).toBe('outcome unknown');
+    // A definite refusal from the browser is a known outcome.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ success: false, error: 'Permission denied' })),
+      ),
+    ).toBeNull();
+  });
 
   it('names the reason when an error-shaped result reports a timeout, a transport failure or a 5xx', () => {
     // The flows plugin's catch-all around a dropped connection.

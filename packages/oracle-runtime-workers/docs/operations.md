@@ -8,20 +8,20 @@ the runbook for the failures we have seen.
 
 Public (UCAN-authenticated unless noted):
 
-| Route                                                                           | Purpose                                                                  |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `GET /health`, `GET /`                                                          | Liveness (no auth).                                                      |
-| `GET /health/matrix`                                                            | 200 when the gateway is running, 503 otherwise; body = `/matrix/status`. |
-| `GET /matrix/status`, `POST /matrix/start`                                      | Gateway status; start the sync loop (idempotent).                        |
-| `GET /models`                                                                   | Priced platform models.                                                  |
-| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                |
-| `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                   |
-| `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                    |
-| `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                         |
-| `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                      |
-| `GET /user-preferences`                                                         | The user's stored preferences.                                           |
-| `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.            |
-| `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.              |
+| Route                                                                           | Purpose                                                                                                           |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `GET /health`, `GET /`                                                          | Liveness (no auth). `/health` also advertises `frontendTools`, the [frontend bridge](frontend-bridge.md) version. |
+| `GET /health/matrix`                                                            | 200 when the gateway is running, 503 otherwise; body = `/matrix/status`.                                          |
+| `GET /matrix/status`, `POST /matrix/start`                                      | Gateway status; start the sync loop (idempotent).                                                                 |
+| `GET /models`                                                                   | Priced platform models.                                                                                           |
+| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                                                         |
+| `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                                                            |
+| `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                                                             |
+| `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                                                                  |
+| `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                                                               |
+| `GET /user-preferences`                                                         | The user's stored preferences.                                                                                    |
+| `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.                                                     |
+| `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.                                                       |
 
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
@@ -114,7 +114,9 @@ attempt fails the create fails.
 Three posts the user object makes are best-effort by design (Node fires and
 forgets them too): the room mirror of every HTTP turn (the user message and
 the reply, threaded under the session's marker), the `ixo.action.log` audit
-event of every browser tool / AG-UI action, and the `delegation_required`
+event of every browser tool / AG-UI action (identifiers and status only —
+never the arguments or the result body, see
+[frontend bridge](frontend-bridge.md)), and the `delegation_required`
 prompt a Matrix turn posts when the user has no usable delegation. On Workers
 the gateway object is replaced on every deploy and can be drained mid-turn,
 so each of these is now retried across a restart for ~30 s
@@ -697,10 +699,18 @@ that is only due for the heartbeat re-arms without opening the database.
 Sockets and their ping/pong bookkeeping live on the socket attachments and
 are re-adopted from `ctx.getWebSockets()` on every wake. Pending browser
 calls do not survive a restart (neither does the turn that made them).
-A socket joins only a session of the user its CONNECT token proves, and a
-`tool_result` / `action_call_result` settles a call only when it arrives on
-a socket of the session the call was made for; a `sessionId` in the result
-payload is ignored. A
+A socket joins only a session of the user its CONNECT token proves; a
+session lookup that fails refuses it. Browser tools and AG-UI actions follow
+the [frontend bridge](frontend-bridge.md) contract: each invocation has its
+own id, goes to one socket of its session (the one with the latest client
+event, else the one that connected last) and settles only from
+that socket; a result from another socket, with a different `sessionId`, or
+for an invocation already settled is rejected with a `[realtime] … rejected:`
+warning that names ids only. A call no socket can take fails at once; one
+whose answer misses its deadline or whose socket goes resolves with
+`FRONTEND_OUTCOME_UNKNOWN` and is never re-sent. `GET /debug/realtime`
+shows `pendingCalls` (with the executing socket's `executorSid`) and
+`completedCalls`. A
 dead connection is noticed by either side after up to four minutes; the
 client SDK's reconnect then restores it. `socket.io-client` must use
 `transports: ['websocket']`.
@@ -709,9 +719,10 @@ Turn events reach the sockets too, mirrored through the event router's
 taps on the Node runtime's wire: the socket event `event` carrying
 `{ eventName, payload }` (`tool_call`, `render_component`, `router_update`,
 `message_cache_invalidation`, …), which is the envelope the client SDK
-validates before it dispatches. Only `browser_tool_call` and `action_call`
-are sent by name with the raw payload, because the SDK answers them that
-way. `message` / `done` chunks stay SSE-only.
+validates before it dispatches. `browser_tool_call` and `action_call` are
+not mirrored: they reach a socket only as a dispatched invocation, by name
+with the raw payload, because the SDK executes them. `message` / `done`
+chunks stay SSE-only.
 
 Background work is bounded: the session-history indexer runs under
 `ctx.waitUntil` with at most two attempts, 3 s apart, each with a 20 s

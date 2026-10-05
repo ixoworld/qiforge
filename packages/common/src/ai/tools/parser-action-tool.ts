@@ -1,6 +1,7 @@
 import { type IRunnableConfigWithRequiredFields } from '@ixo/matrix';
 import { tool } from '@langchain/core/tools';
 import { randomUUID } from 'node:crypto';
+import { summarizeFrontendResult } from '../frontend-bridge/index.js';
 import { callAgAction } from './action-caller.js';
 import { logActionToMatrix } from './log-action-to-matrix.js';
 
@@ -39,21 +40,26 @@ export function parserActionTool(action: IParseAgActionParams) {
       const toolCallId = `ag_${requestId ?? 'noreq'}_${randomUUID().slice(0, 8)}`;
 
       // Call the action and WAIT for result from frontend
+      let invocationId: string | undefined;
       const result = await callAgAction({
         sessionId,
         toolCallId,
         toolName: name,
         args: input as Record<string, unknown>,
         timeout: 15000, // 15 seconds
+        onInvocation: (id) => {
+          invocationId = id;
+        },
       });
 
       if (configs?.matrix.roomId) {
+        // The action log is diagnostic: identifiers and status only, never
+        // the arguments or the result body (they carry user content).
         void logActionToMatrix(
           {
             name,
-            args: input as Record<string, unknown>,
-            result,
-            success: true,
+            args: {},
+            ...summarizeFrontendResult(result, invocationId),
           },
           {
             roomId: configs.matrix.roomId,

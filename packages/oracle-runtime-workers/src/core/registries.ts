@@ -194,7 +194,9 @@ export class ToolRegistry {
   ): Promise<RegisteredTool[]> {
     const boot = await this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
-    const out = [...boot, ...request];
+    const out = rtCtx
+      ? withoutShadowingRequestTools([...boot, ...request], rtCtx.logger)
+      : boot;
     this.collectedMeta = out.map(({ pluginName, tool, origin }) => ({
       pluginName,
       name: tool.name,
@@ -269,6 +271,37 @@ export class ToolRegistry {
       );
     }
   }
+}
+
+/**
+ * A request-time tool (most of them declared by the client in the turn body,
+ * such as the Portal's browser tools) may not take a name another tool of the
+ * turn already has: the model would call one name while the runtime ran
+ * either tool. The colliding request tool is dropped for this turn with one
+ * warning — the server tool (or the first request tool of that name) stays,
+ * and the turn runs. Failing the turn instead would break every turn of a
+ * client release that happens to declare a clashing name. Boot-time
+ * collisions are `assertNoCollisions`' job.
+ */
+function withoutShadowingRequestTools(
+  tools: readonly RegisteredTool[],
+  logger: Pick<RuntimeContext['logger'], 'warn'>,
+): RegisteredTool[] {
+  const owner = new Map<string, string>();
+  const out: RegisteredTool[] = [];
+  for (const entry of tools) {
+    const { pluginName, tool, origin } = entry;
+    const previous = owner.get(tool.name);
+    if (previous !== undefined && origin === 'request') {
+      logger.warn(
+        `${LOG_PREFIX} request tool "${tool.name}" of plugin "${pluginName}" dropped for this turn: the name is already taken by plugin "${previous}"`,
+      );
+      continue;
+    }
+    if (previous === undefined) owner.set(tool.name, pluginName);
+    out.push(entry);
+  }
+  return out;
 }
 
 // ── Sub-agent registry ──────────────────────────────────────────────────────

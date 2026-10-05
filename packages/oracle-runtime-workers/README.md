@@ -97,16 +97,17 @@ lifetime are in [operations](docs/operations.md).
 
 ## Documentation
 
-| Page                                   | What it covers                                                                           |
-| -------------------------------------- | ---------------------------------------------------------------------------------------- |
-| [architecture](docs/architecture.md)   | The objects, the gateway split, self-sovereign storage, cost model, the rules of workerd |
-| [node-parity](docs/node-parity.md)     | What is identical to the Node runtime, what is ported differently, what is not ported    |
-| [configuration](docs/configuration.md) | Wrangler config, migrations, every env var, first-time setup, the bot's send rate        |
-| [operations](docs/operations.md)       | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook |
-| [chat-delivery](docs/chat-delivery.md) | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links    |
-| [channels](docs/channels.md)           | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity         |
-| [testing](docs/testing.md)             | Unit, harness e2e, the devnet feature matrix, stress                                     |
-| [load-tests](docs/load-tests.md)       | Measurements and the findings that shaped the gateway                                    |
+| Page                                       | What it covers                                                                                |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| [architecture](docs/architecture.md)       | The objects, the gateway split, self-sovereign storage, cost model, the rules of workerd      |
+| [node-parity](docs/node-parity.md)         | What is identical to the Node runtime, what is ported differently, what is not ported         |
+| [configuration](docs/configuration.md)     | Wrangler config, migrations, every env var, first-time setup, the bot's send rate             |
+| [operations](docs/operations.md)           | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook      |
+| [chat-delivery](docs/chat-delivery.md)     | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links         |
+| [channels](docs/channels.md)               | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity              |
+| [frontend-bridge](docs/frontend-bridge.md) | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes |
+| [testing](docs/testing.md)                 | Unit, harness e2e, the devnet feature matrix, stress                                          |
+| [load-tests](docs/load-tests.md)           | Measurements and the findings that shaped the gateway                                         |
 
 ## Status (September 2026)
 

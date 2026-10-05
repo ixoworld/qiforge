@@ -30,6 +30,10 @@
       "types": "./dist/ai/decisions/index.d.ts",
       "import": "./dist/ai/decisions/index.js"
     },
+    "./ai/frontend-bridge": {
+      "types": "./dist/ai/frontend-bridge/index.d.ts",
+      "import": "./dist/ai/frontend-bridge/index.js"
+    },
     "./*": {
       "types": "./dist/*.d.ts",
       "import": "./dist/*.js"
