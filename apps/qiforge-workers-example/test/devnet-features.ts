@@ -34,6 +34,7 @@ import {
   waitFor,
   type HarnessAccount,
 } from './lib/harness';
+import { signIxoTransactionWithWallet } from '@ixo/ixo-transaction';
 import { SocketIoClient } from './lib/socket-client';
 
 const ORACLE_URL =
@@ -2925,6 +2926,91 @@ async function main(): Promise<void> {
           `browser served: ${JSON.stringify(served)}`,
         );
         assert.match(r.text, /RENDERED/i);
+      } finally {
+        stop();
+        sock.close();
+      }
+    },
+  );
+
+  await step(
+    'realtime: sign_ixo_transaction sends sign_transaction to the browser wallet and the signed hash returns',
+    async () => {
+      const c = await client();
+      const s = await c.createSession();
+      const invocation = await mintAuthInvocation(user, ORACLE_DID);
+      const { client: sock, outcome } = await socketFor(s, { invocation });
+      assert.ok(
+        outcome.ok,
+        `connect failed: ${outcome.ok ? '' : outcome.error}`,
+      );
+      const txHash = createHash('sha256')
+        .update(tag)
+        .digest('hex')
+        .toUpperCase();
+      const signed: unknown[] = [];
+      // The Portal's handler (`@ixo/ixo-transaction/react`) without the
+      // proto decoding: the same argument and message validation and chain
+      // check, with a wallet that records what it was asked to sign.
+      const stop = sock.serveFrontendTools(async ({ kind, toolName, args }) => {
+        if (kind !== 'agui' || toolName !== 'sign_transaction')
+          throw new Error(`unexpected ${kind} tool ${toolName}`);
+        const result = await signIxoTransactionWithWallet(
+          args,
+          async (messages) => {
+            signed.push(...messages);
+            return { code: 0, height: 1, transactionHash: txHash };
+          },
+          // The devnet harness's testnet chain (what the plugin defaults to).
+          { walletChainId: 'pandora-8' },
+        );
+        if (!result.success) throw new Error(result.error);
+        return result;
+      });
+      try {
+        const draft = {
+          command: '/ixo token retire',
+          network: 'testnet',
+          value: {
+            owner: user.address,
+            tokens: [{ id: `CARBON-${tag}`, amount: '10' }],
+            jurisdiction: 'ZA',
+            reason: `e2e ${tag}`,
+          },
+          riskConfirmation: {
+            confirmed: true,
+            acceptedRisks: [
+              'Permanently retires (burns) impact credits. Irreversible.',
+            ],
+          },
+        };
+        const r = await c.stream(
+          s,
+          `Load the ixo-transaction capability, then call sign_ixo_transaction once with exactly these arguments: ${JSON.stringify(draft)}. I have read and accept the listed risk. When it returns, reply with the transaction hash only.`,
+        );
+        assert.ok(
+          doneTools(r.events).includes('sign_ixo_transaction'),
+          `no sign_ixo_transaction call; tools: ${toolCalls(r.events).join(', ') || '(none)'}; reply: "${r.text.slice(0, 200)}"`,
+        );
+        const action = sock.events.find((e) => e.name === 'action_call');
+        assert.ok(
+          action,
+          `socket saw no action_call; events: ${sock.events.map((e) => e.name).join(', ')}`,
+        );
+        assert.equal(
+          (action.payload as { toolName?: string }).toolName,
+          'sign_transaction',
+        );
+        assert.deepEqual(signed, [
+          {
+            typeUrl: '/ixo.token.v1beta1.MsgRetireToken',
+            value: draft.value,
+          },
+        ]);
+        assert.ok(
+          r.text.includes(txHash),
+          `reply lacks the signed hash ${txHash}: "${r.text.slice(0, 200)}"`,
+        );
       } finally {
         stop();
         sock.close();

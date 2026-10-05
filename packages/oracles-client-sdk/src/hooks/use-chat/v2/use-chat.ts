@@ -107,8 +107,13 @@ export function useChat({
     oracleDid,
     overrides,
   );
-  const { authedRequest, executeAgAction, getAgActionRender, agActions } =
-    useOraclesContext();
+  const {
+    authedRequest,
+    executeAgAction,
+    getAgActionRender,
+    agActions,
+    registeredAgActions,
+  } = useOraclesContext();
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
 
   // The history, one turn-aligned page at a time: the newest page first,
@@ -450,10 +455,11 @@ export function useChat({
     })();
   }, [queryStatus, sessionId, apiUrl, oracleDid]);
 
-  // Build actionTools from registered AG-UI actions
+  // The socket answers every registered AG-UI action, including the ones
+  // hidden from the agent (`exposeToAgent: false`) that a server tool calls.
   const actionTools = useMemo(() => {
     const tools: IActionTools = {};
-    agActions.forEach((action) => {
+    registeredAgActions.forEach((action) => {
       tools[action.name] = {
         toolName: action.name,
         description: action.description,
@@ -465,7 +471,7 @@ export function useChat({
       };
     });
     return tools;
-  }, [agActions, executeAgAction, getAgActionRender]);
+  }, [registeredAgActions, executeAgAction, getAgActionRender]);
 
   const { isConnected: isWebSocketConnected } = useWebSocketEvents({
     oracleDid,

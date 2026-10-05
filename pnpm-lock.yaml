@@ -163,6 +163,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^5.20260825.1
         version: 5.20260825.1
+      '@ixo/ixo-transaction':
+        specifier: workspace:*
+        version: link:../../packages/ixo-transaction
       '@ixo/ucan':
         specifier: workspace:*
         version: link:../../packages/ucan
@@ -369,6 +372,40 @@ importers:
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
+
+  packages/ixo-transaction:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@ixo/impactxclient-sdk':
+        specifier: 3.0.0
+        version: 3.0.0
+      '@ixo/oracles-client-sdk':
+        specifier: workspace:*
+        version: link:../oracles-client-sdk
+      '@ixo/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@ixo/vitest-config':
+        specifier: workspace:*
+        version: link:../vitest-config
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.1
+      '@types/react':
+        specifier: ^18.2.79
+        version: 18.3.31
+      react:
+        specifier: ^18.2.0
+        version: 18.3.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(happy-dom@19.0.2)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.33.0)(terser@5.50.0)(tsx@4.22.4)(yaml@2.9.0)
 
   packages/logger:
     dependencies:
@@ -627,6 +664,9 @@ importers:
       '@ixo/editor':
         specifier: 6.0.1
         version: 6.0.1(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@42.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
+      '@ixo/ixo-transaction':
+        specifier: workspace:*
+        version: link:../ixo-transaction
       '@ixo/matrix-bot-workers-sdk':
         specifier: 0.7.0
         version: 0.7.0(typescript@5.9.3)

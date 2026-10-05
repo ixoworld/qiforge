@@ -11,6 +11,7 @@ import {
   WeatherPlugin,
   SkillsPlugin,
   FlowsPlugin,
+  IxoTransactionPlugin,
   BUNDLED_WORKERS_PLUGINS,
 } from '@ixo/oracle-runtime-workers';
 import { config } from './config';
@@ -21,12 +22,15 @@ const oracle = createOracleWorker({
   // The bundled Workers plugins (memory/sandbox/firecrawl/domain-indexer/
   // composio/vfs/tasks/editor) each self-gate on their env keys; those without
   // config quietly exclude themselves. Weather + Skills are the demo extras;
-  // FlowsPlugin is opt-in by design, so the example constructs it explicitly.
-  // DrillPlugin only exists with DRILL_TOOLS=true (the durable-run tests).
+  // FlowsPlugin and IxoTransactionPlugin (Portal wallet signing; testnet
+  // only unless IXO_TRANSACTION_ALLOW_MAINNET=true) are opt-in by design, so
+  // the example constructs them explicitly. DrillPlugin only exists with
+  // DRILL_TOOLS=true (the durable-run tests).
   plugins: [
     new WeatherPlugin(),
     new SkillsPlugin(),
     new FlowsPlugin(),
+    new IxoTransactionPlugin(),
     new DrillPlugin(),
     ...BUNDLED_WORKERS_PLUGINS,
   ],

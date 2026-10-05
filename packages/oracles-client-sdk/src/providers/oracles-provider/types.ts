@@ -43,7 +43,10 @@ export interface IOraclesContextProps {
   getDelegation: (oracleDid: string) => Promise<string | null>;
   getInvocation: (oracleDid: string) => Promise<string | null>;
   // AG-UI action management
+  /** Actions offered to the agent with each turn (`exposeToAgent` not false). */
   agActions: AgAction[];
+  /** Every registered action, hidden ones included: what the socket can execute. */
+  registeredAgActions: AgAction[];
   registerAgAction: (
     action: AgAction,
     handler: (args: unknown) => Promise<unknown> | unknown,

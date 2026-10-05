@@ -103,8 +103,10 @@ Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 `.dev.vars` under `wrangler dev`). The gateway script needs only the
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
-`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`) through the
-same object; each plugin's `configSchema` is the reference.
+`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
+`IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
+the reference. The opt-in wallet-signing plugin's two variables are described
+in [ixo-transaction](ixo-transaction.md#configuration).
 
 ### Identity and auth
 
