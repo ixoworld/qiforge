@@ -1,6 +1,15 @@
-import { rootEventEmitter } from '@ixo/oracles-events';
-import { BrowserToolCallEvent } from '@ixo/oracles-events';
-import { ActionCallEvent } from '@ixo/oracles-events';
+import {
+  ActionCallEvent,
+  BrowserToolCallEvent,
+  rootEventEmitter,
+} from '@ixo/oracles-events';
+import {
+  frontendInvocationId,
+  frontendOutcomeUnknown,
+  reportsUnknownOutcome,
+} from '../frontend-bridge/index.js';
+
+export type { FrontendOutcomeUnknown } from '../frontend-bridge/index.js';
 
 export interface IFrontendToolCallerParams {
   sessionId: string;
@@ -9,13 +18,23 @@ export interface IFrontendToolCallerParams {
   args: Record<string, unknown>;
   toolType: 'browser' | 'agui';
   timeout?: number;
+  /** Receives the invocation id the call was sent with (for diagnostics). */
+  onInvocation?: (invocationId: string) => void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 /**
- * Unified function to call frontend tools (browser tools or AG-UI actions)
- * and wait for their result via WebSocket
- * @param params - The parameters for the frontend tool call
- * @returns Promise that resolves with the tool result
+ * Call a frontend tool (browser tool or AG-UI action) over the WebSocket
+ * bridge and wait for its result.
+ *
+ * Every call gets its own invocation id and only a result carrying that id
+ * AND the call's session settles it. The listener is attached before the
+ * call is emitted, so an immediate answer cannot be missed. A deadline
+ * resolves with `FRONTEND_OUTCOME_UNKNOWN` rather than rejecting: the browser
+ * may still have performed the write.
  */
 export async function callFrontendTool({
   sessionId,
@@ -24,68 +43,67 @@ export async function callFrontendTool({
   args,
   toolType,
   timeout = 15000,
+  onInvocation,
 }: IFrontendToolCallerParams): Promise<unknown> {
-  // Step 1: Emit appropriate event based on tool type
-  if (toolType === 'browser') {
-    new BrowserToolCallEvent({
-      sessionId,
-      requestId: toolId,
-      toolCallId: toolId,
-      toolName,
-      args,
-    }).emit();
-  } else {
-    new ActionCallEvent({
-      sessionId,
-      requestId: toolId,
-      toolCallId: toolId,
-      toolName,
-      args,
-      status: 'isRunning',
-    }).emit();
-  }
-
-  // Step 2: Wait for result via rootEventEmitter
+  const invocationId = frontendInvocationId(toolId);
+  onInvocation?.(invocationId);
   const resultEventName =
     toolType === 'browser' ? 'browser_tool_result' : 'action_call_result';
 
-  return await new Promise((resolve, reject) => {
-    // eslint-disable-next-line prefer-const -- assigned after handler definition due to mutual reference
-    let timeoutHandle: NodeJS.Timeout;
-    const resultHandler = (...args: unknown[]) => {
-      const data = args[0] as {
-        toolCallId: string;
-        error?: string;
-        result?: Record<string, unknown>;
-      };
-      const receivedId = data.toolCallId;
-      if (receivedId === toolId) {
-        clearTimeout(timeoutHandle);
-        rootEventEmitter.removeListener(resultEventName, resultHandler);
-
-        // Handle success
-        if (data.error) {
-          reject(new Error(data.error));
-        } else if (toolType === 'agui' && data.result?.success === false) {
-          // AG-UI specific error handling
-          reject(new Error((data.result.error as string) || 'Action failed'));
-        } else {
-          resolve(data.result);
-        }
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeoutHandle);
+      rootEventEmitter.removeListener(resultEventName, resultHandler);
+    };
+    const resultHandler = (...events: unknown[]) => {
+      const data = events[0];
+      if (!isRecord(data)) return;
+      if (data.sessionId !== sessionId || data.toolCallId !== invocationId)
+        return;
+      cleanup();
+      const result = data.result;
+      if (typeof data.error === 'string' && data.error) {
+        reject(new Error(data.error));
+      } else if (
+        toolType === 'agui' &&
+        isRecord(result) &&
+        result.success === false &&
+        !reportsUnknownOutcome(result)
+      ) {
+        reject(
+          new Error(
+            typeof result.error === 'string' && result.error
+              ? result.error
+              : 'Action failed',
+          ),
+        );
+      } else {
+        resolve(result);
       }
     };
 
-    // Listen for the specific tool result
+    // Armed before the listener: `cleanup` is only reachable through the
+    // listener, the timer or the dispatch failure below, all of which run
+    // after this line.
+    const timeoutHandle = setTimeout(() => {
+      cleanup();
+      resolve(frontendOutcomeUnknown(invocationId));
+    }, timeout);
     rootEventEmitter.on(resultEventName, resultHandler);
 
-    // Set timeout
-    timeoutHandle = setTimeout(() => {
-      rootEventEmitter.removeListener(resultEventName, resultHandler);
-      reject(
-        new Error(
-          `${toolType === 'agui' ? 'AG-UI action' : 'Browser tool'} timeout after ${timeout}ms: ${toolName}`,
-        ),
-      );
-    }, timeout);
+    try {
+      const payload = {
+        sessionId,
+        requestId: toolId,
+        toolCallId: invocationId,
+        toolName,
+        args,
+      };
+      if (toolType === 'browser') new BrowserToolCallEvent(payload).emit();
+      else new ActionCallEvent({ ...payload, status: 'isRunning' }).emit();
+    } catch (error) {
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }

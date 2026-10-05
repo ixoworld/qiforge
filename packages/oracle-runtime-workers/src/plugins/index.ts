@@ -2,7 +2,8 @@
  * Bundled Workers-runtime plugins — ports of the Node runtime's MCP / fetch
  * plugins. Each is gated the same way as on Node: `autoDetect` on its env
  * key where one exists (memory / sandbox / firecrawl / composio), always-on
- * otherwise (domain-indexer; vfs self-gates on `ctx.ucan.hasSigningKey()`).
+ * otherwise (domain-indexer; vfs self-gates on `ctx.ucan.hasSigningKey()`;
+ * pod-creator is on-demand and stays hidden until `load_capability`).
  *
  * A host opts in by spreading `BUNDLED_WORKERS_PLUGINS` into
  * `createOracleWorker({ plugins })` — plugins whose env keys are absent are
@@ -22,6 +23,7 @@ import { PortalPlugin } from './portal';
 import { AGUIPlugin } from './agui';
 import { AttachmentsPlugin } from './attachments';
 import { MatrixGroupChatsPlugin } from './matrix-group-chats';
+import { PodCreatorPlugin } from './pod-creator';
 
 export * from './composio';
 export * from './editor';
@@ -35,6 +37,7 @@ export * from './vfs';
 export * from './user-preferences';
 export * from './portal';
 export * from './agui';
+export * from './pod-creator';
 
 export const memoryPlugin = new MemoryPlugin();
 export const sandboxPlugin = new SandboxPlugin();
@@ -48,6 +51,7 @@ export const portalPlugin = new PortalPlugin();
 export const aguiPlugin = new AGUIPlugin();
 export const attachmentsPlugin = new AttachmentsPlugin();
 export const matrixGroupChatsPlugin = new MatrixGroupChatsPlugin();
+export const podCreatorPlugin = new PodCreatorPlugin();
 /** TasksPlugin is already an object (defineOraclePlugin), not a class. */
 export const tasksPlugin = TasksPlugin;
 
@@ -70,4 +74,5 @@ export const BUNDLED_WORKERS_PLUGINS = [
   aguiPlugin,
   attachmentsPlugin,
   matrixGroupChatsPlugin,
+  podCreatorPlugin,
 ] as const satisfies readonly OraclePlugin[];

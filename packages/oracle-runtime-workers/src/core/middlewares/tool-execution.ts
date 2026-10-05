@@ -24,6 +24,7 @@
  * counted as tool attempts and scheduled in their own lane, never
  * fingerprinted.
  */
+import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
@@ -214,7 +215,8 @@ function reportedFailure(
 
 /**
  * Why a RETURNED tool result leaves a write's outcome unknown, or null when
- * it does not. Only an error-shaped result counts — an error-status
+ * it does not. A JSON result whose `outcome` is `'unknown'` says so itself.
+ * Otherwise only an error-shaped result counts — an error-status
  * ToolMessage, a JSON failure (`reportedFailure`), or text that opens with
  * `Error` / `Failed` — and only when what it reports is the uncertain kind
  * `isUncertainOutcome` recognises in a thrown error (a timeout, a transport
@@ -227,6 +229,9 @@ export function uncertainResultReason(output: unknown): string | null {
   let failure: { text: string; serverStatus: boolean } | null = null;
   try {
     const parsed: unknown = JSON.parse(text);
+    // A result that says so itself (the frontend bridge's
+    // FRONTEND_OUTCOME_UNKNOWN, or a client reporting the same).
+    if (reportsUnknownOutcome(parsed)) return 'outcome unknown';
     if (isRecord(parsed)) failure = reportedFailure(parsed);
   } catch {
     // Not JSON: plain text, judged below.

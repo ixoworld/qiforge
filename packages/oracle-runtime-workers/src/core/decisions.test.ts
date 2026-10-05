@@ -1,4 +1,6 @@
 import {
+  AmbiguousDecisionProviderError,
+  DecisionNotApplicableError,
   DecisionProviderUnavailableError,
   defineDecision,
   type DecisionAdapter,
@@ -9,7 +11,11 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import type { Logger } from '../plugin-api/types';
-import { createRuntimeCore, type RuntimeCore } from './index';
+import {
+  createRuntimeCore,
+  type RuntimeCore,
+  type RuntimeCoreOptions,
+} from './index';
 import { DecisionRegistry } from './registries';
 import { buildRuntimeContext, createNoopAmbient } from './runtime-context';
 import {
@@ -164,6 +170,8 @@ describe('createRuntimeCore decisions', () => {
 
     expect(result).toMatchObject({
       decision: { name: 'commerce.route', version: '1.0.0' },
+      providerId: 'host',
+      providerSelection: 'default',
       provider: 'stub',
       model: 'stub-model',
       answers: { match: { kind: 'boolean', probabilityTrue: 0.75 } },
@@ -226,11 +234,38 @@ describe('createRuntimeCore decisions', () => {
     });
 
     expect(result).toMatchObject({
+      providerId: 'cloudflare-jev',
+      providerSelection: 'default',
       provider: 'cloudflare',
       model: 'typesafe/jev',
+      applicability: { applicable: true, evidenceComplete: true },
+      judgment: {
+        method: { kind: 'provider-native', name: 'typesafe-system-one' },
+        questionSetVersion: '1.0.0',
+      },
       answers: { match: { kind: 'boolean', probabilityTrue: 0.9 } },
     });
+    expect(result.judgment).not.toHaveProperty('calibration');
     expect(run).toHaveBeenCalledWith('typesafe/jev', ROUTE_JEV_INPUT);
+  });
+
+  it('DECISION_MODEL overriding the Jev model drops the method name from provenance', async () => {
+    const run = vi.fn(async () => JEV_RESULT);
+    const core = bootCore(
+      makeEnv({
+        DECISION_PROVIDER: 'cloudflare-jev',
+        DECISION_MODEL: 'typesafe/jev-next',
+        AI: { run },
+      }),
+    );
+    await core.warm();
+
+    const result = await core.decisions.evaluateByName('commerce.route', {
+      value: 'x',
+    });
+
+    expect(run).toHaveBeenCalledWith('typesafe/jev-next', ROUTE_JEV_INPUT);
+    expect(result.judgment?.method).toEqual({ kind: 'provider-native' });
   });
 
   it('DECISION_PROVIDER=cloudflare-jev without the AI binding or credentials fails the boot', () => {
@@ -242,6 +277,253 @@ describe('createRuntimeCore decisions', () => {
       /Env validation failed \(2 issues\)[\s\S]*'CLOUDFLARE_ACCOUNT_ID'[\s\S]*'CLOUDFLARE_API_TOKEN'/,
     );
     expect(logger.error).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('createRuntimeCore Decision providers', () => {
+  const OTHER = decision('commerce.other');
+
+  function bootWithProviders(
+    env: Record<string, unknown>,
+    extra: Pick<
+      RuntimeCoreOptions,
+      'decisionAdapter' | 'decisionProviders' | 'decisionProviderPolicy'
+    > & { logger?: Logger },
+  ): RuntimeCore {
+    return createRuntimeCore({
+      config: { name: 'TestOracle' },
+      plugins: [
+        makePlugin({ name: 'commerce', getDecisions: () => [ROUTE, OTHER] }),
+      ],
+      env,
+      ...extra,
+    });
+  }
+
+  function namedAdapter(provider: string, probabilityTrue: number) {
+    const evaluate = vi.fn(async (_request: DecisionRequest) => ({
+      answers: { match: { kind: 'boolean' as const, probabilityTrue } },
+    }));
+    const adapter: DecisionAdapter = {
+      provider,
+      model: `${provider}-model`,
+      evaluate,
+    };
+    return { adapter, evaluate };
+  }
+
+  it('registers the env provider beside host providers and makes it the default', async () => {
+    const run = vi.fn(async () => JEV_RESULT);
+    const semif = namedAdapter('semif', 0.3);
+    const core = bootWithProviders(
+      makeEnv({ DECISION_PROVIDER: 'cloudflare-jev', AI: { run } }),
+      {
+        decisionProviders: [{ id: 'semif-local', adapter: semif.adapter }],
+        decisionProviderPolicy: {
+          routes: { 'commerce.route': 'semif-local' },
+        },
+      },
+    );
+    await core.warm();
+
+    const routed = await core.decisions.evaluateByName('commerce.route', {
+      value: 'x',
+    });
+    const defaulted = await core.decisions.evaluateByName('commerce.other', {
+      value: 'x',
+    });
+
+    expect(routed).toMatchObject({
+      providerId: 'semif-local',
+      providerSelection: 'decision-route',
+      provider: 'semif',
+      answers: { match: { probabilityTrue: 0.3 } },
+    });
+    expect(defaulted).toMatchObject({
+      providerId: 'cloudflare-jev',
+      providerSelection: 'default',
+      provider: 'cloudflare',
+      answers: { match: { probabilityTrue: 0.9 } },
+    });
+    expect(semif.evaluate).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('a host policy default wins over the env provider, which stays reachable by id', async () => {
+    const run = vi.fn(async () => JEV_RESULT);
+    const semif = namedAdapter('semif', 0.3);
+    const core = bootWithProviders(
+      makeEnv({ DECISION_PROVIDER: 'cloudflare-jev', AI: { run } }),
+      {
+        decisionProviders: [{ id: 'semif-local', adapter: semif.adapter }],
+        decisionProviderPolicy: { defaultProviderId: 'semif-local' },
+      },
+    );
+    await core.warm();
+
+    const defaulted = await core.decisions.evaluateByName('commerce.route', {
+      value: 'x',
+    });
+    expect(defaulted).toMatchObject({
+      providerId: 'semif-local',
+      providerSelection: 'default',
+    });
+    expect(run).not.toHaveBeenCalled();
+
+    // A plugin can still pick a provider per call through ctx.decisions.
+    const ctx = buildRuntimeContext(
+      makeRunConfig(),
+      createNoopAmbient({ decisions: core.decisions }),
+      { messages: [], loadedPlugins: new Set<string>() },
+    );
+    const overridden = await ctx.decisions.evaluateByName(
+      'commerce.route',
+      { value: 'x' },
+      { providerId: 'cloudflare-jev' },
+    );
+    expect(overridden).toMatchObject({
+      providerId: 'cloudflare-jev',
+      providerSelection: 'caller-override',
+      provider: 'cloudflare',
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a sole host provider without a policy', async () => {
+    const semif = namedAdapter('semif', 0.4);
+    const core = bootWithProviders(makeEnv(), {
+      decisionProviders: [{ id: 'semif-local', adapter: semif.adapter }],
+    });
+    await core.warm();
+
+    await expect(
+      core.decisions.evaluateByName('commerce.route', { value: 'x' }),
+    ).resolves.toMatchObject({
+      providerId: 'semif-local',
+      providerSelection: 'sole-provider',
+    });
+  });
+
+  it('refuses an ambiguous configuration per evaluation without calling a provider', async () => {
+    const a = namedAdapter('a', 0.1);
+    const b = namedAdapter('b', 0.9);
+    // Boot succeeds: the ambiguity is per Decision, and routed ones still work.
+    const core = bootWithProviders(makeEnv(), {
+      decisionProviders: [
+        { id: 'a', adapter: a.adapter },
+        { id: 'b', adapter: b.adapter },
+      ],
+      decisionProviderPolicy: { routes: { 'commerce.other': 'b' } },
+    });
+    await core.warm();
+
+    await expect(
+      core.decisions.evaluateByName('commerce.route', { value: 'x' }),
+    ).rejects.toBeInstanceOf(AmbiguousDecisionProviderError);
+    expect(a.evaluate).not.toHaveBeenCalled();
+    expect(b.evaluate).not.toHaveBeenCalled();
+
+    await expect(
+      core.decisions.evaluateByName('commerce.other', { value: 'x' }),
+    ).resolves.toMatchObject({ providerId: 'b' });
+  });
+
+  it('fails the boot on a policy that names an unknown provider', () => {
+    const logger: Logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const semif = namedAdapter('semif', 0.4);
+
+    expect(() =>
+      bootWithProviders(makeEnv(), {
+        decisionProviders: [{ id: 'semif-local', adapter: semif.adapter }],
+        decisionProviderPolicy: { routes: { 'commerce.route': 'jev' } },
+        logger,
+      }),
+    ).toThrow(/Decision provider "jev" is not registered/);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('[boot-error]'),
+    );
+  });
+
+  it('fails the boot when a host provider id collides with the env provider', () => {
+    const run = vi.fn(async () => JEV_RESULT);
+    const other = namedAdapter('other', 0.4);
+
+    expect(() =>
+      bootWithProviders(
+        makeEnv({ DECISION_PROVIDER: 'cloudflare-jev', AI: { run } }),
+        {
+          decisionProviders: [{ id: 'cloudflare-jev', adapter: other.adapter }],
+          logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        },
+      ),
+    ).toThrow(/"cloudflare-jev" is already registered/);
+  });
+
+  it('still validates the env provider when host providers are supplied', () => {
+    const semif = namedAdapter('semif', 0.4);
+
+    expect(() =>
+      bootWithProviders(makeEnv({ DECISION_PROVIDER: 'cloudflare-jev' }), {
+        decisionProviders: [{ id: 'semif-local', adapter: semif.adapter }],
+        logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      }),
+    ).toThrow(/'CLOUDFLARE_ACCOUNT_ID'/);
+  });
+
+  it('rejects decisionAdapter together with decisionProviders', () => {
+    const legacy = namedAdapter('legacy', 0.4);
+
+    expect(() =>
+      bootWithProviders(makeEnv(), {
+        decisionAdapter: legacy.adapter,
+        decisionProviders: [{ id: 'semif-local', adapter: legacy.adapter }],
+        logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      }),
+    ).toThrow(/mutually exclusive/);
+  });
+});
+
+describe('createRuntimeCore Decision applicability', () => {
+  const OPAQUE = defineDecision({
+    name: 'commerce.opaque',
+    version: '1.0.0',
+    description: 'A Decision over a delegated task it cannot read.',
+    inputSchema: z.object({ value: z.string() }),
+    project: ({ value }) => ({
+      state: { value },
+      applicability: {
+        applicable: true,
+        evidenceComplete: false,
+        reason: 'The delegated task payload is encrypted.',
+      },
+      questions: {
+        match: { kind: 'boolean', instructions: 'Does it match?' },
+      },
+    }),
+  });
+
+  it('refuses before the provider is called, through core and ctx.decisions', async () => {
+    const { adapter, evaluate } = stubAdapter();
+    const core = createRuntimeCore({
+      config: { name: 'TestOracle' },
+      plugins: [makePlugin({ name: 'commerce', getDecisions: () => [OPAQUE] })],
+      env: makeEnv(),
+      decisionProviders: [{ id: 'stub', adapter }],
+    });
+    await core.warm();
+    const ctx = buildRuntimeContext(
+      makeRunConfig(),
+      createNoopAmbient({ decisions: core.decisions }),
+      { messages: [], loadedPlugins: new Set<string>() },
+    );
+
+    await expect(
+      core.decisions.evaluateByName('commerce.opaque', { value: 'x' }),
+    ).rejects.toBeInstanceOf(DecisionNotApplicableError);
+    await expect(
+      ctx.decisions.evaluate(OPAQUE, { value: 'x' }),
+    ).rejects.toThrow(/delegated task payload is encrypted/);
+    expect(evaluate).not.toHaveBeenCalled();
   });
 });
 

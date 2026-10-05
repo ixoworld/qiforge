@@ -70,23 +70,53 @@ export {
 // --- bounded semantic decisions --------------------------------------------
 // `defineDecision` and the plugin-facing types come with `./plugin-api` above.
 export {
+  AmbiguousDecisionProviderError,
   CloudflareJevDecisionAdapter,
   DECISION_PROVIDERS,
+  DecisionNotApplicableError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   DecisionProviderUnavailableError,
   DecisionRegistry,
   DecisionRuntime,
+  HOST_DECISION_PROVIDER_ID,
   JevDecisionError,
   OpenRouterJevDecisionAdapter,
+  StaleDecisionSubjectError,
   UNAVAILABLE_DECISION_EVALUATOR,
   WorkersAiJevDecisionAdapter,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
   decisionProviderEnvShape,
+  digestFinalDecisionSubject,
+  measureDecisionQuestionIsolation,
   resolveDecisionAdapter,
   type CloudflareJevAdapterOptions,
+  type DecisionApplicability,
+  type DecisionAuthorityReceipt,
+  type DecisionCalibrationProvenance,
   type DecisionEvaluator,
+  type DecisionExecution,
+  type DecisionExecutionReceipt,
+  type DecisionJudgmentMethod,
+  type DecisionJudgmentProvenance,
   type DecisionLookup,
   type DecisionProviderConfigIssue,
   type DecisionProviderName,
+  type DecisionProviderPolicy,
+  type DecisionProviderProvenance,
+  type DecisionProviderRegistration,
+  type DecisionProviderResolution,
+  type DecisionProviderSelection,
+  type DecisionQuestionIsolationObservation,
+  type DecisionQuestionIsolationReport,
   type DecisionRuntimeLogger,
+  type FinalDecisionSubject,
+  type FinalDecisionSubjectBinding,
+  type FinalDecisionSubjectValue,
   type JevProviderName,
   type OpenRouterJevAdapterOptions,
   type RegisteredDecision,
@@ -185,11 +215,24 @@ export interface CreateOracleWorkerOptions {
    */
   manifestOverrides?: RuntimeCoreOptions['manifestOverrides'];
   /**
-   * Host-supplied bounded Decision adapter (Node's `createOracleApp` option
-   * of the same name). Wins over the `DECISION_PROVIDER` env configuration;
-   * without either, every `ctx.decisions` call rejects as unavailable.
+   * Single host-supplied Decision adapter, registered as provider `host`.
+   * Wins over the `DECISION_PROVIDER` env configuration; without any
+   * provider, every `ctx.decisions` call rejects as unavailable. Mutually
+   * exclusive with `decisionProviders`.
    */
   decisionAdapter?: DecisionAdapter;
+  /**
+   * Host-configured Decision providers, registered beside the env-selected
+   * one (id = the `DECISION_PROVIDER` value). Adapters are built once per
+   * oracle, outside any `env`; a provider that needs a Worker binding comes
+   * from `DECISION_PROVIDER`.
+   */
+  decisionProviders?: RuntimeCoreOptions['decisionProviders'];
+  /**
+   * Default and exact per-Decision routes over the registered providers. The
+   * env-selected provider is the default unless this names another.
+   */
+  decisionProviderPolicy?: RuntimeCoreOptions['decisionProviderPolicy'];
   /** Extra host routes mounted on the shell. */
   routes?: PluginRoute[];
   /** Host routes exempt from UCAN auth. */
@@ -241,6 +284,8 @@ export function createOracleWorker(
         manifestOverrides: opts.manifestOverrides,
         env,
         decisionAdapter: opts.decisionAdapter,
+        decisionProviders: opts.decisionProviders,
+        decisionProviderPolicy: opts.decisionProviderPolicy,
         logger: console,
       });
       cores.set(env, core);

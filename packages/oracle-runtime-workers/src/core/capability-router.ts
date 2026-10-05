@@ -1,5 +1,7 @@
 import {
+  AmbiguousDecisionProviderError,
   CAPABILITY_ROUTER_MODES,
+  CAPABILITY_ROUTE_DECISION_NAME,
   DecisionProviderUnavailableError,
   capabilityRouteDecision,
   decideCapabilityRoute,
@@ -141,14 +143,26 @@ export function createCapabilityRouter(
   // said once per object, then the router stays quiet.
   let unavailableWarned = false;
 
-  const unavailable = (error: unknown): boolean =>
+  // An ambiguous multi-provider configuration is a subclass: equally a
+  // deployment fact, but fixed by routing rather than by adding a provider.
+  const unavailable = (
+    error: unknown,
+  ): error is DecisionProviderUnavailableError =>
     error instanceof DecisionProviderUnavailableError;
 
-  const warnUnavailable = (requestId: string, mode: CapabilityRouterMode) => {
+  const warnUnavailable = (
+    requestId: string,
+    mode: CapabilityRouterMode,
+    error: DecisionProviderUnavailableError,
+  ) => {
     if (unavailableWarned) return;
     unavailableWarned = true;
+    const hint =
+      error instanceof AmbiguousDecisionProviderError
+        ? `route ${CAPABILITY_ROUTE_DECISION_NAME} or set decisionProviderPolicy.defaultProviderId`
+        : 'set DECISION_PROVIDER or CAPABILITY_ROUTER=off';
     logger.warn(
-      `[capability-router] request=${requestId} mode=${mode} status=fallback reason=DecisionProviderUnavailableError (set DECISION_PROVIDER or CAPABILITY_ROUTER=off)`,
+      `[capability-router] request=${requestId} mode=${mode} status=fallback reason=${error.name} (${hint})`,
     );
   };
 
@@ -187,7 +201,7 @@ export function createCapabilityRouter(
           })
           .catch((error: unknown) => {
             if (unavailable(error)) {
-              warnUnavailable(requestId, 'shadow');
+              warnUnavailable(requestId, 'shadow', error);
               return;
             }
             logger.log(
@@ -220,7 +234,7 @@ export function createCapabilityRouter(
       return new Set(verdict.preload);
     } catch (error) {
       if (unavailable(error)) {
-        warnUnavailable(requestId, 'on');
+        warnUnavailable(requestId, 'on', error);
       } else {
         logger.warn(
           `[capability-router] request=${requestId} mode=on status=fallback reason=${errorName(error)}`,

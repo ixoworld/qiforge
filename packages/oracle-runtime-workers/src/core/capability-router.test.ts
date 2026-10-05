@@ -1,4 +1,5 @@
 import {
+  AmbiguousDecisionProviderError,
   DecisionProviderUnavailableError,
   capabilityRouteDecision,
   noCapabilityOption,
@@ -298,6 +299,25 @@ describe('createCapabilityRouter', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(String(logger.warn.mock.calls[0]?.[0])).toContain(
       'request=req-1 mode=on status=fallback reason=DecisionProviderUnavailableError',
+    );
+  });
+
+  it('on: an ambiguous provider configuration fails open like a missing provider', async () => {
+    const evaluator = evaluatorOf(async () => {
+      throw new AmbiguousDecisionProviderError(capabilityRouteDecision.name, [
+        'a',
+        'b',
+      ]);
+    });
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({ evaluator, logger });
+
+    expect(await route(turn())).toEqual(new Set());
+    expect(await route(turn({ requestId: 'req-2' }))).toEqual(new Set());
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(String(logger.warn.mock.calls[0]?.[0])).toContain(
+      'request=req-1 mode=on status=fallback reason=AmbiguousDecisionProviderError (route runtime.route-capabilities or set decisionProviderPolicy.defaultProviderId)',
     );
   });
 

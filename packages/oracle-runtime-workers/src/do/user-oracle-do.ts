@@ -212,6 +212,7 @@ import { WorkStatusProducer } from '../matrix/work-status';
 import { fetchUserMatrixServerName } from '../matrix/user-homeserver';
 import { createWorkStatusMiddleware } from '../core/middlewares/work-status';
 import { UserPreferencesStore } from '../plugins/user-preferences/user-preferences-store';
+import { SqliteUserKv } from '../sqlite/user-kv-store';
 import {
   SessionHistoryIndexer,
   type HistoryMessage,
@@ -1493,6 +1494,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.ambient = createAmbientServices({
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
+        kv: new SqliteUserKv(liveDb),
         frontend: this.realtime.frontend,
         config: core.validatedEnv,
         identity: core.identity,

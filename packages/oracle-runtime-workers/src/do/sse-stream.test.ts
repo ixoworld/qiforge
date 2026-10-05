@@ -1,3 +1,4 @@
+import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
 import { describe, expect, it } from 'vitest';
 import { HarnessLimitError } from '../core/turn-budget';
@@ -65,6 +66,62 @@ async function* failingToolEvents(): AsyncGenerator<unknown> {
     data: { error: new Error('memory engine returned HTTP 502') },
   };
 }
+
+describe('createSseTurnStream AG-UI action outcomes', () => {
+  async function* actionEvents(content: string): AsyncGenerator<unknown> {
+    yield {
+      event: 'on_tool_start',
+      run_id: 'run-a',
+      name: 'render_table',
+      data: { input: { input: { rows: 2 } } },
+    };
+    yield {
+      event: 'on_tool_end',
+      run_id: 'run-a',
+      name: 'render_table',
+      data: { output: new ToolMessage({ content, tool_call_id: 'run-a' }) },
+    };
+  }
+  const actionFrames = async (content: string) => {
+    const sse = await new Response(
+      createSseTurnStream({
+        events: actionEvents(content),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+        agActionNames: new Set(['render_table']),
+      }),
+    ).text();
+    return sse
+      .split('\n\n')
+      .filter((f) => f.startsWith('event: action_call'))
+      .map(
+        (f) =>
+          JSON.parse(f.slice(f.indexOf('data: ') + 6)) as Record<
+            string,
+            unknown
+          >,
+      );
+  };
+
+  it('ends an action whose outcome is unknown as done, not as a failure a client would retry', async () => {
+    const unknown = JSON.stringify(frontendOutcomeUnknown('ag_r1:inv'));
+    const frames = await actionFrames(unknown);
+    expect(frames.map((f) => f.status)).toEqual(['isRunning', 'done']);
+    expect(frames[1]?.output).toBe(unknown);
+    expect(frames[1]).not.toHaveProperty('error');
+  });
+
+  it('still ends a refused action as an error', async () => {
+    const frames = await actionFrames(
+      JSON.stringify({ success: false, error: 'render failed' }),
+    );
+    expect(frames[1]).toMatchObject({
+      status: 'error',
+      error: 'render failed',
+    });
+  });
+});
 
 describe('createSseTurnStream tool errors', () => {
   it('reports a thrown tool with its message instead of "did not complete"', async () => {

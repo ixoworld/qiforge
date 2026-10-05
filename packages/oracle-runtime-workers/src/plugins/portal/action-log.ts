@@ -1,7 +1,8 @@
 /**
  * The Node runtime's `logActionToMatrix`: a best-effort `ixo.action.log`
  * room event recording a frontend action (browser tool / AG-UI action) and
- * its outcome, posted only when the turn has a room. Never throws.
+ * its outcome, posted only when the turn has a room. Never throws. Frontend
+ * calls log through `logFrontendAction`, which keeps their content out.
  *
  * Retried across a gateway restart (the gateway object is replaced on every
  * deploy and can be drained mid-turn) and handed to the host to keep alive
@@ -10,6 +11,7 @@
  * response lost between the homeserver's ack and the reply to the gateway
  * is deduplicated instead of logged twice.
  */
+import { summarizeFrontendResult } from '@ixo/common/ai/frontend-bridge';
 import { retryGateway, type RetryGatewayOptions } from '../../do/gateway-retry';
 import { retryTxnId } from '../../matrix/txn-id';
 import type { RuntimeContext } from '../../plugin-api/types';
@@ -58,4 +60,22 @@ export function logActionToMatrix(
     },
   );
   ctx.background?.(work);
+}
+
+/**
+ * Log a finished frontend call (browser tool / AG-UI action). The room event
+ * is a diagnostic trail, readable by everyone in the room: it records the
+ * invocation id, a Portal command id when the result carries one, and
+ * whether the outcome is unknown — never the arguments or the result body,
+ * which carry the user's content.
+ */
+export function logFrontendAction(
+  ctx: Pick<RuntimeContext, 'matrix' | 'session' | 'logger' | 'background'>,
+  call: { name: string; invocationId: string | undefined; result: unknown },
+): void {
+  logActionToMatrix(ctx, {
+    name: call.name,
+    args: {},
+    ...summarizeFrontendResult(call.result, call.invocationId),
+  });
 }

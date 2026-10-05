@@ -5,9 +5,14 @@
  * through the router, and browser-tool / AG-UI round trips.
  */
 import { env } from 'cloudflare:test';
+import {
+  FRONTEND_OUTCOME_UNKNOWN,
+  FRONTEND_OUTCOME_UNKNOWN_MESSAGE,
+} from '@ixo/common/ai/frontend-bridge';
 import { describe, expect, it } from 'vitest';
 import {
   TEST_BARE_DELEGATION,
+  TEST_BROKEN_SESSION,
   TEST_GOOD_TOKEN,
   TEST_MISSING_SESSION,
   TEST_USER_DID,
@@ -123,6 +128,28 @@ const sdkAcceptsEnvelope = (ev: unknown): boolean =>
   ev.payload !== null &&
   'sessionId' in ev.payload &&
   'requestId' in ev.payload;
+
+/** The invocation id a frontend call frame carries (what the client echoes). */
+const invocationOf = (payload: unknown): string => {
+  const id = (payload as { toolCallId?: unknown }).toolCallId;
+  if (typeof id !== 'string') throw new Error('call frame without toolCallId');
+  return id;
+};
+/** Send a result event the way the client SDK does. */
+const answer = (
+  c: Client,
+  name: 'tool_result' | 'action_call_result',
+  payload: Record<string, unknown>,
+): void => c.ws.send(`42${JSON.stringify([name, payload])}`);
+/** Messages on one socket are handled in order: a pong means the earlier frames were. */
+async function roundTrip(c: Client): Promise<void> {
+  const pongs = c.frames.filter(isEvent('pong')).length;
+  c.ws.send('42["ping"]');
+  await c.next(
+    () => c.frames.filter(isEvent('pong')).length > pongs,
+    'pong after round trip',
+  );
+}
 
 async function connect(
   s: DurableObjectStub<RealtimeTestDO>,
@@ -347,16 +374,17 @@ describe('RealtimeEndpoint over real WebSockets', () => {
       timeoutMs: 5000,
     });
     const call = event(await c.next(isEvent('browser_tool_call')));
+    const tc1 = invocationOf(call.payload);
+    // The caller's id stays readable; the bridge makes the invocation unique.
+    expect(tc1).toMatch(/^tc-1:[0-9a-f-]{36}$/);
     expect(call.payload).toEqual({
       sessionId: 'rt',
       requestId: 'tc-1',
-      toolCallId: 'tc-1',
+      toolCallId: tc1,
       toolName: 'open_url',
       args: { url: 'https://example.com' },
     });
-    c.ws.send(
-      '42["tool_result",{"toolCallId":"tc-1","result":{"opened":true}}]',
-    );
+    answer(c, 'tool_result', { toolCallId: tc1, result: { opened: true } });
     expect(await browser).toEqual({ ok: true, value: { opened: true } });
 
     const failing = s.callBrowserTool({
@@ -366,10 +394,14 @@ describe('RealtimeEndpoint over real WebSockets', () => {
       args: {},
       timeoutMs: 5000,
     });
-    await c.next((f) => f.includes('"tc-2"'));
-    c.ws.send(
-      '42["tool_result",{"toolCallId":"tc-2","result":null,"error":"Tool open_url not found"}]',
+    const tc2 = invocationOf(
+      event(await c.next((f) => f.includes('"tc-2:'))).payload,
     );
+    answer(c, 'tool_result', {
+      toolCallId: tc2,
+      result: null,
+      error: 'Tool open_url not found',
+    });
     expect(await failing).toEqual({
       ok: false,
       error: 'Tool open_url not found',
@@ -383,15 +415,19 @@ describe('RealtimeEndpoint over real WebSockets', () => {
       timeoutMs: 5000,
     });
     const actionCall = event(await c.next(isEvent('action_call')));
+    const ag1 = invocationOf(actionCall.payload);
+    expect(ag1).toMatch(/^ag_1:/);
     expect(actionCall.payload).toMatchObject({
-      toolCallId: 'ag_1',
+      toolCallId: ag1,
       toolName: 'render_table',
       args: { rows: 2 },
       status: 'isRunning',
     });
-    c.ws.send(
-      '42["action_call_result",{"toolCallId":"ag_1","sessionId":"rt","result":{"success":true,"id":"t1"}}]',
-    );
+    answer(c, 'action_call_result', {
+      toolCallId: ag1,
+      sessionId: 'rt',
+      result: { success: true, id: 't1' },
+    });
     expect(await action).toEqual({
       ok: true,
       value: { success: true, id: 't1' },
@@ -404,26 +440,74 @@ describe('RealtimeEndpoint over real WebSockets', () => {
       args: {},
       timeoutMs: 5000,
     });
-    await c.next((f) => f.includes('"ag_2"'));
-    c.ws.send(
-      '42["action_call_result",{"toolCallId":"ag_2","result":{"success":false,"error":"render failed"}}]',
+    const ag2 = invocationOf(
+      event(await c.next((f) => f.includes('"ag_2:'))).payload,
     );
+    answer(c, 'action_call_result', {
+      toolCallId: ag2,
+      result: { success: false, error: 'render failed' },
+    });
     expect(await refused).toEqual({ ok: false, error: 'render failed' });
 
-    // No answer → Node's timeout message.
-    expect(
-      await s.callBrowserTool({
-        sessionId: 'rt',
-        toolCallId: 'tc-3',
-        toolName: 'slow_tool',
-        args: {},
-        timeoutMs: 50,
-      }),
-    ).toEqual({
-      ok: false,
-      error: 'Browser tool timeout after 50ms: slow_tool',
+    // A client that cannot tell whether its write landed says so; the
+    // runtime hands that to the model instead of turning it into a failure.
+    const uncertain = s.callAgAction({
+      sessionId: 'rt',
+      toolCallId: 'ag_3',
+      toolName: 'render_table',
+      args: {},
+      timeoutMs: 5000,
     });
+    const ag3 = invocationOf(
+      event(await c.next((f) => f.includes('"ag_3:'))).payload,
+    );
+    answer(c, 'action_call_result', {
+      toolCallId: ag3,
+      result: { success: false, outcome: 'unknown' },
+    });
+    expect(await uncertain).toEqual({
+      ok: true,
+      value: { success: false, outcome: 'unknown' },
+    });
+
     expect((await s.status()).pendingCalls).toEqual([]);
+    c.ws.close(1000, 'bye');
+  });
+
+  it('reports an unknown outcome, not a failure, when the answer misses its deadline', async () => {
+    const s = stub('deadline');
+    const c = await connect(s, { sessionId: 'dl' });
+    const slow = s.callBrowserTool({
+      sessionId: 'dl',
+      toolCallId: 'tc-slow',
+      toolName: 'mutate_topic',
+      args: { field: 'title', value: 'PRIVATE-ARG' },
+      timeoutMs: 50,
+    });
+    const id = invocationOf(
+      event(await c.next(isEvent('browser_tool_call'))).payload,
+    );
+    expect(await slow).toEqual({
+      ok: true,
+      value: {
+        success: false,
+        code: FRONTEND_OUTCOME_UNKNOWN,
+        outcome: 'unknown',
+        invocationId: id,
+        message: FRONTEND_OUTCOME_UNKNOWN_MESSAGE,
+      },
+    });
+    // A late answer to a call already reported unknown settles nothing.
+    answer(c, 'tool_result', { toolCallId: id, result: 'PRIVATE-RESULT' });
+    await roundTrip(c);
+    const status = await s.status();
+    expect(status.pendingCalls).toEqual([]);
+    expect(status.completedCalls).toBe(1);
+    const warnings = await s.loggedWarnings();
+    expect(warnings.some((w) => w.includes(id) && w.includes('already'))).toBe(
+      true,
+    );
+    expect(warnings.join('\n')).not.toMatch(/PRIVATE-(ARG|RESULT)/);
     c.ws.close(1000, 'bye');
   });
 
@@ -439,23 +523,355 @@ describe('RealtimeEndpoint over real WebSockets', () => {
       args: {},
       timeoutMs: 5000,
     });
-    await own.next(isEvent('browser_tool_call'));
-    other.ws.send(
-      '42["tool_result",{"toolCallId":"tc-guess","sessionId":"mine","result":{"forged":true}}]',
+    const id = invocationOf(
+      event(await own.next(isEvent('browser_tool_call'))).payload,
     );
-    // Round-trip a ping on the other socket so its result has been handled.
-    other.ws.send('42["ping"]');
-    await other.next(isEvent('pong'));
+    answer(other, 'tool_result', {
+      toolCallId: id,
+      sessionId: 'mine',
+      result: { forged: true },
+    });
+    await roundTrip(other);
     expect((await s.status()).pendingCalls.map((c) => c.toolCallId)).toEqual([
-      'tc-guess',
+      id,
     ]);
 
-    own.ws.send(
-      '42["tool_result",{"toolCallId":"tc-guess","result":{"opened":true}}]',
-    );
+    answer(own, 'tool_result', { toolCallId: id, result: { opened: true } });
     expect(await browser).toEqual({ ok: true, value: { opened: true } });
     own.ws.close(1000, 'bye');
     other.ws.close(1000, 'bye');
+  });
+});
+
+describe('frontend bridge: one invocation, one socket, one result', () => {
+  it('fails closed when the session ownership lookup fails', async () => {
+    const s = stub('ownership-broken');
+    const c = (await open(s, { sessionId: TEST_BROKEN_SESSION })).client!;
+    await c.next((f) => f.startsWith('0{'), 'OPEN');
+    c.ws.send(`40${JSON.stringify({ invocation: TEST_GOOD_TOKEN })}`);
+    expect(await c.next((f) => f.startsWith('44'), 'CONNECT_ERROR')).toContain(
+      'Unauthorized: session check failed',
+    );
+    expect((await c.closed).code).toBe(4401);
+    expect(await s.hasClient(TEST_BROKEN_SESSION)).toBe(false);
+  });
+
+  it('dispatches each invocation to exactly one authenticated socket of its session, with its own id', async () => {
+    const s = stub('single-dispatch');
+    const older = await connect(s, { sessionId: 'one' });
+    const newer = await connect(s, { sessionId: 'one' });
+    const elsewhere = await connect(s, { sessionId: 'two' });
+
+    const first = s.callBrowserTool({
+      sessionId: 'one',
+      toolCallId: 'tc-same',
+      toolName: 'read_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const second = s.callBrowserTool({
+      sessionId: 'one',
+      toolCallId: 'tc-same',
+      toolName: 'read_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    // With no client activity yet, the connection opened last executes;
+    // nobody else sees it.
+    await newer.next(
+      () => newer.frames.filter(isEvent('browser_tool_call')).length === 2,
+      'two calls',
+    );
+    const [a, b] = newer.frames
+      .filter(isEvent('browser_tool_call'))
+      .map((f) => invocationOf(event(f).payload));
+    expect(a).not.toBe(b);
+    expect(a).toMatch(/^tc-same:/);
+    await roundTrip(older);
+    await roundTrip(elsewhere);
+    expect(older.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    expect(elsewhere.frames.some(isEvent('browser_tool_call'))).toBe(false);
+
+    // Each result settles exactly its own invocation.
+    answer(newer, 'tool_result', { toolCallId: b, result: 'second' });
+    answer(newer, 'tool_result', { toolCallId: a, result: 'first' });
+    expect(await first).toEqual({ ok: true, value: 'first' });
+    expect(await second).toEqual({ ok: true, value: 'second' });
+    for (const c of [older, newer, elsewhere]) c.ws.close(1000, 'bye');
+  });
+
+  it('never relays a frontend call frame that is not a dispatched invocation', async () => {
+    const s = stub('no-raw-relay');
+    const c = await connect(s, { sessionId: 'relay' });
+    // The SSE stream mirrors the AG-UI sub-agent's own action_call frames
+    // (isRunning, then done) to the taps; a plugin can emit one too. Neither
+    // is an invocation: a browser that ran them would act twice.
+    await s.emitForSession('relay', 'action_call', {
+      requestId: 'r1',
+      toolCallId: 'lc-run-1',
+      toolName: 'render_table',
+      args: {},
+      status: 'isRunning',
+    });
+    await s.emitForSession('relay', 'browser_tool_call', {
+      requestId: 'r1',
+      toolCallId: 'tc-emitted',
+      toolName: 'open_url',
+      args: {},
+    });
+    await s.emitForSession('relay', 'tool_call', {
+      requestId: 'r1',
+      toolName: 'x',
+      status: 'done',
+    });
+    await c.next(isEnvelope('tool_call'), 'ordinary event');
+    expect(c.frames.some(isEvent('action_call'))).toBe(false);
+    expect(c.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    expect(c.frames.some(isEnvelope('action_call'))).toBe(false);
+    expect(c.frames.some(isEnvelope('browser_tool_call'))).toBe(false);
+    c.ws.close(1000, 'bye');
+  });
+
+  it('refuses a call no socket can execute instead of waiting for a deadline', async () => {
+    const s = stub('no-executor');
+    expect(
+      await s.callAgAction({
+        sessionId: 'nobody-here',
+        toolCallId: 'ag_x',
+        toolName: 'render_table',
+        args: {},
+        timeoutMs: 5000,
+      }),
+    ).toEqual({
+      ok: false,
+      error:
+        'AG-UI action render_table was not sent: no browser is connected to session nobody-here',
+    });
+    expect((await s.status()).pendingCalls).toEqual([]);
+  });
+
+  it('accepts a result only from the executing socket, without a session override, and only once', async () => {
+    const s = stub('bound-result');
+    const sibling = await connect(s, { sessionId: 'bound' });
+    const executor = await connect(s, { sessionId: 'bound' });
+    const call = s.callBrowserTool({
+      sessionId: 'bound',
+      toolCallId: 'tc-bound',
+      toolName: 'mutate_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const id = invocationOf(
+      event(await executor.next(isEvent('browser_tool_call'))).payload,
+    );
+
+    // Another tab of the same session and user knows the id: not its call.
+    answer(sibling, 'tool_result', { toolCallId: id, result: 'sibling' });
+    await roundTrip(sibling);
+    // The executor naming another session is a routing claim it cannot make.
+    answer(executor, 'tool_result', {
+      toolCallId: id,
+      sessionId: 'someone-else',
+      result: 'override',
+    });
+    await roundTrip(executor);
+    expect((await s.status()).pendingCalls).toMatchObject([
+      { toolCallId: id, sessionId: 'bound' },
+    ]);
+
+    answer(executor, 'tool_result', {
+      toolCallId: id,
+      sessionId: 'bound',
+      result: { commandId: 'c', status: 'completed' },
+    });
+    expect(await call).toEqual({
+      ok: true,
+      value: { commandId: 'c', status: 'completed' },
+    });
+    // The replay of a settled result is rejected, not re-delivered.
+    answer(executor, 'tool_result', { toolCallId: id, result: 'replay' });
+    await roundTrip(executor);
+
+    const warnings = (await s.loggedWarnings()).filter((w) => w.includes(id));
+    expect(warnings).toEqual([
+      expect.stringContaining('not the socket it was sent to'),
+      expect.stringContaining('names session someone-else'),
+      expect.stringContaining('already settled'),
+    ]);
+    sibling.ws.close(1000, 'bye');
+    executor.ws.close(1000, 'bye');
+  });
+
+  it('settles a call as unknown when its socket goes, and never re-sends it to another socket', async () => {
+    const s = stub('no-redispatch');
+    const survivor = await connect(s, { sessionId: 'nr' });
+    const executor = await connect(s, { sessionId: 'nr' });
+    const started = Date.now();
+    const call = s.callBrowserTool({
+      sessionId: 'nr',
+      toolCallId: 'tc-drop',
+      toolName: 'mutate_topic',
+      args: {},
+      timeoutMs: 30_000,
+    });
+    const id = invocationOf(
+      event(await executor.next(isEvent('browser_tool_call'))).payload,
+    );
+    executor.ws.send('41');
+    await executor.closed;
+    // The write may have happened before the tab went: unknown, at once —
+    // only that socket could ever have answered.
+    expect(await call).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        code: FRONTEND_OUTCOME_UNKNOWN,
+        invocationId: id,
+      }),
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+
+    // The reconnected tab (a new socket) cannot answer the old invocation,
+    // and the surviving tab never received it.
+    const reconnected = await connect(s, { sessionId: 'nr' });
+    answer(reconnected, 'tool_result', { toolCallId: id, result: 'late' });
+    await roundTrip(reconnected);
+    await roundTrip(survivor);
+    expect(survivor.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    expect(reconnected.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    expect(
+      (await s.loggedWarnings()).some(
+        (w) => w.includes(id) && w.includes('already'),
+      ),
+    ).toBe(true);
+    survivor.ws.close(1000, 'bye');
+    reconnected.ws.close(1000, 'bye');
+  });
+
+  it('settles a call as unknown when the heartbeat drops its socket', async () => {
+    const s = stub('heartbeat-drop');
+    const executor = await connect(s, { sessionId: 'hb' });
+    const call = s.callBrowserTool({
+      sessionId: 'hb',
+      toolCallId: 'tc-hb',
+      toolName: 'mutate_topic',
+      args: {},
+      timeoutMs: 30_000,
+    });
+    await executor.next(isEvent('browser_tool_call'));
+    await s.ageSockets(180_000 + 60_000 + 1);
+    expect(await s.pingTick()).toBeNull();
+    expect(await call).toEqual({
+      ok: true,
+      value: expect.objectContaining({ code: FRONTEND_OUTCOME_UNKNOWN }),
+    });
+  });
+
+  it('runs a call on the tab with the latest client activity, not the one that connected last', async () => {
+    const s = stub('active-tab');
+    const front = await connect(s, { sessionId: 'act' });
+    const background = await connect(s, { sessionId: 'act' });
+    // The user acts in the older tab after the other reconnected.
+    await new Promise((r) => setTimeout(r, 5));
+    await roundTrip(front);
+    const call = s.callBrowserTool({
+      sessionId: 'act',
+      toolCallId: 'tc-active',
+      toolName: 'read_topic',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const id = invocationOf(
+      event(await front.next(isEvent('browser_tool_call'))).payload,
+    );
+    answer(front, 'tool_result', { toolCallId: id, result: 'front' });
+    expect(await call).toEqual({ ok: true, value: 'front' });
+    await roundTrip(background);
+    expect(background.frames.some(isEvent('browser_tool_call'))).toBe(false);
+    front.ws.close(1000, 'bye');
+    background.ws.close(1000, 'bye');
+  });
+
+  it('ends a call whose turn aborts: not sent before dispatch, unknown after', async () => {
+    const s = stub('abort');
+    const c = await connect(s, { sessionId: 'ab' });
+    expect(
+      await s.callBrowserToolAborted(
+        {
+          sessionId: 'ab',
+          toolCallId: 'tc-before',
+          toolName: 'mutate_topic',
+          args: {},
+          timeoutMs: 120_000,
+        },
+        'before',
+      ),
+    ).toEqual({
+      ok: false,
+      error: 'Browser tool mutate_topic was not sent: the turn was aborted',
+    });
+    const after = await s.callBrowserToolAborted(
+      {
+        sessionId: 'ab',
+        toolCallId: 'tc-after',
+        toolName: 'mutate_topic',
+        args: {},
+        timeoutMs: 120_000,
+      },
+      'after',
+    );
+    const id = invocationOf(
+      event(await c.next(isEvent('browser_tool_call'))).payload,
+    );
+    await roundTrip(c);
+    // Only the call sent before its turn aborted reached the browser.
+    expect(c.frames.filter(isEvent('browser_tool_call'))).toHaveLength(1);
+    expect(id).toMatch(/^tc-after:/);
+    expect(after).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        code: FRONTEND_OUTCOME_UNKNOWN,
+        invocationId: id,
+      }),
+    });
+    expect((await s.status()).pendingCalls).toEqual([]);
+    c.ws.close(1000, 'bye');
+  });
+
+  it('shows a browser tool invocation on the SSE stream but not an AG-UI one, which the stream reports itself', async () => {
+    const s = stub('sse-copy');
+    const c = await connect(s, { sessionId: 'sse' });
+    await s.watchSse('sse');
+    const browser = s.callBrowserTool({
+      sessionId: 'sse',
+      toolCallId: 'tc-sse',
+      toolName: 'open_url',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const tc = invocationOf(
+      event(await c.next(isEvent('browser_tool_call'))).payload,
+    );
+    answer(c, 'tool_result', { toolCallId: tc, result: 'ok' });
+    await browser;
+    const action = s.callAgAction({
+      sessionId: 'sse',
+      toolCallId: 'ag_sse',
+      toolName: 'render_table',
+      args: {},
+      timeoutMs: 5000,
+    });
+    const ag = invocationOf(
+      event(await c.next(isEvent('action_call'))).payload,
+    );
+    answer(c, 'action_call_result', {
+      toolCallId: ag,
+      result: { success: true },
+    });
+    await action;
+    expect(await s.sseEvents()).toEqual([
+      { eventName: 'browser_tool_call', toolCallId: tc },
+    ]);
+    c.ws.close(1000, 'bye');
   });
 });
 

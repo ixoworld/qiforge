@@ -17,6 +17,7 @@ import {
  * work unchanged. Every authenticated route resolves the caller's
  * `UserOracleDO` and forwards to it; streaming turns are proxied byte-for-byte.
  */
+import { FRONTEND_BRIDGE } from '@ixo/common/ai/frontend-bridge';
 import { bodyLimit } from 'hono/body-limit';
 import {
   TopicOperationId,
@@ -220,8 +221,15 @@ export function createShell(
       timestamp: new Date().toISOString(),
     }),
   );
+  // `frontendTools` is the frontend bridge version: the Portal enables
+  // conversational writes only against a runtime that advertises it. A
+  // version signal, not proof the deployment behaves (see frontend-bridge.md).
   app.get('/health', (c) =>
-    c.json({ status: 'ok', timestamp: new Date().toISOString() }),
+    c.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      frontendTools: FRONTEND_BRIDGE,
+    }),
   );
   app.get('/health/matrix', async (c) => {
     const status = await gateway(c.env).status();

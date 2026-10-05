@@ -24,6 +24,7 @@ import {
   isOperatorFault,
   redactOperatorFault,
 } from '../llm/provider-error';
+import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { type AIMessageChunk, ToolMessage } from '@langchain/core/messages';
 import { harnessLimitOf, type HarnessLimitError } from '../core/turn-budget';
 import { RunBuffer, type RunFrame } from './run-buffer';
@@ -468,7 +469,12 @@ export async function runTurnFrames(
         const action = actionCallMap.get(evt.run_id);
         if (action) {
           const parsed = safeParseToolContent(output?.content);
-          const failed = parsed?.success === false || Boolean(parsed?.error);
+          // An unknown outcome (FRONTEND_OUTCOME_UNKNOWN) is not a failure:
+          // the action may have run, so the client must not offer a retry.
+          // It ends as `done` with the unknown result as its output.
+          const failed =
+            !reportsUnknownOutcome(parsed) &&
+            (parsed?.success === false || Boolean(parsed?.error));
           write('action_call', {
             ...action,
             output: text,
