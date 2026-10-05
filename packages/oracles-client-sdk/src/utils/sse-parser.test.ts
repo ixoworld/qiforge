@@ -17,6 +17,29 @@ async function parse(chunks: Uint8Array[]): Promise<SSEEvent[]> {
 }
 
 describe('parseSSEStream framing', () => {
+  it('validates lifecycle frames and excludes evidence from the public update', async () => {
+    const update = {
+      sessionId: 's',
+      requestId: 'q',
+      oracleDid: 'did:qi',
+      oracleUserId: '@qi:test',
+      oracleName: 'Qi',
+      state: 'achieved',
+      revision: 3,
+      updatedAt: '2026-10-05',
+      sourceEventId: '$mirror',
+      secretEvidence: 'private-reference',
+    };
+    const events = await parse([
+      encode(
+        `event: interaction\ndata: ${JSON.stringify(update)}\n\nevent: interaction\ndata: {"state":"achieved"}\n\nevent: done\ndata: {}\n\n`,
+      ),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events[0]?.event).toBe('interaction');
+    expect(events[0]?.data).not.toHaveProperty('secretEvidence');
+    expect(events[1]?.event).toBe('done');
+  });
   it('parses whole frames with their ids', async () => {
     const events = await parse([
       encode(

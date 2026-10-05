@@ -38,6 +38,24 @@ describe('mirrorTxnId', () => {
 });
 
 describe('RoomMirror', () => {
+  it('binds the source only when a pending send has a confirmed Matrix event id', async () => {
+    const sendText = vi
+      .fn()
+      .mockResolvedValueOnce('pending-txn')
+      .mockResolvedValueOnce('$confirmed');
+    const onConfirmed = vi.fn(async () => undefined);
+    const { mirror } = harness(sendText);
+    await mirror.enqueue(
+      '$s',
+      async () => ({ ...send('$s', 'hello', 'fixed'), onConfirmed }),
+      'user message',
+    );
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(onConfirmed).toHaveBeenCalledExactlyOnceWith('$confirmed');
+    expect(new Set(sendText.mock.calls.map((call) => call[0].txnId))).toEqual(
+      new Set(['fixed']),
+    );
+  });
   it('sends, logs the event id and keeps the work alive', async () => {
     const sendText = vi.fn().mockResolvedValue('$ev1');
     const { mirror, kept, log } = harness(sendText);

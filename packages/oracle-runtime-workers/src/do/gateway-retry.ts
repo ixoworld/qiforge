@@ -17,6 +17,7 @@ export const GATEWAY_RETRY_DELAYS_MS: readonly number[] = [
 ];
 
 const TRANSIENT_PATTERNS = [
+  /Matrix mirror is still pending confirmation/i,
   /network connection lost/i,
   /durable object (reset|storage operation exceeded|has been)/i,
   /object (was|has been) (reset|evicted)/i,

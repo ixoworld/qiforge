@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 'use client';
+import type { OracleInteraction } from '@ixo/oracles-events/interactions';
 import { useMutation } from '@tanstack/react-query';
 import { useCallback, useRef } from 'react';
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -138,6 +139,7 @@ export function useSendMessage({
   // `chatRef` points at later (the user may have switched sessions).
   const frameCallbacks = useCallback(
     (chat: OracleChat | undefined): RunFrameCallbacks => ({
+      onInteraction: (update) => chat?.applyInteraction(update),
       onMessage: async ({ chunk, requestId }) => {
         await chat?.upsertAIMessage(requestId, chunk);
       },
@@ -420,6 +422,7 @@ export function useSendMessage({
           abortSignal: controller.signal,
           onRequestStarted: (requestId) => {
             chat?.setRun({ requestId });
+            void chat?.associateRequest(userMessage.id, requestId);
           },
           onRunStarted: (runId) => {
             activeRunRef.current = runId;
@@ -506,6 +509,7 @@ function endedOf(result: StreamRunResult): NonNullable<ChatRunState['ended']> {
 }
 
 interface RunFrameCallbacks {
+  onInteraction?: (update: OracleInteraction) => void | Promise<void>;
   onMessage: (args: {
     chunk: string;
     requestId: string;
@@ -573,6 +577,9 @@ const frameHandler =
     const requestId = run.requestId ?? '';
     // Type-safe event handling using discriminated unions
     switch (sseEvent.event) {
+      case 'interaction':
+        await callbacks.onInteraction?.(sseEvent.data);
+        break;
       case 'message':
         await callbacks.onMessage({ chunk: sseEvent.data.content, requestId });
         break;

@@ -1,3 +1,13 @@
+import {
+  isTerminalInteraction,
+  type OracleInteraction,
+} from '@ixo/oracles-events/interactions';
+import {
+  InteractionCoordinator,
+  type InteractionRecord,
+} from '../interactions/coordinator';
+import { TypingLeases } from '../interactions/typing';
+import { matrixTxnId } from './txn-id';
 /**
  * Matrix gateway Durable Object — one per oracle, home of the bot identity.
  *
@@ -99,8 +109,6 @@ import {
 } from './user-homeserver';
 import { replyPartTxnId, roomReplyMessages } from './reply-parts';
 
-const TYPING_REFRESH_MS = 20_000;
-const TYPING_TIMEOUT_MS = 30_000;
 /** User DID → room id memo (aliases never move; a miss re-resolves). */
 const ALIAS_CACHE_TTL_MS = 30 * 60_000;
 /** User DID → Matrix server name (from the DID document via Blocksync). */
@@ -247,6 +255,165 @@ export class MatrixGatewayDO
   extends MatrixBotDO<OracleWorkerEnv>
   implements MatrixGatewayObject
 {
+  protected interactionsEnabled = true;
+  private readonly interactionTyping = new TypingLeases(
+    (roomId, active, timeout) => this.setTyping(roomId, active, timeout),
+    Date.now,
+    (error) => this.log('warn', 'typing update failed', error),
+  );
+  private readonly interactions = new InteractionCoordinator({
+    storage: {
+      get: (key) =>
+        this.ctx.storage.get<InteractionRecord>(`interaction:${key}`),
+      put: (key, record) => this.ctx.storage.put(`interaction:${key}`, record),
+      list: async () =>
+        new Map(
+          [
+            ...(await this.ctx.storage.list<InteractionRecord>({
+              prefix: 'interaction:',
+            })),
+          ].map(([key, value]) => [key.slice('interaction:'.length), value]),
+        ),
+    },
+    send: (update, emoji, txnId) =>
+      this.sendInteractionReaction(update, emoji, txnId),
+    redact: async (roomId, eventId) => {
+      const client = await this.startedClient();
+      await withRateLimitRetry(() =>
+        client.redactEvent(
+          roomId,
+          eventId,
+          matrixTxnId('interaction-redact', roomId, eventId),
+        ),
+      );
+    },
+    keepAlive: (work) => this.ctx.waitUntil(work),
+    warn: (error) => this.log('warn', 'interaction delivery pending', error),
+  });
+  private typingAdmission = Promise.resolve();
+  async publishInteraction(update: OracleInteraction): Promise<void> {
+    if (!this.interactionsEnabled) return;
+    if (
+      update.oracleDid !== this.env.ORACLE_DID ||
+      update.oracleUserId !== this.cfg().userId
+    )
+      return;
+    // Reaction transport cannot delay native typing. Tombstones reject a late working heartbeat.
+    this.typingAdmission = this.typingAdmission
+      .catch(() => undefined)
+      .then(async () => {
+        if (!update.roomId) return;
+        const leaseKey = JSON.stringify([update.sessionId, update.requestId]);
+        const key = `interaction-typing:${leaseKey}`;
+        const old = await this.ctx.storage.get<{
+          revision: number;
+          state: OracleInteraction['state'];
+        }>(key);
+        if (
+          old &&
+          (old.revision > update.revision ||
+            (old.revision === update.revision && old.state !== update.state) ||
+            (isTerminalInteraction(old.state) &&
+              !isTerminalInteraction(update.state)))
+        )
+          return;
+        const active = update.state === 'working';
+        this.interactionTyping.set(leaseKey, update.roomId, active);
+        await this.ctx.storage.put(key, {
+          roomId: update.roomId,
+          expires: active ? Date.now() + 60_000 : 0,
+          revision: update.revision,
+          state: update.state,
+        });
+      });
+    await this.typingAdmission;
+    await this.interactions.update(update);
+  }
+  private async releaseInteractionTyping(
+    sessionId: string,
+    requestId: string,
+    roomId: string,
+    state: OracleInteraction['state'],
+  ): Promise<void> {
+    const leaseKey = JSON.stringify([sessionId, requestId]);
+    this.typingAdmission = this.typingAdmission
+      .catch(() => undefined)
+      .then(async () => {
+        this.interactionTyping.set(leaseKey, roomId, false);
+        const key = `interaction-typing:${leaseKey}`;
+        const old = await this.ctx.storage.get<{
+          revision: number;
+          state: OracleInteraction['state'];
+        }>(key);
+        if (old && !isTerminalInteraction(old.state))
+          await this.ctx.storage.put(key, {
+            roomId,
+            expires: 0,
+            revision: old.revision + 1,
+            state,
+          });
+      });
+    await this.typingAdmission;
+  }
+  private async sendInteractionReaction(
+    update: OracleInteraction,
+    emoji: string,
+    txnId: string,
+  ): Promise<string> {
+    if (!update.roomId || !update.sourceEventId)
+      throw new Error('Reaction has no source');
+    try {
+      return await this.sendEvent(
+        update.roomId,
+        'm.reaction',
+        JSON.stringify({
+          'm.relates_to': {
+            rel_type: 'm.annotation',
+            event_id: update.sourceEventId,
+            key: emoji,
+          },
+        }),
+        { txnId },
+      );
+    } catch (error) {
+      if (
+        !(error instanceof MatrixError) ||
+        error.errcode !== 'M_DUPLICATE_ANNOTATION'
+      )
+        throw error;
+      // A response lost across device rotation can leave the same annotation behind.
+      const credentials = await this.botCredentials();
+      const client = createClient({
+        baseUrl: credentials.baseUrl,
+        accessToken: credentials.accessToken,
+        userId: credentials.userId,
+      });
+      let from: string | undefined;
+      do {
+        const page = await client.relations(
+          update.roomId,
+          update.sourceEventId,
+          'm.annotation',
+          'm.reaction',
+          { from },
+        );
+        const own = page.events.find(
+          (event) =>
+            event.getSender() === update.oracleUserId &&
+            event.getRelation()?.key === emoji &&
+            event.getUnsigned().transaction_id === txnId,
+        );
+        const id = own?.getId();
+        if (id) return id;
+        from = page.nextBatch ?? undefined;
+      } while (from);
+      throw error;
+    }
+  }
+  override async alarm(): Promise<void> {
+    await super.alarm();
+    await this.interactions.reconcilePending();
+  }
   private config: OracleGatewayConfig | null = null;
   private ingest: IngestPipeline | null = null;
   /** `m.room.canonical_alias` per room (null = none), read once per instance. */
@@ -605,11 +772,8 @@ export class MatrixGatewayDO
   }
 
   private async dispatchTurn(turn: IngestTurn): Promise<void> {
-    return this.turnGate.run(() => this.dispatchTurnNow(turn));
-  }
-
-  private async dispatchTurnNow(turn: IngestTurn): Promise<void> {
-    const requestId = crypto.randomUUID();
+    const requestId = replyTxnId(turn.eventIds[0] ?? turn.sourceEventId);
+    let engagementVerified = true;
     // Group rooms: the Node gate — answer a mention, a reply to the bot, or
     // a thread the bot is in; stay silent otherwise (the message is still
     // captured into channel memory). Direct rooms always pass.
@@ -626,6 +790,7 @@ export class MatrixGatewayDO
         ...(turn.inReplyTo ? { inReplyTo: turn.inReplyTo } : {}),
       })
       .catch((err: unknown): GateDecision => {
+        engagementVerified = false;
         this.log(
           'warn',
           `turn ${requestId}: group-chat gate failed; answering`,
@@ -647,20 +812,53 @@ export class MatrixGatewayDO
       deleteInboxRows(this.inboxSql(), turn.eventIds);
       return;
     }
+    const seen: OracleInteraction = {
+      sessionId: turn.sessionId,
+      requestId,
+      oracleDid: this.cfg().oracleDid,
+      oracleUserId: this.cfg().userId,
+      oracleName: this.env.ORACLE_NAME ?? 'Oracle',
+      roomId: turn.roomId,
+      sourceEventId: turn.sourceEventId,
+      threadId: turn.threadId,
+      state: 'seen',
+      revision: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    // Optional signals never delay or fail the agent's execution.
+    this.ctx.waitUntil(
+      (engagementVerified
+        ? this.publishInteraction(seen)
+        : Promise.resolve()
+      ).catch((error: unknown) =>
+        this.log('warn', 'seen acknowledgement failed', error),
+      ),
+    );
+    return this.turnGate.run(() =>
+      this.dispatchTurnNow(turn, requestId, decision, engagementVerified),
+    );
+  }
+
+  private async dispatchTurnNow(
+    turn: IngestTurn,
+    requestId: string,
+    decision: GateDecision,
+    engagementVerified: boolean,
+  ): Promise<void> {
     this.log(
       'info',
       `turn ${requestId}: ${turn.userDid} in ${turn.roomId} (thread ${turn.threadId}${decision.roomKind === 'group' ? `, group room: ${decision.reason}` : ''})`,
     );
     for (const id of turn.eventIds) this.inFlightEvents.add(id);
-    let typing: ReturnType<typeof setInterval> | null = null;
+    let terminal: 'done' | 'failed' | 'cancelled' | 'superseded' | 'waiting' =
+      'done';
     try {
-      await this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS);
-      typing = setInterval(() => {
-        this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS).catch(
-          () => undefined,
-        );
-      }, TYPING_REFRESH_MS);
-      const result = await this.runTurn(turn, requestId, decision);
+      const result = await this.runTurn(
+        turn,
+        requestId,
+        decision,
+        engagementVerified,
+      );
       if (result.replayed)
         this.log(
           'info',
@@ -675,8 +873,8 @@ export class MatrixGatewayDO
       // thread: the reply to a bare message opens the thread on it (Node's
       // listener bridge does the same).
       const eventId = turn.eventIds[0];
-      for (const message of messages)
-        await this.sendText(turn.roomId, message.body, {
+      for (const message of messages) {
+        const confirmed = await this.sendText(turn.roomId, message.body, {
           threadId: turn.threadId,
           ...(message.formattedBody
             ? { formattedBody: message.formattedBody }
@@ -690,6 +888,30 @@ export class MatrixGatewayDO
               }
             : {}),
         });
+        if (!confirmed.startsWith('$'))
+          throw new Error('Reply delivery is not confirmed');
+      }
+      if (result.interaction) {
+        const update = result.interaction;
+        const state =
+          update.state === 'waiting' || update.state === 'failed'
+            ? update.state
+            : result.achievement && messages.length > 0
+              ? 'achieved'
+              : 'completed';
+        terminal =
+          state === 'waiting'
+            ? 'waiting'
+            : state === 'failed'
+              ? 'failed'
+              : 'done';
+        await this.publishInteraction({
+          ...update,
+          state,
+          revision: update.revision + 1,
+          updatedAt: new Date().toISOString(),
+        }).catch(() => undefined);
+      }
       // The reply is in the durable outbox (or there is none): the turn
       // has ended, the inbox row has done its job.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
@@ -697,10 +919,53 @@ export class MatrixGatewayDO
       // A turn aborted because a newer message on the same thread superseded
       // it is not a failure: the new turn answers, the old card says so.
       if (isAbortError(err)) {
-        this.log('info', `turn ${requestId}: superseded by a newer message`);
+        terminal =
+          err instanceof Error && err.message.includes('superseded')
+            ? 'superseded'
+            : 'cancelled';
+        if (this.interactionsEnabled && engagementVerified)
+          await this.interactions
+            .transition(
+              {
+                sessionId: turn.sessionId,
+                requestId,
+                oracleDid: this.cfg().oracleDid,
+                oracleUserId: this.cfg().userId,
+                oracleName: this.env.ORACLE_NAME ?? 'Oracle',
+                roomId: turn.roomId,
+                sourceEventId: turn.sourceEventId,
+                threadId: turn.threadId,
+                state: 'seen',
+                revision: 0,
+                updatedAt: new Date().toISOString(),
+              },
+              terminal,
+            )
+            .catch(() => undefined);
+        this.log('info', `turn ${requestId}: ${terminal}`);
         deleteInboxRows(this.inboxSql(), turn.eventIds);
         return;
       }
+      terminal = 'failed';
+      if (this.interactionsEnabled && engagementVerified)
+        await this.interactions
+          .transition(
+            {
+              sessionId: turn.sessionId,
+              requestId,
+              oracleDid: this.cfg().oracleDid,
+              oracleUserId: this.cfg().userId,
+              oracleName: this.env.ORACLE_NAME ?? 'Oracle',
+              roomId: turn.roomId,
+              sourceEventId: turn.sourceEventId,
+              threadId: turn.threadId,
+              state: 'seen',
+              revision: 0,
+              updatedAt: new Date().toISOString(),
+            },
+            'failed',
+          )
+          .catch(() => undefined);
       if (isInterruptedTurnError(err))
         this.log(
           'warn',
@@ -725,12 +990,18 @@ export class MatrixGatewayDO
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } finally {
       for (const id of turn.eventIds) this.inFlightEvents.delete(id);
-      if (typing) clearInterval(typing);
-      await this.setTyping(turn.roomId, false).catch(() => undefined);
+      await this.releaseInteractionTyping(
+        turn.sessionId,
+        requestId,
+        turn.roomId,
+        terminal === 'done' ? 'completed' : terminal,
+      ).catch((error: unknown) =>
+        this.log('warn', 'typing release failed', error),
+      );
       // Close the card on every exit — reply posted, empty reply, thrown
       // error — so no turn can leave a spinner running in the room.
       await this.userStub(turn.userDid)
-        .finishWorkStatus(requestId, 'done')
+        .finishWorkStatus(requestId, terminal)
         .catch((err: unknown) =>
           this.log(
             'warn',
@@ -754,6 +1025,7 @@ export class MatrixGatewayDO
     turn: IngestTurn,
     requestId: string,
     decision: GateDecision,
+    engagementVerified = true,
   ): Promise<TurnResult> {
     return this.userStub(turn.userDid).runTurn({
       identity: { userDid: turn.userDid, matrixUserId: turn.matrixUserId },
@@ -765,6 +1037,8 @@ export class MatrixGatewayDO
       roomKind: decision.roomKind,
       senderDisplayName: decision.displayName,
       ...(turn.eventIds[0] ? { eventId: turn.eventIds[0] } : {}),
+      interactionEventId: turn.sourceEventId,
+      ...(engagementVerified ? {} : { interactionsDisabled: true }),
       ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
       requestId,
     });
@@ -790,6 +1064,22 @@ export class MatrixGatewayDO
    * moment to re-dispatch the turns a previous incarnation left unfinished.
    */
   protected override async onStarted(_result: StartResult): Promise<void> {
+    if (this.interactionsEnabled) {
+      for (const [key, lease] of await this.ctx.storage.list<{
+        roomId: string;
+        expires: number;
+      }>({ prefix: 'interaction-typing:' })) {
+        if (lease.expires > Date.now())
+          this.interactionTyping.set(
+            key.slice('interaction-typing:'.length),
+            lease.roomId,
+            true,
+            lease.expires,
+          );
+        else await this.ctx.storage.delete(key);
+      }
+    }
+    this.ctx.waitUntil(this.interactions.reconcilePending());
     this.scheduleInboxReplay();
   }
 

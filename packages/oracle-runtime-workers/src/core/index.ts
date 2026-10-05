@@ -365,6 +365,7 @@ export interface RuntimeCoreOptions {
  * `env` object) and hands to every Durable Object turn.
  */
 export interface RuntimeCore {
+  interactionsEnabled?: boolean;
   identity: OracleIdentity;
   /** `OracleConfig.delivery`: how chat surfaces receive replies. */
   delivery: DeliveryConfig;
@@ -704,6 +705,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
 
   return {
     identity,
+    interactionsEnabled: opts.config.interactions?.enabled !== false,
     delivery: deliveryConfigWithEnv(
       opts.config.delivery,
       typeof validated.config.MATRIX_CHAT_DELIVERY === 'string'

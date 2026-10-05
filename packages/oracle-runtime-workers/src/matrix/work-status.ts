@@ -90,7 +90,10 @@ export type WorkStatusPhase =
   | 'working'
   | 'delivering'
   | 'done'
-  | 'superseded';
+  | 'superseded'
+  | 'waiting'
+  | 'failed'
+  | 'cancelled';
 
 const ANCHOR_RETRY_DELAY_MS = 1000;
 
@@ -105,6 +108,9 @@ const DEFAULT_LABELS: Record<WorkStatusPhase, string> = {
   delivering: 'Sending your reply…',
   done: 'Done',
   superseded: 'Got your new message — restarting',
+  waiting: 'Waiting for your input',
+  failed: 'Could not complete this request',
+  cancelled: 'Stopped',
 };
 
 export interface WorkStatusTurn {

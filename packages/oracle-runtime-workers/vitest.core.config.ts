@@ -16,6 +16,7 @@ export default defineConfig({
     // @ixo/editor/core and the wallet-signing round trip on the real runtime.
     include: [
       'src/core/**/*.test.ts',
+      'src/interactions/**/*.test.ts',
       'src/plugins/*.test.ts',
       'src/plugins/!(editor|flows|ixo-transaction)/**/*.test.ts',
       'src/secrets/**/*.test.ts',

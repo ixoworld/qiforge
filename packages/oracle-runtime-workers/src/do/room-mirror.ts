@@ -42,6 +42,7 @@ export interface MirrorSend {
   /** The session's marker event — the thread the mirror is posted under. */
   threadId: string;
   txnId: string;
+  onConfirmed?: (eventId: string) => Promise<void>;
   origin?: {
     provider: 'whatsapp';
     bindingId: string;
@@ -126,13 +127,24 @@ export class RoomMirror {
   }
 
   private async send(send: MirrorSend, label: string): Promise<void> {
-    const eventId = await retryGateway(() => this.deps.sendText(send), {
-      ...this.deps.retry,
-      onRetry: (err, attempt, delayMs) =>
-        this.deps.warn(
-          `[user-do] Matrix replay (${label}) send failed (attempt ${attempt}) — retrying in ${delayMs} ms with the same transaction id: ${errorText(err)}`,
-        ),
-    });
+    const eventId = await retryGateway(
+      async () => {
+        const id = await this.deps.sendText(send);
+        if (!id.startsWith('$'))
+          throw new Error('Matrix mirror is still pending confirmation');
+        return id;
+      },
+      {
+        ...this.deps.retry,
+        onRetry: (err, attempt, delayMs) =>
+          this.deps.warn(
+            `[user-do] Matrix replay (${label}) send failed (attempt ${attempt}) — retrying in ${delayMs} ms with the same transaction id: ${errorText(err)}`,
+          ),
+      },
+    );
+    if (!eventId.startsWith('$'))
+      throw new Error('Matrix mirror is still pending confirmation');
+    await send.onConfirmed?.(eventId);
     this.deps.log(
       `[user-do] Matrix replay (${label}) → ${eventId} in thread ${send.threadId}`,
     );

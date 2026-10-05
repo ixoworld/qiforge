@@ -1,6 +1,6 @@
 import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ToolScheduler } from '../tool-scheduler';
 import { HarnessLimitError, TurnBudget } from '../turn-budget';
 import {
@@ -324,7 +324,8 @@ describe('createToolExecutionMiddleware', () => {
   });
 
   it('keeps the claim when the tool returns an uncertain failure instead of throwing it', async () => {
-    const { claims, wrap } = middlewareFor();
+    const onUncertainOutcome = vi.fn();
+    const { claims, wrap } = middlewareFor({ onUncertainOutcome });
     const dropped = new ToolMessage({
       tool_call_id: 'call_edit_flow',
       name: 'edit_flow',
@@ -352,6 +353,7 @@ describe('createToolExecutionMiddleware', () => {
     expect(ran).toBe(false);
     expect(again.status).toBe('error');
     expect(String(again.content)).toBe(uncertainWriteToolResult('edit_flow'));
+    expect(onUncertainOutcome).toHaveBeenCalledTimes(2);
   });
 
   it('releases the claim when the tool returns a failure the service reported', async () => {

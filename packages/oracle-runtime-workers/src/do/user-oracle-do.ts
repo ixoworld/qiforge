@@ -1,3 +1,12 @@
+import { publishInteractionSnapshot } from './interaction-publication';
+import type {
+  OracleInteraction,
+  InteractionAchievement,
+} from '@ixo/oracles-events/interactions';
+import {
+  InteractionProducer,
+  type InteractionEvidence,
+} from '../interactions/producer';
 import { ChannelTurns } from '../channels/turns';
 import {
   assertActiveChannelBinding,
@@ -296,6 +305,7 @@ import {
   TranscriptCursorError,
   transformTranscript,
   type TranscriptPageOptions,
+  type MessageDto,
 } from './transcript';
 import { evictIdleWorkingCopy } from './idle-eviction';
 import { FeedbackMarkers, reserveFeedback } from '../feedback/reservation';
@@ -734,6 +744,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     /** Matrix `work_status` liveness cards, one per in-flight Matrix turn. */
     private workStatus: WorkStatusProducer | null = null;
+    private readonly interactions = new Map<string, InteractionProducer>();
 
     /** In-flight Matrix turn per session (sessionId → requestId), for supersede. */
     private readonly matrixTurns = new Map<string, string>();
@@ -1356,6 +1367,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         requestAlarm: (at) => this.ctx.waitUntil(this.requestAlarm(at)),
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
+        onRunEnding: (live, outcome) => this.finishInteraction(live, outcome),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
       });
 
@@ -1818,6 +1830,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const now = Date.now();
       const deadlines: number[] = [];
+      // Mirror intent remains after an object reset, including a late source-event confirmation.
+      const mirrors = await this.ctx.storage.list<{
+        req: TurnRequest;
+        text: string;
+        who: 'user' | 'oracle';
+        createdAt: number;
+      }>({ prefix: 'interaction-mirror:' });
+      if (mirrors.size) {
+        if (!this.mirror?.pending) {
+          for (const [key, mirror] of [...mirrors].sort(
+            (a, b) =>
+              a[1].createdAt - b[1].createdAt || (a[1].who === 'user' ? -1 : 1),
+          )) {
+            if (now - mirror.createdAt > 7 * 24 * 60 * 60 * 1000) {
+              await this.ctx.storage.delete(key);
+              continue;
+            }
+            this.ctx.waitUntil(
+              this.replayToRoom(mirror.req, mirror.text, mirror.who).catch(
+                (error: unknown) =>
+                  console.warn('[interaction] mirror retry', error),
+              ),
+            );
+          }
+        }
+        deadlines.push(now + 60_000);
+      }
+
+      const pendingInteractions =
+        await this.ctx.storage.list<OracleInteraction>({
+          prefix: 'interaction-pending:',
+        });
+      if (pendingInteractions.size) {
+        for (const update of pendingInteractions.values())
+          this.ctx.waitUntil(
+            this.publishInteractionSnapshot(update).catch((error: unknown) =>
+              console.warn('[interaction] publication retry', error),
+            ),
+          );
+        deadlines.push(now + 60_000);
+      }
 
       // Durable runs: start the recovery attempts that are due (the boot
       // above may have just scheduled them), then keep the alarm inside the
@@ -2404,6 +2457,21 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
     }
 
+    private async enrichInteractions(messages: MessageDto[]): Promise<void> {
+      await Promise.all(
+        messages.map(async (message) => {
+          if (message.type !== 'human' || !message.requestId) return;
+          const saved = await this.ctx.storage.get<{
+            update: OracleInteraction;
+          }>(`interaction:${message.requestId}`);
+          if (saved) {
+            message.interaction = saved.update;
+            message.matrixEventId = saved.update.sourceEventId;
+          }
+        }),
+      );
+    }
+
     async listMessages(
       identity: TurnIdentity,
       sessionId: string,
@@ -2413,6 +2481,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         (m) => !isSummarizationMessage(m),
       );
       const { messages: dtos } = await transformTranscript(messages);
+      await this.enrichInteractions(dtos);
       return JSON.stringify(dtos);
     }
 
@@ -2481,6 +2550,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           sessionId,
           options,
         );
+        await this.enrichInteractions(page.messages);
         return { ok: true, json: JSON.stringify(page) };
       } catch (err) {
         if (err instanceof TranscriptCursorError)
@@ -2522,7 +2592,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
     async finishWorkStatus(
       requestId: string,
-      phase: 'done' | 'superseded',
+      phase: 'done' | 'superseded' | 'waiting' | 'failed' | 'cancelled',
     ): Promise<void> {
       this.workStatus?.finish(requestId, phase);
       for (const [sessionId, inFlight] of this.matrixTurns)
@@ -2654,6 +2724,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      */
     async runTurn(req: TurnRequest): Promise<TurnResult> {
       await this.ready(req.identity);
+      await this.interactionFor(req);
       const eventId = req.client === 'matrix' ? req.eventId : undefined;
       const ledger = this.matrixLedger;
       if (!eventId || !ledger) return this.runTurnOnce(req);
@@ -2677,6 +2748,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             text: existing?.replyText ?? '',
             ...(existing?.replyPlan ? { plan: existing.replyPlan } : {}),
             toolCalls: [],
+            ...(await this.interactionResult(req)),
             replayed: true,
           };
         case 'interrupted': {
@@ -2713,6 +2785,148 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return run;
     }
 
+    private async publishInteractionSnapshot(
+      update: OracleInteraction,
+    ): Promise<void> {
+      await publishInteractionSnapshot(
+        this.ctx.storage,
+        (snapshot) =>
+          retryGateway(() => this.gateway.publishInteraction(snapshot)),
+        update,
+      );
+    }
+
+    private async interactionFor(
+      req: TurnRequest,
+      live?: LiveRun,
+    ): Promise<InteractionProducer | undefined> {
+      if (
+        this.core.interactionsEnabled === false ||
+        req.interactionsDisabled ||
+        req.taskRunId !== undefined ||
+        req.client === 'channel'
+      )
+        return undefined;
+      const present = this.interactions.get(req.requestId);
+      if (present) {
+        if (live) {
+          present.snapshot = { ...present.snapshot, runId: live.runId };
+          live.buffer.push('interaction', present.snapshot);
+        }
+        return present;
+      }
+      const key = `interaction:${req.requestId}`;
+      const saved = await this.ctx.storage.get<{
+        update: OracleInteraction;
+        evidence?: InteractionEvidence;
+      }>(key);
+      const producer = new InteractionProducer(
+        saved?.update ?? {
+          sessionId: req.sessionId,
+          requestId: req.requestId,
+          oracleDid: this.env.ORACLE_DID,
+          oracleUserId: String(this.env.MATRIX_ORACLE_ADMIN_USER_ID ?? ''),
+          oracleName: this.core.identity.name,
+          ...(req.roomId ? { roomId: req.roomId } : {}),
+          ...((req.interactionEventId ?? req.eventId)
+            ? { sourceEventId: req.interactionEventId ?? req.eventId }
+            : {}),
+          ...(req.threadId ? { threadId: req.threadId } : {}),
+          state: 'seen',
+          revision: 0,
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          save: async (update, evidence) => {
+            await this.ctx.storage.put({
+              [key]: { update, evidence },
+              [`interaction-pending:${req.requestId}`]: update,
+            });
+            this.ctx.waitUntil(
+              this.requestAlarm(Date.now() + 60_000).catch((error: unknown) =>
+                console.warn('[interaction] retry alarm', error),
+              ),
+            );
+          },
+          publish: (update) => this.publishInteractionSnapshot(update),
+          emit: (update) => {
+            const run = this.runs?.byRequestId(req.requestId);
+            if (run && !run.buffer.isClosed)
+              run.buffer.push('interaction', update);
+          },
+          keepAlive: (work) => this.ctx.waitUntil(work),
+          warn: (error) => console.warn('[interaction]', error),
+        },
+        saved?.evidence,
+      );
+      this.interactions.set(req.requestId, producer);
+      if (live) {
+        producer.snapshot = { ...producer.snapshot, runId: live.runId };
+        live.buffer.push('interaction', producer.snapshot);
+      }
+      if (!saved) {
+        await this.ctx.storage.put(key, { update: producer.snapshot });
+        if (req.client === 'portal') producer.update('seen');
+      }
+      return producer;
+    }
+
+    private async interactionResult(
+      req: TurnRequest,
+    ): Promise<Pick<TurnResult, 'interaction' | 'achievement'>> {
+      const producer = await this.interactionFor(req);
+      return producer
+        ? {
+            interaction: producer.snapshot,
+            ...(producer.confirmedAchievement
+              ? { achievement: producer.confirmedAchievement }
+              : {}),
+          }
+        : {};
+    }
+
+    private async finishInteraction(
+      live: LiveRun,
+      outcome: RunOutcome,
+    ): Promise<void> {
+      const req = (JSON.parse(live.record.request) as StoredRunRequest).turn;
+      const producer = await this.interactionFor(req, live);
+      const superseded =
+        live.abort.signal.reason instanceof Error &&
+        live.abort.signal.reason.message.includes('superseded');
+      const state =
+        outcome.status === 'finished'
+          ? 'completed'
+          : outcome.status === 'aborted'
+            ? superseded
+              ? 'superseded'
+              : 'cancelled'
+            : 'failed';
+      producer?.finish(state, req.client !== 'matrix');
+      // Finalization has removed this run from the coordinator's active map.
+      // Emit directly before the buffer closes so subscribers receive the terminal signal.
+      if (producer) live.buffer.push('interaction', producer.snapshot);
+      await producer?.settle();
+      const phase =
+        producer?.snapshot.state === 'failed'
+          ? 'failed'
+          : producer?.snapshot.state === 'waiting'
+            ? 'waiting'
+            : state === 'completed'
+              ? 'done'
+              : state === 'superseded'
+                ? 'superseded'
+                : state === 'cancelled'
+                  ? 'cancelled'
+                  : 'failed';
+      if (
+        outcome.status !== 'finished' ||
+        req.client !== 'matrix' ||
+        phase === 'waiting'
+      )
+        this.workStatus?.finish(req.requestId, phase);
+    }
+
     private async runTurnOnce(req: TurnRequest): Promise<TurnResult> {
       // Matrix turns drive a `work_status` card in the user's thread; a newer
       // message on the same session supersedes the previous card (the
@@ -2738,6 +2952,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // Every turn is a durable run (docs/plans/durable-runs.md): recorded
       // before the first model call, kept alive by the alarm, resumed after
       // a reset. Headless turns (Matrix, tasks) simply await the outcome.
+      await this.interactionFor(req);
       const { live } = await this.runs!.begin({
         runId: crypto.randomUUID(),
         sessionId: req.sessionId,
@@ -2749,6 +2964,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         multitask: req.multitask ?? this.runConfig.multitaskDefault,
         ...(req.taskRunId ? { taskRunId: req.taskRunId } : {}),
       });
+      this.interactions.get(req.requestId)?.accept();
       const outcome = await live.done;
       if (outcome.status !== 'finished') {
         const reason =
@@ -2769,6 +2985,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ? { messageId: outcome.messageId }
           : {}),
         toolCalls: outcome.toolCalls ?? [],
+        ...(await this.interactionResult(req)),
       };
     }
 
@@ -2794,6 +3011,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(outcome.plan ? { plan: JSON.stringify(outcome.plan) } : {}),
           ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
           toolCalls: outcome.toolCalls ?? [],
+          ...(await this.interactionResult(req)),
           replayed: true,
         };
       }
@@ -2807,6 +3025,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(plan ? { plan: JSON.stringify(plan) } : {}),
           ...(record.messageId ? { messageId: record.messageId } : {}),
           toolCalls: [],
+          ...(await this.interactionResult(req)),
           replayed: true,
         };
       }
@@ -3455,7 +3674,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       } catch (err) {
         return readyFailureResponse(err);
       }
-      if (!(await this.sessions!.getSession(sessionId))) {
+      const session = await this.sessions!.getSession(sessionId);
+      if (!session) {
         return Response.json(
           { statusCode: 404, message: `Session ${sessionId} not found` },
           { status: 404 },
@@ -3480,17 +3700,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         sessionId,
         message: body.message,
         client: 'portal',
+        ...(session.roomId ? { roomId: session.roomId } : {}),
         requestId,
         model: body.model,
         metadata: body.metadata ? JSON.stringify(body.metadata) : undefined,
         ...(attachments.length > 0 ? { attachments } : {}),
       };
+      await this.interactionFor(req);
       const stream = body.stream !== false;
       if (!stream) {
-        void this.replayToRoom(req, body.message, 'user');
+        this.ctx.waitUntil(
+          this.replayToRoom(req, body.message, 'user').catch((error: unknown) =>
+            console.warn('[interaction] user mirror pending', error),
+          ),
+        );
         try {
           const result = await this.runTurn(req);
-          void this.replayToRoom(req, result.text, 'oracle');
+          this.ctx.waitUntil(
+            this.replayToRoom(req, result.text, 'oracle').catch(
+              (error: unknown) =>
+                console.warn('[interaction] reply mirror pending', error),
+            ),
+          );
           // Node's `SendMessageResponse.message` is `{ type, content, id }`.
           const payload: Record<string, unknown> = {
             message: {
@@ -3523,7 +3754,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // A streamed turn is a durable run: recorded, kept alive and resumable
       // (docs/plans/durable-runs.md). The response is one subscriber of the
       // run's buffer; the run itself outlives it.
-      void this.replayToRoom(req, body.message, 'user');
+      this.ctx.waitUntil(
+        this.replayToRoom(req, body.message, 'user').catch((error: unknown) =>
+          console.warn('[interaction] user mirror pending', error),
+        ),
+      );
       const { live, queued } = await this.runs!.begin({
         runId: crypto.randomUUID(),
         sessionId,
@@ -3539,6 +3774,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         ),
         multitask: body.multitask ?? this.runConfig.multitaskDefault,
       });
+      this.interactions.get(req.requestId)?.accept();
       if (queued)
         live.buffer.push('router.update', {
           step: 'Queued…',
@@ -3593,9 +3829,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           { status: 404 },
         );
       const { record, replay, buffer } = joined;
+      const saved = await this.ctx.storage.get<{ update: OracleInteraction }>(
+        `interaction:${record.requestId}`,
+      );
       const ended = !buffer || buffer.isClosed;
       const stream = createSseSubscriberStream({
-        replay,
+        replay:
+          ended && saved
+            ? [
+                {
+                  seq: record.lastSeq + saved.update.revision + 1,
+                  event: 'interaction',
+                  data: saved.update,
+                },
+                ...replay,
+              ]
+            : replay,
         ...(buffer && !buffer.isClosed ? { buffer } : {}),
         ...(ended
           ? {
@@ -3637,6 +3886,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): Promise<RunOutcome> {
       const stored = JSON.parse(live.record.request) as StoredRunRequest;
       const req = stored.turn;
+      const interaction = await this.interactionFor(req, live);
+      interaction?.start();
       if (req.client === 'channel') {
         await this.ctx.storage.sync();
         await assertChannelAttemptAllowed(req.identity, this.env);
@@ -3778,6 +4029,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         const outcome = await runTurnFrames({
           events: tapMessages(events, capture),
           sink: live.buffer,
+          deferDone: true,
           sessionId,
           requestId: req.requestId,
           runId: live.runId,
@@ -3935,7 +4187,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                     req.identity.userDid,
                 )
               : req.message,
-          additional_kwargs: kwargs,
+          additional_kwargs: { ...kwargs, requestId: req.requestId },
         }),
         new AIMessage({
           id: disposition.messageId,
@@ -3952,17 +4204,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // in the transcript (the Matrix mirror and the title are skipped).
       live.abort.signal.throwIfAborted();
       await this.afterTurn(req.sessionId, messages, disposition);
-      this.replayToRoom(req, disposition.text, 'oracle');
+      void this.replayToRoom(req, disposition.text, 'oracle');
       const delivered = live.continuation ?? '';
       const content = disposition.text.startsWith(delivered)
         ? disposition.text.slice(delivered.length)
         : disposition.text;
       if (content)
         live.buffer.push('message', { content, timestamp: kwargs.timestamp });
-      live.buffer.push('done', {
-        runId: live.runId,
-        messageId: disposition.messageId,
-      });
+
       return {
         status: 'finished',
         text: disposition.text,
@@ -3986,7 +4235,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     ): RunOutcome {
       announce();
       if (live.abort.signal.aborted) {
-        live.buffer.push('done', { runId: live.runId, aborted: true });
         return { status: 'aborted', text: live.continuation ?? '' };
       }
       console.error(
@@ -4002,7 +4250,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         runId: live.runId,
         timestamp: new Date().toISOString(),
       });
-      live.buffer.push('done', { runId: live.runId, failed: true });
+
       return {
         status: 'failed',
         text: live.continuation ?? '',
@@ -4027,6 +4275,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       record: RunRecord,
       outcome: RunOutcome,
     ): Promise<void> {
+      this.interactions.delete(record.requestId);
       if (record.client === 'channel' && outcome.status === 'finished') {
         const stored = JSON.parse(record.request) as StoredRunRequest;
         // Without the handle (a reset dropped it mid-run) the next poll of
@@ -4803,6 +5052,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const laneOf = (name: string): ToolLane =>
         subAgentToolNames.has(name) ? 'subagent' : effectOf(name);
       const executionMiddleware = createToolExecutionMiddleware({
+        onUncertainOutcome: () =>
+          this.interactions.get(req.requestId)?.needsAttention(),
         budget,
         scheduler: this.toolScheduler,
         laneOf,
@@ -4839,15 +5090,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const turnTools = artifacts
         ? [
             {
-              tool: buildCreateArtifactTool(async (input) =>
-                artifacts.create({
+              tool: buildCreateArtifactTool(async (input) => {
+                const artifact = await artifacts.create({
                   artifactId: await artifactIdFor(run.runId, input.source),
                   sessionId: req.sessionId,
                   runId: run.runId,
                   title: input.title,
                   content: input.content,
-                }),
-              ),
+                });
+                this.interactions.get(req.requestId)?.verifiedAchievement({
+                  kind: 'artifact',
+                  reference: artifact.artifactId,
+                });
+                return artifact;
+              }),
               returnDirect: true,
             },
           ]
@@ -4868,6 +5124,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...ambient,
           llm: meteredLlm,
           attachments: attachmentAccess,
+          ...(this.interactions.get(req.requestId)
+            ? {
+                interactions: {
+                  setWaiting: (waiting: boolean) => {
+                    this.interactions.get(req.requestId)?.setWaiting(waiting);
+                    this.workStatus?.emit(
+                      req.requestId,
+                      waiting ? 'waiting' : 'working',
+                    );
+                  },
+                  needsAttention: () =>
+                    this.interactions.get(req.requestId)?.needsAttention(),
+                  verifiedAchievement: (achievement: InteractionAchievement) =>
+                    this.interactions
+                      .get(req.requestId)
+                      ?.verifiedAchievement(achievement),
+                },
+              }
+            : {}),
           onTurnEnd: (dispose) => turnDisposables.add(dispose),
         },
         hooks: {
@@ -4975,6 +5250,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             content,
             additional_kwargs: {
               timestamp: new Date().toISOString(),
+              requestId: req.requestId,
               oracleName: core.identity.name,
               msgFromMatrixRoom: req.client === 'matrix',
               ...speakerKwargs,
@@ -5032,7 +5308,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * Matrix, a failure is logged. Room-originated turns are answered in the
      * room by the gateway, and synthetic task sessions have no root event.
      */
-    private replayToRoom(
+    private async replayToRoom(
       req: TurnRequest,
       text: string,
       who: 'user' | 'oracle',
@@ -5045,6 +5321,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // transcript to mirror either.
       if (!req.sessionId.startsWith('$')) return Promise.resolve();
       if (!text.trim()) return Promise.resolve();
+      const pendingKey =
+        req.client === 'portal'
+          ? `interaction-mirror:${mirrorTxnId(req.sessionId, req.requestId, who)}`
+          : undefined;
+      if (pendingKey) {
+        const old = await this.ctx.storage.get<{ createdAt: number }>(
+          pendingKey,
+        );
+        await this.ctx.storage.put(pendingKey, {
+          req,
+          text,
+          who,
+          createdAt: old?.createdAt ?? Date.now(),
+        });
+        await this.requestAlarm(Date.now() + 60_000);
+      }
       const label = who === 'user' ? 'user message' : 'AI response';
       // Serialised per session, retried across a gateway restart with a fixed
       // transaction id, kept alive past the request (room-mirror.ts).
@@ -5072,6 +5364,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             body,
             ...(formattedBody ? { formattedBody } : {}),
             threadId: req.sessionId,
+            onConfirmed: async (eventId: string) => {
+              if (who === 'user') {
+                const interaction = await this.interactionFor(req);
+                interaction?.bind(roomId, eventId);
+                await interaction?.settle();
+              }
+              if (pendingKey) await this.ctx.storage.delete(pendingKey);
+            },
             txnId: req.channel
               ? `channel-${await channelRequestHash(JSON.stringify([req.identity.userDid, req.channel.bindingId, req.requestId, who]))}`
               : mirrorTxnId(req.sessionId, req.requestId, who),

@@ -51,9 +51,15 @@ function gatewayStub(env: OracleWorkerEnv) {
  * and 404s everything else; the cron is the keep-alive safety net, same as
  * the single-script layout's.
  */
-export function createGatewayWorker(): GatewayWorker {
+export function createGatewayWorker(
+  options: { interactions?: { enabled?: boolean } } = {},
+): GatewayWorker {
+  class ConfiguredMatrixGatewayDO extends MatrixGatewayDO {
+    protected override interactionsEnabled =
+      options.interactions?.enabled !== false;
+  }
   return {
-    MatrixGatewayDO,
+    MatrixGatewayDO: ConfiguredMatrixGatewayDO,
     fetch: async (request, env, ctx) => {
       const { pathname } = new URL(request.url);
       if (

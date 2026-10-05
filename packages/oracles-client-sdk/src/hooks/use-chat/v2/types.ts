@@ -1,3 +1,4 @@
+import type { OracleInteraction } from '@ixo/oracles-events/interactions';
 import {
   type BrowserToolCallEventPayload,
   type RenderComponentEventPayload,
@@ -111,6 +112,10 @@ export interface ChatCapabilities {
 }
 
 export interface IMessage {
+  /** Present on runtimes with the durable oracle interaction lifecycle. */
+  requestId?: string;
+  matrixEventId?: string;
+  interaction?: OracleInteraction;
   id: string;
   content: MessageContent;
   type: 'ai' | 'human';

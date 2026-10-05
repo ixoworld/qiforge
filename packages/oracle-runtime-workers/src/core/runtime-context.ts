@@ -167,6 +167,7 @@ export interface EmitAdapter {
  * consumes them through these interfaces.
  */
 export interface AmbientServices {
+  interactions?: RuntimeContext['interactions'];
   config: Record<string, unknown>;
   identity: OracleIdentity;
   availablePlugins: ReadonlySet<string>;
@@ -432,6 +433,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
   const ctx: RuntimeContext<TConfig> = {
     user,
     session,
+    ...(ambient.interactions ? { interactions: ambient.interactions } : {}),
     history: {
       messages,
       recent,

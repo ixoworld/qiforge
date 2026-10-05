@@ -59,6 +59,7 @@ export interface ToolExecutionOptions {
   /** The turn's abort signal: waiting for a slot ends with it. */
   signal?: AbortSignal;
   logger?: Logger;
+  onUncertainOutcome?: () => void;
 }
 
 /** Stable text for a value: object keys sorted, arrays in order. */
@@ -282,6 +283,7 @@ export function createToolExecutionMiddleware(
           sessionId: options.sessionId,
         });
         if (claim.status === 'blocked') {
+          options.onUncertainOutcome?.();
           logger.warn(
             `[tool-execution] ${toolName}: an identical write since ${claim.since} has no known outcome; not run again`,
           );
@@ -296,6 +298,7 @@ export function createToolExecutionMiddleware(
           const output = await handler(request);
           const uncertain = uncertainResultReason(output);
           if (uncertain !== null) {
+            options.onUncertainOutcome?.();
             logger.warn(
               `[tool-execution] ${toolName}: returned a failure that leaves its outcome unknown (${uncertain}); its claim stays in the ledger`,
             );
@@ -305,6 +308,7 @@ export function createToolExecutionMiddleware(
           return output;
         } catch (error) {
           if (isUncertainOutcome(error, options.signal)) {
+            options.onUncertainOutcome?.();
             logger.warn(
               `[tool-execution] ${toolName}: outcome unknown (${error instanceof Error ? error.message.split('\n')[0] : String(error)}); its claim stays in the ledger`,
             );
