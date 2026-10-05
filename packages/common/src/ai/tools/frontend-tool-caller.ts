@@ -51,7 +51,6 @@ export async function callFrontendTool({
     toolType === 'browser' ? 'browser_tool_result' : 'action_call_result';
 
   return new Promise((resolve, reject) => {
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
       clearTimeout(timeoutHandle);
       rootEventEmitter.removeListener(resultEventName, resultHandler);
@@ -83,11 +82,14 @@ export async function callFrontendTool({
       }
     };
 
-    rootEventEmitter.on(resultEventName, resultHandler);
-    timeoutHandle = setTimeout(() => {
+    // Armed before the listener: `cleanup` is only reachable through the
+    // listener, the timer or the dispatch failure below, all of which run
+    // after this line.
+    const timeoutHandle = setTimeout(() => {
       cleanup();
       resolve(frontendOutcomeUnknown(invocationId));
     }, timeout);
+    rootEventEmitter.on(resultEventName, resultHandler);
 
     try {
       const payload = {
@@ -101,7 +103,7 @@ export async function callFrontendTool({
       else new ActionCallEvent({ ...payload, status: 'isRunning' }).emit();
     } catch (error) {
       cleanup();
-      reject(error);
+      reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
 }

@@ -43,6 +43,26 @@ describe.each(['browser', 'agui'] as const)(
         toolType,
         onInvocation,
       });
+    /** How a call settled, so one assertion covers both call kinds. */
+    const settled = (outcome: Promise<unknown>) =>
+      outcome.then(
+        (value) => ({ status: 'resolved', value }),
+        (error: unknown) => ({
+          status: 'rejected',
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    /**
+     * An explicit refusal rejects an AG-UI call and resolves a browser-tool
+     * call with the refused result (the ordinary behaviour of each kind).
+     */
+    const explicitRefusal =
+      toolType === 'agui'
+        ? { status: 'rejected', message: 'Permission denied' }
+        : {
+            status: 'resolved',
+            value: { success: false, error: 'Permission denied' },
+          };
 
     it('listens before dispatch and accepts an immediate result', async () => {
       transport.send.mockImplementation(
@@ -126,13 +146,7 @@ describe.each(['browser', 'agui'] as const)(
           });
         },
       );
-      if (toolType === 'agui')
-        await expect(invoke()).rejects.toThrow('Permission denied');
-      else
-        await expect(invoke()).resolves.toEqual({
-          success: false,
-          error: 'Permission denied',
-        });
+      await expect(settled(invoke())).resolves.toEqual(explicitRefusal);
     });
 
     it('returns a client-reported unknown outcome instead of rejecting it', async () => {
