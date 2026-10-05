@@ -47,6 +47,8 @@ const ISO_DATE = /^\(?\d{4}-\d{2}-\d{2}\)?$/;
 const GROUPED_AMOUNT = /^\d{1,3}(?:[ .,]\d{3})+$/;
 /** E.164 allows 15 digits; national numbers have at least 9 with the trunk prefix. */
 const PHONE_DIGITS = { min: 9, max: 15 };
+/** Fifteen digits with every digit separated still fit: `+1 (234) 567-890-123-45` is 24. */
+const PHONE_MAX_CHARS = 40;
 
 function looksLikePhone(candidate: string): boolean {
   if (!/^[+(]?\d/.test(candidate) || !/\d\)?$/.test(candidate)) return false;
@@ -64,14 +66,17 @@ function containsPhoneNumber(text: string): boolean {
     const digitCounts = pieces.map((p) => p.replace(/\D/g, '').length);
     for (let start = 0; start < pieces.length; start += 1) {
       let digits = 0;
+      let chars = 0;
       for (let end = start; end < pieces.length; end += 1) {
         // A date is never part of a phone number; wider windows keep it.
         if (ISO_DATE.test(pieces[end]!)) break;
-        // Every piece holds a digit, so a window past the longest possible
-        // number only grows: stop there, which keeps the scan linear in the
+        // A window past the longest possible number only grows, so stop
+        // there. Pieces of bare separators (`-`, `(`) carry no digit, hence
+        // the character bound as well: both keep the scan linear in the
         // run's length instead of quadratic in its pieces.
         digits += digitCounts[end]!;
-        if (digits > PHONE_DIGITS.max) break;
+        chars += pieces[end]!.length + 1;
+        if (digits > PHONE_DIGITS.max || chars > PHONE_MAX_CHARS) break;
         if (looksLikePhone(pieces.slice(start, end + 1).join(' '))) return true;
       }
     }

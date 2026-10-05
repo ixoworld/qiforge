@@ -118,4 +118,16 @@ describe('screenFeedbackText cost', () => {
     expect(Date.now() - started).toBeLessThan(500);
     expect(typeof result.ok).toBe('boolean');
   });
+
+  it('is not slowed down by digit runs padded with bare separators', () => {
+    const text = `1 ${Array.from({ length: 4000 }, () => '-').join(' ')} 1`;
+    const started = Date.now();
+    const result = screenFeedbackText(text);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(typeof result.ok).toBe('boolean');
+  });
+
+  it('still finds a phone number written with separated digits', () => {
+    expect(screenFeedbackText('ring +1 (234) 567-890-12 later').ok).toBe(false);
+  });
 });
