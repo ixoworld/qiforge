@@ -10,8 +10,10 @@ iterating and the full matrix once at the end.
   `test/wrangler.test.jsonc`): the SQLite VFS and saver (20 MiB files,
   eviction survival, legacy-file load), the ingest pipeline, reply chains,
   the room-state codec, the task scheduler over real SQLite, the socket.io
-  endpoint over real WebSockets, the shell, and the editor and flows plugin
-  suites that must prove the linkedom bridge on the real runtime.
+  endpoint over real WebSockets (including every
+  [frontend bridge](frontend-bridge.md#tests) invariant), the shell, and the
+  editor and flows plugin suites that must prove the linkedom bridge on the
+  real runtime.
 - `pnpm test:core` — plain-Node suites (`vitest.core.config.ts`): plugin
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, and the
@@ -52,7 +54,8 @@ domain-indexer sub-agents, per-room secrets, the owner-store flush plus
 reset/reload, E2EE Matrix ingress, scheduled tasks including a dedicated
 room, HTTP and Matrix attachments with payload retention, user preferences,
 the Node room-state envelope, the socket.io channel (handshake, browser tool
-and AG-UI round trips, `create_page_room` with the CRDT edit replayed),
+and AG-UI round trips, one executing tab out of two plus the `/health`
+bridge advertisement, `create_page_room` with the CRDT edit replayed),
 gateway restarts (catch-up, creates during a restart), the reset-safety
 drills (gateway and user-object hard resets mid-turn) and the reset-leak
 drills (the room mirror under a burst of gateway resets, the dirty mark

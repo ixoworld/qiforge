@@ -161,6 +161,61 @@ describe('ToolRegistry', () => {
     ).toEqual(['agui_baseline', 'agui_submit', 'agui_cancel']);
     expect(requestCalls).toBe(1);
   });
+
+  const warningLogger = () => {
+    const warn = vi.fn();
+    return {
+      warn,
+      rtCtx: makeRuntimeContext({
+        logger: { log: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+      }),
+    };
+  };
+
+  it('drops a request-time tool that shadows a server tool, with one warning, and the turn goes on', async () => {
+    // A client-declared browser tool must not take the name of a server
+    // tool (the model would call one while the runtime ran the other), and a
+    // client release that declares one must not break every turn either.
+    const reg = new ToolRegistry();
+    const serverTool = makeTool('mutate_topic');
+    reg.register(makePlugin({ name: 'topics', getTools: () => [serverTool] }));
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [makeTool('mutate_topic'), makeTool('open_url')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const tools = await reg.collect(makeBuildCtx(), rtCtx);
+    expect(tools.map((t) => `${t.pluginName}:${t.tool.name}`)).toEqual([
+      'topics:mutate_topic',
+      'portal:open_url',
+    ]);
+    expect(tools[0]?.tool).toBe(serverTool);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(
+      /request tool "mutate_topic" of plugin "portal" dropped .* plugin "topics"/,
+    );
+    expect(reg.toolNames()).toEqual(['mutate_topic', 'open_url']);
+  });
+
+  it('keeps the first of two request-time tools with one name and warns once', async () => {
+    const reg = new ToolRegistry();
+    const first = makeTool('open_url');
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [first, makeTool('open_url')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const tools = await reg.collect(makeBuildCtx(), rtCtx);
+    expect(tools.map((t) => t.tool)).toEqual([first]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(
+      'request tool "open_url" of plugin "portal" dropped',
+    );
+  });
 });
 
 describe('SubAgentRegistry', () => {

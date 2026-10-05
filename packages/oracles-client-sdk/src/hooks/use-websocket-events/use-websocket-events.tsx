@@ -125,22 +125,19 @@ export function useWebSocketEvents(
       // (a dedicated `on(...)` per event name on top of it delivered
       // tool_call / render_component / cache invalidation twice).
 
-      if (
-        browserToolsRef.current &&
-        Object.keys(browserToolsRef.current).length > 0
-      ) {
-        // Listen for browser tool calls
-        newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
-          await executeBrowserToolCall(
-            newSocket,
-            browserToolsRef.current,
-            data,
-          );
-        });
-      }
+      // Tools can arrive after connection: always listen, and read the
+      // current registry only at dispatch. A call is run only for this
+      // connection's own session and only while this connection is current
+      // (a late call to a socket of a previous session or lifecycle is not).
+      newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
+        if (cancelled || data.sessionId !== sessionId) return;
+        await executeBrowserToolCall(newSocket, browserToolsRef.current, data);
+      });
 
       // Listen for AG-UI action calls (always register listener, even if no tools yet)
-      // The listener will check actionToolsRef at execution time
+      // The listener will check actionToolsRef at execution time. Only a
+      // running call of this session is executed; a status frame of an
+      // action that already ran (`done` / `error`) is not a new call.
       newSocket.on(
         'action_call',
         async (data: {
@@ -151,6 +148,12 @@ export function useWebSocketEvents(
           args: Record<string, unknown>;
           status: string;
         }) => {
+          if (
+            cancelled ||
+            data.sessionId !== sessionId ||
+            data.status !== 'isRunning'
+          )
+            return;
           const tool = actionToolsRef.current?.[data.toolName];
           if (!tool) {
             console.error(

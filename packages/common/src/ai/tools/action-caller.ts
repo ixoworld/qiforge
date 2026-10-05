@@ -12,6 +12,8 @@ export interface IAgActionCallerParams {
   toolName: string;
   args: Record<string, unknown>;
   timeout?: number;
+  /** Receives the invocation id the call was sent with (for diagnostics). */
+  onInvocation?: (invocationId: string) => void;
 }
 
 /**
@@ -25,6 +27,7 @@ export async function callAgAction({
   toolName,
   args,
   timeout = 10000, // 10 seconds for UI actions
+  onInvocation,
 }: IAgActionCallerParams): Promise<unknown> {
   return callFrontendTool({
     sessionId,
@@ -33,5 +36,6 @@ export async function callAgAction({
     args,
     toolType: 'agui',
     timeout,
+    onInvocation,
   });
 }

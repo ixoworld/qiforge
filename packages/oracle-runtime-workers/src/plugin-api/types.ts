@@ -874,11 +874,14 @@ export interface OracleTaskInput {
 }
 
 /**
- * Bridge to the user's browser over the realtime channel. Both calls emit the
- * corresponding event (`browser_tool_call` / `action_call`) to the sockets
- * subscribed to `sessionId` and resolve with the browser's answer, rejecting
- * on the browser's `error`, an AG-UI `success: false`, or the timeout —
- * exactly the Node runtime's `callBrowserTool` / `callAgAction` contract.
+ * Bridge to the user's browser over the realtime channel. Each call is one
+ * invocation with its own id, sent (`browser_tool_call` / `action_call`) to
+ * ONE authenticated socket of `sessionId`; only that socket's answer settles
+ * it. It resolves with the browser's answer and rejects on the browser's
+ * `error`, an AG-UI `success: false`, or when no socket could take it. When
+ * the answer cannot arrive — the deadline passed or the socket went — it
+ * resolves with `FRONTEND_OUTCOME_UNKNOWN` (`@ixo/common/ai/frontend-bridge`):
+ * the browser may have performed the action, and it is never sent again.
  */
 export interface FrontendCallSurface {
   callBrowserTool(params: FrontendCallParams): Promise<unknown>;
@@ -889,11 +892,20 @@ export interface FrontendCallSurface {
 
 export interface FrontendCallParams {
   sessionId: string;
+  /** The caller's id; the invocation id the browser sees is `<toolCallId>:<uuid>`. */
   toolCallId: string;
   toolName: string;
   args: Record<string, unknown>;
   /** Default 15 s (browser tools) / 10 s (AG-UI actions), as on Node. */
   timeoutMs?: number;
+  /** Receives the invocation id once the call is registered (for diagnostics). */
+  onInvocation?: (invocationId: string) => void;
+  /**
+   * The turn's abort signal (`ctx.abortSignal`). Aborted before the call is
+   * sent, it rejects as not sent; after, it resolves with
+   * `FRONTEND_OUTCOME_UNKNOWN` at once — the browser may already have run it.
+   */
+  signal?: AbortSignal;
 }
 
 /**

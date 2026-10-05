@@ -2859,6 +2859,94 @@ async function main(): Promise<void> {
   );
 
   await step(
+    'realtime: a browser tool call runs on exactly one of two tabs of the session, and /health advertises the frontend bridge',
+    async () => {
+      const health = (await (await fetch(`${ORACLE_URL}/health`)).json()) as {
+        frontendTools?: unknown;
+      };
+      assert.deepEqual(health.frontendTools, {
+        protocolVersion: 2,
+        execution: 'single-socket',
+        timeoutOutcome: 'unknown',
+      });
+      const c = await client();
+      const s = await c.createSession();
+      const tabs: SocketIoClient[] = [];
+      const stops: Array<() => void> = [];
+      const served: string[] = [];
+      try {
+        for (const name of ['older-tab', 'newer-tab']) {
+          const invocation = await mintAuthInvocation(user, ORACLE_DID);
+          const { client: tab, outcome } = await socketFor(s, { invocation });
+          assert.ok(
+            outcome.ok,
+            `${name} connect failed: ${outcome.ok ? '' : outcome.error}`,
+          );
+          tabs.push(tab);
+          stops.push(
+            tab.serveFrontendTools(async ({ toolName }) => {
+              served.push(`${name}:${toolName}`);
+              if (toolName === 'get_tab_secret') return { secret: name };
+              throw new Error(`unexpected tool ${toolName}`);
+            }),
+          );
+        }
+        const r = await c.stream(
+          s,
+          'Call the get_tab_secret browser tool exactly once and reply with ONLY the exact secret string it returns, nothing else.',
+          {
+            body: {
+              tools: [
+                {
+                  name: 'get_tab_secret',
+                  description:
+                    "Returns the secret string of the user's browser tab.",
+                  schema: {
+                    type: 'object',
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            },
+          },
+        );
+        assert.ok(
+          doneTools(r.events).includes('get_tab_secret'),
+          `no get_tab_secret call; tools: ${toolCalls(r.events).join(', ') || '(none)'}; errors: ${toolErrors(r.events).join(' | ')}`,
+        );
+        const calls = tabs.map(
+          (tab) =>
+            tab.events.filter((e) => e.name === 'browser_tool_call').length,
+        );
+        // Every invocation reached one tab: the counts add up to the calls
+        // the model made, and the older tab received none of them.
+        assert.equal(
+          calls[0],
+          0,
+          `the older tab received ${calls[0]} call(s); served: ${served.join(', ')}`,
+        );
+        assert.ok((calls[1] ?? 0) >= 1, `served: ${served.join(', ')}`);
+        const ids = tabs[1]!.events
+          .filter((e) => e.name === 'browser_tool_call')
+          .map((e) => (e.payload as { toolCallId?: string }).toolCallId);
+        assert.equal(
+          new Set(ids).size,
+          ids.length,
+          `invocation ids repeat: ${ids.join(', ')}`,
+        );
+        assert.ok(
+          r.text.includes('newer-tab'),
+          `reply lacks the executing tab's secret: "${r.text.slice(0, 200)}"`,
+        );
+      } finally {
+        for (const stop of stops) stop();
+        for (const tab of tabs) tab.close();
+      }
+    },
+  );
+
+  await step(
     'realtime: an AG-UI action runs through call_ag-ui_agent and its result returns from the browser',
     async () => {
       const c = await client();
