@@ -1,10 +1,21 @@
 import { RunnableLambda } from '@langchain/core/runnables';
 import type { z } from 'zod';
+import {
+  DecisionNotApplicableError,
+  DecisionProviderUnavailableError,
+} from './errors.js';
+import {
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
+  HOST_DECISION_PROVIDER_ID,
+} from './provider-router.js';
 import type {
   DecisionAdapter,
+  DecisionApplicability,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionJudgmentMethod,
   DecisionRegistration,
   DecisionRequest,
 } from './types.js';
@@ -12,6 +23,18 @@ import {
   validateDecisionProviderResult,
   validateDecisionRequest,
 } from './validation.js';
+
+export {
+  DecisionNotApplicableError,
+  DecisionProviderUnavailableError,
+} from './errors.js';
+
+const FULLY_APPLICABLE: DecisionApplicability = {
+  applicable: true,
+  evidenceComplete: true,
+};
+
+const PROVIDER_NATIVE: DecisionJudgmentMethod = { kind: 'provider-native' };
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
@@ -42,21 +65,31 @@ export interface DecisionEvaluator {
   ): Promise<DecisionEvaluation>;
 }
 
-export class DecisionProviderUnavailableError extends Error {
-  constructor() {
-    super(
-      'No DecisionAdapter is configured. Set DECISION_PROVIDER (openrouter-jev or cloudflare-jev), pass a decisionAdapter to the runtime, or configure a test decision mock.',
-    );
-    this.name = 'DecisionProviderUnavailableError';
-  }
-}
-
 export class DecisionRuntime implements DecisionEvaluator {
+  private readonly providers?: DecisionProviderRouter;
+
+  /**
+   * `providers` is either a provider router (several configured providers and
+   * a selection policy) or a single adapter, which is registered as the
+   * default provider with id `HOST_DECISION_PROVIDER_ID` (`host`), the same
+   * id and selection the Workers runtime records for `decisionAdapter`.
+   */
   constructor(
     private readonly registry?: DecisionLookup,
-    private readonly adapter?: DecisionAdapter,
+    providers?: DecisionAdapter | DecisionProviderRouter,
     private readonly logger?: DecisionRuntimeLogger,
-  ) {}
+  ) {
+    if (providers instanceof DecisionProviderRouter) {
+      this.providers = providers;
+    } else if (providers) {
+      this.providers = new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: HOST_DECISION_PROVIDER_ID, adapter: providers },
+        ]),
+        { defaultProviderId: HOST_DECISION_PROVIDER_ID },
+      );
+    }
+  }
 
   async evaluate<TSchema extends z.ZodType>(
     definition: DecisionDefinition<TSchema>,
@@ -96,12 +129,26 @@ export class DecisionRuntime implements DecisionEvaluator {
     request: DecisionRequest,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
-    if (!this.adapter) throw new DecisionProviderUnavailableError();
-
     // `defineDecision` already validates inside `prepare`; this second pass is
     // the safety net for hand-written `DecisionRegistration.prepare`
     // implementations so no adapter ever receives an unbounded request.
     validateDecisionRequest(request);
+
+    // Abstain before any provider is selected or called: missing evidence
+    // must never come back as a negative semantic answer.
+    const applicability = request.applicability ?? FULLY_APPLICABLE;
+    if (!applicability.applicable || !applicability.evidenceComplete) {
+      throw new DecisionNotApplicableError(applicability);
+    }
+
+    const resolution = this.providers?.resolve(
+      registration.name,
+      options?.providerId,
+    );
+    if (!resolution) throw new DecisionProviderUnavailableError();
+    const providerId = resolution.provider.id;
+    const providerSelection = resolution.selectedBy;
+    const adapter = resolution.provider.adapter;
 
     const timeoutMs =
       options?.timeoutMs ??
@@ -116,7 +163,6 @@ export class DecisionRuntime implements DecisionEvaluator {
     const forwardAbort = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', forwardAbort, { once: true });
 
-    const adapter = this.adapter;
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const run = async (): Promise<DecisionEvaluation> => {
@@ -151,7 +197,7 @@ export class DecisionRuntime implements DecisionEvaluator {
 
       const latencyMs = Date.now() - started;
       this.logger?.debug?.(
-        `[decisions] name=${registration.name} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
+        `[decisions] name=${registration.name} providerId=${providerId} selection=${providerSelection} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
       );
 
       return {
@@ -159,9 +205,21 @@ export class DecisionRuntime implements DecisionEvaluator {
           name: registration.name,
           version: registration.version,
         },
+        providerId,
+        providerSelection,
         provider: adapter.provider,
         model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
+        applicability: { ...applicability },
+        judgment: {
+          // An adapter that declares nothing is recorded as provider-native,
+          // which makes no claim that its confidence is calibrated.
+          method: { ...(result.provenance?.method ?? PROVIDER_NATIVE) },
+          ...(result.provenance?.calibration
+            ? { calibration: { ...result.provenance.calibration } }
+            : {}),
+          questionSetVersion: registration.version,
+        },
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
@@ -191,6 +249,8 @@ export class DecisionRuntime implements DecisionEvaluator {
             ...options?.metadata,
             decision_name: registration.name,
             decision_version: registration.version,
+            decision_provider_id: providerId,
+            decision_provider_selection: providerSelection,
             decision_provider: adapter.provider,
             decision_model: adapter.model,
           },

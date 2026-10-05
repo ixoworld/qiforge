@@ -193,7 +193,9 @@ plugins the thread has not loaded, and hands the routed plugin to
 handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
 never written to the checkpointed `loadedPlugins` channel, which stays the
 monotonic record of what `load_capability` loaded. The router fails open — a
-missing provider, a timeout or a malformed verdict preloads nothing and warns
+missing provider, an ambiguous multi-provider configuration (no route or
+default for `runtime.route-capabilities`), a timeout or a malformed verdict
+preloads nothing and warns
 `[capability-router] … status=fallback reason=<error name>`; a preload logs
 `[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
 the same evaluation under `waitUntil` without awaiting it, logs

@@ -24,7 +24,14 @@ implementation, and what is deliberately left out.
   `DECISION_MODEL` env (`openrouter-jev` reusing `OPEN_ROUTER_API_KEY`). The
   one Workers difference: `cloudflare-jev` runs through the Worker's `AI`
   binding when one is declared, so no Cloudflare account credentials are
-  needed there. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
+  needed there. Workers-only: multi-provider routing
+  (`createOracleWorker({ decisionProviders, decisionProviderPolicy })`, the
+  env provider registered beside host providers as the default, `providerId`
+  and selection provenance on evaluations), applicability gating
+  (`DecisionNotApplicableError`), judgment-method provenance, Final Decision
+  Subject receipts and the isolation probe, all from `@ixo/common`. The Node
+  runtime constructs `DecisionRuntime` with a single adapter and gets the
+  shared applicability and provenance behaviour, but not the host options. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
   `src/core/capability-router.ts`) is the first runtime consumer of Decisions
   on both runtimes, with identical semantics: the shared
   `capabilityRouteDecision` predicts the on-demand plugin a message needs,
