@@ -42,7 +42,11 @@ import {
   TASK_STATUSES,
   TaskScheduleSchema,
 } from './spec';
-import { TaskApprovalRequestSchema } from './approval';
+import {
+  TaskApprovalRequestSchema,
+  TaskApprovalReceiptSchema,
+  type TaskApprovalReceipt,
+} from './approval';
 
 /**
  * A stored task. Extends the plugin-api record with the approval markers:
@@ -407,6 +411,12 @@ export class TasksStore {
       `CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at)`,
     );
     await this.db.run(`
+      CREATE TABLE IF NOT EXISTS task_approval_receipts (
+        request_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        receipt_json TEXT NOT NULL
+      )`);
+    await this.db.run(`
       CREATE TABLE IF NOT EXISTS task_runs (
         run_id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL,
@@ -516,6 +526,26 @@ export class TasksStore {
       `UPDATE tasks SET approved_at = NULL, approval_note = NULL,
       pending_approval_at = NULL, approval_request_json = NULL WHERE id = ?`,
       [id],
+    );
+  }
+
+  async recordApproval(receipt: TaskApprovalReceipt): Promise<void> {
+    await this.setup();
+    const parsed = TaskApprovalReceiptSchema.parse(receipt);
+    await this.db.run(
+      `INSERT INTO task_approval_receipts (request_id, task_id, receipt_json) VALUES (?, ?, ?)`,
+      [parsed.approvalRequestId, parsed.taskId, JSON.stringify(parsed)],
+    );
+  }
+
+  async approvalReceipts(taskId: string): Promise<TaskApprovalReceipt[]> {
+    await this.setup();
+    const rows = await this.db.exec<{ receipt_json: string }>(
+      `SELECT receipt_json FROM task_approval_receipts WHERE task_id = ? ORDER BY rowid`,
+      [taskId],
+    );
+    return rows.map((row) =>
+      TaskApprovalReceiptSchema.parse(JSON.parse(row.receipt_json)),
     );
   }
 

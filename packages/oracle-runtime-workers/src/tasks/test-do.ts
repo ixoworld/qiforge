@@ -52,6 +52,7 @@ export type SendMode =
   | 'fail-transient-once'
   | 'lost-response-once'
   | 'fail'
+  | 'hang-before-send'
   | 'hang';
 
 /**
@@ -246,6 +247,8 @@ export class TasksTestDO extends DurableObject {
           return Promise.resolve({ roomId });
         },
         sendText: (roomId: string, body: string, opts?: { txnId?: string }) => {
+          if (this.sendMode === 'hang-before-send')
+            return new Promise<string>(() => undefined);
           if (
             this.sendMode === 'fail' ||
             (this.failingBody !== null && body.includes(this.failingBody))
@@ -470,9 +473,13 @@ export class TasksTestDO extends DurableObject {
     return surface.resolveApproval(taskId, decision, note, requestId);
   }
 
+  async approvalReceipts(taskId: string) {
+    return this.ready().approvalReceipts(taskId);
+  }
+
   /**
-   * `resolve_task_approval` the way the tool execution middleware runs it:
-   * it declares no effect, so it holds the object's single write slot for
+   * A trusted host approval action while another caller holds the write slot:
+   * it holds the object's single write slot for
    * the whole call.
    */
   async resolveApprovalAsTool(

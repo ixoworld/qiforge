@@ -147,6 +147,33 @@ describe('SandboxPlugin (Workers port)', () => {
     );
   });
 
+  it('does not infer MCP read effects from a read-looking tool name without an upstream hint', async () => {
+    upstream.push({
+      name: 'list_external',
+      description: 'upstream text',
+      schema: z.object({}),
+      invoke: async () => 'result',
+    });
+    upstream.push({
+      name: 'trusted_read',
+      description: 'upstream read text',
+      annotations: { readOnlyHint: true },
+      schema: z.object({}),
+      invoke: async () => 'result',
+    });
+    const tools = await new SandboxPlugin({
+      mcpClientFactory: factory,
+    }).getRequestTools(makeCtx());
+    expect(tools.find((tool) => tool.name === 'list_external')).toMatchObject({
+      effect: 'write',
+      description: 'upstream text',
+    });
+    expect(tools.find((tool) => tool.name === 'trusted_read')).toMatchObject({
+      effect: 'read',
+      annotations: { readOnlyHint: true },
+    });
+  });
+
   it('lists definitions without credentials and sends only host-selected credentials at execution', async () => {
     const plugin = new SandboxPlugin({
       mcpClientFactory: factory,

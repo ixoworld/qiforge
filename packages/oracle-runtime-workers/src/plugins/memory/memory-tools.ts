@@ -448,6 +448,7 @@ function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
     description: mcpTool.description,
     schema: mcpTool.schema,
     annotations: mcpTool.annotations,
+    effect: mcpTool.annotations?.readOnlyHint === true ? 'read' : 'write',
     handler: async (args) => mcpTool.invoke(args),
   };
 }

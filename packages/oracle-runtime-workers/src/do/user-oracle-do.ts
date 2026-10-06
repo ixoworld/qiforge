@@ -1,5 +1,9 @@
 import { ChannelTurns } from '../channels/turns';
 import {
+  TaskApprovalDecisionSchema,
+  type TaskApprovalDecision,
+} from '../tasks/approval';
+import {
   WriteFingerprintSchema,
   WriteReconciliationSchema,
   type WriteReconciliation,
@@ -3651,6 +3655,32 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async outstandingWrites(identity: TurnIdentity) {
       await this.ready(identity);
       return this.runStore!.listClaims();
+    }
+    async taskApproval(
+      identity: TurnIdentity,
+      taskId: string,
+      decision?: TaskApprovalDecision,
+    ) {
+      await this.ready(identity);
+      const tasks = this.taskScheduler!.surface;
+      if (!decision)
+        return {
+          task: await tasks.get(taskId),
+          receipts: await this.taskScheduler!.approvalReceipts(taskId),
+        };
+      const parsed = TaskApprovalDecisionSchema.parse(decision);
+      const result = await tasks.resolveApproval(
+        taskId,
+        parsed.decision,
+        parsed.note,
+        parsed.approvalRequestId,
+      );
+      if (result.resolved) this.markDirty();
+      return {
+        ...result,
+        task: await tasks.get(taskId),
+        receipts: await this.taskScheduler!.approvalReceipts(taskId),
+      };
     }
 
     async reconcileWrite(

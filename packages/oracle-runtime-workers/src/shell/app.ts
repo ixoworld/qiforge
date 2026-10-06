@@ -64,6 +64,7 @@ import {
   type FeedbackShellOptions,
 } from '../feedback/submit';
 import { z } from 'zod';
+import { TaskApprovalDecisionSchema } from '../tasks/approval';
 import {
   WriteFingerprintSchema,
   WriteReconciliationSchema,
@@ -556,6 +557,39 @@ export function createShell(
         identityOf(auth, c.req.raw.headers),
       ),
     );
+  });
+  app.use(
+    '/task-approvals/*',
+    bodyLimit({
+      maxSize: 8192,
+      onError: (c) => c.json({ message: 'Request is too large.' }, 413),
+    }),
+  );
+  app.on(['GET', 'POST'], '/task-approvals/:taskId', async (c) => {
+    const auth = c.get('auth');
+    if (auth.via !== 'invocation')
+      return c.json({ message: 'A signed invocation is required.' }, 401);
+    const taskId = c.req.param('taskId');
+    if (!/^task_[A-Za-z0-9_-]+$/.test(taskId))
+      return c.json({ message: 'Invalid task ID.' }, 400);
+    if (c.req.method === 'GET')
+      return c.json(
+        await userStub(c.env, auth.userDid).taskApproval(
+          identityOf(auth, c.req.raw.headers),
+          taskId,
+        ),
+      );
+    const parsed = TaskApprovalDecisionSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json({ message: 'Invalid approval decision.' }, 400);
+    const result = await userStub(c.env, auth.userDid).taskApproval(
+      identityOf(auth, c.req.raw.headers),
+      taskId,
+      parsed.data,
+    );
+    return c.json(result, result.resolved ? 200 : 409);
   });
   app.post('/write-reconciliations/:fingerprint', async (c) => {
     const auth = c.get('auth');

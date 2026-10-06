@@ -622,6 +622,7 @@ export class SandboxPlugin extends OraclePlugin {
       description: tool.description,
       schema: tool.schema,
       annotations: tool.annotations,
+      effect: tool.annotations?.readOnlyHint === true ? 'read' : 'write',
       handler: async (args) => tool.invoke(args),
     }));
 

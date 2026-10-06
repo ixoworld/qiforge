@@ -369,7 +369,16 @@ describe('before-action approval flow', () => {
     await s.tick(Date.now());
     const turns = await s.turnRequests();
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.message).toContain('fix the title first');
+    expect(turns[0]?.message).not.toContain('fix the title first');
+    expect(await s.approvalReceipts(created.id)).toEqual([
+      expect.objectContaining({
+        taskId: created.id,
+        actorDid: 'did:ixo:taskstestuser',
+        decision: 'approve',
+        note: 'fix the title first',
+        digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
     expect(turns[0]?.message).toContain('Publish the post.');
     t = await s.get(created.id);
     expect(t?.status).toBe('completed');
@@ -1337,7 +1346,7 @@ describe('approval: the approved run executes on the alarm', () => {
     await s.tick(Date.now());
     const turns = await s.turnRequests();
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.message).toContain('fix the title first');
+    expect(turns[0]?.message).not.toContain('fix the title first');
     const task = await s.get(created.id);
     expect(task?.status).toBe('completed');
     expect(task?.lastResult?.ok).toBe(true);
@@ -1363,7 +1372,10 @@ describe('approval: the approved run executes on the alarm', () => {
 
     await s.tick(Date.now());
     expect(await s.turnRequests()).toHaveLength(1);
-    expect((await s.turnRequests())[0]?.message).toContain('go');
+    expect((await s.turnRequests())[0]?.message).not.toContain(
+      'approved this run with a note',
+    );
+    expect((await s.approvalReceipts(created.id))[0]?.note).toBe('go');
     expect((await s.get(created.id))?.status).toBe('completed');
 
     // Neither another tick nor another reset runs it again.
@@ -1883,6 +1895,46 @@ describe('dedicated rooms by cadence', () => {
 });
 
 describe('approval requests across a reset', () => {
+  it('recovers a reset before the first approval message reaches Matrix', async () => {
+    const s = stub('approval-reset-before-send');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Before send',
+      intent: 'Publish once.',
+      dedicatedRoom: 'no',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('hang-before-send');
+    void s.tick(Date.parse(at) + 1);
+    await waitFor(async () => Boolean((await s.get(task.id))?.approvalRequest));
+    const pending = await s.get(task.id);
+    expect(pending?.approvalRequest?.delivery).toBe('pending');
+    expect(pending?.nextRunAt).toBeDefined();
+    expect(
+      (await s.sentMessages()).filter((message) =>
+        message.body.includes('needs your approval'),
+      ),
+    ).toEqual([]);
+    await s.simulateReset();
+    await s.setSendBehavior('ok');
+    await s.tick(Date.parse(pending!.nextRunAt!));
+    expect((await s.get(task.id))?.approvalRequest).toEqual({
+      ...pending?.approvalRequest,
+      delivery: 'delivered',
+    });
+    expect(
+      (await s.sentMessages()).filter((message) =>
+        message.body.includes('needs your approval'),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        txnId: `task-approval-${task.id}-${pending?.approvalRequest?.id}`,
+      }),
+    ]);
+    expect(await s.turnRequests()).toEqual([]);
+  });
   it('reissues legacy timestamp approvals rather than executing or stranding them', async () => {
     const s = stub('approval-legacy-migration');
     await s.init();
@@ -1995,14 +2047,19 @@ describe('approval requests across a reset', () => {
       schedule: { kind: 'once', at },
       approval: 'before-action',
     });
-    // The send reaches the room, then the object resets before the
-    // request is recorded on the task.
+    // The send reaches Matrix, then the object resets before acknowledgement.
     await s.setSendBehavior('hang');
     void s.tick(Date.parse(at) + 1);
     await waitFor(async () =>
       (await s.sentMessages()).some((m) =>
         m.body.includes('needs your approval'),
       ),
+    );
+    const before = await s.get(created.id);
+    expect(before?.approvalRequest?.delivery).toBe('pending');
+    expect(before?.nextRunAt).toBeDefined();
+    expect((await s.requestedAlarms()).at(-1)).toBe(
+      Date.parse(before!.nextRunAt!),
     );
     await s.simulateReset();
     await s.setSendBehavior('ok');
@@ -2011,6 +2068,13 @@ describe('approval requests across a reset', () => {
       m.body.includes('needs your approval'),
     );
     expect(requests).toHaveLength(1);
-    expect(pendingApprovalOf((await s.get(created.id))!)).toBeDefined();
+    const recovered = await s.get(created.id);
+    expect(recovered?.approvalRequest).toEqual({
+      ...before?.approvalRequest,
+      delivery: 'delivered',
+    });
+    expect(recovered?.nextRunAt).toBeUndefined();
+    expect(pendingApprovalOf(recovered!)).toBeDefined();
+    expect(await s.turnRequests()).toEqual([]);
   });
 });

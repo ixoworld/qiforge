@@ -10,6 +10,10 @@ import type {
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type { WriteReconciliation } from './write-reconciliation';
 import type { WriteClaimRecord } from './run-store';
+import type {
+  TaskApprovalDecision,
+  TaskApprovalReceipt,
+} from '../tasks/approval';
 import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { TurnUsage } from '../core/turn-budget';
@@ -631,6 +635,15 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  taskApproval(
+    identity: TurnIdentity,
+    taskId: string,
+    decision?: TaskApprovalDecision,
+  ): Promise<{
+    resolved?: boolean;
+    task: import('../plugin-api/types').OracleTaskRecord | null;
+    receipts: TaskApprovalReceipt[];
+  }>;
   outstandingWrites(identity: TurnIdentity): Promise<WriteClaimRecord[]>;
   reconcileWrite(
     identity: TurnIdentity,

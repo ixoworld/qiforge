@@ -36,8 +36,8 @@ const APPROVAL_FIELD_DESCRIPTION =
   "the result. 'before-action' is for runs the user should sign off on first " +
   '(a tweet, a message, a ticket, an email, a publish): when such a task ' +
   'fires it does NOT execute — it posts an approval request into the ' +
-  "user's oracle room and waits. The user approves or declines by replying " +
-  'there; record the decision with `resolve_task_approval` — approval ' +
+  "user's oracle room and waits. The owner approves or declines through " +
+  'the authenticated approval interface — approval ' +
   'starts the run in the background (its result is posted to the room when ' +
   'it finishes), a decline drops it.';
 
@@ -303,6 +303,16 @@ function updateTask(): PluginTool {
       if (!tasks) return TASKS_UNAVAILABLE;
       const { taskId, ...patch } = args;
       try {
+        if (
+          patch.approval === 'never' &&
+          (await tasks.get(taskId))?.approval === 'before-action'
+        ) {
+          return {
+            ok: false,
+            error:
+              'An authenticated owner action is required to remove an approval gate.',
+          };
+        }
         const record = await tasks.update(taskId, patch);
         return { ok: true, ...summarizeRecord(record) };
       } catch (err) {
@@ -372,23 +382,20 @@ function resolveTaskApproval(): PluginTool {
       const tasks = requireTasks(ctx);
       if (!tasks) return TASKS_UNAVAILABLE;
       try {
-        const result = await tasks.resolveApproval(
-          args.taskId,
-          args.outcome === 'approved' ? 'approve' : 'reject',
-          args.note,
-          args.approvalRequestId,
-        );
-        if (!result.resolved) {
+        const task = await tasks.get(args.taskId);
+        if (
+          !task?.approvalRequest ||
+          task.approvalRequest.id !== args.approvalRequestId
+        ) {
           return { ok: false, error: 'No approval is pending for this task.' };
         }
         return {
-          ok: true,
+          ok: false,
+          reviewRequired: true,
           taskId: args.taskId,
-          outcome: args.outcome,
-          note:
-            args.outcome === 'approved'
-              ? "Approved — the run is starting now in the background; its result will be posted to the user's room when it finishes. Tell the user it is running; do not claim a result yet."
-              : 'Decision recorded — the pending run was dropped and nothing was executed.',
+          approvalRequest: task.approvalRequest,
+          error:
+            'Approval requires an authenticated owner action through POST /task-approvals/:taskId. A model tool cannot record the human decision.',
         };
       } catch (err) {
         return failure(err);
@@ -396,8 +403,9 @@ function resolveTaskApproval(): PluginTool {
     },
     {
       name: 'resolve_task_approval',
+      effect: 'read',
       description:
-        "Record the user's decision on a task run that is waiting for approval. 'approved' starts the run right away in the background (its result is posted to the user's room when it finishes); 'declined' drops it without running. Call this when the user answers a pending approval request — pass their requested tweaks in `note`.",
+        'Inspect an exact pending task approval and explain that the owner must approve or decline through the authenticated approval interface. This tool does not record or authorize a decision.',
       schema: resolveApprovalInput,
     },
   );
