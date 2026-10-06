@@ -50,11 +50,17 @@ export class WorkersAiJevDecisionAdapter implements DecisionAdapter {
     options?: DecisionProviderOptions,
   ): Promise<DecisionProviderResult> {
     let payload: unknown;
+    const inputs = {
+      state: request.state,
+      questions: toJevQuestions(request),
+    };
     try {
-      payload = await this.ai.run(this.model, {
-        state: request.state,
-        questions: toJevQuestions(request),
-      });
+      // The binding accepts an AbortSignal in its options; handing it over
+      // stops the inference when the decision times out or is cancelled,
+      // instead of only releasing the caller.
+      payload = await (options?.signal
+        ? this.ai.run(this.model, inputs, { signal: options.signal })
+        : this.ai.run(this.model, inputs));
     } catch (error) {
       if (options?.signal?.aborted) throw error;
       throw new JevDecisionError(

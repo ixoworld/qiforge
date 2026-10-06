@@ -213,7 +213,7 @@ Create a framework-agnostic validator.
 | Option              | Type                 | Description                                                               |
 | ------------------- | -------------------- | ------------------------------------------------------------------------- |
 | `serverDid`         | `string`             | Server's DID (any method supported)                                       |
-| `rootIssuers`       | `string[]`           | DIDs that can self-issue capabilities                                     |
+| `rootIssuers`       | `string[]`           | DIDs that can self-issue capabilities (`'*'`: accept any verified root)   |
 | `didResolver`       | `DIDKeyResolver`     | Resolver for non-`did:key` DIDs                                           |
 | `invocationStore`   | `InvocationStore`    | Custom store for replay protection                                        |
 | `revocationChecker` | `RevocationChecker`  | Check the verified proof chain against a revocation registry (see below)  |
@@ -229,22 +229,26 @@ Create a framework-agnostic validator.
 
 **`validate()`** validates a full invocation — checks signature, capability matching, caveats, replay protection, and resource authorization.
 
-**`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates expiration, and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
+- The reported `capability` (`can`, `with`, `nb`) and the resource check come from the capability ucanto actually authorised. An invocation may carry several capabilities; an unproven one is never reported, wherever it sits in the list. `nb` is the value read through the capability definition's `nb` schema (the value its `derives` checked): caveat fields the schema does not declare are not returned, and it is `undefined` when no caveat is set.
+- Besides `rootIssuers`, an issuer may self-issue on a resource whose URI names its DID exactly or as a whole segment — the DID starts the URI or follows `:` or `/`, and ends it or is followed by `/` (`ixo:tenant/did:key:z6Mk…` or `ixo:tenant/did:key:z6Mk…/files`). A DID that is only a prefix of the named one does not match.
+- The invocation's CID is reserved in the replay store before verification starts, released again if validation fails, and kept until the invocation's own expiry (plus one minute) when it succeeds; a token without expiry keeps the store's default TTL.
+
+**`validateDelegation()`** validates a standalone delegation token — verifies the cryptographic signature of every delegation in the proof chain, checks audience matches `serverDid`, validates the validity window over every proof (the earliest expiry and the latest not-before; a not-before in the future fails with `UNAUTHORIZED`), and ensures chain consistency (each proof's audience matches the child delegation's issuer). Supports `did:key` issuers natively and non-`did:key` issuers (e.g. `did:ixo`) via the configured `didResolver`.
 
 #### `ValidateResult`
 
 Both methods return a `ValidateResult`:
 
-| Field            | Type                                     | Description                                                                                          |
-| ---------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `ok`             | `boolean`                                | Whether validation succeeded                                                                         |
-| `invoker`        | `string`                                 | DID of the invoker/issuer (on success)                                                               |
-| `capability`     | `object`                                 | Validated capability with `can`, `with`, and optional `nb` caveats (on success)                      |
-| `expiration`     | `number \| undefined`                    | Effective expiration (Unix seconds) — the earliest across the delegation chain. Undefined = never.   |
-| `proofChain`     | `string[] \| undefined`                  | Delegation path from root issuer to invoker, e.g. `["did:key:root", "did:key:alice", "did:key:bob"]` |
-| `proofChainCids` | `string[] \| undefined`                  | Canonical CIDs of the verified chain, parents first (the invocation's own CID is last)               |
-| `facts`          | `Record<string, unknown>[] \| undefined` | Facts attached to the invocation/delegation. Undefined if none.                                      |
-| `error`          | `object`                                 | Error with `code` and `message` (on failure)                                                         |
+| Field            | Type                                     | Description                                                                                           |
+| ---------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `ok`             | `boolean`                                | Whether validation succeeded                                                                          |
+| `invoker`        | `string`                                 | DID of the invoker/issuer (on success)                                                                |
+| `capability`     | `object`                                 | Validated capability with `can`, `with`, and optional `nb` caveats (on success)                       |
+| `expiration`     | `number \| undefined`                    | Effective expiration (Unix seconds) — the earliest over every verified delegation. Undefined = never. |
+| `proofChain`     | `string[] \| undefined`                  | Delegation path from root issuer to invoker, e.g. `["did:key:root", "did:key:alice", "did:key:bob"]`  |
+| `proofChainCids` | `string[] \| undefined`                  | Canonical CIDs of the verified chain, parents first (the invocation's own CID is last)                |
+| `facts`          | `Record<string, unknown>[] \| undefined` | Facts attached to the invocation/delegation. Undefined if none.                                       |
+| `error`          | `object`                                 | Error with `code` and `message` (on failure)                                                          |
 
 Error codes: `INVALID_FORMAT`, `INVALID_SIGNATURE`, `UNAUTHORIZED`, `REPLAY`, `EXPIRED`, `CAVEAT_VIOLATION`, `REVOKED`, `REVOCATION_CHECK_FAILED`.
 
@@ -295,8 +299,8 @@ revocations.revoke(await getDelegationCid(delegation));
 ```
 
 The checker **throwing** means "status unknown" and triggers your `revocationFailure` policy;
-returning an array means the answer is authoritative. The check runs _before_ the replay marker is
-written, so a rejected or unverifiable request never burns an invocation's single-use slot.
+returning an array means the answer is authoritative. A request that fails the check releases its
+replay reservation, so a rejected or unverifiable request never burns an invocation's single-use slot.
 
 ### Client Helpers
 
@@ -347,18 +351,29 @@ createCompositeDIDResolver(resolvers: DIDKeyResolver[]): DIDKeyResolver
 
 Resolves `did:ixo` identifiers by querying the IXO blockchain indexer for verification keys.
 
-| Option       | Type     | Description                                |
-| ------------ | -------- | ------------------------------------------ |
-| `indexerUrl` | `string` | Blocksync GraphQL endpoint for DID lookups |
+| Option            | Type       | Description                                                                                                                               |
+| ----------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `indexerUrl`      | `string`   | Blocksync GraphQL endpoint for DID lookups                                                                                                |
+| `fetch`           | `function` | Custom fetch implementation (default: `globalThis.fetch`)                                                                                 |
+| `timeoutMs`       | `number`   | Upper bound for one resolution; the request is aborted and the resolution fails after it (default: `3000`)                                |
+| `cacheTtlMs`      | `number`   | Cache successful resolutions this long; concurrent lookups of one DID share a request. Failures are never cached (default: `0`, no cache) |
+| `cacheMaxEntries` | `number`   | Maximum cached DIDs; the oldest is dropped first (default: `1000`)                                                                        |
+
+A key rotated out of or removed from a DID document stays trusted for up to `cacheTtlMs`. Only
+`publicKeyMultibase` values that are Ed25519 multicodec keys (`0xed01` + 32 bytes) become `did:key`s;
+any other verification method is skipped.
 
 #### `createWebDIDResolver`
 
 Resolves `did:web` identifiers by fetching the DID document from `https://{domain}/.well-known/did.json` (or path-based equivalents) and extracting Ed25519 verification methods.
 
-| Option           | Type       | Description                                                                                |
-| ---------------- | ---------- | ------------------------------------------------------------------------------------------ |
-| `fetch`          | `function` | Custom fetch implementation (default: `globalThis.fetch`)                                  |
-| `fallbackToHttp` | `boolean`  | Retry with `http://` when `https://` fails (default: `false`). Localhost always uses HTTP. |
+| Option            | Type       | Description                                                                                                                                                                                                                            |
+| ----------------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fetch`           | `function` | Custom fetch implementation (default: `globalThis.fetch`)                                                                                                                                                                              |
+| `fallbackToHttp`  | `boolean`  | Retry with `http://` when `https://` fails (default: `false`). Loopback hosts — exactly `localhost`, `127.0.0.1` or `[::1]`, with an optional port — always use HTTP; every other host (including `localhost.example.com`) uses HTTPS. |
+| `timeoutMs`       | `number`   | Upper bound for one resolution; the requests are aborted and the resolution fails after it (default: `3000`)                                                                                                                           |
+| `cacheTtlMs`      | `number`   | Cache successful resolutions this long; concurrent lookups of one DID share a request. Failures are never cached (default: `0`, no cache)                                                                                              |
+| `cacheMaxEntries` | `number`   | Maximum cached DIDs; the oldest is dropped first (default: `1000`)                                                                                                                                                                     |
 
 #### `createLocalDIDResolver`
 
@@ -392,6 +407,16 @@ Chains multiple resolvers. Tries each in order — returns the first successful 
 new InMemoryInvocationStore(options?)
 createInvocationStore(options?)
 ```
+
+| Option              | Type      | Description                                                                                                              |
+| ------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `defaultTtlMs`      | `number`  | TTL for entries added without one, i.e. tokens without expiry (default: 24 h)                                            |
+| `cleanupIntervalMs` | `number`  | Interval of the automatic sweep (default: 1 h)                                                                           |
+| `enableAutoCleanup` | `boolean` | Run the sweep on a timer (default: `true`)                                                                               |
+| `maxEntries`        | `number`  | Size cap; at the cap expired entries are swept (at most once per second), then the oldest are evicted (default: 100 000) |
+
+An evicted entry whose invocation has not expired yet could be presented again, so size the cap
+above the number of distinct invocations expected within their lifetime.
 
 ## DID Support
 
@@ -434,9 +459,19 @@ Implement the `InvocationStore` interface for distributed deployments:
 interface InvocationStore {
   has(cid: string): Promise<boolean>;
   add(cid: string, ttlMs?: number): Promise<void>;
+  // Optional, recommended: one atomic "mark unless marked" step, and its undo.
+  addIfAbsent?(cid: string, ttlMs?: number): Promise<boolean>;
+  delete?(cid: string): Promise<void>;
   cleanup?(): Promise<void>;
 }
 ```
+
+With `addIfAbsent()` the validator marks the CID before verifying the token, so two concurrent
+presentations — also on different instances sharing the store — can never both succeed, and
+`delete()` releases the mark when validation then fails. Without `addIfAbsent()` the validator
+falls back to `has()` + `add()` and serialises concurrent presentations only within one process
+(per store object). `ttlMs` is the token's remaining lifetime plus one minute, or `undefined` for a
+token without expiry.
 
 ## Testing
 

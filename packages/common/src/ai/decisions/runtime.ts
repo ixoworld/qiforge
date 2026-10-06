@@ -22,6 +22,7 @@ import type {
 import {
   validateDecisionProviderResult,
   validateDecisionRequest,
+  validateDecisionTimeoutMs,
 } from './validation.js';
 
 export {
@@ -154,6 +155,14 @@ export class DecisionRuntime implements DecisionEvaluator {
       options?.timeoutMs ??
       registration.timeoutMs ??
       DEFAULT_DECISION_TIMEOUT_MS;
+    // Covers per-call timeouts and hand-written registrations, which do not
+    // go through `defineDecision`.
+    validateDecisionTimeoutMs(
+      timeoutMs,
+      options?.timeoutMs !== undefined
+        ? 'The evaluation'
+        : `Decision "${registration.name}"`,
+    );
     const controller = new AbortController();
     const sourceSignal = options?.signal;
 

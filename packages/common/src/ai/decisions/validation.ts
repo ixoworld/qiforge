@@ -28,6 +28,32 @@ export const DEFAULT_DECISION_LIMITS: DecisionLimits = {
 
 const PROBABILITY_SUM_TOLERANCE = 0.05;
 
+/**
+ * Largest delay `setTimeout` honours. Larger values (and 0, negatives, NaN,
+ * Infinity) make the timer fire at once, which would fail every evaluation
+ * as "timed out".
+ */
+const MAX_DECISION_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * Throws a RangeError unless `timeoutMs` is an integer from 1 to 2^31−1.
+ * `source` names where the value came from, for the error message.
+ */
+export function validateDecisionTimeoutMs(
+  timeoutMs: number,
+  source: string,
+): void {
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_DECISION_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      `${source} timeoutMs must be an integer from 1 to ${MAX_DECISION_TIMEOUT_MS}, got ${String(timeoutMs)}.`,
+    );
+  }
+}
+
 export function validateDecisionRequest(
   request: DecisionRequest,
   limits: DecisionLimits = DEFAULT_DECISION_LIMITS,

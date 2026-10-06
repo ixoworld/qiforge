@@ -1,6 +1,9 @@
 import type { z } from 'zod';
 import type { DecisionDefinition, DecisionRequest } from './types.js';
-import { validateDecisionRequest } from './validation.js';
+import {
+  validateDecisionRequest,
+  validateDecisionTimeoutMs,
+} from './validation.js';
 
 export interface DefineDecisionOptions<TSchema extends z.ZodType> {
   name: string;
@@ -22,6 +25,9 @@ export function defineDecision<TSchema extends z.ZodType>(
   }
   if (!options.description.trim()) {
     throw new Error('Decision description must be non-empty.');
+  }
+  if (options.timeoutMs !== undefined) {
+    validateDecisionTimeoutMs(options.timeoutMs, `Decision "${options.name}"`);
   }
 
   return {

@@ -16,6 +16,7 @@ import { ed25519 } from '@ucanto/principal';
 import { Delegation, UCAN } from '@ucanto/core';
 import { claim } from '@ucanto/validator';
 import { type capability } from '@ucanto/validator';
+import type { Delegation as UcantoDelegation } from '@ucanto/interface';
 import type {
   DIDKeyResolver,
   InvocationStore,
@@ -27,6 +28,182 @@ import { InMemoryInvocationStore } from '../store/memory.js';
 type CapabilityParser = ReturnType<typeof capability<any, any, any>>;
 
 type Verifier = ReturnType<typeof ed25519.Verifier.parse>;
+
+/**
+ * Extra lifetime of a replay mark beyond the token's own expiry. ucanto
+ * refuses an invocation from its expiry second on; the margin covers clock
+ * adjustments between the mark and that check.
+ */
+const REPLAY_MARK_MARGIN_MS = 60_000;
+
+/**
+ * Lifetime of the replay mark for an invocation: until the invocation itself
+ * expires (it is refused afterwards), or undefined — the store's default —
+ * for an invocation without expiry.
+ */
+function replayMarkTtlMs(expiration: unknown): number | undefined {
+  if (typeof expiration !== 'number' || !Number.isFinite(expiration)) {
+    return undefined;
+  }
+  return Math.max(0, expiration * 1000 - Date.now()) + REPLAY_MARK_MARGIN_MS;
+}
+
+/**
+ * CIDs currently being validated, per store, for stores without an atomic
+ * `addIfAbsent()`. The check-and-insert on this set is synchronous, so two
+ * validations of one invocation that share a store object (also through two
+ * validator instances) cannot both pass the replay check while the first is
+ * still verifying.
+ */
+const pendingReplayMarks = new WeakMap<InvocationStore, Set<string>>();
+
+interface ReplayReservation {
+  /** Make the mark permanent (for its TTL) after a successful validation. */
+  commit(): Promise<void>;
+  /** Drop the mark after a failed validation, so the token stays usable. */
+  release(): Promise<void>;
+}
+
+/**
+ * Reserve an invocation CID before verification. Resolves null when the CID
+ * is already used or being validated.
+ */
+async function reserveInvocation(
+  store: InvocationStore,
+  cid: string,
+  ttlMs: number | undefined,
+): Promise<ReplayReservation | null> {
+  if (store.addIfAbsent) {
+    if (!(await store.addIfAbsent(cid, ttlMs))) return null;
+    return {
+      commit: async () => {},
+      release: async () => {
+        await store.delete?.(cid);
+      },
+    };
+  }
+
+  let pending = pendingReplayMarks.get(store);
+  if (!pending) {
+    pending = new Set();
+    pendingReplayMarks.set(store, pending);
+  }
+  if (pending.has(cid)) return null;
+  pending.add(cid);
+  const pendingSet = pending;
+  try {
+    if (await store.has(cid)) {
+      pendingSet.delete(cid);
+      return null;
+    }
+  } catch (err) {
+    pendingSet.delete(cid);
+    throw err;
+  }
+  return {
+    commit: async () => {
+      try {
+        await store.add(cid, ttlMs);
+      } finally {
+        pendingSet.delete(cid);
+      }
+    },
+    release: async () => {
+      pendingSet.delete(cid);
+    },
+  };
+}
+
+/**
+ * True when `resource` names `issuer` exactly or as a whole segment: the DID
+ * starts the URI or follows `:` or `/`, and ends it or is followed by `/`.
+ * A DID that is only a prefix of the named DID (`did:web:victim.co` inside
+ * `…/did:web:victim.com`) does not match.
+ */
+function resourceNamesIssuer(resource: string, issuer: string): boolean {
+  if (!issuer) return false;
+  if (resource === issuer) return true;
+  let from = 0;
+  for (;;) {
+    const at = resource.indexOf(issuer, from);
+    if (at === -1) return false;
+    const before = at === 0 ? undefined : resource[at - 1];
+    const after = resource[at + issuer.length];
+    if (
+      (before === undefined || before === ':' || before === '/') &&
+      (after === undefined || after === '/')
+    ) {
+      return true;
+    }
+    from = at + 1;
+  }
+}
+
+/**
+ * True when `key` is a did:key that parses as an Ed25519 verifier — the only
+ * key type this validator (and ucanto's `ed25519.Verifier`) can verify with.
+ */
+function isEd25519DidKey(key: string): boolean {
+  try {
+    ed25519.Verifier.parse(key);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Earliest finite expiration and latest not-before over a delegation tree,
+ * visiting EVERY proof (not just the first). `delegationOf` maps a tree node
+ * to the delegation that carries the timestamps: the node itself for a raw
+ * delegation, `node.delegation` for a ucanto Authorization.
+ */
+function chainTimeBounds(
+  root: unknown,
+  delegationOf: (node: object) => unknown,
+): { expiration?: number; notBefore?: number } {
+  let expiration: number | undefined;
+  let notBefore: number | undefined;
+  const seen = new Set<object>();
+
+  const visit = (node: unknown): void => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    const delegation = delegationOf(node);
+    if (delegation && typeof delegation === 'object') {
+      if (
+        'expiration' in delegation &&
+        typeof delegation.expiration === 'number' &&
+        Number.isFinite(delegation.expiration)
+      ) {
+        expiration =
+          expiration === undefined
+            ? delegation.expiration
+            : Math.min(expiration, delegation.expiration);
+      }
+      if (
+        'notBefore' in delegation &&
+        typeof delegation.notBefore === 'number' &&
+        Number.isFinite(delegation.notBefore)
+      ) {
+        notBefore =
+          notBefore === undefined
+            ? delegation.notBefore
+            : Math.max(notBefore, delegation.notBefore);
+      }
+    }
+    if ('proofs' in node && Array.isArray(node.proofs)) {
+      for (const proof of node.proofs) visit(proof);
+    }
+  };
+
+  visit(root);
+  return { expiration, notBefore };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 /**
  * Canonical CID string of a proof-chain node.
@@ -75,7 +252,9 @@ export interface CreateValidatorOptions {
 
   /**
    * Optional invocation store for replay protection
-   * If not provided, an in-memory store is used
+   * If not provided, an in-memory store is used. A store that implements
+   * `addIfAbsent()` (and `delete()`) gets race-free marks, also across
+   * instances that share it; see InvocationStore.
    */
   invocationStore?: InvocationStore;
 
@@ -344,8 +523,19 @@ export async function createUCANValidator(
     if (options.didResolver) {
       const result = await options.didResolver(did);
       if ('ok' in result && result.ok.length > 0) {
-        // Return the array of did:key strings (ucanto will parse them)
-        return { ok: result.ok };
+        // Keep only keys ed25519.Verifier can parse. ucanto parses every
+        // returned key outside a try, so one non-Ed25519 or malformed key
+        // listed before the real one would otherwise fail the whole
+        // validation instead of being skipped.
+        const usable = result.ok.filter(isEd25519DidKey);
+        if (usable.length > 0) return { ok: usable };
+        return {
+          error: {
+            name: 'DIDKeyResolutionError' as const,
+            did,
+            message: `No usable Ed25519 key found for ${did}`,
+          },
+        };
       }
       if ('error' in result) {
         return {
@@ -392,7 +582,7 @@ export async function createUCANValidator(
    * Authorization; the array is empty at a self-issued/canIssue root). Deriving
    * the reported chain from it guarantees a forged or unverified proof can never
    * appear in proofChain — even when a canIssue short-circuit (e.g. the
-   * resource-scoped `cap.with.includes(issuer)` self-issue path) stops ucanto
+   * resource-scoped self-issue path, see resourceNamesIssuer) stops ucanto
    * from walking the stapled proofs at all. ucanto only ever attaches a single
    * parent per level, so following proofs[0] captures the whole verified chain.
    */
@@ -511,30 +701,6 @@ export async function createUCANValidator(
   }
 
   /**
-   * Compute the effective (earliest) expiration across the entire delegation chain.
-   * Returns undefined if no expiration is set anywhere in the chain.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function computeEffectiveExpiration(delegation: any): number | undefined {
-    const exp =
-      typeof delegation?.expiration === 'number' &&
-      isFinite(delegation.expiration)
-        ? delegation.expiration
-        : undefined;
-
-    if (!delegation?.proofs || delegation.proofs.length === 0) {
-      return exp;
-    }
-
-    const parentExp = computeEffectiveExpiration(delegation.proofs[0]);
-
-    if (exp !== undefined && parentExp !== undefined) {
-      return Math.min(exp, parentExp);
-    }
-    return exp ?? parentExp;
-  }
-
-  /**
    * Recursively verify signatures across a delegation chain.
    * For each delegation: resolve issuer DID → did:key, verify signature,
    * then check proof chain consistency and recurse into proofs.
@@ -578,18 +744,18 @@ export async function createUCANValidator(
     let sigValid = false;
 
     for (const candidateKey of resolved.ok) {
-      const realVerifier = ed25519.Verifier.parse(candidateKey);
-      const wrappedVerifier = {
-        did: () => issuerDid,
-        verify: (payload: Uint8Array, signature: unknown) =>
-          realVerifier.verify(
-            payload,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SigAlg type mismatch between @ipld/dag-ucan and @ucanto/principal
-            signature as any,
-          ),
-      };
-
       try {
+        const realVerifier = ed25519.Verifier.parse(candidateKey);
+        const wrappedVerifier = {
+          did: () => issuerDid,
+          verify: (payload: Uint8Array, signature: unknown) =>
+            realVerifier.verify(
+              payload,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SigAlg type mismatch between @ipld/dag-ucan and @ucanto/principal
+              signature as any,
+            ),
+        };
+
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto's Verifier type expects a verifier object whose structural shape varies by SignatureAlgorithm; the wrappedVerifier we build above satisfies it at runtime
         if (await UCAN.verifySignature(ucanView, wrappedVerifier as any)) {
           sigValid = true;
@@ -649,6 +815,176 @@ export async function createUCANValidator(
     return { ok: true };
   }
 
+  /**
+   * Steps 6–11 of validate(): authorise the decoded invocation with ucanto's
+   * claim() and derive the result from what ucanto verified. Runs while the
+   * invocation's replay reservation is held.
+   */
+  async function authorizeInvocation(
+    invocation: UcantoDelegation,
+    capabilityDef: CapabilityParser,
+    resource: string,
+  ): Promise<ValidateResult> {
+    // 6. Determine the authorization policy for ucanto's claim().
+    //
+    // SECURITY — the wildcard policy (`rootIssuers: ['*']`, "accept any
+    // root") must NOT be expressed as `canIssue = () => true`. That makes
+    // ucanto treat the INVOKER as a self-issuing root, so it authorizes on
+    // the invocation's own signature alone and NEVER walks or verifies the
+    // attached delegation proofs — while buildProofChain() still reads
+    // proofs[0] blindly and callers trust proofChain[0] as the root (the
+    // row owner). An attacker could then forge a delegation naming any
+    // victim as root and have the request attributed to that victim.
+    //
+    // Instead, in wildcard mode we accept ONLY the structural root of THIS
+    // invocation's proof chain as a root. canIssue returns false for the
+    // invoker and every intermediate, so ucanto is forced to walk the
+    // entire chain and cryptographically verify it (signatures + caveat
+    // attenuation) up to that root. A forged or over-broad proof fails that
+    // verification. Self-issued invocations (no proofs) are unaffected:
+    // their structural root IS the invoker, so canIssue accepts them.
+    const wildcard = options.rootIssuers.includes('*');
+    const structuralRoot = wildcard
+      ? buildProofChain(invocation)[0]
+      : undefined;
+
+    // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
+    const resolvedVerifier = await getServerVerifier();
+    const claimResult = claim(capabilityDef, [invocation], {
+      authority: resolvedVerifier,
+      principal: ed25519.Verifier,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto claim() expects a specific DID resolver signature incompatible with our async resolver
+      resolveDIDKey: resolveDIDKey as any,
+      canIssue: (cap: { with: string }, issuer: string) => {
+        // Explicitly allowlisted roots (non-wildcard config). ucanto still
+        // verifies the chain up to one of these because canIssue is false
+        // for everyone else.
+        if (options.rootIssuers.includes(issuer)) return true;
+        // Resource-scoped self-issue: the resource URI names the issuer
+        // exactly or as a whole segment (see resourceNamesIssuer).
+        if (
+          typeof cap.with === 'string' &&
+          resourceNamesIssuer(cap.with, issuer)
+        )
+          return true;
+        // Wildcard: accept ONLY the structural root of this invocation's
+        // proof chain — never the invoker or an intermediate link (see the
+        // SECURITY note above). ucanto always calls canIssue with the
+        // delegation's DECLARED issuer DID (never a resolved did:key), and
+        // structuralRoot is read from that same declared DID, so a string
+        // match is correct for every DID method (did:key, did:ixo, did:web).
+        if (wildcard && issuer === structuralRoot) return true;
+        return false;
+      },
+      // ucanto's native per-proof-path revocation hook. Left permissive:
+      // revocation is checked ONCE against the whole verified chain after
+      // claim() (see checkRevoked), which batches all CIDs into a single
+      // checker call instead of one network round trip per candidate path.
+      validateAuthorization: () => ({ ok: {} }),
+    });
+
+    const accessResult = await claimResult;
+
+    if (accessResult.error) {
+      // Check if it's a caveat/derives error
+      const errorMsg = accessResult.error.message ?? 'Authorization failed';
+      const isCaveatError =
+        errorMsg.includes('limit') ||
+        errorMsg.includes('caveat') ||
+        errorMsg.includes('exceeds') ||
+        errorMsg.includes('violates');
+
+      return {
+        ok: false,
+        error: {
+          code: isCaveatError ? 'CAVEAT_VIOLATION' : 'UNAUTHORIZED',
+          message: errorMsg,
+        },
+      };
+    }
+
+    // 7. Verify the resource matches. `can`, `with` and `nb` all come from
+    // the capability ucanto actually authorised: claim() tries every
+    // capability of the invocation and returns the first it can prove, so
+    // the invocation's capabilities[0] may be a different, unproven one.
+    // `nb` is the value read through the capability's nb schema (the value
+    // its `derives` checked); fields the schema does not declare are not
+    // part of it.
+    const authorized = accessResult.ok.capability;
+    const authorizedWith = String(authorized.with);
+    const authorizedNb: unknown = authorized.nb;
+    const validatedCap = {
+      can: String(authorized.can),
+      with: authorizedWith,
+      nb:
+        isRecord(authorizedNb) && Object.keys(authorizedNb).length > 0
+          ? authorizedNb
+          : undefined,
+    };
+    if (authorizedWith !== resource) {
+      // Check if it's a wildcard match
+      const isWildcardMatch =
+        (authorizedWith.endsWith('/*') &&
+          resource.startsWith(authorizedWith.slice(0, -1))) ||
+        (authorizedWith.endsWith(':*') &&
+          resource.startsWith(authorizedWith.slice(0, -1)));
+
+      if (!isWildcardMatch) {
+        return {
+          ok: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: `Resource ${authorizedWith} does not match ${resource}`,
+          },
+        };
+      }
+    }
+
+    // 8. Build proof chain and compute effective expiration.
+    // proofChain and the expiry MUST come from the VERIFIED authorization
+    // (see verifiedProofChain) — never from the invocation's raw stapled
+    // proofs — so a forged proof can never be reported as the row-owning
+    // root, and the expiry is the earliest over every delegation ucanto
+    // actually used (the invocation included).
+    const proofChain = verifiedProofChain(accessResult.ok);
+    const proofChainCids = verifiedProofChainCids(accessResult.ok);
+    const { expiration } = chainTimeBounds(accessResult.ok, (node) =>
+      'delegation' in node ? node.delegation : undefined,
+    );
+
+    // 9. Optional policy: refuse tokens that never expire. Such a token can
+    // only ever be neutralized by a revocation record kept forever.
+    if (options.requireExpiration === true && expiration === undefined) {
+      return {
+        ok: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message:
+            'Invocation has no expiration; this validator requires a bounded expiry',
+        },
+      };
+    }
+
+    // 10. Revocation: check the invocation and every VERIFIED delegation in
+    // its proof chain in one batched call. A revoked (or unverifiable)
+    // token fails here, which releases its replay reservation.
+    const revocation = await checkRevoked(proofChainCids);
+    if (revocation) return revocation;
+
+    // 11. Extract facts from the invocation
+    const facts = invocation.facts;
+
+    return {
+      ok: true,
+      invoker: invocation.issuer.did(),
+      capability: validatedCap,
+      expiration,
+      proofChain,
+      proofChainCids,
+      facts: facts && facts.length > 0 ? facts : undefined,
+    };
+  }
+
   return {
     serverDid: options.serverDid,
 
@@ -700,9 +1036,21 @@ export async function createUCANValidator(
           };
         }
 
-        // 5. Check replay protection
+        // 5. Replay protection. The CID is reserved BEFORE any verification
+        // (DID resolution, claim(), revocation are all asynchronous), so two
+        // concurrent presentations of one invocation cannot both pass. The
+        // reservation is released when validation fails afterwards, so a
+        // rejected attempt does not use up the token, and kept for the
+        // invocation's own lifetime when it succeeds.
         const invocationCid = invocation.cid?.toString();
-        if (invocationCid && (await invocationStore.has(invocationCid))) {
+        const reservation = invocationCid
+          ? await reserveInvocation(
+              invocationStore,
+              invocationCid,
+              replayMarkTtlMs(invocation.expiration),
+            )
+          : undefined;
+        if (reservation === null) {
           return {
             ok: false,
             error: {
@@ -712,156 +1060,25 @@ export async function createUCANValidator(
           };
         }
 
-        // 6. Determine the authorization policy for ucanto's claim().
-        //
-        // SECURITY — the wildcard policy (`rootIssuers: ['*']`, "accept any
-        // root") must NOT be expressed as `canIssue = () => true`. That makes
-        // ucanto treat the INVOKER as a self-issuing root, so it authorizes on
-        // the invocation's own signature alone and NEVER walks or verifies the
-        // attached delegation proofs — while buildProofChain() still reads
-        // proofs[0] blindly and callers trust proofChain[0] as the root (the
-        // row owner). An attacker could then forge a delegation naming any
-        // victim as root and have the request attributed to that victim.
-        //
-        // Instead, in wildcard mode we accept ONLY the structural root of THIS
-        // invocation's proof chain as a root. canIssue returns false for the
-        // invoker and every intermediate, so ucanto is forced to walk the
-        // entire chain and cryptographically verify it (signatures + caveat
-        // attenuation) up to that root. A forged or over-broad proof fails that
-        // verification. Self-issued invocations (no proofs) are unaffected:
-        // their structural root IS the invoker, so canIssue accepts them.
-        const wildcard = options.rootIssuers.includes('*');
-        const structuralRoot = wildcard
-          ? buildProofChain(invocation)[0]
-          : undefined;
-
-        // Server verifier is resolved lazily (first call resolves, subsequent calls use cache)
-        const resolvedVerifier = await getServerVerifier();
-        const claimResult = claim(capabilityDef, [invocation], {
-          authority: resolvedVerifier,
-          principal: ed25519.Verifier,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- ucanto claim() expects a specific DID resolver signature incompatible with our async resolver
-          resolveDIDKey: resolveDIDKey as any,
-          canIssue: (cap: { with: string }, issuer: string) => {
-            // Explicitly allowlisted roots (non-wildcard config). ucanto still
-            // verifies the chain up to one of these because canIssue is false
-            // for everyone else.
-            if (options.rootIssuers.includes(issuer)) return true;
-            // Resource-scoped self-issue: the resource URI names the issuer.
-            if (typeof cap.with === 'string' && cap.with.includes(issuer))
-              return true;
-            // Wildcard: accept ONLY the structural root of this invocation's
-            // proof chain — never the invoker or an intermediate link (see the
-            // SECURITY note above). ucanto always calls canIssue with the
-            // delegation's DECLARED issuer DID (never a resolved did:key), and
-            // structuralRoot is read from that same declared DID, so a string
-            // match is correct for every DID method (did:key, did:ixo, did:web).
-            if (wildcard && issuer === structuralRoot) return true;
-            return false;
-          },
-          // ucanto's native per-proof-path revocation hook. Left permissive:
-          // revocation is checked ONCE against the whole verified chain after
-          // claim() (see checkRevoked), which batches all CIDs into a single
-          // checker call instead of one network round trip per candidate path.
-          validateAuthorization: () => ({ ok: {} }),
-        });
-
-        const accessResult = await claimResult;
-
-        if (accessResult.error) {
-          // Check if it's a caveat/derives error
-          const errorMsg = accessResult.error.message ?? 'Authorization failed';
-          const isCaveatError =
-            errorMsg.includes('limit') ||
-            errorMsg.includes('caveat') ||
-            errorMsg.includes('exceeds') ||
-            errorMsg.includes('violates');
-
-          return {
-            ok: false,
-            error: {
-              code: isCaveatError ? 'CAVEAT_VIOLATION' : 'UNAUTHORIZED',
-              message: errorMsg,
-            },
-          };
-        }
-
-        // 7. Verify the resource matches
-        const validatedCap = invocation.capabilities?.[0];
-        if (validatedCap && validatedCap.with !== resource) {
-          // Check if it's a wildcard match
-          const capWith = validatedCap.with as string;
-          const isWildcardMatch =
-            (capWith.endsWith('/*') &&
-              resource.startsWith(capWith.slice(0, -1))) ||
-            (capWith.endsWith(':*') &&
-              resource.startsWith(capWith.slice(0, -1)));
-
-          if (!isWildcardMatch) {
-            return {
-              ok: false,
-              error: {
-                code: 'UNAUTHORIZED',
-                message: `Resource ${validatedCap.with} does not match ${resource}`,
-              },
-            };
+        let accepted = false;
+        try {
+          const result = await authorizeInvocation(
+            invocation,
+            capabilityDef,
+            resource,
+          );
+          if (result.ok) {
+            await reservation?.commit();
+            accepted = true;
+          }
+          return result;
+        } finally {
+          if (!accepted) {
+            // A store that cannot drop the mark leaves the token used; the
+            // validation result stands either way.
+            await reservation?.release().catch(() => undefined);
           }
         }
-
-        // 8. Build proof chain and compute effective expiration.
-        // proofChain MUST come from the VERIFIED authorization (see
-        // verifiedProofChain) — never from the invocation's raw stapled proofs
-        // — so a forged proof can never be reported as the row-owning root.
-        const proofChain = verifiedProofChain(accessResult.ok);
-        const proofChainCids = verifiedProofChainCids(accessResult.ok);
-        const expiration = computeEffectiveExpiration(invocation);
-
-        // 9. Optional policy: refuse tokens that never expire. Such a token can
-        // only ever be neutralized by a revocation record kept forever.
-        if (options.requireExpiration === true && expiration === undefined) {
-          return {
-            ok: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message:
-                'Invocation has no expiration; this validator requires a bounded expiry',
-            },
-          };
-        }
-
-        // 10. Revocation: check the invocation and every VERIFIED delegation in
-        // its proof chain in one batched call. This runs BEFORE the replay
-        // marker is written, so a revoked (or unverifiable) token does not burn
-        // the invocation's single-use slot.
-        const revocation = await checkRevoked(proofChainCids);
-        if (revocation) return revocation;
-
-        // 11. Success! Mark invocation as used for replay protection
-        if (invocationCid) {
-          await invocationStore.add(invocationCid);
-        }
-
-        // 12. Extract facts from the invocation
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- invocation type from Delegation.extract() is complex
-        const facts = (invocation as any).facts as
-          | Record<string, unknown>[]
-          | undefined;
-
-        return {
-          ok: true,
-          invoker: invocation.issuer.did(),
-          capability: validatedCap
-            ? {
-                can: validatedCap.can,
-                with: validatedCap.with,
-                nb: validatedCap.nb as Record<string, unknown> | undefined,
-              }
-            : undefined,
-          expiration,
-          proofChain,
-          proofChainCids,
-          facts: facts && facts.length > 0 ? facts : undefined,
-        };
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
         return { ok: false, error: { code: 'INVALID_FORMAT', message } };
@@ -914,19 +1131,32 @@ export async function createUCANValidator(
           };
         }
 
-        // 5. Check expiration (effective = earliest across chain)
-        const expiration = computeEffectiveExpiration(delegation);
-        if (expiration !== undefined) {
-          const nowSeconds = Math.floor(Date.now() / 1000);
-          if (expiration < nowSeconds) {
-            return {
-              ok: false,
-              error: {
-                code: 'EXPIRED',
-                message: `Delegation expired at ${new Date(expiration * 1000).toISOString()}`,
-              },
-            };
-          }
+        // 5. Check the validity window: the effective expiration is the
+        // earliest and the effective not-before the latest over the
+        // delegation and EVERY proof in its chain (all of which step 6
+        // verifies).
+        const { expiration, notBefore } = chainTimeBounds(
+          delegation,
+          (node) => node,
+        );
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        if (expiration !== undefined && expiration < nowSeconds) {
+          return {
+            ok: false,
+            error: {
+              code: 'EXPIRED',
+              message: `Delegation expired at ${new Date(expiration * 1000).toISOString()}`,
+            },
+          };
+        }
+        if (notBefore !== undefined && notBefore > nowSeconds) {
+          return {
+            ok: false,
+            error: {
+              code: 'UNAUTHORIZED',
+              message: `Delegation is not valid before ${new Date(notBefore * 1000).toISOString()}`,
+            },
+          };
         }
 
         if (options.requireExpiration === true && expiration === undefined) {

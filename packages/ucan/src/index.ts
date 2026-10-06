@@ -119,6 +119,8 @@ export {
 export {
   createIxoDIDResolver,
   createCompositeDIDResolver,
+  DEFAULT_IXO_RESOLVER_TIMEOUT_MS,
+  DEFAULT_IXO_RESOLVER_CACHE_MAX_ENTRIES,
   type IxoDIDResolverConfig,
 } from './did/ixo-resolver.js';
 
@@ -139,6 +141,8 @@ export {
 export {
   InMemoryInvocationStore,
   createInvocationStore,
+  DEFAULT_INVOCATION_STORE_MAX_ENTRIES,
+  type InMemoryInvocationStoreOptions,
 } from './store/memory.js';
 
 // =============================================================================

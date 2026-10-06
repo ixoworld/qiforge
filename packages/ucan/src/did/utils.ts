@@ -117,6 +117,34 @@ export function base58Encode(bytes: Uint8Array): string {
 }
 
 // =============================================================================
+// Ed25519 did:key
+// =============================================================================
+
+/**
+ * Convert a `publicKeyMultibase` value to a did:key, only when it is an
+ * Ed25519 multicodec key: base58btc (`z`) over the varint code 0xed
+ * (`0xed 0x01`) followed by exactly 32 key bytes. Any other value — another
+ * key type, a raw key without the multicodec prefix, another multibase
+ * encoding, malformed base58 — yields null, so callers can skip that
+ * verification method instead of handing an unusable key to the verifier.
+ */
+export function ed25519MultibaseToDidKey(
+  multibase: string,
+): `did:key:${string}` | null {
+  if (!multibase.startsWith('z')) return null;
+  let bytes: Uint8Array;
+  try {
+    bytes = base58Decode(multibase.slice(1));
+  } catch {
+    return null;
+  }
+  if (bytes.length !== 34 || bytes[0] !== 0xed || bytes[1] !== 0x01) {
+    return null;
+  }
+  return `did:key:${multibase}`;
+}
+
+// =============================================================================
 // Hex Encoding/Decoding
 // =============================================================================
 
