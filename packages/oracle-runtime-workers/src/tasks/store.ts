@@ -1,3 +1,9 @@
+import {
+  TopicResearchRequestSchema,
+  ResearchArtifactsSchema,
+  type TopicResearchRequest,
+} from './topic-research';
+import type { ArtifactRef } from '@ixo/common/work';
 /**
  * `tasks` + `task_runs` table access in the USER'S OWN SQLite database — the
  * Workers replacement for the Node runtime's Redis task store. Tasks live in
@@ -299,8 +305,9 @@ function rowToRecord(row: TaskRow): TaskRecord {
   if (row.delivery_room_id !== null) {
     record.deliveryRoomId = row.delivery_room_id;
   }
-  if (row.topic_operation_id !== null && row.topic_request_json !== null) {
+  if (row.topic_operation_id !== null)
     record.topicOperationId = row.topic_operation_id;
+  if (row.topic_request_json !== null) {
     record.topicRequest = TopicDeliverableRequestSchema.parse(
       JSON.parse(row.topic_request_json),
     );
@@ -410,6 +417,9 @@ export class TasksStore {
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at)`,
     );
+    await this.db.run(`CREATE TABLE IF NOT EXISTS topic_research_operations (
+      operation_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
+      request_json TEXT NOT NULL, input_digest TEXT NOT NULL, artifacts_json TEXT NOT NULL DEFAULT '[]')`);
     await this.db.run(`
       CREATE TABLE IF NOT EXISTS task_approval_receipts (
         request_id TEXT PRIMARY KEY,
@@ -572,6 +582,65 @@ export class TasksStore {
     return profile === null || isTaskExecutionProfile(profile)
       ? undefined
       : profile;
+  }
+
+  async insertResearch(
+    operationId: string,
+    taskId: string,
+    request: TopicResearchRequest,
+    inputDigest: string,
+  ): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      'INSERT INTO topic_research_operations(operation_id,task_id,request_json,input_digest) VALUES (?,?,?,?)',
+      [
+        operationId,
+        taskId,
+        JSON.stringify(TopicResearchRequestSchema.parse(request)),
+        inputDigest,
+      ],
+    );
+  }
+  async researchOperation(operationId: string): Promise<{
+    operationId: string;
+    taskId: string;
+    request: TopicResearchRequest;
+    inputDigest: string;
+    artifacts: ArtifactRef[];
+  } | null> {
+    await this.setup();
+    const row = await this.db.get<{
+      task_id: string;
+      request_json: string;
+      input_digest: string;
+      artifacts_json: string;
+    }>(
+      'SELECT task_id,request_json,input_digest,artifacts_json FROM topic_research_operations WHERE operation_id=?',
+      [operationId],
+    );
+    return row
+      ? {
+          operationId,
+          taskId: row.task_id,
+          request: TopicResearchRequestSchema.parse(
+            JSON.parse(row.request_json),
+          ),
+          inputDigest: row.input_digest,
+          artifacts: ResearchArtifactsSchema.parse(
+            JSON.parse(row.artifacts_json),
+          ),
+        }
+      : null;
+  }
+  async recordResearchArtifacts(
+    operationId: string,
+    artifacts: ArtifactRef[],
+  ): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      'UPDATE topic_research_operations SET artifacts_json=? WHERE operation_id=?',
+      [JSON.stringify(ResearchArtifactsSchema.parse(artifacts)), operationId],
+    );
   }
 
   async getTopicOperation(operationId: string): Promise<TaskRecord | null> {

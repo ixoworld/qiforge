@@ -62,6 +62,7 @@ export type MainAgentRequestContext = z.infer<
  * (model selection, prompt section snippets) out of the runtime.
  */
 export interface MainAgentHooks {
+  researchTool?: PluginTool;
   /** Optional model resolver. Default: `ambient.llm.get`. */
   resolveModel?: (
     role: ModelRole,

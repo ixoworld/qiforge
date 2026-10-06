@@ -1659,6 +1659,87 @@ describe('supplied-context Markdown execution', () => {
   });
 });
 
+describe('bounded Topic research model loop', () => {
+  it('binds only the host research tool without collecting registry or private context', async () => {
+    const core = bootCore();
+    let calls = 0;
+    const research = makeTool('run_topic_research', {
+      effect: 'write',
+      schema: z.object({}).strict(),
+      handler: async (_args, ctx) => {
+        calls += 1;
+        return {
+          evidence: 'Committed evidence',
+          privateContext: ctx.history.userContext,
+        };
+      },
+    });
+    const built = await createMainAgent({
+      executionProfile: 'topic-research-v1',
+      registries: new Proxy(core.registries, {
+        get() {
+          throw new Error('Read ordinary registry');
+        },
+      }),
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'run_topic_research', args: {}, id: 'research1' }],
+            [],
+          ],
+        }),
+      ),
+      requestCtx,
+      state: {
+        userContext: { secret: 'PRIVATE_CONTEXT' },
+        loadedPlugins: ['memory'],
+      },
+      hooks: {
+        researchTool: research,
+        getRoomTitle: async () => {
+          throw new Error('Read room title');
+        },
+      },
+    });
+    expect(built.boundToolNames).toEqual(['run_topic_research']);
+    expect(built.systemPrompt).not.toContain('PRIVATE_CONTEXT');
+    expect(built.systemPrompt).not.toContain('French');
+    const result = await built.agent.invoke(
+      { messages: [new HumanMessage('Research frozen evidence')] },
+      { context: built.context },
+    );
+    expect(calls).toBe(1);
+    expect(JSON.stringify(result.messages)).toContain('Committed evidence');
+    expect(JSON.stringify(result.messages)).not.toContain('PRIVATE_CONTEXT');
+  });
+  it('requires the bounded host tool and refuses a read-effect substitute', async () => {
+    const core = bootCore();
+    const args = {
+      executionProfile: 'topic-research-v1',
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, scriptedLlm({})),
+      requestCtx,
+      state: {},
+    } satisfies Parameters<typeof createMainAgent>[0];
+    await expect(createMainAgent(args)).rejects.toThrow(/bounded host/);
+    await expect(
+      createMainAgent({
+        ...args,
+        hooks: {
+          researchTool: makeTool('run_topic_research', { effect: 'read' }),
+        },
+      }),
+    ).rejects.toThrow(/bounded host/);
+  });
+});
+
 // ── Turn-building hardening ─────────────────────────────────────────────────
 
 /** A summarizer model that records what it was handed, and can fail. */

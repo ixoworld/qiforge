@@ -33,60 +33,27 @@ const siblingEnvSchema = z.object({
 const manifest: PluginManifest = {
   title: 'Composio',
   summary:
-    'Hundreds of integrations in one plugin: web search, news, finance, academic research, Gmail, GitHub, Linear, Slack, Google Calendar, Notion, Jira, HubSpot, and much more — all invoked on behalf of the user through Composio. When in doubt, Composio likely has a tool for it.',
+    'Discover Composio integrations and inspect their input schemas. Only COMPOSIO_SEARCH_TOOLS and COMPOSIO_GET_TOOL_SCHEMAS are callable until a verified transport without automatic execution retries is available.',
   whenToUse: [
-    'Composio exposes only a few directly-callable meta-tools: `COMPOSIO_MANAGE_CONNECTIONS` (auth), `COMPOSIO_SEARCH_TOOLS` (discover), and `COMPOSIO_MULTI_EXECUTE_TOOL` (run). Specific app tools (e.g. `GMAIL_SEND_EMAIL`, `COMPOSIO_SEARCH_FINANCE`) are NOT directly callable — discover them first, then run them through `COMPOSIO_MULTI_EXECUTE_TOOL`.',
-    'Standard flow: (1) for any connected-app action call `COMPOSIO_MANAGE_CONNECTIONS` with the toolkit FIRST — if it returns a `redirect_url`, show it as a clickable markdown link and stop; (2) call `COMPOSIO_SEARCH_TOOLS`, describing the action in natural language, to find the exact tool slug(s); (3) if unsure of a tool’s parameters, call `COMPOSIO_GET_TOOL_SCHEMAS` with those slugs to fetch their exact input schema; (4) call `COMPOSIO_MULTI_EXECUTE_TOOL` to execute.',
-    'CRITICAL — `COMPOSIO_MULTI_EXECUTE_TOOL` args are EXACTLY `{ "tools": [{ "tool_slug": "<SLUG>", "arguments": { ... } }], "sync_response_to_workbench": false }` and nothing else — no `session`, `id`, or other top-level keys. NEVER pass a tool name as a top-level key (e.g. `{ "COMPOSIO_SEARCH_FINANCE": {...} }`); always wrap each call inside the `tools` array as `tool_slug` + `arguments`.',
-    'Web, news, finance, academic, and trend searches — and fetching the readable content of a URL — live in the `COMPOSIO_SEARCH_*` family. They need no connection: discover the one you want via `COMPOSIO_SEARCH_TOOLS`, then run it through `COMPOSIO_MULTI_EXECUTE_TOOL`.',
-    'Email, calendar, issue trackers, docs, CRMs (Gmail, Outlook, Google Calendar, GitHub, Linear, Jira, Notion, Slack, HubSpot, …): verify the connection, discover the tool, then execute.',
-    'No native skill covers the requested action — discover what Composio offers with `COMPOSIO_SEARCH_TOOLS` before giving up.',
+    'Discover an integration with `COMPOSIO_SEARCH_TOOLS`, describing the desired action in natural language.',
+    'Inspect exact input schemas with `COMPOSIO_GET_TOOL_SCHEMAS` after discovering the tool slugs.',
+    'Explain available integration capabilities without invoking the discovered app tools.',
   ],
   whenNotToUse: [
+    'Executing an app tool, managing connections, or running `COMPOSIO_MULTI_EXECUTE_TOOL`: the installed SDK can retry consequential calls internally, so execution is blocked until a verified transport without automatic execution retries is available.',
     'A native skill or sub-agent already covers the action more precisely — prefer the skill.',
     'Scraping a complex page that needs JavaScript rendering or main-content extraction — use the Firecrawl sub-agent instead.',
     'IXO entity lookups — use the Domain Indexer.',
     'Normal conversation or general question with no search or external SaaS interaction.',
-    'NEVER write, guess, or fabricate any URL yourself — the only valid auth link is the `redirect_url` returned by `COMPOSIO_MANAGE_CONNECTIONS`. Typing a link from memory is forbidden.',
   ],
   examples: [
     {
-      user: 'What is the current Bitcoin price?',
-      thought:
-        'A search task — no connection needed. Discover the right search tool first.',
+      user: 'Which Composio integration can look up financial prices?',
+      thought: 'Discover available tools without executing them.',
       tool: 'COMPOSIO_SEARCH_TOOLS',
       args: {
         query: 'search the web for live financial / crypto market prices',
       },
-    },
-    {
-      user: '(after COMPOSIO_SEARCH_TOOLS surfaces COMPOSIO_SEARCH_FINANCE)',
-      thought:
-        'Run the discovered tool through the multi-execute meta-tool — wrapped in the tools array, never as a top-level key.',
-      tool: 'COMPOSIO_MULTI_EXECUTE_TOOL',
-      args: {
-        tools: [
-          {
-            tool_slug: 'COMPOSIO_SEARCH_FINANCE',
-            arguments: { query: 'Bitcoin price USD today' },
-          },
-        ],
-        sync_response_to_workbench: false,
-      },
-    },
-    {
-      user: 'Create a Linear issue for this bug',
-      thought:
-        'A SaaS action — verify Linear is connected before discovering or running any Linear tool.',
-      tool: 'COMPOSIO_MANAGE_CONNECTIONS',
-      args: { toolkit: 'linear' },
-    },
-    {
-      user: 'Send an email to the team',
-      thought:
-        'A SaaS action — verify Gmail is connected first, then discover GMAIL_SEND_EMAIL and run it via COMPOSIO_MULTI_EXECUTE_TOOL.',
-      tool: 'COMPOSIO_MANAGE_CONNECTIONS',
-      args: { toolkit: 'gmail' },
     },
   ],
   tags: [

@@ -72,6 +72,7 @@ export const baseEnvSchema = z.object({
    * downstream invocations, so it must not also be a login credential.
    */
   UCAN_ALLOW_BARE_DELEGATION_AUTH: z.enum(['true', 'false']).optional(),
+  TOPIC_RESEARCH_ENABLED: z.enum(['true', 'false']).optional(),
 
   // --- matrix -------------------------------------------------------------
   MATRIX_BASE_URL: z.string().min(1),

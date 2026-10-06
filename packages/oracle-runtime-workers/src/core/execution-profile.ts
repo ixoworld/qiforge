@@ -1,4 +1,7 @@
-export const TASK_EXECUTION_PROFILES = ['supplied-context-markdown'] as const;
+export const TASK_EXECUTION_PROFILES = [
+  'supplied-context-markdown',
+  'topic-research-v1',
+] as const;
 
 export type TaskExecutionProfile = (typeof TASK_EXECUTION_PROFILES)[number];
 

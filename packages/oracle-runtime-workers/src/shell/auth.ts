@@ -26,6 +26,7 @@
 import {
   createIxoDIDResolver,
   createUCANValidator,
+  createUcanStoreRevocationChecker,
   defineCapability,
   type DIDKeyResolver,
   type InvocationStore,
@@ -90,6 +91,7 @@ export interface AuthConfig {
    * legacy fallback. Off unless `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`.
    */
   allowBareDelegation?: boolean;
+  revocationStoreUrl?: string;
 }
 
 /** The auth config of a deployment, from its raw Worker env (shell and user object alike). */
@@ -98,6 +100,7 @@ export function authConfigFromEnv(env: {
   BLOCKSYNC_GRAPHQL_URL: string;
   UCAN_AUTH_MAX_TTL_SECONDS?: string;
   UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
+  UCAN_STORE_URL?: string;
 }): AuthConfig {
   return {
     oracleDid: env.ORACLE_DID,
@@ -106,6 +109,7 @@ export function authConfigFromEnv(env: {
       ? { maxTtlSeconds: Number(env.UCAN_AUTH_MAX_TTL_SECONDS) }
       : {}),
     allowBareDelegation: env.UCAN_ALLOW_BARE_DELEGATION_AUTH === 'true',
+    revocationStoreUrl: env.UCAN_STORE_URL,
   };
 }
 
@@ -182,9 +186,17 @@ async function validateInvocation(
   invocation: string,
   cfg: AuthConfig,
 ): Promise<InvocationVerdict> {
-  const key = await sha256(invocation);
+  const key = await sha256(
+    JSON.stringify({
+      token: invocation,
+      oracleDid: cfg.oracleDid,
+      blocksyncUri: cfg.blocksyncUri,
+      maxTtlSeconds: cfg.maxTtlSeconds,
+      revocationStoreUrl: cfg.revocationStoreUrl,
+    }),
+  );
   const cached = invocationCache.get(key);
-  if (cached) return { ok: true, ...cached };
+  if (cached && !cfg.revocationStoreUrl) return { ok: true, ...cached };
 
   const pending = pendingInvocations.get(key);
   if (pending) return pending;
@@ -205,6 +217,14 @@ async function verifyInvocation(
     rootIssuers: ['*'],
     didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
     invocationStore: reusableInvocations,
+    ...(cfg.revocationStoreUrl
+      ? {
+          revocationChecker: createUcanStoreRevocationChecker({
+            url: cfg.revocationStoreUrl,
+            negativeCacheTtlMs: 0,
+          }),
+        }
+      : {}),
   });
   const result = await validator.validate(
     invocation,
@@ -250,9 +270,16 @@ export async function validateDelegation(
   | { ok: true; userDid: string; expiration: number }
   | { ok: false; error: string }
 > {
-  const key = await sha256(header);
+  const key = await sha256(
+    JSON.stringify({
+      token: header,
+      oracleDid: cfg.oracleDid,
+      blocksyncUri: cfg.blocksyncUri,
+      revocationStoreUrl: cfg.revocationStoreUrl,
+    }),
+  );
   const cached = delegationCache.get(key);
-  if (cached) return { ok: true, ...cached };
+  if (cached && !cfg.revocationStoreUrl) return { ok: true, ...cached };
 
   const validator = await createUCANValidator({
     serverDid: cfg.oracleDid,
@@ -260,6 +287,14 @@ export async function validateDelegation(
     didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
     invocationStore: reusableInvocations,
     requireExpiration: true,
+    ...(cfg.revocationStoreUrl
+      ? {
+          revocationChecker: createUcanStoreRevocationChecker({
+            url: cfg.revocationStoreUrl,
+            negativeCacheTtlMs: 0,
+          }),
+        }
+      : {}),
   });
   const result = await validator.validateDelegation(header);
   if (!result.ok)
@@ -278,6 +313,31 @@ export async function validateDelegation(
   const ttlMs = Math.max(1000, result.expiration * 1000 - Date.now());
   delegationCache.set(key, verdict, Math.min(ttlMs, THREE_MINUTES_MS));
   return { ok: true, ...verdict };
+}
+
+export async function validateCurrentDelegation(
+  raw: string,
+  principalDid: string,
+  cfg: AuthConfig,
+): Promise<void> {
+  if (!cfg.revocationStoreUrl)
+    throw new Error('Current authority requires UCAN_STORE_URL');
+  const validator = await createUCANValidator({
+    serverDid: cfg.oracleDid,
+    rootIssuers: [],
+    didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
+    requireExpiration: true,
+    revocationChecker: createUcanStoreRevocationChecker({
+      url: cfg.revocationStoreUrl,
+      negativeCacheTtlMs: 0,
+    }),
+    revocationFailure: 'closed',
+  });
+  const result = await validator.validateDelegation(raw);
+  if (!result.ok || result.invoker !== principalDid)
+    throw new Error(
+      'Current delegation is absent, expired, revoked, invalid or belongs to another principal',
+    );
 }
 
 function extractInvocation(headers: Headers): string | null {

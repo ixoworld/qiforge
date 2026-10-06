@@ -1,3 +1,5 @@
+import { markdownDigest } from './topic-deliverables';
+import type { TopicResearchRequest } from './topic-research';
 import type {
   TopicDeliverableRequest,
   TopicDeliverableResult,
@@ -124,6 +126,11 @@ export class TasksTestDO extends DurableObject {
   /** Resolvers of hanging turns (`turnMode = 'hang'`), released by `releaseTurns()`. */
   private hanging: Array<() => void> = [];
   private hangingSends: Array<() => void> = [];
+  private researchAuthorized = true;
+  private researchCommits = 0;
+  private researchCommitGate: Promise<void> | undefined;
+  private releaseResearchCommit: (() => void) | undefined;
+  private researchCommitBlocked = false;
   private initOpts: TasksTestInit = {};
   /** The object's write lane, shared by every "tool call" of this fake object. */
   private readonly toolScheduler = new ToolScheduler();
@@ -259,6 +266,33 @@ export class TasksTestDO extends DurableObject {
     return createTaskScheduler({
       db: this.db,
       userDid: TEST_USER_DID,
+      authorizeResearch: async () => {
+        if (!this.researchAuthorized)
+          throw new Error('Current authority revoked');
+      },
+      commitResearch: async (operationId, _request, markdown) => {
+        if (!this.researchAuthorized)
+          throw new Error('Current authority revoked');
+        this.researchCommits += 1;
+        if (this.researchCommitGate) {
+          this.researchCommitBlocked = true;
+          await this.researchCommitGate;
+          this.researchCommitBlocked = false;
+        }
+        return [
+          {
+            resource: 'ixo:filesystem',
+            fileId: `file-${operationId}`,
+            version: 1,
+            cid: `cid-${operationId}`,
+            sha256: await markdownDigest(markdown),
+            name: 'report.md',
+            path: `/.workspaces/${operationId}/report.md`,
+            mediaType: 'text/markdown',
+            bytes: new TextEncoder().encode(markdown).byteLength,
+          },
+        ];
+      },
       oracleDid: 'did:ixo:tasksoracle',
       oracleName: 'TasksTestOracle',
       matrixUserId: TEST_USER_MATRIX_ID,
@@ -402,6 +436,50 @@ export class TasksTestDO extends DurableObject {
   }
   async releaseAlarms(): Promise<void> {
     for (const resolve of this.hangingAlarms.splice(0)) resolve();
+  }
+  async research(
+    action: 'start' | 'cancel' | 'read',
+    operationId: string,
+    request: TopicResearchRequest,
+  ) {
+    if (action === 'read') return this.ready().readTopicResearch(operationId);
+    return action === 'start'
+      ? this.ready().startTopicResearch(operationId, request)
+      : this.ready().cancelTopicResearch(operationId, request);
+  }
+  async researchError(operationId: string, request: TopicResearchRequest) {
+    try {
+      await this.research('start', operationId, request);
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+  async createResearchError(input: OracleTaskInput) {
+    try {
+      await this.create(input);
+      return '';
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+  async setResearchAuthorized(value: boolean) {
+    this.researchAuthorized = value;
+  }
+  async blockResearchCommit() {
+    this.researchCommitGate = new Promise<void>((resolve) => {
+      this.releaseResearchCommit = resolve;
+    });
+  }
+  async isResearchCommitBlocked() {
+    return this.researchCommitBlocked;
+  }
+  async unblockResearchCommit() {
+    this.releaseResearchCommit?.();
+    this.researchCommitGate = undefined;
+  }
+  async researchCommitCount() {
+    return this.researchCommits;
   }
   async startTopicError(
     operationId: string,

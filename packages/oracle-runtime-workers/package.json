@@ -25,7 +25,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./gateway": "./src/gateway-worker.ts",
-    "./prompt": "./src/core/prompt-composer.ts"
+    "./prompt": "./src/core/prompt-composer.ts",
+    "./work": "./src/work/index.ts"
   },
   "files": [
     "src",
@@ -34,6 +35,7 @@
     "!src/**/fixtures/",
     "!src/**/test-do.ts",
     "!src/core/test-fixtures.ts",
+    "!src/work/test-fixtures.ts",
     "!src/plugins/pod-creator/test-fixtures.ts"
   ],
   "dependencies": {

@@ -1,4 +1,9 @@
 import {
+  TopicResearchRequestSchema,
+  TOPIC_RESEARCH_BODY_BYTES,
+  type TopicResearchCommand,
+} from '../tasks/topic-research';
+import {
   authenticateChannel,
   assertActiveChannelBinding,
   channelAuthConfig,
@@ -610,6 +615,61 @@ export function createShell(
     );
     return c.json(result, result.resolved ? 200 : 409);
   });
+
+  app.use('/topic-research/*', async (c, next) => {
+    if (c.env.TOPIC_RESEARCH_ENABLED !== 'true')
+      return c.json({ message: 'Not found.' }, 404);
+    if (c.get('auth')?.via !== 'invocation')
+      return c.json({ message: 'A signed invocation is required.' }, 401);
+    if (!c.env.UCAN_STORE_URL)
+      throw new Error(
+        'Topic research requires current UCAN revocation service',
+      );
+    return next();
+  });
+  app.use(
+    '/topic-research/*',
+    bodyLimit({
+      maxSize: TOPIC_RESEARCH_BODY_BYTES,
+      onError: (c) => c.json({ message: 'Request is too large.' }, 413),
+    }),
+  );
+  app.on(
+    ['PUT', 'GET', 'POST'],
+    ['/topic-research/:operationId', '/topic-research/:operationId/cancel'],
+    async (c) => {
+      const cancelling =
+        c.req.routePath === '/topic-research/:operationId/cancel';
+      if (cancelling !== (c.req.method === 'POST'))
+        return c.json({ message: 'Not found.' }, 404);
+      const operationId = TopicOperationId.safeParse(
+        c.req.param('operationId'),
+      );
+      if (!operationId.success)
+        return c.json({ message: 'Invalid operation ID.' }, 400);
+      let command: TopicResearchCommand;
+      if (c.req.method === 'PUT' || cancelling) {
+        const parsed = TopicResearchRequestSchema.safeParse(
+          await c.req.json().catch(() => null),
+        );
+        if (!parsed.success)
+          return c.json({ message: 'Invalid research request.' }, 400);
+        command = {
+          action: cancelling ? 'cancel' : 'start',
+          request: parsed.data,
+        };
+      } else command = { action: 'read' };
+      const auth = c.get('auth');
+      const result = await userStub(c.env, auth.userDid).topicResearch(
+        identityOf(auth, c.req.raw.headers),
+        operationId.data,
+        command,
+      );
+      return result.ok
+        ? c.json(result.snapshot)
+        : c.json({ message: result.message }, result.status);
+    },
+  );
 
   app.use('/topic-deliverables/*', async (c, next) => {
     if (c.env.TOPIC_DELIVERABLES_ENABLED !== 'true')
