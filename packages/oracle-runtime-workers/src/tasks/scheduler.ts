@@ -284,7 +284,7 @@ function approvalRequestMessage(task: TaskRecord): string {
     task.intent,
     '',
     `Approval request: \`${task.approvalRequest?.id}\` (input digest \`${task.approvalRequest?.digest}\`).`,
-    "Reply here to approve or decline — I'll run it only once you approve.",
+    'Use the authenticated approval interface to approve or decline this exact request.',
   ].join('\n');
 }
 

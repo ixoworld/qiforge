@@ -1909,7 +1909,7 @@ describe('approval requests across a reset', () => {
         dedicatedRoom: 'no',
       });
       await s.blockNextTransaction();
-      void s.tick(Date.parse(at) + 1);
+      const ticking = s.tick(Date.parse(at) + 1);
       await waitFor(() => s.isTransactionBlocked());
       if (change === 'approval')
         await s.update(task.id, { approval: 'before-action' });
@@ -1921,6 +1921,7 @@ describe('approval requests across a reset', () => {
           },
         });
       await s.releaseTransaction();
+      await ticking;
       await s.tick(Date.parse(at) + 2);
       expect(await s.turnRequests()).toEqual([]);
       expect(
