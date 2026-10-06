@@ -44,6 +44,14 @@ import type {
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
   TOPIC_DELIVERABLES_ENABLED?: string;
+  // Live dictation is a separate, explicitly metered service (off by default).
+  TRANSCRIPTION_ENABLED?: string;
+  TRANSCRIPTION_OPENAI_API_KEY?: string;
+  TRANSCRIPTION_ALLOWED_ORIGINS?: string;
+  TRANSCRIPTION_MAX_SECONDS?: string;
+  TRANSCRIPTION_DAILY_SECONDS?: string;
+  TRANSCRIPTION_BILLING_METER?: string;
+  BILLING_ENGINE_URL?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 

@@ -22,6 +22,7 @@ export default defineConfig({
       'src/memory/**/*.test.ts',
       'src/llm/**/*.test.ts',
       'src/attachments/**/*.test.ts',
+      'src/transcription/**/*.test.ts',
     ],
     testTimeout: 30_000,
     hookTimeout: 30_000,

@@ -496,3 +496,20 @@ action) is capped like a read, whatever its `effect`.
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test
 without importing the Worker bootstrap.
+
+## Billable live dictation
+
+Live dictation is opt-in and requires the central billing reservation API proposal to be approved and deployed. See [the protocol and recovery guide](transcription.md). The deprecated Node runtime is unaffected.
+
+| Variable                        | Meaning                                                                                                                                                                                                                      |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TRANSCRIPTION_ENABLED`         | Exact `true` enables admission; absent/false is off                                                                                                                                                                          |
+| `TRANSCRIPTION_OPENAI_API_KEY`  | Dedicated server-side OpenAI project key; never sent to Portal                                                                                                                                                               |
+| `TRANSCRIPTION_ALLOWED_ORIGINS` | Comma-separated exact HTTPS Portal origins; no wildcard                                                                                                                                                                      |
+| `TRANSCRIPTION_MAX_SECONDS`     | Integer recording ceiling, 1–300; default 60                                                                                                                                                                                 |
+| `TRANSCRIPTION_DAILY_SECONDS`   | Required integer per-user daily audio ceiling, at least the recording ceiling, max 86400                                                                                                                                     |
+| `BILLING_ENGINE_URL`            | Exact HTTPS billing-engine origin                                                                                                                                                                                            |
+| `TRANSCRIPTION_BILLING_METER`   | JSON object with approved `serviceSlug`, `productSlug`, `metricSlug`, `eventType`, `quantityProperty`, `unit: "second"`, `denom`, positive integer-string `unitPrice`, `rateCardSlug` and optional exact primitive `filters` |
+| `RATE_LIMIT`                    | Existing native rate-limit binding is required for the unauthenticated ticket-based WebSocket upgrade                                                                                                                        |
+
+The approved meter is checked against the billing catalog; no tariff is seeded by this change. The oracle must be an approved direct-charge submitter using its existing UCAN signing service. Set `NEXT_PUBLIC_ENABLE_VOICE_TRANSCRIPTION=true` separately in the Portal only after the server, catalog, price disclosure, reconciliation process and staging checks are approved. Codex/ChatGPT connection does not bypass admission or fund transcription.
