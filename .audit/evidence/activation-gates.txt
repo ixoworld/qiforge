@@ -1,0 +1,6 @@
+Live acceptance remains blocked.
+An authorized test deployment, configuration location and two distinct test identities have not been supplied for this chat.
+UCAN, Matrix, sandbox, VFS and model-provider integration must be exercised together before activation.
+The devnet endpoints in source are configuration examples, not deployment authorization or live proof.
+The Portal screenshots use actual components with simulated external-service boundaries.
+The sandbox target is principal-isolated and persistent; selected inputs do not establish filesystem or network confinement. Only operator-approved digest-pinned trusted read-only skills are eligible for this slice.

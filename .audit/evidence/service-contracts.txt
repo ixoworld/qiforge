@@ -1,0 +1,14 @@
+Source compatibility only; no live authenticated acceptance was exercised.
+Sandbox: https://github.com/ixoworld/ai-sandbox/blob/bcec8a67dd0d9643e9c491f28d5f2a8f448ccf1e/src/mcp/tools/sandbox.tool.ts
+Verified sandbox_run code/cid input and success/exitCode/output MCP text envelope.
+Skill preparation: https://github.com/ixoworld/ai-sandbox/blob/bcec8a67dd0d9643e9c491f28d5f2a8f448ccf1e/src/mcp/tools/skills.tool.ts
+Verified load_skill success and skillFiles response.
+VFS version API: https://github.com/ixoworld/ixo-virtual-filesystem/blob/b3bc9c7353abb0a1649a32aea9d47c1facd4708d/src/routes/fs.ts#L1503
+Verified GET /files/:id/versions/:version/content under current filesystem authority and metadata cid/version/contentHash.
+History semantics: https://github.com/ixoworld/ixo-virtual-filesystem/blob/b3bc9c7353abb0a1649a32aea9d47c1facd4708d/VERSIONS.md
+Retained versions follow current file authority; purge removes history.
+Upstream scrub limitation: https://github.com/ixoworld/ai-sandbox/blob/bcec8a67dd0d9643e9c491f28d5f2a8f448ccf1e/src/lib/sandbox/sandbox.ts#L927
+Stdout/stderr scrub skips selected values shorter than eight characters. Local receipt scrubbing is under implementation; upstream logs remain an operator concern.
+
+Cloudflare D1 limits (official documentation, inspected this run): https://developers.cloudflare.com/d1/platform/limits/
+The LIKE/GLOB pattern limit is 50 bytes. Workspace recovery uses an exact-match scan below the short /.workspaces prefix; source compatibility does not establish live acceptance.
