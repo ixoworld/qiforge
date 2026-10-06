@@ -89,6 +89,9 @@ export const TEST_ROOM_ID = '!tasks-test-room:example.org';
 export class TasksTestDO extends DurableObject {
   private db: DoSqliteDatabase | undefined;
   private scheduler: TaskScheduler | undefined;
+  private nextTransactionGate: Promise<void> | undefined;
+  private transactionRelease: (() => void) | undefined;
+  private transactionBlocked = false;
   private store: TasksStore | undefined;
 
   private sent: SentMessage[] = [];
@@ -156,6 +159,17 @@ export class TasksTestDO extends DurableObject {
     const db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
     const exec = db.exec.bind(db);
     const run = db.run.bind(db);
+    const transaction = db.transaction.bind(db);
+    db.transaction = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const gate = this.nextTransactionGate;
+      this.nextTransactionGate = undefined;
+      if (gate) {
+        this.transactionBlocked = true;
+        await gate;
+        this.transactionBlocked = false;
+      }
+      return transaction(fn);
+    };
     db.exec = <T extends SqlRow = SqlRow>(sql: string, params?: SqlParams) => {
       this.statementLog?.push({ sql, ...(params ? { params } : {}) });
       return exec<T>(sql, params);
@@ -165,6 +179,19 @@ export class TasksTestDO extends DurableObject {
       return run(sql, params);
     };
     return db;
+  }
+
+  async blockNextTransaction(): Promise<void> {
+    this.nextTransactionGate = new Promise<void>((resolve) => {
+      this.transactionRelease = resolve;
+    });
+  }
+  async isTransactionBlocked(): Promise<boolean> {
+    return this.transactionBlocked;
+  }
+  async releaseTransaction(): Promise<void> {
+    this.transactionRelease?.();
+    this.transactionRelease = undefined;
   }
 
   async startStatementLog(): Promise<void> {

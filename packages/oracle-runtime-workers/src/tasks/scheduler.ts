@@ -1456,6 +1456,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     // ordinary task's turn runs in its delivery room, so that comes first.
     const topic = task.topicOperationId !== undefined;
     const startedAt = new Date(nowMs).toISOString();
+    const fireDigest = await taskApprovalDigest(taskAtFire, startedAt);
     const runId = crypto.randomUUID();
     const txnId = `task-${runId}`;
     const ledger = { runId, state: 'failed' as const };
@@ -1466,6 +1467,21 @@ class AlarmTaskScheduler implements TaskScheduler {
       const started = await this.host.db.transaction(async () => {
         const current = await this.store.get(task.id);
         if (!current || current.status !== 'active') return false;
+        if ((await taskApprovalDigest(current, startedAt)) !== fireDigest)
+          return false;
+        if (current.approval === 'before-action' && !opts.approved)
+          return false;
+        if (
+          !opts.approved &&
+          (!current.nextRunAt || Date.parse(current.nextRunAt) > nowMs)
+        )
+          return false;
+        if (
+          opts.approved &&
+          (current.approvalRequest?.id !== taskAtFire.approvalRequest?.id ||
+            current.approvedAt !== taskAtFire.approvedAt)
+        )
+          return false;
         task = current;
         if (
           opts.approved &&

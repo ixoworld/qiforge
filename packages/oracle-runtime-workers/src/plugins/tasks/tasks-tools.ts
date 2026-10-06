@@ -371,7 +371,7 @@ const resolveApprovalInput = z.object({
     .string()
     .optional()
     .describe(
-      "Anything the user asked to change with their approval (e.g. 'fix the title first') — it is passed into the run's instructions.",
+      'An optional audit note. Instruction changes require an updated task and a new approval; notes never become execution instructions.',
     ),
 });
 

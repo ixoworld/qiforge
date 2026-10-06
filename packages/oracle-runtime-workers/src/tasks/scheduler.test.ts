@@ -1895,6 +1895,47 @@ describe('dedicated rooms by cadence', () => {
 });
 
 describe('approval requests across a reset', () => {
+  it.each(['approval', 'schedule'] as const)(
+    'fences a due snapshot when %s changes before the ledger transaction',
+    async (change) => {
+      const s = stub(`run-snapshot-${change}`);
+      await s.init();
+      const at = inOneMinute();
+      const task = await s.create({
+        title: 'Fenced fire',
+        intent: 'Run frozen inputs.',
+        schedule: { kind: 'once', at },
+        approval: 'never',
+        dedicatedRoom: 'no',
+      });
+      await s.blockNextTransaction();
+      void s.tick(Date.parse(at) + 1);
+      await waitFor(() => s.isTransactionBlocked());
+      if (change === 'approval')
+        await s.update(task.id, { approval: 'before-action' });
+      else
+        await s.update(task.id, {
+          schedule: {
+            kind: 'once',
+            at: new Date(Date.parse(at) + 3600000).toISOString(),
+          },
+        });
+      await s.releaseTransaction();
+      await s.tick(Date.parse(at) + 2);
+      expect(await s.turnRequests()).toEqual([]);
+      expect(
+        (await s.runsFor(task.id)).filter(
+          (run) => run.detail !== 'approval requested',
+        ),
+      ).toEqual([]);
+      const current = await s.get(task.id);
+      expect(current).toMatchObject(
+        change === 'approval'
+          ? { approval: 'before-action' }
+          : { nextRunAt: new Date(Date.parse(at) + 3600000).toISOString() },
+      );
+    },
+  );
   it('recovers a reset before the first approval message reaches Matrix', async () => {
     const s = stub('approval-reset-before-send');
     await s.init();
