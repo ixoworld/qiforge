@@ -1,9 +1,10 @@
 /* eslint-disable no-console */
 import { useOraclesContext } from '../providers/oracles-provider/oracles-context.js';
 
-import { Authz, gqlClient } from '@ixo/oracles-chain-client/react';
+import { gqlClient } from '@ixo/oracles-chain-client/react';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
+import { authzConfigQueryOptions } from './authz-config-query.js';
 
 type Service = {
   type: string;
@@ -33,18 +34,9 @@ export const useOraclesConfig = (
     staleTime: ORACLES_CONFIG_STALE_TIME_MS,
   });
 
-  const { data: authConfig, isLoading: isLoadingAuthConfig } = useQuery({
-    queryKey: ['oracles-config', oracleId, 'authConfig'],
-    queryFn: () =>
-      Authz.getOracleAuthZConfig({
-        oracleDid: oracleId,
-        granterAddress: wallet?.address ?? '',
-        matrixAccessToken: wallet?.matrix.accessToken,
-        matrixHomeServer: wallet?.matrix.homeServer,
-      }),
-    enabled: Boolean(wallet?.address && oracleId),
-    staleTime: ORACLES_CONFIG_STALE_TIME_MS,
-  });
+  const { data: authConfig, isLoading: isLoadingAuthConfig } = useQuery(
+    authzConfigQueryOptions(oracleId, wallet),
+  );
 
   const apiUrl = useMemo(() => {
     if (!data?.service) return null;

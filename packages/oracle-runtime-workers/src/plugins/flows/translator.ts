@@ -21,6 +21,7 @@ import type {
 } from '@ixo/editor/core';
 import { canToType, getActionByCan, typeToCan } from '@ixo/editor/core';
 import { FlowError } from './errors';
+import { rewriteRefTokens, wholeRef } from './ref-syntax';
 import type { Condition, FlowSpecInput, FlowStep } from './types';
 
 /** The compiler's block-id convention (verified: `generateBlockId`). */
@@ -48,8 +49,6 @@ const EVALUATOR_TO_OP: Record<string, Condition['is']> = Object.fromEntries(
     friendly as Condition['is'],
   ]),
 );
-
-const REF_PATTERN = /^\{\{\s*(.+?)\s*\}\}$/;
 
 /**
  * Data refs cross an id boundary. The agent works in STEP ids
@@ -84,17 +83,14 @@ function blockRefToStepRef(ref: string): string {
  * are filled downstream against the same block-id-keyed runtime state; they must
  * therefore carry the block id, or every "{{...}}" resolves to an empty string.
  * Non-output tokens (handlebars helpers like `{{#if}}`, `trigger.payload.*`)
- * contain no ".output." and pass through untouched.
+ * contain no ".output." and pass through untouched. The scan is linear in the
+ * string length (ref-syntax.ts), because it runs on document content.
  */
 function rewriteEmbeddedRefs(
   text: string,
   mapRef: (ref: string) => string,
 ): string {
-  return text.replace(
-    /(\{\{\s*)([^{}]+?)(\s*\}\})/g,
-    (_full, open: string, ref: string, close: string) =>
-      `${open}${mapRef(ref)}${close}`,
-  );
+  return rewriteRefTokens(text, mapRef);
 }
 
 /** Resolve a friendly action name (registry `type`) to its `can` ability string. */
@@ -130,8 +126,8 @@ function isRuntimeRef(value: unknown): value is { $ref: string } {
  */
 function friendlyValueToNb(value: unknown): unknown {
   if (typeof value === 'string') {
-    const match = REF_PATTERN.exec(value);
-    if (match?.[1]) return { $ref: stepRefToBlockRef(match[1]) };
+    const ref = wholeRef(value);
+    if (ref) return { $ref: stepRefToBlockRef(ref) };
     return value.includes('{{')
       ? rewriteEmbeddedRefs(value, stepRefToBlockRef)
       : value;

@@ -266,3 +266,56 @@ it('does not execute again when the object is aborted immediately after admissio
   expect(await recovered.submit(message)).toEqual(admitted);
   expect(await recovered.count()).toBe(1);
 });
+
+describe('channel polls', () => {
+  it('a poll of an admitted request writes nothing and checks the session only when it was bound', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('poll-costs');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    // Admission: the receipt, then the session binding.
+    expect(await stub.hostCalls()).toEqual({ assertSession: 1, changed: 2 });
+    for (let i = 0; i < 5; i += 1)
+      expect(await stub.submit(message)).toEqual(first);
+    expect(await stub.hostCalls()).toEqual({ assertSession: 1, changed: 2 });
+    // A second request is bound to the binding's session (its receipt
+    // and the binding row are written) and checked once.
+    const second = await stub.submit({ ...message, requestId: 'wa:two' });
+    if (!second.ok) throw new Error('Turn rejected');
+    expect(second.result.sessionId).toBe(first.result.sessionId);
+    expect(await stub.hostCalls()).toEqual({ assertSession: 2, changed: 4 });
+    await stub.submit({ ...message, requestId: 'wa:two' });
+    expect(await stub.hostCalls()).toEqual({ assertSession: 2, changed: 4 });
+  });
+
+  it('a request on a deleted session is still refused before it runs', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('poll-deleted-session');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.deleteSession(first.result.sessionId);
+    // An explicit session the binding no longer holds, now deleted.
+    expect(
+      await stub.submit({
+        ...message,
+        requestId: 'wa:late',
+        sessionId: first.result.sessionId,
+      }),
+    ).toEqual({ ok: false, status: 404, message: 'Session deleted' });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it('admits concurrent different requests of one binding into one session, one run each', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('concurrent-requests');
+    const results = await Promise.all(
+      ['wa:a', 'wa:b', 'wa:c'].map((requestId) =>
+        stub.submit({ ...message, requestId }),
+      ),
+    );
+    const ok = results.map((r) => {
+      if (!r.ok) throw new Error('Turn rejected');
+      return r.result;
+    });
+    expect(new Set(ok.map((r) => r.sessionId)).size).toBe(1);
+    expect(new Set(ok.map((r) => r.runId)).size).toBe(3);
+    expect(await stub.count()).toBe(3);
+  });
+});

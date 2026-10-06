@@ -19,9 +19,22 @@ import {
 } from './ydoc-helpers';
 import { setStepInputs } from './edit';
 import { FlowError } from './errors';
+import {
+  MAX_FORM_ANSWERS_BYTES,
+  jsonByteLength,
+  secretLiteralMessage,
+  secretLiteralPaths,
+} from './input-policy';
 import { inferPortType } from './port-types';
 import { readStep } from './read';
 import { stepIdToBlockId } from './translator';
+
+/** Runtime states in which a form's answers belong to the user's submission. */
+const LOCKED_FORM_STATES: readonly string[] = [
+  'running',
+  'completed',
+  'awaiting_readback',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -197,6 +210,27 @@ export function fillForm(
   merge = true,
 ): FillFormResult {
   const { blockId, questions } = readSurveySchema(doc, stepId);
+
+  // Once the user has submitted (or the step is executing), the stored
+  // answers are what downstream steps read; a pre-fill must never replace them.
+  const state = readRuntimeState(doc, blockId)[blockId]?.state;
+  if (typeof state === 'string' && LOCKED_FORM_STATES.includes(state)) {
+    throw new FlowError(
+      'validation_failed',
+      `Step "${stepId}" is ${state}; its answers can no longer be pre-filled.`,
+    );
+  }
+  if (jsonByteLength(answers) > MAX_FORM_ANSWERS_BYTES) {
+    throw new FlowError(
+      'validation_failed',
+      `Form answers may be at most ${MAX_FORM_ANSWERS_BYTES} bytes of JSON.`,
+    );
+  }
+  // Answers are values, not wiring: a secret answer is refused whatever it holds.
+  const secrets = secretLiteralPaths(answers, new Set());
+  if (secrets.length > 0)
+    throw new FlowError('validation_failed', secretLiteralMessage(secrets));
+
   const byName = new Map(questions.map((q) => [q.name, q]));
 
   const applied: string[] = [];

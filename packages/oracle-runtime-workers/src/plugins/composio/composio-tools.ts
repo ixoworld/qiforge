@@ -2,6 +2,7 @@ import { Composio } from '@composio/core';
 import { LangchainProvider } from '@composio/langchain';
 import { z } from 'zod';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
+import { withCallTimeout } from '../mcp-call-timeout';
 
 /**
  * Minimal shape of a LangChain `DynamicStructuredTool` the composio session
@@ -211,9 +212,46 @@ function normalizeArgs(toolName: string, args: unknown): unknown {
 }
 
 /**
+ * Upper bound on one Composio tool call. The Composio SDK gives each HTTP
+ * attempt 60 s and retries a timed-out or failed attempt twice with a short
+ * back-off (about 182 s in the worst case), so this sits just past that and
+ * the SDK's own answer arrives first. What it catches is what the SDK leaves
+ * open: its timer stops once the response headers arrive, so a body that
+ * stalls after them would otherwise be waited on forever.
+ */
+export const COMPOSIO_TOOL_TIMEOUT_MS = 190_000;
+
+/**
+ * A promise that rejects when `signal` aborts (at once if it already has),
+ * plus the call that stops listening. The SDK's LangChain tools take no
+ * signal, so the turn's cancellation is applied by racing against this.
+ */
+function rejectOnAbort(signal: AbortSignal): {
+  promise: Promise<never>;
+  dispose: () => void;
+} {
+  let onAbort = (): void => undefined;
+  const promise = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+  });
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  return {
+    promise,
+    dispose: () => signal.removeEventListener('abort', onAbort),
+  };
+}
+
+/**
  * Wrap a single composio session tool as a {@link PluginTool}. The handler
- * forwards the args through the underlying `invoke` and propagates errors so
- * the agent surfaces a clean failure rather than a silent empty response.
+ * forwards the args through the underlying `invoke`, bounded by
+ * {@link COMPOSIO_TOOL_TIMEOUT_MS} and the turn's abort signal (the request
+ * itself is abandoned, not cancelled: the SDK offers no way to stop it), and
+ * propagates errors so the agent surfaces a clean failure rather than a
+ * silent empty response.
  */
 function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
   return {
@@ -221,8 +259,17 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
     description: sessionTool.description,
     schema: toolSchema(sessionTool.schema),
     handler: async (args, ctx: RuntimeContext) => {
+      const cancelled = rejectOnAbort(ctx.abortSignal);
       try {
-        return await sessionTool.invoke(normalizeArgs(sessionTool.name, args));
+        return await withCallTimeout(
+          () =>
+            Promise.race([
+              sessionTool.invoke(normalizeArgs(sessionTool.name, args)),
+              cancelled.promise,
+            ]),
+          COMPOSIO_TOOL_TIMEOUT_MS,
+          `composio tool ${sessionTool.name}`,
+        );
       } catch (error) {
         const detail =
           error instanceof Error
@@ -232,6 +279,8 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
           `[composio] tool "${sessionTool.name}" failed: ${detail}`,
         );
         throw error;
+      } finally {
+        cancelled.dispose();
       }
     },
   };

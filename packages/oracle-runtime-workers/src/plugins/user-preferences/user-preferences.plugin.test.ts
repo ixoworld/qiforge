@@ -11,7 +11,7 @@ import {
   decodeRoomStateContent,
   ROOM_STATE_EVENT_TYPE,
 } from '../../matrix/room-state-codec';
-import { USER_PREFS_STATE_KEY } from './schema';
+import { MAX_TONE_LENGTH, USER_PREFS_STATE_KEY } from './schema';
 import {
   UserPreferencesStore,
   type RoomStateAccess,
@@ -172,6 +172,102 @@ describe('UserPreferencesStore', () => {
       new UserPreferencesStore(failing, { logger: store['logger'] }).get(ROOM),
     ).resolves.toBeUndefined();
     expect(warnings.some((w) => /gateway down/.test(w))).toBe(true);
+  });
+});
+
+describe('UserPreferencesStore.set never overwrites what it could not read', () => {
+  it('throws without writing when the gateway read fails', async () => {
+    const fake = new FakeRoomState();
+    fake.seed(ROOM, USER_PREFS_STATE_KEY, { data: NODE_FIXTURE });
+    let failReads = true;
+    const flaky: RoomStateAccess = {
+      getRoomStateEvent: async (...args) => {
+        if (failReads) throw new Error('gateway down');
+        return fake.getRoomStateEvent(...args);
+      },
+      sendStateEvent: (...args) => fake.sendStateEvent(...args),
+    };
+    const store = new UserPreferencesStore(flaky);
+
+    await expect(store.set(ROOM, { language: 'es' })).rejects.toThrow(
+      'gateway down',
+    );
+    expect(fake.writes).toBe(0);
+    await expect(fake.stored(ROOM)).resolves.toEqual(NODE_WRITTEN);
+
+    // Once the gateway recovers the same call merges onto the stored fields.
+    failReads = false;
+    const storedFields = Object.fromEntries(
+      Object.entries(NODE_WRITTEN).filter(([key]) => key !== 'updatedAt'),
+    );
+    await expect(store.set(ROOM, { language: 'es' })).resolves.toMatchObject({
+      ...storedFields,
+      language: 'es',
+    });
+  });
+
+  it('still writes when no event exists yet', async () => {
+    const fake = new FakeRoomState();
+    const store = new UserPreferencesStore(fake);
+    await expect(store.set(ROOM, { userName: 'Zed' })).resolves.toMatchObject({
+      userName: 'Zed',
+    });
+    expect(fake.writes).toBe(1);
+  });
+
+  it('the tool reports a failed read as an error, not as an update', async () => {
+    const failing: RoomStateAccess = {
+      getRoomStateEvent: async () => {
+        throw new Error('gateway down');
+      },
+      sendStateEvent: async () => {
+        throw new Error('must not write');
+      },
+    };
+    const [setTool] = new UserPreferencesPlugin().getTools(makeBuildCtx());
+    const ctx = makeRuntimeContext({
+      preferences: new UserPreferencesStore(failing),
+      session: { id: 's1', client: 'portal', requestId: 'r1', roomId: ROOM },
+    });
+    await expect(setTool!.handler({ language: 'es' }, ctx)).resolves.toBe(
+      '[Error updating user preferences: gateway down]',
+    );
+  });
+});
+
+describe('tone length', () => {
+  it('the tool rejects a tone longer than the cap', async () => {
+    const fake = new FakeRoomState();
+    const [setTool] = new UserPreferencesPlugin().getTools(makeBuildCtx());
+    const ctx = makeRuntimeContext({
+      preferences: new UserPreferencesStore(fake),
+      session: { id: 's1', client: 'portal', requestId: 'r1', roomId: ROOM },
+    });
+    expect(
+      setTool!.schema.safeParse({ tone: 'x'.repeat(MAX_TONE_LENGTH + 1) })
+        .success,
+    ).toBe(false);
+    await expect(
+      Promise.resolve().then(() =>
+        setTool!.handler({ tone: 'x'.repeat(MAX_TONE_LENGTH + 1) }, ctx),
+      ),
+    ).rejects.toThrow();
+    expect(fake.writes).toBe(0);
+    expect(
+      setTool!.schema.safeParse({ tone: 'x'.repeat(MAX_TONE_LENGTH) }).success,
+    ).toBe(true);
+  });
+
+  it('an already-stored longer tone is cut to the cap when read', async () => {
+    const fake = new FakeRoomState();
+    // Plain JSON is the legacy envelope the codec still reads.
+    fake.seed(ROOM, USER_PREFS_STATE_KEY, {
+      tone: 'y'.repeat(50_000),
+      userName: 'Zed',
+    });
+    const prefs = await new UserPreferencesStore(fake).get(ROOM);
+    expect(prefs?.tone).toBe('y'.repeat(MAX_TONE_LENGTH));
+    expect(prefs?.userName).toBe('Zed');
   });
 });
 

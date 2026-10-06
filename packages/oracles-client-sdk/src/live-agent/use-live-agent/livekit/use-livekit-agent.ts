@@ -48,14 +48,18 @@ export function useLiveKitAgent(
   // Lazy initialization - only create these when actually needed
   const keyProvider = useMemo(() => new ExternalE2EEKeyProvider(), []);
 
+  // The worker and the room are disposed on unmount. A component that is
+  // mounted again with the same hook state (StrictMode runs effects twice)
+  // gets a new pair through this generation.
+  const [generation, setGeneration] = useState(0);
+
   const worker: Worker | undefined = useMemo(() => {
     // Only create worker in browser environment
     if (typeof window === 'undefined') {
       return undefined;
     }
-    // Worker creation is deferred by useMemo - only runs once
     return new Worker(new URL('livekit-client/e2ee-worker', import.meta.url));
-  }, []);
+  }, [generation]);
 
   const roomOptions = useMemo(() => {
     return {
@@ -68,15 +72,6 @@ export function useLiveKitAgent(
   // Room is created lazily but still on mount - this is acceptable since
   // this hook should only be called when user wants voice/video capability
   const room = useMemo(() => new Room(roomOptions), [roomOptions]);
-
-  // Cleanup worker on unmount
-  useEffect(() => {
-    return () => {
-      if (worker) {
-        worker.terminate();
-      }
-    };
-  }, [worker]);
 
   const { refreshConnectionDetails, existingOrRefreshConnectionDetails } =
     useConnectionDetails();
@@ -159,6 +154,37 @@ export function useLiveKitAgent(
       return response;
     },
   });
+  const updateCallRef = useRef(updateCall);
+  updateCallRef.current = updateCall;
+
+  // Unmounting during a call leaves the room (the microphone is released),
+  // marks the call ended and stops the E2EE worker.
+  const disposedRoomRef = useRef<Room | null>(null);
+  useEffect(() => {
+    if (disposedRoomRef.current === room) {
+      setGeneration((n) => n + 1);
+      return;
+    }
+    return () => {
+      disposedRoomRef.current = room;
+      const call = currentCallRef.current;
+      currentCallRef.current = null;
+      void room.disconnect();
+      worker?.terminate();
+      if (call) {
+        updateCallRef
+          .current({
+            callId: call.callId,
+            callStatus: 'ended',
+            callEndedAt: new Date().toISOString(),
+          })
+          .catch((error: unknown) => {
+            console.error('Failed to mark the call ended:', error);
+          });
+      }
+    };
+  }, [room, worker]);
+
   // Public API
   const startCall = useCallback(
     async ({
@@ -197,7 +223,7 @@ export function useLiveKitAgent(
         }
 
         // Connect to room
-        console.debug('Connecting to room', { callId, encryptionKey });
+        console.debug('Connecting to room', { callId });
         await room.prepareConnection(
           connectionDetails.url,
           connectionDetails.jwt,

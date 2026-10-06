@@ -58,6 +58,19 @@ export abstract class OraclePlugin {
   /** The agent's structured interface to this plugin. */
   abstract readonly manifest: PluginManifest;
 
+  /**
+   * How the agent should work with this plugin once it is in use: the
+   * plugin's working rules, as plain text (markdown, starting at a `###`
+   * heading). Never part of the manifest, the Tier-1 capability block or
+   * `list_capabilities`, so it costs nothing on turns that do not use the
+   * plugin. `load_capability` returns it (once per turn) when it loads the
+   * plugin or the capability router preloaded it for the turn, and the
+   * system prompt carries it on every turn that starts with the plugin
+   * loaded on the thread (or `always` visible) and usable by the user's
+   * delegation.
+   */
+  readonly operatingGuide?: string;
+
   /** Hard dependencies — boot fails if any is missing. */
   readonly dependsOn?: string[];
 

@@ -33,14 +33,15 @@ export async function uploadToSandbox(
   const safeFilename = sanitizeSandboxPath(filename);
   const safePath = sanitizeSandboxPath(destPath);
   const formData = new FormData();
-  // Copy into a fresh ArrayBuffer-backed view so the Blob never sees a
-  // SharedArrayBuffer-typed slice (the DOM lib types reject those).
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  formData.set(
-    'file',
-    new File([copy.buffer], safeFilename, { type: mimetype }),
-  );
+  // A view over a plain ArrayBuffer goes into the Blob as it is (no second
+  // copy of a file of up to 25 MB); only a SharedArrayBuffer-backed one —
+  // which the Blob types reject — is copied.
+  const buffer = bytes.buffer;
+  const part =
+    buffer instanceof ArrayBuffer
+      ? new Uint8Array(buffer, bytes.byteOffset, bytes.byteLength)
+      : Uint8Array.from(bytes);
+  formData.set('file', new File([part], safeFilename, { type: mimetype }));
   formData.set('path', safePath);
   const response = await fetchImpl(`${baseUrl}/artifacts/upload`, {
     method: 'POST',

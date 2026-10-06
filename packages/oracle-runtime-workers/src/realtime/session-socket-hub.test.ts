@@ -164,4 +164,13 @@ describe('SessionSocketHub', () => {
     // The legacy socket has never been pinged: due one interval after open.
     expect(woken.nextPingAt(180_000)).toBe(180_001);
   });
+
+  it('schedules no heartbeat round for a socket that has not authenticated', () => {
+    const hub = new SessionSocketHub<FakeSocket>({ now: () => 1 });
+    const pending = new FakeSocket();
+    hub.add(pending, meta('s1'));
+    expect(hub.nextPingAt(180_000)).toBeNull();
+    hub.update(pending, { userDid: 'did:ixo:u' });
+    expect(hub.nextPingAt(180_000)).toBe(180_001);
+  });
 });

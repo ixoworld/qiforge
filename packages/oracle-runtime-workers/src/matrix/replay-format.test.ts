@@ -19,6 +19,17 @@ describe('formatReplay (Node formatMsg parity)', () => {
     expect(out.formattedBody).toContain('<strong>QiForge:</strong>');
   });
 
+  it('shows raw HTML in a replayed message as text, never as markup', () => {
+    const out = formatReplay({
+      message: 'look <img src=x onerror=alert(1)> and\n\n<script>x()</script>',
+      isOracle: true,
+    });
+    expect(out.formattedBody).not.toContain('<img');
+    expect(out.formattedBody).not.toContain('<script');
+    expect(out.formattedBody).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(out.formattedBody).toContain('&lt;script&gt;');
+  });
+
   it('honours disablePrefix', () => {
     expect(
       formatReplay({ message: 'raw', isOracle: true, disablePrefix: true })

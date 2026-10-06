@@ -2,6 +2,7 @@
  * End-to-end test of the MCP plugin path (memory) against the local harness:
  *
  *   pnpm test:e2e:mcp
+ *   MOCK_MCP_PORT=34676 pnpm test:e2e:mcp   # when 34675 is taken
  *
  * Boots a REAL wire-protocol MCP server in-process (Streamable HTTP via
  * `@modelcontextprotocol/sdk`, stateless mode — see `lib/mock-mcp.ts`; only
@@ -28,7 +29,7 @@ import {
 import { ORACLE_DID, provisionDevVars, startOracle } from './lib/oracle';
 import { startMockMcpServer } from './lib/mock-mcp';
 
-const MOCK_MCP_PORT = 34675;
+const MOCK_MCP_PORT = Number(process.env.MOCK_MCP_PORT ?? 34675);
 
 const results: Array<{
   name: string;

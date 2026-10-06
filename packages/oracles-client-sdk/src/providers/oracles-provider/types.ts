@@ -41,7 +41,14 @@ export interface IOraclesContextProps {
     oracleDid?: string,
   ) => Promise<T>;
   getDelegation: (oracleDid: string) => Promise<string | null>;
-  getInvocation: (oracleDid: string) => Promise<string | null>;
+  /**
+   * The cached invocation for this oracle, or a newly minted one. `fresh`
+   * skips the cache (the oracle refused the cached one).
+   */
+  getInvocation: (
+    oracleDid: string,
+    options?: { fresh?: boolean },
+  ) => Promise<string | null>;
   // AG-UI action management
   /** Actions offered to the agent with each turn (`exposeToAgent` not false). */
   agActions: AgAction[];

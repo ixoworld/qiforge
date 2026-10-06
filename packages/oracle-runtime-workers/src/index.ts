@@ -28,7 +28,12 @@ import {
   type OracleWorkerHooks,
 } from './do/user-oracle-do';
 import { MatrixGatewayDO } from './matrix/gateway-do';
-import { createShell, gateway, type PluginRoute } from './shell/app';
+import {
+  createShell,
+  gateway,
+  type ListModelsOptions,
+  type PluginRoute,
+} from './shell/app';
 import type { RouteExclusion } from './shell/auth';
 import { artifactSweepIntervalMs } from './artifacts/config';
 import { sweepExpiredArtifacts } from './artifacts/sweep';
@@ -51,7 +56,7 @@ export {
   createUserOracleDO,
   type OracleWorkerHooks,
 } from './do/user-oracle-do';
-export { createShell } from './shell/app';
+export { createShell, type ListModelsOptions } from './shell/app';
 export { authenticate } from './shell/auth';
 export {
   createRuntimeCore,
@@ -239,9 +244,14 @@ export interface CreateOracleWorkerOptions {
   authExcludedRoutes?: RouteExclusion[];
   /**
    * Overrides for the model catalog exposed on `GET /models`. Default: the
-   * curated catalog with live OpenRouter prices (`listModels`).
+   * curated catalog with live OpenRouter prices (`listModels`). The second
+   * argument carries the request's `waitUntil` (for background work such as
+   * a price refresh); an override may ignore it.
    */
-  listModels?: (env: OracleWorkerEnv) => unknown | Promise<unknown>;
+  listModels?: (
+    env: OracleWorkerEnv,
+    options?: ListModelsOptions,
+  ) => unknown | Promise<unknown>;
   /**
    * Host hooks for the per-turn agent build — the Node runtime's
    * `opts.hooks.getRoomTitle` / `safetyModel`, resolved per turn against the
@@ -306,7 +316,7 @@ export function createOracleWorker(
           ...core.authExcludedRoutes,
           ...(opts.authExcludedRoutes ?? []),
         ],
-        listModels: opts.listModels ?? ((e) => listModels(e)),
+        listModels: opts.listModels ?? ((e, options) => listModels(e, options)),
         banner: {
           name: opts.config.name,
           description: opts.config.description,

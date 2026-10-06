@@ -241,6 +241,13 @@ export const baseEnvSchema = z.object({
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
   CORS_ORIGIN: z.string().default('*'),
+  /**
+   * Comma-separated DIDs allowed onto the gateway-wide operator routes
+   * (`/debug/matrix/*`). Unset: any authenticated caller (with
+   * `ORACLE_DEBUG_ROUTES=true`). A list with an entry that is not a DID
+   * admits nobody.
+   */
+  ORACLE_OPERATOR_DIDS: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;

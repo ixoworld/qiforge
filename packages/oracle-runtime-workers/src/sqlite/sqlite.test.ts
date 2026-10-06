@@ -918,11 +918,16 @@ describe('migration from the Node runtime', () => {
         ).length,
       ).toBe(2);
 
-      // schema_migrations already records migration 001 → nothing re-applied.
+      // schema_migrations already records migration 001 → not re-applied;
+      // 002 (dropping two unused message indexes) runs once.
       const applied = await db.exec<{ version: number }>(
-        'SELECT version FROM schema_migrations',
+        'SELECT version FROM schema_migrations ORDER BY version',
       );
-      expect(applied.map((r) => r.version)).toEqual([1]);
+      expect(applied.map((r) => r.version)).toEqual([1, 2]);
+      const dropped = await db.exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_messages_thread_id', 'idx_messages_checkpoint_id')",
+      );
+      expect(dropped).toEqual([]);
 
       // sessions written by the Node runtime are readable through SessionsStore.
       const sessions = new SessionsStore(db);
@@ -989,6 +994,42 @@ describe('SessionsStore', () => {
 
       // An empty prefix excludes nothing.
       expect((await sessions.listSessions(undefined, 20, 0, '')).total).toBe(3);
+    });
+  });
+
+  it('pages newest first with a stable total, also past the last page', async () => {
+    await runInDurableObject(stub('sessions-paging'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'sessions-paging.db');
+      const sessions = new SessionsStore(db);
+      const base = {
+        oracleName: 'Oracle',
+        oracleDid: 'did:ixo:oracle',
+        oracleEntityDid: 'did:ixo:entity',
+      };
+      for (let i = 0; i < 7; i++)
+        await sessions.createSession({
+          ...base,
+          sessionId: `s-${i}`,
+          roomId: i % 2 ? '!odd:mx' : '!even:mx',
+        });
+      // Same-millisecond timestamps fall back to insertion order (rowid).
+      const pages: string[][] = [];
+      for (let offset = 0; offset < 7; offset += 3) {
+        const page = await sessions.listSessions(undefined, 3, offset);
+        expect(page.total).toBe(7);
+        pages.push(page.sessions.map((s) => s.sessionId));
+      }
+      expect(pages.flat()).toHaveLength(7);
+      expect(new Set(pages.flat()).size).toBe(7);
+      expect(pages.map((p) => p.length)).toEqual([3, 3, 1]);
+      const past = await sessions.listSessions(undefined, 3, 9);
+      expect(past.sessions).toEqual([]);
+      expect(past.total).toBe(7);
+      const odd = await sessions.listSessions('!odd:mx', 2, 2);
+      expect(odd.total).toBe(3);
+      expect(odd.sessions).toHaveLength(1);
+      expect((await sessions.listSessions('!none:mx')).total).toBe(0);
+      await db.close();
     });
   });
 

@@ -33,7 +33,11 @@ export interface UcanServiceOptions {
   oracleDid: string;
   signingMnemonic?: string;
   logger?: { warn(msg: string): void; debug?(msg: string): void };
+  /** Longest a did.json or UCAN store request may take (default 10 s). */
+  fetchTimeoutMs?: number;
 }
+
+const DEFAULT_FETCH_TIMEOUT_MS = 10_000;
 
 function toSupportedDid(did: string): SupportedDID {
   if (did.startsWith('did:ixo:') || did.startsWith('did:key:'))
@@ -152,6 +156,15 @@ export class WorkersUcanService {
     string,
     { value: { token: string; with: string }; expiresAt: number }
   >();
+  /**
+   * Store look-ups in progress, keyed like `storeDelegationCache`: callers
+   * that miss the cache at the same moment share one fetch. Dropped when it
+   * settles, so a failed look-up is retried by the next call.
+   */
+  private readonly storeDelegationInFlight = new Map<
+    string,
+    Promise<ServiceDelegationResult>
+  >();
   /** Parsed grants per raw delegation; the validity window is checked at use, never cached away. */
   private readonly grantCache = new Map<string, DelegationGrant>();
 
@@ -239,12 +252,21 @@ export class WorkersUcanService {
     return grant;
   }
 
+  /** Bounds one outbound request (headers and body). */
+  private fetchSignal(): AbortSignal {
+    return AbortSignal.timeout(
+      this.opts.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS,
+    );
+  }
+
   async resolveServiceDid(serviceUrl: string): Promise<string | null> {
     try {
       const origin = new URL(serviceUrl).origin;
       const cached = this.serviceDidCache.get(origin);
       if (cached && cached.expiresAt > Date.now()) return cached.did;
-      const res = await fetch(`${origin}/.well-known/did.json`);
+      const res = await fetch(`${origin}/.well-known/did.json`, {
+        signal: this.fetchSignal(),
+      });
       if (!res.ok) {
         this.opts.logger?.warn(`[UCAN] did.json ${origin}: HTTP ${res.status}`);
         return null;
@@ -396,7 +418,23 @@ export class WorkersUcanService {
     const cacheKey = `${userDid}:${opts.resource}:${opts.requiredAbility}`;
     const cached = this.storeDelegationCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const pending = this.storeDelegationInFlight.get(cacheKey);
+    if (pending) return pending;
+    const lookup = this.fetchServiceDelegation(userDid, opts, cacheKey).finally(
+      () => {
+        if (this.storeDelegationInFlight.get(cacheKey) === lookup)
+          this.storeDelegationInFlight.delete(cacheKey);
+      },
+    );
+    this.storeDelegationInFlight.set(cacheKey, lookup);
+    return lookup;
+  }
 
+  private async fetchServiceDelegation(
+    userDid: string,
+    opts: { storeUrl: string; resource: string; requiredAbility: string },
+    cacheKey: string,
+  ): Promise<ServiceDelegationResult> {
     const inv = await this.mintSelfSignedInvocation(
       opts.storeUrl,
       { can: 'store/get', with: 'ixo:ucan-store' },
@@ -419,6 +457,8 @@ export class WorkersUcanService {
             authorization: `Bearer ${inv.invocation}`,
             'x-auth-type': 'ucan',
           },
+          // Every caller waiting on this look-up waits on this request.
+          signal: this.fetchSignal(),
         },
       );
     } catch (error) {

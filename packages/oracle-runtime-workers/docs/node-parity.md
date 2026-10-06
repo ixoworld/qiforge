@@ -120,7 +120,11 @@ runtime since then exist only here; they are listed under
   an `expiration` sent in the body.
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
-  `MODEL_PRICE_MARKUP`.
+  `MODEL_PRICE_MARKUP`. A host override, `createOracleWorker({ listModels })`,
+  is called as `listModels(env, { waitUntil? })` (`ListModelsOptions`,
+  exported from the package root): `waitUntil` is the request's, for
+  background work such as a price refresh, and is absent when the request
+  has no execution context; an `(env) => …` override keeps working.
 - **Agent**: same graph state (including `loadedPlugins`), meta-tools
   (`load_capability` / `list_capabilities`), the ChatGPT-subscription history
   sanitizer, the summarization / capability-gate / tool-validation /
@@ -149,7 +153,9 @@ runtime since then exist only here; they are listed under
   socket of a session going away.
 - **Per-room secrets**: the JWE scheme byte-compatible with
   `oracles-chain-client` (`ECDH-ES+A256KW` + `A256GCM`, PIN-locked account
-  room key), served to plugins through the same secrets surface, minus the
+  room key), served to plugins through the same secrets surface
+  (`ctx.secrets.getIndex` / `getValues`, plus `getAll()`: the values of
+  every listed secret from one read of the room's secret index), minus the
   runtime's own LLM credentials. Every secret named `BYO_LLM_*` (the BYO
   API keys and the ChatGPT OAuth tokens, refresh token included) is
   neither listed nor read for a plugin (`src/do/secrets-adapter.ts`). Node
@@ -170,7 +176,7 @@ runtime since then exist only here; they are listed under
 | Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences, pod-creator; `FlowsPlugin` exported for opt-in wiring; `IxoTransactionPlugin` exported, opt-in and Workers-only ([ixo-transaction](ixo-transaction.md)). MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                        |
 | Tasks                              | BullMQ / Redis                       | DO alarms; records live in the user's SQLite file; runs re-enter the agent as background sessions and deliver to the room, same preview → confirm → create and approval-gate contract; dedicated `[Task] <title>` rooms as on Node. Runs are at-most-once per occurrence (a run ledger in the user's file; Node's BullMQ jobs re-run after a worker restart) and deliveries are idempotent (fixed transaction id, retried across a gateway restart). |
 | Editor / flows                     | JSDOM                                | linkedom DOM shim; the heavy chain is lazy-imported; a second, crypto-less bot device from the gateway (`ctx.matrix.botCredentials()`).                                                                                                                                                                                                                                                                                                              |
-| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                                                                                             |
+| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn, the 50 MB shared by the native and extraction lanes). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                                        |
 | Realtime channel                   | socket.io server                     | socket.io v4 wire protocol over Hibernatable WebSockets, one socket per tab, addressed by session; heartbeat from the object's alarm so an idle tab lets the object hibernate; websocket transport only (a polling handshake gets a 426). Chat events use Node's wire envelope (`event` → `{ eventName, payload }`); `browser_tool_call` / `action_call` are raw by name and sent only to the one socket executing the invocation.                   |
 | Portal browser tools / AG-UI       | portal + agui plugins                | Same contract over the realtime channel (`ctx.frontend.callBrowserTool` / `callAgAction`, 15 s; `mutate_topic` 120 s), version 2 of the [frontend bridge](frontend-bridge.md): unique invocation ids, one executing socket, `FRONTEND_OUTCOME_UNKNOWN` on a deadline; proven live with the Portal's `create_page_room`.                                                                                                                              |
 | User preferences                   | `user_prefs` room state              | Same envelope; hydrated into `state.userPreferences` before every agent build (5-minute read cache, invalidated by the tool's own write).                                                                                                                                                                                                                                                                                                            |
@@ -281,7 +287,9 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
   sender's server (or, for a non-DID sender, the room alias's) must be the
   homeserver the DID document registers, or the message is dropped
-  (`operations.md`, "Rooms and aliases").
+  (`operations.md`, "Rooms and aliases"). A room's canonical alias counts
+  only when its own server resolves it to that room, and a non-DID sender
+  is attributed to the alias's user only from the alias's server.
 - **Frontend calls run on one socket and end unknown, not failed.** Each
   browser-tool / AG-UI invocation has its own id, goes to the most recently
   active authenticated socket of its session, and settles only from that
@@ -325,9 +333,9 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the
   memory-engine bot, so that rule would gate the oracle's own conversation
-  with its user. Here a room whose canonical alias is a user↔oracle alias
-  of this oracle is direct whatever its member count; the two Node rules
-  apply to every other room.
+  with its user. Here a room whose verified canonical alias is a
+  user↔oracle alias of this oracle is direct whatever its member count; the
+  two Node rules apply to every other room.
 - **Group rooms are gated in the gateway, not in a middleware.** Node
   dispatched every group-room message as a turn and let the plugin's
   `beforeAgent` middleware end it silently; here the gateway decides before

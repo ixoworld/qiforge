@@ -1,7 +1,8 @@
 /* eslint-disable no-console */
 'use client';
 import { useMutation } from '@tanstack/react-query';
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { useOraclesContext } from '../../../providers/oracles-provider/oracles-context.js';
 import { RequestError } from '../../../utils/request.js';
@@ -21,6 +22,7 @@ import {
   type SSERunEventData,
   type SSEToolCallEventData,
 } from '../../../utils/sse-parser.js';
+import type { ToolSchema } from '../../../types/browser-tool.type.js';
 import { useOraclesConfig } from '../../use-oracles-config.js';
 import type { OracleChat } from './oracle-chat.js';
 import {
@@ -31,17 +33,23 @@ import {
 } from './types.js';
 
 /**
- * Inline every repeated subschema instead of emitting a JSON-pointer back
- * reference to it.
+ * The JSON Schema a browser tool or AG-UI action is advertised with. The
+ * oracle rebuilds it with `z.fromJSONSchema`, which resolves only `#` and
+ * `#/$defs/*` and throws `Reference not found` on any other `$ref` — killing
+ * the turn before the agent runs — so repeated subschemas are inlined.
  *
- * `zod-to-json-schema` defaults to `$refStrategy: 'root'`, which turns the
- * second occurrence of a shared subschema into `$ref:
- * '#/properties/ops/items/anyOf/2/...'`. The oracle rebuilds these schemas with
- * `z.fromJSONSchema`, which resolves only `#` and `#/$defs/*` and throws
- * `Reference not found` on anything else — killing the turn before the agent
- * runs.
+ * A zod 4 schema (it carries `_zod`) is converted by zod 4 itself, which
+ * inlines by default; `zod-to-json-schema` cannot read one and would yield
+ * an empty schema. The schema describes the input the tool parses, and a
+ * type JSON Schema cannot express (a date, a transform's output) is left
+ * open instead of failing the turn. A `zod/v3` schema goes through
+ * `zod-to-json-schema` with `$refStrategy: 'none'` (its default, `root`,
+ * points a repeated subschema at `#/properties/...`).
  */
-const JSON_SCHEMA_OPTIONS = { $refStrategy: 'none' } as const;
+const toolJsonSchema = (schema: ToolSchema): Record<string, unknown> =>
+  '_zod' in schema
+    ? z.toJSONSchema(schema, { io: 'input', unrepresentable: 'any' })
+    : zodToJsonSchema(schema, { $refStrategy: 'none' });
 
 interface IUseSendMessageReturn {
   sendMessage: (
@@ -98,6 +106,11 @@ export function useSendMessage({
   // The session the in-flight turn belongs to: `isSending` is per session,
   // so a turn started in one session never shows as "thinking" in another.
   const sendingSessionRef = useRef<string | null>(null);
+  // A send is between its start and its end (it supersedes a resume that
+  // is still waiting for credentials).
+  const sendInFlightRef = useRef(false);
+  // Cleared on unmount: a stream that ends afterwards refetches nothing.
+  const mountedRef = useRef(false);
 
   const detachStream = useCallback(() => {
     const controller = abortControllerRef.current;
@@ -108,6 +121,37 @@ export function useSendMessage({
     sendingSessionRef.current = null;
     controller.abort();
   }, []);
+
+  // Leaving the chat stops following the reply (the run goes on on the
+  // runtime and is re-joined when the chat is opened again).
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      detachStream();
+    };
+  }, [detachStream]);
+
+  /**
+   * Re-join credentials, read again for every attempt: an invocation lives
+   * minutes and a turn can outlive it. `renew` mints a new invocation when
+   * the runtime refused the cached one.
+   */
+  const joinAuth = useCallback(
+    (did: string, turnDelegation: string) => ({
+      headers: async () => {
+        const [delegation, invocation] = await Promise.all([
+          getDelegation(did),
+          getInvocation(did),
+        ]);
+        return authHeaders(delegation ?? turnDelegation, invocation);
+      },
+      renew: async () => {
+        await getInvocation(did, { fresh: true });
+      },
+    }),
+    [getDelegation, getInvocation],
+  );
 
   // Abort function to cancel ongoing stream
   const abortStream = useCallback(async () => {
@@ -132,7 +176,7 @@ export function useSendMessage({
       abortControllerRef.current = null;
       chatRef?.current?.setStatus('ready');
     }
-  }, [sessionId, chatRef, apiUrl]);
+  }, [sessionId, chatRef, apiUrl, authedRequest, oracleDid]);
 
   // Frames go to the chat instance the turn started in — never to whatever
   // `chatRef` points at later (the user may have switched sessions).
@@ -206,7 +250,16 @@ export function useSendMessage({
         resumed: result.resumed,
         ended: endedOf(result),
       });
-      chat?.setStatus('ready');
+      if (result.ended === 'unauthorized') {
+        chat?.setStatus(
+          'error',
+          new Error(
+            'The oracle refused to reconnect this chat to the running reply (authorization expired). The reply appears once the conversation reloads.',
+          ),
+        );
+      } else {
+        chat?.setStatus('ready');
+      }
       abortControllerRef.current = null;
       activeRunRef.current = null;
       sendingSessionRef.current = null;
@@ -236,6 +289,7 @@ export function useSendMessage({
       if (!apiUrl || !oracleDid) return;
       if (activeRunRef.current === runId) return;
       const chat = chatRef?.current;
+      const seqAtStart = streamSeqRef.current;
       const delegation = await delegationWithRetry(oracleDid);
       if (!delegation) {
         console.warn(
@@ -245,7 +299,13 @@ export function useSendMessage({
       }
       if (activeRunRef.current === runId) return; // attached meanwhile
       if (chatRef?.current !== chat) return; // the session changed meanwhile
-      const invocation = await getInvocation(oracleDid);
+      // The chat closed meanwhile: a stream opened now would have nothing
+      // left to abort it.
+      if (!mountedRef.current) return;
+      // A message sent (or another stream taken up) while this waited
+      // supersedes the run being resumed: its stream must not be aborted.
+      if (sendInFlightRef.current || streamSeqRef.current !== seqAtStart)
+        return;
       const seq = ++streamSeqRef.current;
       abortControllerRef.current?.abort();
       const controller = new AbortController();
@@ -260,12 +320,13 @@ export function useSendMessage({
         resumed: 0,
         ended: null,
       });
+      const auth = joinAuth(oracleDid, delegation);
       try {
         const result = await joinOracleRun({
           apiURL: apiUrl,
           runId,
-          delegation,
-          invocation,
+          headers: auth.headers,
+          onUnauthorized: auth.renew,
           abortSignal: controller.signal,
           callbacks: frameCallbacks(chat),
         });
@@ -283,7 +344,7 @@ export function useSendMessage({
           err,
         );
       } finally {
-        if (refetchQueries) {
+        if (refetchQueries && mountedRef.current) {
           await refetchQueries();
         }
       }
@@ -294,7 +355,7 @@ export function useSendMessage({
       sessionId,
       chatRef,
       delegationWithRetry,
-      getInvocation,
+      joinAuth,
       frameCallbacks,
       settleStream,
       refetchQueries,
@@ -323,6 +384,7 @@ export function useSendMessage({
       // to `chatRef`, which follows the user to other sessions.
       const chat = chatRef?.current;
       sendingSessionRef.current = sessionId;
+      sendInFlightRef.current = true;
       // A new message starts clean: an error banner from the previous turn
       // must not outlive the retry it prompted.
       chat?.clearError();
@@ -375,6 +437,15 @@ export function useSendMessage({
         // proceed with delegation only.
         const invocation = oracleDid ? await getInvocation(oracleDid) : null;
 
+        // The chat closed while the credentials were minted: the message is
+        // not sent (its stream would have nothing left to abort it).
+        if (!mountedRef.current) {
+          if (sendingSessionRef.current === sessionId)
+            sendingSessionRef.current = null;
+          chat?.setStatus('ready');
+          return;
+        }
+
         // Create abort controller for this request (a resumed stream that
         // is still attached is dropped: this message supersedes its turn)
         const seq = ++streamSeqRef.current;
@@ -389,11 +460,14 @@ export function useSendMessage({
           ended: null,
         });
 
+        const auth = joinAuth(oracleDid, delegation);
         const results = await askOracleStream({
           apiURL: apiUrl,
           message,
           delegation,
           invocation,
+          joinHeaders: auth.headers,
+          onUnauthorized: auth.renew,
           sessionId,
           model,
           metadata,
@@ -402,7 +476,7 @@ export function useSendMessage({
             ? Object.values(browserTools).map((tool) => ({
                 name: tool.toolName,
                 description: tool.description,
-                schema: zodToJsonSchema(tool.schema, JSON_SCHEMA_OPTIONS),
+                schema: toolJsonSchema(tool.schema),
               }))
             : undefined,
           agActions:
@@ -410,10 +484,7 @@ export function useSendMessage({
               ? agActions.map((action) => ({
                   name: action.name,
                   description: action.description,
-                  schema: zodToJsonSchema(
-                    action.parameters,
-                    JSON_SCHEMA_OPTIONS,
-                  ),
+                  schema: toolJsonSchema(action.parameters),
                   hasRender: action.hasRender,
                 }))
               : undefined,
@@ -458,12 +529,14 @@ export function useSendMessage({
         );
         throw err;
       } finally {
+        sendInFlightRef.current = false;
         // Clear abort controller when done (only if it is still ours)
         if (abortControllerRef.current === controller)
           abortControllerRef.current = null;
 
-        // Refetch queries regardless of success/error/early return
-        if (refetchQueries) {
+        // Refetch queries regardless of success/error/early return, unless
+        // the chat was closed meanwhile
+        if (refetchQueries && mountedRef.current) {
           await refetchQueries();
         }
       }
@@ -495,6 +568,7 @@ export function useSendMessage({
 /** Map how a stream ended (and its `done` frame) to the chat's run state. */
 function endedOf(result: StreamRunResult): NonNullable<ChatRunState['ended']> {
   if (result.ended === 'aborted') return 'aborted';
+  if (result.ended === 'unauthorized') return 'unauthorized';
   if (result.ended === 'disconnected' || result.ended === 'error')
     return 'disconnected';
   const done = result.done as SSEDoneEventData | undefined;
@@ -551,16 +625,19 @@ const authHeaders = (
   }),
 });
 
-/** `GET /runs/:runId?after=<seq>` — re-join a durable run after a cursor. */
+/**
+ * `GET /runs/:runId?after=<seq>` — re-join a durable run after a cursor,
+ * with the credentials current at that attempt.
+ */
 const joinRunRequest =
   (
     apiURL: string,
-    headers: Record<string, string>,
+    headers: () => Promise<Record<string, string>>,
     signal?: AbortSignal,
   ): StreamRunInput['join'] =>
-  (runId, after) =>
+  async (runId, after) =>
     fetch(`${apiURL}/runs/${encodeURIComponent(runId)}?after=${after}`, {
-      headers,
+      headers: await headers(),
       method: 'GET',
       signal,
     });
@@ -652,16 +729,17 @@ const frameHandler =
 const joinOracleRun = async (props: {
   apiURL: string;
   runId: string;
-  delegation: string;
-  invocation?: string | null;
+  /** The credentials of each join attempt. */
+  headers: () => Promise<Record<string, string>>;
+  onUnauthorized?: () => Promise<void>;
   abortSignal?: AbortSignal;
   callbacks: RunFrameCallbacks;
 }): Promise<StreamRunResult> => {
-  const headers = authHeaders(props.delegation, props.invocation);
   return streamRun({
     resume: { runId: props.runId, after: 0 },
     start: () => Promise.reject(new Error('a resumed run is never started')),
-    join: joinRunRequest(props.apiURL, headers, props.abortSignal),
+    join: joinRunRequest(props.apiURL, props.headers, props.abortSignal),
+    onUnauthorized: props.onUnauthorized,
     onEvent: frameHandler(props.callbacks),
     onDisconnect: props.callbacks.onDisconnect,
     signal: props.abortSignal,
@@ -673,8 +751,13 @@ const askOracleStream = async (props: {
   apiURL: string;
   message: string;
   sessionId: string;
+  /** The credentials of the POST that starts the turn. */
   delegation: string;
   invocation?: string | null;
+  /** The credentials of each re-join attempt (minted again as they expire). */
+  joinHeaders: () => Promise<Record<string, string>>;
+  /** A re-join was refused for its credentials: mint new ones. */
+  onUnauthorized?: () => Promise<void>;
   /** Model id to answer with; omitted → the oracle's default model. */
   model?: string;
   metadata?: Record<string, unknown>;
@@ -738,7 +821,8 @@ const askOracleStream = async (props: {
         }
         return response;
       },
-      join: joinRunRequest(props.apiURL, headers, props.abortSignal),
+      join: joinRunRequest(props.apiURL, props.joinHeaders, props.abortSignal),
+      onUnauthorized: props.onUnauthorized,
       onEvent: frameHandler(props.callbacks),
       onDisconnect: props.callbacks.onDisconnect,
       signal: props.abortSignal,

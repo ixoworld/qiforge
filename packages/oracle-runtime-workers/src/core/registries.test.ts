@@ -196,7 +196,9 @@ describe('ToolRegistry', () => {
     expect(String(warn.mock.calls[0]?.[0])).toMatch(
       /request tool "mutate_topic" of plugin "portal" dropped .* plugin "topics"/,
     );
-    expect(reg.toolNames()).toEqual(['mutate_topic', 'open_url']);
+    // The shared registry keeps the boot-time names only; the turn's request
+    // tools belong to that turn (one isolate serves every user).
+    expect(reg.toolNames()).toEqual(['mutate_topic']);
   });
 
   it('keeps the first of two request-time tools with one name and warns once', async () => {

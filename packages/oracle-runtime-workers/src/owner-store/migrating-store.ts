@@ -159,15 +159,21 @@ export class MigratingOwnerStore implements OwnerStore {
     return this.legacy.head();
   }
 
-  /** The legacy Matrix copy regardless of what VFS holds (see `OwnerStore.loadLegacy`). */
+  /**
+   * The legacy Matrix copy regardless of what VFS holds (see
+   * `OwnerStore.loadLegacy`). Null means there is none, or one proven
+   * unusable; a read that failed throws, so the caller can tell "absent"
+   * from "unknown" and look again later.
+   */
   async loadLegacy(): Promise<OwnerCopy | null> {
     try {
       const copy = await this.legacy.load();
       return copy ? { ...copy, fromLegacy: true } : null;
     } catch (err) {
+      if (!(err instanceof NotSqliteFileError && err.proven)) throw err;
       this.log(
-        'warn',
-        `[owner-store] legacy Matrix load failed: ${err instanceof Error ? err.message : String(err)}`,
+        'error',
+        `[owner-store] legacy Matrix copy is unusable, treating it as absent: ${err.message}`,
       );
       return null;
     }

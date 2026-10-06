@@ -19,6 +19,7 @@
  * - `channel_values.messages` is stripped from the stored checkpoint and each
  *   message is upserted into `messages` (keyed by message id, so the table is
  *   the full transcript: rows survive checkpoint pruning and summarization).
+ *   An unchanged message keeps its row in place (see `writeMessageRows`).
  * - `put` prunes a thread to `maxCheckpointsPerThread` newest checkpoints (and
  *   their writes) once it exceeds the cap by `PRUNE_SLACK`.
  * - `pending_sends` migration for pre-v4 checkpoints.
@@ -78,6 +79,9 @@ export const DEFAULT_MAX_CHECKPOINTS_PER_THREAD = 10;
 export const PRUNE_SLACK = 5;
 
 const DEFAULT_ORACLE_NAME = 'IXO Oracle';
+
+/** Position of `message_id` in the parameter rows `toMessageRow` returns. */
+const MESSAGE_ID_COLUMN = 3;
 
 type CheckpointRow = {
   thread_id: string;
@@ -182,7 +186,23 @@ const migration001: Migration = {
   },
 };
 
-const MIGRATIONS: readonly Migration[] = [migration001];
+/**
+ * Migration 002: drop `idx_messages_thread_id` and `idx_messages_checkpoint_id`.
+ * No query uses them — every `messages` query filters on `thread_id` (served
+ * by `idx_messages_thread_created` / `idx_messages_lookup`, whose leading
+ * column it is) or looks a row up by `message_id` — yet every message write
+ * updated both b-trees.
+ */
+const migration002: Migration = {
+  version: 2,
+  name: 'drop_unused_message_indexes',
+  up: async (db) => {
+    await db.run('DROP INDEX IF EXISTS idx_messages_thread_id');
+    await db.run('DROP INDEX IF EXISTS idx_messages_checkpoint_id');
+  },
+};
+
+const MIGRATIONS: readonly Migration[] = [migration001, migration002];
 
 // `writes.value` blobs may be gzipped, so they travel as hex() — a
 // CAST(... AS TEXT) of compressed bytes would mangle them irreversibly.
@@ -234,6 +254,17 @@ export class SqliteSaver extends BaseCheckpointSaver {
   protected readonly maxCheckpointsPerThread: number;
   protected readonly oracleName: string;
   private setupPromise: Promise<void> | undefined;
+  /**
+   * The stored blob of each message object last encoded, with the JSON it
+   * was compressed from. LangGraph hands the same message objects to every
+   * `put` of a run; one whose JSON is unchanged reuses its blob instead of
+   * running a gzip pipeline again. The JSON itself is always recomputed —
+   * it is what proves the object did not change.
+   */
+  private readonly encoded = new WeakMap<
+    BaseMessage,
+    { json: string; blob: Uint8Array }
+  >();
 
   constructor(
     db: DoSqliteDatabase,
@@ -304,12 +335,6 @@ export class SqliteSaver extends BaseCheckpointSaver {
         PRIMARY KEY (message_id)
       )`);
     await this.runMigrations();
-    await db.run(
-      `CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)`,
-    );
-    await db.run(
-      `CREATE INDEX IF NOT EXISTS idx_messages_checkpoint_id ON messages(checkpoint_id)`,
-    );
     await db.run(
       `CREATE INDEX IF NOT EXISTS idx_messages_lookup ON messages(thread_id, checkpoint_ns, checkpoint_id)`,
     );
@@ -643,8 +668,10 @@ export class SqliteSaver extends BaseCheckpointSaver {
     checkpointNs: string,
     checkpointId: string,
   ): Promise<BaseMessage[]> {
+    // Rowid order is the order of the checkpoint's message array (see
+    // `writeMessageRows`); the lookup index already yields it, no sort.
     const rows = await this.db.exec<MessageRow>(
-      'SELECT message FROM messages WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?',
+      'SELECT message FROM messages WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ? ORDER BY rowid',
       [threadId, checkpointNs, checkpointId],
     );
     return Promise.all(rows.map((row) => this.loadMessage(row.message)));
@@ -787,13 +814,7 @@ export class SqliteSaver extends BaseCheckpointSaver {
           serializedMetadata,
         ],
       );
-      for (const row of messageRows) {
-        await this.db.run(
-          `INSERT OR REPLACE INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          row,
-        );
-      }
+      await this.writeMessageRows(messageRows);
     });
 
     await this.pruneThread(threadId, checkpointNs);
@@ -805,6 +826,60 @@ export class SqliteSaver extends BaseCheckpointSaver {
         checkpoint_id: checkpoint.id,
       },
     };
+  }
+
+  /**
+   * Upsert a checkpoint's message rows (in array order). A checkpoint's
+   * messages are read back in rowid order (`loadCheckpointMessages`), so
+   * rowids must increase along the array. A message whose row exists keeps
+   * it — updated in place, which leaves the pages whose bytes did not
+   * change untouched — as long as that holds; from the first message that
+   * is new or would break the order (a summary placed before the history
+   * it kept) on, every row is written with `INSERT OR REPLACE`, which
+   * gives it a new rowid after all others, exactly as every row used to be.
+   * Inside the caller's transaction.
+   */
+  private async writeMessageRows(rows: SqlParam[][]): Promise<void> {
+    if (rows.length === 0) return;
+    const ids = rows.map((row) => row[MESSAGE_ID_COLUMN]);
+    const existing = new Map<string, number>();
+    for (const row of await this.db.exec<{
+      message_id: string;
+      rowid: number;
+    }>(
+      'SELECT m.message_id, m.rowid FROM json_each(?) AS j JOIN messages AS m ON m.message_id = j.value',
+      [JSON.stringify(ids)],
+    ))
+      existing.set(row.message_id, row.rowid);
+    let lastRowid = -1;
+    let appending = false;
+    for (const row of rows) {
+      const id = row[MESSAGE_ID_COLUMN];
+      const rowid = typeof id === 'string' ? existing.get(id) : undefined;
+      if (!appending && rowid !== undefined && rowid > lastRowid) {
+        await this.db.run(
+          `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(message_id) DO UPDATE SET
+             thread_id = excluded.thread_id,
+             checkpoint_ns = excluded.checkpoint_ns,
+             checkpoint_id = excluded.checkpoint_id,
+             message_type = excluded.message_type,
+             message_content = excluded.message_content,
+             message = excluded.message,
+             created_at = excluded.created_at`,
+          row,
+        );
+        lastRowid = rowid;
+        continue;
+      }
+      appending = true;
+      await this.db.run(
+        `INSERT OR REPLACE INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        row,
+      );
+    }
   }
 
   /** Normalize a message's `additional_kwargs` and serialize it exactly as the Node runtime does. */
@@ -837,9 +912,15 @@ export class SqliteSaver extends BaseCheckpointSaver {
     }
     message.additional_kwargs = merged;
 
-    const serialized = await compressForStorage(
-      stringify(message, (_key, value) => _default(value)),
-    );
+    const json = stringify(message, (_key, value) => _default(value));
+    const cached = this.encoded.get(message);
+    let serialized: Uint8Array;
+    if (cached !== undefined && cached.json === json) {
+      serialized = cached.blob;
+    } else {
+      serialized = await compressForStorage(json);
+      this.encoded.set(message, { json, blob: serialized });
+    }
     const messageId =
       message.id ??
       (typeof message.lc_kwargs.id === 'string'

@@ -56,7 +56,7 @@ export const tasksManifest: PluginManifest = {
     {
       user: '(replying to an approval request) Yes — go ahead.',
       thought:
-        'The user approved the pending run — record it; approval executes the run and delivers the result.',
+        'The user approved the pending run — record it; approval starts the run, and its result is posted to the room when it finishes.',
       tool: 'resolve_task_approval',
       args: {
         taskId: 'task_daily-linkedin-update_a1b2c3d4',

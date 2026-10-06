@@ -98,7 +98,10 @@ export function clearMemoryToolDefsCache(): void {
  * for the life of the isolate.
  */
 const IDLE_CLIENT_CLOSE_MS = 5 * 60 * 1000;
-/** Our own per-call limit (never given to the SDK — see `mcp-call-timeout.ts`). */
+/**
+ * Per-call limit: the MCP request's own timeout (`metadata.timeoutMs`, see
+ * `mcp-tool-adapter.ts`), also enforced by `withCallTimeout`.
+ */
 const MEMORY_TOOL_TIMEOUT_MS = 420_000;
 
 function createMemoryMcpClient(
@@ -303,7 +306,9 @@ function buildLazyUpstreamTools(
       connection = (async () => {
         const client = createMemoryMcpClient(memoryMcpUrl, headers);
         try {
-          const tools = adaptMcpClientTools(await client.getTools(), console);
+          const tools = adaptMcpClientTools(await client.getTools(), console, {
+            requestTimeoutMs: MEMORY_TOOL_TIMEOUT_MS,
+          });
           return { client, byName: new Map(tools.map((t) => [t.name, t])) };
         } catch (error) {
           await client.close().catch(() => undefined);

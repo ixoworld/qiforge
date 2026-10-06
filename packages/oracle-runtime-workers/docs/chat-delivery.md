@@ -147,12 +147,14 @@ https://<viewer>#a=<encoded https://<oracle>/a/<artifactId>>&k=<key>   ARTIFACT_
 - **`GET /a/:id`** serves one static page for every artefact (`src/artifacts/viewer-page.ts`). The page:
   - reads the key from the fragment and decrypts with WebCrypto;
   - renders the Markdown through DOM APIs only, with no `innerHTML`, only `http(s)` and `mailto` links, and images as links;
+  - parses headings, the table divider row and inline Markdown in linear time, with a hand-written scanner instead of backtracking patterns, so a crafted line cannot freeze the reader's tab; a heading's closing `#`s are dropped only when a space sets them apart (`# C#` stays `C#`);
   - offers Copy and Download `.md`.
+  - Its script is one static string (`VIEWER_SCRIPT`, no interpolation), so the bundled Worker serves exactly the text the CSP hash is computed from; `src/artifacts/viewer-page.test.ts` checks the hash and that the script holds no `__name(` helper a bundler could inject.
   - Its CSP allows only its own hashed script and style, and `connect-src 'self'`. The response also sets `X-Robots-Tag: noindex, nofollow`, `Referrer-Policy: no-referrer` and `nosniff`.
 - **`GET /a/:id/data`** returns the ciphertext.
   - It answers any origin (`Access-Control-Allow-Origin: *`), so a shared viewer on another host can fetch it.
   - It is cached `private, max-age=60`, so a revocation takes effect within a minute.
-  - It is rate-limited per client IP through `RATE_LIMIT` (key `artifact:<ip>`).
+  - It is rate-limited per client IP through `RATE_LIMIT` (key `<ORACLE_DID>|artifact|<ip>`).
   - An expired object answers `410` and is deleted.
 - Both routes sit ahead of CORS and auth. Without the key they serve nothing readable.
 - With **`ARTIFACT_VIEWER_URL`** set, links open a shared viewer instead: the Portal's `/artifact` page on Qi.Space.
@@ -177,7 +179,7 @@ A link is **a bearer link: anyone who has it can open the document until it expi
 ## Delivery by surface
 
 - **IXO Channels.** A finished `/channels/turn` response carries `plan` next to `text` ([channels](channels.md#reply-plans)). The gateway renders each part in provider syntax, paces the parts, and delivers each one exactly once, keyed by `(userDid, bindingId, requestId, partId)`.
-- **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through. An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
+- **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through; a link or image whose URL is not `http(s)`, `mailto` or `mxc` renders as its text (an image as its escaped alt text). Room replays of HTTP turns use the same renderer (`renderRoomMarkdown`). An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
 - **Matrix rooms, chat style off (the default).** One plain `m.text` with the reply text and no `formatted_body`, byte for byte what the runtime sent before chat delivery.
 - **Portal.** Unchanged: SSE frames, no plan.
 

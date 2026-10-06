@@ -64,16 +64,22 @@ const IID_SERVICES_QUERY = `
   }
 `;
 
+/** Upper bound on one Blocksync lookup unless the caller passes its own signal. */
+export const BLOCKSYNC_LOOKUP_TIMEOUT_MS = 5_000;
+
 /**
- * Resolve a user's Matrix server name from Blocksync. Returns null when the
- * DID is unknown or carries no MatrixHomeServer service; throws on transport
- * failure so callers can decide whether to fall back.
+ * What Blocksync knows about a DID's homeserver: `indexed: false` when it
+ * has no record of the DID (not indexed yet, or unknown), otherwise the
+ * server its document names (null for none). Throws on transport failure —
+ * including no answer within `BLOCKSYNC_LOOKUP_TIMEOUT_MS`, or `signal`
+ * aborting first — so callers can decide whether to fall back.
  */
-export async function fetchUserMatrixServerName(
+export async function fetchUserMatrixHomeServer(
   blocksyncGraphqlUrl: string,
   userDid: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<string | null> {
+  signal: AbortSignal = AbortSignal.timeout(BLOCKSYNC_LOOKUP_TIMEOUT_MS),
+): Promise<{ indexed: false } | { indexed: true; serverName: string | null }> {
   const res = await fetchImpl(blocksyncGraphqlUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -81,6 +87,7 @@ export async function fetchUserMatrixServerName(
       query: IID_SERVICES_QUERY,
       variables: { id: userDid },
     }),
+    signal,
   });
   if (!res.ok) {
     throw new Error(
@@ -98,18 +105,51 @@ export async function fetchUserMatrixServerName(
     );
   }
   const node = body.data?.iids?.nodes?.[0];
-  if (!node) return null;
+  if (!node) return { indexed: false };
   const services: DidService[] = Array.isArray(node.service)
     ? node.service
     : [];
-  return matrixServerNameFromServices(services);
+  return { indexed: true, serverName: matrixServerNameFromServices(services) };
 }
+
+/**
+ * Resolve a user's Matrix server name from Blocksync. Returns null when the
+ * DID is unknown or carries no MatrixHomeServer service; throws like
+ * `fetchUserMatrixHomeServer`.
+ */
+export async function fetchUserMatrixServerName(
+  blocksyncGraphqlUrl: string,
+  userDid: string,
+  fetchImpl: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const answer = await fetchUserMatrixHomeServer(
+    blocksyncGraphqlUrl,
+    userDid,
+    fetchImpl,
+    signal,
+  );
+  return answer.indexed ? answer.serverName : null;
+}
+
+/**
+ * How long "the DID document names no homeserver" is served from the cache.
+ * Short: a user who registers one (or whose registration Blocksync indexes
+ * late) must not be held to the default for the full TTL.
+ */
+export const UNREGISTERED_CACHE_TTL_MS = 5 * 60_000;
 
 /** A resolved server name as the gateway caches it (`hs:<did>` in its storage). */
 export interface CachedUserServerName {
   serverName: string;
   /** When Blocksync answered (epoch ms). */
   at: number;
+  /**
+   * Blocksync answered that the DID document names no homeserver;
+   * `serverName` is then the default it stood for when cached. Served for
+   * `UNREGISTERED_CACHE_TTL_MS` only.
+   */
+  unregistered?: true;
 }
 
 /**
@@ -117,7 +157,8 @@ export interface CachedUserServerName {
  * - `cache` — a cached Blocksync answer younger than the TTL;
  * - `blocksync` — Blocksync answered just now (and the answer was cached);
  * - `stale` — Blocksync failed and an EXPIRED cached answer was used;
- * - `unregistered` — the DID document names no homeserver: the default;
+ * - `unregistered` — the DID document names no homeserver, or Blocksync has
+ *   no record of the DID yet: the default;
  * - `unconfigured` — no Blocksync URL is configured: the default.
  */
 export type UserServerNameSource =
@@ -144,6 +185,8 @@ export interface UserServerNameLookupDeps {
   writeCache(userDid: string, entry: CachedUserServerName): Promise<void>;
   now?: () => number;
   fetchImpl?: typeof fetch;
+  /** Ends the Blocksync request early; without one it is bounded by `BLOCKSYNC_LOOKUP_TIMEOUT_MS`. */
+  signal?: AbortSignal;
 }
 
 /** Blocksync could not be asked and nothing was ever cached: there is no answer to give. */
@@ -166,6 +209,11 @@ export class UserServerNameUnavailableError extends Error {
  * Blocksync is down. With nothing cached it throws
  * `UserServerNameUnavailableError`, and each caller decides: the sender check
  * gives no verdict, the room-alias lookup falls back to the oracle's server.
+ * "Registers no homeserver" is an answer too, cached for the short
+ * `UNREGISTERED_CACHE_TTL_MS` (a DID without the service is a normal case,
+ * not one to ask about on every message). A DID Blocksync has no record of
+ * gets the default without anything being cached: it may be indexed any
+ * moment.
  */
 export async function lookupUserServerName(
   userDid: string,
@@ -173,24 +221,45 @@ export async function lookupUserServerName(
 ): Promise<UserServerNameLookup> {
   const now = deps.now ?? Date.now;
   const cached = await deps.readCache(userDid);
-  if (cached && now() - cached.at < deps.ttlMs)
-    return { serverName: cached.serverName, source: 'cache' };
+  if (
+    cached &&
+    now() - cached.at <
+      (cached.unregistered ? UNREGISTERED_CACHE_TTL_MS : deps.ttlMs)
+  )
+    return cached.unregistered
+      ? { serverName: deps.defaultServerName, source: 'unregistered' }
+      : { serverName: cached.serverName, source: 'cache' };
   if (!deps.blocksyncGraphqlUrl)
     return { serverName: deps.defaultServerName, source: 'unconfigured' };
-  let resolved: string | null;
+  let answer: Awaited<ReturnType<typeof fetchUserMatrixHomeServer>>;
   try {
-    resolved = await fetchUserMatrixServerName(
+    answer = await fetchUserMatrixHomeServer(
       deps.blocksyncGraphqlUrl,
       userDid,
       deps.fetchImpl,
+      deps.signal,
     );
   } catch (err) {
     if (cached)
-      return { serverName: cached.serverName, source: 'stale', error: err };
+      return {
+        serverName: cached.unregistered
+          ? deps.defaultServerName
+          : cached.serverName,
+        source: 'stale',
+        error: err,
+      };
     throw new UserServerNameUnavailableError(userDid, err);
   }
-  if (!resolved)
+  if (!answer.indexed)
     return { serverName: deps.defaultServerName, source: 'unregistered' };
-  await deps.writeCache(userDid, { serverName: resolved, at: now() });
-  return { serverName: resolved, source: 'blocksync' };
+  if (!answer.serverName) {
+    await deps.writeCache(userDid, {
+      serverName: deps.defaultServerName,
+      at: now(),
+      unregistered: true,
+    });
+    return { serverName: deps.defaultServerName, source: 'unregistered' };
+  }
+  await deps.writeCache(userDid, { serverName: answer.serverName, at: now() });
+  return { serverName: answer.serverName, source: 'blocksync' };
 }

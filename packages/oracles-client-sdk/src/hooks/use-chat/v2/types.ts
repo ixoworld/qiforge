@@ -150,9 +150,18 @@ export interface ChatRunState {
    * user stopped it), `interrupted` (the runtime gave up after repeated
    * restarts; the kept text is shown), `failed`, or `disconnected` (the
    * client could not re-join; the reply lands in the transcript when the
-   * runtime finishes it).
+   * runtime finishes it), or `unauthorized` (the runtime refused the
+   * re-join's credentials, also freshly minted ones; the chat's status is
+   * `error` and the reply lands in the transcript as with `disconnected`).
    */
-  ended: 'done' | 'aborted' | 'interrupted' | 'failed' | 'disconnected' | null;
+  ended:
+    | 'done'
+    | 'aborted'
+    | 'interrupted'
+    | 'failed'
+    | 'disconnected'
+    | 'unauthorized'
+    | null;
 }
 
 export const IDLE_RUN_STATE: ChatRunState = {

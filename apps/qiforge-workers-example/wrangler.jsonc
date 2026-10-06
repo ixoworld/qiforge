@@ -27,6 +27,7 @@
   "ratelimits": [
     {
       "name": "RATE_LIMIT",
+      // Must be unique per oracle on the account: bindings that share a namespace_id share their counters.
       "namespace_id": "1001",
       "simple": { "limit": 100, "period": 60 },
     },

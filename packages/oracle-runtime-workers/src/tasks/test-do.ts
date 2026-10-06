@@ -17,7 +17,13 @@ import type {
 import { DurableObject } from 'cloudflare:workers';
 import type { OracleTaskInput, OracleTaskRecord } from '../plugin-api/types';
 import type { TurnRequest } from '../do/contracts';
-import { DoSqliteDatabase, type SqlParam } from '../sqlite/database';
+import { ToolScheduler } from '../core/tool-scheduler';
+import {
+  DoSqliteDatabase,
+  type SqlParam,
+  type SqlParams,
+  type SqlRow,
+} from '../sqlite/database';
 import { createTaskScheduler, type TaskScheduler } from './scheduler';
 import {
   TasksStore,
@@ -35,14 +41,28 @@ export interface SentMessage {
 /**
  * How the fake gateway answers `sendText`: `fail-transient` looks like a
  * gateway restart (retried by the scheduler), `fail-transient-once` only for
- * the next call, `fail` is a hard error (never retried).
+ * the next call, `fail` is a hard error (never retried). `lost-response-once`
+ * posts the message and then loses the response (a gateway reset right
+ * after the send). Like the homeserver, the fake posts a message only once
+ * per transaction id.
  */
 export type SendMode =
   | 'ok'
   | 'fail-transient'
   | 'fail-transient-once'
+  | 'lost-response-once'
   | 'fail'
   | 'hang';
+
+/**
+ * How the fake agent turn behaves: `write-tool` calls one write tool through
+ * the object's write lane (a real `ToolScheduler`) and fails if it waits for
+ * the slot longer than `WRITE_SLOT_WAIT_MS` — what a held write slot does to
+ * a real turn, minus the ten-minute turn timeout.
+ */
+export type TurnMode = 'ok' | 'fail' | 'empty' | 'hang' | 'write-tool';
+
+const WRITE_SLOT_WAIT_MS = 2_000;
 
 export interface CreatedRoom {
   roomId: string;
@@ -80,21 +100,37 @@ export class TasksTestDO extends DurableObject {
   private hangingAlarms: Array<() => void> = [];
   private aborted: Array<{ sessionId: string; status: string | undefined }> =
     [];
-  private turnMode: 'ok' | 'fail' | 'empty' | 'hang' = 'ok';
+  private turnMode: TurnMode = 'ok';
   private turnText = 'task run output';
+  /** Text per task session; other sessions answer `turnText`. */
+  private turnTextBySession = new Map<string, string>();
+  /** Task sessions whose turns hang until `releaseTurns()`, whatever the mode. */
+  private hangingSessions = new Set<string>();
   private roomAvailable = true;
   private eventSeq = 0;
   private sendMode: SendMode = 'ok';
+  /** Sends whose body contains this fail hard, whatever the mode. */
+  private failingBody: string | null = null;
   private sendFailures = 0;
+  /** Event id per transaction id: the homeserver posts a txn id once. */
+  private sentTxnIds = new Map<string, string>();
+  /** Hanging turns started and not yet released, and the most at once. */
+  private turnsInFlight = 0;
+  private peakTurnsInFlight = 0;
   /** Resolvers of hanging turns (`turnMode = 'hang'`), released by `releaseTurns()`. */
   private hanging: Array<() => void> = [];
   private hangingSends: Array<() => void> = [];
   private initOpts: TasksTestInit = {};
+  /** The object's write lane, shared by every "tool call" of this fake object. */
+  private readonly toolScheduler = new ToolScheduler();
+  /** SQL statements issued while recording (`startStatementLog`). */
+  private statementLog: Array<{ sql: string; params?: SqlParams }> | null =
+    null;
 
   async init(opts: TasksTestInit = {}): Promise<void> {
     if (this.scheduler) return;
     this.initOpts = opts;
-    this.db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
+    this.db = await this.openDb();
     this.store = new TasksStore(this.db, console);
     this.scheduler = await this.buildScheduler(opts);
   }
@@ -107,11 +143,66 @@ export class TasksTestDO extends DurableObject {
     statements: Array<{ sql: string; params?: SqlParam[] }>,
   ): Promise<void> {
     if (this.scheduler) throw new Error('already initialised');
-    this.db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
+    this.db = await this.openDb();
     for (const statement of statements)
       await this.db.run(statement.sql, statement.params ?? []);
     this.store = new TasksStore(this.db, console);
     this.scheduler = await this.buildScheduler(this.initOpts);
+  }
+
+  /** The test database, with every statement recorded while a log is open. */
+  private async openDb(): Promise<DoSqliteDatabase> {
+    const db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
+    const exec = db.exec.bind(db);
+    const run = db.run.bind(db);
+    db.exec = <T extends SqlRow = SqlRow>(sql: string, params?: SqlParams) => {
+      this.statementLog?.push({ sql, ...(params ? { params } : {}) });
+      return exec<T>(sql, params);
+    };
+    db.run = (sql: string, params?: SqlParams) => {
+      this.statementLog?.push({ sql, ...(params ? { params } : {}) });
+      return run(sql, params);
+    };
+    return db;
+  }
+
+  async startStatementLog(): Promise<void> {
+    this.statementLog = [];
+  }
+
+  async stopStatementLog(): Promise<
+    Array<{ sql: string; params?: SqlParams }>
+  > {
+    const log = this.statementLog ?? [];
+    this.statementLog = null;
+    return log;
+  }
+
+  /** `EXPLAIN QUERY PLAN` details of one statement. */
+  async queryPlan(sql: string, params: SqlParams = []): Promise<string[]> {
+    if (!this.db) throw new Error('call init() first');
+    const rows = await this.db.exec<{ detail: string }>(
+      `EXPLAIN QUERY PLAN ${sql}`,
+      params,
+    );
+    return rows.map((row) => row.detail);
+  }
+
+  /** The raw run rows of one task, newest first (columns the store does not expose). */
+  async rawRuns(taskId: string): Promise<
+    Array<{
+      run_id: string;
+      state: string | null;
+      result_text: string | null;
+      retry_at: number | null;
+    }>
+  > {
+    if (!this.db) throw new Error('call init() first');
+    return this.db.exec(
+      `SELECT run_id, state, result_text, retry_at FROM task_runs WHERE task_id = ?
+       ORDER BY started_at DESC, run_id DESC`,
+      [taskId],
+    );
   }
 
   /** Write a row the way something other than the surface would (another runtime, a host adapter). */
@@ -155,7 +246,10 @@ export class TasksTestDO extends DurableObject {
           return Promise.resolve({ roomId });
         },
         sendText: (roomId: string, body: string, opts?: { txnId?: string }) => {
-          if (this.sendMode === 'fail') {
+          if (
+            this.sendMode === 'fail' ||
+            (this.failingBody !== null && body.includes(this.failingBody))
+          ) {
             return Promise.reject(
               new Error('boom: simulated hard send failure'),
             );
@@ -168,16 +262,27 @@ export class TasksTestDO extends DurableObject {
             this.sendFailures += 1;
             return Promise.reject(new Error('Network connection lost'));
           }
+          const known = opts?.txnId
+            ? this.sentTxnIds.get(opts.txnId)
+            : undefined;
+          if (known) return Promise.resolve(known);
+          const eventId = `$evt-${++this.eventSeq}`;
+          if (opts?.txnId) this.sentTxnIds.set(opts.txnId, eventId);
           this.sent.push({
             roomId,
             body,
             ...(opts?.txnId ? { txnId: opts.txnId } : {}),
           });
+          if (this.sendMode === 'lost-response-once') {
+            this.sendMode = 'ok';
+            this.sendFailures += 1;
+            return Promise.reject(new Error('Network connection lost'));
+          }
           if (this.sendMode === 'hang')
             return new Promise<string>((resolve) =>
-              this.hangingSends.push(() => resolve(`$evt-${++this.eventSeq}`)),
+              this.hangingSends.push(() => resolve(eventId)),
             );
-          return Promise.resolve(`$evt-${++this.eventSeq}`);
+          return Promise.resolve(eventId);
         },
         resolveUserRoom: () =>
           Promise.resolve(
@@ -186,23 +291,45 @@ export class TasksTestDO extends DurableObject {
               : null,
           ),
       },
-      runTurn: (req: TurnRequest) => {
+      runTurn: async (req: TurnRequest) => {
         this.turns.push(req);
         if (this.turnMode === 'fail') {
-          return Promise.reject(new Error('boom: simulated turn failure'));
+          throw new Error('boom: simulated turn failure');
         }
         const result = {
           sessionId: req.sessionId,
           requestId: req.requestId,
-          text: this.turnMode === 'empty' ? '' : this.turnText,
+          text:
+            this.turnMode === 'empty'
+              ? ''
+              : (this.turnTextBySession.get(req.sessionId) ?? this.turnText),
           toolCalls: [],
         };
-        if (this.turnMode === 'hang') {
-          return new Promise((resolve) => {
-            this.hanging.push(() => resolve(result));
-          });
+        if (this.turnMode === 'write-tool') {
+          await this.toolScheduler.run(
+            'write',
+            AbortSignal.timeout(WRITE_SLOT_WAIT_MS),
+            async () => undefined,
+          );
         }
-        return Promise.resolve(result);
+        if (
+          this.turnMode === 'hang' ||
+          this.hangingSessions.has(req.sessionId)
+        ) {
+          this.turnsInFlight += 1;
+          this.peakTurnsInFlight = Math.max(
+            this.peakTurnsInFlight,
+            this.turnsInFlight,
+          );
+          try {
+            return await new Promise<typeof result>((resolve) => {
+              this.hanging.push(() => resolve(result));
+            });
+          } finally {
+            this.turnsInFlight -= 1;
+          }
+        }
+        return result;
       },
       abortTurn: async (sessionId) => {
         this.aborted.push({
@@ -340,6 +467,21 @@ export class TasksTestDO extends DurableObject {
   }
 
   /**
+   * `resolve_task_approval` the way the tool execution middleware runs it:
+   * it declares no effect, so it holds the object's single write slot for
+   * the whole call.
+   */
+  async resolveApprovalAsTool(
+    taskId: string,
+    decision: 'approve' | 'reject',
+    note?: string,
+  ): Promise<{ resolved: boolean }> {
+    return this.toolScheduler.run('write', undefined, () =>
+      this.ready().surface.resolveApproval(taskId, decision, note),
+    );
+  }
+
+  /**
    * Run a surface call that is EXPECTED to throw and return its message ('' on
    * unexpected success). Throwing across the DO RPC boundary leaves workerd
    * with an uncaught-rejection report even when the test handles it, so
@@ -380,29 +522,52 @@ export class TasksTestDO extends DurableObject {
 
   // ── scheduler passthroughs ───────────────────────────────────────────────
 
-  async tick(now: number): Promise<void> {
-    await this.ready().onAlarm(now);
+  /** One alarm tick; resolves to the next wake the scheduler computed. */
+  async tick(now: number): Promise<number | null> {
+    return this.ready().onAlarm(now);
   }
 
   async nextWakeAt(): Promise<number | null> {
     return this.ready().nextWakeAt();
   }
 
+  async isRunActive(runId: string): Promise<boolean> {
+    return this.ready().isRunActive(runId);
+  }
+
   // ── fakes: scripting + inspection ────────────────────────────────────────
 
-  async setTurnBehavior(
-    mode: 'ok' | 'fail' | 'empty' | 'hang',
-    text?: string,
-  ): Promise<void> {
+  async setTurnBehavior(mode: TurnMode, text?: string): Promise<void> {
     this.turnMode = mode;
     if (text !== undefined) this.turnText = text;
+  }
+
+  /** Turns of one task hang until `releaseTurns()`; the others follow the mode. */
+  async hangTask(taskId: string): Promise<void> {
+    this.hangingSessions.add(`task:${taskId}`);
+  }
+
+  /** What the turns of one task answer. */
+  async setTurnTextFor(taskId: string, text: string): Promise<void> {
+    this.turnTextBySession.set(`task:${taskId}`, text);
   }
 
   /** Let every hanging turn finish (in order). Returns how many were released. */
   async releaseTurns(): Promise<number> {
     const n = this.hanging.length;
+    this.hangingSessions.clear();
     for (const release of this.hanging.splice(0)) release();
     return n;
+  }
+
+  /** Turns started and still hanging. */
+  async hangingTurnCount(): Promise<number> {
+    return this.hanging.length;
+  }
+
+  /** The most hanging turns that were in flight at the same time. */
+  async peakConcurrentTurns(): Promise<number> {
+    return this.peakTurnsInFlight;
   }
 
   async releaseSends(): Promise<void> {
@@ -411,6 +576,10 @@ export class TasksTestDO extends DurableObject {
 
   async setSendBehavior(mode: SendMode): Promise<void> {
     this.sendMode = mode;
+  }
+
+  async failSendsContaining(text: string | null): Promise<void> {
+    this.failingBody = text;
   }
 
   async sendFailureCount(): Promise<number> {

@@ -176,12 +176,13 @@ export class ChannelTurns {
         410,
         'Channel response has expired; this request cannot execute again',
       );
-    await this.db.run(
+    const admitted = await this.db.run(
       `INSERT OR IGNORE INTO channel_requests
       (binding_id, request_id, request_hash, run_id) VALUES (?, ?, ?, ?)`,
       [input.bindingId, input.requestId, requestHash, runId],
     );
-    await this.host.changed();
+    // A poll of an admitted request changes nothing.
+    if (admitted.changes === 1) await this.host.changed();
     const receipt = await this.db.get<ReceiptRow>(
       'SELECT * FROM channel_requests WHERE binding_id = ? AND request_id = ?',
       [input.bindingId, input.requestId],
@@ -192,6 +193,10 @@ export class ChannelTurns {
         'This request ID already belongs to another message',
       );
     let sessionId = receipt.session_id;
+    // The session is checked when this request is bound to it, and again
+    // before the request starts a run; a poll of a run that exists already
+    // only reads its receipt and row.
+    let sessionChecked = false;
     if (!sessionId) {
       const binding = await this.db.get<{ session_id: string }>(
         'SELECT session_id FROM channel_sessions WHERE binding_id = ?',
@@ -210,6 +215,7 @@ export class ChannelTurns {
           `channel-session-${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`,
         ));
       await this.host.assertSession(identity, sessionId);
+      sessionChecked = true;
       await this.db.transaction(async () => {
         await this.db.run(
           'INSERT OR IGNORE INTO channel_sessions (binding_id, session_id) VALUES (?, ?)',
@@ -222,7 +228,6 @@ export class ChannelTurns {
       });
       await this.host.changed();
     }
-    await this.host.assertSession(identity, sessionId);
     const request: TurnRequest = {
       identity,
       sessionId,
@@ -238,6 +243,7 @@ export class ChannelTurns {
     };
     let record = await this.host.getRun(runId);
     if (!record) {
+      if (!sessionChecked) await this.host.assertSession(identity, sessionId);
       await this.host.requireDelegation(identity);
       await this.host.mirror(request, request.message, 'user');
       record = await this.host.begin(runId, request);

@@ -7,7 +7,10 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { defaultSandboxMcpClientFactory } from './sandbox-bridge';
+import {
+  defaultSandboxMcpClientFactory,
+  SANDBOX_MCP_TIMEOUT_MS,
+} from './sandbox-bridge';
 import {
   createDefaultAuthBuilder,
   parseOracleSecrets,
@@ -152,9 +155,6 @@ export interface SandboxMcpTool {
 export type SandboxMcpClientFactory = (
   config: ClientConfig,
 ) => SandboxMcpClientLike;
-
-/** Per-tool timeout for sandbox MCP calls (matches the Node runtime wiring). */
-const SANDBOX_MCP_TIMEOUT_MS = 180_000;
 
 /**
  * How long a request's lazily-connected MCP client survives after its last
@@ -351,12 +351,7 @@ export class SandboxPlugin extends OraclePlugin {
       return this.toPluginTools(lazyUpstream, rtCtx);
     }
 
-    const userSecretIndex = await rtCtx.secrets.getIndex();
-    const userSecretKeys = Object.keys(userSecretIndex);
-    const userSecrets: Record<string, string> =
-      userSecretKeys.length > 0
-        ? await rtCtx.secrets.getValues(userSecretKeys)
-        : {};
+    const userSecrets = await rtCtx.secrets.getAll();
 
     const headers = await this.authBuilder(
       {
@@ -526,12 +521,7 @@ export class SandboxPlugin extends OraclePlugin {
     rtCtx: RuntimeContext;
   }): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
     const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
-    const userSecretIndex = await rtCtx.secrets.getIndex();
-    const userSecretKeys = Object.keys(userSecretIndex);
-    const userSecrets: Record<string, string> =
-      userSecretKeys.length > 0
-        ? await rtCtx.secrets.getValues(userSecretKeys)
-        : {};
+    const userSecrets = await rtCtx.secrets.getAll();
 
     const headers = await this.authBuilder(
       { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, userSecrets },

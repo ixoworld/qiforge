@@ -71,10 +71,23 @@ export const DEFAULT_TIER_MAX_SEGMENTS_PER_PASS = 64;
  * with a clear error rather than thrashing the clean cache.
  */
 export const DEFAULT_TIER_MISS_PIN_BYTES = 32 * 1024 * 1024;
-/** Orphan sweep (list + delete unreferenced keys) every this many maintenance runs. */
-const ORPHAN_SWEEP_EVERY = 16;
+/**
+ * A complete orphan sweep (list the prefix, delete segment objects the map
+ * does not reference) at most this often. The time of the last complete
+ * sweep is persisted, so isolate restarts and object evictions do not
+ * postpone it. Orphans are rare (a crash between a segment upload and its
+ * map commit, a failed delete batch, deletes queued in memory by a
+ * truncate/import that never reached maintenance), so a weekly listing is
+ * enough: each sweep step is one R2 list (Class A).
+ */
+export const DEFAULT_TIER_ORPHAN_SWEEP_INTERVAL_MS = 7 * 24 * 60 * 60_000;
+/** Keys one sweep step lists (one R2 list page) — and so at most deletes. */
+const SWEEP_STEP_KEYS = 1000;
 /** R2 `delete()` accepts up to 1000 keys per call. */
 const R2_DELETE_BATCH = 1000;
+
+/** What `PageTier.maintenance` sweeps besides the queued deletes. */
+export type SweepStep = 'none' | 'step' | 'full';
 
 export interface PageTierOptions {
   bucket: R2Bucket;
@@ -86,6 +99,8 @@ export interface PageTierOptions {
   maxSegmentsPerPass?: number;
   /** Cold bytes one statement/transaction may pin while it is retried (default 32 MiB). */
   missPinBytes?: number;
+  /** Minimum time between complete orphan sweeps (default 7 days). */
+  orphanSweepIntervalMs?: number;
   /** Clock, injectable for tests. */
   now?: () => number;
 }
@@ -98,6 +113,7 @@ export interface ResolvedPageTierOptions {
   evictAfterPeriods: number;
   maxSegmentsPerPass: number;
   missPinBytes: number;
+  orphanSweepIntervalMs: number;
   now: () => number;
 }
 
@@ -114,6 +130,8 @@ export function resolvePageTierOptions(
     maxSegmentsPerPass:
       options.maxSegmentsPerPass ?? DEFAULT_TIER_MAX_SEGMENTS_PER_PASS,
     missPinBytes: options.missPinBytes ?? DEFAULT_TIER_MISS_PIN_BYTES,
+    orphanSweepIntervalMs:
+      options.orphanSweepIntervalMs ?? DEFAULT_TIER_ORPHAN_SWEEP_INTERVAL_MS,
     now: options.now ?? (() => Date.now()),
   };
 }
@@ -150,6 +168,11 @@ interface SegmentRow extends Record<string, SqlStorageValue> {
 interface AccessRow extends Record<string, SqlStorageValue> {
   period: number;
   bits: ArrayBuffer;
+}
+
+interface SweepRow extends Record<string, SqlStorageValue> {
+  last_complete_at: number | null;
+  after_key: string | null;
 }
 
 export function segmentOf(chunkno: number): number {
@@ -197,7 +220,6 @@ export class PageTier {
   private readonly segments = new Map<string, Map<number, SegmentEntry>>();
   private schemaReady = false;
   private readonly pendingDeletes = new Set<string>();
-  private maintenanceRuns = 0;
   /** Tiny LRU of raw segment bytes for sequential readers (snapshot windows). */
   private readonly segmentCache = new Map<string, Uint8Array>();
   private static readonly SEGMENT_CACHE_ENTRIES = 2;
@@ -242,6 +264,11 @@ export class PageTier {
     // key must never hit a fresh object.
     this.storage.sql.exec(
       'CREATE TABLE IF NOT EXISTS vfs2_tier_meta (file TEXT PRIMARY KEY, max_gen INTEGER NOT NULL)',
+    );
+    // Orphan sweep progress (one row): when the last complete sweep ended,
+    // and the last key a sweep still in progress has examined.
+    this.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS vfs2_tier_sweep (id INTEGER PRIMARY KEY CHECK (id = 0), last_complete_at INTEGER, after_key TEXT)',
     );
     this.schemaReady = true;
   }
@@ -474,17 +501,12 @@ export class PageTier {
   // R2 (async)
   // ---------------------------------------------------------------------------
 
-  /** The segment object bytes (exactly SEGMENT_BYTES, zero-padded), or null when the map has no entry. */
-  async getSegment(file: string, segno: number): Promise<Uint8Array | null> {
-    const entry = this.segmentsOf(file).get(segno);
-    if (entry === undefined) return null;
-    return this.getSegmentAt(file, segno, entry);
-  }
-
   /**
-   * The bytes of a specific generation of a segment — what a snapshot took
-   * at open time even if the map has moved on since (the old object is
-   * only deleted once no snapshot is open).
+   * The bytes (exactly SEGMENT_BYTES, zero-padded) of a specific generation
+   * of a segment — what a snapshot took at open time even if the map has
+   * moved on since (the old object is only deleted once no snapshot is
+   * open). Callers that need the CURRENT generation re-check the map after
+   * the await (see `DoVfs.currentSegment`).
    */
   async getSegmentAt(
     file: string,
@@ -543,13 +565,16 @@ export class PageTier {
   }
 
   /**
-   * Delete queued keys (objects the map no longer references) and, every
-   * `ORPHAN_SWEEP_EVERY` runs or when `sweep` is set, list the prefix and
-   * delete anything the map does not reference — the leftovers of a crash
-   * between a put and its map update. Never throws.
+   * Delete queued keys (objects the map no longer references), then sweep
+   * orphans: `'step'` examines one listing page of the prefix (continuing
+   * where the previous step stopped), `'full'` the whole prefix now. Only
+   * keys shaped like this tier's segment objects are ever swept — the
+   * prefix is shared with other users of the bucket (the result store
+   * keeps `<prefix>/results/…`). The CALLER guarantees no segment upload
+   * is in flight while a sweep runs (see `DoVfs`). Never throws.
    */
   async maintenance(
-    opts: { sweep?: boolean } = {},
+    opts: { sweep?: SweepStep } = {},
   ): Promise<{ deleted: number }> {
     let deleted = 0;
     const keys = Array.from(this.pendingDeletes);
@@ -562,19 +587,103 @@ export class PageTier {
         `[page-tier] delete of ${keys.length} object(s) failed: ${errorMessage(err)}`,
       );
     }
-    this.maintenanceRuns++;
-    if (
-      opts.sweep === true ||
-      this.maintenanceRuns % ORPHAN_SWEEP_EVERY === 0
-    ) {
+    const sweep = opts.sweep ?? 'none';
+    if (sweep !== 'none') {
       try {
-        deleted += await this.sweepOrphans();
+        for (;;) {
+          const step = await this.sweepStep(sweep === 'full');
+          deleted += step.deleted;
+          if (sweep === 'step' || step.complete) break;
+        }
       } catch (err) {
         console.warn(`[page-tier] orphan sweep failed: ${errorMessage(err)}`);
       }
     }
     this.stats.pendingDeletes = this.pendingDeletes.size;
     return { deleted };
+  }
+
+  /**
+   * Whether a sweep step is due: one is in progress, or the last complete
+   * sweep is older than `orphanSweepIntervalMs` (or there never was one).
+   */
+  sweepDue(now = this.options.now()): boolean {
+    const state = this.sweepState();
+    if (state.after_key !== null) return true;
+    return (
+      state.last_complete_at === null ||
+      now - state.last_complete_at >= this.options.orphanSweepIntervalMs
+    );
+  }
+
+  private sweepState(): SweepRow {
+    this.ensureSchema();
+    return (
+      this.storage.sql
+        .exec<SweepRow>(
+          'SELECT last_complete_at, after_key FROM vfs2_tier_sweep WHERE id = 0',
+        )
+        .toArray()[0] ?? { last_complete_at: null, after_key: null }
+    );
+  }
+
+  /**
+   * One listing page of the prefix: delete the segment-shaped keys the map
+   * does not reference and persist how far the sweep got. `restart` starts
+   * from the beginning of the prefix (a full sweep).
+   */
+  private async sweepStep(
+    restart: boolean,
+  ): Promise<{ deleted: number; complete: boolean }> {
+    const afterKey = restart ? null : this.sweepState().after_key;
+    const page = await this.options.bucket.list({
+      prefix: `${this.options.prefix}/`,
+      limit: SWEEP_STEP_KEYS,
+      ...(afterKey !== null && { startAfter: afterKey }),
+    });
+    this.stats.r2Lists++;
+    // The map is read after the listing: a segment committed meanwhile is
+    // referenced by then (and uploads in flight are excluded by the caller).
+    const referenced = this.referencedKeys();
+    const orphans = page.objects
+      .map((object) => object.key)
+      .filter((key) => this.isSegmentKey(key) && !referenced.has(key));
+    const deleted = await this.deleteKeys(orphans);
+    const lastKey = page.objects.at(-1)?.key;
+    const complete = !page.truncated || lastKey === undefined;
+    if (complete) {
+      this.storage.sql.exec(
+        'INSERT INTO vfs2_tier_sweep (id, last_complete_at, after_key) VALUES (0, ?, NULL) ON CONFLICT(id) DO UPDATE SET last_complete_at = excluded.last_complete_at, after_key = NULL',
+        this.options.now(),
+      );
+    } else {
+      this.storage.sql.exec(
+        'INSERT INTO vfs2_tier_sweep (id, last_complete_at, after_key) VALUES (0, NULL, ?) ON CONFLICT(id) DO UPDATE SET after_key = excluded.after_key',
+        lastKey,
+      );
+    }
+    return { deleted, complete };
+  }
+
+  /** Keys of every segment object the map references, across files. */
+  private referencedKeys(): Set<string> {
+    this.ensureSchema();
+    const referenced = new Set<string>();
+    const rows = this.storage.sql
+      .exec<
+        SegmentRow & { file: string }
+      >('SELECT file, segno, gen, mask FROM vfs2_tier_segments')
+      .toArray();
+    for (const row of rows)
+      referenced.add(this.key(row.file, row.segno, row.gen));
+    return referenced;
+  }
+
+  /** `<prefix>/<file>/<segno>.<gen>` — the only keys a sweep may delete. */
+  private isSegmentKey(key: string): boolean {
+    const head = `${this.options.prefix}/`;
+    if (!key.startsWith(head)) return false;
+    return /^.+\/\d+\.\d+$/.test(key.slice(head.length));
   }
 
   /** Every object under the prefix (keys). */
@@ -591,22 +700,6 @@ export class PageTier {
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor !== undefined);
     return keys;
-  }
-
-  private async sweepOrphans(): Promise<number> {
-    const referenced = new Set<string>();
-    this.ensureSchema();
-    const rows = this.storage.sql
-      .exec<
-        SegmentRow & { file: string }
-      >('SELECT file, segno, gen, mask FROM vfs2_tier_segments')
-      .toArray();
-    for (const row of rows)
-      referenced.add(this.key(row.file, row.segno, row.gen));
-    const orphans = (await this.listKeys()).filter(
-      (key) => !referenced.has(key),
-    );
-    return this.deleteKeys(orphans);
   }
 
   /** Delete everything under the prefix (the object's working copy is being wiped). */

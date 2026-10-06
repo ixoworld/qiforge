@@ -136,6 +136,45 @@ describe('DID mapping', () => {
     ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'evil.example' });
   });
 
+  it("never lends the room owner's identity to a non-DID account on another server", () => {
+    // The alias names a user registered on ixo.test; the sender's account
+    // lives on a server that did not mint it.
+    expect(
+      attributeUser({
+        alias: ALIAS,
+        sender: '@mallory:evil.example',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toBeNull();
+    // Server names compare case-insensitively, as Matrix server names do.
+    expect(
+      attributeUser({
+        alias: ALIAS,
+        sender: '@legacy:IXO.test',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toEqual({ userDid: 'did:ixo:ixo1user', server: 'ixo.test' });
+    // A sender without a server part matches nothing.
+    expect(
+      attributeUser({ alias: ALIAS, sender: '@legacy', oracleDid: ORACLE_DID }),
+    ).toBeNull();
+    // An alias for another oracle, or not an oracle alias at all, names nobody.
+    expect(
+      attributeUser({
+        alias: '#did-ixo-ixo1user_did-ixo-other:ixo.test',
+        sender: '@legacy:ixo.test',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toBeNull();
+    expect(
+      attributeUser({
+        alias: '#general:ixo.test',
+        sender: '@legacy:ixo.test',
+        oracleDid: ORACLE_DID,
+      }),
+    ).toBeNull();
+  });
+
   it('the thread root is the session: a threaded message keys on its root, a bare one on itself', () => {
     expect(threadRootIdOf({ eventId: '$e', threadRootId: '$root' })).toBe(
       '$root',
@@ -183,6 +222,76 @@ describe('IngestPipeline', () => {
       'queued',
     );
     genuine.pipeline.clear();
+  });
+
+  it("leaves a non-DID sender from another server unmapped in an owner's room: no turn, no homeserver lookup", async () => {
+    const asked: string[] = [];
+    const { pipeline, turns } = harness({
+      userServerName: (did) => {
+        asked.push(did);
+        return 'ixo.test';
+      },
+    });
+    expect(pipeline.offer(msg({ sender: '@mallory:evil.example' }))).toBe(
+      'unmapped',
+    );
+    await sleep(60);
+    expect(turns).toEqual([]);
+    expect(asked).toEqual([]);
+  });
+
+  it('attributes with the alias the caller verified, not a memo read afterwards', () => {
+    // The memo answers "no alias" (expired or invalidated meanwhile).
+    const { pipeline } = harness({ alias: null });
+    expect(pipeline.offer(msg({ sender: '@legacy:ixo.test' }), ALIAS)).toBe(
+      'queued',
+    );
+    // And an explicit "none" is not overridden by a memo that has one.
+    const memo = harness();
+    expect(memo.pipeline.offer(msg({ sender: '@legacy:ixo.test' }), null)).toBe(
+      'unmapped',
+    );
+    pipeline.clear();
+  });
+
+  it('attributes every sender shape as documented', async () => {
+    const { pipeline, turns } = harness();
+    // DID-shaped on the registered server → that DID.
+    expect(
+      pipeline.offer(
+        msg({ eventId: '$did-right', sender: '@did-ixo-ixo1guest:ixo.test' }),
+      ),
+    ).toBe('queued');
+    // DID-shaped from a server that is not the DID's → dropped.
+    expect(
+      pipeline.offer(msg({ sender: '@did-ixo-ixo1guest:evil.example' })),
+    ).toBe('foreign');
+    // Legacy on the alias's server → the room owner.
+    expect(
+      pipeline.offer(
+        msg({ eventId: '$legacy-right', sender: '@bob:ixo.test' }),
+      ),
+    ).toBe('queued');
+    // Legacy from another server → nobody.
+    expect(pipeline.offer(msg({ sender: '@bob:evil.example' }))).toBe(
+      'unmapped',
+    );
+    // An edit (`m.replace`) arrives as a message of its own and is attributed
+    // exactly like one: the edit of a foreign sender is as foreign.
+    expect(
+      pipeline.offer(
+        msg({ sender: '@did-ixo-ixo1user:evil.example', body: '* fixed' }),
+      ),
+    ).toBe('foreign');
+    await sleep(60);
+    expect(
+      turns
+        .map((t) => [t.eventIds[0], t.userDid])
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ).toEqual([
+      ['$did-right', 'did:ixo:ixo1guest'],
+      ['$legacy-right', 'did:ixo:ixo1user'],
+    ]);
   });
 
   it("checks each speaker against their own DID's homeserver", () => {

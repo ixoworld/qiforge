@@ -194,6 +194,135 @@ describe('routableCandidates', () => {
   });
 });
 
+describe('routableCandidates — manifest requirements', () => {
+  const REQUIRES = [{ resource: 'ixo:filesystem', action: 'fs/read' }];
+  const withFiles: RegisteredManifest[] = [
+    ...manifests,
+    {
+      pluginName: 'files',
+      manifest: makeManifest({
+        title: 'Files',
+        summary: 'Personal files.',
+        visibility: 'on-demand',
+        requires: REQUIRES,
+      }),
+    },
+  ];
+  const has =
+    (capabilities: Array<{ resource: string; action: string }>) =>
+    (resource: string, action: string) =>
+      delegationHasCapability({ capabilities }, resource, action);
+
+  it('never names a plugin whose requires the delegation does not grant', () => {
+    expect(
+      routableCandidates(withFiles, loaded, undefined, has([])).map(
+        (c) => c.name,
+      ),
+    ).toEqual(CANDIDATE_NAMES);
+    expect(
+      routableCandidates(
+        withFiles,
+        loaded,
+        undefined,
+        has([{ resource: 'ixo:filesystem', action: '*' }]),
+      ).map((c) => c.name),
+    ).toEqual([...CANDIDATE_NAMES, 'files']);
+    // Without a delegation check the requirements are not looked at.
+    expect(routableCandidates(withFiles, loaded).map((c) => c.name)).toEqual([
+      ...CANDIDATE_NAMES,
+      'files',
+    ]);
+  });
+
+  it('does not spend the evaluation on a plugin the delegation cannot use', async () => {
+    const evaluator = evaluatorOf(async () => evaluation(1, 'files', 1));
+    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
+    const preloaded = await route(
+      turn({ manifests: withFiles, hasCapability: has([]) }),
+    );
+    const offered = (
+      evaluator.evaluate.mock.calls[0]?.[1] as {
+        capabilities: Array<{ name: string }>;
+      }
+    ).capabilities.map((c) => c.name);
+    expect(offered).not.toContain('files');
+    // The model named a plugin that was not offered: nothing is preloaded.
+    expect(preloaded.size).toBe(0);
+  });
+});
+
+describe('createCapabilityRouter — hidden plugins', () => {
+  it('computes a lazy hidden set only when it evaluates', async () => {
+    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
+    const route = createCapabilityRouter({ evaluator, logger: loggerSpy() });
+    const hidden = vi.fn(async () => new Set(['payments']));
+
+    await route(turn({ mode: 'off', hidden }));
+    await route(turn({ text: '   ', hidden }));
+    expect(hidden).not.toHaveBeenCalled();
+
+    await route(turn({ hidden }));
+    expect(hidden).toHaveBeenCalledTimes(1);
+    const offered = (
+      evaluator.evaluate.mock.calls[0]?.[1] as {
+        capabilities: Array<{ name: string }>;
+      }
+    ).capabilities.map((c) => c.name);
+    expect(offered).toEqual(['weather']);
+  });
+
+  it('runs no boot sub-agent factory when the router is off', async () => {
+    const registries = createRegistries();
+    const factory = vi.fn(() => [makeTool('plan_trip')]);
+    const planner = makePlugin({
+      name: 'planner',
+      manifest: makeManifest({ title: 'Planner', visibility: 'on-demand' }),
+      getSubAgents: () => [
+        {
+          name: 'Trip Planner',
+          description: 'plans',
+          systemPrompt: 'plan',
+          tools: factory,
+        },
+      ],
+    });
+    registries.tools.register(planner);
+    registries.subAgents.register(planner);
+    const route = createCapabilityRouter({
+      evaluator: evaluatorOf(async () => evaluation(1, 'weather', 1)),
+      logger: loggerSpy(),
+    });
+    const hidden = () =>
+      bootHiddenPlugins({
+        registries,
+        buildCtx: makeBuildCtx(),
+        has: () => true,
+      });
+    await route(turn({ mode: 'off', hidden }));
+    expect(factory).not.toHaveBeenCalled();
+    await route(turn({ hidden }));
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('a hidden set that cannot be computed preloads nothing, with a warning', async () => {
+    const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));
+    const logger = loggerSpy();
+    const route = createCapabilityRouter({ evaluator, logger });
+    const preloaded = await route(
+      turn({
+        hidden: async () => {
+          throw new Error('getTools exploded');
+        },
+      }),
+    );
+    expect(preloaded.size).toBe(0);
+    expect(evaluator.evaluate).not.toHaveBeenCalled();
+    expect(String(logger.warn.mock.calls[0]?.[0])).toContain(
+      'status=fallback reason=Error',
+    );
+  });
+});
+
 describe('createCapabilityRouter', () => {
   it('off: never evaluates', async () => {
     const evaluator = evaluatorOf(async () => evaluation(1, 'weather', 1));

@@ -6,7 +6,11 @@
  * which is what makes multi-GB users multi-GB — only shrinks if rewritten.
  * `compactStep` rewrites a bounded batch per call so the user object's alarm
  * can chip away at arbitrarily large files without ever hogging a tick;
- * `finishCompaction` reclaims the freed pages once nothing is left.
+ * `finishCompaction` reclaims the freed pages once nothing is left. A step
+ * is bounded by rows AND by legacy bytes (`COMPACT_STEP_MAX_BYTES`): it
+ * reads one blob at a time and holds every page it rewrites until its
+ * COMMIT, so a batch of tool outputs with embedded media must not be able
+ * to exhaust the isolate's memory.
  *
  * Lossless by construction: each row's blob is read, gzipped, and written
  * back — the read path decompresses transparently, so the decoded value is
@@ -36,6 +40,12 @@ const TARGETS: readonly CompactTarget[] = [
 
 const textEncoder = new TextEncoder();
 
+/**
+ * Legacy bytes one step reads and rewrites at most — except that a step
+ * always takes at least one row, however large, so it never stalls.
+ */
+export const COMPACT_STEP_MAX_BYTES = 8 * 1024 * 1024;
+
 /** Highest rowid examined per table; persist between calls, `{}` to start. */
 export type CompactCursors = Record<string, number>;
 
@@ -46,6 +56,8 @@ export interface CompactStepResult {
   savedBytes: number;
   /** Rows examined (incl. incompressible ones passed over). */
   examined: number;
+  /** Legacy bytes of the rows examined. */
+  examinedBytes: number;
   /** True once every table's scan is exhausted. */
   done: boolean;
   /** Updated cursors — persist and pass into the next call. */
@@ -53,73 +65,94 @@ export interface CompactStepResult {
 }
 
 /**
- * Examine up to `batch` legacy rows and rewrite the compressible ones as
- * gzipped blobs. Call repeatedly (persisting `cursors`) until `done`.
+ * Examine up to `batch` legacy rows — and at most `maxBytes` of them (at
+ * least one row) — and rewrite the compressible ones as gzipped blobs.
+ * Call repeatedly (persisting `cursors`) until `done`. Where the steps end
+ * changes nothing about the result: rows are visited in the same order and
+ * each is rewritten exactly as an unbounded run would.
  */
 export async function compactStep(
   db: DoSqliteDatabase,
   batch = 200,
   cursors: CompactCursors = {},
+  opts: { maxBytes?: number } = {},
 ): Promise<CompactStepResult> {
+  const maxBytes = opts.maxBytes ?? COMPACT_STEP_MAX_BYTES;
   // One transaction per step: the batch lands atomically and cannot
   // interleave with a turn's own checkpoint transaction.
-  return db.transaction(() => compactStepInTx(db, batch, cursors));
+  return db.transaction(() => compactStepInTx(db, batch, maxBytes, cursors));
 }
 
 async function compactStepInTx(
   db: DoSqliteDatabase,
   batch: number,
+  maxBytes: number,
   cursors: CompactCursors,
 ): Promise<CompactStepResult> {
   let budget = batch;
   let rewritten = 0;
   let savedBytes = 0;
   let examined = 0;
+  let examinedBytes = 0;
+  let full = false;
   let exhausted = true;
   const next: CompactCursors = { ...cursors };
 
   for (const { table, column } of TARGETS) {
     let cursor = next[table] ?? 0;
     while (budget > 0) {
-      const rows = await db.exec<{ rowid: number; data: Uint8Array | string }>(
+      // One candidate at a time: the filter loads each value it examines,
+      // so a batched query would read every candidate behind the budget.
+      const row = await db.get<{ rowid: number; data: Uint8Array | string }>(
         `SELECT rowid, ${column} AS data FROM ${table}
          WHERE rowid > ?
            AND ${column} IS NOT NULL
            AND length(${column}) >= ?
            AND substr(${column}, 1, 2) != X'1F8B'
          ORDER BY rowid
-         LIMIT ?`,
-        [cursor, MIN_COMPRESS_BYTES, budget],
+         LIMIT 1`,
+        [cursor, MIN_COMPRESS_BYTES],
       );
-      if (rows.length === 0) break;
-      for (const { rowid, data } of rows) {
-        cursor = Math.max(cursor, rowid);
-        budget -= 1;
-        examined += 1;
-        const bytes =
-          typeof data === 'string' ? textEncoder.encode(data) : data;
-        if (isGzip(bytes)) continue;
-        const compressed = await gzipBytes(bytes);
-        // Incompressible (already-compressed media): leave as-is; the cursor
-        // has moved past it, so it is never re-attempted.
-        if (compressed.length >= bytes.length) continue;
-        await db.run(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`, [
-          compressed,
-          rowid,
-        ]);
-        rewritten += 1;
-        savedBytes += bytes.length - compressed.length;
+      if (row === undefined) break;
+      const bytes =
+        typeof row.data === 'string' ? textEncoder.encode(row.data) : row.data;
+      if (examined > 0 && examinedBytes + bytes.length > maxBytes) {
+        // Left for the next step, which starts with it.
+        full = true;
+        break;
       }
+      cursor = Math.max(cursor, row.rowid);
+      budget -= 1;
+      examined += 1;
+      examinedBytes += bytes.length;
+      if (isGzip(bytes)) continue;
+      const compressed = await gzipBytes(bytes);
+      // Incompressible (already-compressed media): leave as-is; the cursor
+      // has moved past it, so it is never re-attempted.
+      if (compressed.length >= bytes.length) continue;
+      await db.run(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`, [
+        compressed,
+        row.rowid,
+      ]);
+      rewritten += 1;
+      savedBytes += bytes.length - compressed.length;
     }
     next[table] = cursor;
-    if (budget <= 0) {
-      // Budget ran out mid-table — cannot know whether scans are exhausted.
+    if (budget <= 0 || full) {
+      // A budget ran out mid-table — cannot know whether scans are exhausted.
       exhausted = false;
       break;
     }
   }
 
-  return { rewritten, savedBytes, examined, done: exhausted, cursors: next };
+  return {
+    rewritten,
+    savedBytes,
+    examined,
+    examinedBytes,
+    done: exhausted,
+    cursors: next,
+  };
 }
 
 /**

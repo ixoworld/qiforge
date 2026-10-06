@@ -7,6 +7,7 @@ import {
   hasShellUnsafeChars,
   inferMimeFromPath,
   isUnderWorkspaceData,
+  MAX_SANDBOX_TRANSFER_BYTES,
   readSandboxFile,
   readSandboxResult,
   writeSandboxFile,
@@ -14,7 +15,6 @@ import {
 } from '../sandbox/sandbox-bridge';
 import type { SandboxMcpClientFactory } from '../sandbox/sandbox.plugin';
 import type { VfsFileStat } from './vfs-client';
-import { isTextMime } from './vfs-content';
 import {
   isAlreadyExistsConflict,
   mapVfsError,
@@ -227,16 +227,23 @@ export function createVfsSandboxTools(
         const client = vfsClient(ctx);
         const stat = await client.statByPath(vfsPath);
         if (!stat) return `No such file at \`${vfsPath}\`.`;
+        if (stat.size > MAX_SANDBOX_TRANSFER_BYTES) {
+          return `\`${vfsPath}\` is ${stat.size} bytes; files moved into the sandbox are limited to ${MAX_SANDBOX_TRANSFER_BYTES} bytes.`;
+        }
 
-        const { bytes, mimeType } = await client.contentBytes(stat.id);
+        const { bytes } = await client.contentBytes(
+          stat.id,
+          MAX_SANDBOX_TRANSFER_BYTES,
+        );
         const data = new Uint8Array(bytes);
-        const isText = isTextMime(mimeType || stat.mimeType || '');
 
+        // Always base64: decoding as UTF-8 would silently replace the bytes
+        // of a text file in any other encoding (Latin-1, Windows-1252).
         const write = await writeSandboxFile(
           bridge,
           sandboxPath,
-          isText ? new TextDecoder().decode(data) : bytesToBase64(data),
-          isText ? 'utf8' : 'base64',
+          bytesToBase64(data),
+          'base64',
         );
         if ('error' in write) return write.error;
 

@@ -98,6 +98,7 @@ export interface TestPluginInit {
   name: string;
   version?: string;
   manifest?: PluginManifest;
+  operatingGuide?: string;
   dependsOn?: string[];
   softDependsOn?: string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -127,6 +128,7 @@ export function makePlugin(init: TestPluginInit): OraclePlugin {
     readonly name = init.name;
     readonly version = init.version ?? '0.0.1';
     readonly manifest = init.manifest ?? makeManifest();
+    override readonly operatingGuide?: string = init.operatingGuide;
     override readonly dependsOn?: string[] = init.dependsOn;
     override readonly softDependsOn?: string[] = init.softDependsOn;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

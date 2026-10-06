@@ -20,8 +20,10 @@ import {
 import {
   attemptSeqBase,
   decideRecovery,
+  patchRunRecord,
   runHasCheckpointed,
   type RunDurabilityConfig,
+  type RunPatch,
   type RunRecord,
   type RunStore,
 } from './run-store';
@@ -36,6 +38,8 @@ export interface RunOutcome {
   messageId?: string;
   toolCalls?: Array<{ name: string; status: 'done' | 'error' }>;
   error?: unknown;
+  /** The run's usage snapshot (JSON), stored with the terminal status. */
+  usage?: string;
 }
 
 /**
@@ -48,6 +52,8 @@ export interface RunOutcome {
 export class RunAttemptDeferred extends Error {
   override readonly name = 'RunAttemptDeferred';
 }
+
+export type AttemptSource = 'begin' | 'dequeue' | 'recovery';
 
 export interface LiveRun {
   readonly runId: string;
@@ -63,6 +69,13 @@ export interface LiveRun {
   resolve: (outcome: RunOutcome) => void;
   /** An attempt is executing right now. */
   attemptInFlight: boolean;
+  /**
+   * What started the current attempt: `begin` (the message that was just
+   * admitted, started at once), `dequeue` (it waited behind another run of
+   * its session) or `recovery` (a retry after a reset or a deferral).
+   * Unset on a run built outside the coordinator.
+   */
+  attemptSource?: AttemptSource;
 }
 
 /** The slice of `RunStore` the coordinator drives (tests supply an in-memory one). */
@@ -74,7 +87,7 @@ export type RunCoordinatorStore = Pick<
   | 'listActive'
   | 'readSegments'
   | 'appendSegment'
-  | 'deleteSegments'
+  | 'close'
 >;
 
 export interface RunCoordinatorHost {
@@ -95,6 +108,8 @@ export interface RunCoordinatorHost {
   checkpointIdOf: (sessionId: string) => Promise<string | null>;
   /** After a run reached a terminal state and its row was closed. */
   onRunEnded?: (record: RunRecord, outcome: RunOutcome) => Promise<void>;
+  /** How long a superseded or aborted attempt gets to wind down (default 5 s). */
+  supersedeGraceMs?: number;
 }
 
 export interface BeginRunInput {
@@ -111,6 +126,43 @@ export interface BeginRunInput {
 /** How long a superseded run gets to wind down before the next one starts. */
 const SUPERSEDE_GRACE_MS = 5_000;
 
+/** Shown when a run ends failed without its attempt having said why. */
+const RUN_FAILED_MESSAGE =
+  'Something went wrong while answering. Please try again.';
+
+/**
+ * A `begin` that has not opened its run yet. A later `interrupt` message of
+ * the same session (or `abortAllForSession`) supersedes it: it then records
+ * its run as aborted and never starts an attempt.
+ */
+interface PendingBegin {
+  superseded: boolean;
+  /** Resolves when superseded, so a wait on the previous run is cut short. */
+  readonly woken: Promise<void>;
+  wake: () => void;
+}
+
+/**
+ * Wait for `promise`, at most `ms`, and never leave the timer behind (a
+ * pending timer keeps a Durable Object resident).
+ */
+async function withinGrace(
+  ms: number,
+  ...promises: Array<Promise<unknown>>
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      ...promises,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export interface JoinResult {
   record: RunRecord;
   /** Frames after the cursor, from the segments and the live tail. */
@@ -122,12 +174,27 @@ export interface JoinResult {
 export class RunCoordinator {
   private readonly live = new Map<string, LiveRun>();
 
+  /** Per session: the tail of the chain `begin` calls run on, one at a time. */
+  private readonly sessionTurns = new Map<string, Promise<void>>();
+
+  /** Per session: the `begin` calls that have not opened their run yet. */
+  private readonly pendingBegins = new Map<string, Set<PendingBegin>>();
+
+  /**
+   * Runs queued only because the run their message superseded outlived the
+   * grace: the message is the session's current one, so Stop ends it too.
+   */
+  private readonly queuedBehindSuperseded = new WeakSet<LiveRun>();
+
   private keepAliveArmedUntil = 0;
 
   private readonly now: () => number;
 
+  private readonly graceMs: number;
+
   constructor(private readonly host: RunCoordinatorHost) {
     this.now = host.now ?? (() => Date.now());
+    this.graceMs = host.supersedeGraceMs ?? SUPERSEDE_GRACE_MS;
   }
 
   // ── lookups ─────────────────────────────────────────────────────────────
@@ -200,62 +267,185 @@ export class RunCoordinator {
    * Record a run and start it, or queue it behind the session's active run
    * under the `enqueue` rule. Under `interrupt` (the default) the active run
    * of the session is aborted first — and any run queued behind it.
+   *
+   * The `begin` calls of one session take turns, so each decides on the
+   * session as the previous one left it, and at most one attempt executes
+   * per session. A message superseded by a later `interrupt` message while
+   * it waited for its turn (or for the run it supersedes to wind down) is
+   * recorded and closed as aborted without an attempt; its `live` comes
+   * back with the buffer already closed on its `done` frame. A run that
+   * outlives the supersede grace keeps executing; the new message is then
+   * queued behind it instead of running beside it.
    */
   async begin(
     input: BeginRunInput,
   ): Promise<{ live: LiveRun; queued: boolean }> {
-    const active = this.activeForSession(input.sessionId);
+    const { sessionId } = input;
+    if (input.multitask === 'interrupt') this.supersedePending(sessionId);
+    let wake!: () => void;
+    const woken = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
+    const ticket: PendingBegin = { superseded: false, woken, wake };
+    let pending = this.pendingBegins.get(sessionId);
+    if (!pending) {
+      pending = new Set();
+      this.pendingBegins.set(sessionId, pending);
+    }
+    pending.add(ticket);
+    try {
+      return await this.inSessionTurn(sessionId, () =>
+        this.beginInTurn(input, ticket),
+      );
+    } finally {
+      pending.delete(ticket);
+      if (pending.size === 0 && this.pendingBegins.get(sessionId) === pending)
+        this.pendingBegins.delete(sessionId);
+    }
+  }
+
+  /** Run `fn` after every earlier `inSessionTurn` call of the session settled. */
+  private inSessionTurn<T>(
+    sessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.sessionTurns.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(fn);
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.sessionTurns.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.sessionTurns.get(sessionId) === tail)
+        this.sessionTurns.delete(sessionId);
+    });
+    return result;
+  }
+
+  /** Supersede the session's waiting `begin` calls; whether there were any. */
+  private supersedePending(sessionId: string): boolean {
+    let any = false;
+    for (const ticket of this.pendingBegins.get(sessionId) ?? []) {
+      ticket.superseded = true;
+      ticket.wake();
+      any = true;
+    }
+    return any;
+  }
+
+  private async beginInTurn(
+    input: BeginRunInput,
+    ticket: PendingBegin,
+  ): Promise<{ live: LiveRun; queued: boolean }> {
+    const { sessionId } = input;
     let queued = false;
+    let behindSuperseded = false;
+    const active = ticket.superseded
+      ? undefined
+      : this.activeForSession(sessionId);
     if (active) {
       if (input.multitask === 'enqueue') {
         queued = true;
       } else {
         this.host.log.log(
-          `[runs] ${input.sessionId}: new message supersedes ${active.runId} (${active.record.status})`,
+          `[runs] ${sessionId}: new message supersedes ${active.runId} (${active.record.status})`,
         );
         for (const run of [...this.live.values()])
-          if (
-            run.sessionId === input.sessionId &&
-            run.record.status === 'queued'
-          )
+          if (run.sessionId === sessionId && run.record.status === 'queued')
             await this.cancelQueued(run, 'superseded');
-        if (active.record.status !== 'queued') {
-          this.abortRun(active, 'superseded');
-          await Promise.race([
-            active.done,
-            new Promise((r) => setTimeout(r, SUPERSEDE_GRACE_MS)),
-          ]);
+        const running = this.activeForSession(sessionId);
+        if (running) {
+          this.abortRun(running, 'superseded');
+          await withinGrace(this.graceMs, running.done, ticket.woken);
+        }
+        // Still winding down past the grace: wait behind it.
+        if (!ticket.superseded && this.activeForSession(sessionId)) {
+          queued = true;
+          behindSuperseded = true;
         }
       }
     }
-    const checkpointId = await this.host.checkpointIdOf(input.sessionId);
-    await this.host.store.create({
+    const checkpointId = await this.host.checkpointIdOf(sessionId);
+    const record = await this.host.store.create({
       runId: input.runId,
-      sessionId: input.sessionId,
+      sessionId,
       requestId: input.requestId,
       client: input.client,
-      status: queued ? 'queued' : 'running',
+      status: queued || ticket.superseded ? 'queued' : 'running',
       request: input.request,
       checkpointId,
       taskRunId: input.taskRunId ?? null,
       instanceId: this.host.instanceId,
     });
-    const record = (await this.host.store.get(input.runId))!;
+    // No await from this check to the attempt's start: a supersede that
+    // lands later finds the run open and aborts it like any other.
+    if (ticket.superseded) {
+      const live = this.open({ ...record, status: 'queued' });
+      await this.cancelQueued(live, 'superseded');
+      return { live, queued: false };
+    }
     const live = this.open(record);
-    if (!queued) void this.startAttempt(live, false);
-    return { live, queued };
+    if (!queued) {
+      void this.startAttempt(live, false, 'begin');
+      return { live, queued };
+    }
+    if (behindSuperseded) this.queuedBehindSuperseded.add(live);
+    // The run ahead may have ended during the awaits above, before this
+    // one was open to be dequeued.
+    await this.startNextQueued(sessionId);
+    return { live, queued: live.record.status === 'queued' };
   }
 
-  /** Abort the session's active run (`POST /messages/abort`). */
+  /**
+   * Stop the session's current message (`POST /messages/abort`): its active
+   * run, and a message still waiting in `begin` or queued behind the run it
+   * superseded. Runs enqueued behind the active one still start after it.
+   */
   abortSession(sessionId: string): boolean {
+    let stopped = this.supersedePending(sessionId);
+    for (const run of [...this.live.values()])
+      if (
+        run.sessionId === sessionId &&
+        run.record.status === 'queued' &&
+        this.queuedBehindSuperseded.has(run)
+      ) {
+        void this.cancelQueued(run, 'aborted');
+        stopped = true;
+      }
     const active = this.activeForSession(sessionId);
-    if (!active) return false;
+    if (!active) return stopped;
     if (active.record.status === 'queued') {
       void this.cancelQueued(active, 'aborted');
       return true;
     }
     this.abortRun(active, 'aborted');
     return true;
+  }
+
+  /**
+   * End every run of the session: the executing attempt is aborted, queued
+   * runs and runs waiting for a recovery attempt are closed, and messages
+   * still waiting in `begin` are closed without an attempt — each ends
+   * `aborted`, with its `done` frame. Resolves once the executing attempt
+   * ended, or after the supersede grace. Safe when nothing runs.
+   */
+  async abortAllForSession(sessionId: string): Promise<void> {
+    this.supersedePending(sessionId);
+    const runs = [...this.live.values()].filter(
+      (run) => run.sessionId === sessionId,
+    );
+    if (runs.length === 0) return;
+    this.host.log.log(
+      `[runs] ${sessionId}: aborting all ${runs.length} run(s)`,
+    );
+    // Queued runs first, so an attempt that ends below dequeues none.
+    for (const run of runs)
+      if (run.record.status === 'queued')
+        void this.cancelQueued(run, 'aborted');
+    for (const run of runs)
+      if (run.record.status !== 'queued') this.abortRun(run, 'aborted');
+    await withinGrace(this.graceMs, Promise.all(runs.map((run) => run.done)));
   }
 
   private abortRun(live: LiveRun, reason: 'aborted' | 'superseded'): void {
@@ -275,7 +465,6 @@ export class RunCoordinator {
     reason: 'aborted' | 'superseded',
   ): Promise<void> {
     this.host.log.log(`[runs] ${live.runId} ${reason} while queued`);
-    live.buffer.push('done', { runId: live.runId, aborted: true });
     await this.finalize(live, { status: 'aborted', text: '' });
   }
 
@@ -291,17 +480,31 @@ export class RunCoordinator {
     const record =
       this.live.get(runId)?.record ?? (await this.host.store.get(runId));
     if (!record) return undefined;
-    const live = this.live.get(runId);
+    const before = this.live.get(runId);
     const segments = await this.host.store.readSegments(runId, after);
     const replay = framesOfSegments(segments, after);
     const lastReplayed =
       replay.length > 0 ? replay[replay.length - 1]!.seq : after;
-    if (!live) return { record, replay };
-    // No await between reading the tail and subscribing (the caller
-    // subscribes synchronously on the returned buffer), so no frame slips
-    // between the two.
+    const live = this.live.get(runId);
+    if (!live) {
+      if (!before) return { record, replay };
+      // The run ended during the read: answer as for an ended run, from its
+      // closed row (the caller's trailer carries the final status and text),
+      // with the frames after the cursor that the read or the buffer still
+      // held, less the `done` the trailer replaces.
+      await before.done;
+      replay.push(...before.buffer.tailAfter(lastReplayed));
+      return {
+        record: before.record,
+        replay: replay.filter((frame) => frame.event !== 'done'),
+      };
+    }
+    // The tail includes the frames whose segment write is still pending
+    // (the read above may have been queued before it). No await between
+    // reading the tail and subscribing (the caller subscribes synchronously
+    // on the returned buffer), so no frame slips between the two.
     replay.push(...live.buffer.tailAfter(lastReplayed));
-    return { record, replay, buffer: live.buffer };
+    return { record: live.record, replay, buffer: live.buffer };
   }
 
   // ── attempts ────────────────────────────────────────────────────────────
@@ -322,6 +525,7 @@ export class RunCoordinator {
       done,
       resolve,
       attemptInFlight: false,
+      attemptSource: 'begin',
     };
     this.live.set(record.runId, live);
     return live;
@@ -341,26 +545,36 @@ export class RunCoordinator {
     });
   }
 
-  private async startAttempt(live: LiveRun, resumed: boolean): Promise<void> {
+  private async startAttempt(
+    live: LiveRun,
+    resumed: boolean,
+    source: AttemptSource,
+  ): Promise<void> {
     live.attemptInFlight = true;
+    live.attemptSource = source;
     this.touchKeepAlive();
     let outcome: RunOutcome;
     try {
       outcome = await this.host.runAttempt(live, resumed);
     } catch (error) {
       if (error instanceof RunAttemptDeferred) {
-        live.attemptInFlight = false;
-        if (await this.defer(live, error)) return;
+        const deferred = await this.defer(live, error).catch(
+          (storeError: unknown) => {
+            this.host.log.error(
+              `[runs] ${live.runId}: could not reschedule the attempt: ${storeError instanceof Error ? storeError.message : String(storeError)}`,
+            );
+            return false;
+          },
+        );
+        if (deferred) return;
       } else {
         this.host.log.error(
           `[runs] ${live.runId}: attempt crashed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      outcome = {
-        status: 'failed',
-        text: live.continuation ?? '',
-        error,
-      };
+      outcome = live.abort.signal.aborted
+        ? { status: 'aborted', text: live.continuation ?? '' }
+        : { status: 'failed', text: live.continuation ?? '', error };
     }
     live.attemptInFlight = false;
     await this.finalize(live, outcome);
@@ -370,7 +584,8 @@ export class RunCoordinator {
    * Put a deferred attempt back on the recovery schedule. The attempt did
    * not touch the checkpoint, so every deferral counts against the recovery
    * cap; `false` when the cap is spent (or the run was aborted meanwhile)
-   * and the caller fails the run instead.
+   * and the caller closes the run instead. The attempt stays in flight
+   * until the run is rescheduled, so an abort meanwhile only signals.
    */
   private async defer(
     live: LiveRun,
@@ -389,12 +604,13 @@ export class RunCoordinator {
       );
       return false;
     }
-    await this.host.store.update(live.runId, {
+    await this.write(live, {
       status: 'recovering',
       attempts: decision.attempts,
       nextAttemptAt: decision.at,
     });
-    live.record = (await this.host.store.get(live.runId)) ?? live.record;
+    if (live.abort.signal.aborted) return false;
+    live.attemptInFlight = false;
     this.host.log.warn(
       `[runs] ${live.runId}: attempt deferred (${error.message}); retry ${decision.attempts} in ${Math.round((decision.at - this.now()) / 1000)} s`,
     );
@@ -402,11 +618,43 @@ export class RunCoordinator {
     return true;
   }
 
+  /**
+   * The frames a run's subscribers need to finish, when its attempt did not
+   * push them (it crashed, was never started, or was closed while waiting):
+   * an `error` frame for a failure, then `done`.
+   */
+  private pushClosingFrames(live: LiveRun, outcome: RunOutcome): void {
+    if (live.buffer.isClosed || live.buffer.hasDone) return;
+    if (outcome.status === 'failed')
+      live.buffer.push('error', {
+        error: RUN_FAILED_MESSAGE,
+        kind: 'unknown',
+        source: 'platform',
+        retryable: true,
+        sessionId: live.sessionId,
+        requestId: live.requestId,
+        runId: live.runId,
+        timestamp: new Date(this.now()).toISOString(),
+      });
+    live.buffer.push('done', {
+      runId: live.runId,
+      ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
+      ...(outcome.status === 'finished' ? {} : { [outcome.status]: true }),
+    });
+  }
+
+  /** Write `patch` to the run's row and keep `live.record` in step with it. */
+  private async write(live: LiveRun, patch: RunPatch): Promise<void> {
+    const updatedAt = await this.host.store.update(live.runId, patch);
+    live.record = patchRunRecord(live.record, patch, updatedAt);
+  }
+
   private async finalize(live: LiveRun, outcome: RunOutcome): Promise<void> {
-    if (!this.live.has(live.runId)) return;
+    if (this.live.get(live.runId) !== live) return;
     this.live.delete(live.runId);
     const { runId } = live;
     try {
+      this.pushClosingFrames(live, outcome);
       await live.buffer.close();
       const partialText =
         outcome.status === 'finished'
@@ -417,7 +665,9 @@ export class RunCoordinator {
             partialTextOf([
               ...framesOfSegments(await this.host.store.readSegments(runId)),
             ]);
-      await this.host.store.update(runId, {
+      // One transaction: the terminal row, and the cutover (the reply, or
+      // the partial text, is in the row and the transcript now).
+      const patch: RunPatch = {
         status: outcome.status,
         lastSeq: live.buffer.lastSeq,
         messageId: outcome.messageId ?? null,
@@ -429,10 +679,10 @@ export class RunCoordinator {
               ? outcome.error.message
               : String(outcome.error),
         nextAttemptAt: null,
-      });
-      // Cutover: the reply (or the partial text) is in the row/transcript.
-      await this.host.store.deleteSegments(runId);
-      live.record = (await this.host.store.get(runId)) ?? live.record;
+        ...(outcome.usage !== undefined ? { usage: outcome.usage } : {}),
+      };
+      const updatedAt = await this.host.store.close(runId, patch);
+      live.record = patchRunRecord(live.record, patch, updatedAt);
       this.host.log.log(
         `[runs] ${runId} ${outcome.status} (${live.record.client}, session ${live.sessionId}, ${live.buffer.lastSeq} frames)`,
       );
@@ -457,22 +707,46 @@ export class RunCoordinator {
     // queue waiting: the session's turns stay strictly ordered.
     const active = this.activeForSession(sessionId);
     if (active && active.record.status !== 'queued') return;
-    for (const run of this.live.values()) {
-      if (run.sessionId !== sessionId || run.record.status !== 'queued')
-        continue;
+    let run: LiveRun | undefined;
+    for (const candidate of this.live.values())
+      if (
+        candidate.sessionId === sessionId &&
+        candidate.record.status === 'queued'
+      ) {
+        run = candidate;
+        break;
+      }
+    if (!run) return;
+    // Taken before the awaits below: the session is busy from here on, and
+    // an abort meanwhile only signals (the run is closed here).
+    run.attemptInFlight = true;
+    run.record = { ...run.record, status: 'running' };
+    try {
       // The run's input is written from this checkpoint on: its start.
       const checkpointId = await this.host.checkpointIdOf(sessionId);
-      await this.host.store.update(run.runId, {
+      await this.write(run, {
         status: 'running',
         instanceId: this.host.instanceId,
         checkpointId,
         startCheckpointId: checkpointId,
       });
-      run.record = (await this.host.store.get(run.runId)) ?? run.record;
-      this.host.log.log(`[runs] ${run.runId}: dequeued for ${sessionId}`);
-      void this.startAttempt(run, false);
+    } catch (error) {
+      run.attemptInFlight = false;
+      await this.finalize(
+        run,
+        run.abort.signal.aborted
+          ? { status: 'aborted', text: '' }
+          : { status: 'failed', text: '', error },
+      );
       return;
     }
+    if (run.abort.signal.aborted) {
+      run.attemptInFlight = false;
+      await this.finalize(run, { status: 'aborted', text: '' });
+      return;
+    }
+    this.host.log.log(`[runs] ${run.runId}: dequeued for ${sessionId}`);
+    void this.startAttempt(run, false, 'dequeue');
   }
 
   // ── recovery ────────────────────────────────────────────────────────────
@@ -515,8 +789,13 @@ export class RunCoordinator {
         this.host.log.warn(
           `[runs] ${record.runId}: ${decision.attempts} recovery attempt(s) without progress; closing as interrupted`,
         );
-        await this.host.store.update(record.runId, { generation });
-        const live = this.open(record, startSeq);
+        const updatedAt = await this.host.store.update(record.runId, {
+          generation,
+        });
+        const live = this.open(
+          patchRunRecord(record, { generation }, updatedAt),
+          startSeq,
+        );
         live.continuation = partialTextOf(frames) || null;
         live.buffer.push('error', {
           error:
@@ -535,16 +814,19 @@ export class RunCoordinator {
         });
         continue;
       }
-      await this.host.store.update(record.runId, {
+      const patch: RunPatch = {
         status: 'recovering',
         attempts: decision.attempts,
         generation,
         nextAttemptAt: decision.at,
         checkpointId: current,
         instanceId: this.host.instanceId,
-      });
-      const refreshed = (await this.host.store.get(record.runId)) ?? record;
-      const live = this.open(refreshed, startSeq);
+      };
+      const updatedAt = await this.host.store.update(record.runId, patch);
+      const live = this.open(
+        patchRunRecord(record, patch, updatedAt),
+        startSeq,
+      );
       // A run the graph never checkpointed is retried fresh (resumeDue):
       // there is no reply to continue from.
       live.continuation = runHasCheckpointed(record, current)
@@ -569,19 +851,37 @@ export class RunCoordinator {
       if (run.record.status !== 'recovering' || run.attemptInFlight) continue;
       if (run.record.nextAttemptAt !== null && run.record.nextAttemptAt > now)
         continue;
-      await this.host.store.update(run.runId, {
-        status: 'running',
-        nextAttemptAt: null,
-      });
-      run.record = (await this.host.store.get(run.runId)) ?? run.record;
-      // Resume only when the graph persisted something for this run;
-      // otherwise it never saw the input and the attempt runs fresh with it.
-      // Derived from the stored start checkpoint, so it holds across a
-      // restart (recoverOrphans) as well as for a deferral in this instance.
-      const resumed = runHasCheckpointed(
-        run.record,
-        await this.host.checkpointIdOf(run.sessionId),
-      );
+      // Taken before the awaits below: an abort meanwhile only signals, and
+      // the run is closed here instead of being attempted.
+      run.attemptInFlight = true;
+      let resumed: boolean;
+      try {
+        await this.write(run, { status: 'running', nextAttemptAt: null });
+        // Resume only when the graph persisted something for this run;
+        // otherwise it never saw the input and the attempt runs fresh with
+        // it. Derived from the stored start checkpoint, so it holds across a
+        // restart (recoverOrphans) as well as for a deferral in this instance.
+        resumed = runHasCheckpointed(
+          run.record,
+          await this.host.checkpointIdOf(run.sessionId),
+        );
+      } catch (error) {
+        run.attemptInFlight = false;
+        if (!run.abort.signal.aborted) throw error;
+        await this.finalize(run, {
+          status: 'aborted',
+          text: run.continuation ?? '',
+        });
+        continue;
+      }
+      if (run.abort.signal.aborted) {
+        run.attemptInFlight = false;
+        await this.finalize(run, {
+          status: 'aborted',
+          text: run.continuation ?? '',
+        });
+        continue;
+      }
       if (!resumed) run.continuation = null;
       // `partialLength` is the reply text this attempt continues from (all
       // packed `message` frames). A client that received more than that
@@ -599,7 +899,7 @@ export class RunCoordinator {
       this.host.log.log(
         `[runs] ${run.runId}: ${resumed ? 'resuming' : 'retrying'} (attempt ${run.record.attempts})`,
       );
-      void this.startAttempt(run, resumed);
+      void this.startAttempt(run, resumed, 'recovery');
     }
   }
 

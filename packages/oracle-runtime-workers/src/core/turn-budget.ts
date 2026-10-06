@@ -141,8 +141,12 @@ export class TurnBudget {
     signal?: AbortSignal,
   ): number {
     this.check(signal);
+    // A NaN would poison the counter for the rest of the turn (every later
+    // comparison with the limit is false): an unusable number counts as 0.
+    const usable = (n: number): number =>
+      Number.isFinite(n) ? Math.max(0, n) : 0;
     const reservation =
-      Math.max(0, estimatedInputTokens) + Math.max(0, outputReserveTokens);
+      usable(estimatedInputTokens) + usable(outputReserveTokens);
     if (this.tokens + reservation > this.limits.tokens)
       this.fail('tokens', 'token');
     this.tokens += reservation;
@@ -156,6 +160,16 @@ export class TurnBudget {
       return;
     this.tokens += reportedTotalTokens - reservation;
     this.reportedTokens += reportedTotalTokens;
+  }
+
+  /**
+   * Take a reservation back: the call is known to have cost nothing the turn
+   * should carry (the caller decides which failures qualify). Still counted
+   * as a model call.
+   */
+  releaseModel(reservation: number): void {
+    if (!Number.isFinite(reservation) || reservation <= 0) return;
+    this.tokens = Math.max(0, this.tokens - reservation);
   }
 
   reserveTool(signal?: AbortSignal): void {

@@ -10,11 +10,14 @@ import {
   FRONTEND_OUTCOME_UNKNOWN_MESSAGE,
 } from '@ixo/common/ai/frontend-bridge';
 import { describe, expect, it } from 'vitest';
+import { HANDSHAKE_DEADLINE_MS, MAX_PAYLOAD_BYTES } from './realtime-endpoint';
 import {
   TEST_BARE_DELEGATION,
   TEST_BROKEN_SESSION,
   TEST_GOOD_TOKEN,
   TEST_MISSING_SESSION,
+  TEST_SLOW_AUTH_MS,
+  TEST_SLOW_TOKEN,
   TEST_USER_DID,
   type RealtimeTestDO,
 } from './test-do';
@@ -872,6 +875,95 @@ describe('frontend bridge: one invocation, one socket, one result', () => {
       { eventName: 'browser_tool_call', toolCallId: tc },
     ]);
     c.ws.close(1000, 'bye');
+  });
+});
+
+describe('RealtimeEndpoint before authentication', () => {
+  it('validates one CONNECT at a time per socket: five CONNECTs in a burst authenticate once', async () => {
+    const s = stub('connect-burst');
+    const c = (await open(s)).client!;
+    await c.next((f) => f.startsWith('0{'), 'OPEN');
+    for (let i = 0; i < 5; i += 1)
+      c.ws.send(`40${JSON.stringify({ invocation: TEST_SLOW_TOKEN })}`);
+    await c.next(isEvent('connected'), 'connected');
+    // Past the slow validation: any CONNECT that was let through would have
+    // finished by now.
+    await new Promise((r) => setTimeout(r, TEST_SLOW_AUTH_MS + 100));
+    expect(await s.authenticationCount()).toBe(1);
+    expect(c.frames.filter((f) => f.startsWith('40'))).toHaveLength(1);
+    // Once authenticated, a CONNECT is acknowledged again without a new check.
+    c.ws.send(`40${JSON.stringify({ invocation: TEST_SLOW_TOKEN })}`);
+    await c.next(
+      () => c.frames.filter((f) => f.startsWith('40')).length === 2,
+      'second ack',
+    );
+    expect(await s.authenticationCount()).toBe(1);
+    c.ws.close(1000, 'bye');
+  });
+
+  it('arms no heartbeat alarm for an upgrade that never authenticates; CONNECT arms it', async () => {
+    const s = stub('no-alarm-before-auth');
+    const anon = (await open(s)).client!;
+    await anon.next((f) => f.startsWith('0{'), 'OPEN');
+    expect(await s.alarmRequests()).toEqual([]);
+    expect((await s.status()).nextPingAt).toBeNull();
+    const refused = (await open(s)).client!;
+    await refused.next((f) => f.startsWith('0{'), 'OPEN');
+    refused.ws.send('40{"invocation":"wrong"}');
+    await refused.closed;
+    expect(await s.alarmRequests()).toEqual([]);
+
+    const authed = await connect(s, { sessionId: 's-auth' });
+    const requested = await s.alarmRequests();
+    expect(requested).toHaveLength(1);
+    expect(requested[0]).toBe((await s.status()).nextPingAt);
+    anon.ws.close(1000, 'bye');
+    authed.ws.close(1000, 'bye');
+  });
+
+  it('closes a socket whose frame exceeds the advertised maxPayload, before parsing it', async () => {
+    const s = stub('oversized');
+    const c = (await open(s)).client!;
+    const openFrame = await c.next((f) => f.startsWith('0{'), 'OPEN');
+    const { maxPayload } = JSON.parse(openFrame.slice(1)) as {
+      maxPayload: number;
+    };
+    expect(maxPayload).toBe(MAX_PAYLOAD_BYTES);
+    c.ws.send(
+      `40${JSON.stringify({ invocation: TEST_GOOD_TOKEN, pad: 'x'.repeat(MAX_PAYLOAD_BYTES) })}`,
+    );
+    expect((await c.closed).code).toBe(1009);
+    expect(await s.authenticationCount()).toBe(0);
+    expect((await s.status()).sockets).toBe(0);
+  });
+
+  it('counts UTF-8 bytes against maxPayload, not characters', async () => {
+    const s = stub('oversized-utf8');
+    const c = (await open(s)).client!;
+    await c.next((f) => f.startsWith('0{'), 'OPEN');
+    // Under the limit in characters, over it in bytes ('é' is two).
+    c.ws.send(
+      `42["ping",${JSON.stringify('é'.repeat(MAX_PAYLOAD_BYTES / 2))}]`,
+    );
+    expect((await c.closed).code).toBe(1009);
+  });
+});
+
+describe('RealtimeEndpoint after a restart', () => {
+  it('closes a re-adopted socket that never authenticated once what was left of its handshake window passes', async () => {
+    const s = stub('restored-unauthenticated');
+    const c = (await open(s)).client!;
+    await c.next((f) => f.startsWith('0{'), 'OPEN');
+    // Its window has run out by the time a new instance re-adopts it; the
+    // old instance's own timer would only fire seconds from now.
+    await s.ageOpenedAt(HANDSHAKE_DEADLINE_MS);
+    expect(await s.simulateWake()).toBe(1);
+    const closed = await Promise.race([
+      c.closed,
+      new Promise<null>((r) => setTimeout(() => r(null), 2_000)),
+    ]);
+    expect(closed?.code).toBe(4408);
+    expect(await s.alarmRequests()).toEqual([]);
   });
 });
 

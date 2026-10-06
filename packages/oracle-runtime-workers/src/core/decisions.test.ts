@@ -246,7 +246,11 @@ describe('createRuntimeCore decisions', () => {
       answers: { match: { kind: 'boolean', probabilityTrue: 0.9 } },
     });
     expect(result.judgment).not.toHaveProperty('calibration');
-    expect(run).toHaveBeenCalledWith('typesafe/jev', ROUTE_JEV_INPUT);
+    // The evaluation's deadline reaches the binding, so an abandoned
+    // inference is cancelled too.
+    expect(run).toHaveBeenCalledWith('typesafe/jev', ROUTE_JEV_INPUT, {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('DECISION_MODEL overriding the Jev model drops the method name from provenance', async () => {
@@ -264,7 +268,9 @@ describe('createRuntimeCore decisions', () => {
       value: 'x',
     });
 
-    expect(run).toHaveBeenCalledWith('typesafe/jev-next', ROUTE_JEV_INPUT);
+    expect(run).toHaveBeenCalledWith('typesafe/jev-next', ROUTE_JEV_INPUT, {
+      signal: expect.any(AbortSignal),
+    });
     expect(result.judgment?.method).toEqual({ kind: 'provider-native' });
   });
 

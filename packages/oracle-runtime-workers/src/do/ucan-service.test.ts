@@ -100,6 +100,7 @@ describe('WorkersUcanService.createInvocationFromDelegation', () => {
     expect(result).toHaveProperty('invocation');
     expect(fetchSpy).toHaveBeenCalledWith(
       'https://memory.example.com/.well-known/did.json',
+      { signal: expect.any(AbortSignal) },
     );
   });
 });
@@ -352,5 +353,100 @@ describe('WorkersUcanService.getServiceDelegation', () => {
     expect(await ask()).toEqual({ token: 'token-2', with: 'ixo:filesystem' });
     storeHolds([{ can: '*', with: '*' }]);
     expect(await ask()).toEqual({ token: 'token-0', with: '*' });
+  });
+
+  const listings = () =>
+    fetchSpy.mock.calls.filter(
+      ([input]) =>
+        !String(input instanceof Request ? input.url : input).endsWith(
+          '/.well-known/did.json',
+        ),
+    ).length;
+
+  it('callers that miss the cache together share one store look-up', async () => {
+    storeHolds([{ can: 'fs/*', with: 'ixo:filesystem' }]);
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    const opts = {
+      storeUrl: STORE,
+      resource: 'ixo:filesystem',
+      requiredAbility: 'fs/read',
+    };
+    const results = await Promise.all([
+      service.getServiceDelegation(USER_DID, opts),
+      service.getServiceDelegation(USER_DID, opts),
+      service.getServiceDelegation(USER_DID, opts),
+    ]);
+    for (const result of results)
+      expect(result).toEqual({ token: 'token-0', with: 'ixo:filesystem' });
+    expect(listings()).toBe(1);
+    // A different ability is a different key: its own look-up.
+    await service.getServiceDelegation(USER_DID, {
+      ...opts,
+      requiredAbility: 'fs/write',
+    });
+    expect(listings()).toBe(2);
+  });
+
+  it('a store that never answers gives every waiting caller store-error once the look-up times out', async () => {
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+      fetchTimeoutMs: 30,
+    });
+    // Answers nothing; gives up only when the request is aborted.
+    fetchSpy.mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(init.signal?.reason),
+          );
+        }),
+    );
+    const opts = {
+      storeUrl: STORE,
+      resource: 'ixo:filesystem',
+      requiredAbility: 'fs/read',
+    };
+    const results = await Promise.all([
+      service.getServiceDelegation(USER_DID, opts),
+      service.getServiceDelegation(USER_DID, opts),
+    ]);
+    for (const result of results)
+      expect(result).toMatchObject({ error: 'store-error' });
+  }, 2_000);
+
+  it('a failed look-up is not shared with the next call, which retries', async () => {
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    const opts = {
+      storeUrl: STORE,
+      resource: 'ixo:filesystem',
+      requiredAbility: 'fs/read',
+    };
+    fetchSpy.mockImplementation(async (input) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith('/.well-known/did.json'))
+        return Response.json({ id: 'did:web:ucan-store.example.com' });
+      return new Response('down', { status: 503 });
+    });
+    const failed = await Promise.all([
+      service.getServiceDelegation(USER_DID, opts),
+      service.getServiceDelegation(USER_DID, opts),
+    ]);
+    expect(failed).toEqual([
+      { error: 'store-error', detail: 'store 503' },
+      { error: 'store-error', detail: 'store 503' },
+    ]);
+    expect(listings()).toBe(1);
+    storeHolds([{ can: 'fs/*', with: 'ixo:filesystem' }]);
+    expect(await service.getServiceDelegation(USER_DID, opts)).toEqual({
+      token: 'token-0',
+      with: 'ixo:filesystem',
+    });
   });
 });

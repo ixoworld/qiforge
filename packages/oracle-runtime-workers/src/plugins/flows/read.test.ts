@@ -115,3 +115,64 @@ describe('readFlowSpec: multi-source round-trip', () => {
     expect(readFlowSpec(new Y.Doc(), 'room-empty')).toBeNull();
   });
 });
+
+describe('readFlowSpec: dependencies for blockedBy', () => {
+  function blockedByFor(inputs: Record<string, unknown>): string[] | undefined {
+    const action = someActionType();
+    const doc = buildDoc({
+      title: 'Deps',
+      steps: [
+        { id: 'form', action },
+        { id: 'use', action, inputs },
+      ],
+    });
+    // `form` has not produced its output yet, so a real reference blocks `use`.
+    return readFlowSpec(doc, 'r')?.steps.find((s) => s.id === 'use')?.status
+      ?.blockedBy;
+  }
+
+  it('reports a dependency referenced only inside a nested map', () => {
+    expect(
+      blockedByFor({ variables: { name: '{{form.output.answers.name}}' } }),
+    ).toEqual(['form']);
+  });
+
+  it('reports a dependency referenced only inside an array', () => {
+    expect(
+      blockedByFor({ recipients: ['x@y.z', '{{form.output.answers.email}}'] }),
+    ).toEqual(['form']);
+  });
+
+  it('reports a dependency embedded in a sentence', () => {
+    expect(blockedByFor({ prompt: 'Hi {{form.output.answers.name}}' })).toEqual(
+      ['form'],
+    );
+  });
+
+  it('ignores references to ids that are not steps of the flow', () => {
+    expect(
+      blockedByFor({
+        a: '{{ghost.output.x}}',
+        b: 'Ping {{trigger.payload.id}}',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reads a 10 KB hostile value within the same bound', () => {
+    const action = someActionType();
+    const hostile = `{{${' '.repeat(10_240)}`;
+    const doc = buildDoc({
+      title: 'Hostile',
+      steps: [
+        { id: 'form', action },
+        { id: 'use', action, inputs: { a: hostile, b: { c: [hostile] } } },
+      ],
+    });
+    const started = performance.now();
+    const flow = readFlowSpec(doc, 'r');
+    expect(performance.now() - started).toBeLessThan(10);
+    expect(flow?.steps.find((s) => s.id === 'use')?.status?.blockedBy).toBe(
+      undefined,
+    );
+  });
+});

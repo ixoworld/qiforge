@@ -8,9 +8,17 @@ import {
   unmetRequirements,
   type CapabilityRequirement,
 } from './manifest';
-import type { ManifestRegistry, ToolRegistry } from './registries';
+import type { ManifestRegistry, ToolSummarySource } from './registries';
 import { withoutWithheldExamples, type TurnToolAccess } from './tool-access';
 import { acquireToolLock } from './utils';
+
+export const LOAD_CAPABILITY_TOOL_NAME = 'load_capability';
+export const LIST_CAPABILITIES_TOOL_NAME = 'list_capabilities';
+/** Names of the tools `buildMetaTools` returns. */
+export const META_TOOL_NAMES: readonly string[] = [
+  LOAD_CAPABILITY_TOOL_NAME,
+  LIST_CAPABILITIES_TOOL_NAME,
+];
 
 /**
  * The part of the turn's `resolveTurnToolAccess` result the meta-tools read:
@@ -19,7 +27,14 @@ import { acquireToolLock } from './utils';
 export type MetaToolAccess = Pick<
   TurnToolAccess<never>,
   'withheldToolNames' | 'hiddenPlugins'
->;
+> & {
+  /**
+   * Plugins available this turn only through the capability router's
+   * preload: usable, but their operating guide is not in the system prompt,
+   * so `load_capability` still returns it.
+   */
+  preloadedOnly?: ReadonlySet<string>;
+};
 
 // ── list_capabilities ───────────────────────────────────────────────────────
 
@@ -101,7 +116,7 @@ export function buildListCapabilitiesTool(
       return JSON.stringify(out);
     },
     {
-      name: 'list_capabilities',
+      name: LIST_CAPABILITIES_TOOL_NAME,
       description: 'List all available capabilities and their summaries.',
       schema: listCapabilitiesSchema,
     },
@@ -133,6 +148,13 @@ interface LoadCapabilityResult extends PluginManifest {
   /** One entry per tool the plugin contributes. */
   tools: ToolDetail[];
   /**
+   * The plugin's working rules (`OraclePlugin.operatingGuide`), present when
+   * this call loaded it or the router only preloaded it, once per turn. A
+   * plugin loaded on the thread (or `always` visible) has it in the system
+   * prompt, so it is not repeated.
+   */
+  operatingGuide?: string;
+  /**
    * Present when the plugin was NOT loaded because the user's authorization
    * does not grant what it requires (`manifest.requires`).
    */
@@ -159,7 +181,9 @@ interface LoadCapabilityResult extends PluginManifest {
  *  - Otherwise → added to the `loadedPlugins` state update.
  *
  * The tool list and `examples` leave out the tools the turn withholds
- * (`access.withheldToolNames`).
+ * (`access.withheldToolNames`). A plugin this call loads, or one the router
+ * only preloaded, comes with its `operatingGuide` when it has one — once per
+ * turn; a refused one never does.
  *
  * Return value:
  *  - If all requested plugins were already available: returns the result
@@ -170,9 +194,12 @@ interface LoadCapabilityResult extends PluginManifest {
  */
 export function buildLoadCapabilityTool(
   manifestRegistry: ManifestRegistry,
-  toolRegistry: ToolRegistry,
+  toolSource: ToolSummarySource,
   access: MetaToolAccess,
 ): PluginTool {
+  // Guides this tool already returned: the tool is built per turn, and the
+  // context it reads does not see a load made earlier in the same turn.
+  const guidesReturned = new Set<string>();
   return tool(
     async (args, ctx) => {
       const { names } = loadCapabilitySchema.parse(args);
@@ -205,7 +232,10 @@ export function buildLoadCapabilityTool(
           );
           if (missing.length > 0) {
             results.push({
-              ...entry.manifest,
+              ...withoutWithheldExamples(
+                entry.manifest,
+                access.withheldToolNames,
+              ),
               alreadyAvailable: false,
               tools: [],
               refused: {
@@ -216,7 +246,7 @@ export function buildLoadCapabilityTool(
             continue;
           }
 
-          const tools: ToolDetail[] = toolRegistry
+          const tools: ToolDetail[] = toolSource
             .toolSummariesForPlugin(name)
             .filter((t) => !access.withheldToolNames.has(t.name))
             .map((t) => ({
@@ -228,6 +258,13 @@ export function buildLoadCapabilityTool(
           const alwaysVisible = entry.manifest.visibility === 'always';
           const alreadyAvailable = alreadyLoaded || alwaysVisible;
 
+          const guideInPrompt =
+            alreadyAvailable && access.preloadedOnly?.has(name) !== true;
+          const guide =
+            guideInPrompt || guidesReturned.has(name)
+              ? undefined
+              : manifestRegistry.operatingGuide(name);
+          if (guide) guidesReturned.add(name);
           results.push({
             ...withoutWithheldExamples(
               entry.manifest,
@@ -235,6 +272,7 @@ export function buildLoadCapabilityTool(
             ),
             alreadyAvailable,
             tools,
+            ...(guide ? { operatingGuide: guide } : {}),
           });
 
           if (!alreadyAvailable) {
@@ -265,7 +303,7 @@ export function buildLoadCapabilityTool(
       }
     },
     {
-      name: 'load_capability',
+      name: LOAD_CAPABILITY_TOOL_NAME,
       description:
         "Load one or more capabilities for the rest of this conversation. Pass all capabilities you need in a single call — batching is preferred over multiple calls. The response is an array of plugin manifests plus tool lists; after this call, the new capabilities' tools are usable on the next model step.",
       schema: loadCapabilitySchema,
@@ -276,12 +314,13 @@ export function buildLoadCapabilityTool(
 // ── Bundle ──────────────────────────────────────────────────────────────────
 
 /**
- * Inputs for `buildMetaTools`. The runtime passes its already-collected
- * registries; the meta-tools read manifests and tool descriptors from them.
+ * Inputs for `buildMetaTools`. The runtime passes the manifest registry and
+ * the turn's own collected tools (`turnToolSummaries`); a `ToolRegistry`
+ * also satisfies `toolRegistry`, but lists boot-time tools only.
  */
 export interface BuildMetaToolsOptions {
   manifestRegistry: ManifestRegistry;
-  toolRegistry: ToolRegistry;
+  toolRegistry: ToolSummarySource;
   /** The turn's tool-plane result (`resolveTurnToolAccess`). */
   toolAccess: MetaToolAccess;
 }

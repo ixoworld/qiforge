@@ -631,3 +631,81 @@ describe('createSseTurnStream turn budget', () => {
     expect(out.at(-1)?.data).toMatchObject({ failed: true });
   });
 });
+
+describe('runTurnFrames abort classification', () => {
+  const frames = (sse: string) =>
+    sse
+      .split('\n\n')
+      .filter((b) => b.startsWith('event: '))
+      .map((b) => b.split('\n')[0]!.slice('event: '.length));
+
+  it('a provider timeout that says "aborted" is a failure with an error frame, not an abort', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'm',
+        data: { chunk: { content: 'partial' } },
+      };
+      throw new DOMException(
+        'The operation was aborted due to timeout',
+        'TimeoutError',
+      );
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    expect(frames(sse).slice(-2)).toEqual(['error', 'done']);
+    expect(sse).toContain('"failed":true');
+    expect(sse).not.toContain('"aborted":true');
+  });
+
+  it('an AbortError with the turn signal untouched is a failure too', async () => {
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'm',
+        data: { chunk: { content: 'partial' } },
+      };
+      const error = new Error('Request was aborted.');
+      error.name = 'AbortError';
+      throw error;
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController: new AbortController(),
+      }),
+    ).text();
+    expect(sse).toContain('"failed":true');
+  });
+
+  it('whatever the graph throws after the turn signal fired is an abort', async () => {
+    const abortController = new AbortController();
+    async function* events(): AsyncGenerator<unknown> {
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'm',
+        data: { chunk: { content: 'partial' } },
+      };
+      abortController.abort(new Error('run aborted (aborted)'));
+      throw new Error('some unrelated wording');
+    }
+    const sse = await new Response(
+      createSseTurnStream({
+        events: events(),
+        sessionId: 's1',
+        requestId: 'r1',
+        abortController,
+      }),
+    ).text();
+    expect(frames(sse)).not.toContain('error');
+    expect(sse).toContain('"aborted":true');
+  });
+});

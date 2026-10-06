@@ -98,13 +98,35 @@ import {
   type UserServerNameLookup,
 } from './user-homeserver';
 import { replyPartTxnId, roomReplyMessages } from './reply-parts';
+import { VerifiedRoomAliases } from './room-alias';
+import {
+  boundedSignal,
+  raceSignal,
+  streamWithDeadline,
+} from './media-deadline';
 
 const TYPING_REFRESH_MS = 20_000;
 const TYPING_TIMEOUT_MS = 30_000;
-/** User DID → room id memo (aliases never move; a miss re-resolves). */
+/**
+ * User DID → room id memo (aliases never move; a miss re-resolves), and the
+ * lifetime of a room's verified canonical alias (`room-alias.ts`).
+ */
 const ALIAS_CACHE_TTL_MS = 30 * 60_000;
 /** User DID → Matrix server name (from the DID document via Blocksync). */
 const HOMESERVER_CACHE_TTL_MS = 6 * 60 * 60_000;
+/** Entries each in-memory memo in front of the `hs:` / `alias:` storage keys holds. */
+const MEMO_MAX_ENTRIES = 5_000;
+/**
+ * The full `status()` is served from memory for this long: it scans several
+ * tables, and the route that asks for it is public.
+ */
+const STATUS_CACHE_MS = 5_000;
+/**
+ * Upper bound on one media download (response and body), unless the caller
+ * asks for less. A stalled homeserver stream must not hold the reader — and
+ * with it the user's turn — open indefinitely.
+ */
+export const MEDIA_DOWNLOAD_TIMEOUT_MS = 60_000;
 /**
  * A live message whose sender's homeserver could not be looked up stays in
  * the inbox and is replayed on its own after this delay (each replay is
@@ -173,6 +195,39 @@ interface AliasCacheEntry {
   roomId: string;
   alias: string;
   at: number;
+}
+
+/** A media download's bound. `signal` only works for a caller in this isolate: an `AbortSignal` cannot cross an RPC boundary. */
+export interface MediaDownloadOptions {
+  /** Upper bound on the whole transfer (default `MEDIA_DOWNLOAD_TIMEOUT_MS`). */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/** What `GET /health` on the gateway answers: from memory only, no storage read. */
+export interface GatewayHealth {
+  running: boolean;
+}
+
+/**
+ * A small bounded memo with insertion-order eviction, in front of the
+ * gateway's storage keys (the values carry their own timestamps; freshness
+ * is the caller's rule, the same one the stored copy is judged by).
+ */
+class BoundedMemo<V> {
+  private readonly map = new Map<string, V>();
+  get(key: string): V | undefined {
+    return this.map.get(key);
+  }
+  set(key: string, value: V): void {
+    this.map.delete(key);
+    while (this.map.size >= MEMO_MAX_ENTRIES) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+    this.map.set(key, value);
+  }
 }
 
 function gateSizeFromEnv(raw: string | undefined, fallback: number): number {
@@ -249,8 +304,28 @@ export class MatrixGatewayDO
 {
   private config: OracleGatewayConfig | null = null;
   private ingest: IngestPipeline | null = null;
-  /** `m.room.canonical_alias` per room (null = none), read once per instance. */
-  private readonly roomAliases = new Map<string, string | null>();
+  /** How long a row without a verdict waits before it is offered again. */
+  protected readonly senderCheckRetryMs: number = SENDER_CHECK_RETRY_MS;
+  /**
+   * The verified user↔oracle alias per room (`room-alias.ts`): a canonical
+   * alias counts only when its homeserver resolves it to that same room.
+   */
+  private readonly roomAliases = new VerifiedRoomAliases({
+    readCanonicalAlias: (roomId) => this.readOracleRoomAlias(roomId),
+    resolveAlias: (alias) => this.resolveAlias(alias),
+    ttlMs: ALIAS_CACHE_TTL_MS,
+  });
+  /** In front of `hs:<did>` in storage (same entries, same TTL). */
+  private readonly homeserverMemo = new BoundedMemo<CachedUserServerName>();
+  /** In front of `alias:<did>` in storage (same entries, same TTL). */
+  private readonly roomMemo = new BoundedMemo<AliasCacheEntry>();
+  /** The storage-scanning half of `status()`, served for `STATUS_CACHE_MS`. */
+  private statusCache: {
+    at: number;
+    value: Promise<Omit<GatewayStatus, 'turns' | 'ingestPending'>>;
+  } | null = null;
+  /** Whether the bot was last seen started (set by a start, cleared by `stop`); read by `GET /health`. */
+  private botRunning = false;
   /**
    * User DID → registered Matrix server name (lowercased), refreshed before
    * every offer from `userServerName` so the pipeline can check it synchronously.
@@ -268,6 +343,12 @@ export class MatrixGatewayDO
   private inboxTableReady = false;
   /** Event ids of turns running in this instance (a graceful restart must not replay them). */
   private readonly inFlightEvents = new Set<string>();
+  /**
+   * Event ids waiting in the ingest debounce buffer: their turn exists in
+   * this instance already, so a start in place (a device rotation) must not
+   * replay them. Cleared with the buffers on `stop`, which drops them.
+   */
+  private readonly debouncing = new Set<string>();
   private inboxReplayRunning = false;
   /** Inbox rows whose sender check had no verdict, waiting for `unverifiedRetry`. */
   private readonly unverifiedEvents = new Set<string>();
@@ -364,7 +445,7 @@ export class MatrixGatewayDO
     this.ingest = new IngestPipeline({
       oracleDid: cfg.oracleRoomDid,
       botUserId: cfg.userId,
-      canonicalAlias: (roomId) => this.roomAliases.get(roomId) ?? null,
+      canonicalAlias: (roomId) => this.roomAliases.known(roomId),
       userServerName: (userDid) => this.userServers.get(userDid) ?? null,
       dispatch: (turn) => this.dispatchTurn(turn),
       onError: (err, context) =>
@@ -405,21 +486,35 @@ export class MatrixGatewayDO
     // message back if the instance dies before its reply is in the outbox.
     const sql = this.inboxSql();
     insertInboxRow(sql, inbound, Date.now());
-    // Resolved before the offer so the pipeline's synchronous lookups (room
-    // alias → user DID, user DID → registered homeserver) answer from memos.
-    await this.canonicalAliasOf(message.roomId);
-    await this.resolveSenderServer(inbound);
-    const threadRootId = await this.threadRootFor(
-      eventId,
-      message.roomId,
-      readRelatesTo(message.content),
-      message.threadRootId,
-    );
-    if (threadRootId !== inbound.threadRootId) {
-      inbound.threadRootId = threadRootId;
-      updateInboxThread(sql, eventId, threadRootId);
+    try {
+      // The thread (a quote-reply chain walk) and the sender's identity (the
+      // verified alias, then the user's registered homeserver) are
+      // independent lookups: they run side by side.
+      const [alias, threadRootId] = await Promise.all([
+        this.attributionFor(inbound),
+        this.threadRootFor(
+          eventId,
+          message.roomId,
+          readRelatesTo(message.content),
+          message.threadRootId,
+        ),
+      ]);
+      if (threadRootId !== inbound.threadRootId) {
+        inbound.threadRootId = threadRootId;
+        updateInboxThread(sql, eventId, threadRootId);
+      }
+      this.offerInbound(inbound, alias);
+    } catch (err) {
+      // A homeserver error while preparing the offer (the alias lookup, a
+      // rate limit) is not a verdict on the message. The SDK has already
+      // marked the event processed, so the row comes back on its own timer.
+      this.log(
+        'warn',
+        `ingest: could not prepare ${eventId} in ${message.roomId}; keeping it in the inbox for a replay`,
+        err,
+      );
+      this.retryUnverifiedLater(eventId);
     }
-    this.offerInbound(inbound);
   }
 
   /**
@@ -427,10 +522,11 @@ export class MatrixGatewayDO
    * a turn leaves the inbox at once; one whose sender could not be checked
    * stays there and is replayed after `SENDER_CHECK_RETRY_MS`.
    */
-  private offerInbound(inbound: InboundMessage): void {
-    const outcome = this.ingestPipeline().offer(inbound);
+  private offerInbound(inbound: InboundMessage, alias: string | null): void {
+    const outcome = this.ingestPipeline().offer(inbound, alias);
     const row = settleOfferedRow(this.inboxSql(), inbound.eventId, outcome);
-    if (outcome === 'unverified') {
+    if (outcome === 'queued') this.debouncing.add(inbound.eventId);
+    else if (outcome === 'unverified') {
       this.log(
         'warn',
         `ingest: no homeserver verdict for ${inbound.sender}; keeping ${inbound.eventId} in ${inbound.roomId} for a replay`,
@@ -455,7 +551,22 @@ export class MatrixGatewayDO
       const only = new Set(this.unverifiedEvents);
       this.unverifiedEvents.clear();
       this.scheduleInboxReplay(only);
-    }, SENDER_CHECK_RETRY_MS);
+    }, this.senderCheckRetryMs);
+  }
+
+  /**
+   * The room's verified alias, with the homeserver of the user the message
+   * is then attributed to looked up for the sender check. The alias is
+   * handed on as checked here: re-reading the memo later could find it
+   * expired or invalidated meanwhile, and a legacy sender would read as
+   * unmapped. Throws when the alias could not be checked.
+   */
+  private async attributionFor(
+    inbound: InboundMessage,
+  ): Promise<string | null> {
+    const alias = await this.canonicalAliasOf(inbound.roomId);
+    await this.resolveSenderServer(inbound, alias);
+    return alias;
   }
 
   /**
@@ -466,9 +577,12 @@ export class MatrixGatewayDO
    * memo is cleared, so the pipeline gives no verdict (`'unverified'`) and
    * the message stays in the inbox instead of being dropped as foreign.
    */
-  private async resolveSenderServer(inbound: InboundMessage): Promise<void> {
+  private async resolveSenderServer(
+    inbound: InboundMessage,
+    alias: string | null,
+  ): Promise<void> {
     const attribution = attributeUser({
-      alias: this.roomAliases.get(inbound.roomId) ?? null,
+      alias,
       sender: inbound.sender,
       oracleDid: this.cfg().oracleRoomDid,
     });
@@ -486,10 +600,17 @@ export class MatrixGatewayDO
     }
   }
 
-  /** A membership change invalidates what the group-chat gate knows about the room. */
+  /**
+   * A membership change invalidates what the group-chat gate knows about the
+   * room; an alias change also invalidates the room's verified alias (the
+   * gate's "direct" verdict rests on it too).
+   */
   protected override async onEvent(event: BotTimelineEvent): Promise<void> {
     await super.onEvent(event);
-    if (event.type === 'm.room.member')
+    if (event.type === 'm.room.canonical_alias') {
+      this.roomAliases.invalidate(event.roomId);
+      this.groupChat().invalidateRoom(event.roomId);
+    } else if (event.type === 'm.room.member')
       this.groupChat().invalidateRoom(event.roomId);
   }
 
@@ -586,10 +707,18 @@ export class MatrixGatewayDO
     return this.threadRootFor(row.eventId, row.roomId, relatesTo);
   }
 
-  /** `m.room.canonical_alias` of a room, memoised per instance (null = none). */
+  /**
+   * The room's verified user↔oracle alias (null = none): its canonical alias,
+   * when that is an alias of this oracle AND its homeserver resolves it to
+   * this room. Memoised (`room-alias.ts`). Throws when the homeserver could
+   * not be asked — no verdict, never "accept".
+   */
   private async canonicalAliasOf(roomId: string): Promise<string | null> {
-    const memo = this.roomAliases.get(roomId);
-    if (memo !== undefined) return memo;
+    return this.roomAliases.verify(roomId);
+  }
+
+  /** `m.room.canonical_alias` of a room when it is a user↔oracle alias of this oracle. */
+  private async readOracleRoomAlias(roomId: string): Promise<string | null> {
     const json = await this.getRoomStateEvent(roomId, 'm.room.canonical_alias');
     const parsed: unknown = json ? JSON.parse(json) : null;
     const alias =
@@ -600,12 +729,25 @@ export class MatrixGatewayDO
       parsed.alias
         ? parsed.alias
         : null;
-    this.roomAliases.set(roomId, alias);
-    return alias;
+    return alias !== null &&
+      userDidFromRoomAlias(alias, this.cfg().oracleRoomDid) !== null
+      ? alias
+      : null;
   }
 
   private async dispatchTurn(turn: IngestTurn): Promise<void> {
-    return this.turnGate.run(() => this.dispatchTurnNow(turn));
+    // In flight from the moment the turn exists, not only once it holds a
+    // gate slot: an in-place restart replays the inbox, and a row still
+    // queued behind the gate must not be offered (and charged) again.
+    for (const id of turn.eventIds) {
+      this.debouncing.delete(id);
+      this.inFlightEvents.add(id);
+    }
+    try {
+      await this.turnGate.run(() => this.dispatchTurnNow(turn));
+    } finally {
+      for (const id of turn.eventIds) this.inFlightEvents.delete(id);
+    }
   }
 
   private async dispatchTurnNow(turn: IngestTurn): Promise<void> {
@@ -651,10 +793,14 @@ export class MatrixGatewayDO
       'info',
       `turn ${requestId}: ${turn.userDid} in ${turn.roomId} (thread ${turn.threadId}${decision.roomKind === 'group' ? `, group room: ${decision.reason}` : ''})`,
     );
-    for (const id of turn.eventIds) this.inFlightEvents.add(id);
     let typing: ReturnType<typeof setInterval> | null = null;
     try {
-      await this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS);
+      // Cosmetic: a homeserver hiccup on the typing notice must not cost the
+      // user their turn.
+      await this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS).catch(
+        (err: unknown) =>
+          this.log('debug', `turn ${requestId}: typing notice failed`, err),
+      );
       typing = setInterval(() => {
         this.setTyping(turn.roomId, true, TYPING_TIMEOUT_MS).catch(
           () => undefined,
@@ -724,21 +870,27 @@ export class MatrixGatewayDO
       // Told the user (or could not): either way this turn is over.
       deleteInboxRows(this.inboxSql(), turn.eventIds);
     } finally {
-      for (const id of turn.eventIds) this.inFlightEvents.delete(id);
       if (typing) clearInterval(typing);
       await this.setTyping(turn.roomId, false).catch(() => undefined);
       // Close the card on every exit — reply posted, empty reply, thrown
       // error — so no turn can leave a spinner running in the room.
-      await this.userStub(turn.userDid)
-        .finishWorkStatus(requestId, 'done')
-        .catch((err: unknown) =>
+      await this.finishWorkStatus(turn.userDid, requestId).catch(
+        (err: unknown) =>
           this.log(
             'warn',
             `turn ${requestId}: could not close the status card`,
             err,
           ),
-        );
+      );
     }
+  }
+
+  /** Close the turn's work-status card in the user's object. */
+  protected async finishWorkStatus(
+    userDid: string,
+    requestId: string,
+  ): Promise<void> {
+    await this.userStub(userDid).finishWorkStatus(requestId, 'done');
   }
 
   private userStub(userDid: string): DurableObjectStub<UserOracleObject> {
@@ -790,7 +942,20 @@ export class MatrixGatewayDO
    * moment to re-dispatch the turns a previous incarnation left unfinished.
    */
   protected override async onStarted(_result: StartResult): Promise<void> {
+    this.noteRunning(true);
     this.scheduleInboxReplay();
+  }
+
+  override async ensureStarted(): Promise<StartResult> {
+    const result = await super.ensureStarted();
+    this.noteRunning(true);
+    return result;
+  }
+
+  /** A lifecycle change: `GET /health` follows it, the cached status is stale. */
+  private noteRunning(running: boolean): void {
+    if (this.botRunning !== running) this.statusCache = null;
+    this.botRunning = running;
   }
 
   /** `only`: replay just these rows (the unverified-sender retry); omitted, every row. */
@@ -823,7 +988,7 @@ export class MatrixGatewayDO
     );
     if (rows.length === 0) return;
     const plan = planInboxReplay(rows, {
-      inFlight: this.inFlightEvents,
+      inFlight: new Set([...this.inFlightEvents, ...this.debouncing]),
       maxReplays: MAX_TURN_REPLAYS,
     });
     for (const row of plan.exhausted) {
@@ -852,21 +1017,30 @@ export class MatrixGatewayDO
       );
     for (const row of plan.replay) {
       try {
-        await this.canonicalAliasOf(row.roomId);
+        // Without an alias verdict a legacy sender would read as unmapped
+        // and the row would be dropped: the row waits for the next retry
+        // instead (its attempts were bumped above, so an outage still ends
+        // in the "try again" notice).
+        // A failed homeserver lookup leaves no verdict: the offer answers
+        // 'unverified' and the row stays for the next replay.
+        const inbound = inboundOfRow(row);
+        const [alias, threadRootId] = await Promise.all([
+          this.attributionFor(inbound),
+          this.threadRootForRow(row),
+        ]);
+        if (threadRootId !== inbound.threadRootId) {
+          inbound.threadRootId = threadRootId;
+          updateInboxThread(sql, row.eventId, threadRootId);
+        }
+        this.offerInbound(inbound, alias);
       } catch (err) {
-        this.log('warn', `inbox: alias lookup failed for ${row.roomId}`, err);
+        this.log(
+          'warn',
+          `inbox: could not prepare ${row.eventId} in ${row.roomId}; retrying later`,
+          err,
+        );
+        this.retryUnverifiedLater(row.eventId);
       }
-      const inbound = inboundOfRow(row);
-      // A failed homeserver lookup leaves no verdict: the offer answers
-      // 'unverified' and the row stays for the next replay (its attempts
-      // were bumped above).
-      await this.resolveSenderServer(inbound);
-      const threadRootId = await this.threadRootForRow(row);
-      if (threadRootId !== inbound.threadRootId) {
-        inbound.threadRootId = threadRootId;
-        updateInboxThread(sql, row.eventId, threadRootId);
-      }
-      this.offerInbound(inbound);
     }
     this.log(
       'info',
@@ -890,9 +1064,11 @@ export class MatrixGatewayDO
     // A debounce buffer firing after the stop would send through
     // `startedClient()`, which restarts the bot.
     this.ingest?.clear();
+    this.debouncing.clear();
     if (this.unverifiedRetry) clearTimeout(this.unverifiedRetry);
     this.unverifiedRetry = null;
     this.unverifiedEvents.clear();
+    this.noteRunning(false);
     await super.stop();
   }
 
@@ -914,8 +1090,18 @@ export class MatrixGatewayDO
       blocksyncGraphqlUrl: this.env.BLOCKSYNC_GRAPHQL_URL,
       defaultServerName: cfg.serverName,
       ttlMs: HOMESERVER_CACHE_TTL_MS,
-      readCache: () => this.ctx.storage.get<CachedUserServerName>(cacheKey),
-      writeCache: (_did, entry) => this.ctx.storage.put(cacheKey, entry),
+      readCache: async () => {
+        const memo = this.homeserverMemo.get(userDid);
+        if (memo) return memo;
+        const stored =
+          await this.ctx.storage.get<CachedUserServerName>(cacheKey);
+        if (stored) this.homeserverMemo.set(userDid, stored);
+        return stored;
+      },
+      writeCache: async (_did, entry) => {
+        this.homeserverMemo.set(userDid, entry);
+        await this.ctx.storage.put(cacheKey, entry);
+      },
     });
     if (lookup.source === 'stale')
       this.log(
@@ -962,21 +1148,24 @@ export class MatrixGatewayDO
       await this.userServerName(userDid),
     );
     const cacheKey = `alias:${userDid}`;
+    const fresh = (
+      entry: AliasCacheEntry | undefined,
+    ): entry is AliasCacheEntry =>
+      entry !== undefined &&
+      entry.alias === alias &&
+      Date.now() - entry.at < ALIAS_CACHE_TTL_MS;
+    const memo = this.roomMemo.get(userDid);
+    if (fresh(memo)) return { roomId: memo.roomId, alias };
     const cached = await this.ctx.storage.get<AliasCacheEntry>(cacheKey);
-    if (
-      cached &&
-      cached.alias === alias &&
-      Date.now() - cached.at < ALIAS_CACHE_TTL_MS
-    ) {
+    if (fresh(cached)) {
+      this.roomMemo.set(userDid, cached);
       return { roomId: cached.roomId, alias };
     }
     const roomId = await this.resolveAlias(alias);
     if (!roomId) return null;
-    await this.ctx.storage.put(cacheKey, {
-      roomId,
-      alias,
-      at: Date.now(),
-    } satisfies AliasCacheEntry);
+    const entry: AliasCacheEntry = { roomId, alias, at: Date.now() };
+    this.roomMemo.set(userDid, entry);
+    await this.ctx.storage.put(cacheKey, entry);
     return { roomId, alias };
   }
 
@@ -1289,13 +1478,58 @@ export class MatrixGatewayDO
   async downloadEventMediaStream(
     roomId: string,
     eventId: string,
+    opts: MediaDownloadOptions = {},
   ): Promise<MediaStream | null> {
-    return this.mediaStream(roomId, eventId);
+    const bound = boundedSignal(
+      opts.timeoutMs ?? MEDIA_DOWNLOAD_TIMEOUT_MS,
+      opts.signal,
+    );
+    let media: MediaStream | null;
+    try {
+      // The SDK opens the download without a signal: race it, and release a
+      // stream that arrives after the bound.
+      media = await raceSignal(
+        this.mediaStream(roomId, eventId),
+        bound.signal,
+        (late) => void late?.stream.cancel().catch(() => undefined),
+      );
+    } catch (err) {
+      bound.clear();
+      throw err;
+    }
+    if (!media) {
+      bound.clear();
+      return null;
+    }
+    return { ...media, stream: streamWithDeadline(media.stream, bound) };
   }
 
-  /** Authenticated download of an `mxc://` URI as a stream (`/_matrix/client/v1/media/download`, legacy fallback on 404). */
+  /**
+   * Authenticated download of an `mxc://` URI as a stream
+   * (`/_matrix/client/v1/media/download`, legacy fallback on 404), bounded
+   * by `opts.timeoutMs` (default `MEDIA_DOWNLOAD_TIMEOUT_MS`) from the
+   * request to the last byte.
+   */
   async downloadMxcMediaStream(
     mxc: string,
+    opts: MediaDownloadOptions = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const bound = boundedSignal(
+      opts.timeoutMs ?? MEDIA_DOWNLOAD_TIMEOUT_MS,
+      opts.signal,
+    );
+    try {
+      const body = await this.fetchMxc(mxc, bound.signal);
+      return streamWithDeadline(body, bound);
+    } catch (err) {
+      bound.clear();
+      throw err;
+    }
+  }
+
+  private async fetchMxc(
+    mxc: string,
+    signal: AbortSignal,
   ): Promise<ReadableStream<Uint8Array>> {
     const client = await this.startedClient();
     const token = client.getAccessToken();
@@ -1312,7 +1546,7 @@ export class MatrixGatewayDO
       true,
     );
     if (!authed) throw new Error(`MatrixGatewayDO: invalid mxc url ${mxc}`);
-    let res = await fetch(authed, { headers });
+    let res = await fetch(authed, { headers, signal });
     if (res.status === 404) {
       const legacy = client.mxcUrlToHttp(
         mxc,
@@ -1323,12 +1557,17 @@ export class MatrixGatewayDO
         true,
         false,
       );
-      if (legacy) res = await fetch(legacy, { headers });
+      if (legacy) {
+        await res.body?.cancel().catch(() => undefined);
+        res = await fetch(legacy, { headers, signal });
+      }
     }
-    if (!res.ok)
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
       throw new Error(
         `MatrixGatewayDO: media download failed: ${res.status} ${res.statusText}`,
       );
+    }
     if (!res.body)
       throw new Error('MatrixGatewayDO: media download has no body');
     return res.body;
@@ -1491,14 +1730,54 @@ export class MatrixGatewayDO
     return this.groupChat().unpinFact(roomId, factId);
   }
 
+  /**
+   * The bot's status. The half that scans storage (the SDK's room, outbox
+   * and catch-up counts, crypto key counts, channel memory, the inbox) is
+   * computed at most once per `STATUS_CACHE_MS` and whenever the bot starts
+   * or stops; the in-memory turn counters are always live.
+   */
   override async status(): Promise<GatewayStatus> {
+    const now = Date.now();
+    if (!this.statusCache || now - this.statusCache.at >= STATUS_CACHE_MS) {
+      const value = this.scanStatus();
+      this.statusCache = { at: now, value };
+      // A failed scan is not served to the next caller.
+      value.catch(() => {
+        if (this.statusCache?.value === value) this.statusCache = null;
+      });
+    }
+    return {
+      ...(await this.statusCache.value),
+      turns: { inFlight: this.turnGate.inUse, waiting: this.turnGate.queued },
+      ingestPending: this.ingest?.pendingCount ?? 0,
+    };
+  }
+
+  private async scanStatus(): Promise<
+    Omit<GatewayStatus, 'turns' | 'ingestPending'>
+  > {
     return {
       ...(await super.status()),
-      turns: { inFlight: this.turnGate.inUse, waiting: this.turnGate.queued },
       groupChat: this.groupChat().stats(),
-      ingestPending: this.ingest?.pendingCount ?? 0,
       inbox: countInboxRows(this.inboxSql()),
     };
+  }
+
+  /** Whether the bot is running, from memory only (no storage read, no start). */
+  health(): GatewayHealth {
+    return { running: this.botRunning };
+  }
+
+  /**
+   * The gateway's HTTP surface: `GET /health` answers `health()` — what the
+   * shell's public `GET /health/matrix` asks, at the price of a request to
+   * this object and nothing more.
+   */
+  async fetch(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (request.method === 'GET' && pathname === '/health')
+      return Response.json(this.health());
+    return new Response('Not found', { status: 404 });
   }
 }
 

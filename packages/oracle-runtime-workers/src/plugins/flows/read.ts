@@ -27,6 +27,7 @@ import {
   nbToFriendlyInputs,
   parseConditionsProp,
 } from './translator';
+import { scanRefTokens } from './ref-syntax';
 import type {
   FlowSpecRead,
   FlowStepRead,
@@ -197,19 +198,41 @@ function assigneeFrom(value: unknown): string | undefined {
   return undefined;
 }
 
-/** Collect the upstream step ids this step refers to via "{{step.output.*}}" inputs. */
+/** Every `{{ … }}` reference anywhere in `value` (nested maps, arrays, embedded text). */
+function collectRefs(value: unknown, out: string[]): void {
+  if (typeof value === 'string') {
+    if (value.includes('{{'))
+      for (const token of scanRefTokens(value)) out.push(token.ref);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectRefs(item, out);
+    return;
+  }
+  if (value && typeof value === 'object')
+    for (const item of Object.values(value)) collectRefs(item, out);
+}
+
+/**
+ * The other steps of this flow that `inputs` reads from via "{{step.output.*}}",
+ * at any depth and embedded in longer strings. A reference whose id is not a
+ * step of this flow (`trigger.payload.*`, a removed step) is not a dependency.
+ */
 function referencedSteps(
   inputs: Record<string, unknown> | undefined,
+  stepId: string,
+  stepIds: ReadonlySet<string>,
 ): string[] {
   if (!inputs) return [];
-  const refs = new Set<string>();
-  for (const value of Object.values(inputs)) {
-    if (typeof value === 'string') {
-      const match = /^\{\{\s*([^.}\s]+)\./.exec(value);
-      if (match?.[1]) refs.add(match[1]);
-    }
+  const refs: string[] = [];
+  collectRefs(inputs, refs);
+  const ids = new Set<string>();
+  for (const ref of refs) {
+    const dot = ref.indexOf('.');
+    const id = dot > 0 ? ref.slice(0, dot) : '';
+    if (id && id !== stepId && stepIds.has(id)) ids.add(id);
   }
-  return [...refs];
+  return [...ids];
 }
 
 /** Derive a step's read-only status from its runtime entry + its dependencies' states. */
@@ -286,6 +309,9 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
   >();
   const stateByStepId = new Map<string, StepState>();
 
+  const stepIds = new Set(
+    compiled.order.filter((nodeId) => compiled.nodes[nodeId] !== undefined),
+  );
   for (const nodeId of compiled.order) {
     const node = compiled.nodes[nodeId];
     if (!node) continue;
@@ -363,7 +389,7 @@ export function readFlowSpec(doc: YDoc, ref: string): FlowSpecRead | null {
     runtimeByStep.set(nodeId, runtime);
     stateByStepId.set(nodeId, asStepState(runtime?.state) ?? 'idle');
     dependenciesByStep.set(nodeId, {
-      referenced: referencedSteps(inputs),
+      referenced: referencedSteps(inputs, nodeId, stepIds),
       after: [],
     });
   }

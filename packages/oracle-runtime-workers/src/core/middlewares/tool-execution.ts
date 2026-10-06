@@ -95,11 +95,13 @@ export function uncertainWriteToolResult(toolName: string): string {
 
 /**
  * Transport error codes (Node / undici `code`s; workerd only has them in the
- * message) and the editor's unconfirmed save. Any of them can follow a
- * request that reached the service, so none proves the effect did not happen.
+ * message) and the editor's undelivered write (`write_not_saved`: the
+ * homeserver kept failing, and a send that failed with a server error may
+ * still have landed). Any of them can follow a request that reached the
+ * service, so none proves the effect did not happen.
  */
 const UNCERTAIN_CODES =
-  'ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)|flush_timeout';
+  'ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)|write_not_saved';
 const UNCERTAIN_CODE = new RegExp(`^(?:${UNCERTAIN_CODES})$`, 'i');
 
 /**

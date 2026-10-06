@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   createUnsignedUcanAdapter,
@@ -6,9 +6,11 @@ import {
 } from '../../core/runtime-context';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import type { RuntimeContext } from '../../plugin-api/types';
+import { McpCallTimeoutError } from '../mcp-call-timeout';
 import {
   COMPOSIO_DEFS_CACHE_MAX_ENTRIES,
   COMPOSIO_TOOL_DEFS_TTL_MS,
+  COMPOSIO_TOOL_TIMEOUT_MS,
   createComposioTools,
   type ComposioDefsCache,
   type ComposioSessionTool,
@@ -158,6 +160,69 @@ describe('ComposioPlugin (Workers port)', () => {
     );
     expect(upstream?.invoke).toHaveBeenCalledWith({ query: 'finance' });
     expect(result).toEqual({ found: [], input: { query: 'finance' } });
+  });
+
+  describe('call bounds', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Make the search tool's upstream call never settle. */
+    function hangSearch(): void {
+      sessionTools = sessionTools.map((t) =>
+        t.name === 'COMPOSIO_SEARCH_TOOLS'
+          ? { ...t, invoke: () => new Promise<never>(() => undefined) }
+          : t,
+      );
+    }
+
+    it(`gives up on a call that never answers after ${COMPOSIO_TOOL_TIMEOUT_MS / 1000} s`, async () => {
+      hangSearch();
+      const plugin = new ComposioPlugin();
+      const ctx = makeCtx();
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      vi.useFakeTimers();
+      let outcome: unknown = 'pending';
+      void Promise.resolve(search?.handler({ query: 'x' }, ctx)).then(
+        () => {
+          outcome = 'resolved';
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(COMPOSIO_TOOL_TIMEOUT_MS - 1_000);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toBeInstanceOf(McpCallTimeoutError);
+    });
+
+    it('stops waiting as soon as the turn is cancelled', async () => {
+      hangSearch();
+      const plugin = new ComposioPlugin();
+      const turn = new AbortController();
+      const ctx = Object.assign(makeCtx(), { abortSignal: turn.signal });
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      const pending = Promise.resolve(search?.handler({ query: 'x' }, ctx));
+      const reason = new Error('turn cancelled');
+      turn.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+    });
+
+    it('leaves no timer behind after a call that answers', async () => {
+      const plugin = new ComposioPlugin();
+      const ctx = makeCtx();
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      vi.useFakeTimers();
+      await search?.handler({ query: 'finance' }, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+    });
   });
 
   it('normalizes the COMPOSIO_MULTI_EXECUTE_TOOL envelope', async () => {

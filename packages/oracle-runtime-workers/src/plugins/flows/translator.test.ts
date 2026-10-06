@@ -232,3 +232,70 @@ describe('translator: flowSpecToBaseUcan', () => {
     });
   });
 });
+
+describe('translator: placeholder scanning', () => {
+  it('handles a pathological 10 KB "{{" + whitespace value in linear time', () => {
+    const hostile = `{{${' '.repeat(10_240)}`;
+    const nested = { a: hostile, b: [hostile, { c: hostile }] };
+    const started = performance.now();
+    const friendly = nbToFriendlyInputs(nested);
+    const nb = friendlyInputsToNb(nested);
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeLessThan(10);
+    expect(friendly).toEqual(nested);
+    expect(nb).toEqual(nested);
+  });
+
+  it('treats "{{a}} and {{b}}" as two embedded references, not one', () => {
+    const nb = friendlyInputsToNb({
+      text: '{{a.output.x}} and {{b.output.y}}',
+    });
+    expect(nb).toEqual({
+      text: `{{${stepIdToBlockId('a')}.output.x}} and {{${stepIdToBlockId('b')}.output.y}}`,
+    });
+    expect(nbToFriendlyInputs(nb)).toEqual({
+      text: '{{a.output.x}} and {{b.output.y}}',
+    });
+  });
+
+  it('translates references both ways through nested objects and arrays', () => {
+    const friendly = {
+      variables: { name: '{{form.output.answers.name}}' },
+      list: ['{{a.output.x}}', 'plain', { deep: 'Hi {{ a.output.y }}!' }],
+    };
+    const nb = friendlyInputsToNb(friendly);
+    expect(nb).toEqual({
+      variables: {
+        name: { $ref: `${stepIdToBlockId('form')}.output.answers.name` },
+      },
+      list: [
+        { $ref: `${stepIdToBlockId('a')}.output.x` },
+        'plain',
+        { deep: `Hi {{ ${stepIdToBlockId('a')}.output.y }}!` },
+      ],
+    });
+    expect(nbToFriendlyInputs(nb)).toEqual(friendly);
+  });
+
+  it('leaves stray, tripled and empty braces and non-output tokens as written', () => {
+    const values = {
+      open: 'a {{ b',
+      close: 'a }} b',
+      empty: '{{}}',
+      blank: '{{   }}',
+      helper: '{{#if x}}yes{{/if}}',
+      payload: '{{trigger.payload.id}}',
+    };
+    expect(nbToFriendlyInputs(friendlyInputsToNb(values))).toEqual(values);
+    // A tripled brace still holds one placeholder, one brace in.
+    expect(friendlyInputsToNb({ t: 'x {{{a.output.b}}}' })).toEqual({
+      t: `x {{{${stepIdToBlockId('a')}.output.b}}}`,
+    });
+  });
+
+  it('round-trips a reference to a step id the flow does not have', () => {
+    const nb = friendlyInputsToNb({ x: '{{ghost.output.v}}' });
+    expect(nb).toEqual({ x: { $ref: `${stepIdToBlockId('ghost')}.output.v` } });
+    expect(nbToFriendlyInputs(nb)).toEqual({ x: '{{ghost.output.v}}' });
+  });
+});

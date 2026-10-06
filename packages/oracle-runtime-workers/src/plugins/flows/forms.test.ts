@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { flowSpecToBaseUcan, stepIdToBlockId } from './translator';
 import { setStepProps } from './edit';
 import { describeForm, fillForm, setFormSchema } from './forms';
-import { hydrateFlowDoc, someActionType } from './test-support';
+import { hydrateFlowDoc, setStepRuntime, someActionType } from './test-support';
 import type { Doc as YDoc } from 'yjs';
 
 const SURVEY = JSON.stringify({
@@ -135,5 +135,44 @@ describe('fill_form', () => {
       note: 'first',
       color: 'g',
     });
+  });
+});
+
+describe('fillForm: runtime state', () => {
+  it.each(['running', 'completed', 'awaiting_readback'] as const)(
+    'refuses to pre-fill a %s form and keeps its answers',
+    (state) => {
+      const doc = formFlowDoc();
+      fillForm(doc, 'form', { color: 'r' });
+      setStepRuntime(doc, 'form', { state });
+      const before = JSON.stringify(runtimeOf(doc, 'form'));
+
+      expect(() => fillForm(doc, 'form', { color: 'g' })).toThrowError(
+        new RegExp(`is ${state}`),
+      );
+      expect(JSON.stringify(runtimeOf(doc, 'form'))).toBe(before);
+    },
+  );
+
+  it.each(['idle', 'failed', 'cancelled'] as const)(
+    'pre-fills a %s form',
+    (state) => {
+      const doc = formFlowDoc();
+      setStepRuntime(doc, 'form', { state });
+      expect(fillForm(doc, 'form', { color: 'g' }).applied).toEqual(['color']);
+    },
+  );
+
+  it('pre-fills a form with no runtime entry', () => {
+    const doc = formFlowDoc();
+    doc.getMap('runtime').delete(stepIdToBlockId('form'));
+    expect(fillForm(doc, 'form', { color: 'r' }).applied).toEqual(['color']);
+  });
+
+  it('refuses to pre-fill a PIN', () => {
+    const doc = formFlowDoc();
+    expect(() => fillForm(doc, 'form', { pin: '1234' })).toThrowError(
+      /Refusing to store a secret/,
+    );
   });
 });

@@ -46,6 +46,12 @@ import { NOOP_LOGGER, sweepExpired } from './utils';
 export interface SecretsAdapter {
   getIndex(roomId: string): Promise<SecretIndex>;
   getValues(roomId: string, keys: string[]): Promise<Record<string, string>>;
+  /**
+   * Values of every secret {@link getIndex} would list, from one read of the
+   * index. Optional: an adapter without it is served by `getIndex` followed
+   * by `getValues` of every listed name.
+   */
+  getAll?(roomId: string): Promise<Record<string, string>>;
 }
 
 /**
@@ -453,6 +459,14 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
           return Promise.resolve({});
         }
         return ambient.secrets.getValues(session.roomId, keys);
+      },
+      getAll: async () => {
+        const roomId = session.roomId;
+        if (!roomId) return {};
+        const { secrets } = ambient;
+        if (secrets.getAll) return secrets.getAll(roomId);
+        const keys = Object.keys(await secrets.getIndex(roomId));
+        return keys.length > 0 ? secrets.getValues(roomId, keys) : {};
       },
     },
     blobStore: {

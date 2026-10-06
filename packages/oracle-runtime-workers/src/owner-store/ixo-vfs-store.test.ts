@@ -1,8 +1,10 @@
 /**
- * IxoVfsOwnerStore over a fake VFS: the atomic replace (temp upload → delete
- * old → move into place), the single-shot vs. tus split, resume/retry, stale
- * temp cleanup, the occupied-destination recovery and streamed loads. Auth
- * is stubbed — the UCAN leg has its own tests.
+ * IxoVfsOwnerStore over a fake VFS: the replace by moves (temp upload → old
+ * file moved aside → temp moved into place → old copy deleted), the old file
+ * restored when the move into place fails, leftovers deleted only once the
+ * new file landed, the single-shot vs. tus split, resume/retry, the
+ * occupied-destination recovery and streamed loads. Auth is stubbed — the
+ * UCAN leg has its own tests.
  */
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
@@ -13,6 +15,7 @@ import type {
 import {
   IxoVfsOwnerStore,
   ownerCopyCapability,
+  ASIDE_PATH_INFIX,
   SINGLE_SHOT_MAX_BYTES,
   TEMP_PATH_INFIX,
   VfsNoDelegationError,
@@ -67,6 +70,15 @@ interface FakeVfsOptions {
   seed?: Array<{ path: string; body: Uint8Array }>;
   /** Make the first move hit "Destination occupied" (a phantom occupant). */
   phantomOccupant?: boolean;
+  /** A status to answer a move with (from the file's path, to a path), or undefined to allow it. */
+  failMove?: (from: string, to: string) => number | undefined;
+  /**
+   * The first move INTO a path matching this commits but its response is
+   * lost (502); the retry of that file, having read the row before the
+   * commit, fails the VFS's version check: per-item 409 "File changed
+   * concurrently", once.
+   */
+  racedMoveTo?: (to: string) => boolean;
 }
 
 function fakeVfs(opts: FakeVfsOptions = {}) {
@@ -86,6 +98,8 @@ function fakeVfs(opts: FakeVfsOptions = {}) {
   let createCalls = 0;
   let patches = 0;
   let phantom = opts.phantomOccupant ?? false;
+  let raceArmed = opts.racedMoveTo !== undefined;
+  const racedIds = new Set<string>();
   const sessions = new Map<
     string,
     { path: string; total: number; offset: number; parts: Uint8Array[] }
@@ -151,9 +165,27 @@ function fakeVfs(opts: FakeVfsOptions = {}) {
       const { items } = JSON.parse(new TextDecoder().decode(await body())) as {
         items: Array<{ id: string; destinationPath: string }>;
       };
+      let lost = false;
       const results = items.map(({ id, destinationPath }) => {
         const file = files.get(id);
         if (!file) return { id, ok: false, status: 404, error: 'not found' };
+        if (racedIds.delete(id))
+          return {
+            id,
+            ok: false,
+            status: 409,
+            error: 'File changed concurrently — refetch and retry',
+          };
+        if (raceArmed && opts.racedMoveTo?.(destinationPath)) {
+          raceArmed = false;
+          racedIds.add(id);
+          file.path = destinationPath;
+          lost = true;
+          return { id, ok: true, status: 200, path: destinationPath };
+        }
+        const refused = opts.failMove?.(file.path, destinationPath);
+        if (refused !== undefined)
+          return { id, ok: false, status: refused, error: 'refused' };
         const occupied =
           phantom ||
           Array.from(files.values()).some(
@@ -170,6 +202,7 @@ function fakeVfs(opts: FakeVfsOptions = {}) {
         file.path = destinationPath;
         return { id, ok: true, status: 200, path: destinationPath };
       });
+      if (lost) return new Response('bad gateway', { status: 502 });
       return Response.json({ results });
     }
     // tus
@@ -415,7 +448,7 @@ describe('IxoVfsOwnerStore.save', () => {
     expect(vfs.files.size).toBe(1);
   });
 
-  it('replaces atomically: upload to temp, delete the old, move into place — never a PUT', async () => {
+  it('replaces by moves: upload to temp, move the old aside, move into place, delete the old — never a PUT', async () => {
     const vfs = fakeVfs({
       seed: [{ path: STATE_PATH, body: new Uint8Array([1, 2, 3]) }],
     });
@@ -426,8 +459,9 @@ describe('IxoVfsOwnerStore.save', () => {
     expect(shape(vfs.calls)).toEqual([
       'GET /files',
       'POST /files',
-      'POST /batch/delete',
       'POST /batch/move',
+      'POST /batch/move',
+      'POST /batch/delete',
     ]);
     expect(vfs.calls.some((c) => c.startsWith('PUT'))).toBe(false);
     const files = vfs.at(STATE_PATH);
@@ -515,7 +549,7 @@ describe('IxoVfsOwnerStore.save', () => {
     expect(shape(vfs.calls).filter((c) => c === 'GET /files')).toHaveLength(2);
   });
 
-  it('cleans up stale temp uploads from a crashed flush before uploading', async () => {
+  it('cleans up stale temp uploads from a crashed flush once the new file is in place', async () => {
     const vfs = fakeVfs({
       seed: [
         { path: STATE_PATH, body: new Uint8Array([1]) },
@@ -528,9 +562,114 @@ describe('IxoVfsOwnerStore.save', () => {
     await makeStore(vfs.fetchImpl).save(snapshotOfBytes(sqliteBytes(1000)));
     expect(vfs.files.size).toBe(1);
     expect(vfs.at(STATE_PATH)).toHaveLength(1);
+    // One delete, after the moves: the stale temp and the old file together.
+    const calls = shape(vfs.calls);
+    expect(calls.filter((c) => c === 'POST /batch/delete')).toHaveLength(1);
+    expect(calls.at(-1)).toBe('POST /batch/delete');
+  });
+
+  it('a move into place that fails for good puts the old file back and deletes nothing', async () => {
+    const old = sqliteBytes(3000, 5);
+    const vfs = fakeVfs({
+      seed: [{ path: STATE_PATH, body: old }],
+      // The upload cannot be moved into place; anything else can.
+      failMove: (from, to) =>
+        from.startsWith(`${STATE_PATH}${TEMP_PATH_INFIX}`) && to === STATE_PATH
+          ? 400
+          : undefined,
+    });
+    const seededId = vfs.at(STATE_PATH)[0]!.id;
+    const err = await makeStore(vfs.fetchImpl)
+      .save(snapshotOfBytes(sqliteBytes(4000, 6)))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VfsRequestError);
+    expect((err as VfsRequestError).status).toBe(400);
+    // The user still has the complete previous copy at the path…
+    const atPath = vfs.at(STATE_PATH);
+    expect(atPath.map((f) => f.id)).toEqual([seededId]);
+    expect(sameBytes(atPath[0]!.body, old)).toBe(true);
+    // …nothing was deleted, and the finished upload waits as a temp file.
+    expect(shape(vfs.calls)).not.toContain('POST /batch/delete');
     expect(
-      shape(vfs.calls).filter((c) => c === 'POST /batch/delete'),
-    ).toHaveLength(2); // stale temp, then the old file
+      Array.from(vfs.files.values()).filter((f) =>
+        f.path.startsWith(`${STATE_PATH}${TEMP_PATH_INFIX}`),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('a move that committed upstream but lost its response counts as done', async () => {
+    for (const racedMoveTo of [
+      (to: string) => to.startsWith(`${STATE_PATH}${ASIDE_PATH_INFIX}`),
+      (to: string) => to === STATE_PATH,
+    ]) {
+      const vfs = fakeVfs({
+        seed: [{ path: STATE_PATH, body: sqliteBytes(3000, 11) }],
+        racedMoveTo,
+      });
+      const seededId = vfs.at(STATE_PATH)[0]!.id;
+      const data = sqliteBytes(4000, 12);
+      await makeStore(vfs.fetchImpl).save(snapshotOfBytes(data));
+      const atPath = vfs.at(STATE_PATH);
+      expect(atPath).toHaveLength(1);
+      expect(atPath[0]!.id).not.toBe(seededId);
+      expect(sameBytes(await gunzip(atPath[0]!.body), data)).toBe(true);
+      expect(vfs.files.size).toBe(1);
+    }
+  });
+
+  it('when even the restore fails, the old copy survives set aside', async () => {
+    const old = sqliteBytes(3000, 7);
+    const vfs = fakeVfs({
+      seed: [{ path: STATE_PATH, body: old }],
+      failMove: (_from, to) => (to === STATE_PATH ? 400 : undefined),
+    });
+    const seededId = vfs.at(STATE_PATH)[0]!.id;
+    await expect(
+      makeStore(vfs.fetchImpl).save(snapshotOfBytes(sqliteBytes(4000, 6))),
+    ).rejects.toBeInstanceOf(VfsRequestError);
+    const kept = vfs.files.get(seededId);
+    expect(kept?.path.startsWith(`${STATE_PATH}${ASIDE_PATH_INFIX}`)).toBe(
+      true,
+    );
+    expect(sameBytes(kept!.body, old)).toBe(true);
+    expect(shape(vfs.calls)).not.toContain('POST /batch/delete');
+  });
+
+  it('copies left by a failed swap are kept until a new file has landed', async () => {
+    // A swap died after moving the old file aside: the path is empty and the
+    // only complete copies are the set-aside file and the finished upload.
+    const asideBody = sqliteBytes(3000, 8);
+    const seed = [
+      { path: `${STATE_PATH}${ASIDE_PATH_INFIX}k1`, body: asideBody },
+      {
+        path: `${STATE_PATH}${TEMP_PATH_INFIX}k1`,
+        body: sqliteBytes(3000, 9),
+      },
+    ];
+    const failing = fakeVfs({ seed });
+    const store = makeStore(failing.fetchImpl);
+    // A flush whose upload fails on every retry must leave both alone.
+    const alwaysFail: typeof fetch = async (input, init) => {
+      if (
+        (init?.method ?? 'GET') === 'POST' &&
+        new URL(String(input)).pathname === '/api/fs/files'
+      )
+        return Response.json({ error: 'down' }, { status: 503 });
+      return failing.fetchImpl(input, init);
+    };
+    await expect(
+      makeStore(alwaysFail).save(snapshotOfBytes(sqliteBytes(1000))),
+    ).rejects.toBeInstanceOf(VfsRequestError);
+    expect(failing.files.size).toBe(2);
+    expect(shape(failing.calls)).not.toContain('POST /batch/delete');
+
+    // The next good flush lands its file, then clears both leftovers.
+    const data = sqliteBytes(5000, 10);
+    await store.save(snapshotOfBytes(data));
+    const atPath = failing.at(STATE_PATH);
+    expect(atPath).toHaveLength(1);
+    expect(sameBytes(await gunzip(atPath[0]!.body), data)).toBe(true);
+    expect(failing.files.size).toBe(1);
   });
 
   it('recovers from "Destination occupied" by clearing the occupant and moving again', async () => {
@@ -576,6 +715,48 @@ describe('IxoVfsOwnerStore.load', () => {
     expect(sameBytes(await bytesOfStream(loaded!.stream), raw)).toBe(true);
   });
 
+  it('falls back to the newest set-aside copy when a failed swap left the path empty', async () => {
+    const older = sqliteBytes(3000, 21);
+    const newer = sqliteBytes(3000, 22);
+    const stamp = (ms: number) => ms.toString(36);
+    const vfs = fakeVfs({
+      seed: [
+        {
+          path: `${STATE_PATH}${ASIDE_PATH_INFIX}${stamp(1_700_000_000_000)}`,
+          body: older,
+        },
+        {
+          path: `${STATE_PATH}${ASIDE_PATH_INFIX}${stamp(1_800_000_000_000)}`,
+          body: newer,
+        },
+        // An unfinished swap's upload is never the owner copy.
+        {
+          path: `${STATE_PATH}${TEMP_PATH_INFIX}${stamp(1_900_000_000_000)}`,
+          body: sqliteBytes(3000, 23),
+        },
+      ],
+    });
+    const store = makeStore(vfs.fetchImpl);
+    const newerFile = Array.from(vfs.files.values()).find(
+      (f) => f.body === newer,
+    )!;
+    expect((await store.head())?.etag).toBe(newerFile.contentHash);
+    const loaded = await store.load();
+    expect(loaded?.etag).toBe(newerFile.contentHash);
+    expect(sameBytes(await bytesOfStream(loaded!.stream), newer)).toBe(true);
+    // The next flush lands its file first, then clears every leftover.
+    const data = sqliteBytes(5000, 24);
+    await store.save(snapshotOfBytes(data));
+    const atPath = vfs.at(STATE_PATH);
+    expect(atPath).toHaveLength(1);
+    expect(sameBytes(await gunzip(atPath[0]!.body), data)).toBe(true);
+    expect(vfs.files.size).toBe(1);
+    const calls = shape(vfs.calls);
+    expect(calls.lastIndexOf('POST /batch/move')).toBeLessThan(
+      calls.indexOf('POST /batch/delete'),
+    );
+  });
+
   it('returns null when the user has no state file', async () => {
     const vfs = fakeVfs();
     expect(await makeStore(vfs.fetchImpl).load()).toBeNull();
@@ -584,11 +765,15 @@ describe('IxoVfsOwnerStore.load', () => {
 });
 
 describe('IxoVfsOwnerStore.remove', () => {
-  it('deletes the state file and any temp leftovers', async () => {
+  it('deletes the state file and any temp or set-aside leftovers', async () => {
     const vfs = fakeVfs({
       seed: [
         { path: STATE_PATH, body: new Uint8Array([1]) },
         { path: `${STATE_PATH}${TEMP_PATH_INFIX}x`, body: new Uint8Array([2]) },
+        {
+          path: `${STATE_PATH}${ASIDE_PATH_INFIX}y`,
+          body: new Uint8Array([4]),
+        },
         {
           path: '/.oracles/did:ixo:other/state.db.gz',
           body: new Uint8Array([3]),

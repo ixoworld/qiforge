@@ -172,4 +172,48 @@ describe('request admission', () => {
     await registry.collectRequest(second);
     expect(hook.mock.calls).toEqual([[first], [second]]);
   });
+
+  it("ends with the turn's abort while a handler is still pending, without waiting for its time limit", async () => {
+    const abort = new AbortController();
+    const started = Date.now();
+    const pending = admitRequest(
+      [
+        makePlugin({
+          name: 'stuck',
+          getRequestAdmission: () => new Promise(() => undefined),
+        }),
+      ],
+      { ...context('alice'), signal: abort.signal },
+      { env: {}, timeoutMs: 60_000, warn: () => undefined },
+    );
+    setTimeout(() => abort.abort(new Error('user stopped')), 10);
+    await expect(pending).rejects.toThrow('user stopped');
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('refuses a handled answer with an empty text or an oversized title, and accepts the limits', async () => {
+    const answer = (text: string, title: string) =>
+      admitRequest(
+        [
+          makePlugin({
+            name: 'read',
+            getRequestAdmission: () => ({ kind: 'handled', text, title }),
+          }),
+        ],
+        context('alice'),
+        options,
+      );
+    await expect(answer('   ', 'Status')).rejects.toThrow(
+      RequestAdmissionError,
+    );
+    await expect(answer('ok', 'T'.repeat(201))).rejects.toThrow(
+      RequestAdmissionError,
+    );
+    await expect(answer('x'.repeat(100_001), 'Status')).rejects.toThrow(
+      RequestAdmissionError,
+    );
+    await expect(
+      answer('x'.repeat(100_000), 'T'.repeat(200)),
+    ).resolves.toMatchObject({ kind: 'handled' });
+  });
 });

@@ -133,6 +133,16 @@ const REJECTION_TEXT: Record<FrontendResultRejection, string> = {
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_HANDSHAKE_TIMEOUT = 4408;
 const CLOSE_PROTOCOL = 4400;
+/** RFC 6455 "message too big". */
+const CLOSE_TOO_LARGE = 1009;
+
+/** Whether a text frame is over `MAX_PAYLOAD_BYTES` in UTF-8 bytes (encoded only when its length leaves it in doubt). */
+function exceedsPayloadLimit(message: string): boolean {
+  // A UTF-16 unit is at least one UTF-8 byte and at most three.
+  if (message.length > MAX_PAYLOAD_BYTES) return true;
+  if (message.length * 3 <= MAX_PAYLOAD_BYTES) return false;
+  return new TextEncoder().encode(message).byteLength > MAX_PAYLOAD_BYTES;
+}
 
 export interface RealtimeEndpointDeps {
   /** `ctx.acceptWebSocket` / `ctx.getWebSockets` of the owning object. */
@@ -224,6 +234,9 @@ export class RealtimeEndpoint {
     ReturnType<typeof setTimeout>
   >();
 
+  /** Sockets whose CONNECT is being validated: a second CONNECT meanwhile is ignored. */
+  private readonly authenticating = new Set<WebSocket>();
+
   private readonly now: () => number;
 
   constructor(private readonly deps: RealtimeEndpointDeps) {
@@ -253,6 +266,14 @@ export class RealtimeEndpoint {
     const restored = this.hub.restore(deps.ctx.getWebSockets());
     if (restored > 0) {
       deps.logger.log(`[realtime] re-adopted ${restored} hibernated socket(s)`);
+      // A socket that had not authenticated lost its handshake timer with
+      // the old instance: it gets what is left of its window.
+      for (const { socket, attachment } of this.hub.entries())
+        if (!attachment.userDid)
+          this.armHandshakeDeadline(
+            socket,
+            attachment.openedAt + HANDSHAKE_DEADLINE_MS - this.now(),
+          );
       this.scheduleHeartbeat();
     }
   }
@@ -302,16 +323,27 @@ export class RealtimeEndpoint {
         maxPayloadBytes: MAX_PAYLOAD_BYTES,
       }),
     );
-    this.handshakeTimers.set(
-      server,
-      setTimeout(() => {
-        this.handshakeTimers.delete(server);
-        if (this.hub.get(server)?.userDid) return;
-        this.drop(server, CLOSE_HANDSHAKE_TIMEOUT, 'handshake timeout');
-      }, HANDSHAKE_DEADLINE_MS),
-    );
-    this.scheduleHeartbeat();
+    // Until CONNECT succeeds the handshake timer is the socket's only clock:
+    // no heartbeat alarm is armed for a caller who has not authenticated.
+    this.armHandshakeDeadline(server, HANDSHAKE_DEADLINE_MS);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Close the socket unless it has authenticated within `ms`. */
+  private armHandshakeDeadline(ws: WebSocket, ms: number): void {
+    const existing = this.handshakeTimers.get(ws);
+    if (existing) clearTimeout(existing);
+    this.handshakeTimers.set(
+      ws,
+      setTimeout(
+        () => {
+          this.handshakeTimers.delete(ws);
+          if (this.hub.get(ws)?.userDid) return;
+          this.drop(ws, CLOSE_HANDSHAKE_TIMEOUT, 'handshake timeout');
+        },
+        Math.max(0, ms),
+      ),
+    );
   }
 
   // ── Hibernatable WebSocket handlers ─────────────────────────────────────
@@ -324,6 +356,11 @@ export class RealtimeEndpoint {
     }
     if (typeof message !== 'string') {
       this.drop(ws, CLOSE_PROTOCOL, 'binary frames are not supported');
+      return;
+    }
+    if (exceedsPayloadLimit(message)) {
+      // The limit the OPEN handshake advertised; nothing larger is parsed.
+      this.drop(ws, CLOSE_TOO_LARGE, 'frame exceeds maxPayload');
       return;
     }
     const frame = decodeClientFrame(message);
@@ -433,6 +470,22 @@ export class RealtimeEndpoint {
       this.hub.send(ws, encodeConnectAck(meta.sid));
       return;
     }
+    // One validation per socket at a time: each one may resolve keys from
+    // Blocksync, and a client has no reason to send CONNECT twice.
+    if (this.authenticating.has(ws)) return;
+    this.authenticating.add(ws);
+    try {
+      await this.authenticateConnect(ws, meta, auth);
+    } finally {
+      this.authenticating.delete(ws);
+    }
+  }
+
+  private async authenticateConnect(
+    ws: WebSocket,
+    meta: SocketAttachment,
+    auth: unknown,
+  ): Promise<void> {
     const record = isRecord(auth) ? auth : {};
     const invocation = readString(record, 'invocation');
     const ucanDelegation = readString(record, 'ucanDelegation');
@@ -511,6 +564,8 @@ export class RealtimeEndpoint {
     this.deps.logger.log(
       `[realtime] ${outcome.auth.userDid} connected to session ${meta.sessionId} (${meta.sid})`,
     );
+    // From here the heartbeat (the object's alarm) keeps the socket honest.
+    this.scheduleHeartbeat();
   }
 
   private refuse(ws: WebSocket, message: string): void {
@@ -738,6 +793,7 @@ export class RealtimeEndpoint {
       clearTimeout(timer);
       this.handshakeTimers.delete(ws);
     }
+    this.authenticating.delete(ws);
     const attachment = this.hub.get(ws);
     this.hub.remove(ws);
     if (attachment) this.executorGone(attachment.sid);
@@ -748,7 +804,7 @@ export class RealtimeEndpoint {
     }
   }
 
-  /** Make sure an alarm is set for the next heartbeat round. */
+  /** Make sure an alarm is set for the next heartbeat round (authenticated sockets only). */
   private scheduleHeartbeat(): void {
     const at = this.nextPingAt();
     if (at !== null) this.deps.requestAlarm?.(at);

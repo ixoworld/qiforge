@@ -690,3 +690,87 @@ describe('UNAVAILABLE_DECISION_EVALUATOR', () => {
     ).rejects.toBeInstanceOf(DecisionProviderUnavailableError);
   });
 });
+
+describe('decision timeouts', () => {
+  const invalid = [0, -1, 1.5, Number.NaN, Infinity, 2 ** 31];
+  const answer = async () => ({
+    answers: { yes: { kind: 'boolean' as const, probabilityTrue: 0.8 } },
+  });
+
+  it('defineDecision refuses a timeout that is not an integer in 1..2^31-1', () => {
+    for (const timeoutMs of invalid) {
+      expect(() =>
+        defineDecision({
+          name: 'test.timeout',
+          version: '1.0.0',
+          description: 'Timeout validation.',
+          inputSchema: z.object({}),
+          timeoutMs,
+          project: () => ({
+            state: {},
+            questions: { yes: { kind: 'boolean', instructions: 'Yes?' } },
+          }),
+        }),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it('defineDecision accepts the bounds 1 and 2^31-1', () => {
+    for (const timeoutMs of [1, 2 ** 31 - 1]) {
+      const defined = defineDecision({
+        name: 'test.timeout',
+        version: '1.0.0',
+        description: 'Timeout validation.',
+        inputSchema: z.object({}),
+        timeoutMs,
+        project: () => ({
+          state: {},
+          questions: { yes: { kind: 'boolean', instructions: 'Yes?' } },
+        }),
+      });
+      expect(defined.timeoutMs).toBe(timeoutMs);
+    }
+  });
+
+  it('evaluate refuses an invalid per-call timeout without calling the adapter', async () => {
+    let calls = 0;
+    const runtime = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => {
+        calls += 1;
+        return answer();
+      }),
+    );
+
+    for (const timeoutMs of invalid) {
+      await expect(
+        runtime.evaluate(decision, { text: 'yes' }, { timeoutMs }),
+      ).rejects.toThrow(RangeError);
+    }
+    expect(calls).toBe(0);
+  });
+
+  it('evaluateByName refuses a hand-written registration with an invalid timeout', async () => {
+    const runtime = new DecisionRuntime(
+      {
+        get: () => ({
+          decision: {
+            name: 'test.handwritten',
+            version: '1.0.0',
+            description: 'A registration not built with defineDecision.',
+            timeoutMs: 0,
+            prepare: () => ({
+              state: {},
+              questions: { yes: { kind: 'boolean', instructions: 'Yes?' } },
+            }),
+          },
+        }),
+      },
+      stubAdapter(answer),
+    );
+
+    await expect(
+      runtime.evaluateByName('test.handwritten', {}),
+    ).rejects.toThrow(RangeError);
+  });
+});

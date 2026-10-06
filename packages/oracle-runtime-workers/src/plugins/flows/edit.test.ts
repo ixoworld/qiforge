@@ -394,3 +394,242 @@ describe('edit: reorder', () => {
     expect(flow.steps[0]!.inputs).toEqual({ z: 'c-value' });
   });
 });
+
+function stepBlockOrder(doc: Y.Doc): string[] {
+  return collectAllBlocks(doc.getXmlFragment('document'))
+    .map((b) => b.id)
+    .filter((id) => id.startsWith('flow_block_'))
+    .map((id) => id.slice('flow_block_'.length));
+}
+
+function orderOf(doc: Y.Doc): string[] {
+  return doc.getArray<string>('qi.flow.order').toArray();
+}
+
+describe('edit: remove_step edges and referrers', () => {
+  it('deletes the removed step’s edges (stored as Y.Maps)', () => {
+    // Both ends event-capable: the compiler requires it of a trigger target too.
+    const action = someEventCapableActionType();
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        {
+          title: 'Edges',
+          steps: [
+            { id: 'src', action },
+            {
+              id: 'dst',
+              action,
+              onEvent: { fromStep: 'src', event: 'step.completed' },
+            },
+          ],
+        },
+        { flowId: 'edges' },
+      ),
+    );
+    const edges = doc.getMap('qi.flow.edges');
+    // Only meaningful if the compiler wrote a trigger edge for the onEvent.
+    const before = [...edges.values()].filter(
+      (e) => e instanceof Y.Map && e.get('source') === 'src',
+    );
+    expect(before.length).toBeGreaterThan(0);
+
+    // `dst` references `src` through its trigger, so remove `dst` first.
+    removeStep(doc, 'r', 'dst');
+    expect(
+      [...edges.values()].filter(
+        (e) =>
+          e instanceof Y.Map &&
+          (e.get('source') === 'dst' || e.get('target') === 'dst'),
+      ),
+    ).toEqual([]);
+  });
+
+  it('blocks removal when the only reference is nested inside a map', () => {
+    const doc = threeStepDoc();
+    setStepInputs(doc, 'c', {
+      variables: { name: 'Dear {{a.output.name}}' },
+    });
+    expect(() => removeStep(doc, 'r', 'a')).toThrowError(/used by c/);
+    expect(readStep(doc, 'r', 'a')).not.toBeNull();
+  });
+
+  it('accepts a step id with regex metacharacters', () => {
+    const action = someActionType();
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        {
+          title: 'Ids',
+          steps: [
+            { id: 'a(b', action },
+            { id: 'aXb', action, inputs: { v: '{{aXb.output.z}}' } },
+          ],
+        },
+        { flowId: 'ids' },
+      ),
+    );
+    // "a.b"-style regex reading would treat other ids as matches; this must not throw.
+    expect(() => removeStep(doc, 'r', 'a(b')).not.toThrow();
+    expect(orderOf(doc)).toEqual(['aXb']);
+  });
+
+  it.each(['a', 'c'])('removes the %s (first/last) step cleanly', (id) => {
+    const doc = threeStepDoc();
+    removeStep(doc, 'r', id);
+    expect(orderOf(doc)).toEqual(['a', 'b', 'c'].filter((s) => s !== id));
+    expect(stepBlockOrder(doc)).toEqual(orderOf(doc));
+    expect(doc.getMap('runtime').has(stepIdToBlockId(id))).toBe(false);
+  });
+
+  it('removes the only step, leaving an empty flow', () => {
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        { title: 'One', steps: [{ id: 'only', action: someActionType() }] },
+        { flowId: 'one' },
+      ),
+    );
+    removeStep(doc, 'r', 'only');
+    expect(orderOf(doc)).toEqual([]);
+    expect(stepBlockOrder(doc)).toEqual([]);
+    expect(readFlowSpec(doc, 'r')).toBeNull();
+  });
+});
+
+describe('edit: reorder_step keeps the document in step with the order', () => {
+  function withLeadingParagraph(): Y.Doc {
+    const doc = threeStepDoc();
+    const group = doc.getXmlFragment('document').get(0);
+    if (!(group instanceof Y.XmlElement)) throw new Error('no block group');
+    const container = new Y.XmlElement('blockContainer');
+    container.setAttribute('id', 'intro');
+    container.insert(0, [new Y.XmlElement('paragraph')]);
+    group.insert(0, [container]);
+    return doc;
+  }
+
+  it.each([
+    ['a', 2, ['b', 'c', 'a']],
+    ['c', 0, ['c', 'a', 'b']],
+    ['b', 0, ['b', 'a', 'c']],
+    ['a', 1, ['b', 'a', 'c']],
+  ] as const)(
+    'moves %s to %i with a leading paragraph',
+    (id, toIndex, expected) => {
+      const doc = withLeadingParagraph();
+      reorderStep(doc, id, toIndex);
+      expect(orderOf(doc)).toEqual(expected);
+      expect(stepBlockOrder(doc)).toEqual(expected);
+      // The paragraph stays first.
+      expect(collectAllBlocks(doc.getXmlFragment('document'))[0]?.id).toBe(
+        'intro',
+      );
+    },
+  );
+
+  it('keeps a moved step’s props', () => {
+    const doc = threeStepDoc();
+    reorderStep(doc, 'b', 2);
+    expect(readStep(doc, 'r', 'b')?.inputs).toEqual({ y: 'b-value' });
+  });
+
+  it('is a no-op for the only step', () => {
+    const doc = hydrateFlowDoc(
+      flowSpecToBaseUcan(
+        { title: 'One', steps: [{ id: 'only', action: someActionType() }] },
+        { flowId: 'one' },
+      ),
+    );
+    reorderStep(doc, 'only', 5);
+    expect(orderOf(doc)).toEqual(['only']);
+  });
+});
+
+describe('edit: input and assignment rules', () => {
+  it('refuses literal PIN and mnemonic values at any depth', () => {
+    const doc = threeStepDoc();
+    for (const inputs of [
+      { pin: '1234' },
+      { Mnemonic: 'abandon abandon' },
+      { nested: { pin: 1234 } },
+      { list: [{ mnemonic: 'x' }] },
+    ]) {
+      expect(() => setStepInputs(doc, 'a', inputs)).toThrowError(
+        /Refusing to store a secret/,
+      );
+    }
+    expect(readStep(doc, 'r', 'a')?.inputs).toEqual({ x: 'a-value' });
+    setStepInputs(doc, 'a', { pin: '{{b.output.pin}}', mnemonic: '' });
+    expect(readStep(doc, 'r', 'a')?.inputs).toEqual({
+      pin: '{{b.output.pin}}',
+      mnemonic: '',
+    });
+  });
+
+  it('refuses inputs over the size cap', () => {
+    const doc = threeStepDoc();
+    expect(() =>
+      setStepInputs(doc, 'a', { big: 'x'.repeat(9_000) }),
+    ).toThrowError(/at most 8000 bytes/);
+  });
+
+  it('refuses an assignee that is not a DID', () => {
+    const doc = threeStepDoc();
+    expect(() => setStepAssignment(doc, 'a', 'bob')).toThrowError(/not a DID/);
+    setStepAssignment(doc, 'a', 'did:ixo:ixo1bob');
+    expect(readStep(doc, 'r', 'a')?.assignTo).toBe('did:ixo:ixo1bob');
+  });
+
+  it('refuses a condition on a step the flow does not have', () => {
+    const doc = threeStepDoc();
+    expect(() =>
+      setStepConditions(doc, 'b', [
+        {
+          source: 'runtime_output',
+          fromStep: 'ghost',
+          field: 'x',
+          is: 'isEmpty',
+        },
+      ]),
+    ).toThrowError(/No step "ghost"/);
+  });
+});
+
+describe('edit: concurrent edits to the same step', () => {
+  function sync(from: Y.Doc, to: Y.Doc): void {
+    Y.applyUpdate(to, Y.encodeStateAsUpdate(from, Y.encodeStateVector(to)));
+  }
+
+  it('merges different settings made on two replicas', () => {
+    const left = threeStepDoc();
+    const right = new Y.Doc();
+    sync(left, right);
+
+    setStepInputs(left, 'b', { y: 'from-left' });
+    setStepSchedule(right, 'b', { at: '2030-01-01' });
+    setStepAssignment(right, 'b', 'did:ixo:ixo1right');
+    sync(left, right);
+    sync(right, left);
+
+    for (const doc of [left, right]) {
+      expect(readStep(doc, 'r', 'b')).toMatchObject({
+        inputs: { y: 'from-left' },
+        due: { at: '2030-01-01' },
+        assignTo: 'did:ixo:ixo1right',
+      });
+    }
+  });
+
+  it('converges on one value when both replicas set the same setting', () => {
+    const left = threeStepDoc();
+    const right = new Y.Doc();
+    sync(left, right);
+
+    setStepInputs(left, 'b', { y: 'left' });
+    setStepInputs(right, 'b', { y: 'right' });
+    sync(left, right);
+    sync(right, left);
+
+    const l = readStep(left, 'r', 'b')?.inputs;
+    expect(readStep(right, 'r', 'b')?.inputs).toEqual(l);
+    expect(['left', 'right']).toContain(l?.y);
+  });
+});

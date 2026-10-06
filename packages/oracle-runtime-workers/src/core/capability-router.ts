@@ -12,6 +12,7 @@ import {
   type RoutableCapability,
 } from '@ixo/common/ai/decisions';
 import type { Logger } from '../plugin-api/types';
+import { unmetRequirements } from './manifest';
 import type { RegisteredManifest } from './registries';
 
 /**
@@ -43,9 +44,18 @@ export interface CapabilityRouteTurn {
   loaded: ReadonlySet<string>;
   /**
    * Plugins the user's delegation leaves with nothing to use (all of their
-   * tools admin-plane and not granted): never offered to the router.
+   * tools admin-plane and not granted): never offered to the router. A
+   * function is called only when the router actually evaluates (not when
+   * it is off, or the message is empty), so the host does not compute the
+   * set for nothing.
    */
-  hidden?: ReadonlySet<string>;
+  hidden?: ReadonlySet<string> | (() => Promise<ReadonlySet<string>>);
+  /**
+   * The user's delegation, as `ctx.ucan.hasCapability`: a plugin whose
+   * `manifest.requires` it does not grant is never offered (the gate would
+   * refuse every one of its tools). Omitted, `requires` is not checked.
+   */
+  hasCapability?: (resource: string, action: string) => boolean;
   /** The user's message text for this turn. */
   text: string;
   requestId: string;
@@ -79,12 +89,15 @@ export function capabilityRouterMode(value: unknown): CapabilityRouterMode {
  * The manifests the router may choose from: effectively on-demand plugins the
  * thread has not loaded yet. `always` plugins are already bound and `silent`
  * ones are never surfaced, so predicting them is pointless; a `hidden` one
- * (no tool the user's delegation reaches) is not even named to the router.
+ * (no tool the user's delegation reaches), or one whose `requires` the
+ * delegation (`hasCapability`) does not grant, is not even named to the
+ * router.
  */
 export function routableCandidates(
   manifests: readonly RegisteredManifest[],
   loaded: ReadonlySet<string>,
   hidden: ReadonlySet<string> = NOTHING,
+  hasCapability?: (resource: string, action: string) => boolean,
 ): RoutableCapability[] {
   return toRoutableCapabilities(
     manifests
@@ -92,7 +105,9 @@ export function routableCandidates(
         ({ pluginName, manifest }) =>
           (manifest.visibility ?? 'on-demand') === 'on-demand' &&
           !loaded.has(pluginName) &&
-          !hidden.has(pluginName),
+          !hidden.has(pluginName) &&
+          (hasCapability === undefined ||
+            unmetRequirements(manifest, hasCapability).length === 0),
       )
       .map(({ pluginName, manifest }) => ({
         name: pluginName,
@@ -170,10 +185,22 @@ export function createCapabilityRouter(
     if (turn.mode === 'off') return NOTHING;
     const text = turn.text.trim();
     if (!text) return NOTHING;
+    let hidden: ReadonlySet<string> | undefined;
+    try {
+      hidden =
+        typeof turn.hidden === 'function' ? await turn.hidden() : turn.hidden;
+    } catch (error) {
+      // Fail open like any other router failure: no preload this turn.
+      logger.warn(
+        `[capability-router] request=${turn.requestId} mode=${turn.mode} status=fallback reason=${errorName(error)} (hidden plugins unavailable)`,
+      );
+      return NOTHING;
+    }
     const capabilities = routableCandidates(
       turn.manifests,
       turn.loaded,
-      turn.hidden,
+      hidden,
+      turn.hasCapability,
     );
     if (capabilities.length === 0) return NOTHING;
 

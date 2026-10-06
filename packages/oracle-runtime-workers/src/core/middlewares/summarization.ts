@@ -1,8 +1,20 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import type { BaseMessage } from '@langchain/core/messages';
+import {
+  AIMessage,
+  HumanMessage,
+  ToolMessage,
+  type BaseMessage,
+} from '@langchain/core/messages';
 import { type AgentMiddleware, summarizationMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import type { TurnBudget } from '../turn-budget';
+import {
+  carriedCallsOfTurn,
+  isSummarizationMessage,
+  SUMMARY_PREFIX,
+  turnCarryKwargs,
+  turnStart,
+} from './turn-boundary';
 
 /**
  * IXO-flavoured prompt instructing the summarizer to preserve identifiers
@@ -49,7 +61,7 @@ Messages to summarize:
 {messages}
 </messages>`;
 
-export const SUMMARY_PREFIX = 'Here is a summary of the conversation to date:';
+export { isSummarizationMessage, SUMMARY_PREFIX };
 
 const DEFAULT_TRIGGER_MESSAGES = 20;
 const DEFAULT_TRIGGER_TOKENS = 40_000;
@@ -101,21 +113,101 @@ export function isFailedSummary(message: BaseMessage): boolean {
   return FAILED_SUMMARY.test(body);
 }
 
+interface ApproximateChars {
+  content: unknown;
+  toolCalls: unknown;
+  toolCallId: unknown;
+  chars: number;
+}
+
+const approximateChars = new WeakMap<BaseMessage, ApproximateChars>();
+
 /**
- * `true` for the condensed-history message the summarization middleware
- * writes into graph state. List endpoints use this to keep it out of the
- * user-visible transcript.
+ * The characters LangChain's `countTokensApproximately` counts for one
+ * message (its text, an AI message's tool calls as JSON, a tool message's
+ * call id), memoised per message while those values are unchanged.
  */
-export function isSummarizationMessage(message: BaseMessage): boolean {
-  if (message.additional_kwargs?.lc_source === 'summarization') return true;
+function charsOf(message: BaseMessage): number {
+  const toolCalls = AIMessage.isInstance(message)
+    ? message.tool_calls
+    : undefined;
+  const toolCallId = ToolMessage.isInstance(message)
+    ? message.tool_call_id
+    : undefined;
+  const cached = approximateChars.get(message);
+  if (
+    cached &&
+    cached.content === message.content &&
+    cached.toolCalls === toolCalls &&
+    cached.toolCallId === toolCallId
+  )
+    return cached.chars;
   const { content } = message;
-  return typeof content === 'string' && content.startsWith(SUMMARY_PREFIX);
+  let text: string;
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content))
+    text = content
+      .map((item: unknown) => {
+        if (typeof item === 'string') return item;
+        if (
+          item &&
+          typeof item === 'object' &&
+          'type' in item &&
+          item.type === 'text' &&
+          'text' in item
+        )
+          return item.text;
+        return '';
+      })
+      .join('');
+  else text = '';
+  if (Array.isArray(toolCalls) && toolCalls.length > 0)
+    text += JSON.stringify(toolCalls);
+  if (ToolMessage.isInstance(message)) text += toolCallId ?? '';
+  approximateChars.set(message, {
+    content,
+    toolCalls,
+    toolCallId,
+    chars: text.length,
+  });
+  return text.length;
+}
+
+/**
+ * LangChain's `countTokensApproximately` over messages (chars/4 of the
+ * total, rounded up) with the per-message work memoised: the summarizer
+ * counts the whole history before every model step, and again while it
+ * trims what it reads.
+ */
+export function countMessageTokensApproximately(
+  messages: readonly BaseMessage[],
+): number {
+  let chars = 0;
+  for (const message of messages) chars += charsOf(message);
+  return Math.ceil(chars / 4);
+}
+
+/** The turn-opening message of `messages`, by id and by reference. */
+function openingOf(messages: readonly BaseMessage[]): {
+  id?: string;
+  message?: BaseMessage;
+} {
+  const message = messages[turnStart(messages)];
+  return { id: message?.id, message };
 }
 
 /**
  * Wraps LangChain's built-in `summarizationMiddleware` with the IXO-specific
  * summary prompt + prefix. Pass any compatible chat model — typically the
  * cheap "routing" role.
+ *
+ * A summary that fails is not attempted again before the next turn: the
+ * history it could not condense is the same one on every later step, and
+ * each attempt would send all of it again.
+ *
+ * A summary written in the middle of a turn — the turn's opening message is
+ * among what it condenses — carries the turn's earlier tool calls
+ * (turn-boundary.ts), so the repetition guard still sees them.
  */
 export const createSummarizationMiddleware = (
   options: SummarizationMiddlewareOptions,
@@ -136,6 +228,7 @@ export const createSummarizationMiddleware = (
       { tokens: options.triggerTokens ?? DEFAULT_TRIGGER_TOKENS },
     ],
     keep: { messages: options.keepMessages ?? DEFAULT_KEEP_MESSAGES },
+    tokenCounter: countMessageTokensApproximately,
     ...(options.summaryInputTokens !== undefined
       ? { trimTokensToSummarize: options.summaryInputTokens }
       : {}),
@@ -145,10 +238,21 @@ export const createSummarizationMiddleware = (
   // The hook is either a bare handler or `{ hook, canJumpTo }`; keep the shape.
   const handler =
     typeof beforeModel === 'function' ? beforeModel : beforeModel.hook;
+  // The opening message of the turn whose summary failed.
+  let failedTurn: { id?: string; message?: BaseMessage } | undefined;
+  const sameTurn = (messages: readonly BaseMessage[]): boolean => {
+    if (!failedTurn) return false;
+    const now = openingOf(messages);
+    return (
+      (now.message !== undefined && now.message === failedTurn.message) ||
+      (now.id !== undefined && now.id === failedTurn.id)
+    );
+  };
   // A summary that failed keeps the history exactly as it was: the turn
   // runs on the full context and the next turn tries again.
   const guarded: typeof handler = async (state, runtime) => {
     options.budget?.check(runtime.signal);
+    if (sameTurn(state.messages)) return undefined;
     const update = await handler(state, runtime);
     const messages =
       update && typeof update === 'object' && 'messages' in update
@@ -158,15 +262,18 @@ export const createSummarizationMiddleware = (
       ? messages.find((m) => isBaseMessageLike(m) && isFailedSummary(m))
       : undefined;
     if (failed) {
+      failedTurn = openingOf(state.messages);
       options.logger?.warn(
-        `[summarization] summary failed; keeping the full history this turn: ${String(failed.content).slice(0, 300)}`,
+        `[summarization] summary failed; keeping the full history for the rest of this turn: ${String(failed.content).slice(0, 300)}`,
       );
       return undefined;
     }
-    if (Array.isArray(messages) && messages.length > 0)
+    if (Array.isArray(messages) && messages.length > 0) {
+      carryTurnCalls(state.messages, messages);
       options.logger?.log(
         `[summarization] condensed the history: ${state.messages.length} messages → a summary + ${messages.length - 2} kept`,
       );
+    }
     return update;
   };
   return {
@@ -177,6 +284,33 @@ export const createSummarizationMiddleware = (
         : { ...beforeModel, hook: guarded },
   };
 };
+
+/**
+ * When the summary in `update` removes the current turn's opening message,
+ * record on it the turn's tool calls it condensed (turn-boundary.ts).
+ */
+function carryTurnCalls(
+  before: readonly BaseMessage[],
+  update: readonly unknown[],
+): void {
+  const summary = update.find(
+    (m): m is BaseMessage =>
+      isBaseMessageLike(m) &&
+      HumanMessage.isInstance(m) &&
+      isSummarizationMessage(m),
+  );
+  if (!summary) return;
+  const keptIds = new Set<string>();
+  for (const m of update)
+    if (isBaseMessageLike(m) && m !== summary && typeof m.id === 'string')
+      keptIds.add(m.id);
+  const carried = carriedCallsOfTurn(before, keptIds);
+  if (carried === undefined) return;
+  summary.additional_kwargs = {
+    ...summary.additional_kwargs,
+    ...turnCarryKwargs(carried),
+  };
+}
 
 function isBaseMessageLike(value: unknown): value is BaseMessage {
   return (

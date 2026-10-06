@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { streamRun, StreamRunStartError, withRequestId } from './run-stream.js';
 import type { SSEEvent } from './sse-parser.js';
 
@@ -348,6 +348,256 @@ describe('streamRun', () => {
     });
     expect(abortedJoins).toBe(1);
     expect(aborted.ended).toBe('aborted');
+  });
+
+  it('renews the credentials once when a re-join is refused (401), then re-joins with the new ones', async () => {
+    let token = 'inv-old';
+    const seen: string[] = [];
+    let renewals = 0;
+    let starts = 0;
+    const result = await streamRun({
+      start: async () => {
+        starts += 1;
+        return response(sse([runFrame('run-1'), msg(2, 'a')]), {
+          headers: { 'x-run-id': 'run-1' },
+        });
+      },
+      join: async () => {
+        seen.push(token);
+        if (token === 'inv-old') return response('', { status: 401 });
+        return response(sse([msg(3, 'b'), done(4)]));
+      },
+      onUnauthorized: () => {
+        renewals += 1;
+        token = 'inv-new';
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(starts).toBe(1);
+    expect(renewals).toBe(1);
+    expect(seen).toEqual(['inv-old', 'inv-new']);
+    expect(result.ended).toBe('done');
+    expect(result.text).toBe('ab');
+  });
+
+  it('stops with `unauthorized` when the renewed credentials are refused too, without spinning through the re-join budget', async () => {
+    let joins = 0;
+    let renewals = 0;
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1'), msg(2, 'a')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async () => {
+        joins += 1;
+        return response('', { status: 403 });
+      },
+      onUnauthorized: () => {
+        renewals += 1;
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(renewals).toBe(1);
+    expect(joins).toBe(2);
+    expect(result.ended).toBe('unauthorized');
+    expect(result.lastId).toBe(2);
+  });
+
+  it('stops at the first refused re-join when there is no way to renew the credentials', async () => {
+    let joins = 0;
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async () => {
+        joins += 1;
+        return response('', { status: 401 });
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(joins).toBe(1);
+    expect(result.ended).toBe('unauthorized');
+  });
+
+  it('renews again for a later refusal once a renewed re-join went through', async () => {
+    let generation = 0;
+    let renewals = 0;
+    let joins = 0;
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1'), msg(2, 'a')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async () => {
+        joins += 1;
+        // Every credential generation is accepted for one re-join only.
+        if (joins === 1 || joins === 3) return response('', { status: 401 });
+        if (joins === 2) return response(sse([msg(3, 'b')])); // drops again
+        return response(sse([msg(4, 'c'), done(5)]));
+      },
+      onUnauthorized: () => {
+        renewals += 1;
+        generation += 1;
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(generation).toBe(2);
+    expect(renewals).toBe(2);
+    expect(result.ended).toBe('done');
+    expect(result.text).toBe('abc');
+  });
+
+  it('a resumed run whose first join is refused renews once, then reports `unauthorized`', async () => {
+    let joins = 0;
+    let renewals = 0;
+    const result = await streamRun({
+      start: async () => {
+        throw new Error('resume must not POST');
+      },
+      join: async () => {
+        joins += 1;
+        return response('', { status: 401 });
+      },
+      onUnauthorized: () => {
+        renewals += 1;
+      },
+      onEvent: () => undefined,
+      resume: { runId: 'run-9', after: 0 },
+    });
+    expect(joins).toBe(2);
+    expect(renewals).toBe(1);
+    expect(result.ended).toBe('unauthorized');
+  });
+
+  it("an error thrown by the caller's frame handler surfaces and is not treated as a drop", async () => {
+    let joins = 0;
+    const handled: number[] = [];
+    await expect(
+      streamRun({
+        start: async () =>
+          response(
+            sse([runFrame('run-1'), msg(2, 'a'), msg(3, 'b'), done(4)]),
+            { headers: { 'x-run-id': 'run-1' } },
+          ),
+        join: async () => {
+          joins += 1;
+          return response(sse([done(4)]));
+        },
+        onEvent: (e) => {
+          if (typeof e.id === 'number') handled.push(e.id);
+          if (e.id === 2) throw new Error('host callback failed');
+        },
+        rejoinDelayMs: () => 1,
+      }),
+    ).rejects.toThrow('host callback failed');
+    expect(joins).toBe(0);
+    expect(handled).toEqual([1, 2]);
+  });
+
+  it('a handler error on the done frame does not re-join a finished run', async () => {
+    let joins = 0;
+    await expect(
+      streamRun({
+        start: async () =>
+          response(sse([runFrame('run-1'), done(2)]), {
+            headers: { 'x-run-id': 'run-1' },
+          }),
+        join: async () => {
+          joins += 1;
+          return response(sse([done(2)]));
+        },
+        onEvent: (e) => {
+          if (e.event === 'done') throw new Error('done handler failed');
+        },
+        rejoinDelayMs: () => 1,
+      }),
+    ).rejects.toThrow('done handler failed');
+    expect(joins).toBe(0);
+  });
+
+  it('a frame re-sent on a re-join (id at or below the cursor) is not applied twice', async () => {
+    const delivered: number[] = [];
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1'), msg(2, 'Hello ')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async (_runId, after) => {
+        expect(after).toBe(2);
+        return response(sse([msg(2, 'Hello '), msg(3, 'world'), done(4)]));
+      },
+      onEvent: (e) => {
+        if (typeof e.id === 'number') delivered.push(e.id);
+      },
+      rejoinDelayMs: () => 1,
+    });
+    expect(result.text).toBe('Hello world');
+    expect(delivered).toEqual([1, 2, 3, 4]);
+  });
+
+  it('the cursor never moves back: a lower id after a re-join is skipped and the next re-join asks after the highest id', async () => {
+    const afters: number[] = [];
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1'), msg(5, 'x')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async (_runId, after) => {
+        afters.push(after);
+        if (afters.length === 1) return response(sse([msg(3, 'stale')])); // drops again
+        return response(sse([msg(6, 'y'), done(7)]));
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(afters).toEqual([5, 5]);
+    expect(result.text).toBe('xy');
+    expect(result.lastId).toBe(7);
+  });
+
+  it('frames without an id (a runtime without durable runs) are always applied', async () => {
+    const result = await streamRun({
+      start: async () =>
+        response(
+          sse([
+            { event: 'message', data: { content: 'a' } },
+            { event: 'message', data: { content: 'a' } },
+          ]),
+        ),
+      join: async () => response(''),
+      onEvent: () => undefined,
+    });
+    expect(result.text).toBe('aa');
+    expect(result.lastId).toBe(0);
+  });
+
+  it('a stream that ends in the middle of a frame re-joins after the last complete frame', async () => {
+    const afters: number[] = [];
+    // The cut frame's data is not JSON; the parser reports it and skips it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const result = await streamRun({
+      start: async () =>
+        response(
+          `${sse([runFrame('run-1'), msg(2, 'a')])}id: 3\nevent: message\ndata: {"content":"b`,
+          { headers: { 'x-run-id': 'run-1' } },
+        ),
+      join: async (_runId, after) => {
+        afters.push(after);
+        return response(sse([msg(3, 'b'), done(4)]));
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    expect(afters).toEqual([2]);
+    expect(result.text).toBe('ab');
+    expect(result.ended).toBe('done');
   });
 
   it('throws a typed error when the turn request itself fails', async () => {

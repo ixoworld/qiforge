@@ -4,6 +4,7 @@ import { MigratingOwnerStore } from './migrating-store';
 import {
   assertSqliteStream,
   bytesOfStream,
+  NotSqliteFileError,
   snapshotOfBytes,
   streamOfBytes,
   type OwnerStore,
@@ -332,9 +333,22 @@ describe('MigratingOwnerStore', () => {
     expect(await noLegacy.loadLegacy()).toBeNull();
   });
 
-  it('loadLegacy() treats a legacy failure as "no copy"', async () => {
+  it('loadLegacy() reports a failed legacy read as unknown, never as "no copy"', async () => {
     const legacy = memStore('matrix');
     vi.spyOn(legacy.store, 'load').mockRejectedValue(new Error('room gone'));
+    const store = new MigratingOwnerStore({
+      primary: memStore('vfs').store,
+      legacy: legacy.store,
+      log: noopLog,
+    });
+    await expect(store.loadLegacy()).rejects.toThrow('room gone');
+  });
+
+  it('loadLegacy() treats a legacy copy proven unusable as "no copy"', async () => {
+    const legacy = memStore('matrix');
+    vi.spyOn(legacy.store, 'load').mockRejectedValue(
+      new NotSqliteFileError('legacy copy', 100),
+    );
     const store = new MigratingOwnerStore({
       primary: memStore('vfs').store,
       legacy: legacy.store,

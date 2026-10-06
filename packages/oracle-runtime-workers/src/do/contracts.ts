@@ -742,9 +742,12 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   /**
    * Drop the working copy (pages + caches) so the next access re-imports from
    * the owner store. Simulates eviction/loss of the DO cache in tests and is
-   * the "user deleted their file upstream" path.
+   * the "user deleted their file upstream" path. `userDid` is the caller the
+   * shell authenticated, so an object that never booted boots for it.
    */
-  resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }>;
+  resetWorkingCopy(
+    identity?: TurnIdentity,
+  ): Promise<{ reloadedFromOwnerStore: boolean }>;
   /** Run one R2 page-tier eviction pass now (debug routes; `force` ignores recency). */
   tierFlush(opts?: {
     force?: boolean;
@@ -806,6 +809,16 @@ export interface CreateRoomOptions {
 }
 
 /**
+ * Deadline for one gateway media download, from opening it to the last byte
+ * (the gateway's default applies when omitted). Only the timeout crosses the
+ * RPC: an `AbortSignal` cannot, so the caller stops a transfer early by
+ * cancelling the returned stream.
+ */
+export interface MediaDownloadDeadline {
+  timeoutMs?: number;
+}
+
+/**
  * RPC surface of `MatrixGatewayDO`. User objects call it for anything that
  * needs the bot identity (sending, media, room lookups); the shell calls
  * `ensureStarted()` on boot/health so the sync loop is running. The
@@ -823,9 +836,13 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   downloadEventMediaStream(
     roomId: string,
     eventId: string,
+    opts?: MediaDownloadDeadline,
   ): Promise<MediaStream | null>;
   /** Authenticated media download of an `mxc://` URI, as a stream. */
-  downloadMxcMediaStream(mxc: string): Promise<ReadableStream<Uint8Array>>;
+  downloadMxcMediaStream(
+    mxc: string,
+    opts?: MediaDownloadDeadline,
+  ): Promise<ReadableStream<Uint8Array>>;
   /** Forcibly reset the gateway object like a platform host drain (debug routes only). The call itself rejects. */
   debugAbortObject(): Promise<void>;
   /** Stop the bot (operator/debug; `ensureStarted`/cron brings it back). */

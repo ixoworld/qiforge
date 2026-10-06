@@ -168,18 +168,19 @@ describe('uncertainResultReason', () => {
         ),
       ),
     ).toBe('fetch failed');
-    // The editor's unconfirmed save.
+    // The editor's undelivered write: a send that failed with a server
+    // error may still have landed.
     expect(
       uncertainResultReason(
         result(
           JSON.stringify({
             ok: false,
-            code: 'flush_timeout',
-            message: 'The edit could not be confirmed as saved.',
+            code: 'write_not_saved',
+            message: 'The edit was NOT saved.',
           }),
         ),
       ),
-    ).toBe('flush_timeout');
+    ).toBe('write_not_saved');
     expect(
       uncertainResultReason(
         result(JSON.stringify({ successful: false, error: 'Bad Gateway' })),
