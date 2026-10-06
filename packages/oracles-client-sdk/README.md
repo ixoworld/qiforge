@@ -10,6 +10,7 @@
 - **Real-time Streaming** - AI responses with optimized streaming
 - **Chat Management** - Complete session and message management
 - **Custom UI Components** - Extensible component system for rich interactions
+- **AG-UI Actions & Browser Tools** - Actions and tools the oracle runs in the user's browser, scoped to one session and socket
 - **Voice & Video Calls** - Encrypted live agent calls
 - **Memory Engine** - Optional persistent context across sessions
 - **Payment Integration** - Built-in oracle payment handling
@@ -41,12 +42,16 @@ function App() {
       initialWallet={{
         address: 'ixo1...',
         did: 'did:ixo:entity:...',
-        matrix: { accessToken: 'syt_...' },
+        matrix: { accessToken: 'syt_...', homeServer: 'https://...' },
       }}
       transactSignX={async (messages, memo) => {
         // Handle blockchain transactions
         return undefined;
       }}
+      // The user's UCAN delegation to the oracle, and an invocation proved
+      // by it: { serialized, expiresAt }
+      createDelegation={(oracleDid) => myWallet.delegateTo(oracleDid)}
+      createInvocation={(oracleDid) => myWallet.invoke(oracleDid)}
     >
       <ChatInterface />
     </OraclesProvider>
@@ -102,6 +107,8 @@ function ChatInterface() {
   );
 }
 ```
+
+`myWallet` stands for the host app's own UCAN signing. `createInvocation` is optional in the type, but the Workers runtime (`@ixo/oracle-runtime-workers`) authenticates a request only by its invocation (`Authorization: Bearer <invocation>`); a request carrying only the delegation gets 401 unless the oracle sets `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`. The delegation must have an expiry.
 
 ## 📚 Documentation
 
@@ -181,7 +188,28 @@ submission is still being delivered), `FEEDBACK_RATE_LIMITED` (429) and
 `submissionId`. `submittingFeedbackMessageId` and
 `messageFeedbackError` track the request; the message list is never changed
 or refetched. Against older runtimes the flag is false and the call throws
-before sending anything.
+before sending anything. The `RequestError` class itself is not exported;
+read `code` and `retryable` from the thrown error.
+
+### AG-UI actions and browser tools
+
+`useAgAction({ name, description, parameters, handler, render?, exposeToAgent? })`
+registers an action the oracle can call in the user's browser. Actions are
+sent with each turn as `agActions`, so the model can call them. With
+`exposeToAgent: false` the action is registered and answered over the socket
+but not sent with the turn: the model never sees it, and the oracle reaches it
+only from one of its own tools (the Portal wallet-signing action of
+`@ixo/ixo-transaction/react` works this way). `useOraclesContext()` exposes
+`agActions` (the ones offered to the agent) and `registeredAgActions` (every
+registered action).
+
+Socket calls are scoped to one session and one connection: a
+`browser_tool_call` or `action_call` runs only when it names the hook's
+current session on the current connection, an `action_call` only while its
+status is `isRunning`, and browser tools registered after the socket
+connected are honoured. This matches version 2 of the runtime's
+[frontend bridge](../oracle-runtime-workers/docs/frontend-bridge.md), where a
+call that gets no answer resolves as an unknown outcome instead of a failure.
 
 ### Real-time Streaming
 
@@ -205,15 +233,20 @@ import { useLiveAgent } from '@ixo/oracles-client-sdk/live-agent';
 
 ### Hooks
 
-- `useChat` - Real-time chat with streaming
+- `useChat` - Real-time chat with streaming, history paging, anonymous feedback
 - `useOracleSessions` - Session management
+- `useAgAction` - Register an AG-UI action (`exposeToAgent` hides it from the model)
+- `useModels` - The oracle's model catalog (for a model picker)
+- `useOraclesConfig` - The oracle's entity document and authz config, read from the chain
 - `useContractOracle` - Payment and authorization
 - `useMemoryEngine` - Matrix room management and memory engine setup
+- `useGetOpenIdToken` / `getOpenIdToken` - Matrix OpenID token
 - `useLiveAgent` - Voice/video calls (separate bundle)
 
 ### Components
 
 - `OraclesProvider` - Required context provider
+- `useOraclesContext` - The provider's context (wallet, `authedRequest`, `agActions`, `registeredAgActions`)
 - `renderMessageContent` - Message renderer utility
 
 ### Types

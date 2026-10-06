@@ -268,3 +268,18 @@ the first rule.
   in it yet.
 - The plugin cannot tell whether a timed-out request was signed later; the
   user has to check (it has no chain-read tool).
+
+## Tests
+
+- `pnpm --filter @ixo/ixo-transaction test` — the runtime-neutral package
+  (`packages/ixo-transaction/tests/`): the catalog against the SDK version
+  the lockfile resolves and its codec, intent routing, the proto-JSON
+  conversion, the Portal `sign_transaction` handler, validation and the
+  per-network chain ids, and a scan proving the package imports nothing
+  but `zod` outside `./react` (no signing capability on the oracle side).
+- `pnpm test` (workerd) — `src/plugins/ixo-transaction/*.test.ts`; what they
+  cover is listed in [testing](testing.md#unit-tests-seconds).
+- The devnet feature matrix — the step
+  `realtime: sign_ixo_transaction sends sign_transaction to the browser wallet and the signed hash returns`
+  answers the request with a recording wallet over the real socket
+  ([testing](testing.md#the-devnet-feature-matrix-minutes-deployed-worker)).

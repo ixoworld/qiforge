@@ -1030,7 +1030,8 @@ export interface UserPreferencesSurface {
 /**
  * Bounds applied by a write to {@link UserKvSurface}. Both are optional; an
  * entry written without `idleTtlMs` never expires, and a write without
- * `maxEntries` evicts nothing.
+ * `maxEntries` evicts nothing. They come on top of the store's hard caps
+ * (see {@link UserKvSurface}), which no option lifts.
  */
 export interface UserKvWriteOptions {
   /**
@@ -1040,7 +1041,9 @@ export interface UserKvWriteOptions {
   idleTtlMs?: number;
   /**
    * After the write, drop the namespace's expired entries, then the least
-   * recently used ones until at most this many remain.
+   * recently used ones until at most this many remain. At most
+   * `USER_KV_MAX_ENTRIES_PER_NAMESPACE` (10,000); a larger value is rejected
+   * with a `RangeError`, not clamped.
    */
   maxEntries?: number;
 }
@@ -1056,11 +1059,30 @@ export interface UserKvWriteOptions {
  * caller never shares an object with the store. Reads and writes mark an
  * entry most recently used and slide its idle deadline (LRU + idle TTL, the
  * semantics of an in-memory bounded map, but durable).
+ *
+ * The rows share the user's file with their checkpoints, sessions and
+ * transcript, so the store enforces hard caps no plugin can opt out of:
+ *
+ * - one value: `USER_KV_MAX_VALUE_BYTES` (256 KiB) of UTF-8 JSON;
+ * - one namespace: `USER_KV_MAX_ENTRIES_PER_NAMESPACE` (10,000) entries;
+ * - all namespaces together: `USER_KV_MAX_TOTAL_ENTRIES` (50,000) entries
+ *   and `USER_KV_MAX_TOTAL_BYTES` (32 MiB), counting the UTF-8 bytes of
+ *   namespace, key and value JSON of every row.
+ *
+ * A `set` / `update` that would break one rejects with `UserKvLimitError`
+ * (`limit`, `max`, `actual`, `namespace`): nothing is written and nothing
+ * is evicted to make room — the previous value, if any, stays. Expired
+ * entries of every namespace are swept before a write is refused, and
+ * replacing an entry counts only the difference in size. Keep plugin state
+ * bounded with `idleTtlMs` / `maxEntries` rather than relying on the caps.
  */
 export interface UserKvSurface {
   /** The stored value, or `undefined` when absent or expired. */
   get(namespace: string, key: string): Promise<unknown>;
-  /** Store a JSON-serialisable value. */
+  /**
+   * Store a JSON-serialisable value. Rejects with `UserKvLimitError` when
+   * the write would break a hard cap.
+   */
   set(
     namespace: string,
     key: string,
@@ -1072,7 +1094,9 @@ export interface UserKvSurface {
    * when absent or expired) and returns the new one; returning `undefined`
    * deletes the entry. No other write to the store interleaves. `fn` must be
    * synchronous and free of side effects — the host may run it again when a
-   * storage read has to be retried. Resolves with the value written.
+   * storage read has to be retried. Resolves with the value written; rejects
+   * with `UserKvLimitError` (the entry left as it was) when the new value
+   * would break a hard cap. Deleting is never refused.
    */
   update(
     namespace: string,

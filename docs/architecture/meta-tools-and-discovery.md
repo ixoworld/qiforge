@@ -132,6 +132,12 @@ resource = ixo:qiforge:admin-tool:<tool-name>
 action   = invoke
 ```
 
+That is the Node runtime's capability. The Workers runtime uses
+`admin-tool/invoke` on `ixo:qiforge:admin-tool/<pluginName>/<toolName>`, where
+a grant on a parent resource covers the tools under it
+(`packages/oracle-runtime-workers/src/plugin-api/tool-plane.ts`; see the Workers
+[architecture](../../packages/oracle-runtime-workers/docs/architecture.md)).
+
 The runtime projects this authorization into the agent surface before the model
 sees it. `list_capabilities` suppresses a known capability when all of its
 tools are inaccessible; `load_capability` omits inaccessible admin tool

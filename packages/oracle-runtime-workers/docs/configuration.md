@@ -39,6 +39,11 @@ Both scripts need:
   when the oracle uses [Decisions](#decisions) with
   `DECISION_PROVIDER=cloudflare-jev`: the binding authenticates implicitly, so
   no Cloudflare account credentials are needed. Leave it off otherwise.
+- The other optional bindings are described with their feature below: the
+  R2 buckets `TIER_BUCKET` ([storage](#storage)) and `ARTIFACT_BUCKET`
+  ([chat delivery](#chat-delivery-and-artefacts)), the `FEEDBACK_RATE_LIMIT`
+  rate limiter ([feedback](#anonymous-response-feedback)) and the `AUTH_HUB`
+  service binding ([channels](#channels-ingress)).
 
 ### Two scripts and migrations
 
@@ -97,6 +102,18 @@ Verify after `pnpm install`: the bundle from
 `lib0`, `y-protocols` and `@ixo/matrix-crdt` already resolve to single
 copies.
 
+LangSmith before 0.6.0 can trust public prompt pulls implicitly
+(CVE-2026-45134). The runtime and `@ixo/common` depend on `langsmith`
+`^0.6.0`, and this repo also forces every other path (LangChain's own
+dependency on it) onto the patched line with a second override. pnpm does
+not inherit it either, so an app that wants the same guarantee for its
+transitive copies carries it too, and checks with `pnpm why langsmith`:
+
+```yaml
+overrides:
+  'langsmith@<0.6.0': '^0.6.0'
+```
+
 ## Environment
 
 Non-secret values go in `vars`; secrets through `wrangler secret put` (or
@@ -114,16 +131,17 @@ are described in [ixo-transaction](ixo-transaction.md#configuration).
 
 ### Identity and auth
 
-| Variable                          | Required | Meaning                                                                                                                                                                                                                                                |
-| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ORACLE_NAME`                     | yes      | Display name (device names, replies).                                                                                                                                                                                                                  |
-| `ORACLE_DID`                      | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                             |
-| `ORACLE_ENTITY_DID`               | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                                                    |
-| `NETWORK`                         | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                      |
-| `BLOCKSYNC_GRAPHQL_URL`           | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                  |
-| `UCAN_AUTH_MAX_TTL_SECONDS`       | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
-| `UCAN_ALLOW_BARE_DELEGATION_AUTH` | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
-| `ORACLE_SIGNING_MNEMONIC`         | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
+| Variable                              | Required | Meaning                                                                                                                                                                                                                                                |
+| ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ORACLE_NAME`                         | yes      | Display name (device names, replies).                                                                                                                                                                                                                  |
+| `ORACLE_DID`                          | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                             |
+| `ORACLE_ENTITY_DID`                   | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                                                    |
+| `NETWORK`                             | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                      |
+| `BLOCKSYNC_GRAPHQL_URL`               | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                  |
+| `UCAN_AUTH_MAX_TTL_SECONDS`           | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
+| `UCAN_ALLOW_BARE_DELEGATION_AUTH`     | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
+| `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` | no       | Minimum time between two `delegation_required` prompts a Matrix turn posts for one user without a usable delegation (default 21600 = 6 h; anything not a positive number keeps the default). See [operations](operations.md#best-effort-room-posts).   |
+| `ORACLE_SIGNING_MNEMONIC`             | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
 
 ### Matrix
 
@@ -167,6 +185,26 @@ are described in [ixo-transaction](ixo-transaction.md#configuration).
 | `TIER_HOT_BUDGET_BYTES`    | no       | Soft target for hot bytes per user object (default `16m`, 1 MiB–1 GiB); logged when a pass cannot get under it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `TIER_EVICT_AFTER_PERIODS` | no       | Periods a chunk must go untouched before eviction (default 2).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `TIER_PERIOD_MS`           | no       | Length of one access-tracking period (default one day; ≥ 1000). Tests shorten it; production keeps the day.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### Channels ingress
+
+`POST /channels/turn` lets IXO Channels (WhatsApp now) submit a turn to the
+user's Companion; the authorization model, retries and replies are in
+[channels](channels.md). Set these on the script that serves HTTP (the
+oracle script in a gateway split).
+
+| Binding or variable            | Required         | Meaning                                                                                                                                                                                               |
+| ------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHANNEL_SERVICE_DID`          | to enable        | The one channel service DID allowed to invoke this deployment. Unset = the route answers `503 Channels are not configured`.                                                                           |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                      |
+| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set. |
+| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                  |
+
+Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
+validation is "not configured": a new channel turn gets `503` and nothing is
+recorded, and an admitted run waits on the recovery backoff
+([channels](channels.md#authorization)). Channel turns count against
+`RATE_LIMIT` under the user's DID, like an authenticated request.
 
 ### Chat delivery and artefacts
 
@@ -286,6 +324,30 @@ example) per address; declare the dedicated binding to get the Node runtime's
 | `TOPIC_DELIVERABLES_ENABLED` | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on. |
 | `LOG_LEVEL`                  | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                 |
 | `CORS_ORIGIN`                | Default `*`.                                                                                                                                                                                                                                                   |
+
+## `createOracleWorker` options
+
+What an oracle sets in code rather than in the environment
+(`CreateOracleWorkerOptions`, `src/index.ts`). The result is
+`{ fetch, scheduled, UserOracleDO, MatrixGatewayDO, core }`: the Worker
+exports `fetch` and `scheduled` as its default export and the two classes by
+name.
+
+| Option                                        | Meaning                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`                                      | Required `OracleConfig`: `name`, optional `org`, `description`, `prompt` (opening, communication style, capabilities) and `delivery` ([chat delivery](chat-delivery.md#delivery-profiles)). The entity DID comes from `ORACLE_ENTITY_DID`, never from here.                                               |
+| `plugins`                                     | Every plugin the oracle may load, e.g. `[...BUNDLED_WORKERS_PLUGINS, new IxoTransactionPlugin()]`. Each passes `features` and its own `autoDetect`.                                                                                                                                                       |
+| `features`                                    | Per-plugin toggle by name. `false` leaves the plugin out; `true` requires it, so a failing `autoDetect` fails the boot (`boot.plugin.env_missing`); `'auto'` or no entry loads it when its `autoDetect` passes (or it has none). A loaded plugin whose `configSchema` rejects the env fails the boot too. |
+| `manifestOverrides`                           | Shallow-merged over a loaded plugin's manifest at boot (e.g. `{ portal: { visibility: 'always' } }`); unknown names are logged and ignored; the merged manifest is validated.                                                                                                                             |
+| `decisionAdapter`                             | One host Decision adapter, registered as provider `host`; wins over `DECISION_PROVIDER`; cannot be combined with `decisionProviders` ([Decisions](#decisions)).                                                                                                                                           |
+| `decisionProviders`, `decisionProviderPolicy` | Further host Decision providers beside the env-selected one, and the default plus exact per-Decision routes over them ([Decisions](#decisions)).                                                                                                                                                          |
+| `routes`, `authExcludedRoutes`                | Extra host routes on the shell (after the plugins' `getRoutes`), and host routes exempt from UCAN auth.                                                                                                                                                                                                   |
+| `listModels`                                  | Replaces the `GET /models` listing (default: the curated catalog with live OpenRouter prices).                                                                                                                                                                                                            |
+| `hooks`                                       | Per-turn build hooks: `getRoomTitle(roomId, ambient)` for the page-context middleware and `safetyModel(ambient)` for the safety-guardrail middleware (Node's `createOracleApp({ hooks })` pair).                                                                                                          |
+
+The `scheduled` handler is the cron entry point: it keeps the gateway's sync
+loop alive and, where `ARTIFACT_BUCKET` is bound, runs the
+[artefact sweep](operations.md#artefact-sweep).
 
 ## First-time setup of an oracle
 
@@ -410,6 +472,8 @@ plugin `getRequestAdmission` handler, the inference-free step that may answer
 a turn before the agent is built. A handler that has not answered by then is
 treated as `pass` (logged as a warning) and the turn continues with the next
 handler or the agent. See
+[architecture](architecture.md#useroracledo--one-per-user-did) and, for the
+plugin-author contract,
 [request admission](../../../docs/architecture/request-admission.md).
 
 Tool calls are scheduled per user object: writes one at a time across every

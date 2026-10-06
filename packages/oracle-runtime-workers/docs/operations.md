@@ -8,21 +8,25 @@ the runbook for the failures we have seen.
 
 Public (UCAN-authenticated unless noted):
 
-| Route                                                                           | Purpose                                                                                                           |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `GET /health`, `GET /`                                                          | Liveness (no auth). `/health` also advertises `frontendTools`, the [frontend bridge](frontend-bridge.md) version. |
-| `GET /health/matrix`                                                            | 200 when the gateway is running, 503 otherwise; body = `/matrix/status`.                                          |
-| `GET /matrix/status`, `POST /matrix/start`                                      | Gateway status; start the sync loop (idempotent).                                                                 |
-| `GET /models`                                                                   | Priced platform models.                                                                                           |
-| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                                                         |
-| `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                                                            |
-| `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                                                             |
-| `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                                                                  |
-| `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                                                               |
-| `GET /user-preferences`                                                         | The user's stored preferences.                                                                                    |
-| `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.                                                     |
-| `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.                                                       |
-| `POST /messages/:sessionId/:messageId/feedback`                                 | Anonymous feedback on one completed Agent reply (when configured).                                                |
+| Route                                                                           | Purpose                                                                                                                             |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`, `GET /`                                                          | Liveness (no auth). `/health` also advertises `frontendTools`, the [frontend bridge](frontend-bridge.md) version.                   |
+| `GET /health/matrix`                                                            | 200 when the gateway is running, 503 otherwise; body = `/matrix/status`.                                                            |
+| `GET /matrix/status`, `POST /matrix/start`                                      | Gateway status; start the sync loop (idempotent).                                                                                   |
+| `GET /models`                                                                   | Priced platform models.                                                                                                             |
+| `POST/GET /sessions`, `DELETE /sessions/:id`                                    | Sessions.                                                                                                                           |
+| `POST /messages/:id` (SSE or JSON), `GET /messages/:id`, `POST /messages/abort` | Turns and transcripts.                                                                                                              |
+| `GET /sessions/:id/messages`                                                    | One turn-aligned page of a transcript ([paging](#transcript-paging)).                                                               |
+| `GET /sessions/:id/run`, `GET /runs/:runId?after=<seq>`                         | Whether a session has an active run; re-join a run's frames after a cursor ([durable runs](#turns-durable-runs)).                   |
+| `POST /channels/turn`                                                           | IXO Channels ingress, under its own channel UCAN policy, not the user auth ([channels](channels.md)).                               |
+| `PUT/GET /topic-deliverables/:operationId`, `POST …/:operationId/cancel`        | Owner-only Topic deliverables (`TOPIC_DELIVERABLES_ENABLED=true`, else 404; [architecture](architecture.md#topic-deliverable-api)). |
+| `POST/GET/DELETE /delegation`                                                   | The user's deposited UCAN delegation.                                                                                               |
+| `GET /socket.io/*`                                                              | The realtime channel (websocket transport only).                                                                                    |
+| `/byo-llm/*`                                                                    | Bring-your-own-credential lane (`BYO_LLM_ENABLED`).                                                                                 |
+| `GET /user-preferences`                                                         | The user's stored preferences.                                                                                                      |
+| `GET /a/:id`, `GET /a/:id/data`                                                 | Artefact links (no auth): the viewer page and the ciphertext.                                                                       |
+| `GET /artifacts/:id`, `DELETE /artifacts/:id`                                   | The caller's artefact: its canonical copy; revoke its link.                                                                         |
+| `POST /messages/:sessionId/:messageId/feedback`                                 | Anonymous feedback on one completed Agent reply (when configured).                                                                  |
 
 Operator routes, enabled by `ORACLE_DEBUG_ROUTES=true` and authenticated as
 the calling user:
@@ -33,6 +37,8 @@ the calling user:
 | `POST /debug/storage/tier-flush`                                               | Run one R2 page-tier eviction pass now; body `{ "force": true }` evicts every clean chunk regardless of recency, `{ "maxSegments": n }` caps the pass.              |
 | `GET /debug/sessions/:id`                                                      | Raw session row (`lastProcessedCount` included) plus `threadMessages` / `summaryMessages` / `toolMessages` — whether the thread's agent context was condensed.      |
 | `GET /debug/tasks`                                                             | The caller's task records, the open (unfinished) runs and the object's current alarm.                                                                               |
+| `GET /debug/runs`                                                              | Recent durable runs with their tool marks, segment counts, attempts and live state ([durable runs](#turns-durable-runs)).                                           |
+| `GET /debug/context?model=<id>&session=<id>`                                   | The context-window resolution and derived thresholds for a model; with `session`, that session's context counters ([context budgets](#turns-context-budgets)).      |
 | `GET /debug/realtime`                                                          | Sockets, heartbeat deadline, pending browser calls, live timers with creation stacks.                                                                               |
 | `GET /debug/delegation`, `GET /debug/memory-schema`                            | What header-less turns mint from; the memory engine's tool schema as delivered.                                                                                     |
 | `POST /debug/matrix/restart`, `POST /debug/matrix/stop`                        | Gateway stop / restart.                                                                                                                                             |
@@ -280,6 +286,21 @@ S s`, `resuming`, and the terminal `finished|aborted|interrupted|failed`.
   other and its result delivered once by the scheduler
   (`completeRecoveredRun`); it is closed as interrupted only after the
   recovery cap.
+- **Request admission.** Before the agent is built, a fresh run records
+  the disposition `admitting` in its stored request and offers the turn to
+  the plugins' admission handlers
+  ([architecture](architecture.md#useroracledo--one-per-user-did)); the
+  answer is stored as `direct-read` (text, title, message id) or `agent`.
+  A reset during admission recovers as a fresh attempt with the turn's
+  input; a recorded direct read is replayed, not asked again. A handler
+  that throws or answers invalidly ends the run `failed`: an `error` frame
+  with `kind: 'request_admission'`, `source: 'platform'`,
+  `retryable: true` and a generic message, then `done` with
+  `failed: true`; the user's message is not written to the transcript. The
+  log line is `[user-do] turn <requestId>: admission failed: <message>`
+  (`direct read failed` when a stored direct read could not be delivered);
+  a handler over `REQUEST_ADMISSION_TIMEOUT_MS` logs
+  `[user-do] request admission by <plugin> timed out after N ms; continuing as pass`.
 - **Ordering.** A message sent with `multitask: 'enqueue'` waits behind
   the session's running turn _and_ behind one that is waiting for its
   recovery attempt; the session's turns never interleave.
