@@ -36,10 +36,12 @@ pnpm --filter @ixo/ucan --filter "@ixo/common..." --filter "@ixo/ixo-transaction
 pnpm --filter @ixo/oracle-runtime-workers typecheck
 pnpm --filter @ixo/oracle-runtime-workers test:core        # plain-Node suites (vitest.core.config.ts)
 pnpm --filter @ixo/oracle-runtime-workers test             # inside workerd (@cloudflare/vitest-pool-workers)
-pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts
-
-# Shared packages (plain vitest)
+pnpm --filter @ixo/ucan test
 pnpm --filter @ixo/common test
+pnpm --filter @ixo/oracles-client-sdk typecheck
+pnpm --filter @ixo/oracles-client-sdk test
+
+# Shared packages (plain vitest, not in the CI job)
 pnpm --filter @ixo/ixo-transaction test
 
 # From apps/qiforge-workers-example — against the local ixo testing harness
