@@ -54,6 +54,9 @@ export interface VfsFileStat {
   name: string;
   mimeType: string;
   size: number;
+  contentHash?: string;
+  cid?: string;
+  version?: number;
   /** Anyone-can-download link, present only when the file is public. */
   publicUrl?: string;
 }
@@ -177,6 +180,9 @@ function parseFile(v: unknown, fallbackPath?: string): VfsFileStat | null {
     mimeType: str(v.mimeType) ?? '',
     size: num(v.size) ?? 0,
     publicUrl: str(v.publicUrl),
+    contentHash: str(v.contentHash),
+    cid: str(v.cid),
+    version: num(v.version),
   };
 }
 
@@ -316,6 +322,22 @@ export class VfsClient {
     });
   }
 
+  /** Content-addressed workspace recovery uses a short paginated prefix, avoiding the D1 LIKE byte limit. */
+  async statWorkspacePath(path: string): Promise<VfsFileStat | null> {
+    if (!path.startsWith('/.workspaces/'))
+      throw new Error('Expected a workspace path');
+    for (let pageNo = 0; pageNo < GLOB_MAX_PAGES; pageNo += 1) {
+      const body = await this.get(
+        'fs/list',
+        `/files?path=${enc('/.workspaces')}&limit=${GLOB_MAX_PAGE}&offset=${pageNo * GLOB_MAX_PAGE}`,
+        readJson,
+      );
+      const found = this.exactMatch(path, body);
+      if (found || arrayAt(body, 'files').length < GLOB_MAX_PAGE) return found;
+    }
+    throw new Error('Workspace recovery listing exceeded its scan limit');
+  }
+
   /** The `/glob` entry whose path is exactly `path`; refuses two of them. */
   private exactMatch(path: string, body: unknown): VfsFileStat | null {
     const exact = arrayAt(body, 'files')
@@ -415,6 +437,31 @@ export class VfsClient {
           res.headers.get('content-type')?.split(';')[0]?.trim() ||
           'application/octet-stream';
         return { bytes, mimeType, size: bytes.byteLength };
+      },
+      {},
+    );
+  }
+
+  /** Immutable retained version, read under the caller's current VFS authority. */
+  async versionContentBytes(
+    id: string,
+    version: number,
+    maxBytes: number,
+  ): Promise<VfsContentBytes> {
+    if (!Number.isInteger(version) || version < 1)
+      throw new Error('Invalid VFS version');
+    return this.get(
+      'fs/read',
+      `/files/${enc(id)}/versions/${version}/content`,
+      async (response) => {
+        const bytes = await readBodyCapped(response, maxBytes);
+        return {
+          bytes,
+          size: bytes.byteLength,
+          mimeType:
+            response.headers.get('content-type')?.split(';')[0]?.trim() ||
+            'application/octet-stream',
+        };
       },
       {},
     );

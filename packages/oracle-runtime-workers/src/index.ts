@@ -42,6 +42,7 @@ import { LinearFeedbackSink } from './feedback/linear-sink';
 
 export * from './plugin-api';
 export * from './plugins';
+export * from './work';
 export * from './do/contracts';
 export type { OwnerStore } from './owner-store/types';
 export { MigratingOwnerStore } from './owner-store/migrating-store';

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SkillManifestSchema, type SkillManifest } from '@ixo/common/work';
 import { tool } from '../../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types';
 import { UcanMintUnavailableError } from '../../../plugin-api/ucan-errors';
@@ -270,6 +271,41 @@ export interface SkillsToolsOptions {
   network: string;
   /** Mints the optional `ixo:skills` UCAN per call. */
   ucanBuilder: SkillsUcanBuilder;
+}
+
+export async function loadRegistrySkillManifest(
+  ctx: RuntimeContext,
+  options: SkillsToolsOptions,
+  cid: string,
+): Promise<{ manifest: SkillManifest; cid: string; path: string }> {
+  const skillsUcan = await options.ucanBuilder(options.baseUrl, ctx);
+  if (!skillsUcan)
+    throw new Error('Authenticated skills registry access is required');
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const page = await fetchRegistryCapsules(
+      {
+        baseUrl: options.baseUrl,
+        network: options.network,
+        skillsUcan,
+        signal: ctx.abortSignal,
+      },
+      100,
+      offset,
+    );
+    const capsule = page.capsules.find((item) => item.cid === cid);
+    if (capsule) {
+      const skill = normalizeRegistryCapsule(capsule);
+      const sidecar = capsule.metadata?.qiforgeManifest;
+      const manifest = sidecar
+        ? SkillManifestSchema.parse(JSON.parse(sidecar))
+        : undefined;
+      if (!manifest || manifest.skillId !== cid)
+        throw new Error('Pinned skill has no matching operational manifest');
+      return { manifest, cid, path: skill.path };
+    }
+    if (!page.pagination.hasMore) break;
+  }
+  throw new Error('Pinned skill is absent from the authenticated registry');
 }
 
 /**

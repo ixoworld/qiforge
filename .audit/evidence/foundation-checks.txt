@@ -1,0 +1,88 @@
+Foundation checks captured at 2026-10-06T17:20:28.985821+00:00
+These local test results do not establish live external-service acceptance.
+Workers source: 1848615265f6cf736e4b8c80aff3906346d7a573
+Portal source: b426d02810a50cbef677ff622218d51dd2303df4
+
+Workers plugin regression
+Original log: /private/tmp/qiforge-shared-repair-core.log
+SHA-256: 3a8402a9688485a2286f40f6afc02ce2accc5d04b9fad199dc79bee15a74fc75
+$ vitest run --config vitest.core.config.ts src/plugins/tasks/tasks.plugin.test.ts src/plugins/sandbox/sandbox.plugin.test.ts src/plugins/memory/memory.plugin.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  3 passed (3)
+      Tests  38 passed (38)
+   Start at  00:53:33
+   Duration  586ms (transform 352ms, setup 0ms, import 1.24s, tests 25ms, environment 0ms)
+
+
+Workers durable runtime regression
+Original log: /private/tmp/qiforge-shared-repair-workerd.log
+SHA-256: 529db254b58f977887e7a5d346a2ad8e2c9b75e2774e7d0ee8a9c6d2b895edaf
+$ vitest run src/tasks/scheduler.test.ts src/shell/task-approvals.test.ts src/do/run-store.test.ts src/shell/topic-deliverables.test.ts src/tasks/topic-deliverables.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  5 passed (5)
+      Tests  108 passed (108)
+   Start at  00:53:34
+   Duration  7.30s (transform 8.98s, setup 0ms, import 27.15s, tests 2.09s, environment 0ms)
+
+
+Final scheduler regression
+Original log: /private/tmp/qiforge-shared-unit1-final-scheduler.log
+SHA-256: ad6cced6ddcb41512834acbd6c100129a25d06c9b017c3d759fe05dc9dc61195
+$ vitest run src/tasks/scheduler.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  1 passed (1)
+      Tests  68 passed (68)
+   Start at  01:05:27
+   Duration  6.25s (transform 1.66s, setup 0ms, import 3.88s, tests 1.93s, environment 0ms)
+
+
+Workers type check
+Original log: /private/tmp/qiforge-shared-unit1-typecheck.log
+SHA-256: 8366207267355d3e3d5bf3bf6e8c94c5f93f6078c34f08973fa2b38cdda6cc92
+$ tsc --noEmit
+
+Repository formatting
+Original log: /private/tmp/qiforge-shared-unit1-format.log
+SHA-256: b0168ac70f5b601362b94408e9067d77e337dd3860903090e5ffc627d3ae16c0
+$ prettier --check "**/*.{ts,tsx,md,json}"
+Checking formatting...
+All matched files use Prettier code style!
+
+Portal affected regression
+Original log: /private/tmp/portal-shared-root-regression.log
+SHA-256: ffcca3fee49d147a29e3591c2f9577c92d084a4b71ac3aee5be08250cb9e3ace
+(node:34829) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34827) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34826) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34828) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34825) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:34824) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  6 passed (6)
+      Tests  176 passed (176)
+   Start at  01:01:47
+   Duration  2.00s (transform 1.11s, setup 1.04s, import 2.39s, tests 998ms, environment 660ms)
+
+
+Inherited repository lint failure
+Original log: /private/tmp/qiforge-shared-final-root-lint.log
+SHA-256: 56502706667b4d146f9545dc3c0095cc85f579b611d7e820c6258a99f7d69a91
+  553:18  error  This assertion is unnecessary since the receiver accepts the original type of the expression  @typescript-eslint/no-unnecessary-type-assertion
+1 lint target(s) failed
+[ELIFECYCLE] Command failed with exit code 1.
+Tracked at https://linear.app/ixo-world/issue/ORA-738/align-sqlitesaver-declaration-modes-so-node-bootstrap-lint-and-build

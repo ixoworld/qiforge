@@ -22,6 +22,7 @@
   ],
   "durable_objects": {
     "bindings": [
+      { "name": "WORK_TEST", "class_name": "WorkTestDO" },
       { "name": "CHANNEL_TURNS_TEST", "class_name": "ChannelTurnsTestDO" },
       { "name": "SQLITE_TEST", "class_name": "SqliteTestDO" },
       { "name": "TASKS_TEST", "class_name": "TasksTestDO" },
@@ -42,5 +43,6 @@
     { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ArtifactStoreTestDO"] },
     { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
+    { "tag": "v7", "new_sqlite_classes": ["WorkTestDO"] },
   ],
 }

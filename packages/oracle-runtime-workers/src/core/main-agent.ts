@@ -161,7 +161,8 @@ export async function createMainAgent(
     turnTools.filter((t) => t.returnDirect).map((t) => t.tool.name),
   );
 
-  if (taskExecutionProfile(args.executionProfile)) {
+  const profile = taskExecutionProfile(args.executionProfile);
+  if (profile === 'supplied-context-markdown') {
     const resolveModel =
       hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm);
     const systemPrompt =
@@ -213,6 +214,63 @@ export async function createMainAgent(
       toolEffects: new Map(),
       subAgentToolNames: new Set(),
       context: { user: requestCtx.user, session: requestCtx.session },
+    };
+  }
+
+  if (profile === 'topic-research-v1') {
+    const researchTool = hooks?.researchTool;
+    if (
+      !researchTool ||
+      researchTool.name !== 'run_topic_research' ||
+      researchTool.effect !== 'write'
+    )
+      throw new Error(
+        'Topic research requires the bounded host execution tool',
+      );
+    const fallbackContext = {
+      user: requestCtx.user,
+      session: requestCtx.session,
+    };
+    const wrapped = wrapPluginTool(researchTool, {
+      ambient,
+      state: { messages: [], loadedPlugins: new Set() },
+      fallbackContext,
+      resultCap: hooks?.resultCap,
+    });
+    const systemPrompt =
+      'Call run_topic_research once before writing the report. It executes only the host-approved pinned skill with frozen inputs. Use its committed evidence to produce a Markdown report; distinguish evidence, inference and gaps. No other tools, private conversations, checkpoint memory, publishing, determination or settlement are available.';
+    const agent = createAgent({
+      model: (hooks?.resolveModel ?? ambient.llm.get.bind(ambient.llm))(
+        'main',
+        requestCtx.model ? { model: requestCtx.model } : undefined,
+      ),
+      tools: [wrapped],
+      middleware: [
+        ...(hooks?.toolMiddlewares ?? []),
+        ...(hooks?.toolExecution ? [hooks.toolExecution] : []),
+        ...(contextBudget
+          ? [
+              createContextGuardMiddleware({
+                budget: contextBudget,
+                onOverflow: hooks?.onContextOverflow,
+                onEvent: hooks?.onContextEvent,
+                logger: ambient.logger,
+              }),
+            ]
+          : []),
+      ],
+      stateSchema: MainAgentGraphState,
+      systemPrompt,
+      ...(checkpointer ? { checkpointer } : {}),
+      name: identity.name,
+    });
+    return {
+      agent,
+      systemPrompt,
+      boundToolNames: [researchTool.name],
+      toolEffects: new Map([[researchTool.name, 'write']]),
+      subAgentToolNames: new Set(),
+      context: fallbackContext,
     };
   }
 

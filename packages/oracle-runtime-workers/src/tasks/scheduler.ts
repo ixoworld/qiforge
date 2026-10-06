@@ -1,3 +1,13 @@
+import {
+  researchIntent,
+  researchInputDigest,
+  TopicResearchRequestSchema,
+  type TopicResearchRequest,
+  type TopicResearchResult,
+  type TopicResearchSnapshot,
+} from './topic-research';
+import type { ArtifactRef } from '@ixo/common/work';
+import { WakeSubscriptionStore } from '../work/wake-store';
 /**
  * Per-user task scheduler running on the user object's Durable Object alarm —
  * the Workers replacement for the Node runtime's BullMQ+Redis tasks stack.
@@ -119,6 +129,12 @@ export interface TaskSchedulerHost {
   gateway: TaskGateway;
   /** Run one agent turn in this user's object (same entry the HTTP shell uses). */
   runTurn: (req: TurnRequest) => Promise<TurnResult>;
+  authorizeResearch?: (request: TopicResearchRequest) => Promise<void>;
+  commitResearch?: (
+    operationId: string,
+    request: TopicResearchRequest,
+    markdown: string,
+  ) => Promise<ArtifactRef[]>;
   abortTurn?: (sessionId: string) => Promise<boolean>;
   /** Ask the object to re-arm its alarm no later than `at` (ms epoch). */
   requestAlarm: (at: number) => void | Promise<void>;
@@ -142,6 +158,18 @@ export interface TaskSchedulerHost {
 }
 
 export interface TaskScheduler {
+  startTopicResearch(
+    operationId: string,
+    request: TopicResearchRequest,
+  ): Promise<TopicResearchResult>;
+  readTopicResearch(operationId: string): Promise<TopicResearchResult>;
+  cancelTopicResearch(
+    operationId: string,
+    request: TopicResearchRequest,
+  ): Promise<TopicResearchResult>;
+  researchForTurn(
+    req: TurnRequest,
+  ): Promise<{ operationId: string; request: TopicResearchRequest }>;
   approvalReceipts(taskId: string): Promise<TaskApprovalReceipt[]>;
   /** Plugin-facing surface, exposed as `ctx.tasks`. */
   surface: OracleTasksSurface;
@@ -461,23 +489,265 @@ class AlarmTaskScheduler implements TaskScheduler {
   async readTopicDeliverable(
     operationId: string,
   ): Promise<TopicDeliverableResult> {
+    if (
+      (await this.store.getTopicOperation(operationId))?.executionProfile !==
+      'supplied-context-markdown'
+    )
+      return { ok: false, status: 404, message: 'Deliverable not found.' };
+    return this.readTopicOperation(operationId);
+  }
+  async startTopicResearch(
+    operationId: string,
+    input: TopicResearchRequest,
+  ): Promise<TopicResearchResult> {
+    const request = TopicResearchRequestSchema.parse(input);
+    const digest = await researchInputDigest(request);
+    const known = await this.store.researchOperation(operationId);
+    if (known) {
+      if (known.inputDigest !== digest)
+        return {
+          ok: false,
+          status: 409,
+          message: 'This operation is already bound to different input.',
+        };
+      return this.readTopicResearch(operationId);
+    }
+    if (!this.host.authorizeResearch || !this.host.commitResearch)
+      throw new Error('Topic research host integration is unavailable');
+    await this.host.authorizeResearch(request);
+    const created = await this.host.db.transaction(
+      async (): Promise<
+        | { ok: true; task: TaskRecord }
+        | { ok: false; status: 409 | 429; message: string }
+      > => {
+        const prior = await this.store.getTopicOperation(operationId);
+        if (prior) {
+          const research = await this.store.researchOperation(operationId);
+          if (
+            prior.executionProfile !== 'topic-research-v1' ||
+            research?.inputDigest !== digest
+          )
+            return {
+              ok: false,
+              status: 409,
+              message: 'This operation is already bound to different input.',
+            };
+          return { ok: true, task: prior };
+        }
+        if ((await this.store.countLive()) >= this.maxTasksPerUser)
+          return { ok: false, status: 429, message: 'Too many active tasks.' };
+        const wakes = new WakeSubscriptionStore(this.host.db);
+        const now = new Date().toISOString();
+        await wakes.register({
+          version: 1,
+          subscriptionId: `research-${operationId}`,
+          principalDID: this.host.userDid,
+          source: {
+            kind: 'topic',
+            roomId: request.topic.roomId,
+            topicId: request.topic.id,
+          },
+          resourceRef: `topic:${request.topic.id}`,
+          filter: { eventTypes: ['research-request'] },
+          deliveryPolicy: 'evaluate',
+          expiresAt: new Date(Date.now() + 24 * 3600000).toISOString(),
+          state: 'active',
+          createdAt: now,
+        });
+        const accepted = await wakes.accept(
+          `research-${operationId}`,
+          {
+            id: operationId,
+            cursor: request.topic.observedRevision,
+            eventType: 'research-request',
+            resourceRef: `topic:${request.topic.id}`,
+          },
+          async () => true,
+          async () => {
+            const task: TaskRecord = {
+              id: newTaskId(request.title),
+              title: request.title.slice(0, 120),
+              intent: researchIntent(request),
+              executionProfile: 'topic-research-v1',
+              schedule: { kind: 'once', at: now },
+              approval: 'never',
+              status: 'active',
+              createdAt: now,
+              updatedAt: now,
+              nextRunAt: now,
+              consecutiveFailures: 0,
+              topicOperationId: operationId,
+            };
+            await this.store.insert(task);
+            await this.store.insertResearch(
+              operationId,
+              task.id,
+              request,
+              digest,
+            );
+            return task;
+          },
+        );
+        if (!accepted.accepted || !accepted.result)
+          return {
+            ok: false,
+            status: 409,
+            message: 'Wake is revoked, expired or no longer authorized.',
+          };
+        return { ok: true, task: accepted.result };
+      },
+    );
+    if (!created.ok) return created;
+    if (created.task.nextRunAt)
+      await this.host.requestAlarm(Date.parse(created.task.nextRunAt));
+    return this.readTopicResearch(operationId);
+  }
+  async readTopicResearch(operationId: string): Promise<TopicResearchResult> {
+    const research = await this.store.researchOperation(operationId);
+    if (
+      !research ||
+      (await this.store.get(research.taskId))?.executionProfile !==
+        'topic-research-v1'
+    )
+      return { ok: false, status: 404, message: 'Research not found.' };
+    const result = await this.readTopicOperation(operationId);
+    if (!result.ok) return result;
+    const snapshot: TopicResearchSnapshot = {
+      ...result.snapshot,
+      topic: research.request.topic,
+      requesterDid: this.host.userDid,
+      inputDigest: research.inputDigest,
+      artifacts: research.artifacts,
+      status:
+        result.snapshot.status === 'paused' ? 'failed' : result.snapshot.status,
+    };
+    if (snapshot.status === 'ready' && !snapshot.artifacts.length) {
+      snapshot.status = 'failed';
+      delete snapshot.output;
+    }
+    return { ok: true, snapshot };
+  }
+  async cancelTopicResearch(
+    operationId: string,
+    input: TopicResearchRequest,
+  ): Promise<TopicResearchResult> {
+    const request = TopicResearchRequestSchema.parse(input);
+    const digest = await researchInputDigest(request);
+    const cancelled = await this.host.db.transaction(
+      async (): Promise<
+        | { ok: true; task: TaskRecord }
+        | { ok: false; status: 409; message: string }
+      > => {
+        const prior = await this.store.getTopicOperation(operationId);
+        if (!prior) {
+          const now = new Date().toISOString();
+          const task: TaskRecord = {
+            id: newTaskId(request.title),
+            title: request.title.slice(0, 120),
+            intent: researchIntent(request),
+            executionProfile: 'topic-research-v1',
+            schedule: { kind: 'once', at: now },
+            approval: 'never',
+            status: 'cancelled',
+            createdAt: now,
+            updatedAt: now,
+            consecutiveFailures: 0,
+            topicOperationId: operationId,
+          };
+          await this.store.insert(task);
+          await this.store.insertResearch(
+            operationId,
+            task.id,
+            request,
+            digest,
+          );
+          return { ok: true, task };
+        }
+        const research = await this.store.researchOperation(operationId);
+        if (
+          prior.executionProfile !== 'topic-research-v1' ||
+          research?.inputDigest !== digest
+        )
+          return {
+            ok: false,
+            status: 409,
+            message: 'This operation is already bound to different input.',
+          };
+        if (
+          prior.status !== 'cancelled' &&
+          (prior.status === 'completed' ||
+            (await this.store.topicRun(prior.id))?.completed_at)
+        )
+          return {
+            ok: false,
+            status: 409,
+            message: 'Execution already finished; its result is final.',
+          };
+        await this.cancel(prior.id);
+        await new WakeSubscriptionStore(this.host.db).revoke(
+          `research-${operationId}`,
+        );
+        return { ok: true, task: prior };
+      },
+    );
+    if (!cancelled.ok) return cancelled;
+    await this.host.abortTurn?.(`${TASK_SESSION_PREFIX}${cancelled.task.id}`);
+    return this.readTopicResearch(operationId);
+  }
+  async researchForTurn(
+    req: TurnRequest,
+  ): Promise<{ operationId: string; request: TopicResearchRequest }> {
+    await this.assertTurnProfile(req);
+    const taskId = taskIdOfSession(req.sessionId);
+    const task = taskId ? await this.store.get(taskId) : null;
+    const research = task?.topicOperationId
+      ? await this.store.researchOperation(task.topicOperationId)
+      : null;
+    if (!research || task?.executionProfile !== 'topic-research-v1')
+      throw new Error('Turn is not bound to authorized Topic research');
+    return { operationId: research.operationId, request: research.request };
+  }
+  private async commitResearchResult(
+    task: TaskRecord,
+    text: string,
+  ): Promise<void> {
+    if (task.executionProfile !== 'topic-research-v1') return;
+    const research = task.topicOperationId
+      ? await this.store.researchOperation(task.topicOperationId)
+      : null;
+    if (!research || !this.host.commitResearch)
+      throw new Error('Research output integration is unavailable');
+    const artifacts = await this.host.commitResearch(
+      research.operationId,
+      research.request,
+      text,
+    );
+    if (!artifacts.length)
+      throw new Error('Research requires committed versioned artifacts');
+    await this.host.authorizeResearch?.(research.request);
+    await this.store.recordResearchArtifacts(research.operationId, artifacts);
+  }
+
+  private async readTopicOperation(
+    operationId: string,
+  ): Promise<TopicDeliverableResult> {
     const { task, run } = await this.host.db.transaction(async () => {
       const task = await this.store.getTopicOperation(operationId);
       return {
         task,
+        research: await this.store.researchOperation(operationId),
         run: task ? await this.store.topicRun(task.id) : undefined,
       };
     });
-    if (
-      !task?.topicRequest ||
-      task.executionProfile !== 'supplied-context-markdown'
-    ) {
+    const research = await this.store.researchOperation(operationId);
+    const topic = task?.topicRequest?.topic ?? research?.request.topic;
+    if (!task || !topic || !task.executionProfile) {
       return { ok: false, status: 404, message: 'Deliverable not found.' };
     }
     const snapshot: TopicDeliverableSnapshot = {
       operationId,
       taskId: task.id,
-      topic: task.topicRequest.topic,
+      topic,
       status: 'queued',
       ...(run ? { runId: run.run_id } : {}),
     };
@@ -627,6 +897,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       );
       return;
     }
+    await this.commitResearchResult(task, trimmed);
     this.host.log.log(
       `[tasks] run ${runId} of ${task.id}: turn recovered after a reset; delivering its result`,
     );
@@ -641,7 +912,17 @@ class AlarmTaskScheduler implements TaskScheduler {
     }
     task.updatedAt = new Date().toISOString();
     const roomId = run.roomId ?? (await this.resolveDeliveryRoom(task));
-    await this.host.db.transaction(async () => {
+    const accepted = await this.host.db.transaction(async () => {
+      const current = await this.store.get(task.id);
+      if (!current || current.status !== 'active') {
+        await this.store.updateRun(runId, {
+          state: 'failed',
+          ok: false,
+          finishedAt: new Date().toISOString(),
+          detail: 'Recovered result dropped after cancellation',
+        });
+        return false;
+      }
       await this.store.save(task);
       await this.store.updateRun(runId, {
         state: 'delivering',
@@ -649,7 +930,9 @@ class AlarmTaskScheduler implements TaskScheduler {
         resultText: trimmed,
         completedAt: new Date().toISOString(),
       });
+      return true;
     });
+    if (!accepted) return;
     const refreshed = (await this.store.get(task.id)) ?? task;
     const open: OpenTaskRun = {
       runId,
@@ -936,6 +1219,10 @@ class AlarmTaskScheduler implements TaskScheduler {
 
   private async create(input: OracleTaskInput): Promise<OracleTaskRecord> {
     const executionProfile = taskExecutionProfile(input.executionProfile);
+    if (executionProfile === 'topic-research-v1')
+      throw new Error(
+        'Topic research must be created through the authenticated Topic research API',
+      );
     if (
       executionProfile &&
       (input.schedule.kind !== 'once' ||
@@ -1494,8 +1781,44 @@ class AlarmTaskScheduler implements TaskScheduler {
             !(await this.store.claimApproval(task.id)))
         )
           return false;
-        await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
-        return true;
+        const occurrence = opts.approved
+          ? task.approvalRequest?.occurrence
+          : task.nextRunAt;
+        if (!occurrence) return false;
+        const wakeId = `schedule-${await taskApprovalDigest(task, occurrence)}`;
+        const wakes = new WakeSubscriptionStore(this.host.db);
+        await wakes.register({
+          version: 1,
+          subscriptionId: wakeId,
+          principalDID: this.host.userDid,
+          source: { kind: 'schedule', schedule: JSON.stringify(task.schedule) },
+          resourceRef: `task:${task.id}`,
+          filter: { eventTypes: ['schedule-due'] },
+          deliveryPolicy: 'evaluate',
+          createdAt: startedAt,
+          expiresAt: new Date(nowMs + 24 * 3600000).toISOString(),
+          state: 'active',
+        });
+        const accepted = await wakes.accept(
+          wakeId,
+          {
+            id: occurrence,
+            cursor: occurrence,
+            eventType: 'schedule-due',
+            resourceRef: `task:${task.id}`,
+          },
+          async () => (await this.store.get(task.id))?.status === 'active',
+          async () => {
+            await this.store.startRun({
+              runId,
+              taskId: task.id,
+              startedAt,
+              txnId,
+            });
+            return true;
+          },
+        );
+        return accepted.accepted;
       });
       if (!started) {
         this.activeRuns.delete(runId);
@@ -1504,6 +1827,16 @@ class AlarmTaskScheduler implements TaskScheduler {
       const roomId = topic ? undefined : await this.resolveDeliveryRoom(task);
       if (!topic && !roomId)
         throw new Error('Could not resolve a delivery room');
+      if (task.executionProfile === 'topic-research-v1') {
+        const research = task.topicOperationId
+          ? await this.store.researchOperation(task.topicOperationId)
+          : null;
+        if (!research || !this.host.authorizeResearch)
+          throw new Error('Research authority integration unavailable');
+        await this.host.authorizeResearch(research.request);
+        if ((await this.store.get(task.id))?.status !== 'active')
+          throw new Error('Research cancelled before execution');
+      }
       const result = await this.host.runTurn({
         identity: {
           userDid: this.host.userDid,
@@ -1541,6 +1874,11 @@ class AlarmTaskScheduler implements TaskScheduler {
         return;
       }
       task = current;
+      await this.commitResearchResult(task, text);
+      const afterCommit = await this.store.get(task.id);
+      if (!afterCommit || afterCommit.status !== 'active')
+        throw new Error('Research cancelled before delivery');
+      task = afterCommit;
 
       // The turn is over and its result exists: advance the schedule NOW so
       // no later alarm can fire this occurrence again, whatever happens to
@@ -1560,6 +1898,9 @@ class AlarmTaskScheduler implements TaskScheduler {
       }
       task.updatedAt = new Date().toISOString();
       await this.host.db.transaction(async () => {
+        const current = await this.store.get(task.id);
+        if (current?.status !== 'active')
+          throw new Error('Research cancelled before delivery');
         await this.store.save(task);
         await this.store.updateRun(runId, {
           state: 'delivering',

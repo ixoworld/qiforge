@@ -1,0 +1,12 @@
+Delivered Workers/Portal reference scope and open roadmap boundaries.
+
+ORA-546: Strict common manifest, selected authenticated registry sidecar and host pinned skill loading delivered. Installed Agent Skill projection/reference skill, required-vs-authorized discovery and Node parity remain open.
+ORA-547: Schedule and authenticated one-shot Topic wakes, durable dedupe/revocation/cursor delivered. Webhook, MCP Events, chain/channel ingress, Node parity and wider conformance remain open.
+ORA-548: Public execution provider and existing sandbox target, prepared binding, cancellation distinction and unknown receipts delivered. Node integration, other targets and reusable second-provider conformance remain open.
+ORA-549: Strict action/consequence schemas and current host research guard delivered. Broader consequential action integration, semantic determination and settlement paths remain open.
+ORA-550: Versioned VFS workspace, exact-byte restore/materialization and immutable provenance delivered. Generic/in-memory provider parity and live restart/replacement acceptance remain open.
+ORA-551: One authenticated Topic research and exact-version reviewer journey delivered in source/controlled preview. Operator canonical resolver and trusted skill activation, recurring intent, second-provider acceptance and the live two-person journey remain open.
+
+ORA-546 through ORA-551 remain In Progress, not Done.
+Phase5 follows accepted reference evidence: execution-isolated computer provider, voice/channel routing, governed learned-skill publication and activation remain deferred.
+No merge, deployment, package publication or live release acceptance was performed. No CopilotKit or CopilotKit Intelligence dependency/configuration is added; the existing IXO frontend action bridge is retained.

@@ -13,3 +13,5 @@ export {
   type AgentWake,
   type AgentWakeAcknowledgement,
 } from './agent-wake.js';
+
+export * from './control-plane.js';

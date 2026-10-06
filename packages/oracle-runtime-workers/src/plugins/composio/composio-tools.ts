@@ -170,46 +170,10 @@ function toolSchema(schema: unknown): z.ZodType {
   return schema instanceof z.ZodType ? schema : FALLBACK_ARGS_SCHEMA;
 }
 
-/** Composio tool-router meta-tool that batches one or more tool executions. */
-const MULTI_EXECUTE_TOOL = 'COMPOSIO_MULTI_EXECUTE_TOOL';
-
-/**
- * Coerce the model's `COMPOSIO_MULTI_EXECUTE_TOOL` input to the exact envelope
- * Composio's (strict) schema accepts: `{ tools, sync_response_to_workbench }`.
- *
- * The multi-execute meta-tool is the one piece of the tool-router flow the
- * model keeps malforming — across runs it has dropped the required
- * `sync_response_to_workbench` control flag and hallucinated extra top-level
- * keys (e.g. a spurious `session`). Prompt guidance reduces but doesn't
- * eliminate this. Rebuilding the envelope here is deterministic:
- *
- *   - keep the model's `tools` payload verbatim — the only part it must
- *     genuinely author (a genuinely-empty call still fails upstream because
- *     `tools` is required, which is correct: there is nothing to run);
- *   - default `sync_response_to_workbench` to `false` (return each result
- *     inline rather than offloading to the remote workbench) unless the model
- *     set it explicitly;
- *   - drop every other top-level key.
- *
- * This pins the envelope *shape* — a stable meta-tool contract — not any tool
- * slugs, which live in Composio's registry and must not be hardcoded here.
- */
-function isArgsRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function normalizeArgs(toolName: string, args: unknown): unknown {
-  if (toolName !== MULTI_EXECUTE_TOOL || !isArgsRecord(args)) {
-    return args;
-  }
-  return {
-    tools: args.tools,
-    sync_response_to_workbench:
-      typeof args.sync_response_to_workbench === 'boolean'
-        ? args.sync_response_to_workbench
-        : false,
-  };
-}
+const READ_ONLY_META_TOOLS = new Set([
+  'COMPOSIO_SEARCH_TOOLS',
+  'COMPOSIO_GET_TOOL_SCHEMAS',
+]);
 
 /**
  * Upper bound on one Composio tool call. The Composio SDK gives each HTTP
@@ -258,15 +222,16 @@ function wrapAsPluginTool(sessionTool: ComposioSessionTool): PluginTool {
     name: sessionTool.name,
     description: sessionTool.description,
     schema: toolSchema(sessionTool.schema),
+    effect: READ_ONLY_META_TOOLS.has(sessionTool.name) ? 'read' : 'write',
     handler: async (args, ctx: RuntimeContext) => {
+      if (!READ_ONLY_META_TOOLS.has(sessionTool.name))
+        throw new Error(
+          'Composio consequential and unknown-effect tools are unavailable: the installed SDK can retry side effects internally. Configure a verified no-retry execution transport before enabling these actions.',
+        );
       const cancelled = rejectOnAbort(ctx.abortSignal);
       try {
         return await withCallTimeout(
-          () =>
-            Promise.race([
-              sessionTool.invoke(normalizeArgs(sessionTool.name, args)),
-              cancelled.promise,
-            ]),
+          () => Promise.race([sessionTool.invoke(args), cancelled.promise]),
           COMPOSIO_TOOL_TIMEOUT_MS,
           `composio tool ${sessionTool.name}`,
         );

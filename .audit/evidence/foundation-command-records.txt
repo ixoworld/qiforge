@@ -1,0 +1,71 @@
+Baseline Node test lane; source 77012a8ef4ba6f2c5b7403635a1e6d232510cc69
+Transcript ordinal 549 at 2026-10-06T16:15:39.339Z
+Command: /bin/zsh -lc pnpm test:core src/core/middlewares/tool-execution.test.ts src/core/middlewares/tool-marks.test.ts src/plugins/sandbox/sandbox.plugin.test.ts src/plugins/tasks/tasks.plugin.test.ts
+Exit: 0
+$ vitest run --config vitest.core.config.ts src/core/middlewares/tool-execution.test.ts src/core/middlewares/tool-marks.test.ts src/plugins/sandbox/sandbox.plugin.test.ts src/plugins/tasks/tasks.plugin.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  4 passed (4)
+      Tests  54 passed (54)
+   Start at  00:15:38
+   Duration  594ms (transform 399ms, setup 0ms, import 1.74s, tests 40ms, environment 0ms)
+
+
+
+Recorded check
+Transcript ordinal 592 at 2026-10-06T16:17:13.390Z
+Command: /bin/zsh -lc set -o pipefail
+pnpm test src/tasks/scheduler.test.ts src/do/run-store.test.ts src/tasks/topic-deliverables.test.ts src/shell/topic-deliverables.test.ts src/do/secrets-adapter.test.ts | tee /private/tmp/qiforge-shared-workspaces-baseline-workerd.log
+Exit: 0
+$ vitest run src/tasks/scheduler.test.ts src/do/run-store.test.ts src/tasks/topic-deliverables.test.ts src/shell/topic-deliverables.test.ts src/do/secrets-adapter.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  5 passed (5)
+      Tests  105 passed (105)
+   Start at  00:17:06
+   Duration  7.15s (transform 7.73s, setup 0ms, import 24.61s, tests 1.93s, environment 0ms)
+
+
+
+Recorded check
+Transcript ordinal 903 at 2026-10-06T16:31:19.514Z
+Command: /bin/zsh -lc set -o pipefail
+pnpm test:core src/core/middlewares/tool-execution.test.ts src/core/middlewares/tool-marks.test.ts src/plugins/sandbox/sandbox.plugin.test.ts src/plugins/tasks/tasks.plugin.test.ts src/plugins/mcp-tool-adapter.test.ts | tee /private/tmp/qiforge-shared-workspaces-unit1-core.log
+Exit: 0
+$ vitest run --config vitest.core.config.ts src/core/middlewares/tool-execution.test.ts src/core/middlewares/tool-marks.test.ts src/plugins/sandbox/sandbox.plugin.test.ts src/plugins/tasks/tasks.plugin.test.ts src/plugins/mcp-tool-adapter.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  5 passed (5)
+      Tests  74 passed (74)
+   Start at  00:31:18
+   Duration  482ms (transform 389ms, setup 0ms, import 1.78s, tests 49ms, environment 0ms)
+
+
+
+Recorded check
+Transcript ordinal 906 at 2026-10-06T16:31:30.091Z
+Command: /bin/zsh -lc set -o pipefail
+pnpm test src/tasks/scheduler.test.ts src/do/run-store.test.ts src/tasks/topic-deliverables.test.ts src/shell/topic-deliverables.test.ts src/do/secrets-adapter.test.ts | tee /private/tmp/qiforge-shared-workspaces-unit1-workerd.log
+Exit: 0
+$ vitest run src/tasks/scheduler.test.ts src/do/run-store.test.ts src/tasks/topic-deliverables.test.ts src/shell/topic-deliverables.test.ts src/do/secrets-adapter.test.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  5 passed (5)
+      Tests  109 passed (109)
+   Start at  00:31:23
+   Duration  6.49s (transform 6.96s, setup 0ms, import 22.38s, tests 1.85s, environment 1ms)
+
+
+
+Workers type check; integrated source through e3ff0118
+Transcript ordinal 1571 at 2026-10-06T17:00:12.587Z
+Command: /bin/zsh -lc pnpm typecheck > /private/tmp/qiforge-shared-unit1-typecheck.log 2>&1
+Exit: 0

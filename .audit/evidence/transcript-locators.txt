@@ -1,0 +1,15 @@
+Superseding locator labels. Earlier evidence says ordinal where it means the one-based JSONL record number. Timestamps and copied contents remain supported.
+
+foundation-command-records.txt:
+JSONL record549 -> payload ordinal548
+JSONL record592 -> payload ordinal591
+JSONL record903 -> payload ordinal902
+JSONL record906 -> payload ordinal905
+JSONL record1571 -> payload ordinal1570
+
+review-verdicts.txt:
+JSONL record1052 -> payload ordinal1051
+JSONL record1512 -> payload ordinal1511
+JSONL record1616 -> payload ordinal1615
+
+All pointers refer only to this chat transcript: /Users/shaunconway/.codex/sessions/2026/10/06/rollout-2026-10-06T22-20-48-01a11196-a659-7dc2-a6a4-69c9f736d387.jsonl

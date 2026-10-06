@@ -225,29 +225,43 @@ describe('ComposioPlugin (Workers port)', () => {
     });
   });
 
-  it('normalizes the COMPOSIO_MULTI_EXECUTE_TOOL envelope', async () => {
+  it('refuses consequential SDK calls before invoking the internally retrying transport', async () => {
     const plugin = new ComposioPlugin();
     const ctx = makeCtx();
     const tools = await plugin.getRequestTools(ctx);
     const multi = tools.find((t) => t.name === 'COMPOSIO_MULTI_EXECUTE_TOOL');
-
-    await multi?.handler(
-      {
-        tools: [{ tool_slug: 'COMPOSIO_SEARCH_FINANCE', arguments: {} }],
-        session: 'hallucinated-junk',
-      },
-      ctx,
-    );
-
-    const upstream = sessionTools.find(
-      (t) => t.name === 'COMPOSIO_MULTI_EXECUTE_TOOL',
-    );
-    expect(upstream?.invoke).toHaveBeenCalledWith({
-      tools: [{ tool_slug: 'COMPOSIO_SEARCH_FINANCE', arguments: {} }],
-      sync_response_to_workbench: false,
-    });
+    if (!multi) throw new Error('Missing multi execution tool');
+    await expect(
+      multi.handler(
+        { tools: [{ tool_slug: 'GMAIL_SEND_EMAIL', arguments: {} }] },
+        ctx,
+      ),
+    ).rejects.toThrow(/no-retry execution transport/);
+    expect(
+      sessionTools.find((t) => t.name === 'COMPOSIO_MULTI_EXECUTE_TOOL')
+        ?.invoke,
+    ).not.toHaveBeenCalled();
+    expect(multi.effect).toBe('write');
   });
 
+  it('does not infer harmless effects from an unknown SDK tool name and preserves upstream descriptions', async () => {
+    const invoke = vi.fn(async () => 'sent');
+    sessionTools.push({
+      name: 'LIST_THEN_SEND',
+      description: 'Verbatim upstream description',
+      schema: z.object({}),
+      invoke,
+    });
+    const tools = await new ComposioPlugin().getRequestTools(makeCtx());
+    const unknown = tools.find((t) => t.name === 'LIST_THEN_SEND');
+    if (!unknown) throw new Error('Missing unknown tool');
+    expect(unknown.description).toBe('Verbatim upstream description');
+    expect(unknown.effect).toBe('write');
+    await expect(unknown.handler({}, makeCtx())).rejects.toThrow(
+      /no-retry execution transport/,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+  });
   it('contributes no tools when the invocation cannot be minted', async () => {
     const plugin = new ComposioPlugin();
     const tools = await plugin.getRequestTools(

@@ -1,0 +1,49 @@
+Transcript ordinal 1052 at 2026-10-06T16:37:49.847Z
+Message Type: FINAL_ANSWER
+Task name: /root
+Sender: /root/hardening_review
+Payload:
+Unit 1 verdict is **changes required** at `dca7032b`.
+
+- **P1. A reset can strand an undelivered approval permanently.** [scheduler.ts:1178](/private/tmp/qiforge-shared-review-20261007/packages/oracle-runtime-workers/src/tasks/scheduler.ts:1178) removes a one-shot’s `nextRunAt` before persisting its pending approval and attempting delivery. A reset before delivery completes leaves no deadline. `due()` and `minNextRunAt()` consider only scheduled and approved deadlines, so subsequent alarms never retry it. Persist a delivery deadline before the network call and retain it until delivery succeeds. Add a reset-before-send test that verifies eventual delivery using the same request ID. The existing reset-mid-send test only counts a message already sent before reset.
+
+- **P1. The request ID does not establish reviewer authority.** [tasks-tools.ts:375](/private/tmp/qiforge-shared-review-20261007/packages/oracle-runtime-workers/src/plugins/tasks/tasks-tools.ts:375) still lets the model submit `approved` using an ID exposed through task reads. [scheduler.ts:1313](/private/tmp/qiforge-shared-review-20261007/packages/oracle-runtime-workers/src/tasks/scheduler.ts:1313) validates the request and digest but consumes no authenticated human decision bound to them. The middleware supplies conversational hints, not authorization. Introduce a host-authenticated decision receipt bound to owner, task, request, digest, and occurrence; the model may reference that receipt but cannot manufacture approval. This is an unmet acceptance requirement retained from the previous design.
+
+- **P1. Execution instructions can change outside the approved digest.** [approval.ts:21](/private/tmp/qiforge-shared-review-20261007/packages/oracle-runtime-workers/src/tasks/approval.ts:21) excludes `approvalNote`, while the model-supplied note is persisted and injected as user-approved instructions by `buildRunMessage()`. Bind execution-changing notes into the reviewed revision and reissue approval, or restrict notes to non-executable audit data.
+
+I inspected the changed source and tests and ran `git diff --check`, which passed. I did not rerun tests or modify files under the read-only assignment. No live-service acceptance is claimed. No additional confirmed blocker emerged in claim retention, reconciliation immutability, annotation forwarding, or sandbox credential selection.
+
+The comment/deslop pass found no added suppressions or unsafe casts. Seven newly added narrative comment lines could be removed across `run-store.test.ts`, `scheduler.ts`, and `store.ts`; these are non-blocking. Public API contract comments qualify for retention. No application refactor is requested solely for comment cleanup.
+
+Transcript ordinal 1512 at 2026-10-06T16:58:04.399Z
+Message Type: FINAL_ANSWER
+Task name: /root
+Sender: /root/hardening_review
+Payload:
+**APPROVED** for committed HEAD `3d360a8329409e6ce1680e7481b22d84d276d534`.
+
+The ledger transaction now rejects changed execution inputs, newly required approval, future deadlines, and superseded approval requests or timestamps. This closes the remaining P1 race. The three earlier approval findings remain fixed. No additional blocking issue was found.
+
+The regression tests suspend the ledger transaction and exercise both concurrent changes. Strengthen them by retaining and awaiting the first `s.tick()` promise after releasing the transaction, so assertions explicitly follow its completion.
+
+Two non-blocking cleanups remain:
+
+- [scheduler.ts:287](/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers/src/tasks/scheduler.ts:287) still instructs users to reply to approve. Point them to the authenticated approval interface.
+- Earlier narrative-comment deletion recommendations remain optional.
+
+`git diff --check` passed. Review covered committed source and test arrangements only. No edits, suites, uncommitted drafts, or live-service verification.
+
+Transcript ordinal 1616 at 2026-10-06T17:01:21.852Z
+Message Type: FINAL_ANSWER
+Task name: /root
+Sender: /root/portal_review
+Payload:
+**APPROVED** at `b426d02810a50cbef677ff622218d51dd2303df4`.
+
+Both findings are resolved. New research attempts freeze the revision returned by `startDelivery`; recovered attempts retain their original payload. Wallet identity now participates in the active scope for both modes, clearing verified artifacts and rejecting old-wallet asynchronous completion.
+
+The added tests cover transition ordering, frozen-attempt recovery, wallet-only switching and delayed file-read completion. Surrounding submission, review, polling and cancellation paths retain their scope and authority checks.
+
+No further blocking findings. Comment review found zero deletion recommendations, new suppressions, unsafe casts or `MUST KILL` flags. Checkout was clean.
+
+Read-only verdict. I did not rerun suites or verify live authenticated services; mocked component evidence does not establish live acceptance.

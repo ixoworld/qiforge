@@ -30,6 +30,7 @@ export async function vfsBearer(
   cfg: VfsConfig,
   ability: VfsAbility,
   targetResource?: string,
+  hiddenPaths?: readonly string[],
 ): Promise<VfsBearerResult> {
   const delegation = await rtCtx.ucan.getServiceDelegation(rtCtx.user.did, {
     storeUrl: cfg.UCAN_STORE_URL,
@@ -45,7 +46,11 @@ export async function vfsBearer(
   const minted = await rtCtx.ucan.createInvocationFromDelegation(
     delegation.token,
     cfg.VFS_BASE_URL,
-    { can: ability, with: targetResource ?? delegation.with },
+    {
+      can: ability,
+      with: targetResource ?? delegation.with,
+      ...(hiddenPaths ? { nb: { hidden: [...hiddenPaths] } } : {}),
+    },
     { maxTtlSeconds: INVOCATION_TTL_SECONDS },
   );
   if ('error' in minted) {

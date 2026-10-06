@@ -1,4 +1,8 @@
 import type {
+  TopicResearchCommand,
+  TopicResearchResult,
+} from '../tasks/topic-research';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -50,6 +54,7 @@ import type {
 /** Bindings every oracle Worker must declare (see the example `wrangler.jsonc`). */
 export interface OracleWorkerEnv {
   TOPIC_DELIVERABLES_ENABLED?: string;
+  TOPIC_RESEARCH_ENABLED?: string;
   USER_ORACLE: DurableObjectNamespace<UserOracleObject>;
   MATRIX_GATEWAY: DurableObjectNamespace<MatrixGatewayObject>;
 
@@ -635,6 +640,11 @@ export interface StorageStatus {
  * piped straight to the client.
  */
 export interface UserOracleObject extends Rpc.DurableObjectBranded {
+  topicResearch(
+    identity: TurnIdentity,
+    operationId: string,
+    command: TopicResearchCommand,
+  ): Promise<TopicResearchResult>;
   taskApproval(
     identity: TurnIdentity,
     taskId: string,

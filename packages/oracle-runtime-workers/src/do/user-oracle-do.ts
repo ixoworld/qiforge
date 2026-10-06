@@ -1,3 +1,18 @@
+import { TasksStore } from '../tasks/store';
+import { buildRuntimeContext } from '../core/runtime-context';
+import type { PluginTool } from '../plugin-api/types';
+import {
+  TopicResearchRequestSchema,
+  type TopicResearchRequest,
+  type TopicResearchCommand,
+  type TopicResearchResult,
+} from '../tasks/topic-research';
+import {
+  buildTopicResearchTool,
+  commitResearchReport,
+  type TopicResearchHost,
+  type ResearchExecutionOptions,
+} from '../work/research';
 import { ChannelTurns } from '../channels/turns';
 import {
   TaskApprovalDecisionSchema,
@@ -126,7 +141,11 @@ import {
   RealtimeEndpoint,
   type RealtimeStatus,
 } from '../realtime/realtime-endpoint';
-import { authConfigFromEnv, authenticate } from '../shell/auth';
+import {
+  authConfigFromEnv,
+  authenticate,
+  validateCurrentDelegation,
+} from '../shell/auth';
 import {
   compactStep,
   finishCompaction,
@@ -525,6 +544,7 @@ const SYNTHETIC_SESSION_PREFIX = '$task-';
  * Node.
  */
 export interface OracleWorkerHooks {
+  topicResearch?: TopicResearchHost;
   /**
    * Page title for the page-context middleware (`state.editorRoomId`).
    * Return `undefined` when unknown; the block then shows the bare room id.
@@ -1702,6 +1722,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         matrixUserId: await this.resolveMatrixUserId(userDid),
         gateway: this.gateway,
         runTurn: (req) => this.runTurn(req),
+        authorizeResearch: async (request) => {
+          const context = await this.researchContext();
+          if (
+            this.env.TOPIC_RESEARCH_ENABLED !== 'true' ||
+            !opts.hooks?.topicResearch
+          )
+            throw new Error('Topic research host integration is unavailable');
+          await validateCurrentDelegation(
+            context.user.ucanDelegation?.raw ?? '',
+            context.user.did,
+            authConfigFromEnv(this.env),
+          );
+          const current = await opts.hooks.topicResearch.resolveTopicAuthority({
+            principalDid: context.user.did,
+            topic: request.topic,
+            request,
+          });
+          if (
+            !current.allowed ||
+            current.observedRevision !== request.topic.observedRevision
+          )
+            throw new Error('Current Topic authority or revision changed');
+        },
+        commitResearch: async (operationId, request, markdown) =>
+          commitResearchReport(
+            this.researchOptions(operationId, request),
+            await this.researchContext(),
+            markdown,
+          ),
         abortTurn: (sessionId) => this.abortTurn(sessionId),
         requestAlarm: (at) => this.requestHousekeeping(at),
         turnRunLive: (taskRunId) => Boolean(this.runs?.byTaskRunId(taskRunId)),
@@ -3700,6 +3749,105 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return { resolved };
     }
 
+    private researchOptions(
+      operationId: string,
+      request: TopicResearchRequest,
+    ): ResearchExecutionOptions {
+      if (
+        this.env.TOPIC_RESEARCH_ENABLED !== 'true' ||
+        !opts.hooks?.topicResearch ||
+        !this.db
+      )
+        throw new Error(
+          'Topic research requires explicit activation and an operator Topic authority resolver',
+        );
+      const db = this.db;
+      return {
+        db,
+        operationId,
+        request,
+        host: opts.hooks.topicResearch,
+        authorizeCurrent: async (context) => {
+          const ensureActive = async () => {
+            context.abortSignal.throwIfAborted();
+            const task = await new TasksStore(db, console).getTopicOperation(
+              operationId,
+            );
+            if (
+              task?.status !== 'active' ||
+              task.executionProfile !== 'topic-research-v1'
+            )
+              throw new Error('Research operation is no longer active');
+          };
+          await ensureActive();
+          await validateCurrentDelegation(
+            context.user.ucanDelegation?.raw ?? '',
+            context.user.did,
+            authConfigFromEnv(this.env),
+          );
+          await ensureActive();
+        },
+      };
+    }
+    private async researchContext() {
+      if (!this.userDid || !this.ambient)
+        throw new Error('Research owner context unavailable');
+      const room = await this.gateway.resolveUserRoom(this.userDid);
+      return buildRuntimeContext(
+        {
+          context: {
+            user: {
+              did: this.userDid,
+              matrixUserId: '',
+              ucanDelegation: await this.turnDelegation({
+                userDid: this.userDid,
+              }),
+            },
+            session: {
+              id: 'topic-research',
+              client: 'matrix',
+              requestId: crypto.randomUUID(),
+              roomId: room?.roomId,
+            },
+          },
+        },
+        this.ambient,
+        { messages: [], loadedPlugins: new Set() },
+      );
+    }
+    async topicResearch(
+      identity: TurnIdentity,
+      operationId: string,
+      command: TopicResearchCommand,
+    ): Promise<TopicResearchResult> {
+      if (this.env.TOPIC_RESEARCH_ENABLED !== 'true')
+        return { ok: false, status: 404, message: 'Not found.' };
+      TopicOperationId.parse(operationId);
+      await this.ready(identity);
+      if (!this.taskScheduler || !this.db)
+        throw new Error('Research scheduler unavailable');
+      const generation = this.db.writeGeneration;
+      try {
+        switch (command.action) {
+          case 'start':
+            return await this.taskScheduler.startTopicResearch(
+              operationId,
+              TopicResearchRequestSchema.parse(command.request),
+            );
+          case 'cancel':
+            return await this.taskScheduler.cancelTopicResearch(
+              operationId,
+              TopicResearchRequestSchema.parse(command.request),
+            );
+          case 'read':
+            return await this.taskScheduler.readTopicResearch(operationId);
+        }
+        throw new Error('Unsupported research command');
+      } finally {
+        if (this.db.writeGeneration !== generation) this.markDirty();
+      }
+    }
+
     async topicDeliverable(
       identity: TurnIdentity,
       operationId: string,
@@ -5007,10 +5155,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (req.executionProfile && !this.taskScheduler)
         throw new Error('Task scheduler unavailable');
       await this.taskScheduler?.assertTurnProfile(req);
-      const suppliedContextOnly =
-        req.executionProfile === 'supplied-context-markdown';
+      const restrictedTask =
+        req.executionProfile === 'supplied-context-markdown' ||
+        req.executionProfile === 'topic-research-v1';
       if (
-        suppliedContextOnly &&
+        restrictedTask &&
         (body.attachments?.length ||
           body.tools?.length ||
           body.agActions?.length)
@@ -5135,7 +5284,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // memory engine rejects calls that carry no `x-room-id` (as a generic
       // "invalid token"). Matrix-ingress turns bring the room; HTTP turns
       // take it from the session row or resolve the user↔oracle room alias.
-      const sessionRoomId = suppliedContextOnly
+      const sessionRoomId = restrictedTask
         ? undefined
         : (req.roomId ??
           (await sessions.getSession(req.sessionId))?.roomId ??
@@ -5144,7 +5293,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               .resolveUserRoom(req.identity.userDid)
               .catch(() => null)
           )?.roomId);
-      if (!suppliedContextOnly && !sessionRoomId) {
+      if (!restrictedTask && !sessionRoomId) {
         console.warn(
           `[user-do] no oracle room resolved for ${req.identity.userDid}; room-scoped plugins (memory) will be unavailable this turn`,
         );
@@ -5167,7 +5316,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // on turn 1, exactly like the Node AgentBuilder. Best-effort: a
       // preferences read failure never fails the turn.
       const userPreferences =
-        !suppliedContextOnly && sessionRoomId && this.preferences
+        !restrictedTask && sessionRoomId && this.preferences
           ? await this.preferences.get(sessionRoomId).catch((err: unknown) => {
               console.warn(
                 `[user-do] could not load user preferences for ${sessionRoomId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -5220,7 +5369,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       abortController.signal.addEventListener('abort', () => {
         void this.runTurnDisposables(turnDisposables);
       });
-      const attachmentAccess = suppliedContextOnly
+      const attachmentAccess = restrictedTask
         ? undefined
         : await this.attachmentViewSurface({
             sessionId: req.sessionId,
@@ -5237,12 +5386,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const priorState = existing?.checkpoint.channel_values ?? {};
       // Request metadata (editor room, space, session run, entity) → state,
       // by the Node agent-builder's rules (see turn-metadata.ts).
-      const meta = parseTurnMetadata(
-        suppliedContextOnly ? undefined : req.metadata,
-      );
-      const priorMeta = priorMetadataState(
-        suppliedContextOnly ? {} : priorState,
-      );
+      const meta = parseTurnMetadata(restrictedTask ? undefined : req.metadata);
+      const priorMeta = priorMetadataState(restrictedTask ? {} : priorState);
 
       // Capability router: predict the on-demand plugin this message needs
       // and preload it for THIS turn only. `on` is awaited here, ahead of the
@@ -5260,7 +5405,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // switch or per-DID allowlist — see `resolveLangsmithTracing`).
       // A supplied-context turn is never traced: its source and output stay
       // off third-party services whatever the tracing switches say.
-      const tracing: LangsmithTracingDecision = suppliedContextOnly
+      const tracing: LangsmithTracingDecision = restrictedTask
         ? { metadata: {} }
         : resolveLangsmithTracing({
             userDid: req.identity.userDid,
@@ -5271,7 +5416,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // every capability check of the build and its tools below.
       const ucanDelegation = await this.turnDelegation(req.identity);
       const preloadedPlugins =
-        !suppliedContextOnly && this.capabilityRouter
+        !restrictedTask && this.capabilityRouter
           ? await this.capabilityRouter({
               mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
               manifests: core.registries.manifests.collect(),
@@ -5313,16 +5458,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       // Host page-context / safety-guardrail hooks, resolved against this
       // object's ambient services (see `OracleWorkerHooks`).
-      const hostRoomTitle = suppliedContextOnly
+      const hostRoomTitle = restrictedTask
         ? undefined
         : opts.hooks?.getRoomTitle;
-      const hostSafetyModel = suppliedContextOnly
+      const hostSafetyModel = restrictedTask
         ? undefined
         : opts.hooks?.safetyModel;
 
       // The client-declared tool surface: this body's, else the thread's
       // checkpointed one (run-request.ts).
-      const surface = suppliedContextOnly
+      const surface = restrictedTask
         ? clientSurfaceFor({}, {})
         : clientSurfaceFor(body, priorState);
 
@@ -5425,6 +5570,34 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ]
         : [];
 
+      let researchTool: PluginTool | undefined;
+      if (req.executionProfile === 'topic-research-v1') {
+        const research = await this.taskScheduler!.researchForTurn(req);
+        const context = await this.researchContext();
+        const options = this.researchOptions(
+          research.operationId,
+          research.request,
+        );
+        await options.authorizeCurrent(context);
+        const current = await options.host.resolveTopicAuthority({
+          principalDid: context.user.did,
+          topic: research.request.topic,
+          request: research.request,
+        });
+        if (
+          !current.allowed ||
+          current.observedRevision !== research.request.topic.observedRevision
+        )
+          throw new Error(
+            'Queued research authority or Topic revision changed',
+          );
+        const bounded = buildTopicResearchTool(options);
+        researchTool = {
+          ...bounded,
+          handler: (args, ctx) =>
+            bounded.handler(args, { ...ctx, secrets: context.secrets }),
+        };
+      }
       const built = await createMainAgent({
         executionProfile: req.executionProfile,
         registries: core.registries,
@@ -5455,6 +5628,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // call (main agent and sub-agents alike).
           toolExecution: executionMiddleware,
           resultCap,
+          researchTool,
           turnTools,
           onContextOverflow: (error) =>
             this.contextWindows.learnFromError(mainModelId, error, {
@@ -5496,7 +5670,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           model: effectiveModel,
         },
         state: {
-          ...(suppliedContextOnly ? {} : priorState),
+          ...(restrictedTask ? {} : priorState),
           userPreferences,
           ...metadataBuildState(meta, priorMeta),
           // The client-declared surface: the portal and AG-UI plugins turn
@@ -5545,7 +5719,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // prefix and the attachment blocks), so the system prompt carries the
       // date only and stays identical across the session's turns. A
       // supplied-context task's input stays exactly what was supplied.
-      const timeNote = suppliedContextOnly
+      const timeNote = restrictedTask
         ? undefined
         : renderTurnTimeNote(turnAt, req.identity.timezone);
       const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;

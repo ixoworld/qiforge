@@ -1,3 +1,4 @@
+import { TASK_EXECUTION_PROFILES } from '../core/execution-profile';
 /**
  * Task spec markdown — the user-readable artifact each task is stored as.
  *
@@ -81,7 +82,7 @@ export const TASK_APPROVALS = ['never', 'before-action'] as const;
 
 const SpecFrontmatterSchema = z.object({
   id: z.string().regex(TASK_ID_PATTERN),
-  executionProfile: z.literal('supplied-context-markdown').optional(),
+  executionProfile: z.enum(TASK_EXECUTION_PROFILES).optional(),
   title: z.string().min(1).max(120),
   schedule: TaskScheduleSchema,
   approval: z.enum(TASK_APPROVALS),

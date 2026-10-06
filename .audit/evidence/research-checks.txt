@@ -1,0 +1,161 @@
+Owner source afcf7f019b79796b437198fad6af01518d264271
+Integrated source cd36abce0f66c62cdad7f5ea158e2659dc2910a3
+Real workerd with controlled external-service transports; not live release evidence.
+
+owner full workerd
+owner reports exit 0; 1885 tests
+origin /private/tmp/qiforge-research-final-workerd.log
+sha256 5f096398f50b7e74c552fbb61912bc4b368b9c4164b0aa98bfe4902cbe214a3e
+uncaught exception; exception = workerd/api/actor-state.c++:1187: failed: broken.outputGateBroken; jsg.Error: channel test reset
+stack: 105992d43
+uncaught exception; exception = workerd/api/actor-state.c++:1187: failed: broken.outputGateBroken; jsg.Error: channel test reset
+stack: 105992d43
+uncaught exception; source = Uncaught (in promise); stack = TypeError: Called close() on a decompression stream with incomplete data
+uncaught exception; exception = workerd/jsg/_virtual_includes/iterator/workerd/jsg/value.h:1477: failed: jsg.TypeError: Called close() on a decompression stream with incomplete data
+
+ Test Files  174 passed (174)
+      Tests  1885 passed (1885)
+   Start at  01:49:37
+   Duration  85.87s (transform 82.14s, setup 0ms, import 1173.42s, tests 142.64s, environment 11ms)
+
+
+owner full core
+owner reports exit 0; 798 tests
+origin /private/tmp/qiforge-research-final-core.log
+sha256 43b69ceffd2b7017ba08bf357f0b8f5757beccc855a7b7dc4e5d468201f05212
+$ vitest run --config vitest.core.config.ts
+
+ RUN  v4.1.11 /private/tmp/qiforge-shared-runtime-20261007/packages/oracle-runtime-workers
+
+
+ Test Files  75 passed (75)
+      Tests  798 passed (798)
+   Start at  01:49:09
+   Duration  3.90s (transform 4.18s, setup 0ms, import 17.03s, tests 9.01s, environment 7ms)
+
+
+root core
+root observed exit 0; 798 tests
+origin /private/tmp/qiforge-shared-integrated-core.log
+sha256 1552b60c1bd6cb2aa15b28469f7abcc690c37992bf4a2115e6a7ce50c19e4439
+$ vitest run --config vitest.core.config.ts
+
+ RUN  v4.1.11 /Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers
+
+
+ Test Files  75 passed (75)
+      Tests  798 passed (798)
+   Start at  01:53:17
+   Duration  4.95s (transform 5.94s, setup 0ms, import 27.77s, tests 9.38s, environment 4ms)
+
+
+root focused workerd
+root observed exit 0; 144 tests
+origin /private/tmp/qiforge-shared-integrated-workerd.log
+sha256 669beb45d802f4d9d0f1cb3fd2316abca1af71f360848e4cfca50a3d42d88974
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js" points to missing source files
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/client.js" points to missing source files
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js" points to missing source files
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/cfworker-provider.js" points to missing source files
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.js" points to missing source files
+Sourcemap for "/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/node_modules/.pnpm/@modelcontextprotocol+sdk@1.30.0_@cfworker+json-schema@4.1.1_zod@4.4.3/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js" points to missing source files
+
+ Test Files  13 passed (13)
+      Tests  144 passed (144)
+   Start at  01:53:19
+   Duration  12.55s (transform 34.01s, setup 0ms, import 105.24s, tests 2.38s, environment 0ms)
+
+
+root common build
+root observed exit 0
+origin /private/tmp/qiforge-shared-integrated-common-build.log
+sha256 1beb5d5146e0115414e4753ef035f419abcb21b136e8dc977eacc354730bf103
+packages/ucan build: Done
+packages/events build: Done
+packages/matrix prebuild$ npm run clean
+packages/oracles-chain-client build$ rimraf dist && tsc && tsc-alias
+packages/matrix prebuild: > @ixo/matrix@1.2.33 clean
+packages/matrix prebuild: > rimraf dist
+packages/matrix prebuild: Done
+packages/matrix build$ tsc --project tsconfig.json
+packages/matrix build: Done
+packages/oracles-chain-client build: Done
+packages/common build$ tsc && tsc-alias
+packages/common build: Done
+
+root Workers typecheck
+root observed exit 0
+origin /private/tmp/qiforge-shared-integrated-typecheck.log
+sha256 8366207267355d3e3d5bf3bf6e8c94c5f93f6078c34f08973fa2b38cdda6cc92
+$ tsc --noEmit
+
+root Workers lint
+root observed exit 0; 24 warnings
+origin /private/tmp/qiforge-shared-integrated-lint.log
+sha256 98762b1c38917a0642ea0c945f2ccc219a1ed911a90fb8d32956c9e02a338379
+  285:11  warning  Unexpected console statement  no-console
+  355:9   warning  Unexpected console statement  no-console
+
+/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers/src/shell/auth.concurrency.test.ts
+  7:1  warning  All imports in the declaration are only used as types. Use `import type`  @typescript-eslint/consistent-type-imports
+
+/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime-workers/src/sqlite/chunk-billing.test.ts
+  103:7  warning  Unexpected console statement  no-console
+
+✖ 24 problems (0 errors, 24 warnings)
+  0 errors and 1 warning potentially fixable with the `--fix` option.
+
+
+root format write
+root observed exit 0; tracked tree unchanged
+origin /private/tmp/qiforge-shared-integrated-format.log
+sha256 848a5017e126187795aa630280c97a3d486375c9a30d523c96d3280734ba9323
+specs/tasks/TASK-32-replace-app.md 6ms (unchanged)
+specs/tasks/TASK-33-cli-updates.md 2ms (unchanged)
+specs/tasks/TASK-34-documentation.md 2ms (unchanged)
+specs/tasks/TASK-35-plugin-auth-excluded-routes.md 3ms (unchanged)
+specs/tasks/TASK-36-getnestmodules-ctx.md 3ms (unchanged)
+specs/tasks/TASK-FOLLOWUP-logger.md 2ms (unchanged)
+specs/vfs-oracle-integration-plan.md 9ms (unchanged)
+specs/work-status-card-fix.md 10ms (unchanged)
+todo.md 1ms (unchanged)
+tsconfig.json 0ms (unchanged)
+turbo.json 1ms (unchanged)
+vitest.workspace.ts 0ms (unchanged)
+
+root repository lint
+root observed exit 1; unchanged Node assertion; ORA-738
+origin /private/tmp/qiforge-shared-integrated-root-lint.log
+sha256 049d15f1eba2bc735c432aa2e9437afe4916a6845d324576410fd20e91e20606
+$ node scripts/lint.mjs
+
+/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/common/src/services/session-manager/session-manager.service.test.ts
+  19:35  warning  `import()` type annotations are forbidden  @typescript-eslint/consistent-type-imports
+
+✖ 1 problem (0 errors, 1 warning)
+
+lint ok: packages/common (7.9s)
+lint ok: packages/events (4.5s)
+lint ok: packages/ixo-transaction (4.6s)
+lint ok: packages/logger (4.0s)
+lint ok: packages/matrix (4.2s)
+
+/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime/src/bootstrap/create-oracle-app.ts
+  553:18  error  This assertion is unnecessary since the receiver accepts the original type of the expression  @typescript-eslint/no-unnecessary-type-assertion
+
+/Users/shaunconway/.codex/worktrees/shared-oracle-workspaces/qiforge/packages/oracle-runtime/src/modules/messages/agent-builder.test.ts
+  59:46  warning  `import()` type annotations are forbidden  @typescript-eslint/consistent-type-imports
+
+✖ 2 problems (1 error, 1 warning)
+  1 error and 0 warnings potentially fixable with the `--fix` option.
+
+lint FAILED: packages/oracle-runtime (exit 1, 8.8s)
+
+Commands independently executed by root:
+pnpm --filter @ixo/common... build
+pnpm --filter @ixo/oracle-runtime-workers test:core
+pnpm --filter @ixo/oracle-runtime-workers test src/work src/tasks/topic-research.test.ts src/tasks/scheduler.test.ts src/shell/research-auth.test.ts src/shell/auth.test.ts src/shell/auth.concurrency.test.ts src/shell/delegation-expiry.test.ts src/shell/task-approvals.test.ts src/tasks/topic-deliverables.test.ts src/shell/topic-deliverables.test.ts
+pnpm --filter @ixo/oracle-runtime-workers typecheck
+pnpm --filter @ixo/oracle-runtime-workers lint
+pnpm lint
+pnpm format
