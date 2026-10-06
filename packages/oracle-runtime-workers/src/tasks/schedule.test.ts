@@ -275,7 +275,12 @@ describe('cronIntervalMs', () => {
         timeZone: timezone,
         timeZoneName: 'longOffset',
       });
-      const offsetAt = (ms: number) => format.format(new Date(ms));
+      // The offset part alone: the formatted string also carries the date,
+      // which differs every day.
+      const offsetAt = (ms: number) =>
+        format
+          .formatToParts(new Date(ms))
+          .find((part) => part.type === 'timeZoneName')?.value;
       let shortest = Number.POSITIVE_INFINITY;
       for (let day = 1; day <= 366; day += 1) {
         const at = T0 + day * 86_400_000;
