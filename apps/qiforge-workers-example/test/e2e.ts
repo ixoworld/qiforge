@@ -652,6 +652,11 @@ async function main(): Promise<void> {
             `object still holds a delegation: ${none.text}`,
           );
           const since = Date.now();
+          // Listen for the reply before polling for the prompt: the listener
+          // only sees events that arrive after it is attached, and a fast
+          // turn answers inside one poll interval.
+          const reply = waitForBotReply(since, /PROMPT/i);
+          reply.catch(() => undefined);
           await mx.sendTextMessage(
             roomId,
             'Reply with the single word PROMPT.',
@@ -664,7 +669,7 @@ async function main(): Promise<void> {
             'the delegation_required prompt',
             2_000,
           );
-          await waitForBotReply(since, /PROMPT/i);
+          await reply;
           // Inside the window a second message must not prompt again.
           const since2 = Date.now();
           await mx.sendTextMessage(roomId, 'Reply with the single word AGAIN.');
@@ -717,8 +722,10 @@ async function main(): Promise<void> {
           const before = (await (
             await fetch(`${oracle.url}/matrix/status`)
           ).json()) as { deviceId?: string };
+          // Operator routes authenticate like every other route.
           const restart = await fetch(`${oracle.url}/debug/matrix/restart`, {
             method: 'POST',
+            headers: client.headers(),
           });
           assert.equal(restart.status, 200, await restart.text());
           const after = await waitForMatrixGateway(oracle.url);

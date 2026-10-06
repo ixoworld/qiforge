@@ -29,4 +29,9 @@ jobs:
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
       - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
-      - run: pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts
+      # The packages the runtime and the Portal build on: UCAN validation,
+      # the shared Decision and work contracts, and the client SDK.
+      - run: pnpm --filter @ixo/ucan test
+      - run: pnpm --filter @ixo/common test
+      - run: pnpm --filter @ixo/oracles-client-sdk typecheck
+      - run: pnpm --filter @ixo/oracles-client-sdk test

@@ -819,12 +819,14 @@ async function main(): Promise<void> {
           if (i > 0) {
             // Wait for the next attempt to be executing, then kill it
             // before it can commit a checkpoint (the model call takes far
-            // longer than this).
+            // longer than this). Polled no faster than twice a second: the
+            // drill is one user, and a poll the per-user rate limit refuses
+            // hides the attempt until it has finished.
             await waitFor(
               async () => (await runDebug(s.runId!))?.status === 'running',
               RECOVERY_WAIT_MS,
               `attempt ${i} to start`,
-              200,
+              500,
             );
             await pause(1500);
           }
