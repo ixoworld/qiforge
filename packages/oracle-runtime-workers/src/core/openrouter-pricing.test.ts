@@ -90,6 +90,45 @@ describe('fetchOpenRouterPrices', () => {
     await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
   });
 
+  it('a refresh that settles after a reset writes nothing', async () => {
+    let now = 1_000_000;
+    await fetchOpenRouterPrices({
+      fetch: async () => jsonResponse(payload),
+      now: () => now,
+    });
+    now += OPENROUTER_PRICE_CACHE_TTL_MS + 1;
+    let release: ((response: Response) => void) | undefined;
+    let refreshed: Promise<unknown> | undefined;
+    const stale = await fetchOpenRouterPrices({
+      fetch: () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+      now: () => now,
+      waitUntil: (work) => {
+        refreshed = work;
+      },
+    });
+    expect(stale.size).toBe(1);
+    expect(release).toBeDefined();
+    expect(refreshed).toBeDefined();
+
+    resetOpenRouterPriceCache();
+    release?.(jsonResponse(payload));
+    await refreshed;
+
+    // The late listing did not land: the next caller fetches afresh, and a
+    // failure there leaves it with no listing at all.
+    const warn = vi.fn();
+    const after = await fetchOpenRouterPrices({
+      fetch: async () => jsonResponse({ nope: true }, 500),
+      now: () => now,
+      logger: { warn },
+    });
+    expect(after.size).toBe(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('gives up on a hanging fetch at the timeout, and remembers the failure', async () => {
     let now = 1_000_000;
     let signal: AbortSignal | undefined;

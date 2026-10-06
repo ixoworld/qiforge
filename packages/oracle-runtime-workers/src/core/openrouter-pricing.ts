@@ -80,6 +80,8 @@ interface InflightFetch {
 let inflight: InflightFetch | null = null;
 /** When the last fetch failed (by the caller's clock); `null` after a success. */
 let failedAt: number | null = null;
+/** Bumped by a reset: a refresh started before it settles without writing. */
+let generation = 0;
 
 function parseContextLengths(
   data: z.infer<typeof openRouterModelsSchema>['data'],
@@ -160,6 +162,7 @@ async function refresh(opts: FetchOpenRouterPricesOptions): Promise<void> {
     opts.fetch ?? ((input: string, init?: RequestInit) => fetch(input, init));
   const logger = opts.logger ?? console;
   const controller = new AbortController();
+  const startedIn = generation;
   try {
     const parsed = await withTimeout(
       (async () => {
@@ -186,6 +189,7 @@ async function refresh(opts: FetchOpenRouterPricesOptions): Promise<void> {
     if (prices.size === 0) {
       throw new Error('OpenRouter /models returned no usable pricing');
     }
+    if (generation !== startedIn) return;
     cache = {
       fetchedAt: now(),
       prices,
@@ -193,6 +197,7 @@ async function refresh(opts: FetchOpenRouterPricesOptions): Promise<void> {
     };
     failedAt = null;
   } catch (error) {
+    if (generation !== startedIn) return;
     failedAt = now();
     logger.warn(
       `[models] live OpenRouter pricing unavailable — serving ${cache ? 'the last listing' : 'baseline prices'}: ${
@@ -281,9 +286,13 @@ export async function fetchOpenRouterContextLengths(
   return cache?.contextLengths ?? new Map<string, number>();
 }
 
-/** Test seam: clear the in-memory price cache, the shared fetch and the remembered failure. */
+/**
+ * Test seam: clear the in-memory price cache, the shared fetch and the
+ * remembered failure. A refresh still running settles without writing.
+ */
 export function resetOpenRouterPriceCache(): void {
   cache = null;
   inflight = null;
   failedAt = null;
+  generation += 1;
 }
