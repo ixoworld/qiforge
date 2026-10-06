@@ -41,6 +41,7 @@ describe('historyQueryOptions', () => {
       defaultOptions: { queries: { retry: false } },
     });
     const options = historyQueryOptions({
+      userDid: 'did:u',
       oracleDid: 'did:o',
       sessionId: 's',
       apiUrl: 'https://o',
@@ -83,6 +84,7 @@ describe('historyQueryOptions', () => {
       defaultOptions: { queries: { retry: false } },
     });
     const options = historyQueryOptions({
+      userDid: 'did:u',
       oracleDid: 'did:o',
       sessionId: 's',
       apiUrl: 'https://o',

@@ -30,6 +30,21 @@ const OraclesContext = createContext<IOraclesContextProps | undefined>(
   undefined,
 );
 
+/** Join the mint in flight for `key`, or start one and register it until it settles. */
+function shareMint(
+  pending: Map<string, Promise<string | null>>,
+  key: string,
+  mint: () => Promise<string | null>,
+): Promise<string | null> {
+  const inFlight = pending.get(key);
+  if (inFlight) return inFlight;
+  const minting = mint().finally(() => {
+    if (pending.get(key) === minting) pending.delete(key);
+  });
+  pending.set(key, minting);
+  return minting;
+}
+
 export const useOraclesContext = () => {
   const context = useContext(OraclesContext);
   if (context === undefined) {
@@ -66,6 +81,13 @@ export const OraclesProvider = ({
     Map<string, (props: Record<string, unknown>) => React.ReactElement | null>
   >(new Map());
 
+  // Mints in flight, per user and oracle: callers that miss the cache at the
+  // same moment (sessions, history, socket and run check all start together
+  // on a cold cache) share one mint instead of each signing their own. An
+  // entry is removed when its mint settles, so a failed mint can be retried.
+  const pendingDelegations = useRef(new Map<string, Promise<string | null>>());
+  const pendingInvocations = useRef(new Map<string, Promise<string | null>>());
+
   const getDelegation = useCallback(
     async (oracleDid: string): Promise<string | null> => {
       // Check cache first
@@ -75,45 +97,63 @@ export const OraclesProvider = ({
       // No callback provided — skip delegation
       if (!createDelegation) return null;
 
-      try {
-        const result = await createDelegation(oracleDid);
-        setCachedDelegation(
-          initialWallet.did,
-          oracleDid,
-          result.serialized,
-          result.expiresAt,
-        );
-        return result.serialized;
-      } catch (error) {
-        console.warn('Failed to create UCAN delegation:', error);
-        return null;
-      }
+      return shareMint(
+        pendingDelegations.current,
+        `${initialWallet.did}::${oracleDid}`,
+        async () => {
+          try {
+            const result = await createDelegation(oracleDid);
+            setCachedDelegation(
+              initialWallet.did,
+              oracleDid,
+              result.serialized,
+              result.expiresAt,
+            );
+            return result.serialized;
+          } catch (error) {
+            console.warn('Failed to create UCAN delegation:', error);
+            return null;
+          }
+        },
+      );
     },
     [initialWallet.did, createDelegation],
   );
 
   const getInvocation = useCallback(
-    async (oracleDid: string): Promise<string | null> => {
+    async (
+      oracleDid: string,
+      options?: { fresh?: boolean },
+    ): Promise<string | null> => {
       // Check cache first
-      const cached = getCachedInvocation(initialWallet.did, oracleDid);
-      if (cached) return cached;
+      if (!options?.fresh) {
+        const cached = getCachedInvocation(initialWallet.did, oracleDid);
+        if (cached) return cached;
+      }
 
       // No callback provided — skip invocation (migration-safe)
       if (!createInvocation) return null;
 
-      try {
-        const result = await createInvocation(oracleDid);
-        setCachedInvocation(
-          initialWallet.did,
-          oracleDid,
-          result.serialized,
-          result.expiresAt,
-        );
-        return result.serialized;
-      } catch (error) {
-        console.warn('Failed to create UCAN invocation:', error);
-        return null;
-      }
+      // A mint already in flight is as fresh as a new one.
+      return shareMint(
+        pendingInvocations.current,
+        `${initialWallet.did}::${oracleDid}`,
+        async () => {
+          try {
+            const result = await createInvocation(oracleDid);
+            setCachedInvocation(
+              initialWallet.did,
+              oracleDid,
+              result.serialized,
+              result.expiresAt,
+            );
+            return result.serialized;
+          } catch (error) {
+            console.warn('Failed to create UCAN invocation:', error);
+            return null;
+          }
+        },
+      );
     },
     [initialWallet.did, createInvocation],
   );

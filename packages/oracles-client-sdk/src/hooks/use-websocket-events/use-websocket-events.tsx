@@ -81,18 +81,25 @@ export function useWebSocketEvents(
         return;
       }
 
-      // Resolve the UCAN invocation (treated like a bearer token) alongside
-      // the delegation. Migration-safe: if no createInvocation callback is
-      // provided this is null and the handshake behaves as before.
-      const invocation = await getInvocation(props.oracleDid);
-      if (cancelled) return;
-
-      // Create WebSocket connection
+      // The handshake payload is built on every CONNECT (socket.io calls
+      // `auth` again for each reconnect), so a socket that reconnects after
+      // the cached invocation expired sends a current one. The invocation
+      // is treated like a bearer token; without a createInvocation callback
+      // it is null and the handshake carries the delegation only.
+      const oracleDid = props.oracleDid;
       const newSocket = io(apiUrl, {
         query: { sessionId, userDid: wallet.did },
-        auth: {
-          ucanDelegation: delegation,
-          ...(invocation && { invocation }),
+        auth: (cb) => {
+          void Promise.all([getDelegation(oracleDid), getInvocation(oracleDid)])
+            .then(([current, invocation]) => {
+              cb({
+                ucanDelegation: current ?? delegation,
+                ...(invocation && { invocation }),
+              });
+            })
+            .catch(() => {
+              cb({ ucanDelegation: delegation });
+            });
         },
         transports: ['websocket'],
       });
@@ -100,8 +107,16 @@ export function useWebSocketEvents(
       activeSocket = newSocket;
       socketRef.current = newSocket;
 
+      // socket.io never retries a CONNECT the server refused (the socket is
+      // no longer `active`). A refusal of the credentials (the server's
+      // message starts with `Unauthorized`) renews the invocation once and
+      // connects again; any other refusal (an unknown session) is final.
+      // A connection that succeeds earns the next refusal its own renewal.
+      let renewedAfterRefusal = false;
+
       // Connection event handlers
       newSocket.on('connect', () => {
+        renewedAfterRefusal = false;
         setIsConnected(true);
         setConnectionStatus('connected');
         setLastActivity(new Date().toISOString());
@@ -119,6 +134,17 @@ export function useWebSocketEvents(
         setConnectionStatus('error');
         setError(err);
         setLastActivity(new Date().toISOString());
+        if (
+          newSocket.active ||
+          !err.message.startsWith('Unauthorized') ||
+          renewedAfterRefusal ||
+          cancelled
+        )
+          return;
+        renewedAfterRefusal = true;
+        void getInvocation(oracleDid, { fresh: true }).then(() => {
+          if (!cancelled) newSocket.connect();
+        });
       });
 
       // Every server event is forwarded once, by the `onAny` listener below
@@ -129,9 +155,13 @@ export function useWebSocketEvents(
       // current registry only at dispatch. A call is run only for this
       // connection's own session and only while this connection is current
       // (a late call to a socket of a previous session or lifecycle is not).
+      // A client with no browser tools leaves the call to another client of
+      // the session.
       newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
         if (cancelled || data.sessionId !== sessionId) return;
-        await executeBrowserToolCall(newSocket, browserToolsRef.current, data);
+        const tools = browserToolsRef.current;
+        if (!tools || Object.keys(tools).length === 0) return;
+        await executeBrowserToolCall(newSocket, tools, data);
       });
 
       // Listen for AG-UI action calls (always register listener, even if no tools yet)

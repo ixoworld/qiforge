@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   useSyncExternalStore,
@@ -60,6 +61,14 @@ export function useChat({
 }: IChatOptions) {
   // Create chat instance with lazy initialization
   const chatRef = useRef<OracleChat | null>(null);
+  // The chat disposed by the unmount cleanup. A component mounted again
+  // with the same hook state (StrictMode runs effects twice) replaces it
+  // with a new one and counts a generation, which re-mirrors the history.
+  const disposedChatRef = useRef<OracleChat | null>(null);
+  const [chatGeneration, nextChatGeneration] = useReducer(
+    (n: number) => n + 1,
+    0,
+  );
 
   // Initialize or recreate chat if sessionId changes
   if (!chatRef.current || chatRef.current.id !== sessionId) {
@@ -114,12 +123,14 @@ export function useChat({
     overrides,
   );
   const {
+    wallet,
     authedRequest,
     executeAgAction,
     getAgActionRender,
     agActions,
     registeredAgActions,
   } = useOraclesContext();
+  const userDid = wallet?.did;
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
 
   // The history, one turn-aligned page at a time: the newest page first,
@@ -135,13 +146,14 @@ export function useChat({
   const historyOptions = useMemo(
     () =>
       historyQueryOptions({
+        userDid,
         oracleDid,
         sessionId,
         apiUrl,
         pageSize,
         request: requestJson,
       }),
-    [oracleDid, sessionId, apiUrl, pageSize, requestJson],
+    [userDid, oracleDid, sessionId, apiUrl, pageSize, requestJson],
   );
   const historyKey = historyOptions.queryKey;
   const {
@@ -288,7 +300,7 @@ export function useChat({
       agActionNames: agActions.map((action) => action.name),
     });
     void chatRef.current.setHistory(Object.values(transformedMessages));
-  }, [pages, queryStatus, agActions, uiComponents]);
+  }, [pages, queryStatus, agActions, uiComponents, chatGeneration]);
 
   // Handle tool call events from streaming
   const handleToolCall = useCallback(
@@ -554,15 +566,20 @@ export function useChat({
     actionTools,
   });
 
-  // Cleanup on unmount to ensure garbage collection
+  // Cleanup on unmount to ensure garbage collection. The disposed chat stays
+  // in the ref (writes still in flight land in it harmlessly); mounted again,
+  // the next render builds a new one.
   useEffect(() => {
+    if (chatRef.current && chatRef.current === disposedChatRef.current) {
+      chatRef.current = null;
+      nextChatGeneration();
+      return;
+    }
     return () => {
-      if (chatRef.current) {
-        chatRef.current.cleanup();
-        chatRef.current = null;
-      }
+      disposedChatRef.current = chatRef.current;
+      chatRef.current?.cleanup();
     };
-  }, []);
+  }, [chatGeneration]);
 
   useEffect(() => {
     if (queryError instanceof RequestError && queryError.outstandingClaims) {

@@ -8,6 +8,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import MatrixClient from '../../matrix/matrix-client.js';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
+import { authzConfigQueryOptions } from '../authz-config-query.js';
 
 const payments = new Payments();
 
@@ -40,20 +41,9 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
     [wallet?.matrix.accessToken],
   );
 
-  const { data: authzConfig, isLoading: isLoadingAuthzConfig } = useQuery({
-    queryKey: ['authz-config', params.oracleDid],
-    queryFn: async () => {
-      const config = await Authz.getOracleAuthZConfig({
-        oracleDid: params.oracleDid,
-        granterAddress: wallet?.address ?? '',
-        matrixAccessToken: wallet?.matrix.accessToken,
-        matrixHomeServer: wallet?.matrix.homeServer,
-      });
-      return config;
-    },
-    enabled: Boolean(wallet?.address && params.oracleDid),
-    staleTime: ORACLE_CONFIG_STALE_TIME_MS,
-  });
+  const { data: authzConfig, isLoading: isLoadingAuthzConfig } = useQuery(
+    authzConfigQueryOptions(params.oracleDid, wallet),
+  );
 
   const { data: oracleRoomId, isLoading: _isLoadingOracleRoomId } = useQuery({
     queryKey: ['oracle-room-id', params.oracleDid, wallet?.did],
@@ -217,6 +207,7 @@ const useContractOracle = ({ params }: IUseContractOracleProps) => {
       'oracle-in-room',
       params.oracleDid,
       params.userClaimCollectionId,
+      wallet?.did,
     ],
     queryFn: async () => {
       if (!oracleRoomId) {

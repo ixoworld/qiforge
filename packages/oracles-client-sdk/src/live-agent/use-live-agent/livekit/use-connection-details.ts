@@ -20,12 +20,17 @@ const JWT_SERVER = {
 };
 
 export default function useConnectionDetails() {
-  const [connectionDetails, setConnectionDetails] =
-    useState<ConnectionDetails | null>(null);
+  // The details are a JWT for one LiveKit room: kept with the room they
+  // were issued for, and never handed out for another.
+  const [current, setCurrent] = useState<{
+    roomId: string;
+    details: ConnectionDetails;
+  } | null>(null);
+  const connectionDetails = current?.details ?? null;
 
   const fetchConnectionDetails = useCallback(
     async (roomId: string, openIdToken: IOpenIDToken) => {
-      setConnectionDetails(null);
+      setCurrent(null);
       const url = process.env.NEXT_PUBLIC_JWT_SERVER ?? JWT_SERVER[network];
 
       let data: ConnectionDetails;
@@ -46,13 +51,18 @@ export default function useConnectionDetails() {
             device_id: 'PORTAL',
           }),
         });
+        if (!res.ok) {
+          throw new Error(`the JWT service answered ${res.status}`);
+        }
         data = await res.json();
       } catch (error) {
         console.error('Error fetching connection details:', error);
-        throw new Error('Error fetching connection details!');
+        throw new Error('Error fetching connection details!', {
+          cause: error,
+        });
       }
 
-      setConnectionDetails(data);
+      setCurrent({ roomId, details: data });
       return data;
     },
     [],
@@ -63,7 +73,7 @@ export default function useConnectionDetails() {
   // }, [fetchConnectionDetails]);
 
   const isConnectionDetailsExpired = useCallback(() => {
-    const token = connectionDetails?.jwt;
+    const token = current?.details.jwt;
     if (!token) {
       return true;
     }
@@ -72,21 +82,22 @@ export default function useConnectionDetails() {
     if (!jwtPayload.exp) {
       return true;
     }
-    const expiresAt = new Date(jwtPayload.exp - ONE_MINUTE_IN_MILLISECONDS);
-
-    const now = new Date();
-    return expiresAt >= now;
-  }, [connectionDetails?.jwt]);
+    // `exp` is in seconds; the details count as expired a minute early.
+    return jwtPayload.exp * 1000 - ONE_MINUTE_IN_MILLISECONDS <= Date.now();
+  }, [current?.details.jwt]);
 
   const existingOrRefreshConnectionDetails = useCallback(
     async (roomId: string, openIdToken: IOpenIDToken) => {
-      if (isConnectionDetailsExpired() || !connectionDetails) {
+      if (
+        !current ||
+        current.roomId !== roomId ||
+        isConnectionDetailsExpired()
+      ) {
         return fetchConnectionDetails(roomId, openIdToken);
-      } else {
-        return connectionDetails;
       }
+      return current.details;
     },
-    [connectionDetails, fetchConnectionDetails, isConnectionDetailsExpired],
+    [current, fetchConnectionDetails, isConnectionDetailsExpired],
   );
 
   return {

@@ -19,17 +19,21 @@ export type HistoryData = InfiniteData<HistoryPage<IMessage>, string | null>;
  * through what had been loaded. (Newest-last, with older pages prepended,
  * would make a refetch start from the oldest loaded page and stop there —
  * the conversation would come back showing only old messages.)
+ *
+ * The key names the user: the query client outlives an account switch, and
+ * one user's transcript must never be served from the cache to another.
  */
 export function historyQueryOptions(input: {
+  userDid: string | undefined;
   oracleDid: string;
   sessionId: string;
   apiUrl: string | null | undefined;
   pageSize: number;
   request: HistoryRequest;
 }) {
-  const { oracleDid, sessionId, apiUrl, pageSize, request } = input;
+  const { userDid, oracleDid, sessionId, apiUrl, pageSize, request } = input;
   return {
-    queryKey: [oracleDid, 'messages', sessionId] as const,
+    queryKey: [oracleDid, 'messages', sessionId, userDid] as const,
     queryFn: ({ pageParam }: { pageParam: string | null }) => {
       if (!apiUrl) throw new Error('the oracle API URL is not known yet');
       return fetchHistoryPage<IMessage>(request, apiUrl, sessionId, {
