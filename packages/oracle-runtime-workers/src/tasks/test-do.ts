@@ -462,8 +462,12 @@ export class TasksTestDO extends DurableObject {
     taskId: string,
     decision: 'approve' | 'reject',
     note?: string,
+    approvalRequestId?: string,
   ): Promise<{ resolved: boolean }> {
-    return this.ready().surface.resolveApproval(taskId, decision, note);
+    const surface = this.ready().surface;
+    const requestId =
+      approvalRequestId ?? (await surface.get(taskId))?.approvalRequest?.id;
+    return surface.resolveApproval(taskId, decision, note, requestId);
   }
 
   /**
@@ -476,8 +480,10 @@ export class TasksTestDO extends DurableObject {
     decision: 'approve' | 'reject',
     note?: string,
   ): Promise<{ resolved: boolean }> {
+    const surface = this.ready().surface;
+    const requestId = (await surface.get(taskId))?.approvalRequest?.id;
     return this.toolScheduler.run('write', undefined, () =>
-      this.ready().surface.resolveApproval(taskId, decision, note),
+      surface.resolveApproval(taskId, decision, note, requestId),
     );
   }
 

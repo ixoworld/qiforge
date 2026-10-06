@@ -64,6 +64,10 @@ import {
   type FeedbackShellOptions,
 } from '../feedback/submit';
 import { z } from 'zod';
+import {
+  WriteFingerprintSchema,
+  WriteReconciliationSchema,
+} from '../do/write-reconciliation';
 
 const DebugEventBody = z.object({
   type: z
@@ -534,6 +538,43 @@ export function createShell(
     return ok
       ? c.json({ message: 'Session deleted successfully' })
       : c.json({ message: 'Session not found' }, 404);
+  });
+
+  app.use(
+    '/write-reconciliations/*',
+    bodyLimit({
+      maxSize: 8192,
+      onError: (c) => c.json({ message: 'Request is too large.' }, 413),
+    }),
+  );
+  app.get('/write-reconciliations', async (c) => {
+    const auth = c.get('auth');
+    if (auth.via !== 'invocation')
+      return c.json({ message: 'A signed invocation is required.' }, 401);
+    return c.json(
+      await userStub(c.env, auth.userDid).outstandingWrites(
+        identityOf(auth, c.req.raw.headers),
+      ),
+    );
+  });
+  app.post('/write-reconciliations/:fingerprint', async (c) => {
+    const auth = c.get('auth');
+    if (auth.via !== 'invocation')
+      return c.json({ message: 'A signed invocation is required.' }, 401);
+    const fingerprint = WriteFingerprintSchema.safeParse(
+      c.req.param('fingerprint'),
+    );
+    const decision = WriteReconciliationSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!fingerprint.success || !decision.success)
+      return c.json({ message: 'Invalid reconciliation.' }, 400);
+    const result = await userStub(c.env, auth.userDid).reconcileWrite(
+      identityOf(auth, c.req.raw.headers),
+      fingerprint.data,
+      decision.data,
+    );
+    return c.json(result, result.resolved ? 200 : 409);
   });
 
   app.use('/topic-deliverables/*', async (c, next) => {

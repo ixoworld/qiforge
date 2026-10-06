@@ -337,7 +337,12 @@ describe('task tools', () => {
 
     const approved = asRecord(
       await toolByName('resolve_task_approval').handler(
-        { taskId: record.id, outcome: 'approved', note: 'fix the title' },
+        {
+          taskId: record.id,
+          outcome: 'approved',
+          note: 'fix the title',
+          approvalRequestId: '00000000-0000-4000-8000-000000000001',
+        },
         ctxWith(surface),
       ),
     );
@@ -352,7 +357,11 @@ describe('task tools', () => {
 
     const again = asRecord(
       await toolByName('resolve_task_approval').handler(
-        { taskId: record.id, outcome: 'declined' },
+        {
+          taskId: record.id,
+          outcome: 'declined',
+          approvalRequestId: '00000000-0000-4000-8000-000000000001',
+        },
         ctxWith(surface),
       ),
     );

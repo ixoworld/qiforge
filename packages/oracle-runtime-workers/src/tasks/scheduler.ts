@@ -65,6 +65,7 @@ import {
 } from './store';
 import { taskExecutionProfile } from '../core/execution-profile';
 import { retryGateway } from '../do/gateway-retry';
+import { taskApprovalDigest } from './approval';
 
 /** Session-id prefix for the synthetic sessions task runs execute on. */
 export const TASK_SESSION_PREFIX = 'task:';
@@ -287,6 +288,7 @@ function approvalRequestMessage(task: TaskRecord): string {
     'What it will do:',
     task.intent,
     '',
+    `Approval request: \`${task.approvalRequest?.id}\` (input digest \`${task.approvalRequest?.digest}\`).`,
     "Reply here to approve or decline — I'll run it only once you approve.",
   ].join('\n');
 }
@@ -400,8 +402,8 @@ class AlarmTaskScheduler implements TaskScheduler {
           throw new Error(TOPIC_TASK_CANCEL_ERROR);
         return this.cancel(id);
       },
-      resolveApproval: (taskId, decision, note) =>
-        this.resolveApproval(taskId, decision, note),
+      resolveApproval: (taskId, decision, note, approvalRequestId) =>
+        this.resolveApproval(taskId, decision, note, approvalRequestId),
     };
   }
 
@@ -748,6 +750,10 @@ class AlarmTaskScheduler implements TaskScheduler {
   /** One due task: its approved run, else its scheduled fire. */
   private async fire(task: TaskRecord, now: number): Promise<void> {
     if (task.status !== 'active') return;
+    if (task.approvalRequest?.delivery === 'pending') {
+      await this.deliverApprovalRequest(task, now);
+      return;
+    }
     if (task.approvedAt !== undefined && Date.parse(task.approvedAt) <= now) {
       await this.executeRun(task, now, {
         approved: true,
@@ -1004,6 +1010,8 @@ class AlarmTaskScheduler implements TaskScheduler {
     patch: Partial<OracleTaskInput>,
   ): Promise<OracleTaskRecord> {
     const task = await this.load(id);
+    const invalidatesOccurrence =
+      task.pendingApprovalAt !== undefined || task.approvedAt !== undefined;
     if (
       'executionProfile' in patch &&
       patch.executionProfile !== task.executionProfile
@@ -1062,7 +1070,20 @@ class AlarmTaskScheduler implements TaskScheduler {
       }
     }
     task.updatedAt = new Date().toISOString();
-    await this.store.save(task);
+    if (
+      invalidatesOccurrence &&
+      task.status === 'active' &&
+      patch.schedule === undefined
+    ) {
+      nextMs = Date.now();
+      task.nextRunAt = new Date(nextMs).toISOString();
+    }
+    await this.host.db.transaction(async () => {
+      delete task.pendingApprovalAt;
+      delete task.approvalRequest;
+      await this.store.invalidateApproval(task.id);
+      await this.store.save(task);
+    });
     if (nextMs !== null) await this.host.requestAlarm(nextMs);
     return task;
   }
@@ -1078,6 +1099,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     delete task.nextRunAt;
     // Pausing drops an unanswered approval request with it.
     delete task.pendingApprovalAt;
+    delete task.approvalRequest;
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
     return task;
@@ -1103,6 +1125,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     task.consecutiveFailures = 0;
     // Resuming skips any stale unanswered approval request.
     delete task.pendingApprovalAt;
+    delete task.approvalRequest;
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
     await this.host.requestAlarm(nextMs);
@@ -1118,6 +1141,7 @@ class AlarmTaskScheduler implements TaskScheduler {
     task.status = 'cancelled';
     delete task.nextRunAt;
     delete task.pendingApprovalAt;
+    delete task.approvalRequest;
     task.updatedAt = new Date().toISOString();
     await this.store.save(task);
     this.host.log.log(`[tasks] cancelled ${task.id}`);
@@ -1144,6 +1168,68 @@ class AlarmTaskScheduler implements TaskScheduler {
           'Could not resolve a delivery room for the approval request',
         );
       }
+      task.approvalRequest = {
+        id: crypto.randomUUID(),
+        digest: await taskApprovalDigest(task, startedAt),
+        occurrence: startedAt,
+        delivery: 'pending',
+      };
+      task.pendingApprovalAt = startedAt;
+      if (task.schedule.kind === 'once') delete task.nextRunAt;
+      else {
+        const nextMs = computeNextRunAtMs(
+          task.schedule,
+          Math.max(nowMs, Date.now()),
+        );
+        if (nextMs !== null) task.nextRunAt = new Date(nextMs).toISOString();
+        else delete task.nextRunAt;
+      }
+      task.updatedAt = new Date().toISOString();
+      // Persist before the network await. An edit during delivery cannot be
+      // overwritten by a stale task copy after the message returns.
+      const persisted = await this.host.db.transaction(async () => {
+        const current = await this.store.get(task.id);
+        if (
+          !current ||
+          current.status !== 'active' ||
+          task.approvalRequest?.digest !==
+            (await taskApprovalDigest(current, startedAt))
+        )
+          return false;
+        task = {
+          ...current,
+          pendingApprovalAt: startedAt,
+          approvalRequest: task.approvalRequest,
+          nextRunAt: task.nextRunAt,
+          updatedAt: task.updatedAt,
+        };
+        await this.store.invalidateApproval(task.id);
+        await this.store.save(task);
+        await this.store.recordRun({
+          runId: crypto.randomUUID(),
+          taskId: task.id,
+          startedAt,
+          finishedAt: task.updatedAt,
+          detail: 'approval requested',
+        });
+        return true;
+      });
+      if (!persisted) return;
+      await this.deliverApprovalRequest(task, nowMs);
+    } catch (err) {
+      await this.recordFailure(await this.load(task.id), nowMs, startedAt, err);
+    }
+  }
+
+  private async deliverApprovalRequest(
+    task: TaskRecord,
+    nowMs: number,
+  ): Promise<void> {
+    const binding = task.approvalRequest;
+    if (!binding || binding.delivery !== 'pending') return;
+    try {
+      const roomId = await this.resolveDeliveryRoom(task);
+      if (!roomId) throw new Error('Approval delivery room unavailable');
       // Retried across a gateway restart under an id fixed per occurrence:
       // a send whose response was lost — or that went out just before a
       // reset, so the next tick asks again — is deduplicated by the
@@ -1151,7 +1237,7 @@ class AlarmTaskScheduler implements TaskScheduler {
       await retryGateway(
         () =>
           this.host.gateway.sendText(roomId, approvalRequestMessage(task), {
-            txnId: `task-approval-${task.id}-${task.nextRunAt ?? task.createdAt}`,
+            txnId: `task-approval-${task.id}-${binding.id}`,
             priority: 'interactive',
           }),
         {
@@ -1164,31 +1250,41 @@ class AlarmTaskScheduler implements TaskScheduler {
             ),
         },
       );
-      task.pendingApprovalAt = startedAt;
-      if (task.schedule.kind === 'once') {
-        delete task.nextRunAt;
-      } else {
-        const nextMs = computeNextRunAtMs(
-          task.schedule,
-          Math.max(nowMs, Date.now()),
-        );
-        if (nextMs !== null) task.nextRunAt = new Date(nextMs).toISOString();
-        else delete task.nextRunAt;
-      }
-      task.updatedAt = new Date().toISOString();
       await this.host.db.transaction(async () => {
-        await this.store.save(task);
-        await this.store.recordRun({
-          runId: crypto.randomUUID(),
-          taskId: task.id,
-          startedAt,
-          finishedAt: new Date().toISOString(),
-          detail: 'approval requested',
-        });
+        const current = await this.store.get(task.id);
+        if (
+          current?.approvalRequest?.id !== binding.id ||
+          current.status !== 'active'
+        )
+          return;
+        current.approvalRequest.delivery = 'delivered';
+        if (current.schedule.kind === 'once') delete current.nextRunAt;
+        else {
+          const next = computeNextRunAtMs(current.schedule, nowMs);
+          current.nextRunAt =
+            next === null ? undefined : new Date(next).toISOString();
+        }
+        await this.store.save(current);
       });
       this.host.log.log(`[tasks] approval requested for ${task.id}`);
     } catch (err) {
-      await this.recordFailure(task, nowMs, startedAt, err);
+      await this.host.db.transaction(async () => {
+        const current = await this.store.get(task.id);
+        if (
+          current?.approvalRequest?.id !== binding.id ||
+          current.status !== 'active'
+        )
+          return;
+        current.consecutiveFailures += 1;
+        current.nextRunAt = new Date(
+          nowMs + backoffDelayMs(current.consecutiveFailures),
+        ).toISOString();
+        await this.store.save(current);
+        await this.host.requestAlarm(Date.parse(current.nextRunAt));
+      });
+      this.host.log.warn(
+        `[tasks] approval delivery deferred for ${task.id}: ${errorMessage(err)}`,
+      );
     }
   }
 
@@ -1196,12 +1292,33 @@ class AlarmTaskScheduler implements TaskScheduler {
     taskId: string,
     decision: 'approve' | 'reject',
     note?: string,
+    approvalRequestId?: string,
+  ): Promise<{ resolved: boolean }> {
+    return this.host.db.transaction(() =>
+      this.resolveApprovalInTransaction(
+        taskId,
+        decision,
+        note,
+        approvalRequestId,
+      ),
+    );
+  }
+
+  private async resolveApprovalInTransaction(
+    taskId: string,
+    decision: 'approve' | 'reject',
+    note?: string,
+    approvalRequestId?: string,
   ): Promise<{ resolved: boolean }> {
     const task = await this.store.get(taskId);
     if (
       !task ||
       task.status !== 'active' ||
-      task.pendingApprovalAt === undefined
+      task.pendingApprovalAt === undefined ||
+      !task.approvalRequest ||
+      task.approvalRequest.id !== approvalRequestId ||
+      task.approvalRequest.digest !==
+        (await taskApprovalDigest(task, task.approvalRequest.occurrence))
     ) {
       return { resolved: false };
     }
@@ -1335,7 +1452,16 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.activeRuns.set(runId, task.id);
     try {
       const started = await this.host.db.transaction(async () => {
-        if (opts.approved && !(await this.store.claimApproval(task.id)))
+        if (
+          opts.approved &&
+          (!task.approvalRequest ||
+            task.approvalRequest.digest !==
+              (await taskApprovalDigest(
+                task,
+                task.approvalRequest.occurrence,
+              )) ||
+            !(await this.store.claimApproval(task.id)))
+        )
           return false;
         await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
         return true;

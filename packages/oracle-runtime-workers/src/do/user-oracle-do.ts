@@ -1,4 +1,9 @@
 import { ChannelTurns } from '../channels/turns';
+import {
+  WriteFingerprintSchema,
+  WriteReconciliationSchema,
+  type WriteReconciliation,
+} from './write-reconciliation';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
   ChannelError,
@@ -3641,6 +3646,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             }
           : undefined,
       };
+    }
+
+    async outstandingWrites(identity: TurnIdentity) {
+      await this.ready(identity);
+      return this.runStore!.listClaims();
+    }
+
+    async reconcileWrite(
+      identity: TurnIdentity,
+      fingerprint: string,
+      decision: WriteReconciliation,
+    ) {
+      WriteFingerprintSchema.parse(fingerprint);
+      const parsed = WriteReconciliationSchema.parse(decision);
+      await this.ready(identity);
+      const resolved = await this.runStore!.reconcileWrite(
+        fingerprint,
+        identity.userDid,
+        parsed,
+      );
+      if (resolved) this.markDirty();
+      return { resolved };
     }
 
     async topicDeliverable(

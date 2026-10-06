@@ -30,6 +30,8 @@ const configSchema = z.object({
   SANDBOX_MCP_URL: z.string().url(),
   /** Operator secrets injected as `x-os-*` headers: `KEY1=v1,KEY2=v2`. */
   ORACLE_SECRETS: z.string().optional(),
+  SANDBOX_USER_SECRET_NAMES: z.string().optional(),
+  SANDBOX_ORACLE_SECRET_NAMES: z.string().optional(),
 });
 
 /**
@@ -149,6 +151,7 @@ export interface SandboxMcpTool {
   name: string;
   description: string;
   schema: z.ZodType;
+  annotations?: PluginTool['annotations'];
   invoke(input: unknown): Promise<unknown>;
 }
 
@@ -163,6 +166,10 @@ export type SandboxMcpClientFactory = (
 const SANDBOX_IDLE_CLIENT_CLOSE_MS = 5 * 60 * 1000;
 
 export interface SandboxPluginOptions {
+  /** Host-selected names for this execution. Defaults to the configured allowlists, then none. */
+  selectCredentials?: (
+    ctx: RuntimeContext,
+  ) => Promise<{ user: string[]; oracle: string[] }>;
   /**
    * Override the auth header builder. Tests inject a stub here to skip the
    * did:web resolution + UCAN mint; production code lets the default builder
@@ -193,7 +200,10 @@ const ORACLE_MANAGEMENT_TOOL_PREFIX = 'oracle_';
  * {@link SandboxMcpTool}. Auth (UCAN invocation + secret headers) is applied
  * per request at invoke time, so definitions are safe to share.
  */
-type SandboxToolDef = Pick<SandboxMcpTool, 'name' | 'description' | 'schema'>;
+type SandboxToolDef = Pick<
+  SandboxMcpTool,
+  'name' | 'description' | 'schema' | 'annotations'
+>;
 
 interface CachedSandboxDefs {
   defs: SandboxToolDef[];
@@ -242,6 +252,9 @@ export class SandboxPlugin extends OraclePlugin {
   private readonly authBuilder: SandboxAuthBuilder;
   private readonly mcpClientFactory: SandboxMcpClientFactory;
   private readonly includeOracleManagementTools: boolean;
+  private readonly selectCredentials: NonNullable<
+    SandboxPluginOptions['selectCredentials']
+  >;
 
   constructor(opts: SandboxPluginOptions = {}) {
     super();
@@ -253,6 +266,25 @@ export class SandboxPlugin extends OraclePlugin {
       opts.mcpClientFactory ?? defaultSandboxMcpClientFactory;
     this.includeOracleManagementTools =
       opts.includeOracleManagementTools ?? false;
+    this.selectCredentials =
+      opts.selectCredentials ??
+      (async (ctx) => {
+        const names = (value: unknown): string[] =>
+          typeof value === 'string'
+            ? [
+                ...new Set(
+                  value
+                    .split(',')
+                    .map((name) => name.trim())
+                    .filter(Boolean),
+                ),
+              ]
+            : [];
+        return {
+          user: names(ctx.config.SANDBOX_USER_SECRET_NAMES),
+          oracle: names(ctx.config.SANDBOX_ORACLE_SECRET_NAMES),
+        };
+      });
   }
 
   override autoDetect(env: PluginEnv): boolean {
@@ -317,16 +349,18 @@ export class SandboxPlugin extends OraclePlugin {
           skillsServiceUrl,
           oracleSecrets,
           rtCtx,
+          discovery: true,
         })
           .then(async ({ client, tools }) => {
             // Defs are plain data — the refresh connection has nothing left
             // to serve once they're snapshotted.
             await client.close().catch(() => undefined);
             this.toolDefsCache.set(sandboxMcpUrl, {
-              defs: tools.map(({ name, description, schema }) => ({
+              defs: tools.map(({ name, description, schema, annotations }) => ({
                 name,
                 description,
                 schema,
+                annotations,
               })),
               expiresAt: Date.now() + SANDBOX_TOOL_DEFS_TTL_MS,
             });
@@ -351,14 +385,12 @@ export class SandboxPlugin extends OraclePlugin {
       return this.toPluginTools(lazyUpstream, rtCtx);
     }
 
-    const userSecrets = await rtCtx.secrets.getAll();
-
     const headers = await this.authBuilder(
       {
         sandboxMcpUrl,
         skillsServiceUrl,
-        oracleSecrets,
-        userSecrets,
+        oracleSecrets: {},
+        userSecrets: {},
       },
       rtCtx,
     );
@@ -395,10 +427,11 @@ export class SandboxPlugin extends OraclePlugin {
     } finally {
       await client.close().catch(() => undefined);
     }
-    const defs = upstream.map(({ name, description, schema }) => ({
+    const defs = upstream.map(({ name, description, schema, annotations }) => ({
       name,
       description,
       schema,
+      annotations,
     }));
     this.toolDefsCache.set(sandboxMcpUrl, {
       defs,
@@ -491,6 +524,7 @@ export class SandboxPlugin extends OraclePlugin {
       name: def.name,
       description: def.description,
       schema: def.schema,
+      annotations: def.annotations,
       invoke: async (input: unknown) => {
         const { byName } = await connect();
         const upstream = byName.get(def.name);
@@ -519,12 +553,28 @@ export class SandboxPlugin extends OraclePlugin {
     skillsServiceUrl: string | undefined;
     oracleSecrets: Record<string, string>;
     rtCtx: RuntimeContext;
+    discovery?: boolean;
   }): Promise<{ client: SandboxMcpClientLike; tools: SandboxMcpTool[] }> {
     const { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, rtCtx } = args;
-    const userSecrets = await rtCtx.secrets.getAll();
+    const selected = args.discovery
+      ? { user: [], oracle: [] }
+      : await this.selectCredentials(rtCtx);
+    const userSecrets = selected.user.length
+      ? await rtCtx.secrets.getValues(selected.user)
+      : {};
+    const selectedOracleSecrets: Record<string, string> = {};
+    for (const name of selected.oracle) {
+      const value = oracleSecrets[name];
+      if (value !== undefined) selectedOracleSecrets[name] = value;
+    }
 
     const headers = await this.authBuilder(
-      { sandboxMcpUrl, skillsServiceUrl, oracleSecrets, userSecrets },
+      {
+        sandboxMcpUrl,
+        skillsServiceUrl,
+        oracleSecrets: selectedOracleSecrets,
+        userSecrets,
+      },
       rtCtx,
     );
     if (!headers.Authorization) {
@@ -571,6 +621,7 @@ export class SandboxPlugin extends OraclePlugin {
       name: tool.name,
       description: tool.description,
       schema: tool.schema,
+      annotations: tool.annotations,
       handler: async (args) => tool.invoke(args),
     }));
 

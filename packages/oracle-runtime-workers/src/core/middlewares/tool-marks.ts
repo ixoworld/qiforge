@@ -119,6 +119,7 @@ export function toolEffectOf(tool: {
 }): ToolEffect {
   if (tool.effect) return tool.effect;
   if (tool.annotations?.readOnlyHint === true) return 'read';
+  if (tool.annotations?.readOnlyHint === false) return 'write';
   if (READ_NAMES.has(tool.name)) return 'read';
   // MCP tools arrive as `<server>__<tool>`; classify on the tool part.
   const bare = tool.name.includes('__')

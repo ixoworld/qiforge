@@ -1883,6 +1883,108 @@ describe('dedicated rooms by cadence', () => {
 });
 
 describe('approval requests across a reset', () => {
+  it('reissues legacy timestamp approvals rather than executing or stranding them', async () => {
+    const s = stub('approval-legacy-migration');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Legacy approval',
+      intent: 'Publish.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.runSql(
+      `UPDATE tasks SET next_run_at = NULL, pending_approval_at = ?, approved_at = ?, approval_request_json = NULL WHERE id = ?`,
+      [at, Date.now(), task.id],
+    );
+    await s.simulateReset();
+    await s.tick(Date.now() + 1);
+    expect(await s.turnRequests()).toEqual([]);
+    expect((await s.get(task.id))?.approvalRequest?.id).toBeDefined();
+    expect((await s.get(task.id))?.approvalRequest?.delivery).toBe('delivered');
+  });
+  it('invalidates the exact request when inputs change before or after approval', async () => {
+    const s = stub('approval-revision-bound');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Frozen inputs',
+      intent: 'Publish version one.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.tick(Date.parse(at) + 1);
+    const first = (await s.get(task.id))?.approvalRequest;
+    expect(first?.digest).toMatch(/^[a-f0-9]{64}$/);
+    await s.update(task.id, { intent: 'Publish version two.' });
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, first?.id),
+    ).toEqual({ resolved: false });
+    await s.tick(Date.now() + 1);
+    const second = (await s.get(task.id))?.approvalRequest;
+    expect(second?.id).not.toBe(first?.id);
+    expect(second?.digest).not.toBe(first?.digest);
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, second?.id),
+    ).toEqual({ resolved: true });
+    await s.update(task.id, { intent: 'Publish version three.' });
+    await s.tick(Date.now() + 1);
+    expect(await s.turnRequests()).toEqual([]);
+    expect((await s.get(task.id))?.intent).toBe('Publish version three.');
+    expect((await s.get(task.id))?.approvalRequest?.id).not.toBe(second?.id);
+  });
+
+  it('does not overwrite an edit made while an approval message is in flight', async () => {
+    const s = stub('approval-edit-during-send');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Edit in flight',
+      intent: 'Original.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('hang');
+    void s.tick(Date.parse(at) + 1);
+    await waitFor(async () => Boolean((await s.get(task.id))?.approvalRequest));
+    const originalId = (await s.get(task.id))?.approvalRequest?.id;
+    await s.update(task.id, { intent: 'Replacement.' });
+    await s.releaseSends();
+    expect((await s.get(task.id))?.intent).toBe('Replacement.');
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, originalId),
+    ).toEqual({ resolved: false });
+    expect(await s.turnRequests()).toEqual([]);
+  });
+
+  it('retries a failed approval delivery after restart with the persisted occurrence and request id', async () => {
+    const s = stub('approval-delivery-retry');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Retry delivery',
+      intent: 'Publish once.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('fail');
+    await s.tick(Date.parse(at) + 1);
+    const pending = (await s.get(task.id))?.approvalRequest;
+    expect(pending?.delivery).toBe('pending');
+    const retryAt = (await s.get(task.id))?.nextRunAt;
+    expect(retryAt).toBeDefined();
+    await s.simulateReset();
+    await s.setSendBehavior('ok');
+    await s.tick(Date.parse(retryAt!));
+    const delivered = (await s.get(task.id))?.approvalRequest;
+    expect(delivered).toEqual({ ...pending, delivery: 'delivered' });
+    expect(
+      (await s.sentMessages()).find((message) =>
+        message.body.includes('needs your approval'),
+      )?.txnId,
+    ).toBe(`task-approval-${task.id}-${pending?.id}`);
+    expect(await s.turnRequests()).toEqual([]);
+  });
   it('a request sent just before a reset is not posted again by the next tick', async () => {
     const s = stub('approval-reset-mid-send');
     await s.init();

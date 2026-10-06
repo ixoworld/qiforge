@@ -92,6 +92,7 @@ function summarizeRecord(record: OracleTaskRecord): Record<string, unknown> {
     approval: record.approval,
     ...(pendingApprovalAt !== undefined && {
       awaitingApprovalSince: pendingApprovalAt,
+      approvalRequest: record.approvalRequest,
     }),
     ...(record.executionProfile && {
       restricted: true,
@@ -349,6 +350,12 @@ function setStatusTool(
 
 const resolveApprovalInput = z.object({
   taskId: taskIdSchema.shape.taskId,
+  approvalRequestId: z
+    .string()
+    .uuid()
+    .describe(
+      'Exact request ID shown in the approval message or current task record.',
+    ),
   outcome: z.enum(['approved', 'declined']),
   note: z
     .string()
@@ -369,6 +376,7 @@ function resolveTaskApproval(): PluginTool {
           args.taskId,
           args.outcome === 'approved' ? 'approve' : 'reject',
           args.note,
+          args.approvalRequestId,
         );
         if (!result.resolved) {
           return { ok: false, error: 'No approval is pending for this task.' };
