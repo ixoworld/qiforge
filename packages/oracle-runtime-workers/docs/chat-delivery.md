@@ -180,3 +180,11 @@ A link is **a bearer link: anyone who has it can open the document until it expi
 - **Matrix rooms, chat style on.** The gateway posts one `m.text` event per part in the thread (`src/matrix/reply-parts.ts`). A text part's `formatted_body` is its Markdown rendered to HTML with any raw HTML from the model escaped, never passed through. An artefact is its title and an "Open document" link. Each part has its own transaction id (`reply-<eventId>-<partId>`), so a replay posts nothing twice. The typing indicator shows liveness while the run works.
 - **Matrix rooms, chat style off (the default).** One plain `m.text` with the reply text and no `formatted_body`, byte for byte what the runtime sent before chat delivery.
 - **Portal.** Unchanged: SSE frames, no plan.
+
+## Tests
+
+All in `pnpm test` (workerd), listed with what they prove in
+[testing](testing.md#unit-tests-seconds): the plan, profile and shaper
+(`src/delivery/*.test.ts`), the Matrix reply parts, the return-direct
+ordering hook, the artefact store, sweep and routes, and the channel turn
+that returns a finished run as its Reply Plan (`src/channels/turns.test.ts`).

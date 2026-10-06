@@ -7,6 +7,7 @@ forwards it to the right object.
 ```mermaid
 graph LR
     Client[Portal / SDK / curl] -->|HTTP + SSE, UCAN auth| Shell[Hono shell]
+    Channels[IXO Channels gateway] -->|POST /channels/turn, channel UCAN| Shell
     Shell -->|per user DID| UserDO[UserOracleDO × N users]
     Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
     Gateway -->|decrypted turn| UserDO
@@ -16,59 +17,16 @@ graph LR
 
 ## The objects
 
-### Supplied-context tasks
-
-A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
-when it creates a task through `ctx.tasks`. The task must run once with
-`approval: 'never'`. The adapter must obtain authorization for the supplied
-text before creation. This profile does not provide an authorization UI or
-an HTTP task endpoint.
-
-The scheduler persists the profile in the task row and its Markdown spec.
-It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
-Before original or resumed execution, the runtime checks the owner, task,
-run, session, profile and exact task input. The profile and task inputs
-cannot change. A revision requires a new task.
-
-The agent binds no tools and rejects model-emitted tool calls. Preparation
-excludes personal preferences, memory, plugin hooks, page context, attachment
-processing and capability routing. Model selection, token and time budgets,
-checkpoints and delivery recovery continue to use the existing runtime.
-The output is generated text, not proof that the user's goal was achieved
-or that a reviewer accepted it.
-
-The scheduler re-checks the policy on every original and recovered turn, not
-only at creation: a row that is not one-shot with `approval: 'never'` is
-refused, however it was written. A turn without the profile on a restricted
-task's `task:<id>` session is refused as well.
-
-Around the turn, the profile is read from the task row (never from a
-request) and keeps the source and result inside the turn:
-
-- No session title. The `task:<id>` session keeps its placeholder title; the
-  `session-title` model (the platform adapter, outside the turn's metered
-  model and budget) is never called.
-- No memory indexing. No task-run session is sent to the memory engine —
-  not on the next session create, not on a realtime drain, not on delete.
-  The next session create indexes the user's latest conversation instead.
-- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
-  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
-  own env-driven tracer is outside this switch: it attaches only when
-  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
-  that runs restricted tasks must not rely on that variable being hidden.
-- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
-  `get_task` returns metadata only (no intent, no result text) and
-  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
-  only cancelled.
-
-A task row whose profile this runtime does not know (written by a newer
-runtime) is skipped: it is never listed, scheduled or run, the other tasks
-keep working, and any turn on its session is refused.
-
-Before rolling back to a runtime that predates this profile, cancel or drain
-all restricted tasks. An older scheduler ignores the new profile column
-and can execute a pending restricted task with its ordinary tool set; it
-also titles, indexes and traces task sessions as ordinary ones.
+Turns reach a user object from four places: the Portal and other HTTP
+clients (`POST /messages/:id`, SSE), Matrix rooms through the gateway, IXO
+Channels (`POST /channels/turn`, [channels](channels.md)), and the task
+scheduler's alarm — which also runs the tasks the owner-only
+[Topic deliverable API](#topic-deliverable-api) creates. Every one of them
+is a durable run in the same object
+([operations](operations.md#turns-durable-runs)). How a reply is
+shaped for a chat surface is in [chat delivery](chat-delivery.md); browser
+tools and AG-UI actions over the socket are in
+[frontend bridge](frontend-bridge.md).
 
 ### `UserOracleDO` — one per user DID
 
@@ -82,6 +40,31 @@ writes about 5 chunk rows instead of 30–80 page rows.
 The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
+
+**Request admission.** Before the agent is prepared, a turn is offered to
+every plugin's `getRequestAdmission(ctx)`, in the order the plugins were
+loaded (`src/core/request-admission.ts`). A handler answers `pass` or
+`{ kind: 'handled', text, title }`, a deterministic authorized read that
+becomes the reply without a model call; the first `handled` wins (an empty
+text or title, a title over 200 or a text over 100,000 characters is
+refused as invalid). Handlers
+see a redacted config (the core settings without `OPEN_ROUTER_API_KEY`, the
+Matrix password and recovery phrase or `CLOUDFLARE_API_TOKEN`, plus their
+own plugin's keys), get `REQUEST_ADMISSION_TIMEOUT_MS` each (default 2 s;
+a late handler counts as `pass`), and are skipped for a turn with
+attachments, a scheduled task run and a Matrix group-room turn
+(`admissionApplies`, `src/do/user-oracle-do.ts`). The outcome is stored on
+the durable run as its disposition (`admitting`, `agent` or `direct-read`,
+inside the run's stored request), so a recovered attempt repeats an
+interrupted admission, replays a recorded direct read, or resumes the
+agent. A thrown or invalid answer ends the run `failed` with an `error`
+frame of `kind: 'request_admission'`
+([operations](operations.md#turns-durable-runs)). Plugins can also add
+per-turn middleware with `getRequestMiddlewares(ctx)`, collected afresh for
+each ordinary agent turn after the boot-time middleware. The plugin-author
+contract is in
+[`docs/architecture/request-admission.md`](../../../docs/architecture/request-admission.md)
+at the repo root.
 
 **Capability gate.** On-demand plugin tools and sub-agents are bound at
 build time but hidden from the model until the thread has loaded their plugin
@@ -408,6 +391,54 @@ sessions there ([pod-creator](pod-creator.md)). Hosts without it leave
 `ctx.kv` undefined; `createMemoryUserKv()` (`src/core/user-kv.ts`) is the
 in-memory implementation for tests.
 
+**Hard caps.** The rows sit in the same file as the user's LangGraph
+checkpoints, sessions and transcript, and that file is the owner copy:
+exported daily, re-imported on a cold start. The per-write options are the
+plugin's choice, so on their own they bound nothing. Both implementations
+enforce four caps that no option lifts (`USER_KV_LIMITS` in
+`src/core/user-kv.ts`, exported to plugins as `USER_KV_MAX_*`):
+
+| Cap                                 | Value   | Counts                                                              |
+| ----------------------------------- | ------- | ------------------------------------------------------------------- |
+| `USER_KV_MAX_VALUE_BYTES`           | 256 KiB | UTF-8 bytes of one value's JSON                                     |
+| `USER_KV_MAX_ENTRIES_PER_NAMESPACE` | 10,000  | rows in one namespace                                               |
+| `USER_KV_MAX_TOTAL_ENTRIES`         | 50,000  | rows across all namespaces                                          |
+| `USER_KV_MAX_TOTAL_BYTES`           | 32 MiB  | UTF-8 bytes of namespace, key and value JSON, summed over every row |
+
+A `maxEntries` above the per-namespace cap is rejected with a `RangeError`,
+not clamped. A value above the byte cap is refused before anything is
+written. Otherwise the write, and the trim its own `maxEntries` asks for,
+run first; then, inside the same transaction, the store is measured. If a
+cap is broken, expired rows of every namespace are swept once and the store
+measured again; if it is still broken, the call rejects with
+`UserKvLimitError` (`limit`: `value` / `namespace-entries` / `entries` /
+`bytes`, plus `max`, `actual` and `namespace`) and the transaction rolls
+back: the write and its trim are undone, the previous value stays, and
+nothing is evicted to make room — the runtime cannot tell which plugin's
+rows are expendable. Only a measure the write grew is checked: a
+new key for the entry counts, a bigger value than the row it replaces for
+the byte total (a replaced row keeps its namespace and key). Replacing a
+key therefore counts only the difference in size, and a file already above a cap (written before the caps existed) can still
+shrink, replace in place and delete. `delete`, and `update` returning
+`undefined`, are never refused.
+
+Each row carries `bytes`: the UTF-8 bytes of its namespace, key and value
+JSON together (`userKvRowBytes`, computed in JS with the same encoder as the
+per-value check). Names count because each may be 512 UTF-16 characters, up
+to 3 UTF-8 bytes each — about 3 KB of names per row, about 150 MB over
+50,000 rows — which a value-only total would let past the 32 MiB cap.
+`idx_user_kv_bytes` covers the
+store-wide `COUNT(*)` + `SUM(bytes)`, so the measure reads that index, not
+the values; the namespace count uses `idx_user_kv_recency`, and the sweep
+`idx_user_kv_expiry`. A write that adds no key and no bytes skips the
+measure. `setup()` upgrades a table from an older build in place (the
+harness and live objects keep their files across releases): if
+`PRAGMA table_info(user_kv)` has no `bytes`, it adds the column and fills it
+with `length(CAST(namespace AS BLOB)) + length(CAST(key AS BLOB)) +
+length(CAST(value AS BLOB))` in one transaction, then creates the
+indexes idempotently. The constructor's `limits` option exists for tests;
+`UserOracleDO` constructs the store without it.
+
 ### What fills a user's file
 
 Measured on a devnet user after ~350 sessions / 2,500 messages (26 MB
@@ -418,12 +449,16 @@ plain-text column the Node schema declares, plus the gzipped blob that is
 the only copy anything reads). Checkpoints are kept at 10 per thread
 (`DEFAULT_MAX_CHECKPOINTS_PER_THREAD`).
 
-Candidates deliberately not done yet, in order of payoff: cap or
-de-duplicate large tool outputs; a full-text index (our wa-sqlite build has
-no FTS5); native DO SQLite instead of the in-isolate WASM engine (removes
-the ~16 MB per-object heap, loses raw-file export); a resume of the turn
-after an isolate reset (the checkpointer already saves every step, but a
-tool mid-flight at the reset would run twice).
+Candidates deliberately not done yet, in order of payoff: de-duplicate the
+plain-text and blob copies of each message; a full-text index (our wa-sqlite
+build has no FTS5); native DO SQLite instead of the in-isolate WASM engine
+(removes the ~16 MB per-object heap, loses raw-file export). Two earlier
+candidates are done: a tool result above the context cap is truncated at
+the tool boundary, so the checkpoint and the transcript carry the capped
+text and the whole text is kept for 24 h in `tool_results` or R2
+([context budgets](operations.md#turns-context-budgets)); and a turn cut
+off by an isolate reset resumes from its checkpoint without repeating a
+write tool ([durable runs](operations.md#turns-durable-runs)).
 
 ## Object lifetime and cost
 
@@ -626,6 +661,100 @@ and an object stops hibernating or a request dies with an opaque error.
   waited sends retry with the same transaction id (`src/do/gateway-retry.ts`).
 - **DO SQL** allows at most 100 bound parameters per statement and dislikes
   `LIKE` patterns; wa-sqlite's heap never shrinks (~16 MiB steady state).
+- **A cache on a plugin instance is shared by every user of the isolate.**
+  It must be keyed per user and bounded, or one-off users accumulate for the
+  isolate's lifetime. The composio plugin's tool-definition cache
+  (`src/plugins/composio/composio-tools.ts`) keys entries by base URL and
+  user, keeps them 5 minutes (`COMPOSIO_TOOL_DEFS_TTL_MS`), serves an expired
+  entry for one more TTL while a background refresh runs, and prunes
+  everything older on every lookup and every write — including when the
+  replacement session open fails and nothing is written — with a hard cap
+  of 1,000 users (`COMPOSIO_DEFS_CACHE_MAX_ENTRIES`, soonest-to-expire
+  evicted first).
+
+## Tasks
+
+Scheduled tasks live in the user's own SQLite file and run from the
+object's alarm as durable runs; the run ledger, delivery rounds and what the
+user sees are in [operations](operations.md#tasks-the-run-ledger).
+Supplied-context tasks, the Topic deliverables built on them, and two
+export adapters use the same scheduler and task records.
+
+### Supplied-context tasks
+
+A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
+when it creates a task through `ctx.tasks`. The task must run once with
+`approval: 'never'`. The adapter must obtain authorization for the supplied
+text before creation. The profile has no authorization UI and no generic
+HTTP task endpoint; the one HTTP surface that creates such tasks is the
+owner-only [Topic deliverable API](#topic-deliverable-api) below.
+
+The scheduler persists the profile in the task row and its Markdown spec.
+It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
+Before original or resumed execution, the runtime checks the owner, task,
+run, session, profile and exact task input. The profile and task inputs
+cannot change. A revision requires a new task.
+
+The agent binds no tools and rejects model-emitted tool calls. Preparation
+excludes personal preferences, memory, plugin hooks, page context, attachment
+processing and capability routing. Model selection, token and time budgets,
+checkpoints and delivery recovery continue to use the existing runtime.
+The output is generated text, not proof that the user's goal was achieved
+or that a reviewer accepted it.
+
+The scheduler re-checks the policy on every original and recovered turn, not
+only at creation: a row that is not one-shot with `approval: 'never'` is
+refused, however it was written. A turn without the profile on a restricted
+task's `task:<id>` session is refused as well.
+
+Around the turn, the profile is read from the task row (never from a
+request) and keeps the source and result inside the turn:
+
+- No session title. The `task:<id>` session keeps its placeholder title; the
+  `session-title` model (the platform adapter, outside the turn's metered
+  model and budget) is never called.
+- No memory indexing. No task-run session is sent to the memory engine —
+  not on the next session create, not on a realtime drain, not on delete.
+  The next session create indexes the user's latest conversation instead.
+- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
+  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
+  own env-driven tracer is outside this switch: it attaches only when
+  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
+  that runs restricted tasks must not rely on that variable being hidden.
+- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
+  `get_task` returns metadata only (no intent, no result text) and
+  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
+  only cancelled.
+
+A task row whose profile this runtime does not know (written by a newer
+runtime) is skipped: it is never listed, scheduled or run, the other tasks
+keep working, and any turn on its session is refused.
+
+Before rolling back to a runtime that predates this profile, cancel or drain
+all restricted tasks. An older scheduler ignores the new profile column
+and can execute a pending restricted task with its ordinary tool set; it
+also titles, indexes and traces task sessions as ordinary ones.
+
+### Portable work and wake adapters
+
+Two pure functions exported from the package root turn a task record into
+the provider-neutral contracts of `@ixo/common/work`, each validated with
+its schema before it is returned (a record that does not fit throws a
+`ZodError`). Nothing in the runtime calls them yet; they are for hosts that
+hand work or wake-ups to another system (`src/tasks/spec.ts`):
+
+- `portableWorkFromTaskRecord(record)` → a `PortableWorkDefinition`
+  (`version: 1`, the task's `title` and `intent`). Owner, schedule,
+  approvals, credentials and execution state are left out on purpose; the
+  schema also refuses reserved authority, credential and execution-state
+  keys in `configurationDefaults` (`PORTABLE_WORK_RESERVED_CONFIGURATION_KEYS`).
+- `agentWakeFromTaskRecord(record, principal, occurredAt)` → a notify-only
+  `AgentWake` for one scheduled occurrence (`wakeId`
+  `task:<id>@<occurredAt>`, `source: 'task'`, `resourceRef: task:<id>`,
+  `observedRevision` = the record's `updatedAt`, `reason: 'scheduled-run'`,
+  `notifyOnly: true`). `principal` must be a DID and `occurredAt` an ISO
+  datetime. A wake carries no authority: the scheduler still re-reads the
+  task before it runs anything.
 
 ### Topic deliverable API
 

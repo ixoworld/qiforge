@@ -31,6 +31,14 @@ export {
 } from './tool-plane';
 export type { ToolHelperOptions } from './tool-helper';
 export { UcanMintUnavailableError } from './ucan-errors';
+export {
+  USER_KV_MAX_ENTRIES_PER_NAMESPACE,
+  USER_KV_MAX_TOTAL_BYTES,
+  USER_KV_MAX_TOTAL_ENTRIES,
+  USER_KV_MAX_VALUE_BYTES,
+  UserKvLimitError,
+} from '../core/user-kv';
+export type { UserKvLimitKind } from '../core/user-kv';
 export type {
   ActionCallEventPayload,
   AgentMiddleware,

@@ -38,7 +38,9 @@ re-asked with a fabricated "authorization override".
    service reported — releases the claim. An abort, the deadline, a dropped
    connection or a 5xx keeps it, whether thrown or returned by a tool that
    catches its own failures (an error-shaped result whose message is one of
-   those; `uncertainResultReason`). An identical call while a claim stands is
+   those; `uncertainResultReason`), and so does a result that reports
+   `outcome: 'unknown'` itself (the frontend bridge's
+   `FRONTEND_OUTCOME_UNKNOWN`). An identical call while a claim stands is
    answered with an error tool message telling the model to verify with a
    read and ask the user (the claim becomes `warned`, owned by that run);
    the same turn stays blocked, a later turn that asks again runs it. Claims

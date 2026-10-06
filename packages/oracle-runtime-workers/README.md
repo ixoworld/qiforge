@@ -2,7 +2,9 @@
 
 Run a QiForge oracle on **Cloudflare Workers** — no server, no disk, no Redis.
 The same plugin API, wire protocol and UCAN auth as `@ixo/oracle-runtime`,
-re-hosted on Durable Objects. Bounded semantic Decisions are included too, and
+re-hosted on Durable Objects. This is the only maintained runtime: the Node
+runtime is deprecated, and what differs from it is in
+[node-parity](docs/node-parity.md). Bounded semantic Decisions are included too, and
 can run on Workers AI through the `AI` binding instead of account credentials
 (see [configuration](docs/configuration.md#decisions)).
 
@@ -87,7 +89,11 @@ Every variable, binding and migration is explained in
 | `GET /health`, `GET /health/matrix`                   | Liveness; the gateway's health (503 when not running) |
 | `GET /matrix/status`, `POST /matrix/start`            | Gateway status and start                              |
 | `POST/GET /sessions`, `POST/GET /messages/:id`        | The chat API                                          |
+| `GET /runs/:runId`, `GET /sessions/:id/messages`      | Re-join a durable run; one page of a transcript       |
 | `/delegation`, `/models`, `/socket.io/`, `/byo-llm/*` | Delegation, models, realtime channel, BYO LLM         |
+| `POST /channels/turn`                                 | IXO Channels ingress (its own channel UCAN policy)    |
+| `POST /messages/:sessionId/:messageId/feedback`       | Anonymous feedback on a reply (when configured)       |
+| `/topic-deliverables/:operationId`                    | Owner-only Topic deliverables (when enabled)          |
 | `GET /a/:id`, `GET /a/:id/data`                       | Artefact links opened from chat apps (public)         |
 | `GET/DELETE /artifacts/:id`                           | An artefact's canonical copy; revoke its link         |
 | `/debug/*` (with `ORACLE_DEBUG_ROUTES=true`)          | Storage, tasks, sockets, outbox, gateway restart      |
@@ -99,13 +105,15 @@ lifetime are in [operations](docs/operations.md).
 
 | Page                                       | What it covers                                                                                |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| [architecture](docs/architecture.md)       | The objects, the gateway split, self-sovereign storage, cost model, the rules of workerd      |
-| [node-parity](docs/node-parity.md)         | What is identical to the Node runtime, what is ported differently, what is not ported         |
-| [configuration](docs/configuration.md)     | Wrangler config, migrations, every env var, first-time setup, the bot's send rate             |
+| [architecture](docs/architecture.md)       | The objects, the gateway split, self-sovereign storage, cost model, workerd rules, tasks      |
+| [node-parity](docs/node-parity.md)         | What is identical to the Node runtime, what differs, what is Workers-only, what is not ported |
+| [configuration](docs/configuration.md)     | Wrangler config, migrations, every env var and binding, `createOracleWorker` options, setup   |
 | [operations](docs/operations.md)           | Routes, status fields, gateway and user-object lifecycle, the ChatGPT proxy, the runbook      |
 | [chat-delivery](docs/chat-delivery.md)     | Chat replies on WhatsApp and Matrix: profiles, Reply Plans, artefacts and their links         |
 | [channels](docs/channels.md)               | The IXO Channels ingress: authorization, retries, Reply Plans, Matrix continuity              |
 | [frontend-bridge](docs/frontend-bridge.md) | Browser tools and AG-UI actions over the socket: one invocation, one socket, unknown outcomes |
+| [pod-creator](docs/pod-creator.md)         | The POD Creator plugin: roles, state in `ctx.kv`, the create path and its launch gate         |
+| [ixo-transaction](docs/ixo-transaction.md) | The opt-in wallet-signing plugin: chain ids, signing outcomes, the mainnet receipt rule       |
 | [testing](docs/testing.md)                 | Unit, harness e2e, the devnet feature matrix, stress                                          |
 | [load-tests](docs/load-tests.md)           | Measurements and the findings that shaped the gateway                                         |
 
@@ -122,6 +130,12 @@ lifetime are in [operations](docs/operations.md).
   attachments now use (a 50 MB Node-era checkpoint no longer resets the
   user object's isolate) and the crypto-snapshot flush before every keys
   upload.
+- October 2026: the Node runtime was deprecated (pull request 330), and the
+  Workers runtime gained the IXO Channels ingress, chat delivery with
+  artefacts, request admission, supplied-context tasks and the Topic
+  deliverable API, admin-plane tools, anonymous feedback, the POD Creator
+  and ixo-transaction plugins (see the pages above and
+  [node-parity](docs/node-parity.md#workers-only)).
 - Open: the memory engine's recall ranking on accounts with a long history;
   the storage cost of task-holding users at scale (R2 page tier, see
   [architecture](docs/architecture.md#storage-cost-planning)).

@@ -6,6 +6,11 @@ formats are the same, so a user can move between the runtimes. This page is
 the contract — what is identical, what is ported with a different
 implementation, and what is deliberately left out.
 
+The Node runtime is deprecated (October 2026, pull request 330): nothing new
+is built there and no parity work is done. Features added to the Workers
+runtime since then exist only here; they are listed under
+[Workers only](#workers-only) rather than as divergences.
+
 ## Identical
 
 - **Plugin API**: `OraclePlugin` / `defineOraclePlugin` / `tool()`,
@@ -162,7 +167,7 @@ implementation, and what is deliberately left out.
 
 | Surface                            | Node                                 | Workers                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ---------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences, pod-creator; `FlowsPlugin` exported for opt-in wiring. MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                                                                                                                          |
+| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences, pod-creator; `FlowsPlugin` exported for opt-in wiring; `IxoTransactionPlugin` exported, opt-in and Workers-only ([ixo-transaction](ixo-transaction.md)). MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                        |
 | Tasks                              | BullMQ / Redis                       | DO alarms; records live in the user's SQLite file; runs re-enter the agent as background sessions and deliver to the room, same preview → confirm → create and approval-gate contract; dedicated `[Task] <title>` rooms as on Node. Runs are at-most-once per occurrence (a run ledger in the user's file; Node's BullMQ jobs re-run after a worker restart) and deliveries are idempotent (fixed transaction id, retried across a gateway restart). |
 | Editor / flows                     | JSDOM                                | linkedom DOM shim; the heavy chain is lazy-imported; a second, crypto-less bot device from the gateway (`ctx.matrix.botCredentials()`).                                                                                                                                                                                                                                                                                                              |
 | Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                                                                                             |
@@ -266,8 +271,12 @@ implementation, and what is deliberately left out.
 tool schema: …`), and reaches the client as a `tool_call` frame with
   `status: 'error'` and the message, so the Portal renders it as failed
   instead of as a finished call.
-- **Turn resume after an isolate reset** is not built: the in-flight turn
-  dies with an SSE `error` and the user resends.
+- **A turn survives an isolate reset.** Every turn is a durable run: a reset
+  mid-turn is recovered from the last checkpoint on the next boot, a started
+  write tool is not run again (the model is told its outcome is unknown),
+  and a client re-joins the run's frames with a cursor
+  ([operations](operations.md#turns-durable-runs)). Node has no
+  equivalent.
 - **A room message's sender is checked against the DID's homeserver.**
   Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
   sender's server (or, for a non-DID sender, the room alias's) must be the
@@ -338,6 +347,28 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   durable, so a quiet room's messages are compacted at its next engagement.
   Node's weekly/monthly tier rollups were never scheduled on Node either
   and are not ported (the `tier` column stays at 1).
+
+## Workers only
+
+Built on the Workers runtime with no Node counterpart; none will be added to
+the deprecated Node runtime:
+
+- **IXO Channels ingress** (`POST /channels/turn`) — [channels](channels.md).
+- **Chat delivery and artefacts** (Reply Plans, `create_artifact`, the
+  `/a/:id` links, the R2 sweep) — [chat delivery](chat-delivery.md).
+- **Request admission** (`getRequestAdmission`, `getRequestMiddlewares`) —
+  [architecture](architecture.md#useroracledo--one-per-user-did).
+- **Supplied-context tasks and the Topic deliverable API** —
+  [architecture](architecture.md#tasks).
+- **Plugin state in the user's file** (`ctx.kv`) —
+  [architecture](architecture.md#plugin-state-in-the-users-file-ctxkv).
+- **The `IxoTransactionPlugin`** — [ixo-transaction](ixo-transaction.md).
+
+The portable-work and AgentWake adapters exist on both runtimes, over each
+runtime's own task shape (`portableWorkFromTaskRecord` /
+`agentWakeFromTaskRecord` here, `portableWorkFromTaskSpec` /
+`agentWakeFromTaskSpec` on Node); the admin tool plane exists on both with
+the naming difference above.
 
 ## Not ported
 
