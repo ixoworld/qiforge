@@ -268,7 +268,9 @@ describe('createRuntimeCore decisions', () => {
       value: 'x',
     });
 
-    expect(run).toHaveBeenCalledWith('typesafe/jev-next', ROUTE_JEV_INPUT);
+    expect(run).toHaveBeenCalledWith('typesafe/jev-next', ROUTE_JEV_INPUT, {
+      signal: expect.any(AbortSignal),
+    });
     expect(result.judgment?.method).toEqual({ kind: 'provider-native' });
   });
 

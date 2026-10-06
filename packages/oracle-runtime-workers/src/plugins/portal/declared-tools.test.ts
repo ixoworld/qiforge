@@ -100,21 +100,16 @@ describe('dropped declarations are logged once per request', () => {
   it.each(['portal', 'agui'] as const)(
     '%s writes one bounded warning for many dropped entries',
     async (plugin) => {
+      // Distinct names: a name declared twice is already folded to its first
+      // descriptor when the declarations are read, before this check.
+      const bad = Array.from({ length: 200 }, (_, i) =>
+        declared(`bad name ${i}`),
+      );
       const base = makeRuntimeContext(
         {},
         {
           state:
-            plugin === 'portal'
-              ? {
-                  browserTools: Array.from({ length: 200 }, () =>
-                    declared('bad name'),
-                  ),
-                }
-              : {
-                  agActions: Array.from({ length: 200 }, () =>
-                    declared('bad name'),
-                  ),
-                },
+            plugin === 'portal' ? { browserTools: bad } : { agActions: bad },
         },
       );
       const warn = vi.fn();

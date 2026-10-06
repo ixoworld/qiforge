@@ -821,9 +821,14 @@ describe('createMainAgent', () => {
     expect(systemPrompt).toContain(
       "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url",
     );
+    // A clash with a server tool is dropped by the registry as the tools are
+    // collected; one with a meta-tool by the agent build. Each names the
+    // plugin and the tool.
     for (const name of ['record_note', 'get_note_count', 'load_capability'])
       expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining(`plugin "portal" request-time tool "${name}"`),
+        expect.stringMatching(
+          new RegExp(`"portal".*"${name}"|"${name}".*"portal"`),
+        ),
       );
 
     // The server's handler runs, and its identical write stays capped: the
