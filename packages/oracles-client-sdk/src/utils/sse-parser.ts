@@ -1,3 +1,7 @@
+import {
+  parseOracleInteraction,
+  type OracleInteraction,
+} from '@ixo/oracles-events/interactions';
 /* eslint-disable no-console */
 /**
  * SSE (Server-Sent Events) stream parser for handling real-time events
@@ -157,6 +161,7 @@ export interface SSEReasoningEventData {
 
 // Type-safe SSE events using discriminated unions
 export type SSEEvent =
+  | BaseSSEEvent<'interaction', OracleInteraction>
   | BaseSSEEvent<'message', SSEMessageEventData>
   | BaseSSEEvent<'tool_call', SSEToolCallEventData>
   | BaseSSEEvent<'action_call', SSEActionCallEventData>
@@ -182,6 +187,7 @@ function isValidSSEEventType(
   eventType: string,
 ): eventType is SSEEvent['event'] {
   const validEventTypes: SSEEvent['event'][] = [
+    'interaction',
     'message',
     'tool_call',
     'action_call',
@@ -249,6 +255,16 @@ export async function* parseSSEStream(
       // The event name decides the payload type; the server is the
       // authority on the shape, as it always was.
       const parsedData = JSON.parse(payload);
+      if (eventName === 'interaction') {
+        const update = parseOracleInteraction(parsedData);
+        return update
+          ? {
+              event: 'interaction',
+              data: update,
+              ...(frameId !== undefined ? { id: frameId } : {}),
+            }
+          : undefined;
+      }
       return {
         event: eventName,
         data: parsedData,

@@ -1,4 +1,8 @@
 import type {
+  OracleInteraction,
+  InteractionAchievement,
+} from '@ixo/oracles-events/interactions';
+import type {
   TopicDeliverableCommand,
   TopicDeliverableResult,
 } from '../tasks/topic-deliverables';
@@ -344,6 +348,10 @@ export interface TurnIdentity {
 
 /** Request the shell / gateway sends to `UserOracleDO` to run one turn. */
 export interface TurnRequest {
+  /** The message acknowledged; the deduplication eventId can instead be an attachment. */
+  interactionEventId?: string;
+  /** Intake could not verify engagement; retain existing agent fallback without signals. */
+  interactionsDisabled?: boolean;
   channel?: {
     provider: 'whatsapp';
     bindingId: string;
@@ -518,6 +526,8 @@ export interface RunsStatus {
 
 /** Non-streaming turn result. */
 export interface TurnResult {
+  interaction?: OracleInteraction;
+  achievement?: InteractionAchievement;
   sessionId: string;
   requestId: string;
   /** The model's final text, on every surface (never a chat rendering). */
@@ -721,7 +731,7 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
    */
   finishWorkStatus(
     requestId: string,
-    phase: 'done' | 'superseded',
+    phase: 'done' | 'superseded' | 'waiting' | 'failed' | 'cancelled',
   ): Promise<void>;
   /** Operator probe: what header-less turns would mint from. */
   delegationStatus(userDid: string): Promise<{
@@ -813,6 +823,7 @@ export interface CreateRoomOptions {
  * rest is the oracle's.
  */
 export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
+  publishInteraction(update: OracleInteraction): Promise<void>;
   /**
    * A media event's content as a stream, AS STORED: in an E2EE room the
    * ciphertext plus the `EncryptedFile` fields to pipe through the SDK's

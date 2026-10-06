@@ -1,3 +1,7 @@
+import {
+  isTerminalInteraction,
+  type OracleInteraction,
+} from '@ixo/oracles-events/interactions';
 import { JobExecutor } from './job-executor.js';
 import { OracleChatState } from './oracle-chat-state.js';
 import { mergeHistory } from '../../../utils/transcript-pages.js';
@@ -138,6 +142,43 @@ export class OracleChat {
       }
     });
   };
+
+  associateRequest(messageId: string, requestId: string): Promise<void> {
+    return this.#jobExecutor.run(async () => {
+      this.#state.updateMessageById(messageId, (message) => ({
+        ...message,
+        requestId,
+      }));
+    });
+  }
+
+  applyInteraction(update: OracleInteraction): Promise<void> {
+    return this.#jobExecutor.run(async () => {
+      if (update.sessionId !== this.id) return;
+      const index = this.#state.messages.findIndex(
+        (message) =>
+          message.type === 'human' && message.requestId === update.requestId,
+      );
+      const message = this.#state.messages[index];
+      if (!message) return;
+      const previous = message.interaction;
+      if (
+        previous &&
+        (previous.oracleDid !== update.oracleDid ||
+          previous.revision >= update.revision ||
+          (isTerminalInteraction(previous.state) &&
+            !isTerminalInteraction(update.state)))
+      )
+        return;
+      this.#state.replaceMessage(index, {
+        ...message,
+        interaction: update,
+        ...(update.sourceEventId
+          ? { matrixEventId: update.sourceEventId }
+          : {}),
+      });
+    });
+  }
 
   // Add user message
   addUserMessage = async (message: IMessage): Promise<void> => {

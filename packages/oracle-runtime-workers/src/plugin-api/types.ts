@@ -1,3 +1,4 @@
+import type { InteractionAchievement } from '@ixo/oracles-events/interactions';
 import type { TaskExecutionProfile } from '../core/execution-profile';
 import type {
   DecisionDefinition,
@@ -440,6 +441,8 @@ export interface OraclePromptConfig {
  * combines this with bundled defaults to build the internal `OracleIdentity`.
  */
 export interface OracleConfig {
+  /** Standard reactions and room activity. Enabled unless explicitly false. */
+  interactions?: { enabled?: boolean };
   /** Oracle display name. Required. */
   name: string;
   /** Sponsoring organization. Optional — composer falls back gracefully. */
@@ -513,6 +516,12 @@ export type SessionSurface =
   | { kind: 'chat'; surface: string; label: string };
 
 export interface RuntimeContext<TConfig = MergedConfig> {
+  /** Host-reported state; never exposed as a model-callable achievement tool. */
+  interactions?: {
+    setWaiting(waiting: boolean): void;
+    needsAttention(): void;
+    verifiedAchievement(outcome: InteractionAchievement): void;
+  };
   /** Authenticated user identity (validated by core auth middleware). */
   user: {
     did: string;

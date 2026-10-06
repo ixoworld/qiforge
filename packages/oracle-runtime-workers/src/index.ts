@@ -326,9 +326,14 @@ export function createOracleWorker(
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
   });
 
+  class ConfiguredMatrixGatewayDO extends MatrixGatewayDO {
+    protected override interactionsEnabled =
+      opts.config.interactions?.enabled !== false;
+  }
+
   return {
     UserOracleDO,
-    MatrixGatewayDO,
+    MatrixGatewayDO: ConfiguredMatrixGatewayDO,
     core: coreFor,
     fetch: async (request, env, ctx) => {
       // Make sure the Matrix bot is running; the call is idempotent and cheap
@@ -365,3 +370,9 @@ export function createOracleWorker(
     },
   };
 }
+
+export {
+  reportPersistedArtifact,
+  reportVerifiedTaskCompletion,
+  withHumanInput,
+} from './interactions/host-adapters';

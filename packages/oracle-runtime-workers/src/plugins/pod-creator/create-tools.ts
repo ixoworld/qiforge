@@ -1,3 +1,4 @@
+import { withHumanInput } from '../../interactions/host-adapters';
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
@@ -153,6 +154,7 @@ export function createCreateTools(
       ctx.logger.log(
         `[pod-creator] prepared batch ${blobId} (${batch.messageCount} msgs, ${network}) user=${ctx.user.did} thread=${threadId(ctx)}`,
       );
+      ctx.interactions?.setWaiting(true);
       return {
         prepared: true,
         blobId,
@@ -258,13 +260,15 @@ export function createCreateTools(
             `no browser is connected to session ${ctx.session.id}`,
           );
         }
-        const result = await frontend.callAgAction({
-          sessionId: ctx.session.id,
-          toolCallId,
-          toolName: SIGN_TRANSACTION_ACTION,
-          args: { blobId, unsignedTx: blob.value, network },
-          timeoutMs: SIGN_TIMEOUT_MS,
-        });
+        const result = await withHumanInput(ctx, () =>
+          frontend.callAgAction({
+            sessionId: ctx.session.id,
+            toolCallId,
+            toolName: SIGN_TRANSACTION_ACTION,
+            args: { blobId, unsignedTx: blob.value, network },
+            timeoutMs: SIGN_TIMEOUT_MS,
+          }),
+        );
         const parsed = signResultSchema.safeParse(result);
         if (parsed.success) {
           ctx.logger.log(

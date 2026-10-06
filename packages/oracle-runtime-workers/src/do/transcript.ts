@@ -1,3 +1,4 @@
+import type { OracleInteraction } from '@ixo/oracles-events/interactions';
 /**
  * Transcript → client DTO. Port of `@ixo/common`'s
  * `transformGraphStateMessageToListMessageResponse` so `GET /messages/:id`
@@ -39,6 +40,9 @@ export interface AttachmentMeta {
 }
 
 export interface MessageDto {
+  requestId?: string;
+  matrixEventId?: string;
+  interaction?: OracleInteraction;
   id: string;
   type: 'ai' | 'human';
   content: string;
@@ -164,6 +168,12 @@ export async function transformTranscript(
         id: await uuidFromString(message.id ?? textContent),
         isComplete: true,
         isReasoning: false,
+        ...(typeof kw.requestId === 'string'
+          ? { requestId: kw.requestId }
+          : {}),
+        ...(typeof kw.eventId === 'string'
+          ? { matrixEventId: kw.eventId }
+          : {}),
       };
       if (toolCalls?.length) {
         dto.toolCalls = [];

@@ -64,7 +64,8 @@
     "superjson": "1.13.3",
     "wa-sqlite": "1.0.0",
     "yjs": "13.6.32",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "@ixo/oracles-events": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

@@ -232,6 +232,33 @@ function harness(overrides: Partial<RunDurabilityConfig> = {}) {
 }
 
 describe('RunCoordinator', () => {
+  it('publishes a terminal interaction before the only done frame', async () => {
+    const h = harness();
+    h.host.onRunEnding = async (live, outcome) => {
+      live.buffer.push('interaction', {
+        state: outcome.status === 'finished' ? 'completed' : 'failed',
+      });
+    };
+    const { live } = await h.begin('lifecycle');
+    const frames: RunFrame[] = [];
+    const unsubscribe = live.buffer.subscribe((frame) => frames.push(frame));
+    h.attempts[0]!.finish({ status: 'finished', text: 'reply' });
+    await live.done;
+    await settled();
+    unsubscribe();
+    expect(frames.map((frame) => frame.event)).toEqual(['interaction', 'done']);
+    expect((frames[1]?.data as { status: string }).status).toBe('finished');
+  });
+  it('ends a run even when its optional interaction hook fails', async () => {
+    const h = harness();
+    h.host.onRunEnding = async () => {
+      throw new Error('Matrix unavailable');
+    };
+    const { live } = await h.begin('lifecycle-fail');
+    h.attempts[0]!.finish({ status: 'finished', text: 'reply' });
+    expect((await live.done).status).toBe('finished');
+    expect(live.buffer.isClosed).toBe(true);
+  });
   it('streams a run into its buffer, packs segments, and closes it finished with the segments dropped', async () => {
     const h = harness();
     const { live, queued } = await h.begin('r1');

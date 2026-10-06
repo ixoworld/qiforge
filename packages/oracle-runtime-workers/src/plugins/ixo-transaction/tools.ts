@@ -1,3 +1,4 @@
+import { withHumanInput } from '../../interactions/host-adapters';
 /**
  * The ixo-transaction tools. Three read tools resolve and validate a draft;
  * `sign_ixo_transaction` dispatches the validated transaction to the user's
@@ -323,19 +324,19 @@ async function signIxoTransaction(
   const toolCallId = `ixo_tx_${ctx.session.requestId || 'noreq'}_${crypto
     .randomUUID()
     .slice(0, 8)}`;
-  const outcome = await frontend
-    .callAgAction({
+  const outcome = await withHumanInput(ctx, () =>
+    frontend.callAgAction({
       sessionId,
       toolCallId,
       toolName: SIGN_TRANSACTION_ACTION_NAME,
       args,
       timeoutMs: options.signTimeoutMs,
       signal: ctx.abortSignal,
-    })
-    .then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error: errorText(error) }),
-    );
+    }),
+  ).then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error: errorText(error) }),
+  );
   const settled = settledResult(args, outcome, options.signTimeoutMs);
   const result = await withTestnetReceipt(ctx, args, settled);
   logActionToMatrix(ctx, {

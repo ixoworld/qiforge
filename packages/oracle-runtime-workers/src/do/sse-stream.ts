@@ -70,6 +70,8 @@ export interface TurnFrameProducerInput {
   messageIdOf?: () => string | undefined;
   /** Called on every frame — the keep-alive touch. */
   onFrame?: () => void;
+  /** Durable runs publish their terminal lifecycle before their single done frame. */
+  deferDone?: boolean;
 }
 
 export type TurnFrameOutcome =
@@ -138,7 +140,7 @@ export const SSE_HEADERS: Record<string, string> = {
  * settled tool call, is the segment write budget of a turn.
  */
 export function isImmediateFrame(event: string, data: unknown): boolean {
-  if (event === 'done') return true;
+  if (event === 'done' || event === 'interaction') return true;
   if (event === 'tool_call' || event === 'action_call')
     return (data as { status?: string } | null)?.status !== 'isRunning';
   return false;
@@ -285,6 +287,7 @@ export async function runTurnFrames(
       input.mirror(mirrored, payload as Record<string, unknown>);
   };
   const doneFrame = (extra: Record<string, unknown> = {}) => {
+    if (input.deferDone) return;
     const messageId = input.messageIdOf?.();
     write('done', {
       ...(input.runId ? { runId: input.runId } : {}),

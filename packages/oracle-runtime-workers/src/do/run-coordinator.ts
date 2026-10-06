@@ -94,6 +94,7 @@ export interface RunCoordinatorHost {
   /** Latest checkpoint id of a session (progress detection across attempts). */
   checkpointIdOf: (sessionId: string) => Promise<string | null>;
   /** After a run reached a terminal state and its row was closed. */
+  onRunEnding?: (live: LiveRun, outcome: RunOutcome) => Promise<void>;
   onRunEnded?: (record: RunRecord, outcome: RunOutcome) => Promise<void>;
 }
 
@@ -275,7 +276,9 @@ export class RunCoordinator {
     reason: 'aborted' | 'superseded',
   ): Promise<void> {
     this.host.log.log(`[runs] ${live.runId} ${reason} while queued`);
-    live.buffer.push('done', { runId: live.runId, aborted: true });
+    live.abort.abort(new Error(`run aborted (${reason})`));
+    if (!this.host.onRunEnding)
+      live.buffer.push('done', { runId: live.runId, aborted: true });
     await this.finalize(live, { status: 'aborted', text: '' });
   }
 
@@ -407,6 +410,24 @@ export class RunCoordinator {
     this.live.delete(live.runId);
     const { runId } = live;
     try {
+      if (this.host.onRunEnding) {
+        await this.host
+          .onRunEnding(live, outcome)
+          .catch((error: unknown) =>
+            this.host.log.warn('[runs] interaction delivery failed', error),
+          );
+        live.buffer.push('done', {
+          runId,
+          status: outcome.status,
+          ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
+          ...(outcome.status === 'aborted' ? { aborted: true } : {}),
+          ...(outcome.status === 'failed' ? { failed: true } : {}),
+          ...(outcome.status === 'interrupted' ? { interrupted: true } : {}),
+          ...(outcome.status !== 'finished'
+            ? { partialText: outcome.text }
+            : {}),
+        });
+      }
       await live.buffer.close();
       const partialText =
         outcome.status === 'finished'
@@ -528,7 +549,8 @@ export class RunCoordinator {
           runId: record.runId,
           timestamp: new Date(now).toISOString(),
         });
-        live.buffer.push('done', { runId: record.runId, interrupted: true });
+        if (!this.host.onRunEnding)
+          live.buffer.push('done', { runId: record.runId, interrupted: true });
         await this.finalize(live, {
           status: 'interrupted',
           text: live.continuation ?? '',
