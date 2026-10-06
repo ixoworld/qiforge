@@ -243,12 +243,14 @@ export class SessionSocketHub<S extends HubSocket = HubSocket> {
 
   /**
    * When the next heartbeat round is due: `pingIntervalMs` after the most
-   * overdue socket's last ping (its open time before the first round), or
-   * null with no sockets attached.
+   * overdue authenticated socket's last ping (its open time before the first
+   * round), or null with none attached. A socket still in its handshake is
+   * on the handshake deadline, not the heartbeat: it never arms an alarm.
    */
   nextPingAt(pingIntervalMs: number): number | null {
     let next: number | null = null;
     for (const meta of this.sockets.values()) {
+      if (!meta.userDid) continue;
       const due = (meta.lastPingAt ?? meta.openedAt) + pingIntervalMs;
       if (next === null || due < next) next = due;
     }

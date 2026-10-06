@@ -21,6 +21,10 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { logFrontendAction } from '../portal/action-log';
+import {
+  describeDropped,
+  sanitizeDeclaredTools,
+} from '../portal/declared-tools';
 import { createAguiSubAgent } from './agui-agent';
 
 const manifest: PluginManifest = {
@@ -125,8 +129,17 @@ export function buildActionTool(action: AgAction): PluginTool | null {
   );
 }
 
+/**
+ * The AG-UI actions declared on this request that may become tools: invalid,
+ * duplicate and oversized declarations are dropped (`declared-tools.ts`).
+ */
 function readAgActions(rtCtx: RuntimeContext): AgAction[] {
-  return parseAgActions(rtCtx.history.state.agActions);
+  const { kept, dropped } = sanitizeDeclaredTools(
+    parseAgActions(rtCtx.history.state.agActions),
+  );
+  const summary = describeDropped('AG-UI actions', dropped);
+  if (summary) rtCtx.logger.warn(summary);
+  return kept;
 }
 
 export class AGUIPlugin extends OraclePlugin {

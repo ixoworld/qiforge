@@ -163,4 +163,34 @@ describe('truncateHeadTail', () => {
       '[Result truncated: showing the first 640 and last 960 of 10000 characters',
     );
   });
+
+  it('caps a result one character over the cap, never one exactly at it', async () => {
+    const put = vi
+      .fn()
+      .mockResolvedValue({ id: 'b'.repeat(64), size: 1001, tier: 'sqlite' });
+    const mw = createResultCapMiddleware({
+      capChars: 1000,
+      sessionId: 's',
+      store: { put },
+    });
+    const at = new ToolMessage({
+      tool_call_id: 'call-1',
+      name: 't',
+      content: 'x'.repeat(1000),
+    });
+    expect(await runCap(mw, 't', at)).toBe(at);
+    expect(put).not.toHaveBeenCalled();
+    const over = (await runCap(
+      mw,
+      't',
+      new ToolMessage({
+        tool_call_id: 'call-1',
+        name: 't',
+        content: 'x'.repeat(1001),
+      }),
+    )) as ToolMessage;
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(String(over.content).length).toBeLessThanOrEqual(1000 + 400);
+    expect(cappedMetaOf(over)).toBeDefined();
+  });
 });

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  fetchOpenRouterContextLengths,
   fetchOpenRouterPrices,
+  OPENROUTER_FAILURE_TTL_MS,
+  OPENROUTER_INFLIGHT_MARGIN_MS,
   OPENROUTER_MODELS_URL,
   OPENROUTER_PRICE_CACHE_TTL_MS,
   resetOpenRouterPriceCache,
@@ -35,6 +38,7 @@ describe('fetchOpenRouterPrices', () => {
     });
     expect(fetchImpl).toHaveBeenCalledWith(OPENROUTER_MODELS_URL, {
       headers: { Authorization: 'Bearer k' },
+      signal: expect.any(AbortSignal),
     });
     expect(prices.get('openai/gpt-5.6-luna')).toEqual({
       inputPerMillion: 1,
@@ -81,6 +85,130 @@ describe('fetchOpenRouterPrices', () => {
       inputPerMillion: 1,
       outputPerMillion: 6,
     });
-    expect(warn).toHaveBeenCalledTimes(2);
+    // The expired listing is served at once; the refresh that fails runs
+    // behind it.
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(2));
+  });
+
+  it('gives up on a hanging fetch at the timeout, and remembers the failure', async () => {
+    let now = 1_000_000;
+    let signal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>(() => {
+          signal = init?.signal ?? undefined;
+        }),
+    );
+    const warn = vi.fn();
+    const opts = {
+      fetch: fetchImpl,
+      now: () => now,
+      timeoutMs: 50,
+      logger: { warn },
+    };
+    const started = Date.now();
+    const prices = await fetchOpenRouterPrices(opts);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(prices.size).toBe(0);
+    expect(signal?.aborted).toBe(true);
+    expect(String(warn.mock.calls[0]?.[0])).toContain('timed out after 50 ms');
+    // Within the failure window nobody waits on the fetch again.
+    now += OPENROUTER_FAILURE_TTL_MS - 1;
+    expect((await fetchOpenRouterContextLengths(opts)).size).toBe(0);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // After it, the next caller tries again.
+    now += 2;
+    await fetchOpenRouterPrices(opts);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one fetch between concurrent callers', async () => {
+    let release: (response: Response) => void = () => undefined;
+    const fetchImpl = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const pending = [
+      fetchOpenRouterPrices({ fetch: fetchImpl }),
+      fetchOpenRouterContextLengths({ fetch: fetchImpl }),
+      fetchOpenRouterPrices({ fetch: fetchImpl }),
+    ];
+    release(jsonResponse(payload));
+    const [first, , third] = await Promise.all(pending);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(first).toBe(third);
+    expect(first?.size).toBe(1);
+  });
+
+  it('serves an expired listing at once and refreshes it in the background', async () => {
+    let now = 7_000_000;
+    const first = vi.fn(async () => jsonResponse(payload));
+    await fetchOpenRouterPrices({ fetch: first, now: () => now });
+    now += OPENROUTER_PRICE_CACHE_TTL_MS + 1;
+
+    let release: (response: Response) => void = () => undefined;
+    const slow = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const background: Array<Promise<unknown>> = [];
+    const stale = await fetchOpenRouterPrices({
+      fetch: slow,
+      now: () => now,
+      waitUntil: (work) => background.push(work),
+    });
+    // Answered from the expired listing while the fetch is still open.
+    expect(stale.get('openai/gpt-5.6-luna')?.inputPerMillion).toBe(1);
+    expect(slow).toHaveBeenCalledTimes(1);
+    expect(background).toHaveLength(1);
+
+    release(
+      jsonResponse({
+        data: [
+          {
+            id: 'openai/gpt-5.6-luna',
+            pricing: { prompt: '0.0000002', completion: '0.0000012' },
+          },
+        ],
+      }),
+    );
+    await background[0];
+    const fresh = await fetchOpenRouterPrices({ fetch: slow, now: () => now });
+    expect(fresh.get('openai/gpt-5.6-luna')?.inputPerMillion).toBeCloseTo(0.2);
+    expect(slow).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts a new fetch once a shared one has outlived its time limit without settling', async () => {
+    // Timers that never fire: what a fetch looks like after the runtime
+    // dropped the request that started it, timer and all.
+    vi.useFakeTimers();
+    try {
+      let now = 9_000_000;
+      const fetchImpl = vi.fn(() => new Promise<Response>(() => undefined));
+      const opts = { fetch: fetchImpl, now: () => now, timeoutMs: 50 };
+      const first = fetchOpenRouterPrices(opts);
+      let firstSettled = false;
+      void first.then(() => {
+        firstSettled = true;
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // Within its limit the fetch is shared.
+      void fetchOpenRouterPrices(opts);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      // Past it, it is given up and the next caller fetches again.
+      now += 50 + OPENROUTER_INFLIGHT_MARGIN_MS + 1;
+      void fetchOpenRouterPrices(opts);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      // A waiting caller is released by its own timer.
+      await vi.advanceTimersByTimeAsync(50 + OPENROUTER_INFLIGHT_MARGIN_MS);
+      expect(firstSettled).toBe(true);
+      expect((await first).size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

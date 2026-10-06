@@ -27,7 +27,12 @@ import {
 import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
-import { estimateContentTokens, type ContextBudget } from '../context-budget';
+import {
+  estimateContentTokens,
+  messageContentTokens,
+  messageToolCallTokens,
+  type ContextBudget,
+} from '../context-budget';
 import { isContextOverflowError } from '../context-window';
 import { NOOP_LOGGER } from '../utils';
 import { cappedMetaOf } from './result-cap';
@@ -157,11 +162,50 @@ export function estimateRequestTokens(input: {
 }): number {
   let tokens = input.systemTokens + input.schemaTokens;
   for (const m of input.messages) {
-    tokens += estimateContentTokens(m.content) + 4;
+    tokens += messageContentTokens(m) + 4;
     if (AIMessage.isInstance(m) && m.tool_calls?.length)
-      tokens += estimateContentTokens(m.tool_calls);
+      tokens += messageToolCallTokens(m, m.tool_calls);
   }
   return tokens;
+}
+
+/**
+ * Tool-schema sizes, kept across turns. Every turn binds fresh tool objects,
+ * but a plugin's tool keeps its schema object for the life of the isolate,
+ * and what a tool sends is fixed by that schema, its name and its
+ * description: the size is kept per schema object, then per name and
+ * description. A tool without a schema object is sized per tool object.
+ */
+const schemaSizes = new WeakMap<object, Map<string, number>>();
+const entrySizes = new WeakMap<object, number>();
+
+function schemaTokensOf(tools: readonly unknown[]): number {
+  let total = 0;
+  for (const entry of tools) {
+    if (!entry || typeof entry !== 'object') continue;
+    const schema: unknown =
+      'schema' in entry ? Reflect.get(entry, 'schema') : undefined;
+    const sizes =
+      schema && typeof schema === 'object'
+        ? (schemaSizes.get(schema) ??
+          schemaSizes.set(schema, new Map()).get(schema))
+        : undefined;
+    const key = `${String(Reflect.get(entry, 'name'))}\n${String(Reflect.get(entry, 'description'))}`;
+    let n = sizes ? sizes.get(key) : entrySizes.get(entry);
+    if (n === undefined) {
+      try {
+        n = estimateContentTokens(
+          'schema' in entry ? convertToOpenAITool(entry as never) : entry,
+        );
+      } catch {
+        n = 0;
+      }
+      if (sizes) sizes.set(key, n);
+      else entrySizes.set(entry, n);
+    }
+    total += n;
+  }
+  return total;
 }
 
 export function createContextGuardMiddleware(
@@ -177,26 +221,6 @@ export function createContextGuardMiddleware(
         `[context] onEvent failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-  };
-  const schemaTokensCache = new WeakMap<object, number>();
-  const schemaTokensOf = (tools: unknown[]): number => {
-    let total = 0;
-    for (const entry of tools) {
-      if (!entry || typeof entry !== 'object') continue;
-      let n = schemaTokensCache.get(entry);
-      if (n === undefined) {
-        try {
-          n = estimateContentTokens(
-            'schema' in entry ? convertToOpenAITool(entry as never) : entry,
-          );
-        } catch {
-          n = 0;
-        }
-        schemaTokensCache.set(entry, n);
-      }
-      total += n;
-    }
-    return total;
   };
   return createMiddleware({
     name: 'ContextGuardMiddleware',

@@ -7,8 +7,12 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { parseTaskSpec, TASK_ID_PATTERN } from './spec';
-import { pendingApprovalOf } from './store';
-import { TASK_SESSION_PREFIX } from './scheduler';
+import { MAX_RUNS_KEPT_PER_TASK, pendingApprovalOf } from './store';
+import {
+  MAX_CONCURRENT_TASK_RUNS,
+  shouldCreateDedicatedRoom,
+  TASK_SESSION_PREFIX,
+} from './scheduler';
 import type { TasksTestDO } from './test-do';
 import { TEST_ROOM_ID, TEST_USER_MATRIX_ID } from './test-do';
 
@@ -352,13 +356,17 @@ describe('before-action approval flow', () => {
     expect(t?.nextRunAt).toBeUndefined();
     expect(await s.nextWakeAt()).toBeNull();
 
-    // Approving executes the run now (with the user's note) and completes it.
+    // Approving records the decision and arms the alarm; the alarm runs it
+    // (with the user's note) and completes it.
     const resolved = await s.resolveApproval(
       created.id,
       'approve',
       'fix the title first',
     );
     expect(resolved.resolved).toBe(true);
+    expect(await s.turnRequests()).toHaveLength(0);
+    expect(await s.nextWakeAt()).toBeLessThanOrEqual(Date.now());
+    await s.tick(Date.now());
     const turns = await s.turnRequests();
     expect(turns).toHaveLength(1);
     expect(turns[0]?.message).toContain('fix the title first');
@@ -1278,5 +1286,629 @@ describe('task rows from other runtimes', () => {
         requestId: 'request',
       }),
     ).toMatch(/does not support/);
+  });
+});
+
+/** Poll `check` until it holds (a few seconds at most). */
+async function waitFor(
+  check: () => Promise<boolean>,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!(await check())) {
+    if (Date.now() > until) throw new Error('condition not reached in time');
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+describe('approval: the approved run executes on the alarm', () => {
+  async function pendingApproval(
+    s: DurableObjectStub<TasksTestDO>,
+    title: string,
+  ) {
+    const at = inOneMinute();
+    const created = await s.create({
+      title,
+      intent: 'Publish the post.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.tick(Date.parse(at) + 1);
+    expect(pendingApprovalOf((await s.get(created.id))!)).toBeDefined();
+    return created;
+  }
+
+  it('an approval given from a tool call (holding the write slot) runs on the alarm, and its write tool gets the slot', async () => {
+    const s = stub('approval-write-lane');
+    await s.init();
+    const created = await pendingApproval(s, 'Lane Publish');
+    await s.setTurnBehavior('write-tool', 'Published with the fixed title.');
+
+    const resolved = await s.resolveApprovalAsTool(
+      created.id,
+      'approve',
+      'fix the title first',
+    );
+    expect(resolved.resolved).toBe(true);
+    // Nothing ran inside the tool call; the alarm is armed for now.
+    expect(await s.turnRequests()).toHaveLength(0);
+    expect((await s.requestedAlarms()).at(-1)).toBeLessThanOrEqual(Date.now());
+
+    await s.tick(Date.now());
+    const turns = await s.turnRequests();
+    expect(turns).toHaveLength(1);
+    expect(turns[0]?.message).toContain('fix the title first');
+    const task = await s.get(created.id);
+    expect(task?.status).toBe('completed');
+    expect(task?.lastResult?.ok).toBe(true);
+    // One executed run besides the bookkeeping row of the request.
+    const executed = (await s.runsFor(created.id)).filter(
+      (r) => r.state !== undefined,
+    );
+    expect(executed.map((r) => r.state)).toEqual(['delivered']);
+    expect(
+      (await s.sentMessages()).some((m) =>
+        m.body.includes('Published with the fixed title.'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an approval survives a reset before the alarm and runs exactly once', async () => {
+    const s = stub('approval-reset');
+    await s.init();
+    const created = await pendingApproval(s, 'Reset Publish');
+    await s.resolveApproval(created.id, 'approve', 'go');
+    await s.simulateReset();
+    expect(await s.nextWakeAt()).toBeLessThanOrEqual(Date.now());
+
+    await s.tick(Date.now());
+    expect(await s.turnRequests()).toHaveLength(1);
+    expect((await s.turnRequests())[0]?.message).toContain('go');
+    expect((await s.get(created.id))?.status).toBe('completed');
+
+    // Neither another tick nor another reset runs it again.
+    await s.tick(Date.now());
+    await s.simulateReset();
+    await s.tick(Date.now());
+    expect(await s.turnRequests()).toHaveLength(1);
+    expect(await s.nextWakeAt()).toBeNull();
+  });
+
+  it('a declined request runs nothing, from a tool call too', async () => {
+    const s = stub('approval-reject-tool');
+    await s.init();
+    const created = await pendingApproval(s, 'Declined Publish');
+    expect(
+      (await s.resolveApprovalAsTool(created.id, 'reject', 'not now')).resolved,
+    ).toBe(true);
+    await s.tick(Date.now());
+    expect(await s.turnRequests()).toHaveLength(0);
+    expect((await s.get(created.id))?.status).toBe('cancelled');
+    expect((await s.runsFor(created.id)).map((r) => r.detail)).toContain(
+      'declined: not now',
+    );
+  });
+
+  it('pausing after the approval drops the approved run', async () => {
+    const s = stub('approval-then-pause');
+    await s.init();
+    const created = await s.create({
+      title: 'Guarded Weekly',
+      intent: 'Post the update.',
+      schedule: { kind: 'cron', cron: '0 9 * * 1', timezone: 'UTC' },
+      approval: 'before-action',
+    });
+    await s.tick(Date.parse(created.nextRunAt!) + 1);
+    await s.resolveApproval(created.id, 'approve');
+    await s.pause(created.id);
+    await s.tick(Date.now());
+    expect(await s.turnRequests()).toHaveLength(0);
+    await s.resume(created.id);
+    await s.tick(Date.now());
+    expect(await s.turnRequests()).toHaveLength(0);
+  });
+
+  it('an approval request whose send response is lost is not a failure: one message, the task waits', async () => {
+    const s = stub('approval-lost-response');
+    await s.init();
+    const at = inOneMinute();
+    const created = await s.create({
+      title: 'Lost Ack',
+      intent: 'Publish the post.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('lost-response-once');
+    await s.tick(Date.parse(at) + 1);
+    expect(await s.sendFailureCount()).toBe(1);
+    const requests = (await s.sentMessages()).filter((m) =>
+      m.body.includes('needs your approval'),
+    );
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.txnId).toBeDefined();
+    const task = await s.get(created.id);
+    expect(task?.status).toBe('active');
+    expect(pendingApprovalOf(task!)).toBeDefined();
+    expect((await s.resolveApproval(created.id, 'approve')).resolved).toBe(
+      true,
+    );
+  });
+});
+
+describe('run ledger: what each row records', () => {
+  it('a delivered row records THIS run’s output, not the previous one', async () => {
+    const s = stub('ledger-detail');
+    await s.init({ minCronIntervalSec: 1 });
+    const created = await s.create({
+      title: 'Two Outputs',
+      intent: 'Say something.',
+      schedule: { kind: 'interval', everySeconds: 60 },
+      dedicatedRoom: 'no',
+    });
+    await s.setTurnBehavior('ok', 'first output');
+    await s.tick(Date.parse(created.nextRunAt!) + 1);
+    await s.setTurnBehavior('ok', 'second output');
+    await s.tick(Date.parse((await s.get(created.id))!.nextRunAt!) + 1);
+    const runs = await s.runsFor(created.id);
+    expect(runs.map((r) => r.detail)).toEqual([
+      'second output',
+      'first output',
+    ]);
+  });
+
+  it('keeps at most MAX_RUNS_KEPT_PER_TASK rows per task and no result text once an ordinary run is closed', async () => {
+    const s = stub('ledger-prune');
+    await s.init({ minCronIntervalSec: 1 });
+    const created = await s.create({
+      title: 'Chatty',
+      intent: 'Say something.',
+      schedule: { kind: 'interval', everySeconds: 60 },
+      dedicatedRoom: 'no',
+    });
+    let due = Date.parse(created.nextRunAt!);
+    for (let i = 0; i < MAX_RUNS_KEPT_PER_TASK + 5; i += 1) {
+      await s.tick(due + 1);
+      due = Date.parse((await s.get(created.id))!.nextRunAt!);
+    }
+    expect(await s.turnRequests()).toHaveLength(MAX_RUNS_KEPT_PER_TASK + 5);
+    const rows = await s.rawRuns(created.id);
+    expect(rows).toHaveLength(MAX_RUNS_KEPT_PER_TASK);
+    expect(rows.every((r) => r.state === 'delivered')).toBe(true);
+    expect(rows.every((r) => r.result_text === null)).toBe(true);
+    expect(rows.every((r) => r.retry_at === null)).toBe(true);
+  });
+
+  it('keeps the result text of a run that is still being delivered', async () => {
+    const s = stub('ledger-keep-text');
+    await s.init({ deliveryRoundBackoffMs: [60_000] });
+    const created = await s.create({
+      title: 'Parked',
+      intent: 'Do it.',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    await s.setTurnBehavior('ok', 'kept until delivered');
+    await s.setSendBehavior('fail-transient');
+    await s.tick(Date.parse(created.nextRunAt!) + 1);
+    expect((await s.rawRuns(created.id))[0]).toMatchObject({
+      state: 'delivering',
+      result_text: 'kept until delivered',
+    });
+  });
+
+  it('the wake query uses an index instead of scanning the run history', async () => {
+    const s = stub('ledger-retry-index');
+    await s.init();
+    await s.startStatementLog();
+    await s.nextWakeAt();
+    const statements = await s.stopStatementLog();
+    const retry = statements.find((st) => /MIN\(retry_at\)/.test(st.sql));
+    expect(retry).toBeDefined();
+    const plan = await s.queryPlan(retry!.sql, retry!.params ?? []);
+    expect(plan.join('\n')).toMatch(
+      /USING (COVERING )?INDEX idx_task_runs_retry/,
+    );
+    expect(plan.some((detail) => /^SCAN task_runs\b/.test(detail))).toBe(false);
+  });
+});
+
+describe('alarm ticks', () => {
+  it('an idle tick costs four statements and returns the wake it computed', async () => {
+    const s = stub('tick-statements');
+    await s.init();
+    const created = await s.create({
+      title: 'Later',
+      intent: 'x',
+      schedule: {
+        kind: 'once',
+        at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      dedicatedRoom: 'no',
+    });
+    await s.startStatementLog();
+    const next = await s.tick(Date.now());
+    const statements = await s.stopStatementLog();
+    expect(next).toBe(Date.parse(created.nextRunAt!));
+    expect(statements).toHaveLength(4);
+  });
+
+  it('a tick leaves arming the alarm to its caller, which arms the wake it returns', async () => {
+    const s = stub('tick-no-own-arm');
+    await s.init();
+    const created = await s.create({
+      title: 'Later',
+      intent: 'x',
+      schedule: {
+        kind: 'once',
+        at: new Date(Date.now() + 3_600_000).toISOString(),
+      },
+      dedicatedRoom: 'no',
+    });
+    const before = (await s.requestedAlarms()).length;
+    expect(await s.tick(Date.now())).toBe(Date.parse(created.nextRunAt!));
+    expect(await s.requestedAlarms()).toHaveLength(before);
+  });
+
+  it('an open run waiting for its next delivery round or for its recovery reads no task row', async () => {
+    const s = stub('tick-open-runs');
+    await s.init();
+    const parked = await s.create({
+      title: 'Parked',
+      intent: 'x',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    const recovering = await s.create({
+      title: 'Recovering',
+      intent: 'x',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    await s.injectOpenRun({
+      taskId: parked.id,
+      state: 'delivering',
+      retryAt: Date.now() + 600_000,
+    });
+    const live = await s.injectOpenRun({
+      taskId: recovering.id,
+      state: 'running',
+    });
+    await s.setTurnRunLive(live, true);
+    await s.startStatementLog();
+    await s.tick(Date.now());
+    const statements = await s.stopStatementLog();
+    await s.setTurnRunLive(live, false);
+    expect(
+      statements.filter((st) => /FROM tasks WHERE id = \?/.test(st.sql)),
+    ).toEqual([]);
+    expect(statements).toHaveLength(4);
+  });
+
+  it('a task whose turn is being recovered does not make the alarm spin; its end re-arms the alarm', async () => {
+    const s = stub('tick-recovery-no-spin');
+    await s.init();
+    const created = await s.create({
+      title: 'Recovering Cron',
+      intent: 'x',
+      schedule: { kind: 'cron', cron: '0 * * * *', timezone: 'UTC' },
+      dedicatedRoom: 'no',
+    });
+    const due = Date.parse(created.nextRunAt!);
+    const runId = await s.injectOpenRun({
+      taskId: created.id,
+      state: 'running',
+    });
+    await s.setTurnRunLive(runId, true);
+    await s.simulateReset();
+    const alarmsBefore = (await s.requestedAlarms()).length;
+    const now = due + 5_000;
+    const next = await s.tick(now);
+    // The overdue occurrence belongs to the recovering turn: no 1 s re-arm.
+    expect(next).toBeNull();
+    expect((await s.requestedAlarms()).slice(alarmsBefore)).toEqual([]);
+    expect(await s.turnRequests()).toHaveLength(0);
+
+    await s.setTurnRunLive(runId, false);
+    await s.completeRecoveredRun(runId, 'recovered hourly result');
+    const advanced = Date.parse((await s.get(created.id))!.nextRunAt!);
+    expect(advanced).toBeGreaterThan(Date.now());
+    expect((await s.requestedAlarms()).at(-1)).toBe(advanced);
+    expect(await s.nextWakeAt()).toBe(advanced);
+  });
+
+  it('after long downtime a recurring task runs once and resumes its cadence, not once per missed slot', async () => {
+    const s = stub('tick-catch-up');
+    await s.init();
+    const created = await s.create({
+      title: 'Every Five',
+      intent: 'x',
+      schedule: { kind: 'cron', cron: '*/5 * * * *', timezone: 'UTC' },
+      dedicatedRoom: 'no',
+    });
+    // Due a week ago: 2016 slots were missed.
+    await s.runSql('UPDATE tasks SET next_run_at = ? WHERE id = ?', [
+      Date.now() - 7 * 86_400_000,
+      created.id,
+    ]);
+    const now = Date.now();
+    await s.tick(now);
+    await s.tick(now + 1);
+    expect(await s.turnRequests()).toHaveLength(1);
+    const next = Date.parse((await s.get(created.id))!.nextRunAt!);
+    expect(next).toBeGreaterThan(now);
+    expect(next - now).toBeLessThanOrEqual(5 * 60_000);
+  });
+});
+
+describe('alarm ticks: several due tasks', () => {
+  async function dueTasks(
+    s: DurableObjectStub<TasksTestDO>,
+    count: number,
+  ): Promise<string[]> {
+    const at = inOneMinute();
+    const ids: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const task = await s.create({
+        title: `Due ${i}`,
+        intent: `Task number ${i}.`,
+        schedule: { kind: 'once', at },
+        dedicatedRoom: 'no',
+      });
+      await s.setTurnTextFor(task.id, `result of task ${i}`);
+      ids.push(task.id);
+    }
+    return ids;
+  }
+
+  it('a slow task no longer holds back the others, and none runs twice', async () => {
+    const s = stub('tick-concurrent');
+    await s.init();
+    const [slow, ...fast] = await dueTasks(s, 3);
+    await s.hangTask(slow!);
+    const now = Date.now() + 120_000;
+    const ticking = s.tick(now);
+    await waitFor(async () => (await s.sentMessages()).length === fast.length);
+    for (const id of fast) expect((await s.get(id))?.status).toBe('completed');
+    expect((await s.get(slow!))?.status).toBe('active');
+    expect(await s.hangingTurnCount()).toBe(1);
+
+    // A second alarm while the slow run is live starts nothing.
+    await s.tick(now + 1);
+    expect(await s.turnRequests()).toHaveLength(3);
+
+    await s.releaseTurns();
+    await ticking;
+    expect((await s.get(slow!))?.status).toBe('completed');
+    const sent = await s.sentMessages();
+    expect(sent).toHaveLength(3);
+    expect(new Set(sent.map((m) => m.txnId)).size).toBe(3);
+    expect((await s.turnRequests()).map((r) => r.sessionId).sort()).toEqual(
+      [slow!, ...fast].map((id) => `${TASK_SESSION_PREFIX}${id}`).sort(),
+    );
+  });
+
+  it(`runs at most MAX_CONCURRENT_TASK_RUNS at once; the rest start as slots free up`, async () => {
+    const s = stub('tick-concurrency-cap');
+    await s.init();
+    const ids = await dueTasks(s, MAX_CONCURRENT_TASK_RUNS + 1);
+    for (const id of ids) await s.hangTask(id);
+    const ticking = s.tick(Date.now() + 120_000);
+    await waitFor(
+      async () => (await s.hangingTurnCount()) === MAX_CONCURRENT_TASK_RUNS,
+    );
+    await s.releaseTurns();
+    await ticking;
+    expect(await s.turnRequests()).toHaveLength(MAX_CONCURRENT_TASK_RUNS + 1);
+    // Every turn hung until released, so all four overlapped unless the cap
+    // held the fourth back.
+    expect(await s.peakConcurrentTurns()).toBe(MAX_CONCURRENT_TASK_RUNS);
+    for (const id of ids) expect((await s.get(id))?.status).toBe('completed');
+  });
+
+  it('a task paused while it waits for a slot does not run', async () => {
+    const s = stub('tick-paused-while-queued');
+    await s.init({ minCronIntervalSec: 1 });
+    const ids = await dueTasks(s, MAX_CONCURRENT_TASK_RUNS);
+    for (const id of ids) await s.hangTask(id);
+    const queued = await s.create({
+      title: 'Queued',
+      intent: 'x',
+      schedule: { kind: 'interval', everySeconds: 600 },
+      dedicatedRoom: 'no',
+    });
+    const now = Date.parse(queued.nextRunAt!) + 1;
+    const ticking = s.tick(Math.max(now, Date.now() + 120_000));
+    await waitFor(
+      async () => (await s.hangingTurnCount()) === MAX_CONCURRENT_TASK_RUNS,
+    );
+    await s.pause(queued.id);
+    await s.releaseTurns();
+    await ticking;
+    expect(
+      (await s.turnRequests()).some((r) => r.sessionId.endsWith(queued.id)),
+    ).toBe(false);
+    expect((await s.get(queued.id))?.status).toBe('paused');
+  });
+});
+
+describe('giving up on a delivery', () => {
+  it('a one-shot whose result could not be delivered says so, without asking for a re-run', async () => {
+    const s = stub('undelivered-once');
+    await s.init({ deliveryRoundBackoffMs: [1] });
+    await s.setTurnBehavior('ok', 'UNDELIVERABLE-RESULT');
+    await s.failSendsContaining('UNDELIVERABLE-RESULT');
+    const created = await s.create({
+      title: 'Undeliverable',
+      intent: 'Do it.',
+      schedule: { kind: 'once', at: inOneMinute() },
+      dedicatedRoom: 'no',
+    });
+    let now = Date.parse(created.nextRunAt!) + 1;
+    for (let round = 0; round < 5; round += 1) {
+      await s.tick(now);
+      now += 10;
+    }
+    expect((await s.get(created.id))?.status).toBe('failed');
+    const sent = await s.sentMessages();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body).toMatch(/could not be delivered/);
+    expect(sent[0]?.body).not.toMatch(/could not be completed|run it again/);
+  });
+
+  it('a Topic deliverable that could not be delivered posts no notice and stays readable', async () => {
+    const s = stub('undelivered-topic');
+    await s.init({ deliveryRoundBackoffMs: [1] });
+    await s.setTurnBehavior('ok', '# Brief');
+    await s.failSendsContaining('# Brief');
+    const request = {
+      topic: {
+        id: 'topic-undelivered',
+        roomId: '!r:example.org',
+        threadId: '$root',
+        attemptId: 'a1',
+      },
+      title: 'Brief',
+      goal: 'g',
+      instructions: 'i',
+      sources: [{ label: 's', text: 't' }],
+    };
+    await s.startTopic('op-undelivered', request);
+    let now = Date.now() + 1_000;
+    for (let round = 0; round < 5; round += 1) {
+      await s.tick(now);
+      now += 10;
+    }
+    expect(await s.sentMessages()).toHaveLength(0);
+    const read = await s.readTopic('op-undelivered');
+    expect(read).toMatchObject({
+      ok: true,
+      snapshot: {
+        status: 'ready',
+        delivery: 'failed',
+        output: { markdown: '# Brief' },
+      },
+    });
+  });
+});
+
+describe('task limits', () => {
+  it('a cancelled task frees its slot; a paused one still counts', async () => {
+    const s = stub('limit-slots');
+    await s.init({ maxTasksPerUser: 2, minCronIntervalSec: 1 });
+    const input = (title: string) => ({
+      title,
+      intent: 'x',
+      schedule: { kind: 'interval' as const, everySeconds: 600 },
+      dedicatedRoom: 'no' as const,
+    });
+    const one = await s.create(input('One'));
+    const two = await s.create(input('Two'));
+    await s.pause(two.id);
+    expect(await s.errorOf({ kind: 'create', input: input('Three') })).toMatch(
+      /Task limit reached \(2\)/,
+    );
+    await s.cancel(one.id);
+    const three = await s.create(input('Three'));
+    expect(three.status).toBe('active');
+    const once = await s.errorOf({
+      kind: 'create',
+      input: {
+        title: 'Four',
+        intent: 'x',
+        schedule: { kind: 'once', at: inOneMinute() },
+      },
+    });
+    expect(once).toMatch(/Task limit reached/);
+  });
+});
+
+describe('task rows from older runtimes: the run ledger', () => {
+  it('migrates a pre-ledger task_runs table: rows survive, the wake index exists and approvals work', async () => {
+    const s = stub('legacy-task-runs');
+    const now = new Date().toISOString();
+    await s.initWith([
+      {
+        sql: `CREATE TABLE task_runs (
+          run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, started_at TEXT NOT NULL,
+          finished_at TEXT, ok INTEGER, detail TEXT
+        )`,
+      },
+      {
+        sql: `INSERT INTO task_runs (run_id, task_id, started_at, finished_at, ok, detail)
+          VALUES ('old-run', 'task_old_0000000a', ?, ?, 1, 'old result')`,
+        params: [now, now],
+      },
+    ]);
+    expect(await s.runsFor('task_old_0000000a')).toMatchObject([
+      { runId: 'old-run', ok: true, detail: 'old result' },
+    ]);
+    await s.startStatementLog();
+    await s.nextWakeAt();
+    const retry = (await s.stopStatementLog()).find((st) =>
+      /MIN\(retry_at\)/.test(st.sql),
+    );
+    expect(
+      (await s.queryPlan(retry!.sql, retry!.params ?? [])).join('\n'),
+    ).toMatch(/INDEX idx_task_runs_retry/);
+
+    const at = inOneMinute();
+    const created = await s.create({
+      title: 'After Migration',
+      intent: 'x',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.tick(Date.parse(at) + 1);
+    await s.resolveApproval(created.id, 'approve');
+    await s.tick(Date.now());
+    expect((await s.get(created.id))?.status).toBe('completed');
+  });
+});
+
+describe('dedicated rooms by cadence', () => {
+  const auto = (cron: string, timezone?: string) =>
+    shouldCreateDedicatedRoom({
+      schedule: { kind: 'cron', cron, ...(timezone ? { timezone } : {}) },
+      intent: 'Summarize the news.',
+      explicit: 'auto',
+    });
+
+  it('judges the clock cadence: a daily task in a DST timezone is daily', () => {
+    expect(auto('0 9 * * *', 'Europe/London')).toBe(false);
+    expect(auto('0 9 * * *', 'America/New_York')).toBe(false);
+    expect(auto('0 9 * * *', 'UTC')).toBe(false);
+    expect(auto('0 9,21 * * *', 'Europe/London')).toBe(true);
+    expect(auto('0 * * * *', 'Europe/London')).toBe(true);
+  });
+});
+
+describe('approval requests across a reset', () => {
+  it('a request sent just before a reset is not posted again by the next tick', async () => {
+    const s = stub('approval-reset-mid-send');
+    await s.init();
+    const at = inOneMinute();
+    const created = await s.create({
+      title: 'Reset Mid Send',
+      intent: 'Publish the post.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    // The send reaches the room, then the object resets before the
+    // request is recorded on the task.
+    await s.setSendBehavior('hang');
+    void s.tick(Date.parse(at) + 1);
+    await waitFor(async () =>
+      (await s.sentMessages()).some((m) =>
+        m.body.includes('needs your approval'),
+      ),
+    );
+    await s.simulateReset();
+    await s.setSendBehavior('ok');
+    await s.tick(Date.parse(at) + 60_000);
+    const requests = (await s.sentMessages()).filter((m) =>
+      m.body.includes('needs your approval'),
+    );
+    expect(requests).toHaveLength(1);
+    expect(pendingApprovalOf((await s.get(created.id))!)).toBeDefined();
   });
 });

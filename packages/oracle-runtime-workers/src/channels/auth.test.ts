@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createDelegation,
   createInvocation,
@@ -11,6 +11,7 @@ import {
   authenticateChannel,
   assertActiveChannelBinding,
   assertChannelAttemptAllowed,
+  channelAuthConfig,
   ChannelInvoke,
 } from './auth';
 import { RunAttemptDeferred } from '../do/run-coordinator';
@@ -342,5 +343,51 @@ describe('active channel binding', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('channel service identity resolution', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('fetches a did:web channel service document once across requests and caches no failure', async () => {
+    const service = await generateKeypair();
+    // A DID no other test resolves: the resolver is shared per isolate.
+    const channelDid = 'did:web:channels-cache.example.test';
+    const requests: string[] = [];
+    let available = false;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      requests.push(String(input instanceof Request ? input.url : input));
+      if (!available) return new Response('unavailable', { status: 503 });
+      return Response.json({
+        verificationMethod: [
+          {
+            id: `${channelDid}#key-1`,
+            type: 'Ed25519VerificationKey2020',
+            publicKeyMultibase: service.did.slice('did:key:'.length),
+          },
+        ],
+      });
+    });
+    const env = {
+      ORACLE_DID: 'did:ixo:ixo1oracle',
+      BLOCKSYNC_GRAPHQL_URL: 'https://blocksync-channels.invalid/graphql',
+      CHANNEL_SERVICE_DID: channelDid,
+    };
+
+    expect(
+      'error' in (await channelAuthConfig(env).didResolver(channelDid)),
+    ).toBe(true);
+    available = true;
+    for (let i = 0; i < 3; i++) {
+      expect(await channelAuthConfig(env).didResolver(channelDid)).toEqual({
+        ok: [service.did],
+      });
+    }
+    expect(requests).toEqual([
+      'https://channels-cache.example.test/.well-known/did.json',
+      'https://channels-cache.example.test/.well-known/did.json',
+    ]);
   });
 });

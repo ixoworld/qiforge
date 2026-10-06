@@ -13,6 +13,10 @@ import {
   isAttachmentViewMessage,
 } from '../attachments/retention';
 import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
+import {
+  stripTurnTimeNote,
+  TURN_TIME_NOTE_KWARG,
+} from '../core/turn-time-note';
 import { ChannelOrigin } from '../channels/contract';
 import { CREATE_ARTIFACT_TOOL, createArtifactParts } from '../artifacts/tool';
 import { planText } from '../delivery/schema';
@@ -113,6 +117,25 @@ export function contentToText(content: BaseMessage['content']): string {
 }
 
 /**
+ * A stored message's content as a person (or a service acting for one)
+ * reads it: a user message loses the "current time" note the model was
+ * given with it, when it still starts with exactly the note recorded on it.
+ * Every other message is returned as stored.
+ */
+export function visibleContent(message: BaseMessage): BaseMessage['content'] {
+  if (message.type !== 'human') return message.content;
+  return stripTurnTimeNote(
+    message.content,
+    message.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
+  );
+}
+
+/** `visibleContent` as text (titles, mirrors, indexing). */
+export function visibleText(message: BaseMessage): string {
+  return contentToText(visibleContent(message));
+}
+
+/**
  * The summarization middleware's bookkeeping message — never shown to users.
  * LangChain 1.4 writes it as a HUMAN message tagged
  * `additional_kwargs.lc_source: 'summarization'` whose text starts with the
@@ -136,6 +159,9 @@ export async function transformTranscript(
   messages: BaseMessage[],
 ): Promise<ListMessagesResponse> {
   const acc: MessageDto[] = [];
+  // The first listed reply that made each tool call: a tool result folds
+  // into it (looked up, not searched, so long transcripts stay linear).
+  const callers = new Map<string, MessageDto>();
   for (const message of messages) {
     const toolMsg = message.type === 'tool' ? (message as ToolMessage) : null;
     const kw = (message.additional_kwargs ?? {}) as Record<string, unknown>;
@@ -156,7 +182,7 @@ export async function transformTranscript(
             (kw.attachment ? [kw.attachment as AttachmentMeta] : undefined))
           : undefined;
       const attachment = attachments?.[0];
-      const textContent = contentToText(message.content);
+      const textContent = visibleText(message);
       const toolCalls = (message as AIMessage).tool_calls;
       const dto: MessageDto = {
         type: message.type === 'ai' ? 'ai' : 'human',
@@ -184,6 +210,8 @@ export async function transformTranscript(
         if (origin.success) dto.metadata = { 'org.ixo.qi.origin': origin.data };
       }
       acc.push(dto);
+      for (const call of dto.toolCalls ?? [])
+        if (!callers.has(call.id)) callers.set(call.id, dto);
     }
 
     if (toolMsg) {
@@ -196,10 +224,7 @@ export async function transformTranscript(
         toolMsg.tool_call_id ??
         kwargs?.tool_call_id ??
         (await uuidFromString(JSON.stringify(kwargs?.args)));
-      const idx = acc.findIndex((m) =>
-        m.toolCalls?.some((t) => t.id === toolCallId),
-      );
-      const el = idx !== -1 ? acc[idx] : undefined;
+      const el = callers.get(toolCallId);
       if (el) {
         // A chat reply that ended in `create_artifact` wrote no text of its
         // own: list what the user received, the message, link and question.

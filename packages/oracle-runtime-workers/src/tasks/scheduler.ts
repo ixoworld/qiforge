@@ -15,7 +15,10 @@
  * Task records live in the USER'S OWN SQLite database (`host.db`) so they are
  * part of the owner file the user controls — pausing, exporting or deleting
  * the file carries the tasks with it. A Durable Object is single-threaded, so
- * there are no run locks: `onAlarm` executes due runs serially.
+ * there are no run locks: `onAlarm` executes due runs up to
+ * `MAX_CONCURRENT_TASK_RUNS` at a time, and in-memory ownership (a task
+ * taken up by a tick, a run executing, a turn being recovered) keeps any
+ * task from firing twice.
  *
  * A run re-enters the SAME agent through `host.runTurn` — the exact entry the
  * HTTP shell and Matrix gateway use — on a synthetic per-task session
@@ -23,8 +26,8 @@
  * and the result is delivered to the user's oracle room via the Matrix
  * gateway. `before-action` tasks do not execute on fire: the scheduler posts
  * an approval request to the room and waits; `surface.resolveApproval`
- * (driven by the `resolve_task_approval` tool) triggers or drops the actual
- * run.
+ * (driven by the `resolve_task_approval` tool) drops the run or persists
+ * the approval, and the next alarm — armed for right away — executes it.
  */
 import {
   deliverableIntent,
@@ -160,10 +163,20 @@ export interface TaskScheduler {
     operationId: string,
     request: TopicDeliverableRequest,
   ): Promise<TopicDeliverableResult>;
-  /** Earliest pending deadline (ms epoch), or null when nothing is scheduled. */
+  /**
+   * Earliest pending deadline (ms epoch), or null when nothing is scheduled.
+   * A task whose run is executing or being recovered contributes nothing:
+   * the end of that run re-arms the alarm for its next occurrence.
+   */
   nextWakeAt(): Promise<number | null>;
-  /** Run everything that is due. Must be safe to call spuriously. */
-  onAlarm(now: number): Promise<void>;
+  /**
+   * Run everything that is due — up to `MAX_CONCURRENT_TASK_RUNS` runs at a
+   * time — and resolve to the `nextWakeAt()` computed afterwards. The caller
+   * arms the alarm for it (no earlier than a second from now, so a deadline
+   * left in the past cannot spin the alarm). Must be safe to call
+   * spuriously.
+   */
+  onAlarm(now: number): Promise<number | null>;
   /** Runs no incarnation has finished (operator/debug). */
   openRuns(): Promise<OpenTaskRun[]>;
   /** A run this instance is executing or delivering right now. */
@@ -177,6 +190,15 @@ export interface TaskScheduler {
   /** The recovered turn of a `running` task run ended without a result. */
   failRecoveredRun(runId: string, detail: string): Promise<void>;
 }
+
+/**
+ * Due runs one alarm tick executes at the same time. Each is an agent turn
+ * of up to `TURN_TIMEOUT_MS`; run one after another, a single slow turn held
+ * back every task due with it, and a long queue outlived the alarm
+ * invocation. The runs share the object's tool lanes (one write slot), so
+ * the cap stays small.
+ */
+export const MAX_CONCURRENT_TASK_RUNS = 3;
 
 /** How much of a run's output is kept as `lastResult.summary`. */
 const RESULT_SUMMARY_MAX = 500;
@@ -227,7 +249,14 @@ export function shouldCreateDedicatedRoom(args: {
   if (args.explicit !== 'auto') return args.explicit === 'yes';
   const { schedule } = args;
   if (schedule.kind === 'cron') {
-    const interval = cronIntervalMs(schedule.cron, schedule.timezone);
+    // The clock cadence, without the timezone: a daily task is daily even
+    // on the day the clocks change (its real gap is then 23 or 25 hours).
+    const interval = cronIntervalMs(
+      schedule.cron,
+      undefined,
+      Date.now(),
+      DAY_MS,
+    );
     if (interval !== null && interval < DAY_MS) return true;
   } else if (schedule.kind === 'interval') {
     if (schedule.everySeconds * 1000 < DAY_MS) return true;
@@ -300,10 +329,43 @@ class AlarmTaskScheduler implements TaskScheduler {
   /** Tasks whose open run is being recovered by the object (rebuilt per alarm). */
   private readonly recoveringTasks = new Set<string>();
 
+  /**
+   * Tasks an alarm tick has taken up (approval request or run) and not yet
+   * finished. Claimed synchronously before the first await, so a second
+   * tick — or a second worker of the same tick — never fires them again.
+   */
+  private readonly firingTasks = new Set<string>();
+
   private hasActiveRun(taskId: string): boolean {
     for (const owner of this.activeRuns.values())
       if (owner === taskId) return true;
     return false;
+  }
+
+  /** The task has a run (or approval request) in flight, or a turn being recovered. */
+  private isBusy(taskId: string): boolean {
+    return (
+      this.firingTasks.has(taskId) ||
+      this.recoveringTasks.has(taskId) ||
+      this.hasActiveRun(taskId)
+    );
+  }
+
+  private busyTaskIds(): string[] {
+    return [
+      ...new Set([
+        ...this.firingTasks,
+        ...this.recoveringTasks,
+        ...this.activeRuns.values(),
+      ]),
+    ];
+  }
+
+  /** Re-arm the alarm for the next deadline (after a run ended outside a tick). */
+  private async rearm(): Promise<void> {
+    const next = await this.nextWakeAt();
+    if (next !== null)
+      await this.host.requestAlarm(Math.max(next, Date.now() + 1000));
   }
 
   constructor(
@@ -508,8 +570,11 @@ class AlarmTaskScheduler implements TaskScheduler {
   // ── alarm client ─────────────────────────────────────────────────────────
 
   async nextWakeAt(): Promise<number | null> {
+    // A busy task's `nextRunAt` stays in the past until its run (or the
+    // recovered turn) ends — counting it would re-arm the alarm every
+    // second for the length of a turn.
     const [nextRun, nextRetry] = await Promise.all([
-      this.store.minNextRunAt(),
+      this.store.minNextRunAt(this.busyTaskIds()),
       this.store.minRetryAt(),
     ]);
     if (nextRun === null) return nextRetry;
@@ -528,6 +593,20 @@ class AlarmTaskScheduler implements TaskScheduler {
   async completeRecoveredRun(runId: string, text: string): Promise<void> {
     const run = await this.store.getOpenRun(runId);
     if (!run || run.state !== 'running') return;
+    try {
+      await this.finishRecoveredRun(run, text);
+    } finally {
+      // The task waited on this turn (no wake was armed for it).
+      this.recoveringTasks.delete(run.taskId);
+      await this.rearm();
+    }
+  }
+
+  private async finishRecoveredRun(
+    run: OpenTaskRun,
+    text: string,
+  ): Promise<void> {
+    const runId = run.runId;
     const nowMs = Date.now();
     const loaded = await this.store.get(run.taskId);
     if (!loaded || loaded.status !== 'active') {
@@ -596,64 +675,93 @@ class AlarmTaskScheduler implements TaskScheduler {
   async failRecoveredRun(runId: string, detail: string): Promise<void> {
     const run = await this.store.getOpenRun(runId);
     if (!run || run.state !== 'running') return;
-    const task = await this.store.get(run.taskId);
-    if (!task) {
-      await this.store.updateRun(runId, {
-        state: 'interrupted',
-        ok: false,
-        finishedAt: new Date().toISOString(),
-        detail,
-      });
-      return;
+    try {
+      const task = await this.store.get(run.taskId);
+      if (!task) {
+        await this.store.updateRun(runId, {
+          state: 'interrupted',
+          ok: false,
+          finishedAt: new Date().toISOString(),
+          detail,
+        });
+        return;
+      }
+      await this.recordFailure(
+        task,
+        Date.now(),
+        run.startedAt,
+        new Error(detail),
+        {
+          runId,
+          state: 'interrupted',
+        },
+      );
+    } finally {
+      this.recoveringTasks.delete(run.taskId);
+      await this.rearm();
     }
-    await this.recordFailure(
-      task,
-      Date.now(),
-      run.startedAt,
-      new Error(detail),
-      {
-        runId,
-        state: 'interrupted',
-      },
-    );
   }
 
-  async onAlarm(now: number): Promise<void> {
+  async onAlarm(now: number): Promise<number | null> {
     // Unfinished runs first: what a previous incarnation left behind decides
     // the fate of its task before the due scan can fire the task again.
     await this.reconcileOpenRuns(now);
     const due = await this.store.due(now);
-    for (const stale of due) {
-      // Re-load: a tool call awaited between iterations may have paused,
-      // cancelled or rescheduled the task since the due scan.
-      const task = await this.store.get(stale.id);
-      if (!task || task.status !== 'active' || task.nextRunAt === undefined) {
-        continue;
-      }
-      if (Date.parse(task.nextRunAt) > now) continue;
-      // A run of this task is executing in this instance right now (a long
-      // turn while the object's alarm fires for something else), or its
-      // turn is being recovered by the object after a reset: its schedule
-      // advances when the turn ends, never start a second one.
-      if (this.hasActiveRun(task.id) || this.recoveringTasks.has(task.id))
-        continue;
-      try {
-        if (task.approval === 'before-action') {
-          await this.requestApproval(task, now);
-        } else {
-          await this.executeRun(task, now);
+    let cursor = 0;
+    // The due scan's rows are current for the runs started before anything
+    // yields; a task taken up later (after a slot freed) is re-read, since a
+    // tool call may have paused, cancelled or rescheduled it meanwhile.
+    let reload = false;
+    const worker = async (): Promise<void> => {
+      while (cursor < due.length) {
+        const listed = due[cursor++]!;
+        // A run of this task is executing in this instance right now (a
+        // long turn while the object's alarm fires for something else), or
+        // its turn is being recovered by the object after a reset: its
+        // schedule advances when the turn ends, never start a second one.
+        if (this.isBusy(listed.id)) continue;
+        this.firingTasks.add(listed.id);
+        try {
+          const task = reload ? await this.store.get(listed.id) : listed;
+          if (task) await this.fire(task, now);
+        } catch (err) {
+          // `executeRun`/`requestApproval` do their own failure bookkeeping —
+          // reaching here means the BOOKKEEPING failed (storage trouble).
+          // Log and move on; the caller's 1s re-arm floor prevents a hot loop.
+          this.host.log.error(
+            `[tasks] run bookkeeping crashed for ${listed.id}: ${errorMessage(err)}`,
+          );
+        } finally {
+          this.firingTasks.delete(listed.id);
         }
-      } catch (err) {
-        // `executeRun`/`requestApproval` do their own failure bookkeeping —
-        // reaching here means the BOOKKEEPING failed (storage trouble). Log
-        // and move on; the 1s re-arm floor below prevents a hot loop.
-        this.host.log.error(
-          `[tasks] run bookkeeping crashed for ${task.id}: ${errorMessage(err)}`,
-        );
       }
+    };
+    const workers = Array.from(
+      { length: Math.min(MAX_CONCURRENT_TASK_RUNS, due.length) },
+      () => worker(),
+    );
+    reload = true;
+    await Promise.all(workers);
+    return this.nextWakeAt();
+  }
+
+  /** One due task: its approved run, else its scheduled fire. */
+  private async fire(task: TaskRecord, now: number): Promise<void> {
+    if (task.status !== 'active') return;
+    if (task.approvedAt !== undefined && Date.parse(task.approvedAt) <= now) {
+      await this.executeRun(task, now, {
+        approved: true,
+        ...(task.approvalNote ? { approvalNote: task.approvalNote } : {}),
+      });
+      return;
     }
-    const next = await this.nextWakeAt();
-    if (next !== null) await this.host.requestAlarm(Math.max(next, now + 1000));
+    if (task.nextRunAt === undefined || Date.parse(task.nextRunAt) > now)
+      return;
+    if (task.approval === 'before-action') {
+      await this.requestApproval(task, now);
+    } else {
+      await this.executeRun(task, now);
+    }
   }
 
   /**
@@ -668,9 +776,9 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.recoveringTasks.clear();
     for (const run of open) {
       if (this.activeRuns.has(run.runId)) continue; // alive in this instance
-      const task = await this.store.get(run.taskId);
       if (run.state === 'delivering') {
         if (run.retryAt !== undefined && run.retryAt > now) continue;
+        const task = await this.store.get(run.taskId);
         if (!task || task.status === 'cancelled') {
           await this.store.updateRun(run.runId, {
             state: 'failed',
@@ -696,6 +804,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         this.host.log.warn(
           `[tasks] run ${run.runId} of ${run.taskId} started ${run.startedAt} never finished (the object was reset while it ran); closing it as interrupted, not re-running`,
         );
+        const task = await this.store.get(run.taskId);
         if (!task) {
           await this.store.updateRun(run.runId, {
             state: 'interrupted',
@@ -1035,7 +1144,26 @@ class AlarmTaskScheduler implements TaskScheduler {
           'Could not resolve a delivery room for the approval request',
         );
       }
-      await this.host.gateway.sendText(roomId, approvalRequestMessage(task));
+      // Retried across a gateway restart under an id fixed per occurrence:
+      // a send whose response was lost — or that went out just before a
+      // reset, so the next tick asks again — is deduplicated by the
+      // homeserver instead of reaching the user twice.
+      await retryGateway(
+        () =>
+          this.host.gateway.sendText(roomId, approvalRequestMessage(task), {
+            txnId: `task-approval-${task.id}-${task.nextRunAt ?? task.createdAt}`,
+            priority: 'interactive',
+          }),
+        {
+          ...(this.deliveryRetryDelaysMs
+            ? { delaysMs: this.deliveryRetryDelaysMs }
+            : {}),
+          onRetry: (err, attempt, delayMs) =>
+            this.host.log.warn(
+              `[tasks] approval request for ${task.id} failed on attempt ${attempt}, retrying in ${delayMs} ms: ${errorMessage(err)}`,
+            ),
+        },
+      );
       task.pendingApprovalAt = startedAt;
       if (task.schedule.kind === 'once') {
         delete task.nextRunAt;
@@ -1102,9 +1230,20 @@ class AlarmTaskScheduler implements TaskScheduler {
       return { resolved: true };
     }
 
-    await this.store.save(task);
-    this.host.log.log(`[tasks] approval granted for ${task.id} — running now`);
-    await this.executeRun(task, Date.now(), { approvalNote: note });
+    // The run itself executes on the alarm, never inside this call: the
+    // approval arrives as a tool call that holds the object's only write
+    // slot, which the run's own write tools would wait on until the turn
+    // timed out. The approval is persisted with the cleared request, so a
+    // reset before the alarm still runs it — once.
+    const approvedAt = Date.now();
+    await this.host.db.transaction(async () => {
+      await this.store.save(task);
+      await this.store.approve(task.id, approvedAt, note?.trim() || undefined);
+    });
+    this.host.log.log(
+      `[tasks] approval granted for ${task.id} — running on the alarm`,
+    );
+    await this.host.requestAlarm(approvedAt);
     return { resolved: true };
   }
 
@@ -1168,17 +1307,19 @@ class AlarmTaskScheduler implements TaskScheduler {
    * Two extra single-row writes per run against the dozens of checkpoint
    * writes the turn itself makes; task runs are rare next to chat turns.
    *
-   * `opts.approvalNote` marks an approval-triggered run: the schedule was
-   * already advanced when the request was posted, so only a one-shot's
-   * completion is recorded here.
+   * `opts.approved` marks the approved run of a `before-action` task: the
+   * approval marker is taken in the transaction that opens the ledger row
+   * (no marker, no run), and the schedule was already advanced when the
+   * request was posted, so only a one-shot's completion is recorded here.
    */
   private async executeRun(
     taskAtFire: TaskRecord,
     nowMs: number,
-    opts: { approvalNote?: string } = {},
+    opts: { approved?: boolean; approvalNote?: string } = {},
   ): Promise<void> {
     let task = taskAtFire;
-    const approvalRun = task.approval === 'before-action';
+    const approvalRun =
+      opts.approved === true || task.approval === 'before-action';
     // A Topic deliverable's turn never uses a room (the restricted turn
     // leaves no room trail) and its product is the stored result, read
     // through the owner API: run first, deliver afterwards, best-effort
@@ -1190,9 +1331,19 @@ class AlarmTaskScheduler implements TaskScheduler {
     const txnId = `task-${runId}`;
     const ledger = { runId, state: 'failed' as const };
     let open: OpenTaskRun | undefined;
+    // Owned from here on: a concurrent tick sees the task as busy.
+    this.activeRuns.set(runId, task.id);
     try {
-      await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
-      this.activeRuns.set(runId, task.id);
+      const started = await this.host.db.transaction(async () => {
+        if (opts.approved && !(await this.store.claimApproval(task.id)))
+          return false;
+        await this.store.startRun({ runId, taskId: task.id, startedAt, txnId });
+        return true;
+      });
+      if (!started) {
+        this.activeRuns.delete(runId);
+        return;
+      }
       const roomId = topic ? undefined : await this.resolveDeliveryRoom(task);
       if (!topic && !roomId)
         throw new Error('Could not resolve a delivery room');
@@ -1350,16 +1501,13 @@ class AlarmTaskScheduler implements TaskScheduler {
     }
 
     const finishedAt = new Date().toISOString();
+    const summary = text.slice(0, RESULT_SUMMARY_MAX);
     // Delivered. Bookkeeping goes onto the task as it is NOW (a pause or
     // cancel during the send must stand); only an active one-shot completes.
     await this.host.db.transaction(async () => {
       const current = (await this.store.get(task.id)) ?? task;
       current.lastRunAt = run.startedAt;
-      current.lastResult = {
-        ok: true,
-        summary: text.slice(0, RESULT_SUMMARY_MAX),
-        at: finishedAt,
-      };
+      current.lastResult = { ok: true, summary, at: finishedAt };
       current.consecutiveFailures = 0;
       if (current.schedule.kind === 'once' && current.status === 'active')
         current.status = 'completed';
@@ -1369,7 +1517,7 @@ class AlarmTaskScheduler implements TaskScheduler {
         state: 'delivered',
         ok: true,
         finishedAt,
-        detail: task.lastResult?.summary,
+        detail: summary,
         retryAt: null,
       });
     });
@@ -1479,14 +1627,20 @@ class AlarmTaskScheduler implements TaskScheduler {
     this.host.log.warn(
       `[tasks] run failed for ${task.id} (${task.consecutiveFailures} consecutive${stopped ? ', stopped' : ''}): ${message}`,
     );
-    if (stopped) {
+    // A Topic deliverable's product is its stored result, read through the
+    // owner's API (which reports the failed delivery): no room notice.
+    if (stopped && task.topicOperationId === undefined) {
       // Best-effort notice — the failure bookkeeping above is already saved.
       // Retried across a gateway restart under a fixed id: never two copies.
       const roomId = await this.resolveDeliveryRoom(task);
       if (roomId) {
-        const text = oneShot
-          ? `🛑 **${task.title}** could not be completed. Ask me to run it again or to reschedule it.`
-          : `🛑 **${task.title}** has been stopped after ${task.consecutiveFailures} unsuccessful runs in a row. Ask me to look into it or to reschedule it when you're ready.`;
+        // A run whose result exists but could not be delivered is not a
+        // failed run: asking for a re-run would pay for the work twice.
+        const text = !oneShot
+          ? `🛑 **${task.title}** has been stopped after ${task.consecutiveFailures} unsuccessful runs in a row. Ask me to look into it or to reschedule it when you're ready.`
+          : ledger?.undelivered
+            ? `🛑 **${task.title}** ran, but its result could not be delivered here.`
+            : `🛑 **${task.title}** could not be completed. Ask me to run it again or to reschedule it.`;
         await retryGateway(
           () =>
             this.host.gateway.sendText(roomId, text, {

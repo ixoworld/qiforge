@@ -1,8 +1,5 @@
 import { ChannelTurns } from '../channels/turns';
-import {
-  assertActiveChannelBinding,
-  assertChannelAttemptAllowed,
-} from '../channels/auth';
+import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
   ChannelError,
   channelRequestHash,
@@ -57,8 +54,10 @@ import {
   type AttachmentViewSurface,
   type MatrixMediaSource,
   type SandboxUploadConfig,
+  DOWNLOAD_TIMEOUT_MS,
   MAX_FILE_SIZE,
   readBytesCapped,
+  AttachmentTextCacheStore,
 } from '../attachments';
 import type { RuntimeCore } from '../core';
 import {
@@ -72,7 +71,10 @@ import {
   type LangsmithTracingDecision,
   type OpenRouterLlmAdapter,
   DEFAULT_MODEL_ID,
+  OPENROUTER_MODEL_MAP,
 } from '../core/llm';
+import { renderTurnTimeNote } from '../core/prompt-composer';
+import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
 import {
   capabilityRouterMode,
   createCapabilityRouter,
@@ -94,7 +96,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
 import { createByoLlmAdapter } from '../llm/byo-adapter';
-import { isByoModelId } from '../llm/byo-catalog';
+import { byoModelForRole, isByoModelId } from '../llm/byo-catalog';
 import { handleByoRequest } from '../llm/byo-routes';
 import {
   WorkersByoService,
@@ -171,7 +173,11 @@ import {
   VFS_DEFAULT_BASE_URLS,
 } from '../owner-store/ixo-vfs-store';
 import type { OwnerStore } from '../owner-store/types';
-import { createAmbientServices, SessionEventRouter } from './ambient';
+import {
+  createAmbientServices,
+  SessionEventRouter,
+  sweepExpiredBlobs,
+} from './ambient';
 import {
   checkpointStorageKey,
   type MatrixGatewayObject,
@@ -296,6 +302,7 @@ import {
   TranscriptCursorError,
   transformTranscript,
   type TranscriptPageOptions,
+  visibleText,
 } from './transcript';
 import { evictIdleWorkingCopy } from './idle-eviction';
 import { FeedbackMarkers, reserveFeedback } from '../feedback/reservation';
@@ -306,6 +313,22 @@ import type {
 } from '../feedback/contract';
 import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
+
+/** What one attempt's agent build reads from the request body. */
+type TurnBuildBody = Pick<
+  TurnBody,
+  'message' | 'timezone' | 'model' | 'tools' | 'agActions' | 'attachments'
+>;
+
+/** The run an attempt's agent build belongs to. */
+interface TurnBuildRun {
+  runId: string;
+  abortController: AbortController;
+  /** A recovery attempt: no new input, the graph continues from the checkpoint. */
+  resumed: boolean;
+  /** The reply text the user already received (resumed attempts). */
+  continuation: string | null;
+}
 
 /**
  * Whether a turn is offered to the plugins' admission handlers. Not for a
@@ -352,8 +375,31 @@ const FLUSH_FAILURES_ERROR_THRESHOLD = 3;
  * more for anyone who comes back within that window.
  */
 const IDLE_EVICT_MS = 5 * 24 * 60 * 60 * 1000;
+/**
+ * A stream of requests to a loaded object persists its last access at most
+ * this often. The idle checks read the in-memory value as well, so what an
+ * instance saw is never lost to the throttle while it lives; an instance
+ * that unloads takes at most this much of its last access with it, against
+ * the five-day idle horizon.
+ */
+const ACCESS_PERSIST_INTERVAL_MS = 60 * 60_000;
+/**
+ * The session title is a separate model call after the reply; it runs in
+ * the background and is abandoned after this long.
+ */
+const TITLE_TIMEOUT_MS = 15_000;
+/** A new sweep of expired ambient blobs starts at most this often per instance. */
+const BLOB_SWEEP_INTERVAL_MS = 60 * 60_000;
+/** The Blocksync lookup of the user's homeserver is abandoned after this long (the fallback applies). */
+const HOMESERVER_LOOKUP_TIMEOUT_MS = 3_000;
 /** Set once the legacy Matrix copy has been removed (or found absent): no more lookups. */
 const META_LEGACY_CLEARED = 'meta:legacyCleared';
+/**
+ * Set once a zero-turn working copy looked for a legacy Matrix copy to adopt
+ * and found none, or one without turns: later boots skip the gateway round
+ * trips. Cleared when a legacy copy is imported after all.
+ */
+const META_LEGACY_UNUSABLE = 'meta:legacyUnusable';
 const META_USER_DID = 'meta:userDid';
 
 /** KV key of a session's context-guard counters (`GET /debug/context?session=`). */
@@ -687,6 +733,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private resultStore: ResultStore | null = null;
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
+    /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
+    private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
      * Per-model context windows; learned limits persist in this object's KV
      * storage (`ctxwin:<model>`), so a provider's rejection is remembered
@@ -698,6 +746,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         fetchOpenRouterContextLengths({
           apiKey: this.env.OPEN_ROUTER_API_KEY,
           logger: console,
+          // A background refresh of the catalogue outlives the request.
+          waitUntil: (work) => this.ctx.waitUntil(work),
         }),
       learned: {
         get: (model) => this.ctx.storage.get<number>(`ctxwin:${model}`),
@@ -715,6 +765,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /** Epoch-ms until which a room-state delegation lookup is not retried. */
     private delegationMissUntil = 0;
     private dirty = false;
+    /**
+     * `META_FLUSH_AT` as this instance last wrote or read it (null =
+     * unknown). With `dirty`, it tells `markDirty` that the upload is
+     * already scheduled, so a turn's mark costs no storage operation.
+     */
+    private flushAt: number | null = null;
+    /** The newest real request this instance served (null = none yet). */
+    private lastAccessAt: number | null = null;
+    /** The `META_LAST_ACCESS` this instance last wrote (null = none yet). */
+    private persistedAccessAt: number | null = null;
+    /** The user's Matrix id as resolved (or read from storage) by this instance. */
+    private matrixUserIdCache: MatrixUserIdCache | null = null;
+    /**
+     * The earliest housekeeping deadline armed since the current full alarm
+     * tick began: the tick's own `META_HOUSEKEEPING_AT` write never rises
+     * above a deadline armed while it ran.
+     */
+    private housekeepingFloor = Infinity;
+    /** Where the expired-blob sweep continues on the next tick (null = from the start). */
+    private blobSweepCursor: string | null = null;
+    /** When this instance last swept from the start (the sweep reads whole values). */
+    private lastBlobSweepAt: number | null = null;
     /** The flush in progress, if any (single-flight; a VFS snapshot is open while it runs). */
     private flushInFlight: Promise<FlushResult> | null = null;
 
@@ -791,22 +863,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       userDid: string,
     ): Promise<string | undefined> {
       if (!userDid.startsWith('did:ixo:')) return undefined;
+      const fresh = (
+        entry: MatrixUserIdCache | null | undefined,
+      ): entry is MatrixUserIdCache =>
+        !!entry &&
+        entry.userDid === userDid &&
+        (entry.resolved ||
+          Date.now() - entry.at < MATRIX_USER_ID_FALLBACK_TTL_MS);
+      if (fresh(this.matrixUserIdCache))
+        return this.matrixUserIdCache.matrixUserId;
       const cached =
         await this.ctx.storage.get<MatrixUserIdCache>(META_MATRIX_USER_ID);
-      if (
-        cached &&
-        cached.userDid === userDid &&
-        (cached.resolved ||
-          Date.now() - cached.at < MATRIX_USER_ID_FALLBACK_TTL_MS)
-      ) {
+      if (fresh(cached)) {
+        this.matrixUserIdCache = cached;
         return cached.matrixUserId;
       }
       let server: string | undefined;
       let resolved = false;
       const blocksync = this.env.BLOCKSYNC_GRAPHQL_URL;
       if (blocksync) {
+        // Bounded: this lookup sits on the boot path and on every turn
+        // start. The timer is cleared however the lookup ends.
+        const lookup = new AbortController();
+        const timer = setTimeout(
+          () =>
+            lookup.abort(
+              new Error(
+                `Blocksync lookup timed out after ${HOMESERVER_LOOKUP_TIMEOUT_MS} ms`,
+              ),
+            ),
+          HOMESERVER_LOOKUP_TIMEOUT_MS,
+        );
         try {
-          const fromDid = await fetchUserMatrixServerName(blocksync, userDid);
+          const fromDid = await fetchUserMatrixServerName(
+            blocksync,
+            userDid,
+            (input, init) =>
+              globalThis.fetch(input, { ...init, signal: lookup.signal }),
+          );
           if (fromDid) {
             server = fromDid;
             resolved = true;
@@ -817,6 +911,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               err instanceof Error ? err.message : String(err)
             }`,
           );
+        } finally {
+          clearTimeout(timer);
         }
       }
       server ??=
@@ -825,12 +921,14 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           : undefined;
       if (!server) return undefined;
       const matrixUserId = `@${userDid.replace(/:/g, '-')}:${server}`;
-      await this.ctx.storage.put<MatrixUserIdCache>(META_MATRIX_USER_ID, {
+      const entry: MatrixUserIdCache = {
         userDid,
         matrixUserId,
         resolved,
         at: Date.now(),
-      });
+      };
+      this.matrixUserIdCache = entry;
+      await this.ctx.storage.put<MatrixUserIdCache>(META_MATRIX_USER_ID, entry);
       return matrixUserId;
     }
 
@@ -858,8 +956,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
     }
 
-    /** Idempotent boot: bind user, open SQLite (importing the owner copy on a cold object). */
-    private async ready(identity: TurnIdentity): Promise<void> {
+    /**
+     * Idempotent boot: bind user, open SQLite (importing the owner copy on a
+     * cold object). A request from the user records the access the idle
+     * eviction reads; the object's own wakes (the alarm, a flush, debug and
+     * operator calls) pass `recordAccess: false`, or an idle object would
+     * keep itself alive.
+     */
+    private async ready(
+      identity: TurnIdentity,
+      options: { recordAccess?: boolean } = {},
+    ): Promise<void> {
       this.installDebugTimerTracker();
       this.adoptHibernatedSockets();
       let delegationReplaced = false;
@@ -873,14 +980,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         this.delegations.set(identity.userDid, {
           raw: identity.ucanDelegation,
         });
-        // Remember it for turns that arrive without the header.
-        void this.ctx.storage.put(META_DELEGATION, {
-          raw: identity.ucanDelegation,
-          at: Date.now(),
-          ...(typeof identity.ucanDelegationExpiration === 'number'
-            ? { expiration: identity.ucanDelegationExpiration }
-            : {}),
-        } satisfies StoredDelegation);
+        // Remember a new one for turns that arrive without the header.
+        if (delegationReplaced)
+          await this.ctx.storage.put(META_DELEGATION, {
+            raw: identity.ucanDelegation,
+            at: Date.now(),
+            ...(typeof identity.ucanDelegationExpiration === 'number'
+              ? { expiration: identity.ucanDelegationExpiration }
+              : {}),
+          } satisfies StoredDelegation);
       } else if (!this.delegations.has(identity.userDid)) {
         await this.hydrateDelegation(identity.userDid);
       }
@@ -899,8 +1007,57 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `UserOracleDO bound to ${this.userDid} received a request for ${identity.userDid}`,
         );
       }
-      await this.ctx.storage.put(META_LAST_ACCESS, Date.now());
+      if (options.recordAccess !== false) await this.recordAccess();
       if (delegationReplaced) await this.onDelegationReplaced();
+    }
+
+    /**
+     * A request from the user: remember it in memory, and in storage on this
+     * instance's first request and then at most every
+     * `ACCESS_PERSIST_INTERVAL_MS`.
+     */
+    private async recordAccess(): Promise<void> {
+      const now = Date.now();
+      this.lastAccessAt = now;
+      if (
+        typeof this.persistedAccessAt === 'number' &&
+        now - this.persistedAccessAt < ACCESS_PERSIST_INTERVAL_MS
+      )
+        return;
+      this.persistedAccessAt = now;
+      await this.ctx.storage.put(META_LAST_ACCESS, now);
+    }
+
+    /** The in-memory last access, when it is newer than the stored one. */
+    private async persistAccess(): Promise<void> {
+      const inMemory = this.lastAccessAt;
+      if (
+        typeof inMemory !== 'number' ||
+        (typeof this.persistedAccessAt === 'number' &&
+          this.persistedAccessAt >= inMemory)
+      )
+        return;
+      this.persistedAccessAt = inMemory;
+      await this.ctx.storage.put(META_LAST_ACCESS, inMemory);
+    }
+
+    /**
+     * The user's last request: the newer of what storage holds and what
+     * this instance saw (undefined when neither knows of one).
+     */
+    private async knownLastAccess(): Promise<number | undefined> {
+      const stored = await this.ctx.storage.get<number>(META_LAST_ACCESS);
+      const inMemory = this.lastAccessAt;
+      const known = Math.max(
+        typeof stored === 'number' ? stored : -Infinity,
+        typeof inMemory === 'number' ? inMemory : -Infinity,
+      );
+      return Number.isFinite(known) ? known : undefined;
+    }
+
+    /** `knownLastAccess`, or `now` when there is none (never idle). */
+    private async lastAccess(now: number): Promise<number> {
+      return (await this.knownLastAccess()) ?? now;
     }
 
     /**
@@ -933,10 +1090,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * The object holds a delegation it had not seen before (a header on this
      * request, or a deposit through the shell). A fresh delegation is the one
      * thing that turns a "no file-storage grant" flush failure into a
-     * success: forget the failure streak and, with unsaved turns, flush now
-     * instead of at the next 10-minute retry.
+     * success: after a recorded failure, forget the streak and, with unsaved
+     * turns, flush now instead of at the next 10-minute retry. Without one
+     * the debounce stands: a user on two clients alternates two delegations,
+     * and an upload per request would replace the daily one.
      */
     private async onDelegationReplaced(): Promise<void> {
+      const failures =
+        (await this.ctx.storage.get<number>(META_FLUSH_FAILURES)) ?? 0;
+      if (failures === 0) return;
       await this.ctx.storage.delete(META_FLUSH_FAILURES);
       if (!this.db) return;
       if (
@@ -1088,6 +1250,45 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         DB_FILE,
         this.sqliteOpenOptions(),
       );
+      try {
+        await this.bootWorkingCopy(
+          db,
+          userDid,
+          this.ownerStore,
+          this.ucan,
+          secretsService,
+        );
+      } catch (err) {
+        // Nothing of a failed boot stays behind: the connection (and the
+        // one a dropped zero-turn copy was reopened into) is closed and the
+        // handles forgotten, so the next request or alarm boots afresh on
+        // one connection instead of finding a half-built object.
+        const reopened = this.db;
+        this.dropInMemoryState();
+        await db.close().catch(() => undefined);
+        if (reopened && reopened !== db)
+          await reopened.close().catch(() => undefined);
+        throw err;
+      }
+    }
+
+    /**
+     * The fallible part of `boot()`, from the open database on: reconcile it
+     * with the owner copy, then build the stores and services over it.
+     */
+    private async bootWorkingCopy(
+      db: DoSqliteDatabase,
+      userDid: string,
+      ownerStore: OwnerStore,
+      ucan: WorkersUcanService,
+      secretsService: WorkersSecretsService,
+    ): Promise<void> {
+      const env = this.env;
+      // Whether the working copy holds a turn: one existence query, asked
+      // again only after an import or a wipe changed the file.
+      let turns: boolean | undefined;
+      const hasTurns = async (target: DoSqliteDatabase): Promise<boolean> =>
+        (turns ??= await this.hasLocalTurns(target));
       // Cold object (no pages yet) → pull the user's file if they have one.
       // `null` means the owner store PROVABLY holds no file (a new user): an
       // empty working copy is right. A load that FAILS is different: there is
@@ -1096,7 +1297,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // real copy. So the request fails instead; the boot is not memoised on
       // failure, and the next request simply retries the load.
       if (db.fileSize === 0) {
-        const store = this.ownerStore;
+        const store = ownerStore;
         let loaded: OwnerCopy | null;
         let attempts = 0;
         try {
@@ -1126,24 +1327,35 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           throw toRpcError(failure);
         }
         if (loaded) {
-          const imported = await this.adoptOwnerCopy(db, loaded);
+          let imported: number;
+          try {
+            imported = await this.adoptOwnerCopy(db, loaded);
+          } catch (err) {
+            // The object was empty, so nothing is lost by emptying it
+            // again: a copy that is not a database (a short or truncated
+            // file passes the import's header check) must not stay behind,
+            // or every later boot would open it and fail.
+            await this.wipeWorkingCopy(db).catch(() => undefined);
+            throw err;
+          }
           this.reloadedFromOwnerStore = true;
           console.log(
-            `[user-do] imported ${imported} bytes from ${loaded.fromLegacy ? 'legacy Matrix media' : this.ownerStore.kind} for ${userDid}`,
+            `[user-do] imported ${imported} bytes from ${loaded.fromLegacy ? 'legacy Matrix media' : ownerStore.kind} for ${userDid}`,
           );
         }
       } else {
         // Warm object: notice if the user replaced or deleted their file
         // upstream. A `head()` that FAILS (a VFS error/timeout, or our own
-        // delete→move replace window where the real path momentarily does
-        // not exist) must NEVER be read as "the file is gone" — swallowing
+        // replace window between moving the old file aside and moving the
+        // new one in, where the real path momentarily does not exist) must
+        // NEVER be read as "the file is gone" — swallowing
         // the error to null and wiping the working copy on it would destroy
         // the durable local history over a transient blip. So distinguish a
         // proven absence (null) from an unknown (the call threw).
         const knownEtag = await this.ctx.storage.get<string>(META_OWNER_ETAG);
         let head: { etag: string } | null | undefined;
         try {
-          head = await this.ownerStore.head();
+          head = await ownerStore.head();
         } catch (err) {
           head = undefined; // unknown — leave the working copy untouched
           console.warn(
@@ -1159,11 +1371,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // re-flushed, re-establishing the owner copy; a genuine "forget me"
           // goes through the explicit `remove()` path, never through an
           // auto-wipe that could fire on a mid-replace crash or a stale list.
-          if ((await this.localTurnCount(db)) === 0) {
+          if (!(await hasTurns(db))) {
             console.warn(
               `[user-do] owner copy for ${userDid} is gone upstream and the working copy is empty — dropping it`,
             );
             await this.wipeWorkingCopy(db);
+            turns = undefined;
             this.db = await DoSqliteDatabase.open(
               this.ctx,
               DB_FILE,
@@ -1176,13 +1389,27 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             this.markDirty();
           }
         } else if (head && knownEtag && head.etag !== knownEtag) {
-          const loaded = await this.ownerStore.load().catch(() => null);
-          if (loaded) {
-            await this.adoptOwnerCopy(db, loaded);
-            this.reloadedFromOwnerStore = true;
-            console.log(
-              `[user-do] owner copy changed upstream (${knownEtag} → ${head.etag}); re-imported`,
+          // The file changed upstream. Re-import it only when every local
+          // write already went up: up to a day of turns waits for the
+          // debounced flush, and an import would drop them. With unflushed
+          // turns neither side can win automatically, so keep local (the
+          // next flush replaces the upstream file) and say so loudly.
+          const unflushed = await this.unflushedLocalWrites(db);
+          if (unflushed) {
+            console.warn(
+              `[user-do] owner copy for ${userDid} changed upstream (${knownEtag} → ${head.etag}) but the working copy holds writes not uploaded yet — keeping the local copy`,
             );
+            this.markDirty();
+          } else {
+            const loaded = await ownerStore.load().catch(() => null);
+            if (loaded) {
+              await this.adoptOwnerCopy(db, loaded);
+              turns = undefined;
+              this.reloadedFromOwnerStore = true;
+              console.log(
+                `[user-do] owner copy changed upstream (${knownEtag} → ${head.etag}); re-imported`,
+              );
+            }
           }
         } else if (head && !knownEtag) {
           // This object first booted before the user's owner file became
@@ -1193,9 +1420,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           // empty session, but no turn ever ran → no checkpoints); once local
           // turns exist neither side can win automatically, so keep local
           // and say so loudly (operators resolve via /debug/storage/reset).
-          const localTurns = await this.localTurnCount(db);
-          if (localTurns === 0) {
-            const loaded = await this.ownerStore.load().catch((err) => {
+          if (!(await hasTurns(db))) {
+            const loaded = await ownerStore.load().catch((err) => {
               console.warn(
                 `[user-do] late owner copy load failed for ${userDid}: ${err instanceof Error ? err.message : String(err)}`,
               );
@@ -1203,14 +1429,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             });
             if (loaded) {
               const imported = await this.adoptOwnerCopy(db, loaded);
+              turns = undefined;
               this.reloadedFromOwnerStore = true;
               console.log(
-                `[user-do] owner copy appeared upstream after first boot; imported ${imported} bytes from ${this.ownerStore.kind} for ${userDid}`,
+                `[user-do] owner copy appeared upstream after first boot; imported ${imported} bytes from ${ownerStore.kind} for ${userDid}`,
               );
             }
           } else {
             console.warn(
-              `[user-do] owner copy exists upstream (${head.etag}) but was never imported and ${localTurns} local checkpoint(s) already exist for ${userDid} — keeping the local copy`,
+              `[user-do] owner copy exists upstream (${head.etag}) but was never imported and local checkpoints already exist for ${userDid} — keeping the local copy`,
             );
           }
         }
@@ -1224,21 +1451,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // the working copy has zero turns and a legacy (Matrix) copy WITH turns
       // exists, adopt it and flush it over the empty file. Guard on the legacy
       // copy actually having turns so a genuinely new user (empty everywhere)
-      // is left empty, not churned.
+      // is left empty, not churned. A probe that proved there is nothing
+      // usable is remembered (`META_LEGACY_UNUSABLE`), as is a legacy copy
+      // already removed: later boots of a still zero-turn copy skip the
+      // gateway. A probe that failed proves nothing and runs again on the
+      // next boot.
       const activeDb = this.db ?? db;
-      if (
-        this.ownerStore.loadLegacy &&
-        (await this.localTurnCount(activeDb)) === 0
-      ) {
-        const legacy = await this.ownerStore.loadLegacy();
+      if (ownerStore.loadLegacy && !(await hasTurns(activeDb))) {
+        const markers = await this.ctx.storage.get<boolean>([
+          META_LEGACY_CLEARED,
+          META_LEGACY_UNUSABLE,
+        ]);
+        const settled =
+          markers.get(META_LEGACY_CLEARED) === true ||
+          markers.get(META_LEGACY_UNUSABLE) === true;
+        let legacy: OwnerCopy | null = null;
+        if (!settled) {
+          try {
+            legacy = await ownerStore.loadLegacy();
+            if (!legacy) await this.ctx.storage.put(META_LEGACY_UNUSABLE, true);
+          } catch (err) {
+            console.warn(
+              `[user-do] legacy Matrix copy of ${userDid} could not be read; checking again on the next boot: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
         if (legacy) {
-          // Trial import: only the checkpoint count tells us whether the
-          // legacy copy holds history, so keep the (tiny, zero-turn) working
-          // copy to put back if it does not.
+          // Trial import: only the checkpoints tell us whether the legacy
+          // copy holds history, so keep the (tiny, zero-turn) working copy
+          // to put back if it does not.
           const before = await activeDb.export();
           const adoptedBytes = await activeDb.importFromStream(legacy.stream);
-          const adoptedTurns = await this.localTurnCount(activeDb);
-          if (adoptedTurns > 0) {
+          turns = undefined;
+          if (await hasTurns(activeDb)) {
             // The adopted bytes are NOT what the system of record holds:
             // forget the last upload so the flush below actually sends them.
             await this.ctx.storage.delete([
@@ -1250,10 +1495,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             // record so the next cold boot imports it directly.
             this.markDirty();
             console.log(
-              `[user-do] working copy had no turns; adopted the legacy Matrix copy (${adoptedBytes} bytes, ${adoptedTurns} checkpoint(s)) for ${userDid} — flushing it to the system of record`,
+              `[user-do] working copy had no turns; adopted the legacy Matrix copy (${adoptedBytes} bytes) for ${userDid} — flushing it to the system of record`,
             );
           } else {
             await activeDb.import(before);
+            turns = undefined;
+            await this.ctx.storage.put(META_LEGACY_UNUSABLE, true);
             console.log(
               `[user-do] legacy Matrix copy for ${userDid} holds no turns either; working copy left as is`,
             );
@@ -1276,7 +1523,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         try {
           const flushed = await this.flushToOwnerStore();
           console.log(
-            `[user-do] migrated ${bytes} bytes from legacy Matrix media to ${this.ownerStore.kind} for ${userDid} (${flushed.etag ?? '-'})`,
+            `[user-do] migrated ${bytes} bytes from legacy Matrix media to ${ownerStore.kind} for ${userDid} (${flushed.etag ?? '-'})`,
           );
         } catch (err) {
           console.warn(
@@ -1303,16 +1550,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // Redacting on etag alone would drop the last backstop while the VFS
         // copy could still be a smaller or older export. A dirty or
         // not-yet-verified copy waits: the flush that lands it does the
-        // removal itself.
+        // removal itself. The verification hashes the whole file, so it
+        // only runs while a legacy copy may still exist.
+        const ownerEtag = await this.ctx.storage.get<string>(META_OWNER_ETAG);
         if (
-          (await this.localTurnCount(liveDb)) > 0 &&
+          ownerEtag &&
+          ownerStore.removeLegacyCopy &&
+          (await this.ctx.storage.get<boolean>(META_LEGACY_CLEARED)) !== true &&
+          (await hasTurns(liveDb)) &&
           (await this.ownerCopyIsCurrent(liveDb))
-        ) {
-          const ownerEtag = await this.ctx.storage.get<string>(META_OWNER_ETAG);
-          if (ownerEtag) await this.removeLegacyCopyIfAny(ownerEtag);
-        }
+        )
+          await this.removeLegacyCopyIfAny(ownerEtag);
         console.log(
-          `[user-do] ready ${userDid}: store=${this.ownerStore.kind} legacy=${this.ownerStore.loadLegacy ? 'yes' : 'no'} file=${liveDb.fileSize}B turns=${await this.localTurnCount(liveDb)} sessions=${sessionRow?.n ?? 0} ownerEtag=${(await this.ctx.storage.get<string>(META_OWNER_ETAG)) ?? '-'} reloaded=${this.reloadedFromOwnerStore}`,
+          `[user-do] ready ${userDid}: store=${ownerStore.kind} legacy=${ownerStore.loadLegacy ? 'yes' : 'no'} file=${liveDb.fileSize}B turns=${(await hasTurns(liveDb)) ? 'yes' : 'none'} sessions=${sessionRow?.n ?? 0} ownerEtag=${ownerEtag ?? '-'} reloaded=${this.reloadedFromOwnerStore}`,
         );
       }
       this.saver = new SqliteSaver(liveDb, undefined, {
@@ -1334,6 +1584,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       await this.resultStore.setup();
+      this.attachmentTextCache = new AttachmentTextCacheStore(liveDb, console);
       // The store exists whenever the bucket is bound, so artefacts made
       // earlier stay readable, revocable and deleted with their session after
       // the public origin is removed; only new ones need it.
@@ -1353,7 +1604,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         config: this.runConfig,
         instanceId: this.instanceId,
         log: console,
-        requestAlarm: (at) => this.ctx.waitUntil(this.requestAlarm(at)),
+        // Keep-alive and recovery deadlines alike: after a reset, the
+        // keep-alive deadline is the wake that boots the object and
+        // recovers its runs, so the heartbeat fast path must not skip it.
+        requestAlarm: (at) => this.ctx.waitUntil(this.requestHousekeeping(at)),
         runAttempt: (live, resumed) => this.runAttempt(live, resumed),
         checkpointIdOf: (sessionId) => this.checkpointIdOf(sessionId),
         onRunEnded: (record, outcome) => this.onRunEnded(record, outcome),
@@ -1406,14 +1660,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             sessionId: request.sessionId,
             requestId: request.requestId,
             client: 'channel',
-            request: JSON.stringify(storedRunRequest(request)),
+            request: this.runRequestJson(request, storedRunRequest(request)),
             multitask: 'enqueue',
           });
           this.markDirty();
-          const recoveryAt = Date.now() + this.runConfig.keepAliveMs;
-          const alarm = await this.ctx.storage.getAlarm();
-          if (alarm === null || alarm > recoveryAt)
-            await this.ctx.storage.setAlarm(recoveryAt);
+          await this.requestHousekeeping(
+            Date.now() + this.runConfig.keepAliveMs,
+          );
           await this.ctx.storage.sync();
           this.ctx.waitUntil(live.done.catch(() => undefined));
           return live.record;
@@ -1441,7 +1694,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         gateway: this.gateway,
         runTurn: (req) => this.runTurn(req),
         abortTurn: (sessionId) => this.abortTurn(sessionId),
-        requestAlarm: (at) => this.requestAlarm(at),
+        requestAlarm: (at) => this.requestHousekeeping(at),
         turnRunLive: (taskRunId) => Boolean(this.runs?.byTaskRunId(taskRunId)),
         log: console,
         ...(Number.isFinite(maxTasks) ? { maxTasksPerUser: maxTasks } : {}),
@@ -1450,7 +1703,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (this.taskScheduler) {
         const next = await this.taskScheduler.nextWakeAt().catch(() => null);
         if (next !== null)
-          await this.requestAlarm(Math.max(next, Date.now() + 1000));
+          await this.requestHousekeeping(Math.max(next, Date.now() + 1000));
       }
 
       // Runs a previous incarnation left in flight: schedule their recovery
@@ -1467,7 +1720,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // imported from the Node runtime arrive with uncompressed blobs.
       this.compactDone ??=
         (await this.ctx.storage.get<boolean>(META_COMPACT_DONE)) ?? false;
-      if (!this.compactDone) await this.requestAlarm(Date.now() + 3000);
+      if (!this.compactDone) await this.requestHousekeeping(Date.now() + 3000);
 
       // Provider selection: `core.llm` is the OpenRouter adapter built from
       // the validated base env; `LLM_PROVIDER=nebius` (read from the raw
@@ -1504,7 +1757,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
         storage: this.ctx.storage,
         gateway: this.gateway,
-        ucan: this.ucan,
+        ucan,
         delegationFor: (did) => this.delegations.get(did),
         events: this.events,
         secrets: createSecretsAdapter(secretsService),
@@ -1568,6 +1821,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.feedbackMarkers = null;
       this.runs = null;
       this.resultStore = null;
+      this.artifacts = null;
+      this.attachmentTextCache = null;
+      // Its store is bound to the database just dropped: a caller that sees
+      // no scheduler boots again instead of reading a closed connection.
+      this.taskScheduler = null;
       this.sessionRooms.clear();
       this.mainRoomId = null;
       this.ambient = null;
@@ -1580,11 +1838,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     /**
      * Still idle after the idle tick's awaits: the same working copy, nothing
      * written or uploading, no run, and no request since (every request
-     * records its access in `ready()`).
+     * records its access in `ready()`, in memory at once).
      */
     private async stillIdle(db: DoSqliteDatabase): Promise<boolean> {
-      const lastAccess =
-        (await this.ctx.storage.get<number>(META_LAST_ACCESS)) ?? Date.now();
+      const lastAccess = await this.lastAccess(Date.now());
       return (
         this.db === db &&
         !this.dirty &&
@@ -1610,6 +1867,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         META_FLUSH_FAILURES,
         META_LAST_VACUUM,
       ]);
+      this.flushAt = null;
     }
 
     /**
@@ -1670,6 +1928,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           META_LAST_CHECKSUM,
           META_UPLOADED_GEN,
           META_LEGACY_CLEARED,
+          META_LEGACY_UNUSABLE,
         ]);
         this.markDirty();
         this.pendingLegacyMigration = { bytes };
@@ -1691,8 +1950,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const uploadedGen = await this.ctx.storage.get<number>(META_UPLOADED_GEN);
       const lastChecksum =
         await this.ctx.storage.get<string>(META_LAST_CHECKSUM);
-      if (lastChecksum === undefined)
-        return (await this.localTurnCount(db)) === 0;
+      if (lastChecksum === undefined) return !(await this.hasLocalTurns(db));
       // Objects that last flushed before generations were recorded verify
       // by hash alone; everyone else gets the cheap generation gate first.
       if (uploadedGen !== undefined && uploadedGen !== db.writeGeneration)
@@ -1700,17 +1958,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return (await db.checksum()) === lastChecksum;
     }
 
-    /** Checkpoint rows in the working copy — zero means no turn ever ran here. */
-    private async localTurnCount(db: DoSqliteDatabase): Promise<number> {
+    /** Whether the working copy holds a checkpoint — none means no turn ever ran here. */
+    private async hasLocalTurns(db: DoSqliteDatabase): Promise<boolean> {
       const row = await db
-        .get<{ n: number }>('SELECT count(*) AS n FROM checkpoints')
+        .get<{ one: number }>('SELECT 1 AS one FROM checkpoints LIMIT 1')
         .catch(() => undefined);
-      return row?.n ?? 0;
+      return row !== undefined;
     }
 
+    /**
+     * Whether the working copy holds writes the owner store has not seen:
+     * marked dirty (in memory or on disk), or written past the generation
+     * of the last upload (`decideBootDirty`).
+     */
+    private async unflushedLocalWrites(db: DoSqliteDatabase): Promise<boolean> {
+      const got = await this.ctx.storage.get<unknown>([
+        META_DIRTY,
+        META_UPLOADED_GEN,
+      ]);
+      const decision = decideBootDirty({
+        dirtyInMemory: this.dirty,
+        dirtyFlag: got.get(META_DIRTY),
+        uploadedGen: got.get(META_UPLOADED_GEN),
+        writeGeneration: db.writeGeneration,
+      });
+      return (
+        decision === 'already-dirty' ||
+        decision === 'flagged' ||
+        decision === 'behind-upload'
+      );
+    }
+
+    /**
+     * The working copy holds writes the owner store has not seen: persist the
+     * mark and make sure the upload is scheduled. Free once the copy is dirty
+     * with a known deadline — the alarm armed for it only ever moves earlier,
+     * and the tick that serves it re-arms whatever it leaves pending.
+     */
     private markDirty(): void {
+      if (this.dirty && typeof this.flushAt === 'number') return;
+      if (!this.dirty) void this.ctx.storage.put(META_DIRTY, true);
       this.dirty = true;
-      void this.ctx.storage.put(META_DIRTY, true);
       void this.armFlush(Date.now() + FLUSH_DEBOUNCE_MS);
     }
 
@@ -1720,12 +2008,16 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * `FLUSH_DEBOUNCE_MS` after the first of them, never later.
      */
     private async armFlush(at: number): Promise<void> {
-      const existing = await this.ctx.storage.get<number>(META_FLUSH_AT);
+      const existing =
+        typeof this.flushAt === 'number'
+          ? this.flushAt
+          : await this.ctx.storage.get<number>(META_FLUSH_AT);
       const deadline =
         typeof existing === 'number' && existing <= at ? existing : at;
+      this.flushAt = deadline;
       if (deadline !== existing)
         await this.ctx.storage.put(META_FLUSH_AT, deadline);
-      await this.requestAlarm(deadline);
+      await this.requestHousekeeping(deadline);
     }
 
     /**
@@ -1733,11 +2025,36 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * that just came due (which would otherwise make every wake retry).
      */
     private async scheduleFlushRetry(at: number): Promise<void> {
+      this.flushAt = at;
       await this.ctx.storage.put(META_FLUSH_AT, at);
-      await this.requestAlarm(at);
+      await this.requestHousekeeping(at);
     }
 
     private alarmArm: Promise<void> = Promise.resolve();
+
+    /**
+     * Arm the alarm for a deadline the full housekeeping tick serves (a
+     * flush, its retry, a task, compaction, a run's keep-alive or recovery),
+     * and lower the stored housekeeping deadline to it: the heartbeat fast
+     * path trusts that value, and a deadline it does not know of would wait
+     * for as long as a socket stays attached. Serialised with every other
+     * arm.
+     */
+    private requestHousekeeping(at: number): Promise<void> {
+      this.housekeepingFloor = Math.min(this.housekeepingFloor, at);
+      this.alarmArm = this.alarmArm
+        .catch(() => {})
+        .then(async () => {
+          const stored =
+            await this.ctx.storage.get<number>(META_HOUSEKEEPING_AT);
+          if (typeof stored === 'number' && stored > at)
+            await this.ctx.storage.put(META_HOUSEKEEPING_AT, at);
+          const existing = await this.ctx.storage.getAlarm();
+          if (existing === null || existing > at)
+            await this.ctx.storage.setAlarm(at);
+        });
+      return this.alarmArm;
+    }
 
     /** Arm the object's single alarm no later than `at` (multiplexed). */
     private requestAlarm(at: number): Promise<void> {
@@ -1773,8 +2090,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // exists once the object booted).
       const keepAliveAt = this.runs?.keepAliveDeadline(wakeAt) ?? null;
       const recoveryAt = this.runs?.nextRecoveryAt() ?? null;
-      if (this.runs && recoveryAt !== null && recoveryAt <= wakeAt + 1000)
-        await this.runs.resumeDue(wakeAt);
+      if (this.runs && recoveryAt !== null && recoveryAt <= wakeAt + 1000) {
+        // A store error here must not reject the alarm: the tick below (or
+        // the re-arm) still has to run.
+        try {
+          await this.runs.resumeDue(wakeAt);
+        } catch (err) {
+          console.error(
+            `[user-do] run recovery tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
       if (
         nextPingAt !== null &&
         housekeepingAt !== undefined &&
@@ -1788,22 +2114,27 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         return;
       }
 
+      // A full tick from here on. Deadlines armed while it runs (the boot
+      // below included) are kept by the housekeeping write at its end.
+      this.housekeepingFloor = Infinity;
+
       // Alarms routinely wake an EVICTED object: no db, no task scheduler,
       // dirty flag gone. Boot from the persisted identity first — a tick on
       // the un-booted object would skip every client and re-arm at the idle
-      // horizon, silently dropping pending task runs and flushes.
+      // horizon, silently dropping pending task runs and flushes. The boot
+      // is not a request: it records no access.
       if (!this.db) {
         const storedDid = await this.ctx.storage.get<string>(META_USER_DID);
         if (storedDid) {
           try {
-            await this.ready({ userDid: storedDid });
+            await this.ready({ userDid: storedDid }, { recordAccess: false });
           } catch (err) {
             console.error(
               `[user-do] alarm boot failed for ${storedDid}: ${err instanceof Error ? err.message : String(err)}`,
             );
             // State exists but could not be opened — retry soon instead of
             // falling through to a schedulerless re-arm.
-            await this.requestAlarm(Date.now() + 60_000);
+            await this.requestHousekeeping(Date.now() + 60_000);
             return;
           }
         }
@@ -1837,8 +2168,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           deadlines.push(Math.max(nextRecovery, now + 1000));
       }
 
-      const lastAccess =
-        (await this.ctx.storage.get<number>(META_LAST_ACCESS)) ?? now;
+      // The last real request, stored for the next instance before anything
+      // is decided on it.
+      await this.persistAccess();
+      const lastAccess = await this.lastAccess(now);
       const idle = now - lastAccess > IDLE_EVICT_MS;
 
       // Owner-store flush: only when its own deadline is due, or the copy
@@ -1869,14 +2202,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
 
       if (this.taskScheduler) {
+        let next: number | null;
         try {
-          await this.taskScheduler.onAlarm(now);
+          next = await this.taskScheduler.onAlarm(now);
         } catch (err) {
           console.error(
             `[user-do] task scheduler tick failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
           );
+          next = await this.taskScheduler.nextWakeAt().catch(() => null);
         }
-        const next = await this.taskScheduler.nextWakeAt().catch(() => null);
         if (next !== null) deadlines.push(Math.max(next, now + 1000));
       }
 
@@ -1906,24 +2240,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (next !== null) deadlines.push(next);
       }
 
-      // R2 page tier: move chunks no turn touched for a couple of days out
-      // of DO storage (see sqlite/page-tier.ts). After the flush above (the
-      // upload reads hot rows, not R2) and never over an in-flight one (it
-      // holds a snapshot). A pass is capped; more work re-arms soon.
+      // Expired ambient blobs (`blob:` keys), one page per tick while a
+      // sweep is under way, a new sweep at most hourly (a page read loads
+      // the whole values, and blobs live a day at most). Its follow-up is
+      // no reason to keep an idle copy: it is armed after the eviction
+      // decision below.
+      let blobSweepPending = false;
       if (
-        this.db?.tierEnabled &&
-        !this.flushInFlight &&
-        (this.runs?.activeCount ?? 0) === 0
+        this.blobSweepCursor !== null ||
+        this.lastBlobSweepAt === null ||
+        now - this.lastBlobSweepAt >= BLOB_SWEEP_INTERVAL_MS
       ) {
-        const next = await this.tierTick(this.db, now);
-        if (next !== null) deadlines.push(next);
+        if (this.blobSweepCursor === null) this.lastBlobSweepAt = now;
+        try {
+          const swept = await sweepExpiredBlobs(
+            this.ctx.storage,
+            this.blobSweepCursor ? { startAfter: this.blobSweepCursor } : {},
+          );
+          this.blobSweepCursor = swept.next;
+          blobSweepPending = swept.next !== null;
+        } catch (err) {
+          console.warn(
+            `[user-do] blob sweep failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
 
-      // Idle housekeeping: a user silent for a day loses the cached pages —
-      // their file is safe upstream, and we stop paying to store a copy. Never
-      // evict while tasks are scheduled: their runs ARE activity. The flush
-      // above ran first; the wipe additionally verifies the upstream copy
-      // matches the working copy, else the copy stays until it does.
+      // Idle housekeeping: a user silent for five days loses the cached
+      // pages — their file is safe upstream, and we stop paying to store a
+      // copy. Never evict while tasks are scheduled: their runs ARE
+      // activity. The flush above ran first; the wipe additionally verifies
+      // the upstream copy matches the working copy, else the copy stays
+      // until it does. The R2 tier's next pass is no reason to stay: the
+      // wipe deletes the object's R2 prefix with the working copy.
       if (
         idle &&
         !this.dirty &&
@@ -1967,12 +2316,44 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           );
         }
       }
+
+      // R2 page tier: move chunks no turn touched for a couple of days out
+      // of DO storage (see sqlite/page-tier.ts). After the flush above (the
+      // upload reads hot rows, not R2) and never over an in-flight one (it
+      // holds a snapshot). A pass is capped; more work re-arms soon.
+      if (
+        this.db?.tierEnabled &&
+        !this.flushInFlight &&
+        (this.runs?.activeCount ?? 0) === 0
+      ) {
+        const next = await this.tierTick(this.db, now);
+        if (next !== null) deadlines.push(next);
+      }
+      if (blobSweepPending) deadlines.push(now + 60_000);
+
       deadlines.push(now + IDLE_EVICT_MS);
       const housekeeping = Math.min(...deadlines);
-      await this.ctx.storage.put(META_HOUSEKEEPING_AT, housekeeping);
+      await this.storeHousekeeping(housekeeping);
       await this.requestAlarm(
         nextPingAt === null ? housekeeping : Math.min(housekeeping, nextPingAt),
       );
+    }
+
+    /**
+     * Record the next housekeeping deadline at the end of a full tick: the
+     * earliest the tick found, lowered by any deadline armed while it ran
+     * (an arm that lands after this write lowers it itself). Serialised
+     * with the arms, so neither overwrites the other.
+     */
+    private storeHousekeeping(at: number): Promise<void> {
+      this.alarmArm = this.alarmArm
+        .catch(() => {})
+        .then(async () => {
+          const deadline = Math.min(at, this.housekeepingFloor);
+          this.housekeepingFloor = Infinity;
+          await this.ctx.storage.put(META_HOUSEKEEPING_AT, deadline);
+        });
+      return this.alarmArm;
     }
 
     /**
@@ -2031,7 +2412,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!this.db) {
         const userDid =
           this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
-        if (userDid) await this.ready({ userDid });
+        if (userDid) await this.ready({ userDid }, { recordAccess: false });
       }
       if (!this.db) throw new Error('no working copy');
       if (this.flushInFlight) await this.flushInFlight.catch(() => undefined);
@@ -2178,8 +2559,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             403,
             'Channel grants cannot become tool authority',
           );
+        // The shell (the only caller) checked the binding just before.
         await this.ready(identity);
-        await assertActiveChannelBinding(identity, this.env);
         return {
           ok: true,
           result: await this.channelTurns!.submit(identity, input, requestHash),
@@ -2231,6 +2612,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       sessionId: string,
     ): Promise<boolean> {
       await this.ready(identity);
+      // End every run of the session first: the executing one is aborted
+      // and waited for (up to the supersede grace), queued and recovering
+      // ones are closed — none may start a turn on the deleted thread, or
+      // recreate its session row, after the rows below are gone.
+      await this.runs?.abortAllForSession(sessionId);
       this.aborts.get(sessionId)?.abort();
       // Node indexes a session into the memory engine as it is deleted.
       // The rows are gone once this RPC returns, so capture the transcript
@@ -2246,6 +2632,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const deleted = await this.sessions!.deleteSession(sessionId);
       if (deleted) {
         await this.saver!.deleteThread(sessionId);
+        await this.attachmentTextCache
+          ?.forgetSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[user-do] could not delete the cached attachment text of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
         await this.resultStore
           ?.deleteForSession(sessionId)
           .catch((err: unknown) => {
@@ -2316,7 +2709,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         .filter(
           (m) => !isSummarizationMessage(m) && !isAttachmentViewMessage(m),
         )
-        .map((m) => ({ type: m.type, content: contentToText(m.content) }));
+        .map((m) => ({ type: m.type, content: visibleText(m) }));
     }
 
     /**
@@ -2743,7 +3136,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         sessionId: req.sessionId,
         requestId: req.requestId,
         client: req.client,
-        request: JSON.stringify(
+        request: this.runRequestJson(
+          req,
           storedRunRequest(req, { timezone: req.identity.timezone }),
         ),
         multitask: req.multitask ?? this.runConfig.multitaskDefault,
@@ -2847,6 +3241,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // One export at the end, not per batch — flushing a multi-GB file
         // after every 300 rows would dwarf the savings.
         this.markDirty();
+      } else if (await this.unflushedLocalWrites(db)) {
+        // Nothing saved, but the closing vacuum rewrote the file: an
+        // unmarked write would keep the owner copy unverifiable, and the
+        // idle wipe waiting on it, until some later boot noticed.
+        this.markDirty();
       }
       return false;
     }
@@ -2909,7 +3308,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         // an operator's `POST /debug/storage/flush` is never a silent no-op.
         const userDid =
           this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
-        if (userDid) await this.ready({ userDid });
+        if (userDid) await this.ready({ userDid }, { recordAccess: false });
       }
       if (this.flushInFlight) return this.flushInFlight;
       const run = this.flushOnce().finally(() => {
@@ -3009,7 +3408,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // Defence in depth: never drop the backstop for an empty working copy —
       // a zero-turn file is not worth confirming against, and redacting here
       // would strip a migrated user's only history if VFS held a stub.
-      if (this.db && (await this.localTurnCount(this.db)) === 0) return false;
+      if (this.db && !(await this.hasLocalTurns(this.db))) return false;
       try {
         const removed = await store.removeLegacyCopy(etag);
         await this.ctx.storage.put(META_LEGACY_CLEARED, true);
@@ -3061,21 +3460,36 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         uploadedGen !== this.db.writeGeneration
       ) {
         const at = Date.now() + FLUSH_DEBOUNCE_MS;
+        this.flushAt = at;
         await this.ctx.storage.put(META_FLUSH_AT, at);
-        await this.requestAlarm(at);
+        await this.requestHousekeeping(at);
         return;
       }
       this.dirty = false;
+      this.flushAt = null;
       await this.ctx.storage.delete([META_DIRTY, META_FLUSH_AT]);
     }
 
-    async resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }> {
+    /**
+     * `POST /debug/storage/reset`: upload what is unsaved, drop the working
+     * copy and boot again from the owner copy. `identity` is the caller the
+     * shell authenticated, with the delegation the request carried: an
+     * object that never booted boots for it (the owner store needs that
+     * delegation), and an object bound to another DID refuses before
+     * anything is dropped.
+     */
+    async resetWorkingCopy(
+      identity?: TurnIdentity,
+    ): Promise<{ reloadedFromOwnerStore: boolean }> {
       const userDid =
-        this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
+        identity?.userDid ??
+        this.userDid ??
+        (await this.ctx.storage.get<string>(META_USER_DID));
+      const caller = identity ?? (userDid ? { userDid } : undefined);
       // On a cold (evicted) object the in-memory dirty flag is gone — boot and
       // consult the persisted marker, or the wipe below discards changes the
-      // owner store never received.
-      if (!this.db && userDid) await this.ready({ userDid });
+      // owner store never received. A booted object only checks the caller.
+      if (caller) await this.ready(caller, { recordAccess: false });
       if (
         this.dirty ||
         (await this.ctx.storage.get<boolean>(META_DIRTY)) === true
@@ -3085,7 +3499,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       await this.wipeWorkingCopy(this.db);
       this.dropInMemoryState();
-      if (userDid) await this.ready({ userDid });
+      if (caller) await this.ready(caller, { recordAccess: false });
       return { reloadedFromOwnerStore: this.reloadedFromOwnerStore };
     }
 
@@ -3099,7 +3513,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       userDid: string,
       sessionId: string,
     ): Promise<Record<string, unknown> | null> {
-      await this.ready({ userDid });
+      await this.ready({ userDid }, { recordAccess: false });
       const session = await this.sessions!.getSession(sessionId);
       if (!session) return null;
       // Whether the thread's agent context was condensed: the summarization
@@ -3131,7 +3545,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     async debugMemorySchema(userDid: string): Promise<MemorySchemaDebug> {
-      await this.ready({ userDid });
+      await this.ready({ userDid }, { recordAccess: false });
       const ambient = this.ambient;
       const url = this.core.validatedEnv['MEMORY_MCP_URL'];
       if (!ambient || typeof url !== 'string' || url.length === 0) {
@@ -3194,7 +3608,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         lastVacuumAt: await this.ctx.storage.get<number>(META_LAST_VACUUM),
         legacyCleared:
           (await this.ctx.storage.get<boolean>(META_LEGACY_CLEARED)) === true,
-        lastAccessAt: await this.ctx.storage.get<number>(META_LAST_ACCESS),
+        lastAccessAt: await this.knownLastAccess(),
         indexingInFlight: this.historyIndexer?.inFlightCount ?? 0,
         activeTurns: this.aborts.size,
         pendingTimers: timerTrackerInstalled()
@@ -3299,7 +3713,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       if (!this.taskScheduler) {
         const did =
           userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
-        if (did) await this.ready({ userDid: did });
+        if (did) await this.ready({ userDid: did }, { recordAccess: false });
       }
       const records = this.taskScheduler
         ? await this.taskScheduler.surface.list()
@@ -3529,7 +3943,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         sessionId,
         requestId,
         client: 'portal',
-        request: JSON.stringify(
+        request: this.runRequestJson(
+          req,
           storedRunRequest(req, {
             timezone: body.timezone,
             tools: body.tools,
@@ -3625,6 +4040,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
+     * The stored request of a new run. When no admission handler can see the
+     * turn (no plugin declares one, or the turn is out of admission's scope)
+     * it is recorded as an agent turn from the start, which spares the first
+     * attempt both rewrites of the row (`admitting`, then `agent`). Recovery
+     * stays correct: a run the graph never checkpointed is retried with its
+     * input whatever its disposition.
+     */
+    private runRequestJson(req: TurnRequest, stored: StoredRunRequest): string {
+      const admissible =
+        admissionApplies(req) &&
+        this.core.plugins.some((plugin) => plugin.getRequestAdmission);
+      return JSON.stringify(
+        admissible ? stored : { ...stored, disposition: { kind: 'agent' } },
+      );
+    }
+
+    /**
      * One attempt of a run (the coordinator's `runAttempt` host hook): build
      * the agent for the stored request, stream the turn's frames into the
      * run's buffer, and report the outcome. `resumed` attempts hand the
@@ -3639,7 +4071,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const req = stored.turn;
       if (req.client === 'channel') {
         await this.ctx.storage.sync();
-        await assertChannelAttemptAllowed(req.identity, this.env);
+        // The binding was checked as the request was admitted; a queued or
+        // recovered attempt starts later and checks it again.
+        if (live.attemptSource !== 'begin')
+          await assertChannelAttemptAllowed(req.identity, this.env);
         requireChannelDelegation(
           !!this.delegations.get(req.identity.userDid)?.raw,
         );
@@ -3737,6 +4172,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider,
         toolOutputCapChars,
         delivery,
+        usage,
       } = await this.prepareTurn(
         req,
         {
@@ -3761,20 +4197,22 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           live.buffer.push(eventName, payload);
         },
       };
-      this.events.register(sessionId, sink);
-      if (byoNotice)
-        sink.emit('error', {
-          ...byoNotice,
-          sessionId,
-          requestId: req.requestId,
-        });
-      const events = agent.streamEvents(freshInput ? stateInput : null, {
-        ...config,
-        version: 'v2',
-      });
       const capture: BaseMessage[] = [];
       let completed = false;
+      // Everything after `prepareTurn` runs inside the try: its cleanups
+      // (the turn's deadline timer among them) run however the attempt ends.
       try {
+        this.events.register(sessionId, sink);
+        if (byoNotice)
+          sink.emit('error', {
+            ...byoNotice,
+            sessionId,
+            requestId: req.requestId,
+          });
+        const events = agent.streamEvents(freshInput ? stateInput : null, {
+          ...config,
+          version: 'v2',
+        });
         const outcome = await runTurnFrames({
           events: tapMessages(events, capture),
           sink: live.buffer,
@@ -3794,7 +4232,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             completed = true;
             if (req.client !== 'channel')
               void this.replayToRoom(req, lastAiText(capture), 'oracle');
-            await this.afterTurn(sessionId, capture);
+            await this.afterTurn(
+              sessionId,
+              capture,
+              { kind: 'agent' },
+              live.abort.signal,
+            );
           },
           onError: (err) => {
             console.error(`[user-do] turn ${req.requestId} failed:`, err);
@@ -3833,6 +4276,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           ...(messageId ? { messageId } : {}),
           toolCalls,
           ...(outcome.status === 'failed' ? { error: outcome.error } : {}),
+          // Written with the terminal status: one row update per run.
+          usage: usage(),
         };
       } finally {
         this.events.unregister(sessionId, sink);
@@ -3952,7 +4397,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // in the transcript (the Matrix mirror and the title are skipped).
       live.abort.signal.throwIfAborted();
       await this.afterTurn(req.sessionId, messages, disposition);
-      this.replayToRoom(req, disposition.text, 'oracle');
+      // A channel's reply reaches the room through the channel's own
+      // delivery (`onRunEnded`), as on the agent path; its mirror is the
+      // required kind, whose failure would surface here unhandled.
+      if (req.client !== 'channel')
+        void this.replayToRoom(req, disposition.text, 'oracle');
       const delivered = live.continuation ?? '';
       const content = disposition.text.startsWith(delivered)
         ? disposition.text.slice(delivered.length)
@@ -4082,7 +4531,15 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const window = await this.contextWindows.resolve(modelId, {
         ...(byoProvider ? { byoProvider } : {}),
       });
-      const budget = contextBudgetFor(window, contextKnobs(this.env, console));
+      const budget = contextBudgetFor(
+        window,
+        contextKnobs(this.env, console),
+        await this.contextWindows.resolve(
+          llm && isProviderAdapter(llm)
+            ? llm.modelForRole('routing')
+            : OPENROUTER_MODEL_MAP.routing,
+        ),
+      );
       const stats = (await this.resultStore?.stats()) ?? {
         rows: 0,
         sqliteBytes: 0,
@@ -4197,7 +4654,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     async runsStatus(): Promise<RunsStatus> {
       const userDid =
         this.userDid ?? (await this.ctx.storage.get<string>(META_USER_DID));
-      if (!this.db && userDid) await this.ready({ userDid });
+      if (!this.db && userDid)
+        await this.ready({ userDid }, { recordAccess: false });
       const store = this.runStore;
       const records = store ? await store.listRecent(50) : [];
       const runs: RunsStatus['runs'] = [];
@@ -4239,25 +4697,39 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * the gateway (its whole-buffer download grew the crypto WASM heap for
      * good, and a hash mismatch on the far side of the RPC would only reach
      * this object as a disconnect).
+     *
+     * The gateway bounds each transfer to the attachment download deadline,
+     * from opening it to the last byte. An `AbortSignal` cannot cross the
+     * Durable Object RPC, so the turn's abort acts on this side instead:
+     * `readBytesCapped` cancels the stream it reads, and the cancel travels
+     * back over the RPC stream to stop the gateway's download.
      */
     private matrixMediaSource(): MatrixMediaSource {
+      const deadline = { timeoutMs: DOWNLOAD_TIMEOUT_MS };
       return {
-        downloadMxc: async (mxc, maxBytes = MAX_FILE_SIZE) =>
+        downloadMxc: async (mxc, maxBytes = MAX_FILE_SIZE, signal) =>
           readBytesCapped(
-            await this.gateway.downloadMxcMediaStream(mxc),
+            await this.gateway.downloadMxcMediaStream(mxc, deadline),
             maxBytes,
+            signal,
           ),
-        downloadEvent: async (roomId, eventId, maxBytes = MAX_FILE_SIZE) => {
+        downloadEvent: async (
+          roomId,
+          eventId,
+          maxBytes = MAX_FILE_SIZE,
+          signal,
+        ) => {
           const media = await this.gateway.downloadEventMediaStream(
             roomId,
             eventId,
+            deadline,
           );
           if (!media) return null;
           const plain = media.file
             ? media.stream.pipeThrough(createAttachmentDecryptor(media.file))
             : media.stream;
           return {
-            bytes: await readBytesCapped(plain, maxBytes),
+            bytes: await readBytesCapped(plain, maxBytes, signal),
             ...(media.mimetype ? { mimetype: media.mimetype } : {}),
             ...(media.filename ? { filename: media.filename } : {}),
           };
@@ -4319,6 +4791,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             roomId: input.roomId,
             signal: input.signal,
             logger: console,
+            ...(this.attachmentTextCache
+              ? { cache: this.attachmentTextCache.forSession(input.sessionId) }
+              : {}),
           });
           return { meta, view };
         },
@@ -4422,20 +4897,55 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       };
     }
 
+    /**
+     * The model that summarises the turn's history (the `routing` role): its
+     * window bounds what the summariser is handed.
+     */
+    private summaryModelId(
+      platform: LlmAdapter,
+      byoTurn: ByoTurnState | null,
+    ): string {
+      if (byoTurn)
+        return (
+          byoModelForRole(
+            byoTurn.credential.provider,
+            'routing',
+            byoTurn.mainModelId,
+          ) ?? OPENROUTER_MODEL_MAP.routing
+        );
+      return isProviderAdapter(platform)
+        ? platform.modelForRole('routing')
+        : OPENROUTER_MODEL_MAP.routing;
+    }
+
+    /**
+     * Build one attempt's agent and input (`buildTurn`). A build that fails
+     * part-way leaves nothing behind: the cleanups it registered run (the
+     * turn's deadline timer would otherwise keep the object resident for
+     * the whole turn limit and abort a finished run later) and the session's
+     * abort entry is released.
+     */
     private async prepareTurn(
       req: TurnRequest,
-      body: Pick<
-        TurnBody,
-        'message' | 'timezone' | 'model' | 'tools' | 'agActions' | 'attachments'
-      >,
-      run: {
-        runId: string;
-        abortController: AbortController;
-        /** A recovery attempt: no new input, the graph continues from the checkpoint. */
-        resumed: boolean;
-        /** The reply text the user already received (resumed attempts). */
-        continuation: string | null;
-      },
+      body: TurnBuildBody,
+      run: TurnBuildRun,
+    ) {
+      const turnDisposables = new Set<() => void | Promise<void>>();
+      try {
+        return await this.buildTurn(req, body, run, turnDisposables);
+      } catch (err) {
+        await this.runTurnDisposables(turnDisposables);
+        if (this.aborts.get(req.sessionId) === run.abortController)
+          this.aborts.delete(req.sessionId);
+        throw err;
+      }
+    }
+
+    private async buildTurn(
+      req: TurnRequest,
+      body: TurnBuildBody,
+      run: TurnBuildRun,
+      turnDisposables: Set<() => void | Promise<void>>,
     ) {
       if (req.executionProfile && !this.taskScheduler)
         throw new Error('Task scheduler unavailable');
@@ -4452,6 +4962,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }
       const core = this.core;
       const baseAmbient = this.ambient!;
+      // One instant per turn: the prompt's date and the message's time note.
+      const turnAt = new Date();
       const saver = this.saver!;
       const sessions = this.sessions!;
 
@@ -4538,6 +5050,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const contextBudget = contextBudgetFor(
         windowResolution,
         contextKnobs(this.env, console),
+        await this.contextWindows.resolve(
+          this.summaryModelId(baseAmbient.llm, byoTurn),
+          byoTurn ? { byoProvider: byoTurn.provider } : {},
+        ),
       );
       if (
         req.client === 'matrix' &&
@@ -4644,7 +5160,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // `retainAttachmentPayloads`); the tool fetches one again on demand.
       // Cleanups registered by tools for THIS turn (MCP clients …): run once
       // the turn ends, however it ends — see `RuntimeContext.onTurnEnd`.
-      const turnDisposables = new Set<() => void | Promise<void>>();
       abortController.signal.addEventListener('abort', () => {
         void this.runTurnDisposables(turnDisposables);
       });
@@ -4704,12 +5219,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               mode: capabilityRouterMode(core.validatedEnv.CAPABILITY_ROUTER),
               manifests: core.registries.manifests.collect(),
               loaded: priorLoaded,
-              hidden: await bootHiddenPlugins({
-                registries: core.registries,
-                buildCtx: core.buildCtx(),
-                has: (resource, action) =>
-                  ambient.ucan.hasCapability(ucanDelegation, resource, action),
-              }),
+              hidden: () =>
+                bootHiddenPlugins({
+                  registries: core.registries,
+                  buildCtx: core.buildCtx(),
+                  has: (resource, action) =>
+                    ambient.ucan.hasCapability(
+                      ucanDelegation,
+                      resource,
+                      action,
+                    ),
+                }),
+              hasCapability: (resource, action) =>
+                ambient.ucan.hasCapability(ucanDelegation, resource, action),
               text: body.message,
               requestId: req.requestId,
               signal: abortController.signal,
@@ -4792,13 +5314,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         console.log(
           `[harness] turn ${req.requestId} usage: ~${usage.tokens} tokens (${usage.reportedTokens} reported over ${usage.modelCalls} model calls), ${usage.toolAttempts} tool attempts, ${usage.elapsedMs} ms`,
         );
-        await this.runStore
-          ?.update(run.runId, { usage: JSON.stringify(usage) })
-          .catch((error: unknown) => {
-            console.warn(
-              `[harness] could not record the turn's usage: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
       });
       const laneOf = (name: string): ToolLane =>
         subAgentToolNames.has(name) ? 'subagent' : effectOf(name);
@@ -4913,7 +5428,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
               '',
             ucanDelegation,
             timezone: req.identity.timezone,
-            currentTime: new Date().toISOString(),
+            currentTime: turnAt.toISOString(),
           },
           session: {
             id: req.sessionId,
@@ -4965,16 +5480,25 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             }
           : {};
       const rawContent = prepared ? prepared.content : body.message;
-      const content =
+      const spoken =
         req.client === 'matrix' && req.roomKind === 'group'
           ? prefixSpeaker(rawContent, speakerName)
           : rawContent;
+      // The exact time rides on the message (outermost, after the speaker
+      // prefix and the attachment blocks), so the system prompt carries the
+      // date only and stays identical across the session's turns. A
+      // supplied-context task's input stays exactly what was supplied.
+      const timeNote = suppliedContextOnly
+        ? undefined
+        : renderTurnTimeNote(turnAt, req.identity.timezone);
+      const content = timeNote ? withTurnTimeNote(spoken, timeNote) : spoken;
       const stateInput = {
         messages: [
           new HumanMessage({
             content,
             additional_kwargs: {
-              timestamp: new Date().toISOString(),
+              timestamp: turnAt.toISOString(),
+              ...(timeNote ? { [TURN_TIME_NOTE_KWARG]: timeNote } : {}),
               oracleName: core.identity.name,
               msgFromMatrixRoom: req.client === 'matrix',
               ...speakerKwargs,
@@ -5020,6 +5544,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         byoProvider: byoTurn?.provider,
         turnDisposables,
         toolOutputCapChars: contextBudget.resultCapChars,
+        /** The budget's usage so far (JSON), stored with the run's end. */
+        usage: (): string => JSON.stringify(budget.snapshot()),
         delivery,
       };
     }
@@ -5112,6 +5638,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       sessionId: string,
       messages: BaseMessage[],
       disposition: RequestDisposition = { kind: 'agent' },
+      signal?: AbortSignal,
     ): Promise<void> {
       const sessions = this.sessions!;
       await sessions.touchSession(sessionId);
@@ -5128,17 +5655,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // The title model is the platform adapter, outside the turn's metered
       // model and budget: a supplied-context task's source and result never
       // reach it. A direct read brings its own deterministic title.
+      // A generated title is a model call of its own: it runs in the
+      // background, so the reply's `done` (and a Matrix answer) never waits
+      // for it.
       if (
         row &&
         (!row.title || row.title === UNTITLED_SESSION) &&
         !(await this.isRestrictedTaskSession(sessionId))
       ) {
-        const title =
-          disposition.kind === 'direct-read'
-            ? disposition.title
-            : await this.generateTitle(messages).catch(() => null);
-        if (title)
-          await sessions.setTitle(sessionId, title, { onlyIfUntitled: true });
+        if (disposition.kind === 'direct-read')
+          await sessions.setTitle(sessionId, disposition.title, {
+            onlyIfUntitled: true,
+          });
+        else this.ctx.waitUntil(this.titleSession(sessionId, messages, signal));
       }
       this.markDirty();
       // Which chunks this turn touched, for the page tier's eviction policy
@@ -5217,8 +5746,47 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
     }
 
+    /**
+     * Title an untitled session from its first exchange, in the background:
+     * bounded by `TITLE_TIMEOUT_MS` and by the turn's abort, never throws.
+     * The timer is cleared however the call ends.
+     */
+    private async titleSession(
+      sessionId: string,
+      messages: BaseMessage[],
+      turnSignal: AbortSignal | undefined,
+    ): Promise<void> {
+      const bound = new AbortController();
+      const onAbort = (): void => bound.abort(turnSignal?.reason);
+      if (turnSignal?.aborted) return;
+      turnSignal?.addEventListener('abort', onAbort, { once: true });
+      const timer = setTimeout(
+        () =>
+          bound.abort(
+            new Error(`session title timed out after ${TITLE_TIMEOUT_MS} ms`),
+          ),
+        TITLE_TIMEOUT_MS,
+      );
+      try {
+        const title = await this.generateTitle(messages, bound.signal);
+        // A session deleted (or reset away) meanwhile is not titled.
+        const sessions = this.sessions;
+        if (!title || !sessions || bound.signal.aborted) return;
+        if (await sessions.setTitle(sessionId, title, { onlyIfUntitled: true }))
+          this.markDirty();
+      } catch (err) {
+        console.warn(
+          `[user-do] no title for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      } finally {
+        clearTimeout(timer);
+        turnSignal?.removeEventListener('abort', onAbort);
+      }
+    }
+
     private async generateTitle(
       messages: BaseMessage[],
+      signal: AbortSignal,
     ): Promise<string | null> {
       const human = messages.find((m) => m.type === 'human');
       const ai = [...messages].reverse().find((m) => m.type === 'ai');
@@ -5228,9 +5796,24 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const model = (this.ambient?.llm ?? this.core.llm).get('session-title');
       const prompt =
         'Write a 3–6 word title for this conversation. Reply with the title only, no quotes.\n\n' +
-        `User: ${contentToText(human.content).slice(0, 500)}\n` +
+        `User: ${visibleText(human).slice(0, 500)}\n` +
         (ai ? `Assistant: ${contentToText(ai.content).slice(0, 500)}` : '');
-      const res = await model.invoke(prompt);
+      // Raced as well as signalled: a provider that ignores the signal
+      // still cannot hold the call past it.
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const fail = (): void =>
+          reject(
+            signal.reason instanceof Error
+              ? signal.reason
+              : new Error('session title aborted'),
+          );
+        if (signal.aborted) fail();
+        else signal.addEventListener('abort', fail, { once: true });
+      });
+      const res = await Promise.race([
+        model.invoke(prompt, { signal }),
+        aborted,
+      ]);
       const title = contentToText(res.content)
         .trim()
         .replace(/^["']|["']$/g, '')

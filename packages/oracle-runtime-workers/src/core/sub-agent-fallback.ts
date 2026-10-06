@@ -55,8 +55,15 @@ export interface CollectSubAgentsInput {
    * in name collisions.
    */
   passthroughTools?: StructuredTool[];
-  /** Middlewares every sub-agent's inner graph gets in addition to its own (the durable-run tool marks). */
+  /** Middlewares every sub-agent's inner graph gets in addition to its own. */
   extraMiddleware?: AgentMiddleware[];
+  /**
+   * Middlewares built for each dispatch of a sub-agent (see
+   * `AgentSpec.dispatchMiddleware`), placed before `extraMiddleware`: the
+   * main agent's tool middlewares scoped to the dispatch, and its
+   * repetition guard.
+   */
+  dispatchMiddleware?: (dispatch: string) => AgentMiddleware[];
   /** The turn's result cap, applied to every wrapped sub-agent tool (see `wrapPluginTool`). */
   resultCap?: ResultCapConfig;
   /**
@@ -88,6 +95,7 @@ function defaultToAgentSpec(
   fallbackContext: RunConfigContext | undefined,
   extraMiddleware?: AgentMiddleware[],
   resultCap?: ResultCapConfig,
+  dispatchMiddleware?: (dispatch: string) => AgentMiddleware[],
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -133,6 +141,7 @@ function defaultToAgentSpec(
     tools,
     model,
     middleware: [...(extraMiddleware ?? []), ...(subAgent.middlewares ?? [])],
+    ...(dispatchMiddleware ? { dispatchMiddleware } : {}),
     userDid,
     sessionId,
     logger: ambient.logger,
@@ -164,6 +173,7 @@ export async function collectSubAgentsWithFallback(
     subAgents,
     extraMiddleware,
     resultCap,
+    dispatchMiddleware,
   } = input;
 
   const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
@@ -185,6 +195,7 @@ export async function collectSubAgentsWithFallback(
               fallbackContext,
               extraMiddleware,
               resultCap,
+              dispatchMiddleware,
             );
         const withPassthrough: AgentSpec = passthroughTools?.length
           ? { ...spec, passthroughTools }

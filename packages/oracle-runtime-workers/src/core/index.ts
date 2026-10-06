@@ -31,7 +31,12 @@ import {
   openRouterAttributionHeaders,
   type OpenRouterLlmAdapter,
 } from './llm';
-import { validateManifest, type PluginManifestOverride } from './manifest';
+import {
+  estimateTokensApprox,
+  OPERATING_GUIDE_WARN_TOKENS,
+  validateManifest,
+  type PluginManifestOverride,
+} from './manifest';
 import {
   resolvePlugins,
   type ExcludedPlugin,
@@ -152,6 +157,7 @@ export type {
 
 export {
   estimateTokensApprox,
+  OPERATING_GUIDE_WARN_TOKENS,
   manifestCategorySchema,
   manifestExampleSchema,
   manifestStabilitySchema,
@@ -227,9 +233,16 @@ export type {
 export {
   buildOracleSection,
   composePrompt,
+  formatDateContext,
   formatTimeContext,
   formatUserPreferences,
+  renderTurnTimeNote,
 } from './prompt-composer';
+export {
+  stripTurnTimeNote,
+  TURN_TIME_NOTE_KWARG,
+  withTurnTimeNote,
+} from './turn-time-note';
 export type {
   ComposePromptInput,
   MemoryCommunity,
@@ -478,6 +491,24 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     const result = validateManifest(manifest, pluginName);
     for (const warning of result.warnings) logger.warn(`[boot] ${warning}`);
     if (!result.valid) manifestErrors.push(...result.errors);
+  }
+  const guides = registries.manifests.operatingGuides();
+  if (guides.length > 0) {
+    logger.log(
+      `[boot] operating guides: ${guides
+        .map(
+          ({ pluginName, guide }) =>
+            `${pluginName}=${guide.length} chars (~${estimateTokensApprox(guide)} tokens)`,
+        )
+        .join(', ')}`,
+    );
+    for (const { pluginName, guide } of guides) {
+      const tokens = estimateTokensApprox(guide);
+      if (tokens > OPERATING_GUIDE_WARN_TOKENS)
+        logger.warn(
+          `[boot] operating guide of '${pluginName}' is ~${tokens} tokens (over ${OPERATING_GUIDE_WARN_TOKENS}); it is in the system prompt of every turn that has the plugin loaded`,
+        );
+    }
   }
   if (manifestErrors.length > 0) {
     for (const err of manifestErrors) reportBootError(logger, err);

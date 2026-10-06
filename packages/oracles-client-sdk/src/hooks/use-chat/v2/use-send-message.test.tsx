@@ -35,6 +35,7 @@ function makeContext(
     getDelegation: vi.fn(async () => 'delegation'),
     getInvocation: vi.fn(async () => 'inv-1'),
     agActions: [],
+    registeredAgActions: [],
     registerAgAction: vi.fn(),
     unregisterAgAction: vi.fn(),
     executeAgAction: vi.fn(),

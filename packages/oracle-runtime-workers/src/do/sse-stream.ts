@@ -625,13 +625,12 @@ export async function runTurnFrames(
     const limit =
       harnessLimitOf(error) ?? harnessLimitOf(abortController.signal.reason);
     if (limit) return limitFailure(limit);
-    // The run's signal is the authority: LangGraph rethrows the signal's
-    // reason (whatever the aborter passed), not always an `AbortError`.
-    const aborted =
-      abortController.signal.aborted ||
-      (error instanceof Error &&
-        (error.name === 'AbortError' || /abort/i.test(error.message)));
-    if (aborted) {
+    // The run's signal is the only authority: LangGraph rethrows the
+    // signal's reason (whatever the aborter passed), not always an
+    // `AbortError`, while an `AbortError` or "aborted" message with the
+    // signal untouched is a provider or tool timing out — a failure the
+    // client must see as one.
+    if (abortController.signal.aborted) {
       flushOrphans();
       doneFrame({ aborted: true });
       return { status: 'aborted', fullText: fullContent };
@@ -726,7 +725,9 @@ export function createSseSubscriberStream(
       for (const frame of input.replay) write(frame);
       if (closed) return;
       if (input.buffer && !input.buffer.isClosed) {
-        unsubscribe = input.buffer.subscribe(write);
+        // A buffer that closes without a `done` (it never should) still
+        // ends the response instead of leaving it on heartbeats.
+        unsubscribe = input.buffer.subscribe(write, finish);
       } else {
         if (input.trailer)
           write({

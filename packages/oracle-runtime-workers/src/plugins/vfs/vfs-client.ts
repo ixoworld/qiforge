@@ -1,5 +1,6 @@
 import {
   VfsAuthError,
+  VfsContentTooLargeError,
   VfsHttpError,
   type VfsAbility,
   type VfsAuthErrorKind,
@@ -279,28 +280,71 @@ export class VfsClient {
   // Read / search
   // -------------------------------------------------------------------------
 
-  /** Resolve a path to its file via `/glob` (exact-path match). */
+  /**
+   * Resolve a path to exactly that file, or `null` when no file has that
+   * path. The worker has no metadata-by-path endpoint, so this asks `/glob`
+   * — which treats `*` and `?` as wildcards — and keeps only the entry whose
+   * path equals `path` character for character. A wildcard path therefore
+   * never resolves to some other file it happens to match, while a real file
+   * whose name contains `*` or `?` still resolves: its matches are read in
+   * worker-maximum pages, in the worker's path order, until the page holding
+   * it or a short page, at most {@link GLOB_MAX_PAGES} pages. When every
+   * page is full and the file was not seen, the path is refused instead of
+   * reported missing. Folders never resolve: `/glob` returns files only. More
+   * than one exact match is refused rather than guessed between.
+   */
   async statByPath(path: string): Promise<VfsFileStat | null> {
-    const res = await this.get('fs/list', `/glob?pattern=${enc(path)}`);
-    const first = arrayAt(await this.json(res), 'files')[0];
-    return first === undefined ? null : parseFile(first, path);
+    if (!hasGlobWildcard(path)) {
+      return this.exactMatch(
+        path,
+        await this.get('fs/list', `/glob?pattern=${enc(path)}`, readJson),
+      );
+    }
+    for (let pageNo = 0; pageNo < GLOB_MAX_PAGES; pageNo += 1) {
+      const body = await this.get(
+        'fs/list',
+        `/glob?pattern=${enc(path)}&limit=${GLOB_MAX_PAGE}&offset=${pageNo * GLOB_MAX_PAGE}`,
+        readJson,
+      );
+      const found = this.exactMatch(path, body);
+      if (found || arrayAt(body, 'files').length < GLOB_MAX_PAGE) return found;
+    }
+    throw new VfsHttpError({
+      status: 400,
+      message: `\`${path}\` matches more than ${GLOB_MAX_PAGES * GLOB_MAX_PAGE} files as a pattern, so the file with exactly that name cannot be looked up; rename it without \`*\` or \`?\`.`,
+      raw: '',
+    });
+  }
+
+  /** The `/glob` entry whose path is exactly `path`; refuses two of them. */
+  private exactMatch(path: string, body: unknown): VfsFileStat | null {
+    const exact = arrayAt(body, 'files')
+      .map((v) => parseFile(v))
+      .filter(nonNull)
+      .filter((f) => f.path === path);
+    if (exact.length > 1) {
+      throw new VfsHttpError({
+        status: 400,
+        message: `\`${path}\` matches more than one file; refusing to act on an ambiguous path.`,
+        raw: '',
+      });
+    }
+    return exact[0] ?? null;
   }
 
   /** List the direct children of a folder (`/tree`). */
   async list(path: string): Promise<VfsTreeEntry[]> {
-    const res = await this.get('fs/list', `/tree?path=${enc(path)}`);
-    return arrayAt(await this.json(res), 'nodes')
-      .map(parseTreeEntry)
-      .filter(nonNull);
+    const body = await this.get('fs/list', `/tree?path=${enc(path)}`, readJson);
+    return arrayAt(body, 'nodes').map(parseTreeEntry).filter(nonNull);
   }
 
   /** Hybrid lexical + semantic search over indexed content (`/search`). */
   async search(q: string, path: string): Promise<VfsSearchResult> {
-    const res = await this.get(
+    const body = await this.get(
       'fs/read',
       `/search?q=${enc(q)}&path=${enc(path)}`,
+      readJson,
     );
-    const body = await this.json(res);
     return {
       results: arrayAt(body, 'hits').map(parseSearchHit).filter(nonNull),
       semantic: (isRecord(body) && bool(body.semantic)) ?? true,
@@ -309,19 +353,22 @@ export class VfsClient {
 
   /** Literal term search inside files (`/grep`). */
   async grep(q: string, path: string): Promise<VfsSearchHit[]> {
-    const res = await this.get(
+    const body = await this.get(
       'fs/read',
       `/grep?q=${enc(q)}&path=${enc(path)}`,
+      readJson,
     );
-    return arrayAt(await this.json(res), 'matches')
-      .map(parseGrepMatch)
-      .filter(nonNull);
+    return arrayAt(body, 'matches').map(parseGrepMatch).filter(nonNull);
   }
 
   /** Match files by path pattern (`/glob`). */
   async glob(pattern: string): Promise<VfsGlobMatch[]> {
-    const res = await this.get('fs/list', `/glob?pattern=${enc(pattern)}`);
-    return arrayAt(await this.json(res), 'files').flatMap((v) => {
+    const body = await this.get(
+      'fs/list',
+      `/glob?pattern=${enc(pattern)}`,
+      readJson,
+    );
+    return arrayAt(body, 'files').flatMap((v) => {
       const f = parseFile(v);
       return f ? [{ path: f.path, id: f.id }] : [];
     });
@@ -336,11 +383,13 @@ export class VfsClient {
     offset: number,
     limit: number,
   ): Promise<VfsReadWindow> {
-    const res = await this.get(
-      'fs/read',
-      `/files/${enc(id)}/read?offset=${offset}&limit=${limit}`,
+    const r = asRecord(
+      await this.get(
+        'fs/read',
+        `/files/${enc(id)}/read?offset=${offset}&limit=${limit}`,
+        readJson,
+      ),
     );
-    const r = asRecord(await this.json(res));
     return {
       text: str(r.text) ?? '',
       offset: num(r.offset) ?? offset,
@@ -350,14 +399,25 @@ export class VfsClient {
     };
   }
 
-  /** Download a file's raw bytes (`/files/:id/content`) — for binaries. */
-  async contentBytes(id: string): Promise<VfsContentBytes> {
-    const res = await this.get('fs/read', `/files/${enc(id)}/content`, {});
-    const bytes = await res.arrayBuffer();
-    const mimeType =
-      res.headers.get('content-type')?.split(';')[0]?.trim() ||
-      'application/octet-stream';
-    return { bytes, mimeType, size: bytes.byteLength };
+  /**
+   * Download a file's raw bytes (`/files/:id/content`) — for binaries. Throws
+   * {@link VfsContentTooLargeError} once the body is known to exceed
+   * `maxBytes` — from `content-length` before reading, or while streaming —
+   * so an oversized file is never fully buffered in the isolate.
+   */
+  async contentBytes(id: string, maxBytes: number): Promise<VfsContentBytes> {
+    return this.get(
+      'fs/read',
+      `/files/${enc(id)}/content`,
+      async (res) => {
+        const bytes = await readBodyCapped(res, maxBytes);
+        const mimeType =
+          res.headers.get('content-type')?.split(';')[0]?.trim() ||
+          'application/octet-stream';
+        return { bytes, mimeType, size: bytes.byteLength };
+      },
+      {},
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -380,7 +440,7 @@ export class VfsClient {
         accept: 'application/json',
       },
     );
-    return parseFile(await this.json(res), path) ?? emptyStat(path);
+    return parseFile(res, path) ?? emptyStat(path);
   }
 
   /** Replace a file's whole content (`PUT /files/:id`). */
@@ -394,7 +454,7 @@ export class VfsClient {
       contentType: mime,
       accept: 'application/json',
     });
-    return parseFile(await this.json(res)) ?? emptyStat('');
+    return parseFile(res) ?? emptyStat('');
   }
 
   /** Exact-string edit (`PATCH /files/:id/edit`). */
@@ -409,7 +469,7 @@ export class VfsClient {
       contentType: 'application/json',
       accept: 'application/json',
     });
-    return { replacements: num(asRecord(await this.json(res)).replacements) };
+    return { replacements: num(asRecord(res).replacements) };
   }
 
   /**
@@ -425,7 +485,7 @@ export class VfsClient {
       contentType: 'application/json',
       accept: 'application/json',
     });
-    return parseBatchResults(await this.json(res));
+    return parseBatchResults(res);
   }
 
   /** Move files to trash by id (`POST /batch/delete`). */
@@ -435,7 +495,7 @@ export class VfsClient {
       contentType: 'application/json',
       accept: 'application/json',
     });
-    return parseBatchResults(await this.json(res));
+    return parseBatchResults(res);
   }
 
   /**
@@ -449,7 +509,7 @@ export class VfsClient {
       `/files/${enc(id)}/public?public=${pub}`,
       { accept: 'application/json' },
     );
-    const r = asRecord(await this.json(res));
+    const r = asRecord(res);
     return { public: bool(r.public) ?? pub, publicUrl: str(r.publicUrl) };
   }
 
@@ -465,7 +525,7 @@ export class VfsClient {
       `/folders/public?path=${enc(path)}&public=${pub}`,
       { accept: 'application/json' },
     );
-    const r = asRecord(await this.json(res));
+    const r = asRecord(res);
     return { public: bool(r.public) ?? pub, publicUrl: str(r.publicUrl) };
   }
 
@@ -473,31 +533,30 @@ export class VfsClient {
   // Transport core
   // -------------------------------------------------------------------------
 
-  /** Idempotent GET (retried once on 429/5xx/network). */
-  private get(
+  /**
+   * Idempotent GET (retried once on 429/5xx/network). `consume` reads the 2xx
+   * body inside the request's timeout and abort window.
+   */
+  private get<T>(
     ability: VfsAbility,
     pathAndQuery: string,
+    consume: (res: Response) => Promise<T>,
     opts: RequestInitLite = { accept: 'application/json' },
-  ): Promise<Response> {
-    return this.request(ability, 'GET', pathAndQuery, opts, true);
+  ): Promise<T> {
+    return this.request(ability, 'GET', pathAndQuery, opts, true, consume);
   }
 
-  /** Non-idempotent write (retried only once on 401, to re-mint). */
+  /**
+   * Non-idempotent write (retried only once on 401, to re-mint). Resolves to
+   * the parsed JSON body (`null` when it is empty or not JSON).
+   */
   private send(
     ability: VfsAbility,
     method: string,
     pathAndQuery: string,
     opts: RequestInitLite,
-  ): Promise<Response> {
-    return this.request(ability, method, pathAndQuery, opts, false);
-  }
-
-  private async json(res: Response): Promise<unknown> {
-    try {
-      return await res.json();
-    } catch {
-      return null;
-    }
+  ): Promise<unknown> {
+    return this.request(ability, method, pathAndQuery, opts, false, readJson);
   }
 
   private delay(): Promise<void> {
@@ -508,17 +567,20 @@ export class VfsClient {
 
   /**
    * One fetch with a fresh bearer, an accept/content-type header set, and a
-   * combined caller-abort + timeout signal. Every non-2xx that isn't retried
-   * becomes a {@link VfsHttpError}; an unresolved auth mint becomes a
-   * {@link VfsAuthError}.
+   * combined caller-abort + timeout signal that stays armed until the body
+   * has been read — a stalled body times out and honours cancellation just
+   * like stalled headers. Every non-2xx that isn't retried becomes a
+   * {@link VfsHttpError}; an unresolved auth mint becomes a
+   * {@link VfsAuthError}. A body read that times out or fails is not retried.
    */
-  private async request(
+  private async request<T>(
     ability: VfsAbility,
     method: string,
     pathAndQuery: string,
     opts: RequestInitLite,
     idempotent: boolean,
-  ): Promise<Response> {
+    consume: (res: Response) => Promise<T>,
+  ): Promise<T> {
     const url = `${this.baseUrl}${pathAndQuery}`;
     let didGetRetry = false;
     let didAuthRetry = false;
@@ -554,6 +616,11 @@ export class VfsClient {
           });
       }
 
+      const disarm = (): void => {
+        clearTimeout(timer);
+        this.callerSignal?.removeEventListener('abort', onCallerAbort);
+      };
+
       let res: Response;
       try {
         res = await this.fetchImpl(url, {
@@ -568,6 +635,7 @@ export class VfsClient {
           signal: controller.signal,
         });
       } catch (err) {
+        disarm();
         // A caller-initiated abort is terminal — surface it, don't retry.
         if (this.callerSignal?.aborted && !timedOut) throw err;
         if (idempotent && !didGetRetry) {
@@ -580,27 +648,43 @@ export class VfsClient {
           message: 'Filesystem request failed.',
           raw: err instanceof Error ? err.message : String(err),
         });
+      }
+
+      const retryAuth = res.status === 401 && !didAuthRetry;
+      const retryTransient =
+        (res.status === 429 || res.status >= 500) && idempotent && !didGetRetry;
+      if (retryAuth || retryTransient) {
+        disarm();
+        discardBody(res);
+        if (retryAuth) {
+          didAuthRetry = true;
+        } else {
+          didGetRetry = true;
+          await this.delay();
+        }
+        continue;
+      }
+
+      try {
+        const read = res.ok
+          ? consume(res)
+          : this.toHttpError(res).then((e): never => {
+              throw e;
+            });
+        return await raceAbort(read, controller.signal, () => discardBody(res));
+      } catch (err) {
+        if (err instanceof VfsHttpError) throw err;
+        if (this.callerSignal?.aborted && !timedOut) throw err;
+        throw new VfsHttpError({
+          status: 0,
+          message: timedOut
+            ? 'Filesystem request timed out.'
+            : 'Filesystem request failed.',
+          raw: err instanceof Error ? err.message : String(err),
+        });
       } finally {
-        clearTimeout(timer);
-        this.callerSignal?.removeEventListener('abort', onCallerAbort);
+        disarm();
       }
-
-      if (res.ok) return res;
-
-      if (res.status === 401 && !didAuthRetry) {
-        didAuthRetry = true;
-        continue;
-      }
-      if (
-        (res.status === 429 || res.status >= 500) &&
-        idempotent &&
-        !didGetRetry
-      ) {
-        didGetRetry = true;
-        await this.delay();
-        continue;
-      }
-      throw await this.toHttpError(res);
     }
   }
 
@@ -637,6 +721,101 @@ export class VfsClient {
 
     return new VfsHttpError({ status: res.status, message, raw, code });
   }
+}
+
+/** The worker's largest `/glob` page (`limit` is validated as 1..200). */
+const GLOB_MAX_PAGE = 200;
+
+/**
+ * Most `/glob` pages one path lookup reads: 5,000 matches, the most the
+ * worker scans for one pattern.
+ */
+const GLOB_MAX_PAGES = 25;
+
+/** `true` when the worker's glob would treat a character of `path` as a wildcard. */
+export function hasGlobWildcard(path: string): boolean {
+  return path.includes('*') || path.includes('?');
+}
+
+/** Parse a body as JSON; empty or malformed JSON is `null`, a read failure throws. */
+async function readJson(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a body into an `ArrayBuffer`, refusing with
+ * {@link VfsContentTooLargeError} as soon as it is known to exceed
+ * `maxBytes`: from `content-length` before any byte is read, otherwise
+ * while streaming (the stream is cancelled at the first chunk past the cap).
+ */
+async function readBodyCapped(
+  res: Response,
+  maxBytes: number,
+): Promise<ArrayBuffer> {
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    discardBody(res);
+    throw new VfsContentTooLargeError(maxBytes, declared);
+  }
+  if (!res.body) return new ArrayBuffer(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      void reader.cancel().catch(() => undefined);
+      throw new VfsContentTooLargeError(maxBytes);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
+/** Release an unread body so its connection is not held open. */
+function discardBody(res: Response): void {
+  if (res.body && !res.body.locked) {
+    void res.body.cancel().catch(() => undefined);
+  }
+}
+
+/**
+ * Settle with `work`, or reject with the signal's reason as soon as it
+ * aborts (running `onAbort` first). Bounds a body read even when the
+ * transport does not tie the body stream to the request signal.
+ */
+function raceAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  onAbort: () => void,
+): Promise<T> {
+  let abort = (): void => undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    abort = () => {
+      onAbort();
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new Error(String(reason)));
+    };
+  });
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  return Promise.race([work, aborted]).finally(() => {
+    signal.removeEventListener('abort', abort);
+  });
 }
 
 /** URL-encode a path/query value. */

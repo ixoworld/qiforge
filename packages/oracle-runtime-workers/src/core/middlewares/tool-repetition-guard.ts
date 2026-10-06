@@ -1,15 +1,15 @@
 import {
   AIMessage,
   type BaseMessage,
-  HumanMessage,
   ToolMessage,
 } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
-import { isAttachmentViewMessage } from '../../attachments/retention';
 import type { Logger } from '../../plugin-api/types';
 import { NOOP_LOGGER } from '../utils';
 import { isCapabilityGateRefusal } from './capability-gate';
-import { isSummarizationMessage } from './summarization';
+import { turnCarryOf, turnStart } from './turn-boundary';
+
+export { turnStart };
 
 /** Identical successful calls a turn may make, per effect. */
 export interface RepetitionCaps {
@@ -105,27 +105,22 @@ export const createToolRepetitionGuardMiddleware = (
 
       const argsKey = canonicalArgsKey(toolCall.args);
       const messages = state.messages ?? [];
-      const start = Math.max(
-        turnStart(messages),
-        messages.length - lookback,
-        0,
-      );
+      const opening = turnStart(messages);
+      const start = Math.max(opening, messages.length - lookback, 0);
       const argsById = toolCallArgsById(messages, start);
+      // The turn's calls a mid-turn summary condensed away (oldest first):
+      // only while the lookback still reaches the summary.
+      const openingMessage = messages[opening];
+      const carried = (
+        start === opening && openingMessage
+          ? (turnCarryOf(openingMessage) ?? [])
+          : []
+      ).filter(
+        (call) =>
+          call.name === toolName && canonicalArgsKey(call.args) === argsKey,
+      );
 
-      for (let i = messages.length - 1; i >= start; i--) {
-        const msg = messages[i];
-        if (!(msg instanceof ToolMessage)) continue;
-        if (msg.status !== 'error') continue;
-        // The capability gate refused it without running it; after a
-        // `load_capability` the same call is the expected next step.
-        if (isCapabilityGateRefusal(msg)) continue;
-        if (msg.name !== toolName) continue;
-
-        const priorArgs = argsById.get(msg.tool_call_id);
-        if (priorArgs === undefined) continue;
-        if (canonicalArgsKey(priorArgs) !== argsKey) continue;
-
-        const priorError = toolMessageText(msg);
+      const failedInTurn = (priorError: string): ToolMessage => {
         logger.warn(
           `Repetition guard: short-circuiting duplicate failed call to ${toolName}`,
           { toolName, priorError },
@@ -144,12 +139,37 @@ export const createToolRepetitionGuardMiddleware = (
           name: toolName,
           status: 'error',
         });
+      };
+
+      for (let i = messages.length - 1; i >= start; i--) {
+        const msg = messages[i];
+        if (!(msg instanceof ToolMessage)) continue;
+        if (msg.status !== 'error') continue;
+        // The capability gate refused it without running it; after a
+        // `load_capability` the same call is the expected next step.
+        if (isCapabilityGateRefusal(msg)) continue;
+        if (msg.name !== toolName) continue;
+
+        const priorArgs = argsById.get(msg.tool_call_id);
+        if (priorArgs === undefined) continue;
+        if (canonicalArgsKey(priorArgs) !== argsKey) continue;
+
+        return failedInTurn(toolMessageText(msg));
       }
+      const carriedFailure = carried.findLast(
+        (call) => call.status === 'error',
+      );
+      if (carriedFailure) return failedInTurn(carriedFailure.result);
 
       // Identical calls that succeeded in this turn, plus identical calls
       // earlier in this same model response (still running beside this one).
       let identical = 0;
-      let lastResult: ToolMessage | undefined;
+      let lastResult: string | undefined;
+      for (const call of carried) {
+        if (call.status === 'error') continue;
+        identical += 1;
+        lastResult = call.result;
+      }
       for (let i = start; i < messages.length; i++) {
         const msg = messages[i];
         if (!(msg instanceof ToolMessage)) continue;
@@ -158,7 +178,7 @@ export const createToolRepetitionGuardMiddleware = (
         if (priorArgs === undefined) continue;
         if (canonicalArgsKey(priorArgs) !== argsKey) continue;
         identical += 1;
-        lastResult = msg;
+        lastResult = toolMessageText(msg);
       }
       for (const sibling of stepCallsBefore(messages, toolCall.id, start)) {
         if (
@@ -174,13 +194,14 @@ export const createToolRepetitionGuardMiddleware = (
       logger.warn(
         `Repetition guard: ${toolName} already ran ${identical} time(s) this turn with these exact arguments (${effect} cap ${cap}); not run again`,
       );
-      const earlier = lastResult
-        ? ['', 'It returned:', '', excerpt(toolMessageText(lastResult))]
-        : [];
+      const earlier =
+        lastResult !== undefined
+          ? ['', 'It returned:', '', excerpt(lastResult)]
+          : [];
       return new ToolMessage({
         content: (effect === 'write'
           ? [
-              lastResult
+              lastResult !== undefined
                 ? `\`${toolName}\` already ran with these exact arguments in this turn, so it was NOT run again: running it twice would repeat its effect.`
                 : `An identical \`${toolName}\` call is already part of this step, so this one was NOT run: running it twice would repeat its effect.`,
               ...earlier,
@@ -239,29 +260,6 @@ function stepCallsBefore(
     if (at >= 0) return calls.slice(0, at);
   }
   return [];
-}
-
-/**
- * Index of the message that opens the current turn: the latest human
- * message, other than the human messages the runtime writes itself — the
- * summary the summarizer puts in place of the condensed history, and the
- * re-attachment `view_attachment` appends after its tool result. Neither is
- * the user speaking; counting the re-attachment would reset the turn's
- * write cap and failed-call memory in the middle of the turn. 0 when there
- * is none.
- */
-export function turnStart(messages: readonly BaseMessage[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (
-      message &&
-      HumanMessage.isInstance(message) &&
-      !isSummarizationMessage(message) &&
-      !isAttachmentViewMessage(message)
-    )
-      return i;
-  }
-  return 0;
 }
 
 function canonicalArgsKey(args: unknown): string {

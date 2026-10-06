@@ -70,6 +70,7 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260825.1",
     "@ixo/typescript-config": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "happy-dom": "^19.0.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.0",

@@ -3,10 +3,10 @@ import type { MessageContent } from '@langchain/core/messages';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { bytesToBase64 } from '../base64';
 import type { VfsClient, VfsFileStat } from './vfs-client';
-import { VfsHttpError } from './vfs-errors';
+import { VfsContentTooLargeError, VfsHttpError } from './vfs-errors';
 
-/** Cap on the bytes we base64 into the vision model. */
-const MAX_VISION_BYTES = 10 * 1024 * 1024;
+/** Cap on the bytes we download and base64 into the vision model. */
+export const MAX_VISION_BYTES = 10 * 1024 * 1024;
 
 /** MIME types that are text even though they don't start with `text/`. */
 const TEXT_MIME_EXACT = new Set<string>([
@@ -65,27 +65,46 @@ function renderTextWindow(
   return `${text}\n… more lines below (${totalLines} total). Call vfs_read again with offset=${nextOffset} to continue.`;
 }
 
+function isRenderableMime(mime: string): boolean {
+  return mime.startsWith('image/') || isDocMime(mime);
+}
+
 /**
- * Read a non-text file for the agent. Fetches the bytes, then either returns a
- * size stub (too large / unsupported binary) or routes the bytes through the
- * vision model and returns its description/transcription. Never throws — a
- * vision failure degrades to a metadata stub.
+ * Read a non-text file for the agent. Returns a metadata stub without
+ * downloading when the stored size or type already rules rendering out;
+ * otherwise fetches at most {@link MAX_VISION_BYTES} and routes the bytes
+ * through the vision model, returning its description/transcription. A vision
+ * failure degrades to a metadata stub.
  */
 async function renderBinary(
   client: VfsClient,
   rtCtx: RuntimeContext,
   stat: VfsFileStat,
 ): Promise<string> {
-  const { bytes, mimeType, size } = await client.contentBytes(stat.id);
   const name = basename(stat.path) || stat.id;
-  const mime = mimeType || stat.mimeType || 'application/octet-stream';
   const publicSuffix = stat.publicUrl
     ? ` — public link: ${stat.publicUrl}`
     : '';
+  const tooLarge = (mime: string, size: number | string): string =>
+    `[binary file "${name}" — ${mime}, ${size} bytes — too large to render (limit ${MAX_VISION_BYTES} bytes)${publicSuffix}]`;
+  const storedMime = stat.mimeType || 'application/octet-stream';
 
-  if (size > MAX_VISION_BYTES) {
-    return `[binary file "${name}" — ${mime}, ${size} bytes — too large to render${publicSuffix}]`;
+  if (stat.size > MAX_VISION_BYTES) return tooLarge(storedMime, stat.size);
+  if (stat.mimeType && !isRenderableMime(stat.mimeType)) {
+    return `[binary file "${name}" — ${stat.mimeType}, ${stat.size} bytes — not rendered${publicSuffix}]`;
   }
+
+  let downloaded: Awaited<ReturnType<VfsClient['contentBytes']>>;
+  try {
+    downloaded = await client.contentBytes(stat.id, MAX_VISION_BYTES);
+  } catch (err) {
+    if (err instanceof VfsContentTooLargeError) {
+      return tooLarge(storedMime, `more than ${MAX_VISION_BYTES}`);
+    }
+    throw err;
+  }
+  const { bytes, mimeType, size } = downloaded;
+  const mime = mimeType || storedMime;
 
   const isImage = mime.startsWith('image/');
   const isDoc = isDocMime(mime);

@@ -244,13 +244,16 @@ describe('a complete supplied-context run', () => {
     // No memory-engine indexing, no gateway (room) traffic, no enrichment.
     expect(o.indexed).not.toHaveBeenCalled();
     expect(o.forbidden).not.toHaveBeenCalled();
-    // The turn budget charged the one model call.
-    expect(o.runStore.update).toHaveBeenCalledWith(
-      'run',
-      expect.objectContaining({
-        usage: expect.stringContaining('"modelCalls":1'),
-      }),
-    );
+    // The turn budget charged the one model call, reported with the
+    // outcome (written with the run's terminal status, no row update).
+    expect(outcome).toMatchObject({
+      usage: expect.stringContaining('"modelCalls":1'),
+    });
+    expect(
+      o.runStore.update.mock.calls.some((call: unknown[]) =>
+        JSON.stringify(call).includes('usage'),
+      ),
+    ).toBe(false);
   });
 });
 

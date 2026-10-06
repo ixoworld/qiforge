@@ -82,7 +82,7 @@ export const TIER_DISPLAY: Record<
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   // ── $ Everyday — fast and cheap ─────────────────────────────────────────
   {
-    id: DEFAULT_MODEL_ID,
+    id: 'openai/gpt-5.4-nano',
     label: 'GPT-5.4 Nano',
     family: 'openai',
     tier: 'everyday',
@@ -120,7 +120,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
 
   // ── $$ Balanced — smarter, still affordable ─────────────────────────────
   {
-    id: 'openai/gpt-5.6-luna',
+    id: DEFAULT_MODEL_ID,
     label: 'GPT-5.6 Luna',
     family: 'openai',
     tier: 'balanced',
@@ -239,7 +239,10 @@ export function getDefaultModelId(
   return override.length > 0 ? override : DEFAULT_MODEL_ID;
 }
 
-const MODEL_INPUT_CAPS: Record<string, ModelInputCapabilities> = {
+/** Native input capabilities per catalog id (every key is a `MODEL_CATALOG` id). */
+export const MODEL_INPUT_CAPS: Readonly<
+  Record<string, ModelInputCapabilities>
+> = {
   'openai/gpt-5.4-nano': {
     image: true,
     file: true,
@@ -396,12 +399,19 @@ export async function listModels(
         OPEN_ROUTER_API_KEY?: unknown;
       }
     | undefined,
+  options: {
+    /** Keeps a background price refresh alive past the response (`ctx.waitUntil`). */
+    waitUntil?: (work: Promise<unknown>) => void;
+  } = {},
 ): Promise<ModelListing> {
   const apiKey =
     typeof env?.OPEN_ROUTER_API_KEY === 'string' && env.OPEN_ROUTER_API_KEY
       ? env.OPEN_ROUTER_API_KEY
       : undefined;
-  const livePrices = await fetchOpenRouterPrices({ apiKey });
+  const livePrices = await fetchOpenRouterPrices({
+    apiKey,
+    ...(options.waitUntil ? { waitUntil: options.waitUntil } : {}),
+  });
   return listModelCatalog(env, livePrices);
 }
 

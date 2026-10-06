@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { tool as pluginTool } from '../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
+import { readSandboxResult } from './sandbox-bridge';
 import type { SandboxMcpTool } from './sandbox.plugin';
 
 const sandboxWriteBlobSchema = z.object({
@@ -80,10 +81,19 @@ export function createSandboxWriteBlobTool(
           content: blob.value,
           encoding: 'utf8',
         });
+        // The sandbox reports a rejected write (bad path, quota) as a
+        // returned `success:false` envelope, not a throw.
+        const outcome = readSandboxResult(result);
+        if (!outcome.ok) {
+          return JSON.stringify({
+            success: false,
+            error: `sandbox_write_file failed: ${outcome.text}`,
+          });
+        }
         return JSON.stringify({
           success: true,
           path,
-          bytesWritten: blob.value.length,
+          bytesWritten: new TextEncoder().encode(blob.value).byteLength,
           blobName: blob.name,
           note: typeof result === 'string' ? result : undefined,
         });

@@ -11,6 +11,9 @@ import type { AuthOutcome } from '../shell/auth';
 import { RealtimeEndpoint, type RealtimeStatus } from './realtime-endpoint';
 
 export const TEST_GOOD_TOKEN = 'good-token';
+/** Authenticates like `TEST_GOOD_TOKEN`, after `TEST_SLOW_AUTH_MS` (a Blocksync round trip). */
+export const TEST_SLOW_TOKEN = 'slow-token';
+export const TEST_SLOW_AUTH_MS = 200;
 /** A CONNECT carrying only this delegation authenticates as the bare-delegation fallback does. */
 export const TEST_BARE_DELEGATION = 'bare-delegation';
 export const TEST_USER_DID = 'did:ixo:realtimeuser';
@@ -48,6 +51,7 @@ export class RealtimeTestDO extends DurableObject {
     eventName: string;
     payload: Record<string, unknown>;
   }> = [];
+  private authentications = 0;
 
   private get realtime(): RealtimeEndpoint {
     this.endpoint ??= new RealtimeEndpoint({
@@ -58,25 +62,32 @@ export class RealtimeTestDO extends DurableObject {
       onSessionDrained: (sessionId, userDid) => {
         this.drained.push({ sessionId, userDid });
       },
-      authenticate: (auth): Promise<AuthOutcome> =>
-        Promise.resolve(
-          auth.invocation === TEST_GOOD_TOKEN
-            ? { ok: true, auth: { userDid: TEST_USER_DID, via: 'invocation' } }
-            : !auth.invocation && auth.ucanDelegation === TEST_BARE_DELEGATION
-              ? {
-                  ok: true,
-                  auth: {
-                    userDid: TEST_USER_DID,
-                    delegation: TEST_BARE_DELEGATION,
-                    via: 'delegation',
-                  },
-                }
-              : {
-                  ok: false,
-                  status: 401,
-                  error: 'Invalid UCAN invocation: nope',
+      authenticate: async (auth): Promise<AuthOutcome> => {
+        this.authentications += 1;
+        if (auth.invocation === TEST_SLOW_TOKEN) {
+          await new Promise((r) => setTimeout(r, TEST_SLOW_AUTH_MS));
+          return {
+            ok: true,
+            auth: { userDid: TEST_USER_DID, via: 'invocation' },
+          };
+        }
+        return auth.invocation === TEST_GOOD_TOKEN
+          ? { ok: true, auth: { userDid: TEST_USER_DID, via: 'invocation' } }
+          : !auth.invocation && auth.ucanDelegation === TEST_BARE_DELEGATION
+            ? {
+                ok: true,
+                auth: {
+                  userDid: TEST_USER_DID,
+                  delegation: TEST_BARE_DELEGATION,
+                  via: 'delegation',
                 },
-        ),
+              }
+            : {
+                ok: false,
+                status: 401,
+                error: 'Invalid UCAN invocation: nope',
+              };
+      },
       sessionExists: (_userDid, sessionId) =>
         sessionId === TEST_BROKEN_SESSION
           ? Promise.reject(new Error('user database unavailable'))
@@ -214,9 +225,23 @@ export class RealtimeTestDO extends DurableObject {
     }
   }
 
+  /**
+   * Move every socket's open time `ms` into the past (rewrites the
+   * attachment), as if the handshake had started that much earlier.
+   */
+  async ageOpenedAt(ms: number): Promise<void> {
+    for (const { socket, attachment } of this.realtime.hub.entries())
+      this.realtime.hub.update(socket, { openedAt: attachment.openedAt - ms });
+  }
+
   /** The alarm requests the endpoint made (next heartbeat deadlines). */
   async alarmRequests(): Promise<number[]> {
     return [...this.requestedAlarms];
+  }
+
+  /** How many times the endpoint asked the authenticator to validate a CONNECT. */
+  async authenticationCount(): Promise<number> {
+    return this.authentications;
   }
 
   /** Every warning the endpoint logged, in order. */

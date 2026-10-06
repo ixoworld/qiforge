@@ -26,6 +26,7 @@ const context: IOraclesContextProps = {
   getDelegation: vi.fn(async () => 'delegation'),
   getInvocation: vi.fn(async () => null),
   agActions: [],
+  registeredAgActions: [],
   registerAgAction: vi.fn(),
   unregisterAgAction: vi.fn(),
   executeAgAction: vi.fn(),

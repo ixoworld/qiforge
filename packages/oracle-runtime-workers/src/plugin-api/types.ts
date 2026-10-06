@@ -562,6 +562,12 @@ export interface RuntimeContext<TConfig = MergedConfig> {
   secrets: {
     getIndex: () => Promise<SecretIndex>;
     getValues: (keys: string[]) => Promise<Record<string, string>>;
+    /**
+     * Values of every secret `getIndex` lists, read with one lookup of the
+     * room's secret index — use it instead of `getIndex` followed by
+     * `getValues` of every key. `{}` without a room.
+     */
+    getAll: () => Promise<Record<string, string>>;
   };
 
   /**

@@ -19,6 +19,7 @@ import {
  */
 import { FRONTEND_BRIDGE } from '@ixo/common/ai/frontend-bridge';
 import { bodyLimit } from 'hono/body-limit';
+import { HTTPException } from 'hono/http-exception';
 import {
   TopicOperationId,
   TopicDeliverableRequestSchema,
@@ -49,7 +50,7 @@ import {
   type AuthResult,
   type RouteExclusion,
 } from './auth';
-import { turnBodyTooLarge } from './turn-body-cap';
+import { MAX_TURN_BODY_BYTES } from './turn-body-cap';
 import {
   artifactDataResponse,
   artifactPageResponse,
@@ -88,13 +89,41 @@ export interface PluginRoute {
   ) => Response | Promise<Response>;
 }
 
+/** What `GET /models` hands its payload provider besides the env. */
+export interface ListModelsOptions {
+  waitUntil?: (work: Promise<unknown>) => void;
+}
+
+/**
+ * The request's `waitUntil`, or undefined when the app runs without an
+ * execution context (Hono's `executionCtx` getter throws then).
+ */
+function executionWaitUntil(c: {
+  readonly executionCtx: { waitUntil(work: Promise<unknown>): void };
+}): ((work: Promise<unknown>) => void) | undefined {
+  let ctx: { waitUntil(work: Promise<unknown>): void };
+  try {
+    ctx = c.executionCtx;
+  } catch {
+    return undefined;
+  }
+  return (work) => ctx.waitUntil(work);
+}
+
 export interface ShellOptions {
   /** Routes contributed by plugins (`getRoutes`) and the host. */
   routes?: PluginRoute[];
   /** Auth exclusions contributed by plugins and the host. */
   authExcludedRoutes?: RouteExclusion[];
-  /** `GET /models` payload provider (may fetch live prices). */
-  listModels?: (env: OracleWorkerEnv) => unknown | Promise<unknown>;
+  /**
+   * `GET /models` payload provider (may fetch live prices). `waitUntil`
+   * keeps work it starts in the background (a price refresh) alive past the
+   * response; absent when the request has no execution context.
+   */
+  listModels?: (
+    env: OracleWorkerEnv,
+    options?: ListModelsOptions,
+  ) => unknown | Promise<unknown>;
   /** Version banner for `GET /`. */
   banner?: { name: string; description?: string };
   /**
@@ -117,17 +146,120 @@ function isAbortRejection(err: unknown): boolean {
   );
 }
 
-const BUILTIN_EXCLUSIONS: RouteExclusion[] = [
+/**
+ * Routes that answer without a UCAN invocation: the banner, liveness
+ * probes, the model list, and the gateway's status/start that monitors and
+ * the drills poll. Every one of them is read-only or idempotent; nothing
+ * that changes state for other users is here (the debug routes included —
+ * they authenticate like every other route).
+ */
+export const BUILTIN_EXCLUSIONS: readonly RouteExclusion[] = [
   { path: '/', method: 'GET' },
   { path: '/health', method: 'ALL' },
   { path: '/health/*', method: 'ALL' },
   { path: '/models', method: 'GET' },
   { path: '/matrix/status', method: 'GET' },
   { path: '/matrix/start', method: 'POST' },
-  // Operator-only; the /debug/* middleware 404s unless ORACLE_DEBUG_ROUTES=true.
-  { path: '/debug/matrix/restart', method: 'POST' },
-  { path: '/debug/matrix/stop', method: 'POST' },
 ];
+
+// Body caps of the built-in routes (a turn's is `MAX_TURN_BODY_BYTES`).
+/** `POST /messages/abort`: a session id. */
+export const ABORT_BODY_BYTES = 4 * 1024;
+/** `POST /delegation`: one serialized delegation (a base64 CAR with its proof chain). */
+export const DELEGATION_BODY_BYTES = 64 * 1024;
+/** `/byo-llm/*`: provider credentials and OAuth exchanges. */
+export const BYO_LLM_BODY_BYTES = 64 * 1024;
+/** `/debug/*`: operator drills (the largest is one Matrix event, itself capped at 64 KiB). */
+export const DEBUG_BODY_BYTES = 64 * 1024;
+
+/** A body cap enforced before the body is buffered: over it, 413 and the handler never runs. */
+function limitBody(maxSize: number) {
+  return bodyLimit({
+    maxSize,
+    onError: (c) =>
+      c.json({ statusCode: 413, message: 'request entity too large' }, 413),
+  });
+}
+
+const DID_SEGMENT = String.raw`(?:[A-Za-z0-9._-]|%[0-9A-Fa-f]{2})+`;
+/** A W3C DID (`did:<method>:<method-specific-id>`), bounded in length. */
+const DID_RE = new RegExp(`^did:[a-z0-9]+:${DID_SEGMENT}(?::${DID_SEGMENT})*$`);
+const MAX_DID_LENGTH = 512;
+
+export function isDidShaped(value: string): boolean {
+  return value.length <= MAX_DID_LENGTH && DID_RE.test(value);
+}
+
+/**
+ * The key of one rate-limit budget. Prefixed with the oracle's DID: rate
+ * limiter bindings that share a `namespace_id` share their counters, even
+ * across Workers, so two oracles on one account would otherwise share every
+ * user's budget.
+ */
+export function rateLimitKey(
+  env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
+  scope: 'user' | 'artifact' | 'socket' | 'status' | 'start',
+  subject: string,
+): string {
+  return `${env.ORACLE_DID}|${scope}|${subject}`;
+}
+
+/**
+ * Whether an unauthenticated caller (keyed by its IP) is over its budget.
+ * No binding or no client IP (local runs, tests): never limited.
+ */
+async function ipOverLimit(
+  env: OracleWorkerEnv,
+  scope: 'artifact' | 'socket' | 'status' | 'start',
+  ip: string | undefined,
+): Promise<boolean> {
+  if (!ip || !env.RATE_LIMIT) return false;
+  const { success } = await env.RATE_LIMIT.limit({
+    key: rateLimitKey(env, scope, ip),
+  });
+  return !success;
+}
+
+/**
+ * The operators allowed onto the gateway-wide debug routes
+ * (`ORACLE_OPERATOR_DIDS`, comma-separated DIDs): null when the variable is
+ * unset, an empty set when it is malformed (fail closed — nobody, and an
+ * error in the log). Parsed once per distinct value.
+ */
+let operatorList: { raw: string; dids: ReadonlySet<string> } | null = null;
+
+function operatorDids(env: OracleWorkerEnv): ReadonlySet<string> | null {
+  const raw = env.ORACLE_OPERATOR_DIDS;
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  if (operatorList?.raw === raw) return operatorList.dids;
+  const entries = raw
+    .split(',')
+    .map((did) => did.trim())
+    .filter(Boolean);
+  const malformed = entries.filter((did) => !isDidShaped(did));
+  if (malformed.length > 0)
+    console.error(
+      `[shell] ORACLE_OPERATOR_DIDS has entries that are not DIDs (${malformed.join(', ')}); no caller is let onto /debug/matrix/*`,
+    );
+  operatorList = {
+    raw,
+    dids: new Set(malformed.length > 0 ? [] : entries),
+  };
+  return operatorList.dids;
+}
+
+/** What `GET /health/matrix` answers: the gateway's in-memory `running` flag. */
+async function gatewayRunning(env: OracleWorkerEnv): Promise<boolean> {
+  const res = await gateway(env).fetch('https://matrix-gateway/health');
+  if (!res.ok) return false;
+  const body: unknown = await res.json();
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    'running' in body &&
+    body.running === true
+  );
+}
 
 export function createShell(
   opts: ShellOptions = {},
@@ -145,11 +277,20 @@ export function createShell(
   // — the shell only routes on `?userDid`, and the object refuses a token
   // that does not belong to that DID. The 101 response must also reach the
   // client untouched (no CORS header rewriting on an upgraded response).
+  // Unauthenticated until CONNECT, so before any object is addressed the
+  // DID must at least look like one and the caller's IP must be within its
+  // budget: each upgrade costs a user object a request and a held socket.
   app.all('/socket.io/*', async (c) => {
     const userDid = c.req.query('userDid');
     if (!userDid) {
       return c.json(
         { code: 3, message: 'userDid query parameter is required.' },
+        400,
+      );
+    }
+    if (!isDidShaped(userDid)) {
+      return c.json(
+        { code: 3, message: 'userDid query parameter is not a DID.' },
         400,
       );
     }
@@ -163,6 +304,8 @@ export function createShell(
         426,
       );
     }
+    if (await ipOverLimit(c.env, 'socket', c.req.header('cf-connecting-ip')))
+      return c.json({ code: 3, message: 'Too many requests.' }, 429);
     const target = new URL(c.req.url);
     target.protocol = 'https:';
     target.host = 'user-oracle';
@@ -180,12 +323,7 @@ export function createShell(
     artifactPageResponse(c.env, c.req.param('artifactId')),
   );
   app.get('/a/:artifactId/data', async (c) => {
-    const ip = c.req.header('cf-connecting-ip');
-    if (
-      ip &&
-      c.env.RATE_LIMIT &&
-      !(await c.env.RATE_LIMIT.limit({ key: `artifact:${ip}` })).success
-    )
+    if (await ipOverLimit(c.env, 'artifact', c.req.header('cf-connecting-ip')))
       return c.text('Too many requests', 429, {
         'access-control-allow-origin': '*',
       });
@@ -231,24 +369,38 @@ export function createShell(
       frontendTools: FRONTEND_BRIDGE,
     }),
   );
+  // A liveness probe: the gateway's in-memory flag, no storage read. The
+  // full picture is `/matrix/status`.
   app.get('/health/matrix', async (c) => {
-    const status = await gateway(c.env).status();
-    return c.json(status, status.running ? 200 : 503);
+    const running = await gatewayRunning(c.env).catch((err: unknown) => {
+      console.warn(`[shell] gateway health check failed: ${errorText(err)}`);
+      return false;
+    });
+    return c.json({ running }, running ? 200 : 503);
   });
-  app.get('/matrix/status', async (c) => c.json(await gateway(c.env).status()));
-  app.post('/matrix/start', async (c) =>
-    c.json(await gateway(c.env).ensureStarted()),
-  );
-  app.get('/models', async (c) =>
-    c.json(
-      (await opts.listModels?.(c.env)) ?? {
+  // Public (monitors and the drills poll it), so limited per IP; the
+  // gateway serves the storage-scanning part from a short cache.
+  app.get('/matrix/status', async (c) => {
+    if (await ipOverLimit(c.env, 'status', c.req.header('cf-connecting-ip')))
+      return c.json({ statusCode: 429, message: 'Too many requests' }, 429);
+    return c.json(await gateway(c.env).status());
+  });
+  app.post('/matrix/start', async (c) => {
+    if (await ipOverLimit(c.env, 'start', c.req.header('cf-connecting-ip')))
+      return c.json({ statusCode: 429, message: 'Too many requests' }, 429);
+    return c.json(await gateway(c.env).ensureStarted());
+  });
+  app.get('/models', async (c) => {
+    const waitUntil = executionWaitUntil(c);
+    return c.json(
+      (await opts.listModels?.(c.env, waitUntil ? { waitUntil } : {})) ?? {
         models: [],
         // Node's `ModelListing` shape (`{ models, default }`); the client SDK
         // reads `default`.
         default: c.env.DEFAULT_MODEL ?? null,
       },
-    ),
-  );
+    );
+  });
 
   app.post('/channels/turn', async (c) => {
     try {
@@ -269,12 +421,18 @@ export function createShell(
         parsed.data,
         channelAuthConfig(c.env),
       );
-      await assertActiveChannelBinding(identity, c.env);
+      // Limited as soon as the user is proven, before the Auth Hub round
+      // trip: a flood or a tight poll must not cost one call there each.
       if (
         c.env.RATE_LIMIT &&
-        !(await c.env.RATE_LIMIT.limit({ key: identity.userDid })).success
+        !(
+          await c.env.RATE_LIMIT.limit({
+            key: rateLimitKey(c.env, 'user', identity.userDid),
+          })
+        ).success
       )
         throw new ChannelError(429, 'Too many requests');
+      await assertActiveChannelBinding(identity, c.env);
       const outcome = await userStub(c.env, identity.userDid).channelTurn(
         identity,
         parsed.data,
@@ -321,15 +479,17 @@ export function createShell(
   // Cloudflare's native limiter; the limit/period live on the binding in
   // wrangler.jsonc. Keyed by DID rather than IP so co-located users (one
   // NAT/proxy) never share a bucket and a single leaked token can't burn
-  // unbounded LLM spend. Auth-excluded routes (health/models/matrix status)
-  // ran `next()` above and never reach here. Absent binding = no limiting
-  // (local harness / tests).
+  // unbounded LLM spend; the key carries the oracle's DID (`rateLimitKey`).
+  // Auth-excluded routes (health/models/matrix status) ran `next()` above
+  // and never reach here. Absent binding = no limiting (local harness / tests).
   app.use('*', async (c, next) => {
     const limiter = c.env.RATE_LIMIT;
     if (!limiter) return next();
     const auth = c.get('auth') as AuthResult | undefined;
     if (!auth) return next();
-    const { success } = await limiter.limit({ key: auth.userDid });
+    const { success } = await limiter.limit({
+      key: rateLimitKey(c.env, 'user', auth.userDid),
+    });
     if (!success)
       return c.json(
         {
@@ -458,7 +618,7 @@ export function createShell(
   });
 
   // --- messages ----------------------------------------------------------------
-  app.post('/messages/abort', async (c) => {
+  app.post('/messages/abort', limitBody(ABORT_BODY_BYTES), async (c) => {
     const identity = identityOf(c.get('auth'), c.req.raw.headers);
     const body = (await c.req.json().catch(() => ({}))) as {
       sessionId?: string;
@@ -561,43 +721,42 @@ export function createShell(
     );
     return new Response(res.body, { status: res.status, headers });
   });
-  app.post('/messages/:sessionId', async (c) => {
-    const identity = identityOf(c.get('auth'), c.req.raw.headers);
-    const sessionId = c.req.param('sessionId');
-    const body = await c.req.text();
-    // Bounds the memory one request can pin (see turn-body-cap.ts); the
-    // status and message are the ones Node's body parser uses.
-    if (turnBodyTooLarge(body)) {
-      return c.json(
-        { statusCode: 413, message: 'request entity too large' },
-        413,
-      );
-    }
-    // Node accepts a client-supplied `requestId` (correlates the SSE events
-    // with the client's own bookkeeping); fall back to a fresh UUID.
-    const requestId = clientRequestId(body) ?? crypto.randomUUID();
-    // The user object owns the turn; it returns either an SSE stream or JSON.
-    // We pass the raw body through so attachments/tools/agActions survive.
-    const res = await userStub(c.env, identity.userDid).fetch(
-      `https://user-oracle/turn/${encodeURIComponent(sessionId)}`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-request-id': requestId,
-          'x-identity': JSON.stringify(identity),
+  // The cap bounds the memory one request can pin (see turn-body-cap.ts); it
+  // is enforced before the body is read, with the status and message Node's
+  // body parser uses.
+  app.post(
+    '/messages/:sessionId',
+    limitBody(MAX_TURN_BODY_BYTES),
+    async (c) => {
+      const identity = identityOf(c.get('auth'), c.req.raw.headers);
+      const sessionId = c.req.param('sessionId');
+      const body = await c.req.text();
+      // Node accepts a client-supplied `requestId` (correlates the SSE events
+      // with the client's own bookkeeping); fall back to a fresh UUID.
+      const requestId = clientRequestId(body) ?? crypto.randomUUID();
+      // The user object owns the turn; it returns either an SSE stream or JSON.
+      // We pass the raw body through so attachments/tools/agActions survive.
+      const res = await userStub(c.env, identity.userDid).fetch(
+        `https://user-oracle/turn/${encodeURIComponent(sessionId)}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-request-id': requestId,
+            'x-identity': JSON.stringify(identity),
+          },
+          body,
         },
-        body,
-      },
-    );
-    const headers = new Headers(res.headers);
-    headers.set('x-request-id', requestId);
-    headers.set('access-control-expose-headers', 'x-request-id');
-    return new Response(res.body, { status: res.status, headers });
-  });
+      );
+      const headers = new Headers(res.headers);
+      headers.set('x-request-id', requestId);
+      headers.set('access-control-expose-headers', 'x-request-id');
+      return new Response(res.body, { status: res.status, headers });
+    },
+  );
 
   // --- delegation (room-state persisted, for header-less Matrix turns) -----------
-  app.post('/delegation', async (c) => {
+  app.post('/delegation', limitBody(DELEGATION_BODY_BYTES), async (c) => {
     const auth = c.get('auth');
     const body = (await c.req.json().catch(() => ({}))) as { raw?: string };
     const raw = body.raw ?? auth.delegation;
@@ -715,6 +874,7 @@ export function createShell(
   // so every route is proxied there — same pattern as streaming turns. The
   // shell only short-circuits the disabled case so stray requests never boot
   // a Durable Object.
+  app.use('/byo-llm/*', limitBody(BYO_LLM_BODY_BYTES));
   app.all('/byo-llm/*', async (c) => {
     if (c.env.BYO_LLM_ENABLED !== 'true') {
       return c.req.method === 'GET' && c.req.path === '/byo-llm/status'
@@ -752,6 +912,20 @@ export function createShell(
       return c.json({ statusCode: 404, message: 'Not found' }, 404);
     return next();
   });
+  app.use('/debug/*', limitBody(DEBUG_BODY_BYTES));
+  // The gateway-wide routes act on the one gateway every user depends on
+  // (stop, restart, reset, rotate, every user's outbox). With
+  // ORACLE_OPERATOR_DIDS set only those DIDs may call them; unset, any
+  // authenticated caller may (local and devnet drills).
+  app.use('/debug/matrix/*', async (c, next) => {
+    const operators = operatorDids(c.env);
+    if (operators && !operators.has(c.get('auth').userDid))
+      return c.json(
+        { statusCode: 403, message: 'Operator routes are restricted' },
+        403,
+      );
+    return next();
+  });
   app.get('/debug/storage', async (c) =>
     c.json(await userStub(c.env, c.get('auth').userDid).storageStatus()),
   );
@@ -771,7 +945,11 @@ export function createShell(
     );
   });
   app.post('/debug/storage/reset', async (c) =>
-    c.json(await userStub(c.env, c.get('auth').userDid).resetWorkingCopy()),
+    c.json(
+      await userStub(c.env, c.get('auth').userDid).resetWorkingCopy(
+        identityOf(c.get('auth'), c.req.raw.headers),
+      ),
+    ),
   );
   app.post('/debug/object/abort', async (c) => {
     try {
@@ -903,7 +1081,15 @@ export function createShell(
     ),
   );
   app.onError((err, c) => {
-    console.error(`[shell] ${c.req.method} ${loggedRoute(c)} failed:`, err);
+    // Thrown on purpose with a status and a message meant for the client.
+    if (err instanceof HTTPException) return err.getResponse();
+    if (err instanceof ChannelError)
+      return c.json({ message: err.message }, err.status);
+    const requestId = errorRequestId(c.req.header('x-request-id'));
+    console.error(
+      `[shell] ${c.req.method} ${loggedRoute(c)} failed (request ${requestId}):`,
+      err,
+    );
     // A cold boot that could not read the user's owner copy changed nothing.
     // Say precisely why: 503 + retryable for a transient store/VFS failure
     // (the object already retried with backoff), 403 for a missing
@@ -924,9 +1110,16 @@ export function createShell(
         failure.httpStatus,
       );
     }
+    // Anything else may carry internals (SQL, homeserver or Blocksync error
+    // text, room ids): the client gets a generic message and the id that
+    // finds the details in the log.
     return c.json(
-      { statusCode: 500, message: err.message || 'Internal error' },
+      { statusCode: 500, message: 'Internal server error', requestId },
       500,
+      {
+        'x-request-id': requestId,
+        'access-control-expose-headers': 'x-request-id',
+      },
     );
   });
 
@@ -934,6 +1127,11 @@ export function createShell(
 }
 
 const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The client's `x-request-id` when it is a sane opaque token, else a fresh one. */
+function errorRequestId(header: string | undefined): string {
+  return header && REQUEST_ID_RE.test(header) ? header : crypto.randomUUID();
+}
 
 /** The body's `requestId` when it is a sane opaque token; null otherwise. */
 function clientRequestId(rawBody: string): string | null {

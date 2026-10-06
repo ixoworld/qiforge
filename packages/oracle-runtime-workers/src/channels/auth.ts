@@ -1,6 +1,5 @@
 import {
   createCompositeDIDResolver,
-  createIxoDIDResolver,
   createWebDIDResolver,
   createUCANValidator,
   defineCapability,
@@ -11,6 +10,10 @@ import {
 import { z } from 'zod';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
 import { RunAttemptDeferred } from '../do/run-coordinator';
+import {
+  IXO_DID_RESOLUTION_CACHE_TTL_MS,
+  sharedIxoDIDResolver,
+} from '../shell/auth';
 import {
   ChannelError,
   type ChannelTurnInput,
@@ -61,8 +64,15 @@ export async function authenticateChannel(
     rootIssuers: ['*'],
     didResolver: config.didResolver,
     requireExpiration: true,
-    // Durable receipts allow identical retries across isolates.
-    invocationStore: { has: async () => false, add: async () => undefined },
+    // No replay marks: a poll repeats its exact body and may reuse an
+    // invocation, also concurrently. The durable receipt keyed by
+    // (user, binding, requestId) and the request hash in the invocation's
+    // facts make every repeat return the same run instead of a new one.
+    invocationStore: {
+      has: async () => false,
+      add: async () => undefined,
+      addIfAbsent: async () => true,
+    },
   });
   const result = await validator.validate(
     token,
@@ -142,12 +152,26 @@ export async function authenticateChannel(
   };
 }
 
-export function channelAuthConfig(env: OracleWorkerEnv): ChannelAuthConfig {
+/**
+ * did:web documents (a channel service identity) resolved for every channel
+ * request, shared per isolate: successful lookups are cached as long as
+ * did:ixo keys, failures never, and concurrent lookups share one request.
+ */
+const channelWebResolver = createWebDIDResolver({
+  cacheTtlMs: IXO_DID_RESOLUTION_CACHE_TTL_MS,
+});
+
+export function channelAuthConfig(
+  env: Pick<
+    OracleWorkerEnv,
+    'CHANNEL_SERVICE_DID' | 'BLOCKSYNC_GRAPHQL_URL' | 'ORACLE_DID'
+  >,
+): ChannelAuthConfig {
   if (!env.CHANNEL_SERVICE_DID)
     throw new ChannelError(503, 'Channels are not configured');
   const resolver = createCompositeDIDResolver([
-    createIxoDIDResolver({ indexerUrl: env.BLOCKSYNC_GRAPHQL_URL }),
-    createWebDIDResolver(),
+    sharedIxoDIDResolver(env.BLOCKSYNC_GRAPHQL_URL),
+    channelWebResolver,
   ]);
   return {
     oracleDid: env.ORACLE_DID,

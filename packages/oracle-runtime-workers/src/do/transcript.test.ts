@@ -24,7 +24,11 @@ import {
   TranscriptCursorError,
   type TranscriptRowSource,
   transformTranscript,
+  visibleContent,
+  visibleText,
 } from './transcript';
+import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
+import { SUMMARY_PREFIX } from '../core/middlewares/summarization';
 
 const META = {
   filename: 'red.png',
@@ -504,4 +508,171 @@ it('preserves only validated channel provenance on human messages in session his
   expect(result.messages[0]?.metadata).toEqual({ 'org.ixo.qi.origin': origin });
   expect(result.messages[1]?.metadata).toBeUndefined();
   expect(result.messages[2]?.metadata).toBeUndefined();
+});
+
+describe('transcript tool results', () => {
+  const call = (id: string, name = 'search') => ({ id, name, args: { q: id } });
+
+  it('folds each result into the reply that made the call, by call id', async () => {
+    const { messages } = await transformTranscript([
+      new HumanMessage({ id: 'h1', content: 'go' }),
+      new AIMessage({
+        id: 'a1',
+        content: '',
+        tool_calls: [call('c1'), call('c2')],
+      }),
+      // Results arrive in a different order than the calls.
+      new ToolMessage({ tool_call_id: 'c2', content: 'two' }),
+      new ToolMessage({ tool_call_id: 'c1', content: 'one' }),
+      new AIMessage({ id: 'a2', content: 'done' }),
+    ]);
+    expect(messages.map((m) => m.content)).toEqual(['go', '', 'done']);
+    expect(messages[1]!.toolCalls).toEqual([
+      { ...call('c1'), output: '"one"', status: 'done' },
+      { ...call('c2'), output: '"two"', status: 'done' },
+    ]);
+  });
+
+  it('ignores a result whose call is not listed (missing, or only listed later)', async () => {
+    const { messages } = await transformTranscript([
+      new ToolMessage({ tool_call_id: 'early', content: 'too soon' }),
+      new AIMessage({ id: 'a1', content: '', tool_calls: [call('early')] }),
+      new ToolMessage({ tool_call_id: 'nobody', content: 'orphan' }),
+    ]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.toolCalls).toEqual([
+      { ...call('early'), output: undefined },
+    ]);
+  });
+
+  it('a call id listed by two replies folds into the first one only', async () => {
+    const { messages } = await transformTranscript([
+      new AIMessage({ id: 'a1', content: 'x', tool_calls: [call('dup')] }),
+      new AIMessage({ id: 'a2', content: 'y', tool_calls: [call('dup')] }),
+      new ToolMessage({ tool_call_id: 'dup', content: 'result' }),
+    ]);
+    expect(messages[0]!.toolCalls?.[0]).toMatchObject({
+      output: '"result"',
+      status: 'done',
+    });
+    expect(messages[1]!.toolCalls?.[0]?.status).toBeUndefined();
+  });
+
+  it('folds thousands of tool results in a long session', async () => {
+    const history: BaseMessage[] = [];
+    for (let i = 0; i < 1_000; i += 1) {
+      history.push(new HumanMessage({ id: `h${i}`, content: `q${i}` }));
+      history.push(
+        new AIMessage({
+          id: `a${i}`,
+          content: '',
+          tool_calls: [call(`c${i}-1`), call(`c${i}-2`)],
+        }),
+      );
+      history.push(new ToolMessage({ tool_call_id: `c${i}-1`, content: 'r' }));
+      history.push(new ToolMessage({ tool_call_id: `c${i}-2`, content: 'r' }));
+      history.push(new AIMessage({ id: `f${i}`, content: `answer ${i}` }));
+    }
+    const started = performance.now();
+    const { messages } = await transformTranscript(history);
+    const elapsed = performance.now() - started;
+    expect(messages).toHaveLength(3_000);
+    const calls = messages.flatMap((m) => m.toolCalls ?? []);
+    expect(calls).toHaveLength(2_000);
+    expect(calls.every((c) => c.status === 'done')).toBe(true);
+    // Linear: well under a second for 5,000 messages (generous for CI).
+    expect(elapsed).toBeLessThan(1_000);
+  });
+});
+
+describe('transcript and the turn-time note', () => {
+  const NOTE = 'Current time: 2026-10-03 09:15 (Africa/Johannesburg)';
+  const noted = (content: BaseMessage['content'], id: string) =>
+    new HumanMessage({
+      id,
+      content,
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: NOTE },
+    });
+
+  it('shows only what the user sent, for text and for blocks with an image', async () => {
+    const image = {
+      type: 'image_url',
+      image_url: { url: 'https://i.test/a.png' },
+    };
+    const text = noted(withTurnTimeNote('What is due today?', NOTE), 'h1');
+    const blocks = noted(
+      withTurnTimeNote([{ type: 'text', text: 'And this one?' }, image], NOTE),
+      'h2',
+    );
+    expect(contentToText(text.content)).toContain(NOTE);
+    expect(visibleText(text)).toBe('What is due today?');
+    expect(visibleContent(blocks)).toEqual([
+      { type: 'text', text: 'And this one?' },
+      image,
+    ]);
+    const { messages } = await transformTranscript([text, blocks]);
+    expect(messages.map((m) => m.content)).toEqual([
+      'What is due today?',
+      'And this one?',
+    ]);
+    expect(JSON.stringify(messages)).not.toContain('Current time');
+  });
+
+  it('pages show the user text without the note', async () => {
+    const source = rowSource([
+      noted(withTurnTimeNote('hello', NOTE), 'h1'),
+      new AIMessage({ id: 'a1', content: 'hi' }),
+      noted(withTurnTimeNote('next question', NOTE), 'h2'),
+      new AIMessage({ id: 'a2', content: 'next answer' }),
+    ]);
+    const page = await pageThreadTranscript(source, 'thread', { limit: 5 });
+    expect(page.messages.map((m) => m.content)).toEqual([
+      'hello',
+      'hi',
+      'next question',
+      'next answer',
+    ]);
+    const newer = await pageThreadTranscript(source, 'thread', {
+      limit: 5,
+      after: 'a1',
+    });
+    expect(newer.messages.map((m) => m.content)).toEqual([
+      'next question',
+      'next answer',
+    ]);
+  });
+
+  it('leaves alone a message that merely starts like a note, and every other kind', async () => {
+    const lookalike = new HumanMessage({
+      id: 'h1',
+      content: `${NOTE}\n\nI typed this myself`,
+    });
+    const otherNote = new HumanMessage({
+      id: 'h2',
+      content: `${NOTE}\n\nRecorded with another note`,
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: 'Current time: yesterday' },
+    });
+    const ai = new AIMessage({
+      id: 'a1',
+      content: `${NOTE}\n\nquoted by the model`,
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: NOTE },
+    });
+    const tool = new ToolMessage({
+      tool_call_id: 'c1',
+      content: `${NOTE}\n\nfrom a tool`,
+      additional_kwargs: { [TURN_TIME_NOTE_KWARG]: NOTE },
+    });
+    const summary = new HumanMessage({
+      id: 's1',
+      content: `${SUMMARY_PREFIX} earlier talk`,
+      additional_kwargs: { lc_source: 'summarization' },
+    });
+    for (const message of [lookalike, otherNote, ai, tool, summary])
+      expect(visibleContent(message)).toBe(message.content);
+    const { messages } = await transformTranscript([lookalike, ai]);
+    expect(messages.map((m) => m.content)).toEqual([
+      `${NOTE}\n\nI typed this myself`,
+      `${NOTE}\n\nquoted by the model`,
+    ]);
+  });
 });

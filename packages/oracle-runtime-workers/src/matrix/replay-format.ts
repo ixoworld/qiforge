@@ -2,9 +2,11 @@
  * Room replay formatting — a port of `@ixo/matrix`'s `formatMsg`. The Node
  * runtime replays every HTTP/SSE turn into the user's oracle room as a thread
  * under the session's root event: the user message prefixed `**You:**`, the
- * reply prefixed with the oracle's name, both rendered to HTML with marked.
+ * reply prefixed with the oracle's name, both rendered to HTML with marked —
+ * with raw HTML escaped, as for every room reply (`reply-parts.ts`): the
+ * text may come from a model or a user and must not become room markup.
  */
-import { marked } from 'marked';
+import { renderRoomMarkdown } from './reply-parts';
 
 export interface FormatReplayParams {
   message: string;
@@ -29,6 +31,6 @@ export function formatReplay({
   const body = disablePrefix
     ? message
     : `**${isOracle ? oracleName : 'You'}:**\n${message}`;
-  const formattedBody = marked.parse(body, { gfm: true, async: false });
+  const formattedBody = renderRoomMarkdown(body);
   return { body, formattedBody };
 }

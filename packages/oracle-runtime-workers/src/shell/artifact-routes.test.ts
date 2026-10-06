@@ -36,10 +36,11 @@ describe('artefact routes in the shell', () => {
     );
   });
 
-  it('rate-limits the data route per client IP', async () => {
+  it('rate-limits the data route per client IP, in a budget of this oracle', async () => {
     const keys: string[] = [];
     const app = createShell();
     const bindings = {
+      ORACLE_DID: 'did:ixo:ixo1oracle',
       ARTIFACT_BUCKET: env.ARTIFACT_TEST,
       RATE_LIMIT: {
         limit: async ({ key }: { key: string }) => {
@@ -55,7 +56,7 @@ describe('artefact routes in the shell', () => {
     );
     expect(limited.status).toBe(429);
     expect(limited.headers.get('access-control-allow-origin')).toBe('*');
-    expect(keys).toEqual(['artifact:203.0.113.9']);
+    expect(keys).toEqual(['did:ixo:ixo1oracle|artifact|203.0.113.9']);
   });
 
   it('keeps the owner routes behind auth', async () => {

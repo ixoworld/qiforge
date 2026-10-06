@@ -20,17 +20,36 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** URL schemes a link or image in a room message may use. */
+const ALLOWED_URL = /^(?:https?|mailto|mxc):/i;
+
 /**
- * Markdown → `formatted_body` for chat parts. Raw HTML in the model's text
- * (block or inline) is shown as text, never passed through as markup.
+ * Markdown → `formatted_body` for anything the oracle posts to a room. Raw
+ * HTML in the text (block or inline) is shown as text, never passed through
+ * as markup, and a link or image whose URL is not http(s), mailto or mxc
+ * (`javascript:`, `data:`, a relative path) is shown as its text. Returning
+ * `false` hands an allowed one to marked's own renderer.
  */
-const partMarkdown = new Marked({
+const safeMarkdown = new Marked({
   gfm: true,
   async: false,
   renderer: {
     html: ({ text }) => escapeHtml(text),
+    link({ href, tokens }) {
+      return ALLOWED_URL.test(href.trim())
+        ? false
+        : this.parser.parseInline(tokens);
+    },
+    image({ href, text }) {
+      return ALLOWED_URL.test(href.trim()) ? false : escapeHtml(text);
+    },
   },
 });
+
+/** Markdown rendered to room HTML with raw HTML escaped. */
+export function renderRoomMarkdown(text: string): string {
+  return safeMarkdown.parse(text, { async: false });
+}
 
 export function replyPartContent(part: ReplyPart): {
   body: string;
@@ -39,7 +58,7 @@ export function replyPartContent(part: ReplyPart): {
   if (part.kind === 'text')
     return {
       body: part.text,
-      formattedBody: partMarkdown.parse(part.text, { async: false }),
+      formattedBody: renderRoomMarkdown(part.text),
     };
   const { title, url } = part.artifact;
   return {

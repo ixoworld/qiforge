@@ -91,6 +91,11 @@ export const DEFAULT_REQUIRE_POWER_LEVEL = 0;
 export const COMPACT_BUFFER_THRESHOLD = 20;
 export const COMPACT_JIT_MIN = 5;
 export const COMPACT_JIT_TIMEOUT_MS = 3000;
+/** The oldest messages one summary covers at most; a longer buffer is compacted over several runs. */
+export const COMPACT_BATCH_MAX = 50;
+/** After a failed summary a room's automatic compaction waits this long, doubling per failure up to the max. */
+export const COMPACT_RETRY_MIN_MS = 60_000;
+export const COMPACT_RETRY_MAX_MS = 30 * 60_000;
 export const RECALL_DEFAULT_CHUNKS = 10;
 export const RECALL_MAX_CHUNKS = 30;
 export const PINNED_FACT_MAX_CHARS = 500;
@@ -508,13 +513,13 @@ export class GroupChatStore {
   }
 
   deletePinnedFact(roomId: string, factId: string): boolean {
-    const before = this.countFacts(roomId);
-    this.sql.exec(
-      `DELETE FROM group_pinned_facts WHERE room_id = ? AND id = ?`,
-      roomId,
-      factId,
+    return (
+      this.sql.exec(
+        `DELETE FROM group_pinned_facts WHERE room_id = ? AND id = ?`,
+        roomId,
+        factId,
+      ).rowsWritten > 0
     );
-    return this.countFacts(roomId) < before;
   }
 
   countFacts(roomId?: string): number {
@@ -568,21 +573,23 @@ export class GroupChatStore {
 
   /** Buffer a message for compaction; false when the event was already buffered (a replay). */
   bufferAppend(roomId: string, msg: ObservedMessage): boolean {
-    const before = this.bufferCount(roomId);
-    this.sql.exec(
-      `INSERT OR IGNORE INTO group_message_buffer
+    // An ignored duplicate writes nothing; an insert writes its row (and
+    // its index entries).
+    return (
+      this.sql.exec(
+        `INSERT OR IGNORE INTO group_message_buffer
         (event_id, room_id, thread_id, sender_did, sender_user_id, display_name, body, ts)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      msg.eventId,
-      roomId,
-      msg.threadId,
-      msg.senderDid,
-      msg.senderMatrixUserId,
-      msg.senderDisplayName,
-      msg.body,
-      msg.timestamp,
+        msg.eventId,
+        roomId,
+        msg.threadId,
+        msg.senderDid,
+        msg.senderMatrixUserId,
+        msg.senderDisplayName,
+        msg.body,
+        msg.timestamp,
+      ).rowsWritten > 0
     );
-    return this.bufferCount(roomId) > before;
   }
 
   bufferCount(roomId?: string): number {
@@ -601,12 +608,13 @@ export class GroupChatStore {
     return Number(rows[0]?.n ?? 0);
   }
 
-  /** The room's buffered messages, oldest first. */
-  bufferRows(roomId: string): ObservedMessage[] {
+  /** The room's buffered messages, oldest first (at most `limit`). */
+  bufferRows(roomId: string, limit = COMPACT_BATCH_MAX): ObservedMessage[] {
     return this.sql
       .exec<BufferRow>(
-        `SELECT * FROM group_message_buffer WHERE room_id = ? ORDER BY ts ASC, rowid ASC`,
+        `SELECT * FROM group_message_buffer WHERE room_id = ? ORDER BY ts ASC, rowid ASC LIMIT ?`,
         roomId,
+        limit,
       )
       .toArray()
       .map(rowToObserved);
@@ -760,6 +768,11 @@ export class GroupChatService {
   >();
   private readonly activeThreads = new Map<string, number>();
   private readonly compacting = new Map<string, Promise<void>>();
+  /** Rooms whose last summary failed: no automatic compaction before `until`. */
+  private readonly compactBackoff = new Map<
+    string,
+    { until: number; delayMs: number }
+  >();
   private readonly now: () => number;
 
   constructor(
@@ -1013,7 +1026,10 @@ export class GroupChatService {
 
   observe(roomId: string, message: ObservedMessage): void {
     if (!this.store.bufferAppend(roomId, message)) return;
-    if (this.store.bufferCount(roomId) >= COMPACT_BUFFER_THRESHOLD)
+    if (
+      this.compactDue(roomId) &&
+      this.store.bufferCount(roomId) >= COMPACT_BUFFER_THRESHOLD
+    )
       this.deps.keepAlive(
         this.compact(roomId).catch((err: unknown) =>
           this.deps.log(
@@ -1027,6 +1043,7 @@ export class GroupChatService {
 
   /** Compact a buffer of ≥ 5 before the bot answers, bounded so the reply is not held up. */
   async compactJustInTime(roomId: string): Promise<void> {
+    if (!this.compactDue(roomId)) return;
     if (this.store.bufferCount(roomId) < COMPACT_JIT_MIN) return;
     const work = this.compact(roomId).catch((err: unknown) =>
       this.deps.log(
@@ -1053,19 +1070,45 @@ export class GroupChatService {
     return work;
   }
 
+  /**
+   * Whether automatic compaction (threshold, just in time) may run for the
+   * room: not while it backs off after a failed summary, so a model outage
+   * costs one summary call per back-off window, not one per message.
+   */
+  private compactDue(roomId: string): boolean {
+    const backoff = this.compactBackoff.get(roomId);
+    return !backoff || backoff.until <= this.now();
+  }
+
+  private noteCompactFailure(roomId: string): void {
+    const previous = this.compactBackoff.get(roomId)?.delayMs;
+    const delayMs = previous
+      ? Math.min(previous * 2, COMPACT_RETRY_MAX_MS)
+      : COMPACT_RETRY_MIN_MS;
+    this.compactBackoff.set(roomId, { until: this.now() + delayMs, delayMs });
+  }
+
   private async compactInner(roomId: string): Promise<void> {
     const drained = this.store.bufferRows(roomId);
     const first = drained[0];
     const last = drained[drained.length - 1];
     if (!first || !last) return;
-    const summary = await this.deps.summarize(drained);
+    let summary: string | null;
+    try {
+      summary = await this.deps.summarize(drained);
+    } catch (err) {
+      this.noteCompactFailure(roomId);
+      throw err;
+    }
     if (!summary) {
+      this.noteCompactFailure(roomId);
       this.deps.log(
         'warn',
         `[group-chat] summary unavailable; ${drained.length} messages stay buffered for ${roomId}`,
       );
       return;
     }
+    this.compactBackoff.delete(roomId);
     const chunk: ChannelMemoryChunk = {
       id: crypto.randomUUID(),
       roomId,

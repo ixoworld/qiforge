@@ -102,10 +102,12 @@ describe('FirecrawlPlugin (Workers port)', () => {
     const upstreamSearch = upstreamTools.find(
       (t) => t.name === FIRECRAWL_SEARCH_MCP_NAME,
     );
-    expect(upstreamSearch?.invoke).toHaveBeenCalledWith({
-      query: 'gold spot price USD',
-      limit: 3,
-    });
+    // The second argument carries the MCP request timeout; without it the
+    // MCP SDK ends the call at its 60 s default.
+    expect(upstreamSearch?.invoke).toHaveBeenCalledWith(
+      { query: 'gold spot price USD', limit: 3 },
+      { metadata: { timeoutMs: 120_000 } },
+    );
     expect(result).toEqual({
       hits: [],
       input: { query: 'gold spot price USD', limit: 3 },

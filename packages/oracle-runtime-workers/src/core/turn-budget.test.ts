@@ -71,6 +71,23 @@ describe('TurnBudget', () => {
     expect(budget.snapshot().tokens).toBe(600);
   });
 
+  it('ignores unusable provider usage and gives back only what was reserved', () => {
+    const budget = new TurnBudget(limits, () => 0);
+    const reservation = budget.reserveModel(300, 100);
+    for (const usage of [Number.NaN, -1, Number.POSITIVE_INFINITY])
+      budget.settleModel(reservation, usage);
+    expect(budget.snapshot()).toMatchObject({ tokens: 400, reportedTokens: 0 });
+    // A negative or non-finite estimate reserves nothing for it.
+    expect(budget.reserveModel(-50, Number.NaN)).toBe(0);
+    budget.releaseModel(reservation);
+    expect(budget.snapshot()).toMatchObject({ tokens: 0, modelCalls: 2 });
+    // Nothing to give back below zero, and nonsense is ignored.
+    budget.releaseModel(400);
+    budget.releaseModel(Number.NaN);
+    budget.releaseModel(-10);
+    expect(budget.snapshot().tokens).toBe(0);
+  });
+
   it('counts tool attempts and refuses the one past the limit', () => {
     const budget = new TurnBudget(limits, () => 0);
     budget.reserveTool();

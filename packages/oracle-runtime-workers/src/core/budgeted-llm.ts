@@ -14,7 +14,11 @@ import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMResult } from '@langchain/core/outputs';
 import type { ChatOpenAIFields, ModelRole } from '../plugin-api/types';
-import { estimateContentTokens } from './context-budget';
+import {
+  estimateContentTokens,
+  messageContentTokens,
+  messageToolCallTokens,
+} from './context-budget';
 import type { LlmAdapter } from './runtime-context';
 import type { TurnBudget } from './turn-budget';
 
@@ -31,26 +35,65 @@ export interface BudgetedLlm extends LlmAdapter {
   readonly callback: BaseCallbackHandler;
 }
 
-/** What one model call sends, reduced to what costs tokens. */
+/**
+ * Key of a request's tool list for the per-turn schema estimate: the tool
+ * names in order. Within one turn a name always carries the same schema (the
+ * tools are bound when the turn's graph is built), so the names identify
+ * the list; anything without a recognisable name is not cached.
+ */
+function toolListKey(tools: unknown): string | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const names: string[] = [];
+  for (const entry of tools) {
+    const fn: unknown =
+      entry && typeof entry === 'object' && 'function' in entry
+        ? entry.function
+        : entry;
+    const name: unknown =
+      fn && typeof fn === 'object' && 'name' in fn ? fn.name : undefined;
+    if (typeof name !== 'string') return undefined;
+    names.push(name);
+  }
+  return names.join('\n');
+}
+
+/**
+ * What one model call sends, reduced to what costs tokens. Message estimates
+ * are memoised per message (`messageContentTokens`), the tool schemas per
+ * tool list in `toolTokens`, so a long history is not re-serialised on every
+ * step of the turn.
+ */
 function estimateRequestTokens(
   messages: LLMResultMessages,
   invocationParams: unknown,
+  toolTokens: Map<string, number>,
 ): number {
   let tokens = 0;
   for (const batch of messages)
     for (const message of batch) {
-      tokens += estimateContentTokens(message.content) + 4;
+      tokens += messageContentTokens(message) + 4;
       if ('tool_calls' in message && Array.isArray(message.tool_calls))
-        tokens += estimateContentTokens(message.tool_calls);
+        tokens += messageToolCallTokens(message, message.tool_calls);
     }
   if (
     invocationParams &&
     typeof invocationParams === 'object' &&
     'tools' in invocationParams
-  )
-    tokens += estimateContentTokens(invocationParams.tools);
+  ) {
+    const { tools } = invocationParams;
+    const key = toolListKey(tools);
+    let schema = key === undefined ? undefined : toolTokens.get(key);
+    if (schema === undefined) {
+      schema = estimateContentTokens(tools);
+      if (key !== undefined) toolTokens.set(key, schema);
+    }
+    tokens += schema;
+  }
   return tokens;
 }
+
+/** The summarizer tags its model call with this `lc_source` (LangChain's summarization middleware). */
+const SUMMARIZATION_SOURCE = 'summarization';
 
 type LLMResultMessages = Parameters<
   NonNullable<BaseCallbackHandler['handleChatModelStart']>
@@ -88,7 +131,12 @@ class TurnBudgetHandler extends BaseCallbackHandler {
   /** A refused reservation must fail the model call, not be logged and ignored. */
   raiseError = true;
   awaitHandlers = true;
-  private readonly reservations = new Map<string, number>();
+  private readonly reservations = new Map<
+    string,
+    { tokens: number; summary: boolean }
+  >();
+  /** Tool-schema estimate per tool list, for this turn (see `toolListKey`). */
+  private readonly toolTokens = new Map<string, number>();
 
   constructor(private readonly options: BudgetedLlmOptions) {
     super();
@@ -100,16 +148,25 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     runId: string,
     _parentRunId?: string,
     extraParams?: Record<string, unknown>,
+    _tags?: string[],
+    metadata?: Record<string, unknown>,
   ): void {
     // The handler can reach the same call twice (model-level and run-level
     // registration); the first registration charges it.
     if (this.reservations.has(runId)) return;
-    const reservation = this.options.budget.reserveModel(
-      estimateRequestTokens(messages, extraParams?.invocation_params),
+    const tokens = this.options.budget.reserveModel(
+      estimateRequestTokens(
+        messages,
+        extraParams?.invocation_params,
+        this.toolTokens,
+      ),
       this.options.outputReserveTokens,
       this.options.signal,
     );
-    this.reservations.set(runId, reservation);
+    this.reservations.set(runId, {
+      tokens,
+      summary: metadata?.lc_source === SUMMARIZATION_SOURCE,
+    });
   }
 
   handleLLMEnd(output: LLMResult, runId: string): void {
@@ -118,13 +175,20 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     this.reservations.delete(runId);
     const reported = reportedTotalTokens(output);
     if (reported !== undefined)
-      this.options.budget.settleModel(reservation, reported);
+      this.options.budget.settleModel(reservation.tokens, reported);
   }
 
   handleLLMError(_error: unknown, runId: string): void {
-    // A failed call keeps its reservation: the provider may have consumed
-    // the input before failing, and a retry reserves again.
+    const reservation = this.reservations.get(runId);
     this.reservations.delete(runId);
+    // A failed call keeps its reservation: the provider may have consumed
+    // the input before failing, and a retry reserves again. A failed summary
+    // is the exception: the summarizer swallows the failure, the turn goes on
+    // with its history unchanged and does not try again (summarization.ts),
+    // so its reservation — the whole history it was handed — is given back
+    // instead of starving the rest of the turn.
+    if (reservation?.summary)
+      this.options.budget.releaseModel(reservation.tokens);
   }
 }
 

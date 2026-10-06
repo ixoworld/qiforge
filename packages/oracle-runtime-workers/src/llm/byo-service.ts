@@ -106,6 +106,15 @@ export interface ByoProviderStatus {
 export interface ByoSecretsBackend {
   getIndex(roomId: string): Promise<Array<{ name: string; eventId: string }>>;
   getValues(roomId: string, names: string[]): Promise<Record<string, string>>;
+  /**
+   * Values for index entries already read with `getIndex`, without reading
+   * the index again. Optional: without it the service asks `getValues` for
+   * the entries' names.
+   */
+  getValuesFor?(
+    roomId: string,
+    index: ReadonlyArray<{ name: string; eventId: string }>,
+  ): Promise<Record<string, string>>;
   putSecret(roomId: string, name: string, value: string): Promise<void>;
   deleteSecret(roomId: string, name: string): Promise<void>;
 }
@@ -132,12 +141,23 @@ export interface WorkersByoServiceOptions {
   logger?: Logger;
   /** Fetch used for the ChatGPT-backend reachability probe (tests). */
   probeFetch?: typeof fetch;
+  /** Bound on the reachability probe (default `CHATGPT_PROBE_TIMEOUT_MS`). */
+  probeTimeoutMs?: number;
+  /** Bound on a key-validation call (default `KEY_CHECK_TIMEOUT_MS`). */
+  keyCheckTimeoutMs?: number;
   /** Where ChatGPT-subscription requests go (default: the real backend). */
   chatGptBackend?: ChatGptBackendConfig;
 }
 
 /** How long a ChatGPT-backend reachability verdict is trusted. */
 const CHATGPT_PROBE_TTL_MS = 10 * 60 * 1000;
+/**
+ * The probe runs at the start of a ChatGPT turn: a backend that does not
+ * answer within this is treated as reachable rather than holding the turn.
+ */
+const CHATGPT_PROBE_TIMEOUT_MS = 5_000;
+/** How long a "check my key" call waits on the provider. */
+const KEY_CHECK_TIMEOUT_MS = 10_000;
 
 const NOOP: Logger = {
   log: () => undefined,
@@ -173,6 +193,8 @@ export class WorkersByoService {
   /** Per-user refresh-failure cooldown (epoch-ms deadline). */
   private readonly refreshCooldownUntil = new Map<string, number>();
   private readonly probeFetch: typeof fetch;
+  private readonly probeTimeoutMs: number;
+  private readonly keyCheckTimeoutMs: number;
   readonly chatGptBackend: ChatGptBackendConfig;
   /** Last ChatGPT-backend reachability verdict (deployment-wide, not per user). */
   private chatGptProbe: { blocked: boolean; at: number } | null = null;
@@ -189,6 +211,8 @@ export class WorkersByoService {
     // method. Resolve the global at call time so the probe really runs.
     this.probeFetch =
       opts.probeFetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.probeTimeoutMs = opts.probeTimeoutMs ?? CHATGPT_PROBE_TIMEOUT_MS;
+    this.keyCheckTimeoutMs = opts.keyCheckTimeoutMs ?? KEY_CHECK_TIMEOUT_MS;
     this.chatGptBackend = opts.chatGptBackend ?? DEFAULT_CHATGPT_BACKEND;
   }
 
@@ -201,8 +225,9 @@ export class WorkersByoService {
    * a failed turn with no reply, so probe once (a cheap GET the backend
    * answers with a JSON 404/405 when reachable) and trust the verdict for
    * `CHATGPT_PROBE_TTL_MS`. Only an HTML 403 counts as blocked — a network
-   * error or any JSON status is "reachable", so a probe hiccup never hides
-   * the user's own provider errors.
+   * error, a probe that times out (`CHATGPT_PROBE_TIMEOUT_MS`) or any JSON
+   * status is "reachable", so a probe hiccup never hides the user's own
+   * provider errors.
    */
   private async chatGptBackendBlocked(accessToken: string): Promise<boolean> {
     if (
@@ -222,6 +247,7 @@ export class WorkersByoService {
             Authorization: `Bearer ${accessToken}`,
             originator: 'codex_cli_rs',
           },
+          signal: AbortSignal.timeout(this.probeTimeoutMs),
         },
       );
       const type = res.headers.get('content-type') ?? '';
@@ -340,12 +366,20 @@ export class WorkersByoService {
     const roomId = await this.resolveRoomIdFn(userDid);
     if (!roomId) return {};
 
-    const index = await this.secrets.getIndex(roomId);
-    const byoNames = index
-      .map((entry) => entry.name)
-      .filter((name) => providerForSecretName(name) !== undefined);
+    // One read of the room's secret index when the backend can decrypt the
+    // entries already read; `getValues` would read the index again.
+    const byoEntries = (await this.secrets.getIndex(roomId)).filter(
+      (entry) => providerForSecretName(entry.name) !== undefined,
+    );
     const values =
-      byoNames.length > 0 ? await this.secrets.getValues(roomId, byoNames) : {};
+      byoEntries.length === 0
+        ? {}
+        : this.secrets.getValuesFor
+          ? await this.secrets.getValuesFor(roomId, byoEntries)
+          : await this.secrets.getValues(
+              roomId,
+              byoEntries.map((entry) => entry.name),
+            );
 
     const creds: ByoCredentialMap = {};
     for (const [name, value] of Object.entries(values)) {
@@ -789,7 +823,10 @@ export class WorkersByoService {
         credential.provider,
         credential.apiKey,
       );
-      const res = await fetch(url, { headers });
+      const res = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(this.keyCheckTimeoutMs),
+      });
       if (res.ok) return { valid: true };
       return {
         valid: false,

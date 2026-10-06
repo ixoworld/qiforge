@@ -24,6 +24,7 @@ import type {
   RuntimeContext,
 } from '../../plugin-api/types';
 import { logFrontendAction } from './action-log';
+import { describeDropped, sanitizeDeclaredTools } from './declared-tools';
 
 const manifest: PluginManifest = {
   title: 'Portal',
@@ -198,8 +199,17 @@ export function buildBrowserTool(
   );
 }
 
+/**
+ * The browser tools declared on this request that may become tools: invalid,
+ * duplicate and oversized declarations are dropped (`declared-tools.ts`).
+ */
 function readBrowserTools(rtCtx: RuntimeContext): BrowserToolCall[] {
-  return parseBrowserTools(rtCtx.history.state.browserTools);
+  const { kept, dropped } = sanitizeDeclaredTools(
+    parseBrowserTools(rtCtx.history.state.browserTools),
+  );
+  const summary = describeDropped('browser tools', dropped);
+  if (summary) rtCtx.logger.warn(summary);
+  return kept;
 }
 
 export class PortalPlugin extends OraclePlugin {

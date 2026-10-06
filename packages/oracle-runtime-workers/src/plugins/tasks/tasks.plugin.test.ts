@@ -19,8 +19,16 @@ import {
   userDidFromContext,
 } from './middleware';
 import { createTaskTools } from './tasks-tools';
-import { createTasksPlugin, TasksPlugin } from './tasks.plugin';
+import {
+  createTasksPlugin,
+  TaskSurfaceRegistry,
+  TasksPlugin,
+} from './tasks.plugin';
 import { HumanMessage, AIMessage } from '@langchain/core/messages';
+import {
+  TURN_TIME_NOTE_KWARG,
+  withTurnTimeNote,
+} from '../../core/turn-time-note';
 
 const EXPECTED_TOOL_NAMES = [
   'preview_task',
@@ -334,7 +342,10 @@ describe('task tools', () => {
       ),
     );
     expect(approved.ok).toBe(true);
-    expect(String(approved.note)).toMatch(/executed/);
+    // The run executes on the alarm, after this call: the note must not
+    // claim a result.
+    expect(String(approved.note)).toMatch(/starting now in the background/);
+    expect(String(approved.note)).not.toMatch(/was executed|was delivered/);
     expect(surface.resolveCalls).toEqual([
       { taskId: record.id, decision: 'approve', note: 'fix the title' },
     ]);
@@ -492,6 +503,43 @@ describe('approval gate', () => {
     expect(nuanced).toContain(record.id);
   });
 
+  it('reads the reply under the turn time note, so a noted yes/no still decides', async () => {
+    const surface = new FakeSurface();
+    const record = surface.seed(
+      makeRecord(
+        { ...cronInput, approval: 'before-action' },
+        { pendingApprovalAt: '2026-08-26T00:00:00.000Z' },
+      ),
+    );
+    const note = 'Current time: 2026-08-26 09:00 (UTC)';
+    const noted = (reply: string) =>
+      new HumanMessage({
+        content: withTurnTimeNote(reply, note),
+        additional_kwargs: { [TURN_TIME_NOTE_KWARG]: note },
+      });
+    expect(lastHumanText([noted('yes')])).toBe('yes');
+    const approve = await computeApprovalHint(
+      surface,
+      lastHumanText([noted('yes')])!,
+    );
+    expect(approve).toContain('APPROVES');
+    expect(approve).toContain(record.id);
+    const reject = await computeApprovalHint(
+      surface,
+      lastHumanText([noted('no')])!,
+    );
+    expect(reject).toContain('DECLINES');
+    // Parts content carries the note as its first text part.
+    expect(
+      lastHumanText([
+        new HumanMessage({
+          content: withTurnTimeNote([{ type: 'text', text: 'ok' }], note),
+          additional_kwargs: { [TURN_TIME_NOTE_KWARG]: note },
+        }),
+      ]),
+    ).toBe('ok');
+  });
+
   it('computeApprovalHint falls back to the listing hint for multiple pending tasks', async () => {
     const surface = new FakeSurface();
     surface.seed(
@@ -574,5 +622,71 @@ describe('plugin wiring', () => {
     expect(withTasks).toEqual([]);
     const withoutTasks = await plugin.getRequestTools?.(makeRuntimeContext());
     expect(withoutTasks).toEqual([]);
+  });
+});
+
+describe('per-user surfaces (one plugin instance serves every user object of the isolate)', () => {
+  function turnEnds(): {
+    onTurnEnd: (dispose: () => void | Promise<void>) => void;
+    end: () => Promise<void>;
+  } {
+    const disposers: Array<() => void | Promise<void>> = [];
+    return {
+      onTurnEnd: (dispose) => disposers.push(dispose),
+      end: async () => {
+        for (const dispose of disposers.splice(0)) await dispose();
+      },
+    };
+  }
+
+  it('drops a user’s surface when their turn ends', async () => {
+    const registry = new TaskSurfaceRegistry();
+    const plugin = createTasksPlugin(registry);
+    const surface = new FakeSurface();
+    const turn = turnEnds();
+    await plugin.getRequestTools?.(
+      makeRuntimeContext({ tasks: surface, onTurnEnd: turn.onTurnEnd }),
+    );
+    const did = makeRuntimeContext().user.did;
+    expect(registry.surfaceFor(did)).toBe(surface);
+    await turn.end();
+    expect(registry.surfaceFor(did)).toBeUndefined();
+    expect(registry.size).toBe(0);
+  });
+
+  it('keeps the surface while another turn of the same user is still running', async () => {
+    const registry = new TaskSurfaceRegistry();
+    const plugin = createTasksPlugin(registry);
+    const surface = new FakeSurface();
+    const first = turnEnds();
+    const second = turnEnds();
+    await plugin.getRequestTools?.(
+      makeRuntimeContext({ tasks: surface, onTurnEnd: first.onTurnEnd }),
+    );
+    await plugin.getRequestTools?.(
+      makeRuntimeContext({ tasks: surface, onTurnEnd: second.onTurnEnd }),
+    );
+    const did = makeRuntimeContext().user.did;
+    await first.end();
+    expect(registry.surfaceFor(did)).toBe(surface);
+    await first.end(); // a disposer runs once, even if the host calls it again
+    await second.end();
+    expect(registry.surfaceFor(did)).toBeUndefined();
+  });
+
+  it('a turn without a scheduler clears the user’s surface', async () => {
+    const registry = new TaskSurfaceRegistry();
+    const plugin = createTasksPlugin(registry);
+    const turn = turnEnds();
+    await plugin.getRequestTools?.(
+      makeRuntimeContext({
+        tasks: new FakeSurface(),
+        onTurnEnd: turn.onTurnEnd,
+      }),
+    );
+    await plugin.getRequestTools?.(makeRuntimeContext());
+    expect(registry.surfaceFor(makeRuntimeContext().user.did)).toBeUndefined();
+    await turn.end();
+    expect(registry.size).toBe(0);
   });
 });

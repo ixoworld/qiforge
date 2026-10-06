@@ -27,25 +27,53 @@ import {
   createIxoDIDResolver,
   createUCANValidator,
   defineCapability,
-  InMemoryInvocationStore,
+  type DIDKeyResolver,
+  type InvocationStore,
 } from '@ixo/ucan';
 
 /**
- * One replay-protection store per isolate, WITHOUT the library's hourly
- * `setInterval` sweep: a pending timer keeps a Durable Object resident, and
- * this code also runs inside the user object (socket CONNECT auth), where a
- * leaked interval per CONNECT blocked WebSocket hibernation entirely. Expired
- * entries are dropped lazily on lookup and swept every N validations instead.
+ * The shell keeps no replay marks. An auth invocation is a bearer token the
+ * client reuses for its whole (short, `UCAN_AUTH_MAX_TTL_SECONDS`-bounded)
+ * lifetime, often on several requests at once, so a single-use mark would
+ * refuse legitimate repeats. A no-op store also keeps the library from
+ * creating its default store, whose hourly `setInterval` would keep a Durable
+ * Object resident (this code also runs inside the user object for socket
+ * CONNECT auth) and block WebSocket hibernation.
  */
-const invocationStore = new InMemoryInvocationStore({
-  enableAutoCleanup: false,
-});
-const SWEEP_EVERY = 500;
-let validations = 0;
+const reusableInvocations: InvocationStore = {
+  has: async () => false,
+  add: async () => undefined,
+  addIfAbsent: async () => true,
+};
 
-function sweepInvocationStore(): void {
-  validations += 1;
-  if (validations % SWEEP_EVERY === 0) void invocationStore.cleanup();
+/**
+ * did:ixo key lookups are cached per isolate for this long. A key rotated out
+ * of, or removed from, a DID document on-chain is still trusted for up to
+ * this long after the change. Failed lookups are never cached.
+ */
+export const IXO_DID_RESOLUTION_CACHE_TTL_MS = 60_000;
+/** Distinct Blocksync URLs that keep a resolver; a deployment uses one. */
+const MAX_IXO_RESOLVERS = 8;
+const ixoResolvers = new Map<string, DIDKeyResolver>();
+
+/**
+ * The isolate's did:ixo resolver for one Blocksync GraphQL URL, built once and
+ * reused so its resolution cache and in-flight de-duplication span requests.
+ * Each lookup keeps the library's default timeout.
+ */
+export function sharedIxoDIDResolver(indexerUrl: string): DIDKeyResolver {
+  const existing = ixoResolvers.get(indexerUrl);
+  if (existing) return existing;
+  if (ixoResolvers.size >= MAX_IXO_RESOLVERS) {
+    const oldest = ixoResolvers.keys().next().value;
+    if (oldest !== undefined) ixoResolvers.delete(oldest);
+  }
+  const resolver = createIxoDIDResolver({
+    indexerUrl,
+    cacheTtlMs: IXO_DID_RESOLUTION_CACHE_TTL_MS,
+  });
+  ixoResolvers.set(indexerUrl, resolver);
+  return resolver;
 }
 
 export const DEFAULT_UCAN_AUTH_MAX_TTL_SECONDS = 900;
@@ -138,23 +166,45 @@ async function sha256(text: string): Promise<string> {
     .join('');
 }
 
+type InvocationVerdict =
+  | { ok: true; userDid: string; expiration: number }
+  | { ok: false; error: string };
+
+/**
+ * Verifications in progress, by token hash. Concurrent requests carrying one
+ * invocation (a page load firing several queries with the same token) share
+ * one verification; the entry is dropped as soon as it settles, so a failure
+ * reaches only the callers that were already waiting on it.
+ */
+const pendingInvocations = new Map<string, Promise<InvocationVerdict>>();
+
 async function validateInvocation(
   invocation: string,
   cfg: AuthConfig,
-): Promise<
-  | { ok: true; userDid: string; expiration: number }
-  | { ok: false; error: string }
-> {
+): Promise<InvocationVerdict> {
   const key = await sha256(invocation);
   const cached = invocationCache.get(key);
   if (cached) return { ok: true, ...cached };
 
-  sweepInvocationStore();
+  const pending = pendingInvocations.get(key);
+  if (pending) return pending;
+  const verification = verifyInvocation(invocation, key, cfg).finally(() => {
+    pendingInvocations.delete(key);
+  });
+  pendingInvocations.set(key, verification);
+  return verification;
+}
+
+async function verifyInvocation(
+  invocation: string,
+  key: string,
+  cfg: AuthConfig,
+): Promise<InvocationVerdict> {
   const validator = await createUCANValidator({
     serverDid: cfg.oracleDid,
     rootIssuers: ['*'],
-    didResolver: createIxoDIDResolver({ indexerUrl: cfg.blocksyncUri }),
-    invocationStore,
+    didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
+    invocationStore: reusableInvocations,
   });
   const result = await validator.validate(
     invocation,
@@ -204,12 +254,11 @@ export async function validateDelegation(
   const cached = delegationCache.get(key);
   if (cached) return { ok: true, ...cached };
 
-  sweepInvocationStore();
   const validator = await createUCANValidator({
     serverDid: cfg.oracleDid,
     rootIssuers: [],
-    didResolver: createIxoDIDResolver({ indexerUrl: cfg.blocksyncUri }),
-    invocationStore,
+    didResolver: sharedIxoDIDResolver(cfg.blocksyncUri),
+    invocationStore: reusableInvocations,
     requireExpiration: true,
   });
   const result = await validator.validateDelegation(header);

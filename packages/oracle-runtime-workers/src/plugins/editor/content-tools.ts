@@ -8,7 +8,6 @@
  * per tool.
  */
 
-import type { MatrixClient } from 'matrix-js-sdk';
 import type * as Y from 'yjs';
 import { z } from 'zod';
 
@@ -18,7 +17,7 @@ import {
   markdownToBlockContainers,
   markdownToInlineContent,
 } from './blocknote-bridge';
-import { applyDocumentEdit, withDocument } from './content-session';
+import { applyDocumentEdit, type DocumentSource } from './content-session';
 import {
   appendBlocks,
   flattenBlocks,
@@ -47,16 +46,17 @@ import {
   type EditorFailure,
 } from './failures';
 import {
+  classifyBlockType,
   filterWritableProps,
   isTextEditable,
   redactProps,
 } from './prop-policy';
-import type { AppConfig } from './provider';
-
 export interface ContentToolsOptions {
-  matrixClient: MatrixClient;
-  /** Provider config with the target room already baked in. */
-  appConfig: AppConfig;
+  /**
+   * The one document every tool reads and writes, shared across the calls of
+   * one `call_editor_agent` run.
+   */
+  documents: DocumentSource;
 }
 
 const DEFAULT_READ_LIMIT = 60;
@@ -82,6 +82,45 @@ function redactBlock(block: DocumentBlock): DocumentBlock {
 
 function redactFlat(block: FlatDocumentBlock): FlatDocumentBlock {
   return { ...block, props: redactProps(block.type, block.props) };
+}
+
+/**
+ * The first locked block (`secrets`, `skills`) in `blockId`'s subtree,
+ * itself included. Deleting or moving a block rewrites its whole subtree, so
+ * a locked block nested anywhere inside refuses the operation.
+ */
+function findLockedBlock(
+  doc: Y.Doc,
+  blockId: string,
+): { id: string; type: string } | undefined {
+  const visit = (block: DocumentBlock): DocumentBlock | undefined => {
+    if (classifyBlockType(block.type) === 'locked') return block;
+    for (const child of block.children) {
+      const hit = visit(child);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+  const root = readBlockById(doc, blockId);
+  const hit = root ? visit(root) : undefined;
+  return hit ? { id: hit.id, type: hit.type } : undefined;
+}
+
+/** The refusal for a delete/move that would touch a locked block. */
+function lockedBlockRefusal(
+  blockId: string,
+  blockType: string,
+  locked: { id: string; type: string },
+  verb: 'deleted' | 'moved',
+): EditorFailure {
+  const where =
+    locked.id === blockId ? '' : ` (block ${locked.id} is nested inside it)`;
+  return propNotEditable(blockId, blockType, [
+    {
+      prop: 'block',
+      reason: `'${locked.type}' blocks are never editable by the assistant, so this block cannot be ${verb}${where}`,
+    },
+  ]);
 }
 
 /** Case-insensitive substring match. */
@@ -118,7 +157,7 @@ function createReadDocumentTool(options: ContentToolsOptions): PluginTool {
       const start = args.start ?? 0;
       const limit = args.limit ?? DEFAULT_READ_LIMIT;
 
-      const result = await withDocument(options, async (session) => {
+      const result = await options.documents.use(async (session) => {
         const blocks = flattenBlocks(readDocumentBlocks(session.doc)).map(
           redactFlat,
         );
@@ -161,7 +200,7 @@ function createReadBlockTool(options: ContentToolsOptions): PluginTool {
   return pluginTool(
     async (rawArgs) => {
       const args = schema.parse(rawArgs);
-      const result = await withDocument(options, async (session) => {
+      const result = await options.documents.use(async (session) => {
         const block = readBlockById(session.doc, args.block_id);
         if (!block) return blockNotFound(args.block_id);
         return {
@@ -199,7 +238,7 @@ function createSearchDocumentTool(options: ContentToolsOptions): PluginTool {
       const args = schema.parse(rawArgs);
       const limit = args.limit ?? 20;
 
-      const result = await withDocument(options, async (session) => {
+      const result = await options.documents.use(async (session) => {
         const blocks = flattenBlocks(readDocumentBlocks(session.doc)).map(
           redactFlat,
         );
@@ -292,7 +331,7 @@ function createInsertContentTool(options: ContentToolsOptions): PluginTool {
         );
       }
 
-      const result = await withDocument(options, async (session) =>
+      const result = await options.documents.use(async (session) =>
         applyDocumentEdit(session, {
           plan: (doc) => {
             // Anchored inserts need a live reference; end/start do not.
@@ -395,7 +434,7 @@ function createEditBlockTool(options: ContentToolsOptions): PluginTool {
         parsedText.set(index, await markdownToInlineContent(edit.text));
       }
 
-      const result = await withDocument(options, async (session) =>
+      const result = await options.documents.use(async (session) =>
         applyDocumentEdit(session, {
           plan: (doc): PreparedEdit[] | EditorFailure => {
             const prepared: PreparedEdit[] = [];
@@ -484,7 +523,7 @@ function createDeleteBlockTool(options: ContentToolsOptions): PluginTool {
     async (rawArgs) => {
       const args = schema.parse(rawArgs);
 
-      const result = await withDocument(options, async (session) =>
+      const result = await options.documents.use(async (session) =>
         applyDocumentEdit(session, {
           plan: (doc) => {
             const located = locateBlock(
@@ -493,7 +532,17 @@ function createDeleteBlockTool(options: ContentToolsOptions): PluginTool {
             );
             if (!located) return blockNotFound(args.block_id);
             const content = getContentElement(located.container);
-            return { blockType: content?.nodeName ?? 'unknown' };
+            const blockType = content?.nodeName ?? 'unknown';
+            const locked = findLockedBlock(doc, args.block_id);
+            if (locked) {
+              return lockedBlockRefusal(
+                args.block_id,
+                blockType,
+                locked,
+                'deleted',
+              );
+            }
+            return { blockType };
           },
           apply: (doc, plan) => {
             const removed = removeBlock(doc, args.block_id);
@@ -537,12 +586,22 @@ function createMoveBlockTool(options: ContentToolsOptions): PluginTool {
     async (rawArgs) => {
       const args = schema.parse(rawArgs);
 
-      const result = await withDocument(options, async (session) =>
+      const result = await options.documents.use(async (session) =>
         applyDocumentEdit(session, {
           plan: (doc) => {
             const fragment = doc.getXmlFragment(DOCUMENT_FRAGMENT_NAME);
-            if (!locateBlock(fragment, args.block_id)) {
+            const source = locateBlock(fragment, args.block_id);
+            if (!source) {
               return blockNotFound(args.block_id);
+            }
+            const locked = findLockedBlock(doc, args.block_id);
+            if (locked) {
+              return lockedBlockRefusal(
+                args.block_id,
+                getContentElement(source.container)?.nodeName ?? 'unknown',
+                locked,
+                'moved',
+              );
             }
             if (!locateBlock(fragment, args.reference_block_id)) {
               return blockNotFound(args.reference_block_id);
@@ -619,7 +678,7 @@ function createReplaceTextTool(options: ContentToolsOptions): PluginTool {
     async (rawArgs) => {
       const args = schema.parse(rawArgs);
 
-      const result = await withDocument(options, async (session) =>
+      const result = await options.documents.use(async (session) =>
         applyDocumentEdit(session, {
           plan: (doc) => {
             if (args.block_id) {

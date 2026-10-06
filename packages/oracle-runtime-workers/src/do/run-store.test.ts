@@ -483,3 +483,56 @@ describe('channel runs over the SQLite store', () => {
     expect(result.summary?.client).toBe('portal');
   });
 });
+
+it('prunes ended runs set-based in one transaction, leaving exactly what per-run pruning left', async () => {
+  const s = stub('prune-equivalence');
+  const { legacy, current, transactions, receiptPlan } =
+    await s.pruneEquivalence();
+  expect(current).toEqual(legacy);
+  expect(transactions).toBe(1);
+  // What survives: fresh and active runs, every tombstone, and the
+  // receipts of runs that are not tombstoned.
+  expect(current.turn_runs).toHaveLength(8);
+  expect(current.turn_tool_marks).toHaveLength(8);
+  expect(current.channel_run_tombstones).toHaveLength(32);
+  expect(current.channel_requests.map((r) => r.run_id)).toEqual(
+    [
+      'ch-active-queued',
+      'ch-active-recovering',
+      'ch-active-running',
+      'ch-fresh-0',
+      'ch-fresh-1',
+      'ch-fresh-2',
+      'ch-fresh-3',
+      'ch-fresh-4',
+      'ch-never-begun',
+    ].sort(),
+  );
+  expect(current.turn_write_claims).toHaveLength(1);
+  // The receipt sweep walks the receipts and looks tombstones up by key.
+  expect(receiptPlan.join('\n')).toMatch(/SCAN channel_requests/);
+  expect(receiptPlan.join('\n')).toMatch(/SEARCH t USING PRIMARY KEY/);
+});
+
+it('finds stale runs and old write claims through an index, not a table scan', async () => {
+  const { staleRuns, oldClaims } = await stub('prune-plans').prunePlans();
+  expect(staleRuns.join('\n')).toMatch(/USING (COVERING )?INDEX/);
+  expect(staleRuns.join('\n')).not.toMatch(/SCAN turn_runs/);
+  expect(oldClaims.join('\n')).toMatch(/USING (COVERING )?INDEX/);
+  expect(oldClaims.join('\n')).not.toMatch(/SCAN turn_write_claims/);
+});
+
+it('closes a finished run in one transaction, without reading back what it wrote', async () => {
+  const s = stub('run-close-work');
+  await s.setNow(T0);
+  const result = await s.coordinateRun({
+    runId: 'closed-once',
+    client: 'portal',
+    reply: 'Done',
+  });
+  expect(result.work).toEqual({ transactions: 1, reads: 0 });
+  // What onRunEnded is handed matches the row as stored.
+  expect(result.ended).toEqual(result.stored);
+  expect(result.stored).toMatchObject({ status: 'finished', lastSeq: 1 });
+  expect(await s.countSegments('closed-once')).toBe(0);
+});

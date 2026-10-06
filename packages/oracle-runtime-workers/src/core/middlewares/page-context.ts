@@ -22,8 +22,36 @@ export interface PageContextMiddlewareOptions {
   logger?: Logger;
 }
 
+/** Longest page title rendered (characters); longer ones are cut. */
+export const PAGE_TITLE_MAX_CHARS = 120;
+/** Longest room id rendered; a real Matrix room id is far shorter. */
+const ROOM_ID_MAX_CHARS = 255;
+
+/**
+ * Text set by other people (a page title any room member can change, a room
+ * id from the request) as inert single-line text: line breaks, control and
+ * format characters become spaces, runs of whitespace one space, the
+ * markdown and markup characters that open code, emphasis, headings,
+ * quotes, tables, links or tags (`` ` * # > < [ ] | ``) are dropped, the
+ * length is capped. What remains cannot open a section, a list or a tag in
+ * the system prompt.
+ */
+export function inertInline(text: string, maxChars: number): string {
+  const flat = text
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ')
+    .replace(/[`*#><|[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return flat.length <= maxChars
+    ? flat
+    : `${flat.slice(0, maxChars).trimEnd()}…`;
+}
+
 function formatLabel(title: string | undefined, roomId: string): string {
-  return title ? `"${title}" (${roomId})` : roomId;
+  const id = inertInline(roomId, ROOM_ID_MAX_CHARS);
+  const name = title ? inertInline(title, PAGE_TITLE_MAX_CHARS) : '';
+  // Quoted as a value (JSON string rules): a quote in the title cannot end it.
+  return name ? `${JSON.stringify(name)} (${id})` : id;
 }
 
 /**
@@ -31,12 +59,28 @@ function formatLabel(title: string | undefined, roomId: string): string {
  * the agent is editing a page (`state.editorRoomId` is set). When the user
  * switches pages mid-conversation the block flags it explicitly so the
  * agent re-reads the current page before editing.
+ *
+ * A page's title is looked up once per room for the life of the middleware
+ * (one turn: the main agent is built per turn), not on every model step.
  */
 export const createPageContextMiddleware = (
   options: PageContextMiddlewareOptions,
 ): AgentMiddleware => {
   const logger = options.logger ?? NOOP_LOGGER;
-  const { getRoomTitle } = options;
+  const titles = new Map<string, Promise<string | undefined>>();
+  const getRoomTitle = (roomId: string): Promise<string | undefined> => {
+    let title = titles.get(roomId);
+    if (!title) {
+      title = options.getRoomTitle(roomId).catch((error: unknown) => {
+        logger.warn(
+          `[PageContextMiddleware] title lookup failed for ${roomId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return undefined;
+      });
+      titles.set(roomId, title);
+    }
+    return title;
+  };
 
   return createMiddleware({
     name: 'PageContextMiddleware',

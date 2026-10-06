@@ -89,9 +89,20 @@ export class RunBuffer {
   /** Frames not yet packed into a segment. */
   private readonly tail: RunFrame[] = [];
 
+  /**
+   * Frames taken out of the tail whose segment write has not settled yet,
+   * one batch per pending pack, in order. A re-join reads the store and then
+   * the tail; without these, a frame packed between the two would be in
+   * neither.
+   */
+  private readonly inFlight: RunFrame[][] = [];
+
   private tailBytes = 0;
 
-  private readonly subscribers = new Set<RunSubscriber>();
+  private readonly subscribers = new Map<RunSubscriber, (() => void) | null>();
+
+  /** The `done` frame, once pushed (a closed buffer keeps it for late readers). */
+  private doneFrame: RunFrame | null = null;
 
   private timer: unknown = null;
 
@@ -115,13 +126,19 @@ export class RunBuffer {
     return this.closed;
   }
 
+  /** A `done` frame has been pushed: the run told its subscribers it ended. */
+  get hasDone(): boolean {
+    return this.doneFrame !== null;
+  }
+
   /** Append a frame, fan it out, and schedule or force a pack. */
   push(event: string, data: unknown): RunFrame {
     if (this.closed) throw new Error('run buffer is closed');
     const frame: RunFrame = { seq: ++this.seq, event, data };
+    if (event === 'done' && this.doneFrame === null) this.doneFrame = frame;
     this.tail.push(frame);
     this.tailBytes += JSON.stringify(frame).length;
-    for (const subscriber of this.subscribers) {
+    for (const subscriber of this.subscribers.keys()) {
       try {
         subscriber(frame);
       } catch {
@@ -144,19 +161,40 @@ export class RunBuffer {
   }
 
   /**
-   * The unflushed frames after `after` — what a re-join needs on top of the
-   * segments it read from the store.
+   * The frames after `after` that a store read may not hold yet — the ones
+   * whose segment write is still pending, then the unflushed tail — what a
+   * re-join needs on top of the segments it read from the store. A closed
+   * buffer also keeps its `done` frame, so a reader that arrives after the
+   * run ended still learns how it ended.
    */
   tailAfter(after: number): RunFrame[] {
-    return this.tail.filter((frame) => frame.seq > after);
+    const out: RunFrame[] = [];
+    for (const batch of this.inFlight)
+      for (const frame of batch) if (frame.seq > after) out.push(frame);
+    for (const frame of this.tail) if (frame.seq > after) out.push(frame);
+    const done = this.doneFrame;
+    if (
+      this.closed &&
+      done !== null &&
+      done.seq > after &&
+      !out.some((frame) => frame.seq === done.seq)
+    )
+      out.push(done);
+    return out;
   }
 
   /**
    * Attach a live subscriber. The caller replays the store's segments and
    * `tailAfter(cursor)` first; from then on every new frame is delivered.
+   * `onEnd` runs once when the buffer closes (at once when it already is),
+   * after the subscriber received every frame.
    */
-  subscribe(subscriber: RunSubscriber): () => void {
-    this.subscribers.add(subscriber);
+  subscribe(subscriber: RunSubscriber, onEnd?: () => void): () => void {
+    if (this.closed) {
+      onEnd?.();
+      return () => undefined;
+    }
+    this.subscribers.set(subscriber, onEnd ?? null);
     return () => {
       this.subscribers.delete(subscriber);
     };
@@ -175,6 +213,7 @@ export class RunBuffer {
     if (this.tail.length === 0) return this.packing;
     const frames = this.tail.splice(0, this.tail.length);
     this.tailBytes = 0;
+    this.inFlight.push(frames);
     const segment: PackedSegment = {
       seqFrom: frames[0]!.seq,
       seqTo: frames[frames.length - 1]!.seq,
@@ -190,15 +229,31 @@ export class RunBuffer {
         // copy is missing. Report and carry on — the next pack retries
         // nothing (the frames are gone) but the run itself is unaffected.
         this.options.onPackError?.(error);
+      })
+      .finally(() => {
+        // Packs settle in order: this batch is the oldest one pending.
+        this.inFlight.shift();
       });
     return this.packing;
   }
 
-  /** Final pack; no more frames accepted afterwards. */
+  /**
+   * Final pack; no more frames accepted afterwards. Every subscriber is
+   * told the buffer ended (after the frames it was already given) and
+   * detached.
+   */
   async close(): Promise<void> {
     if (this.closed) return this.packing;
     this.closed = true;
-    await this.flush();
+    const ended = [...this.subscribers.values()];
     this.subscribers.clear();
+    for (const onEnd of ended) {
+      try {
+        onEnd?.();
+      } catch {
+        /* a broken subscriber never breaks the run */
+      }
+    }
+    await this.flush();
   }
 }

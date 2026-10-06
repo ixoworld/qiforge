@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  BLOCKSYNC_LOOKUP_TIMEOUT_MS,
   type CachedUserServerName,
+  UNREGISTERED_CACHE_TTL_MS,
   extractUrlDomain,
   fetchUserMatrixServerName,
   lookupUserServerName,
@@ -124,6 +126,14 @@ describe('lookupUserServerName (cached sender-server lookup)', () => {
       ),
   );
 
+  /** Blocksync knows the DID, and its document names no MatrixHomeServer. */
+  const namesNoServer = (did: string) => async () =>
+    new Response(
+      JSON.stringify({
+        data: { iids: { nodes: [{ id: did, service: [] }] } },
+      }),
+    );
+
   function deps(
     cache: Map<string, CachedUserServerName>,
     fetchImpl: typeof fetch,
@@ -177,18 +187,113 @@ describe('lookupUserServerName (cached sender-server lookup)', () => {
     ).resolves.toEqual({ serverName: 'devmx.ixo.earth', source: 'blocksync' });
     expect(cache.get(DID)).toEqual({ serverName: 'devmx.ixo.earth', at: NOW });
 
-    const unregistered = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ data: { iids: { nodes: [] } } }), {
-          status: 200,
-        }),
-    );
+    const unregistered = vi.fn(namesNoServer('did:ixo:other'));
     await expect(
       lookupUserServerName('did:ixo:other', deps(cache, unregistered)),
     ).resolves.toEqual({
       serverName: 'oracle.example',
       source: 'unregistered',
     });
-    expect(cache.has('did:ixo:other')).toBe(false);
+    // "No homeserver" is an answer, cached for the short negative TTL.
+    expect(cache.get('did:ixo:other')).toEqual({
+      serverName: 'oracle.example',
+      at: NOW,
+      unregistered: true,
+    });
+    await expect(
+      lookupUserServerName('did:ixo:other', deps(cache, unregistered)),
+    ).resolves.toEqual({
+      serverName: 'oracle.example',
+      source: 'unregistered',
+    });
+    expect(unregistered).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks again once the negative TTL has passed, and takes the homeserver the DID registered since', async () => {
+    let now = NOW;
+    let registered = false;
+    const fetchImpl = vi.fn(async () =>
+      registered ? registersDevmx() : namesNoServer(DID)(),
+    );
+    const cache = new Map<string, CachedUserServerName>();
+    const lookup = () =>
+      lookupUserServerName(DID, { ...deps(cache, fetchImpl), now: () => now });
+    expect((await lookup()).source).toBe('unregistered');
+    registered = true;
+    now += UNREGISTERED_CACHE_TTL_MS - 1;
+    expect((await lookup()).source).toBe('unregistered');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    now += 1;
+    await expect(lookup()).resolves.toEqual({
+      serverName: 'devmx.ixo.earth',
+      source: 'blocksync',
+    });
+    expect(UNREGISTERED_CACHE_TTL_MS).toBe(5 * 60_000);
+  });
+
+  it('caches nothing for a DID Blocksync has no record of yet', async () => {
+    const notIndexed = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: { iids: { nodes: [] } } })),
+    );
+    const cache = new Map<string, CachedUserServerName>();
+    await expect(
+      lookupUserServerName(DID, deps(cache, notIndexed)),
+    ).resolves.toEqual({
+      serverName: 'oracle.example',
+      source: 'unregistered',
+    });
+    expect(cache.size).toBe(0);
+    await lookupUserServerName(DID, deps(cache, notIndexed));
+    expect(notIndexed).toHaveBeenCalledTimes(2);
+  });
+
+  it('an expired "unregistered" entry stands in for a failed refresh with the default, not a stale server', async () => {
+    const cache = new Map<string, CachedUserServerName>([
+      [
+        DID,
+        {
+          serverName: 'old-default.example',
+          at: NOW - TTL - 1,
+          unregistered: true,
+        },
+      ],
+    ]);
+    await expect(
+      lookupUserServerName(DID, deps(cache, blocksyncDown)),
+    ).resolves.toMatchObject({ serverName: 'oracle.example', source: 'stale' });
+  });
+
+  it('a Blocksync that never answers is cut off: by the default bound, or sooner by the caller', async () => {
+    const hangs: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        // Like fetch: an aborted signal rejects at once or when it aborts.
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        signal?.addEventListener('abort', () => reject(signal.reason));
+      });
+    const cache = new Map<string, CachedUserServerName>();
+    const caller = new AbortController();
+    const pending = lookupUserServerName(DID, {
+      ...deps(cache, hangs),
+      signal: caller.signal,
+    });
+    caller.abort(new Error('caller gave up'));
+    await expect(pending).rejects.toBeInstanceOf(
+      UserServerNameUnavailableError,
+    );
+    // Without a caller signal the request carries the default bound.
+    let seen: AbortSignal | undefined;
+    await fetchUserMatrixServerName(
+      'https://bs/graphql',
+      DID,
+      async (_i, init) => {
+        seen = init?.signal ?? undefined;
+        return Response.json({ data: { iids: { nodes: [] } } });
+      },
+    );
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen?.aborted).toBe(false);
+    expect(BLOCKSYNC_LOOKUP_TIMEOUT_MS).toBe(5_000);
   });
 });

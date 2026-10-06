@@ -44,6 +44,59 @@ export const ACTIVE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set([
 
 export type ToolEffect = 'read' | 'write';
 
+/** The columns a run's row is updated with. */
+export type RunPatch = Partial<
+  Pick<
+    RunRecord,
+    | 'status'
+    | 'attempts'
+    | 'generation'
+    | 'nextAttemptAt'
+    | 'checkpointId'
+    | 'startCheckpointId'
+    | 'lastSeq'
+    | 'partialText'
+    | 'messageId'
+    | 'error'
+    | 'taskRunId'
+    | 'instanceId'
+    | 'usage'
+    | 'request'
+  >
+>;
+
+/**
+ * `record` as its row reads after `update(patch)` stamped `updatedAt`, so a
+ * writer keeps its copy current without reading the row back. Like
+ * `update`, a field whose value is `undefined` is left as it was.
+ */
+export function patchRunRecord(
+  record: RunRecord,
+  patch: RunPatch,
+  updatedAt: string,
+): RunRecord {
+  const next: RunRecord = { ...record, updatedAt };
+  if (patch.status !== undefined) next.status = patch.status;
+  if (patch.attempts !== undefined) next.attempts = patch.attempts;
+  if (patch.generation !== undefined) next.generation = patch.generation;
+  if (patch.nextAttemptAt !== undefined)
+    next.nextAttemptAt = patch.nextAttemptAt;
+  if (patch.checkpointId !== undefined) next.checkpointId = patch.checkpointId;
+  if (patch.startCheckpointId !== undefined) {
+    next.startCheckpointId = patch.startCheckpointId;
+    next.startRecorded = true;
+  }
+  if (patch.lastSeq !== undefined) next.lastSeq = patch.lastSeq;
+  if (patch.partialText !== undefined) next.partialText = patch.partialText;
+  if (patch.messageId !== undefined) next.messageId = patch.messageId;
+  if (patch.error !== undefined) next.error = patch.error;
+  if (patch.taskRunId !== undefined) next.taskRunId = patch.taskRunId;
+  if (patch.instanceId !== undefined) next.instanceId = patch.instanceId;
+  if (patch.usage !== undefined) next.usage = patch.usage;
+  if (patch.request !== undefined) next.request = patch.request;
+  return next;
+}
+
 export interface RunRecord {
   runId: string;
   sessionId: string;
@@ -120,6 +173,9 @@ export interface ToolMark {
 
 /** Rows of ended runs are kept a week (a re-join that late gets 404). */
 export const RUN_RETENTION_MS = 7 * 24 * 3600 * 1000;
+
+/** An ended run last touched before the cutoff (the one bound parameter). */
+export const STALE_RUN_FILTER = `status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`;
 
 /**
  * Sequence-number space of one attempt. A cursor is `after=<seq>`; the
@@ -436,51 +492,62 @@ export class RunStore {
     await this.db.run(`CREATE TABLE IF NOT EXISTS turn_run_plans (
       run_id TEXT PRIMARY KEY, plan TEXT NOT NULL
     ) WITHOUT ROWID`);
-    // Ended runs older than the retention window: their segments are gone
-    // already (cutover); drop the rows and marks in one pass per boot.
+    // Boot pruning looks rows up by age: these keep it a range seek, not a
+    // scan of every run and claim, on every boot.
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS idx_turn_runs_updated ON turn_runs(updated_at)`,
+    );
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS idx_turn_write_claims_started ON turn_write_claims(started_at)`,
+    );
+    await this.pruneEnded();
+  }
+
+  /**
+   * Ended runs older than the retention window: their segments are gone
+   * already (cutover); drop the rows, marks, plans and leftover segments in
+   * one transaction per boot, set-based. A channel run leaves a tombstone
+   * (its id and final status) and loses its receipt (channels/turns.ts):
+   * from then on the tombstone alone refuses a replay (410).
+   */
+  private async pruneEnded(): Promise<void> {
     const cutoff = new Date(this.now() - RUN_RETENTION_MS).toISOString();
     await this.db.run(`DELETE FROM turn_write_claims WHERE started_at < ?`, [
       cutoff,
     ]);
-    const stale = await this.db.exec<{
-      run_id: string;
-      client: string;
-      status: string;
-    }>(
-      `SELECT run_id, client, status FROM turn_runs WHERE status IN ('finished','aborted','interrupted','failed') AND updated_at < ?`,
-      [cutoff],
-    );
-    for (const row of stale) {
+    const stale = `SELECT run_id FROM turn_runs WHERE ${STALE_RUN_FILTER}`;
+    if (await this.db.get(`${stale} LIMIT 1`, [cutoff]))
       await this.db.transaction(async () => {
-        if (row.client === 'channel')
-          await this.db.run(
-            'INSERT OR IGNORE INTO channel_run_tombstones (run_id, status) VALUES (?, ?)',
-            [row.run_id, row.status],
-          );
-        await this.db.run(`DELETE FROM turn_tool_marks WHERE run_id = ?`, [
-          row.run_id,
-        ]);
-        await this.db.run(`DELETE FROM turn_run_plans WHERE run_id = ?`, [
-          row.run_id,
-        ]);
-        await this.db.run(`DELETE FROM turn_run_segments WHERE run_id = ?`, [
-          row.run_id,
-        ]);
-        await this.db.run(`DELETE FROM turn_runs WHERE run_id = ?`, [
-          row.run_id,
+        await this.db.run(
+          `INSERT OR IGNORE INTO channel_run_tombstones (run_id, status)
+           SELECT run_id, status FROM turn_runs WHERE client = 'channel' AND ${STALE_RUN_FILTER}`,
+          [cutoff],
+        );
+        for (const table of [
+          'turn_tool_marks',
+          'turn_run_plans',
+          'turn_run_segments',
+        ])
+          await this.db.run(`DELETE FROM ${table} WHERE run_id IN (${stale})`, [
+            cutoff,
+          ]);
+        await this.db.run(`DELETE FROM turn_runs WHERE ${STALE_RUN_FILTER}`, [
+          cutoff,
         ]);
       });
-    }
-    // A channel receipt (channels/turns.ts) outlives its run only until the
-    // run is tombstoned: from then on the tombstone alone refuses a replay
-    // (410), so the receipt row is dropped. The table exists once the object
-    // has served a channel turn.
+    // Every receipt whose run is tombstoned, this boot or an earlier one
+    // that stopped before getting here. Driven by the receipts (at most the
+    // retention window of them), one key lookup each into the tombstones,
+    // which are never pruned and never scanned. The table exists once the
+    // object has served a channel turn.
     const receipts = await this.db.get<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_requests'`,
     );
     if (receipts)
       await this.db.run(
-        `DELETE FROM channel_requests WHERE run_id IN (SELECT run_id FROM channel_run_tombstones)`,
+        `DELETE FROM channel_requests WHERE EXISTS (
+           SELECT 1 FROM channel_run_tombstones t WHERE t.run_id = channel_requests.run_id
+         )`,
       );
   }
 
@@ -526,7 +593,7 @@ export class RunStore {
     checkpointId: string | null;
     taskRunId?: string | null;
     instanceId: string;
-  }): Promise<void> {
+  }): Promise<RunRecord> {
     await this.setup();
     const at = this.iso();
     await this.db.run(
@@ -547,6 +614,29 @@ export class RunStore {
         input.instanceId,
       ],
     );
+    return {
+      runId: input.runId,
+      sessionId: input.sessionId,
+      requestId: input.requestId,
+      client: input.client,
+      status: input.status,
+      startedAt: at,
+      updatedAt: at,
+      request: input.request,
+      attempts: 0,
+      generation: 0,
+      nextAttemptAt: null,
+      checkpointId: input.checkpointId,
+      startCheckpointId: input.checkpointId,
+      startRecorded: true,
+      lastSeq: 0,
+      partialText: null,
+      messageId: null,
+      error: null,
+      taskRunId: input.taskRunId ?? null,
+      instanceId: input.instanceId,
+      usage: null,
+    };
   }
 
   async get(runId: string): Promise<RunRecord | undefined> {
@@ -611,31 +701,12 @@ export class RunStore {
     return rows.map(toRecord);
   }
 
-  async update(
-    runId: string,
-    patch: Partial<
-      Pick<
-        RunRecord,
-        | 'status'
-        | 'attempts'
-        | 'generation'
-        | 'nextAttemptAt'
-        | 'checkpointId'
-        | 'startCheckpointId'
-        | 'lastSeq'
-        | 'partialText'
-        | 'messageId'
-        | 'error'
-        | 'taskRunId'
-        | 'instanceId'
-        | 'usage'
-        | 'request'
-      >
-    >,
-  ): Promise<void> {
+  /** Write `patch` to the run's row; returns the `updatedAt` it stamped. */
+  async update(runId: string, patch: RunPatch): Promise<string> {
     await this.setup();
+    const updatedAt = this.iso();
     const sets: string[] = ['updated_at = ?'];
-    const params: Array<string | number | null> = [this.iso()];
+    const params: Array<string | number | null> = [updatedAt];
     const column: Record<string, string> = {
       request: 'request',
       status: 'status',
@@ -664,6 +735,21 @@ export class RunStore {
       `UPDATE turn_runs SET ${sets.join(', ')} WHERE run_id = ?`,
       params,
     );
+    return updatedAt;
+  }
+
+  /**
+   * A run's end in one transaction: its row takes the terminal `patch` and
+   * its segments are dropped (the reply, or the partial text, is in the row
+   * and the transcript now). Returns the `updatedAt` it stamped.
+   */
+  async close(runId: string, patch: RunPatch): Promise<string> {
+    await this.setup();
+    return this.db.transaction(async () => {
+      const updatedAt = await this.update(runId, patch);
+      await this.deleteSegments(runId);
+      return updatedAt;
+    });
   }
 
   // ── segments ────────────────────────────────────────────────────────────

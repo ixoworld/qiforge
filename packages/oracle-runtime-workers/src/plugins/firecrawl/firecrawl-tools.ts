@@ -1,7 +1,11 @@
 import { MultiServerMCPClient } from '@langchain/mcp-adapters';
 import { withCallTimeout } from '../mcp-call-timeout';
+import { adaptMcpClientTools } from '../mcp-tool-adapter';
 
-/** Our own per-call limit (never given to the SDK — see `mcp-call-timeout.ts`). */
+/**
+ * Per-call limit: the MCP request's own timeout (`metadata.timeoutMs`, see
+ * `mcp-tool-adapter.ts`), also enforced by {@link withCallTimeout}.
+ */
 const FIRECRAWL_TOOL_TIMEOUT_MS = 120_000;
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper';
@@ -112,10 +116,14 @@ export function createDefaultFirecrawlMcpFactory(
     try {
       const all = await client.getTools();
       return await run(
-        all.filter(
-          (t) =>
-            t.name === FIRECRAWL_SCRAPE_MCP_NAME ||
-            t.name === FIRECRAWL_SEARCH_MCP_NAME,
+        adaptMcpClientTools(
+          all.filter(
+            (t) =>
+              t.name === FIRECRAWL_SCRAPE_MCP_NAME ||
+              t.name === FIRECRAWL_SEARCH_MCP_NAME,
+          ),
+          console,
+          { requestTimeoutMs: FIRECRAWL_TOOL_TIMEOUT_MS },
         ),
       );
     } finally {

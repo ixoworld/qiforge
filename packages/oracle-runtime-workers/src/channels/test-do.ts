@@ -17,6 +17,8 @@ export class ChannelTurnsTestDO extends DurableObject {
   private runs?: RunStore;
   private turns?: ChannelTurns;
   private nowMs = Date.now();
+  /** Host calls made since the object loaded. */
+  private calls = { assertSession: 0, changed: 0 };
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -28,6 +30,7 @@ export class ChannelTurnsTestDO extends DurableObject {
     this.turns = new ChannelTurns(db, {
       createSession: async (_identity, marker) => `$${marker}`,
       assertSession: async (_identity, sessionId) => {
+        this.calls.assertSession += 1;
         if (!sessionId.startsWith('$channel-session-'))
           throw new ChannelError(404, 'Session not owned');
         if ((await this.deletedSessions()).includes(sessionId))
@@ -68,7 +71,10 @@ export class ChannelTurnsTestDO extends DurableObject {
         );
         await this.ctx.storage.put(`mirrored:${author}`, text);
       },
-      changed: () => this.ctx.storage.sync(),
+      changed: () => {
+        this.calls.changed += 1;
+        return this.ctx.storage.sync();
+      },
     });
     return this.turns;
   }
@@ -180,6 +186,10 @@ export class ChannelTurnsTestDO extends DurableObject {
       ))!.n;
     }
     return counts;
+  }
+
+  async hostCalls(): Promise<{ assertSession: number; changed: number }> {
+    return { ...this.calls };
   }
 
   async count(): Promise<number> {

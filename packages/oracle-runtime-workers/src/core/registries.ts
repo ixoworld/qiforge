@@ -86,6 +86,31 @@ export interface ToolSummary {
   origin: 'boot' | 'request';
 }
 
+/** Where `load_capability` reads the tools a plugin contributes. */
+export interface ToolSummarySource {
+  toolSummariesForPlugin(
+    pluginName: string,
+  ): Array<{ name: string; description: string }>;
+}
+
+/**
+ * One turn's view of its own collected tools (boot and request-time), in
+ * collection order — never another turn's.
+ */
+export function turnToolSummaries(
+  tools: ReadonlyArray<{ pluginName: string; tool: PluginTool }>,
+): ToolSummarySource {
+  return {
+    toolSummariesForPlugin: (pluginName) =>
+      tools
+        .filter((entry) => entry.pluginName === pluginName)
+        .map(({ tool }) => ({
+          name: tool.name,
+          description: tool.description,
+        })),
+  };
+}
+
 /**
  * Stores plugins that contribute tools and resolves them lazily by invoking
  * each plugin's `getTools(buildCtx)` once at collection time.
@@ -108,19 +133,11 @@ export interface ToolSummary {
 export class ToolRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredTool[] | null = null;
-  /**
-   * Metadata snapshot of the most recent `collect()`. Deliberately NOT the
-   * tool objects: request-time tools close over that request's
-   * `RuntimeContext`, and retaining them here would pin a full request
-   * graph in memory between turns.
-   */
-  private collectedMeta: ToolSummary[] | null = null;
 
   /** Add a plugin whose `getTools` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collectedMeta = null;
   }
 
   /**
@@ -187,6 +204,11 @@ export class ToolRegistry {
    * Combined boot + request collection used by the main agent build. Uses
    * the cached boot output when present so per-request rebuilds skip the
    * `getTools` invocations that don't depend on runtime state.
+   *
+   * The request-time part is returned to the caller only, never kept: the
+   * registry is shared by every turn of the isolate, so nothing one user's
+   * turn collected may be read back by another (`turnToolSummaries` gives a
+   * turn its own view).
    */
   async collect(
     buildCtx: PluginContext,
@@ -194,21 +216,11 @@ export class ToolRegistry {
   ): Promise<RegisteredTool[]> {
     const boot = await this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
-    const out = rtCtx
-      ? withoutShadowingRequestTools([...boot, ...request], rtCtx.logger)
-      : boot;
-    this.collectedMeta = out.map(({ pluginName, tool, origin }) => ({
-      pluginName,
-      name: tool.name,
-      description: tool.description,
-      origin,
-    }));
-    return out;
+    return [...boot, ...request];
   }
 
-  /** Summaries source: the last full collection, else the boot cache. */
+  /** Summaries of the boot-time tools (the boot checks read these). */
   private summaries(): ToolSummary[] {
-    if (this.collectedMeta !== null) return this.collectedMeta;
     return (this.bootCache ?? []).map(({ pluginName, tool, origin }) => ({
       pluginName,
       name: tool.name,
@@ -217,15 +229,12 @@ export class ToolRegistry {
     }));
   }
 
-  /** The flat list of tool names produced by the most recent `collect()`. */
+  /** The flat list of boot-time tool names. */
   toolNames(): string[] {
     return this.summaries().map((entry) => entry.name);
   }
 
-  /**
-   * Tool names contributed by a given plugin in the most recent `collect()`
-   * (or `collectBoot()` if no full collection has happened yet).
-   */
+  /** Boot-time tool names contributed by a given plugin. */
   toolNamesForPlugin(pluginName: string): string[] {
     return this.summaries()
       .filter((entry) => entry.pluginName === pluginName)
@@ -233,8 +242,9 @@ export class ToolRegistry {
   }
 
   /**
-   * Name/description of the tools a given plugin contributed in the most
-   * recent collection. Summaries, not the tool objects — see `collectedMeta`.
+   * Name/description of the boot-time tools a given plugin contributed.
+   * Summaries, not the tool objects. A turn that also has request-time tools
+   * reads its own collection instead (`turnToolSummaries`).
    */
   toolSummariesForPlugin(
     pluginName: string,
@@ -250,7 +260,7 @@ export class ToolRegistry {
    * actual conflict.
    */
   assertNoCollisions(): void {
-    if (this.collectedMeta === null && this.bootCache === null) {
+    if (this.bootCache === null) {
       throw new Error('ToolRegistry.assertNoCollisions called before collect');
     }
     const seen = new Map<string, string>();
@@ -274,34 +284,50 @@ export class ToolRegistry {
 }
 
 /**
- * A request-time tool (most of them declared by the client in the turn body,
- * such as the Portal's browser tools) may not take a name another tool of the
- * turn already has: the model would call one name while the runtime ran
- * either tool. The colliding request tool is dropped for this turn with one
- * warning — the server tool (or the first request tool of that name) stays,
- * and the turn runs. Failing the turn instead would break every turn of a
- * client release that happens to declare a clashing name. Boot-time
- * collisions are `assertNoCollisions`' job.
+ * Drop the request-time tools and sub-agents whose name is already taken.
+ * Request-time contributions are recomputed every turn and some carry names
+ * a client declared (browser tools, AG-UI actions), so none of them may stand
+ * in for a tool the server owns: a name in `reservedNames` (the turn's
+ * boot-time tools and sub-agents, the meta-tools and the runtime's per-turn
+ * tools), or one an earlier request-time entry of the same turn already
+ * claimed, is dropped with one warning naming the plugin. Sub-agents are
+ * compared by the tool name they are bound under. Boot-time entries pass
+ * through untouched; their collisions are a boot error
+ * (`assertNoCollisions`).
  */
-function withoutShadowingRequestTools(
-  tools: readonly RegisteredTool[],
-  logger: Pick<RuntimeContext['logger'], 'warn'>,
-): RegisteredTool[] {
-  const owner = new Map<string, string>();
-  const out: RegisteredTool[] = [];
-  for (const entry of tools) {
-    const { pluginName, tool, origin } = entry;
-    const previous = owner.get(tool.name);
-    if (previous !== undefined && origin === 'request') {
-      logger.warn(
-        `${LOG_PREFIX} request tool "${tool.name}" of plugin "${pluginName}" dropped for this turn: the name is already taken by plugin "${previous}"`,
-      );
+export function dropShadowingRequestEntries(opts: {
+  tools: readonly RegisteredTool[];
+  requestSubAgents: readonly RegisteredSubAgent[];
+  reservedNames: Iterable<string>;
+  logger: { warn(message: string): void };
+}): { tools: RegisteredTool[]; requestSubAgents: RegisteredSubAgent[] } {
+  const taken = new Set(opts.reservedNames);
+  const drop = (pluginName: string, name: string, kind: string): void =>
+    opts.logger.warn(
+      `${LOG_PREFIX} plugin "${pluginName}" request-time ${kind} "${name}" dropped: the name is already taken this turn`,
+    );
+  const tools: RegisteredTool[] = [];
+  for (const entry of opts.tools) {
+    if (entry.origin === 'request') {
+      if (taken.has(entry.tool.name)) {
+        drop(entry.pluginName, entry.tool.name, 'tool');
+        continue;
+      }
+      taken.add(entry.tool.name);
+    }
+    tools.push(entry);
+  }
+  const requestSubAgents: RegisteredSubAgent[] = [];
+  for (const entry of opts.requestSubAgents) {
+    const toolName = computeSubAgentToolName(entry.subAgent.name);
+    if (taken.has(toolName)) {
+      drop(entry.pluginName, toolName, 'sub-agent');
       continue;
     }
-    if (previous === undefined) owner.set(tool.name, pluginName);
-    out.push(entry);
+    taken.add(toolName);
+    requestSubAgents.push(entry);
   }
-  return out;
+  return { tools, requestSubAgents };
 }
 
 // ── Sub-agent registry ──────────────────────────────────────────────────────
@@ -322,17 +348,11 @@ export interface RegisteredSubAgent {
 export class SubAgentRegistry {
   private readonly plugins: OraclePlugin[] = [];
   private bootCache: RegisteredSubAgent[] | null = null;
-  /** Names-only snapshot of the most recent `collect()` (see ToolRegistry). */
-  private collectedNames: Array<{
-    pluginName: string;
-    subAgentName: string;
-  }> | null = null;
 
   /** Add a plugin whose `getSubAgents` will be called at `collect()` time. */
   register(plugin: OraclePlugin): void {
     this.plugins.push(plugin);
     this.bootCache = null;
-    this.collectedNames = null;
   }
 
   /** Run every plugin's `getSubAgents(buildCtx)` once and cache the result. */
@@ -379,24 +399,21 @@ export class SubAgentRegistry {
     return perPlugin.flat();
   }
 
-  /** Combined boot + request collection used by the main agent build. */
+  /**
+   * Combined boot + request collection used by the main agent build. As
+   * with `ToolRegistry.collect`, the request-time part is not kept.
+   */
   async collect(
     buildCtx: PluginContext,
     rtCtx?: RuntimeContext,
   ): Promise<RegisteredSubAgent[]> {
     const boot = this.collectBoot(buildCtx);
     const request = rtCtx ? await this.collectRequest(rtCtx) : [];
-    const out = [...boot, ...request];
-    this.collectedNames = out.map(({ pluginName, subAgent }) => ({
-      pluginName,
-      subAgentName: subAgent.name,
-    }));
-    return out;
+    return [...boot, ...request];
   }
 
-  /** Names source: the last full collection, else the boot cache. */
+  /** Names of the boot-time sub-agents (the boot checks read these). */
   private names(): Array<{ pluginName: string; subAgentName: string }> {
-    if (this.collectedNames !== null) return this.collectedNames;
     return (this.bootCache ?? []).map(({ pluginName, subAgent }) => ({
       pluginName,
       subAgentName: subAgent.name,
@@ -404,8 +421,8 @@ export class SubAgentRegistry {
   }
 
   /**
-   * The *wrapped* tool names contributed by a given plugin in the most recent
-   * collection. Each entry passes through `computeSubAgentToolName` — the
+   * The *wrapped* tool names of the boot-time sub-agents a given plugin
+   * contributes. Each entry passes through `computeSubAgentToolName` — the
    * same transform `createSubagentAsTool` applies — so the names returned
    * here match what the agent will actually see.
    */
@@ -420,7 +437,7 @@ export class SubAgentRegistry {
    * message names both plugin names so the boot log points at the conflict.
    */
   assertNoCollisions(): void {
-    if (this.collectedNames === null && this.bootCache === null) {
+    if (this.bootCache === null) {
       throw new Error(
         'SubAgentRegistry.assertNoCollisions called before collect',
       );
@@ -520,17 +537,35 @@ export interface ManifestCrossCheckResult {
  */
 export class ManifestRegistry {
   private readonly entries: RegisteredManifest[] = [];
+  /** Plugin name → `operatingGuide`, kept apart from the manifests (never rendered with them). */
+  private readonly guides = new Map<string, string>();
 
   /**
    * Record a plugin's manifest. A fork-supplied `override` is merged shallowly
    * over the plugin's own manifest, so every downstream reader sees the
-   * effective manifest.
+   * effective manifest. A non-blank `operatingGuide` is recorded beside it.
    */
   register(plugin: OraclePlugin, override?: PluginManifestOverride): void {
     this.entries.push({
       pluginName: plugin.name,
       manifest: mergeManifestOverride(plugin.manifest, override),
     });
+    const guide = plugin.operatingGuide?.trim();
+    if (guide) this.guides.set(plugin.name, guide);
+  }
+
+  /** The plugin's operating guide, trimmed; `undefined` when it has none. */
+  operatingGuide(pluginName: string): string | undefined {
+    return this.guides.get(pluginName);
+  }
+
+  /** Every registered operating guide, by plugin name in code-point order. */
+  operatingGuides(): Array<{ pluginName: string; guide: string }> {
+    return [...this.guides]
+      .map(([pluginName, guide]) => ({ pluginName, guide }))
+      .sort((a, b) =>
+        a.pluginName < b.pluginName ? -1 : a.pluginName > b.pluginName ? 1 : 0,
+      );
   }
 
   /** Registered manifests in registration order. */
