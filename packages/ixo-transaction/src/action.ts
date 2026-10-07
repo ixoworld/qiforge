@@ -2,9 +2,12 @@ import { z } from 'zod';
 
 import {
   ITrxMsgSchema,
+  MAX_BATCH_MESSAGES,
+  MAX_BATCH_SUMMARY_LENGTH,
   NetworkSchema,
   RiskConfirmationSchema,
   TestnetReceiptSchema,
+  TransactionBatchSchema,
   TransactionDraftSchema,
   type ITrxMsg,
   type Network,
@@ -12,6 +15,7 @@ import {
 import {
   describeValidationError,
   validateMessage,
+  validateTransactionBatch,
   validateTransactionDraft,
   type ValidationOptions,
 } from './validate.js';
@@ -54,28 +58,116 @@ export const IntentActionMetadataSchema = z
   })
   .strict();
 
+export type IntentActionMetadata = z.infer<typeof IntentActionMetadataSchema>;
+
+const MsgTypeUrlSchema = IntentActionMetadataSchema.shape.typeUrl;
+
+/**
+ * The intent of a batch request: what the batch does as a whole, and the
+ * catalog route of each of its messages, in order.
+ */
+export const BatchIntentSchema = z
+  .object({
+    source: z.literal('batch'),
+    summary: z.string().trim().min(1).max(MAX_BATCH_SUMMARY_LENGTH),
+    messages: z
+      .array(
+        z
+          .object({
+            module: z.string().min(1),
+            action: z.string().min(1),
+            messageName: z.string().min(1),
+            typeUrl: MsgTypeUrlSchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(MAX_BATCH_MESSAGES),
+  })
+  .strict();
+
+export type BatchIntent = z.infer<typeof BatchIntentSchema>;
+
+/**
+ * The `sign_transaction` action args. Two forms, told apart by
+ * `intent.source`:
+ *
+ * - a single message (a conversational draft): exactly one message, whose
+ *   route `intent` describes; mainnet needs a `testnetReceipt`;
+ * - a batch (`intent.source: 'batch'`): 1 to `MAX_BATCH_MESSAGES` catalogued
+ *   messages signed together in one wallet transaction; `intent.messages`
+ *   names each message's route in order; no `testnetReceipt`.
+ *
+ * Either way the Portal validates every message against the catalog and the
+ * risks and level cover every message.
+ */
 export const SignTransactionActionArgsSchema = z
   .object({
     action: z.literal(SIGN_TRANSACTION_ACTION_NAME),
     network: NetworkSchema,
     /** The chain the transaction is for; the Portal refuses any other. */
     chainId: ChainIdSchema,
-    // One message per signing request: the oracle validates and the user
-    // reviews exactly one transaction at a time.
-    messages: z.array(ITrxMsgSchema).length(1),
+    messages: z.array(ITrxMsgSchema).min(1).max(MAX_BATCH_MESSAGES),
     memo: z.string().optional(),
-    intent: IntentActionMetadataSchema,
+    intent: z.discriminatedUnion('source', [
+      IntentActionMetadataSchema,
+      BatchIntentSchema,
+    ]),
     risks: z.array(z.string()),
     riskLevel: z.enum(['low', 'medium', 'high', 'critical']),
     requiresConfirmation: z.boolean(),
     riskConfirmation: RiskConfirmationSchema.optional(),
     testnetReceipt: TestnetReceiptSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((args, ctx) => {
+    if (args.intent.source !== 'batch') {
+      // A conversational draft: the oracle validates and the user reviews
+      // exactly one message at a time.
+      if (args.messages.length !== 1) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['messages'],
+          message:
+            "A single-message request carries exactly one message; several are sent as a batch (intent.source 'batch')",
+        });
+      }
+      return;
+    }
+    const named = args.intent.messages.map((route) => route.typeUrl);
+    const sent = args.messages.map((message) => message.typeUrl);
+    if (
+      named.length !== sent.length ||
+      named.some((typeUrl, index) => typeUrl !== sent[index])
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['intent', 'messages'],
+        message: 'The batch intent must name every message, in order',
+      });
+    }
+    if (args.testnetReceipt !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['testnetReceipt'],
+        message: 'A batch carries no testnet receipt',
+      });
+    }
+  });
 
 export type SignTransactionActionArgs = z.infer<
   typeof SignTransactionActionArgsSchema
 >;
+
+/** The single-message form, as `buildSignTransactionActionArgs` returns it. */
+export type SingleSignTransactionActionArgs = SignTransactionActionArgs & {
+  intent: IntentActionMetadata;
+};
+
+/** The batch form, as `buildBatchSignTransactionActionArgs` returns it. */
+export type BatchSignTransactionActionArgs = SignTransactionActionArgs & {
+  intent: BatchIntent;
+};
 
 export const SignTransactionActionResultSchema = z
   .object({
@@ -143,20 +235,25 @@ function readNumberField(
  * Validate a draft for signing (risk gate on, mainnet gate as configured) and
  * render the `sign_transaction` action args the Portal handler receives.
  */
+export type BuildSignTransactionOptions = Pick<
+  ValidationOptions,
+  'allowMainnet'
+> & {
+  /** Chain id per network; `DEFAULT_CHAIN_IDS` when omitted. */
+  chainIds?: Readonly<Record<Network, string>>;
+};
+
 export function buildSignTransactionActionArgs(
   input: unknown,
-  options: Pick<ValidationOptions, 'allowMainnet'> & {
-    /** Chain id per network; `DEFAULT_CHAIN_IDS` when omitted. */
-    chainIds?: Readonly<Record<Network, string>>;
-  } = {},
-): SignTransactionActionArgs {
+  options: BuildSignTransactionOptions = {},
+): SingleSignTransactionActionArgs {
   const draft = TransactionDraftSchema.parse(input);
   const validated = validateTransactionDraft(draft, {
     requireRiskConfirmation: true,
     allowMainnet: options.allowMainnet,
   });
 
-  return SignTransactionActionArgsSchema.parse({
+  const args = SignTransactionActionArgsSchema.parse({
     action: SIGN_TRANSACTION_ACTION_NAME,
     network: validated.network,
     chainId: (options.chainIds ?? DEFAULT_CHAIN_IDS)[validated.network],
@@ -169,6 +266,49 @@ export function buildSignTransactionActionArgs(
     riskConfirmation: draft.riskConfirmation,
     testnetReceipt: draft.testnetReceipt,
   });
+  const { intent } = args;
+  if (intent.source === 'batch') {
+    throw new Error('A conversational draft never builds a batch');
+  }
+  return { ...args, intent };
+}
+
+/**
+ * Validate a batch for signing (`validateTransactionBatch` with the risk gate
+ * on and the mainnet gate as configured) and render the batch form of the
+ * `sign_transaction` action args: every message in one wallet transaction.
+ */
+export function buildBatchSignTransactionActionArgs(
+  input: unknown,
+  options: BuildSignTransactionOptions = {},
+): BatchSignTransactionActionArgs {
+  const batch = TransactionBatchSchema.parse(input);
+  const validated = validateTransactionBatch(batch, {
+    requireRiskConfirmation: true,
+    allowMainnet: options.allowMainnet,
+  });
+
+  const args = SignTransactionActionArgsSchema.parse({
+    action: SIGN_TRANSACTION_ACTION_NAME,
+    network: validated.network,
+    chainId: (options.chainIds ?? DEFAULT_CHAIN_IDS)[validated.network],
+    messages: validated.messages,
+    memo: validated.memo,
+    intent: {
+      source: 'batch',
+      summary: validated.summary,
+      messages: validated.routes,
+    },
+    risks: validated.risks,
+    riskLevel: validated.riskLevel,
+    requiresConfirmation: validated.requiresConfirmation,
+    riskConfirmation: batch.riskConfirmation,
+  });
+  const { intent } = args;
+  if (intent.source !== 'batch') {
+    throw new Error('A batch always builds the batch form');
+  }
+  return { ...args, intent };
 }
 
 /**
@@ -229,12 +369,12 @@ export interface WalletSigningOptions {
 }
 
 /**
- * The Portal side of `sign_transaction`: re-validate the action args and the
- * message itself against the catalog (known typeUrl, exactly its fields, each
+ * The Portal side of `sign_transaction`: re-validate the action args and
+ * every message against the catalog (known typeUrl, exactly its fields, each
  * of its kind), refuse a transaction for another chain than the wallet's,
- * hand the message to the wallet and summarise its answer. Never throws — a
- * failure is `{ success: false, error }`, which the oracle receives as a
- * failed action.
+ * hand the messages to the wallet in one transaction — one message, or every
+ * message of a batch — and summarise its answer. Never throws — a failure is
+ * `{ success: false, error }`, which the oracle receives as a failed action.
  */
 export async function signIxoTransactionWithWallet(
   input: unknown,

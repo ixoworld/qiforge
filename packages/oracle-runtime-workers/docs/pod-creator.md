@@ -80,7 +80,7 @@ an approval gate).
 | ---------------------------- | ----------------------------------------- | ---------------------------------------- | ------------------------ |
 | `KvBlueprintStore`           | `ctx.kv` `pod-creator/blueprints`         | one blueprint per thread                 | 500 entries / 24 h idle  |
 | `KvCreateSessionStore`       | `ctx.kv` `pod-creator/create-sessions`    | propose→approve state per (user, thread) | 1000 entries / 1 h idle  |
-| unsigned tx bytes            | `ctx.blobStore` (object storage, not SQL) | the prepared batch                       | 1 h TTL                  |
+| prepared batch               | `ctx.blobStore` (object storage, not SQL) | the batch's validated proto-JSON         | 1 h TTL                  |
 | `CapsuleContentClient` cache | plugin instance (isolate memory)          | SKILL.md per capsule name (public text)  | 64 / 6 h; failures 5 min |
 
 On a host without `ctx.kv` every tool fails with a clear error rather than
@@ -90,9 +90,15 @@ nothing.
 ## The create path
 
 A propose → approve → commit handoff (`create-tools.ts` +
-`create-session-store.ts`). The unsigned transaction bytes never enter model
-context: `prepare` stashes them in `ctx.blobStore` (per-user, 1 h TTL) and the
-model only ever sees a short `blobId`.
+`create-session-store.ts`). `prepare` has the gateway compose the batch as
+proto-JSON messages, validates every message against the
+`@ixo/ixo-transaction` catalog (the check the Portal runs again before the
+wallet sees it) and that the batch is a POD batch (`podBatchProblem`: exactly
+one `MsgCreateEntity`, first, and only `POD_BATCH_TYPE_URLS`), and stashes it
+in `ctx.blobStore` (per-user, 1 h TTL, name `pod-batch-messages`). A gateway
+batch that fails either check is an error at `prepare`, before the user is
+asked anything. The message values never enter model context: the model sees
+a short `blobId`, the summary, the message names and every risk.
 
 ```mermaid
 stateDiagram-v2
@@ -113,8 +119,12 @@ Safety properties, in order of enforcement:
    mainnet unless `POD_CREATOR_ALLOW_MAINNET=true`. The base env schema
    defaults `NETWORK` to `mainnet`, so an oracle that sets neither gets a
    refusal, never a mainnet batch.
-3. **Exact-batch approval** — `approve` binds to the blobId prepared for this
-   (user, thread); a batch prepared elsewhere cannot be approved here.
+3. **Exact-batch approval, risks accepted** — `approve` binds to the blobId
+   prepared for this (user, thread); a batch prepared elsewhere cannot be
+   approved here. It also needs `riskConfirmation` quoting, word for word,
+   every risk `prepare` listed (each message's catalog risks, as
+   `sign_ixo_transaction` requires of one message); a paraphrase or a missing
+   risk is refused.
 4. **Approval in a later turn** — the create session records the request
    that prepared the batch, and `approve` refuses within that request. One
    model turn therefore cannot run prepare → approve → sign by itself (for
@@ -128,15 +138,16 @@ Safety properties, in order of enforcement:
    batch was prepared). `start_pod_design({ restart: true })` also clears the
    create session, so nothing prepared from a discarded design stays approvable.
 6. **Single-use approval** — `request_pod_signature` consumes the approval
-   before dispatching, so a sign request can never be replayed; every dispatch
-   needs a fresh approval (also across an object reset: the approval state is
-   durable).
-7. **Wallet signature** — the real human gate. The user reviews and signs the
-   batch in their own wallet; nothing reaches the chain without it. The oracle
-   only ever produces unsigned bytes and hands the wallet exactly the bytes the
-   gateway built (`create-tools.test.ts` › "the oracle never signs a POD
-   creation" — auth minting by the gateway is allowed, signing or
-   broadcasting is not).
+   right before dispatching, so a sign request can never be replayed; every
+   dispatch needs a fresh approval (also across an object reset: the approval
+   state is durable). When no Portal browser is connected nothing is sent and
+   the approval is kept.
+7. **Wallet signature** — the real human gate. The Portal re-validates every
+   message against the catalog and the user reviews and signs the batch in
+   their own wallet; nothing reaches the chain without it. The oracle never
+   encodes or signs: it hands the wallet exactly the messages the gateway
+   composed (`create-tools.test.ts` › "the oracle never signs a POD creation"
+   — auth minting by the gateway is allowed, signing or broadcasting is not).
 
 Every step writes an audit line via `ctx.logger`
 (`[pod-creator] prepared/approved/signed/confirmed …` with user DID, thread,
@@ -151,21 +162,50 @@ not dispatched to the wallet a second time.
 
 ### The `sign_transaction` round-trip
 
-`request_pod_signature` uses `ctx.frontend.callAgAction` — the realtime
-(socket.io) bridge the agui plugin uses — with a 120 s deadline:
+The POD Creator sends the **same `sign_transaction` contract as
+[`IxoTransactionPlugin`](ixo-transaction.md#the-portal-handler-contract)**, in
+its batch form, so one Portal handler —
+`useIxoTransactionSigningAction({ chainId })` from
+`@ixo/ixo-transaction/react` — serves both. The dispatch and the reading of
+the answer are shared code (`src/plugins/ixo-transaction/wallet-signing.ts`),
+over `ctx.frontend.callAgAction` with a 120 s deadline and the turn's abort
+signal.
 
-- **Action name:** `sign_transaction` (exported as `SIGN_TRANSACTION_ACTION`).
-- **Args to the client:** `{ blobId, unsignedTx, network }` — the bytes ride
-  the realtime channel, not model context.
-- **Expected result:** `{ txHash }` (64-hex) after the wallet signs and
-  broadcasts.
-- **Timeout, rejection, no connected browser, or a host without a realtime
-  channel:** the tool returns a graceful message; the approval stays spent, so
-  retrying requires a fresh approve.
+- **Action name:** `sign_transaction` (`SIGN_TRANSACTION_ACTION` is the
+  package's `SIGN_TRANSACTION_ACTION_NAME`).
+- **Args to the client:** `buildBatchSignTransactionActionArgs` over the
+  stored batch —
+  `{ action, network, chainId, messages, intent: { source: 'batch', summary, messages: [{ module, action, messageName, typeUrl }] }, risks, riskLevel, requiresConfirmation, riskConfirmation }`,
+  no `testnetReceipt`. `chainId` is the configured network's
+  (`IXO_TRANSACTION_CHAIN_ID_*`, shared with `IxoTransactionPlugin`;
+  defaults `devnet-1` / `pandora-8` / `ixo-5`); `riskConfirmation` carries
+  every risk, which `approve_pod_transaction` checked word for word against
+  this same stored batch. The messages ride the realtime channel, not model
+  context.
+- **Portal side:** the handler re-validates every message against the
+  catalog, refuses another chain than its wallet's, decodes each message
+  with the SDK's `fromJSON` and signs all of them in **one** `transactSignX`
+  call — one transaction, all or nothing on chain.
+- **Result:** `SignTransactionActionResultSchema` (or a raw wallet answer
+  through `normalizeWalletSignResult`), reported as:
 
-The Portal must register the action client-side
-(`useAgAction('sign_transaction', …)`) and hold the realtime channel open for
-the session; until it does, the tool reports the wallet didn't respond.
+| `status`      | When                                                                                                        | Approval     | Next                                                             |
+| ------------- | ----------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------- |
+| `signed`      | Signed and included with code 0; `txHash`, `code`, `height` when the wallet gave them                       | spent        | `confirm_pod_creation({ txHash })`; without a hash, ask the user |
+| `failed`      | Included in a block with a non-zero code: nothing was created; `code`, `txHash`, `height` and the chain log | spent        | fix the cause, `prepare_pod_transaction` again                   |
+| `rejected`    | The call failed and the Portal's error says the user declined                                               | spent        | the user confirms again → approve → sign                         |
+| `error`       | Any other refusal (chain mismatch, a message the Portal refused, a wallet error)                            | spent        | as `rejected`                                                    |
+| `timeout`     | No answer: deadline, the Portal tab's socket gone, or the turn aborted after sending. `outcome: 'unknown'`  | spent        | do not send again; ask the user whether it went through          |
+| `unavailable` | No realtime channel or no Portal browser connected (nothing sent), or no `sign_transaction` handler         | kept / spent | open the chat in the Portal and call again                       |
+
+A `timeout` carries `outcome: 'unknown'` (the bridge's
+`FRONTEND_OUTCOME_UNKNOWN` answer), worded exactly as `sign_ixo_transaction`
+words it: the tool-execution middleware keeps the write claim, so an
+identical request in a later turn is answered "outcome unknown, verify first"
+instead of reaching the wallet again. `rejected` is read only from the
+Portal's error text, never from a chain log. The approval is kept only when
+nothing could be sent (no channel, no browser); once the request is sent it
+is spent whatever the answer.
 
 ## Wiring for production
 
@@ -173,52 +213,116 @@ Two injectable seams on `PodCreatorPluginOptions` (the class is exported from
 the package root, so a fork constructs its own instance and passes it in
 `plugins: [...]` in place of the bundled singleton):
 
-- **`chainGateway`** — builds the unsigned POD batch and resolves a broadcast
-  tx. The planned binding calls the IXO MCP server over the runtime's
-  remote-MCP pattern: resolve the server's `did:web`, mint a per-user `ixo:*`
-  UCAN invocation via `ctx.ucan`, send it as the `Authorization` header (see
-  the sandbox plugin). The bundled default reports on-chain creation as
-  unavailable — it never throws into the retry loop. The plugin itself has no
-  chain dependency (no `@ixo/oracles-chain-client`, no cosmjs): a gateway
-  implementation that needs one should import it lazily inside its methods so
-  the published runtime does not carry it.
+- **`chainGateway`** — composes the POD batch and resolves a broadcast tx:
+
+  ```ts
+  interface ChainGateway {
+    preparePodBatch(
+      input: { blueprint: ServicePodBlueprint; network: Network },
+      ctx: RuntimeContext,
+    ): Promise<{
+      messages: ITrxMsg[];
+      summary: string;
+      estimatedCost?: string;
+    }>;
+    confirmPodCreation(
+      input: { txHash: string; network: Network },
+      ctx: RuntimeContext,
+    ): Promise<{ podDid: string; summary: string }>;
+  }
+  ```
+
+  `messages` are proto-JSON `{ typeUrl, value }` (camelCase fields, integer
+  amounts as strings, bytes as base64) with exactly the fields of their
+  `@ixo/ixo-transaction` catalog entry, at most `MAX_BATCH_MESSAGES` (16),
+  `MsgCreateEntity` first and only `POD_BATCH_TYPE_URLS`:
+  `MsgCreateEntity`, `MsgCreateEntityAccount`, `MsgCreateCollection`,
+  `MsgCreateClaimAuthorization`, `MsgGrantEntityAccountAuthz` (whose
+  authorization is the catalog's allowlist: generic or bank-send, as
+  structured JSON). `summary` is at most 1000 characters. Never encoded
+  bytes: the Portal signs only messages it can show and re-validate. The
+  planned binding calls the IXO MCP server over the runtime's remote-MCP
+  pattern: resolve the server's `did:web`, mint a per-user `ixo:*` UCAN
+  invocation via `ctx.ucan`, send it as the `Authorization` header (see the
+  sandbox plugin). The bundled default (`notConfiguredChainGateway`) throws
+  "ChainGateway not configured" from both methods, and the tools report
+  on-chain creation as unavailable without calling it. The plugin itself
+  has no chain dependency (no `@ixo/oracles-chain-client`, no cosmjs): a
+  gateway implementation that needs one should import it lazily inside its
+  methods so the published runtime does not carry it.
+
+  **What a gateway has to get right.** The chain runs the messages of one
+  transaction in order and keeps none of them if one fails. Later messages
+  name what earlier ones create, and the chain assigns those values while the
+  transaction runs: the entity DID is `did:ixo:entity:` + the MD5 of
+  `<nft contract>/<entity create sequence>` (ixo-blockchain
+  `x/entity/keeper/msg_server.go`), the collection id is the claims module's
+  collection sequence, and the collection admin is the entity's `admin`
+  account. A gateway has to predict them from chain state at prepare time;
+  when another creation lands first, the transaction fails as a whole
+  (`failed`, fees spent, nothing created) and the user prepares again.
+
 - **`capsuleContentFetcher`** — see above.
 
 Config: `POD_CREATOR_ALLOW_MAINNET` (plugin-owned, default `false`; the
-string `'true'` from a Worker var is accepted); `NETWORK` and
-`SKILLS_CAPSULES_BASE_URL` are read as siblings (owned by the base schema /
-skills plugin). The create path uses `NETWORK`; the capsule client falls back
-to `testnet` only when the config is unreadable.
+string `'true'` from a Worker var is accepted) and the chain ids
+`IXO_TRANSACTION_CHAIN_ID_DEVNET` / `_TESTNET` / `_MAINNET` (the
+ixo-transaction plugin's own schema objects, declared by both plugins, so
+one set of variables configures both and the boot reports no collision);
+`NETWORK` and `SKILLS_CAPSULES_BASE_URL` are read as siblings (owned by the
+base schema / skills plugin). The create path uses `NETWORK`; the capsule
+client falls back to `testnet` only when the config is unreadable.
+`request_pod_signature` refuses when either `NETWORK` or the stored batch's
+network is mainnet without the opt-in, before spending the approval.
 
 ## Differences from the Node implementation (pull request 210)
 
-| Node                                                                          | Workers                                                           | Why                                                                                                                                          |
-| ----------------------------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `InMemoryBlueprintStore`, `InMemoryCreateSessionStore` on the plugin instance | `KvBlueprintStore`, `KvCreateSessionStore` over `ctx.kv`          | The user object is evicted and restored from its owner copy; process memory would lose the design. Same LRU / idle-TTL limits, now per user. |
-| Stores passed to the tool factories                                           | Store **resolvers** `(ctx) => store`                              | The store is per user (per Durable Object), so it is resolved from each call's context, never from the context that built the tools.         |
-| In-place read-modify-write                                                    | Atomic `ctx.kv.update` (SQLite transaction)                       | SQLite access is async; without it, parallel `submit_section` calls lose sections (proven by `user-kv-store.test.ts`).                       |
-| `callAgAction` from `@ixo/common` (WS gateway)                                | `ctx.frontend.callAgAction` (realtime channel), `hasClient` check | The Workers runtime's AG-UI bridge.                                                                                                          |
-| `node:crypto` `randomUUID`                                                    | global `crypto.randomUUID`                                        | workerd.                                                                                                                                     |
-| `ixo:skills` mint without an ability                                          | mint claiming `skills/*`                                          | On Workers an unqualified mint claims `'*'`, which only a `'*'` grant covers (same as the Workers skills plugin).                            |
-| Capsule cache keyed by thread, failures never cached                          | keyed by capsule name; failures remembered 5 min, logged once     | The endpoint serves public content only; a per-turn retry of an unpublished capsule would cost a request and a log line on every turn.       |
-| Default fetcher that throws (UCAN mint + warn on every build)                 | no fetcher → built-in prompt at once, no mint, no log             | The sub-agent hook runs on every turn of every user.                                                                                         |
-| Qualify specialist offered before any design exists                           | no specialists until `start_pod_design`                           | Same reason: no per-turn work for users who never asked for a POD.                                                                           |
-| Approval accepted in the turn that prepared the batch                         | refused in that turn                                              | One model turn must not reach the wallet prompt on its own.                                                                                  |
-| Signature requested on any approved batch                                     | launch gate re-checked; restart clears the session                | A batch from a discarded or re-opened design must not reach the wallet.                                                                      |
-| Default fetcher only                                                          | + opt-in `createRegistryInstructionsFetcher()` (64 KB cap)        | The registry content endpoint was confirmed (`/skills/{name}/instructions`); the bundled default is unchanged.                               |
-| Undeclared tool effects                                                       | `effect: 'read'` on the four pure reads                           | Durable runs re-run reads after a reset and never repeat writes.                                                                             |
-| Bundled in `BUNDLED_PLUGINS`                                                  | Bundled in `BUNDLED_WORKERS_PLUGINS`                              | Same; on-demand, so inert until loaded.                                                                                                      |
+| Node                                                                                                                     | Workers                                                                                                                            | Why                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InMemoryBlueprintStore`, `InMemoryCreateSessionStore` on the plugin instance                                            | `KvBlueprintStore`, `KvCreateSessionStore` over `ctx.kv`                                                                           | The user object is evicted and restored from its owner copy; process memory would lose the design. Same LRU / idle-TTL limits, now per user. |
+| Stores passed to the tool factories                                                                                      | Store **resolvers** `(ctx) => store`                                                                                               | The store is per user (per Durable Object), so it is resolved from each call's context, never from the context that built the tools.         |
+| In-place read-modify-write                                                                                               | Atomic `ctx.kv.update` (SQLite transaction)                                                                                        | SQLite access is async; without it, parallel `submit_section` calls lose sections (proven by `user-kv-store.test.ts`).                       |
+| `callAgAction` from `@ixo/common` (WS gateway)                                                                           | `ctx.frontend.callAgAction` (realtime channel), `hasClient` check                                                                  | The Workers runtime's AG-UI bridge.                                                                                                          |
+| `node:crypto` `randomUUID`                                                                                               | global `crypto.randomUUID`                                                                                                         | workerd.                                                                                                                                     |
+| `ixo:skills` mint without an ability                                                                                     | mint claiming `skills/*`                                                                                                           | On Workers an unqualified mint claims `'*'`, which only a `'*'` grant covers (same as the Workers skills plugin).                            |
+| Capsule cache keyed by thread, failures never cached                                                                     | keyed by capsule name; failures remembered 5 min, logged once                                                                      | The endpoint serves public content only; a per-turn retry of an unpublished capsule would cost a request and a log line on every turn.       |
+| Default fetcher that throws (UCAN mint + warn on every build)                                                            | no fetcher → built-in prompt at once, no mint, no log                                                                              | The sub-agent hook runs on every turn of every user.                                                                                         |
+| Qualify specialist offered before any design exists                                                                      | no specialists until `start_pod_design`                                                                                            | Same reason: no per-turn work for users who never asked for a POD.                                                                           |
+| Approval accepted in the turn that prepared the batch                                                                    | refused in that turn                                                                                                               | One model turn must not reach the wallet prompt on its own.                                                                                  |
+| Signature requested on any approved batch                                                                                | launch gate re-checked; restart clears the session                                                                                 | A batch from a discarded or re-opened design must not reach the wallet.                                                                      |
+| Default fetcher only                                                                                                     | + opt-in `createRegistryInstructionsFetcher()` (64 KB cap)                                                                         | The registry content endpoint was confirmed (`/skills/{name}/instructions`); the bundled default is unchanged.                               |
+| Undeclared tool effects                                                                                                  | `effect: 'read'` on the four pure reads                                                                                            | Durable runs re-run reads after a reset and never repeat writes.                                                                             |
+| Gateway returns base64 unsigned tx bytes; `sign_transaction` args `{ blobId, unsignedTx, network }`, result `{ txHash }` | Gateway returns proto-JSON messages; the ixo-transaction `sign_transaction` batch form and result contract                         | The Portal signs only messages it can show and validate; one handler serves both wallet-signing plugins.                                     |
+| Approval without risks                                                                                                   | Approval quotes every risk of every message                                                                                        | Same risk gate as `sign_ixo_transaction`.                                                                                                    |
+| Every failure "did not complete", approval spent                                                                         | `signed` / `failed` / `rejected` / `error` / `timeout` (unknown, claim kept) / `unavailable` (approval kept when nothing was sent) | A lost answer must not read as a failure: the wallet may still sign.                                                                         |
+| Bundled in `BUNDLED_PLUGINS`                                                                                             | Bundled in `BUNDLED_WORKERS_PLUGINS`                                                                                               | Same; on-demand, so inert until loaded.                                                                                                      |
 
 ## Tests
 
-- `pnpm test:core` — `src/plugins/pod-creator/*.test.ts` (bounded map,
+- `pnpm test` (workerd) — `src/plugins/pod-creator/*.test.ts` (bounded map,
   blueprint store, create-session store, capsule client + registry fetcher,
   stage, orchestration tools, sub-agents, create tools, plugin boot through
-  `createRuntimeCore`) and `src/core/user-kv.test.ts`.
-- `pnpm test` (workerd) — `src/sqlite/user-kv-store.test.ts`: `ctx.kv` over
-  real DO SQLite (TTL, LRU, atomic updates, eviction) and the plugin driven
-  through its own tools and sub-agents across an eviction and across an
-  owner-copy wipe + re-import.
+  `createRuntimeCore`). `request-pod-signature.test.ts` drives the create
+  path through the plugin's own tools against a fake AG-UI bridge over the
+  real `FrontendCallRegistry`: the dispatched args are exactly
+  `buildBatchSignTransactionActionArgs` of the stored batch and pass the
+  package's own Portal-side check (`signIxoTransactionWithWallet`, one
+  wallet call for the whole batch); every outcome; a lost socket and an
+  abort after dispatch as an unknown outcome that keeps the write claim
+  (`uncertainResultReason`); the approval kept when no browser is
+  connected; the chain id per network and its shared overrides; the mainnet
+  gate at prepare and at signing; the not-configured gateway; and booting
+  beside `IxoTransactionPlugin` without a key collision.
+  `create-tools.test.ts` covers the gateway batch being refused at prepare
+  (outside the catalog, or not a POD batch) and the word-for-word risk
+  acceptance at approve. Also `src/sqlite/user-kv-store.test.ts`: `ctx.kv`
+  over real DO SQLite (TTL, LRU, atomic updates, eviction) and the plugin
+  driven through its own tools and sub-agents across an eviction and across
+  an owner-copy wipe + re-import.
+- `pnpm test:core` — `src/core/user-kv.test.ts`.
+- `pnpm --filter @ixo/ixo-transaction test` — the batch form itself
+  (`tests/batch.test.ts`) with a POD-shaped batch, and the Portal handler
+  decoding and signing it in one call (`tests/react-handler.test.ts`).
 - `pnpm test:e2e:pod` (example app, real model, local harness) — capability
   load, `start_pod_design`, the qualify specialist as a sub-agent, the
   blueprint after `/debug/object/abort` and after `/debug/storage/reset`, and

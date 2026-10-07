@@ -135,7 +135,12 @@ the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
 mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
 unset, the create path refuses ([pod-creator](pod-creator.md)); the opt-in
 wallet-signing plugin's variables, including `IXO_TRANSACTION_ALLOW_MAINNET`,
-are described in [ixo-transaction](ixo-transaction.md#configuration).
+are described in [ixo-transaction](ixo-transaction.md#configuration). The
+`IXO_TRANSACTION_CHAIN_ID_DEVNET` / `_TESTNET` / `_MAINNET` chain ids are
+declared by both wallet-signing plugins (the same schema objects, so the
+boot does not report them as a collision): one set of variables names the
+chain for `sign_ixo_transaction` and for the POD Creator's
+`request_pod_signature`, whichever plugins the oracle loads.
 
 ### Identity and auth
 

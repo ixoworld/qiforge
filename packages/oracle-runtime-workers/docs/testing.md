@@ -19,12 +19,17 @@ iterating and the full matrix once at the end.
   gate in a real turn, every signing outcome against a fake AG-UI bridge
   over the real `FrontendCallRegistry`, the timeout keeping the write claim
   across turns, the chain id on every request, the mainnet receipt check,
-  mainnet off by default).
+  mainnet off by default), and the pod-creator suites
+  (`src/plugins/pod-creator/*.test.ts`, listed in
+  [pod-creator](pod-creator.md#tests); `request-pod-signature.test.ts`
+  drives the batch form of the same `sign_transaction` contract against the
+  same fake bridge, every outcome included).
 - `pnpm test:core` — plain-Node suites (`vitest.core.config.ts`): plugin
   loader, env composition, registries, middlewares, prompt composer, a full
   tool-calling turn against a fake model, the memory indexer, the
   attachment pipeline, and the bundled-plugin tests that mock the MCP and
-  Composio SDKs (every plugin outside `editor/` and `flows/`).
+  Composio SDKs (every plugin outside `editor/`, `flows/`,
+  `ixo-transaction/` and `pod-creator/`).
 - `src/core/**` suites run in both projects. That is how the Decision tests
   prove their contract on workerd as well as Node: `src/core/decisions.test.ts`
   covers provider wiring, routing, provenance and applicability, and

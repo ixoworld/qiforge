@@ -51,7 +51,10 @@ The chain id defaults are what each network's RPC reported in
 chain id, so the plugin keeps its own map; override an entry when a chain
 upgrade changes the id. One variable per network (rather than one chain id
 for the oracle) because one oracle prepares both the testnet run and the
-mainnet run of the same transaction.
+mainnet run of the same transaction. The POD Creator declares the same three
+variables (the same schema objects, `src/plugins/ixo-transaction/chain-ids.ts`,
+so the boot does not report them as a collision): one set names the chain
+for both plugins' signing requests.
 
 There is no key, mnemonic or endpoint to configure: the plugin makes no network
 request of its own.
@@ -163,35 +166,49 @@ It registers the `sign_transaction` AG-UI action with `exposeToAgent: false`
 with the turn's `agActions`, so the model cannot call it — only
 `sign_ixo_transaction` reaches it.
 
-On `action_call` with `toolName: 'sign_transaction'` the oracle sends:
+On `action_call` with `toolName: 'sign_transaction'` the oracle sends
+(`SignTransactionActionArgsSchema`):
 
 ```ts
 {
   action: 'sign_transaction';
   network: 'devnet' | 'testnet' | 'mainnet';
   chainId: string; // e.g. 'pandora-8'
-  messages: [{ typeUrl: string; value: Record<string, unknown> }]; // exactly one, proto-JSON
+  messages: { typeUrl: string; value: Record<string, unknown> }[]; // proto-JSON; see the two forms below
   memo?: string;
-  intent: { source; module; action; messageName; typeUrl; confidence; ambiguities };
+  intent:
+    | { source: 'slash-command' | 'natural-language' | 'type-url' | 'explicit-route'; module; action; messageName; typeUrl; confidence; ambiguities }
+    | { source: 'batch'; summary: string; messages: { module; action; messageName; typeUrl }[] };
   risks: string[];
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   requiresConfirmation: boolean;
   riskConfirmation?: { confirmed: true; acceptedRisks: string[] };
-  testnetReceipt?: { transactionHash: string; receiptId: string }; // mainnet only
+  testnetReceipt?: { transactionHash: string; receiptId: string }; // single form, mainnet only
 }
 ```
 
+`intent.source` tells the two forms apart:
+
+- **Single message** (a conversational draft, `sign_ixo_transaction`):
+  exactly one message, whose route `intent` describes.
+- **Batch** (`intent.source: 'batch'`, the POD Creator's
+  `request_pod_signature`): 1 to `MAX_BATCH_MESSAGES` (16) messages signed
+  together in one wallet transaction; `intent.messages` names each message's
+  route in order and must match `messages`; no `testnetReceipt`. See
+  [The batch form](#the-batch-form).
+
 The handler:
 
-1. validates the args (exactly one message), and the message itself against
-   the catalog: a known typeUrl, exactly its fields, each of its kind, nested
-   messages included — the same check the oracle ran, so a tampered or
-   mis-built message never reaches the wallet;
+1. validates the args, and every message against the catalog: a known
+   typeUrl, exactly its fields, each of its kind, nested messages included —
+   the same check the oracle ran, so a tampered or mis-built message never
+   reaches the wallet; one bad message refuses the whole request;
 2. refuses a `chainId` other than the one it was given;
-3. decodes the message with the IXO SDK's generated `fromJSON` (bytes, `Long`,
-   `Timestamp`), encoding an allowlisted authorization into the grant's `Any`
-   with the SDK codec;
-4. calls `transactSignX(messages, memo)` and answers `action_call_result`.
+3. decodes every message with the IXO SDK's generated `fromJSON` (bytes,
+   `Long`, `Timestamp`), encoding an allowlisted authorization into the
+   grant's `Any` with the SDK codec;
+4. calls `transactSignX(messages, memo)` once — one transaction for one
+   message or a whole batch — and answers `action_call_result`.
 
 Results:
 
@@ -207,6 +224,43 @@ would lose the hash and code. The handler never forwards the wallet's own
 response object: a cosmjs `DeliverTxResponse` carries `bigint` fields that
 socket.io cannot serialise. A Portal with its own handler must keep to the
 same result shape.
+
+## The batch form
+
+A caller that composes several messages itself — today only the POD
+Creator, whose chain gateway builds the entity, its claim collection and the
+grants — signs them as one transaction (all or nothing on chain) through the
+same action and the same Portal handler. Conversational drafts stay single:
+`TransactionDraftSchema` has no `messages`, and
+`validate_ixo_transaction_draft` / `sign_ixo_transaction` take one message.
+
+- `TransactionBatchSchema` — strict: `messages` (1–16), `summary` (1–1000
+  characters), `memo?`, `network` (default testnet), `riskConfirmation?`.
+- `validateTransactionBatch(input, { allowMainnet, requireRiskConfirmation })`
+  — every message through `validateMessage`; `risks` are every message's
+  catalog risks, each once, in message order; `riskLevel` is the highest;
+  `requiresConfirmation` is true when any message is risky; with
+  `requireRiskConfirmation` every risk must be accepted word for word, as
+  for one message. Mainnet needs `allowMainnet`. There is no testnet receipt:
+  the receipt check proves "the same message was signed on testnet", which a
+  batch that creates new entities cannot repeat; each caller owns its
+  mainnet policy (the POD Creator's is `POD_CREATOR_ALLOW_MAINNET`).
+- `buildBatchSignTransactionActionArgs(input, { allowMainnet, chainIds })` —
+  validates with the risk gate on and renders the batch form of the args.
+
+The bound (16) keeps what the user reviews in one wallet prompt, and the
+transaction's size, small. It is a review bound, not a gas figure: a batch
+within it can still run out of gas; the chain's block gas limit was not
+checked against it.
+
+The catalog already holds every message the POD batch uses —
+`MsgCreateEntity`, `MsgCreateEntityAccount`, `MsgCreateCollection`,
+`MsgCreateClaimAuthorization` and `MsgGrantEntityAccountAuthz` — each
+checked against the SDK by `tests/catalog-sdk.test.ts`, so the batch added
+no catalog entries. The POD's claim authorizations go through
+`MsgCreateClaimAuthorization`, whose fields are all structured; an
+entity-account grant's `authorization` stays limited to the allowlist
+(generic, bank send).
 
 ## Risks to disclose
 
@@ -274,11 +328,18 @@ the first rule.
 - `pnpm --filter @ixo/ixo-transaction test` — the runtime-neutral package
   (`packages/ixo-transaction/tests/`): the catalog against the SDK version
   the lockfile resolves and its codec, intent routing, the proto-JSON
-  conversion, the Portal `sign_transaction` handler, validation and the
-  per-network chain ids, and a scan proving the package imports nothing
-  but `zod` outside `./react` (no signing capability on the oracle side).
+  conversion, the Portal `sign_transaction` handler (a single message and a
+  POD-shaped batch decoded and signed in one wallet call), validation and
+  the per-network chain ids, the batch form (`tests/batch.test.ts`: bounds,
+  drafts staying single, risk derivation, the mainnet gate, the builder, the
+  args schema refusing a misnamed batch or a receipt), and a scan proving
+  the package imports nothing but `zod` outside `./react` (no signing
+  capability on the oracle side).
 - `pnpm test` (workerd) — `src/plugins/ixo-transaction/*.test.ts`; what they
-  cover is listed in [testing](testing.md#unit-tests-seconds).
+  cover is listed in [testing](testing.md#unit-tests-seconds). The dispatch
+  and the outcome mapping are shared with the POD Creator
+  (`wallet-signing.ts`), whose suite is listed in
+  [pod-creator](pod-creator.md#tests).
 - The devnet feature matrix — the step
   `realtime: sign_ixo_transaction sends sign_transaction to the browser wallet and the signed hash returns`
   answers the request with a recording wallet over the real socket

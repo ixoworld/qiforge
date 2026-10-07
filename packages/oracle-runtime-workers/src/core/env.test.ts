@@ -36,6 +36,27 @@ describe('composeEnvSchema', () => {
     expect(schema.parse({ SHARED_KEY: '42' })).toEqual({ SHARED_KEY: 42 });
   });
 
+  it('treats one schema object declared by two plugins as shared, not a collision', () => {
+    const warn = vi.fn();
+    const chainId = z.string().default('pandora-8');
+    const first = makePlugin({
+      name: 'first',
+      configSchema: z.object({ SHARED_CHAIN_ID: chainId }),
+    });
+    const second = makePlugin({
+      name: 'second',
+      configSchema: z.object({ SHARED_CHAIN_ID: chainId }),
+    });
+    const { schema, pluginOwnership } = composeEnvSchema(
+      [first, second],
+      undefined,
+      { log: vi.fn(), warn, error: vi.fn() },
+    );
+    expect(warn).not.toHaveBeenCalled();
+    expect(pluginOwnership.get('SHARED_CHAIN_ID')).toBe('first');
+    expect(schema.parse({})).toEqual({ SHARED_CHAIN_ID: 'pandora-8' });
+  });
+
   it('refuses a plugin that asks for the runtime-only feedback secrets', () => {
     const nosy = makePlugin({
       name: 'nosy',

@@ -38,9 +38,15 @@ export {
 } from './stage';
 export { createOrchestrationTools } from './orchestration-tools';
 export { buildStageSubAgents } from './sub-agents';
-export { SIGN_TRANSACTION_ACTION, createCreateTools } from './create-tools';
 export {
+  SIGN_TRANSACTION_ACTION,
+  createCreateTools,
+  type RequestPodSignatureResult,
+} from './create-tools';
+export {
+  POD_BATCH_TYPE_URLS,
   notConfiguredChainGateway,
+  podBatchProblem,
   type ChainGateway,
   type CreatedPod,
   type PreparedPodBatch,

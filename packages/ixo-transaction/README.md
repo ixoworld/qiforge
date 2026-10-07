@@ -23,6 +23,12 @@ The root export depends on `zod` only and can neither sign nor broadcast.
   `SignTransactionActionArgsSchema`, `SignTransactionActionResultSchema`,
   `buildSignTransactionActionArgs`, `normalizeWalletSignResult`,
   `signIxoTransactionWithWallet`, `ChainIdSchema`, `DEFAULT_CHAIN_IDS`.
+- **Batches** — `TransactionBatchSchema`, `validateTransactionBatch`,
+  `buildBatchSignTransactionActionArgs`, `BatchIntentSchema`,
+  `MAX_BATCH_MESSAGES` (16): several catalogued messages signed in one wallet
+  transaction (the POD Creator's create path). The args carry
+  `intent.source: 'batch'`; risks are every message's, the level the
+  highest. Conversational drafts stay one message.
 
 `@ixo/ixo-transaction/react`: `useIxoTransactionSigningAction({ chainId })`,
 plus `createSignTransactionHandler` and the proto-JSON helpers
@@ -47,10 +53,12 @@ Mount it inside `OraclesProvider` (`@ixo/oracles-client-sdk` ≥ 1.5.0). It need
 
 The hook registers the `sign_transaction` AG-UI action with
 `exposeToAgent: false`, so the model never sees the raw wallet action and
-reaches the wallet only through the plugin's validating `sign_ixo_transaction`
-tool. The handler re-validates the message against the catalog, refuses a
-request for another chain than `chainId`, decodes the proto-JSON with the
-SDK's `fromJSON` and signs through the provider's `transactSignX`.
+reaches the wallet only through the validating plugin tools — the
+ixo-transaction plugin's `sign_ixo_transaction` (one message) and the POD
+Creator's `request_pod_signature` (a batch). The handler re-validates every
+message against the catalog, refuses a request for another chain than
+`chainId`, decodes the proto-JSON with the SDK's `fromJSON` and signs all the
+messages in one `transactSignX` call.
 
 ## Tests
 

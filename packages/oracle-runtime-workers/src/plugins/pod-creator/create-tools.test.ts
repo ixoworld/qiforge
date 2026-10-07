@@ -1,3 +1,7 @@
+import {
+  buildBatchSignTransactionActionArgs,
+  type ITrxMsg,
+} from '@ixo/ixo-transaction';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { createMemoryBlobStore } from '../../core/runtime-context';
@@ -16,6 +20,7 @@ import {
   type CreateSessionStore,
 } from './create-session-store';
 import {
+  POD_BATCH_BLOB_NAME,
   SIGN_TIMEOUT_MS,
   SIGN_TRANSACTION_ACTION,
   createCreateTools,
@@ -25,7 +30,10 @@ import {
   ISO,
   THREAD,
   USER,
+  acceptPodRisks,
   byName,
+  podBatchMessages,
+  podBatchRisks,
   seedRoles,
 } from './test-fixtures';
 
@@ -35,6 +43,25 @@ const PREP = 'req-prepare';
 const LATER = 'req-later';
 const TX_HASH =
   'A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6E7F8A9B0C1D2E3F4A5B6C7D8E9F0A1B2';
+
+/** What the Portal handler answers for a signed, included transaction. */
+const SIGNED = { success: true, transactionHash: TX_HASH, code: 0, height: 7 };
+
+/** `approve_pod_transaction` args: the batch, every risk accepted word for word. */
+const approval = (blobId: string) => ({
+  blobId,
+  riskConfirmation: acceptPodRisks(),
+});
+
+/** The stored batch as `prepare_pod_transaction` writes it. */
+const STORED_BATCH = {
+  name: POD_BATCH_BLOB_NAME,
+  value: JSON.stringify({
+    network: 'testnet',
+    summary: 'Creates POD X',
+    messages: podBatchMessages(),
+  }),
+};
 
 const callAgActionMock =
   vi.fn<(params: FrontendCallParams) => Promise<unknown>>();
@@ -55,10 +82,9 @@ function frontend(
 
 function mockGateway(over: Partial<ChainGateway> = {}): ChainGateway {
   return {
-    prepareUnsignedPodBatch: async () => ({
-      unsignedTx: 'BASE64',
+    preparePodBatch: async () => ({
+      messages: podBatchMessages(),
       summary: 'Creates POD X',
-      messageCount: 3,
     }),
     confirmPodCreation: async () => ({
       podDid: 'did:ixo:entity:pod123',
@@ -73,7 +99,7 @@ function ctxWithStoredBlob(over: Partial<RuntimeContext> = {}): RuntimeContext {
   return makeRuntimeContext({
     blobStore: {
       put: async () => BLOB,
-      get: async () => ({ name: 'pod-unsigned-tx', value: 'BASE64' }),
+      get: async () => STORED_BATCH,
       isValidBlobId: (v): v is string =>
         typeof v === 'string' && /^blob_[0-9a-f]{16}$/.test(v),
     },
@@ -151,50 +177,112 @@ describe('create-path tools', () => {
     expect((out.blockers ?? []).length).toBeGreaterThan(0);
   });
 
-  it('prepare_pod_transaction builds the unsigned batch once the gate passes and stashes it out of model context', async () => {
+  it('prepare_pod_transaction validates the batch once the gate passes and stashes it out of model context', async () => {
     const blueprint = new KvBlueprintStore(createMemoryUserKv());
     await seedComplete(blueprint, THREAD);
     const prepareSpy = vi.fn(async () => ({
-      unsignedTx: 'BASE64',
+      messages: podBatchMessages(),
       summary: 'Creates POD X',
-      messageCount: 3,
+      estimatedCost: '0.5 IXO',
     }));
     const { tools } = await makeTools({
       blueprint,
-      gateway: mockGateway({ prepareUnsignedPodBatch: prepareSpy }),
+      gateway: mockGateway({ preparePodBatch: prepareSpy }),
     });
     const blobStore = createMemoryBlobStore();
     const ctx = makeRuntimeContext({}, { ambient: { blobStore } });
     const raw = await byName(tools, 'prepare_pod_transaction').handler({}, ctx);
     const out = z
       .object({
-        prepared: z.boolean(),
-        blobId: z.string().optional(),
-        messageCount: z.number().optional(),
+        prepared: z.literal(true),
+        blobId: z.string(),
+        summary: z.string(),
+        messageCount: z.number(),
+        messages: z.array(z.string()),
+        risks: z.array(z.string()),
+        riskLevel: z.string(),
+        estimatedCost: z.string(),
       })
       .parse(raw);
-    expect(out.prepared).toBe(true);
-    expect(out.messageCount).toBe(3);
+    expect(out).toMatchObject({
+      summary: 'Creates POD X',
+      messageCount: 4,
+      messages: [
+        'MsgCreateEntity',
+        'MsgCreateCollection',
+        'MsgCreateClaimAuthorization',
+        'MsgGrantEntityAccountAuthz',
+      ],
+      risks: podBatchRisks(),
+      riskLevel: 'critical',
+      estimatedCost: '0.5 IXO',
+    });
     expect(out.blobId).toMatch(/^blob_[0-9a-f]{16}$/);
-    expect(prepareSpy).toHaveBeenCalledOnce();
-    // The bytes sit in the user's blob store; the model only sees the id.
-    expect(JSON.stringify(raw)).not.toContain('BASE64');
-    expect(
-      await blobStore.get({ userDid: USER, blobId: out.blobId ?? '' }),
-    ).toEqual({ name: 'pod-unsigned-tx', value: 'BASE64' });
+    expect(prepareSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ network: 'testnet' }),
+      ctx,
+    );
+    // The messages sit in the user's blob store; the model sees their names.
+    expect(JSON.stringify(raw)).not.toContain('ownerAddress');
+    expect(await blobStore.get({ userDid: USER, blobId: out.blobId })).toEqual(
+      STORED_BATCH,
+    );
+  });
+
+  it('prepare_pod_transaction refuses a gateway batch the wallet would refuse, or that is not a POD batch', async () => {
+    const prepareWith = async (messages: ITrxMsg[]) => {
+      const { tools } = await makeTools({
+        gateway: mockGateway({
+          preparePodBatch: async () => ({ messages, summary: 'Creates POD X' }),
+        }),
+      });
+      return byName(tools, 'prepare_pod_transaction').handler(
+        {},
+        makeRuntimeContext(
+          {},
+          { ambient: { blobStore: createMemoryBlobStore() } },
+        ),
+      );
+    };
+    const [entity, collection] = podBatchMessages();
+    if (!entity || !collection) throw new Error('fixture is short');
+    await expect(
+      prepareWith([
+        entity,
+        { typeUrl: '/cosmos.bank.v1beta1.MsgSend', value: {} },
+      ]),
+    ).rejects.toThrow(
+      /^The chain gateway built a batch the wallet would refuse: Unsupported message typeUrl \/cosmos\.bank\.v1beta1\.MsgSend/,
+    );
+    await expect(prepareWith([collection, entity])).rejects.toThrow(
+      /^The chain gateway built a wrong batch: A POD creation batch creates exactly one entity, with \/ixo\.entity\.v1beta1\.MsgCreateEntity as its first message$/,
+    );
+    await expect(
+      prepareWith([
+        entity,
+        {
+          typeUrl: '/ixo.token.v1beta1.MsgStopToken',
+          value: {
+            minter: 'ixo1qwertyuiopasdfghjklzxcvbnmqwerty12345',
+            contractAddress: 'ixo1qwertyuiopasdfghjklzxcvbnmqwerty12345',
+          },
+        },
+      ]),
+    ).rejects.toThrow(
+      /carries only .*; it had \/ixo\.token\.v1beta1\.MsgStopToken$/,
+    );
   });
 
   it('prepare_pod_transaction refuses mainnet without the operator opt-in', async () => {
     const blueprint = new KvBlueprintStore(createMemoryUserKv());
     await seedComplete(blueprint, THREAD);
     const prepareSpy = vi.fn(async () => ({
-      unsignedTx: 'BASE64',
+      messages: podBatchMessages(),
       summary: 'Creates POD X',
-      messageCount: 3,
     }));
     const { tools } = await makeTools({
       blueprint,
-      gateway: mockGateway({ prepareUnsignedPodBatch: prepareSpy }),
+      gateway: mockGateway({ preparePodBatch: prepareSpy }),
     });
     const out = z
       .object({ prepared: z.boolean(), message: z.string() })
@@ -252,129 +340,110 @@ describe('create-path tools', () => {
     expect(confirmed.created).toBe(false);
   });
 
-  it('request_pod_signature runs the sign round-trip and returns the txHash', async () => {
+  it('request_pod_signature sends the batch as the ixo-transaction sign_transaction action and returns the txHash', async () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
-    callAgActionMock.mockResolvedValueOnce({ txHash: TX_HASH });
+    callAgActionMock.mockResolvedValueOnce(SIGNED);
     const ctx = ctxWithStoredBlob();
 
     const approved = z
       .object({ approved: z.boolean() })
       .parse(
         await byName(tools, 'approve_pod_transaction').handler(
-          { blobId: BLOB },
+          approval(BLOB),
           ctx,
         ),
       );
     expect(approved.approved).toBe(true);
 
-    const out = z
-      .object({ requested: z.boolean(), txHash: z.string().nullable() })
-      .parse(
-        await byName(tools, 'request_pod_signature').handler(
-          { blobId: BLOB },
-          ctx,
-        ),
-      );
-    expect(out.requested).toBe(true);
-    expect(out.txHash).toBe(TX_HASH);
+    const out = await byName(tools, 'request_pod_signature').handler(
+      { blobId: BLOB },
+      ctx,
+    );
+    expect(out).toEqual({
+      status: 'signed',
+      network: 'testnet',
+      chainId: 'pandora-8',
+      txHash: TX_HASH,
+      code: 0,
+      height: 7,
+      message:
+        'The wallet signed and broadcast the batch. Call confirm_pod_creation with this txHash.',
+    });
     expect(callAgActionMock).toHaveBeenCalledOnce();
     const dispatch = callAgActionMock.mock.calls[0]?.[0];
     expect(dispatch?.toolName).toBe(SIGN_TRANSACTION_ACTION);
     expect(dispatch?.toolName).toBe('sign_transaction');
     expect(dispatch?.sessionId).toBe(THREAD);
     expect(dispatch?.timeoutMs).toBe(SIGN_TIMEOUT_MS);
-    expect(dispatch?.args).toEqual({
-      blobId: BLOB,
-      unsignedTx: 'BASE64',
-      network: 'testnet',
-    });
+    expect(dispatch?.args).toEqual(
+      buildBatchSignTransactionActionArgs({
+        messages: podBatchMessages(),
+        summary: 'Creates POD X',
+        network: 'testnet',
+        riskConfirmation: acceptPodRisks(),
+      }),
+    );
   });
 
   it('request_pod_signature cannot be replayed — the approval is spent on dispatch', async () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
-    callAgActionMock.mockResolvedValue({ txHash: TX_HASH });
+    callAgActionMock.mockResolvedValue(SIGNED);
     const ctx = ctxWithStoredBlob();
 
-    await byName(tools, 'approve_pod_transaction').handler(
-      { blobId: BLOB },
-      ctx,
-    );
+    await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);
     await byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx);
     await expect(
       byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
     ).rejects.toThrow(/not approved|already used/i);
 
     // A fresh explicit approval re-arms exactly one more dispatch.
-    await byName(tools, 'approve_pod_transaction').handler(
-      { blobId: BLOB },
-      ctx,
-    );
-    const again = z
-      .object({ requested: z.boolean() })
-      .parse(
-        await byName(tools, 'request_pod_signature').handler(
-          { blobId: BLOB },
-          ctx,
-        ),
-      );
-    expect(again.requested).toBe(true);
+    await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);
+    await expect(
+      byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
+    ).resolves.toMatchObject({ status: 'signed', txHash: TX_HASH });
     expect(callAgActionMock).toHaveBeenCalledTimes(2);
   });
 
-  it('the approval is spent even when the wallet round-trip fails', async () => {
+  it('the approval is spent once the request was sent, even when the wallet fails', async () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
-    callAgActionMock.mockRejectedValueOnce(new Error('Timeout'));
+    callAgActionMock.mockRejectedValueOnce(new Error('Ledger disconnected'));
     const ctx = ctxWithStoredBlob();
 
-    await byName(tools, 'approve_pod_transaction').handler(
-      { blobId: BLOB },
-      ctx,
-    );
-    const out = z
-      .object({
-        requested: z.boolean(),
-        txHash: z.string().nullable(),
-        message: z.string(),
-      })
-      .parse(
-        await byName(tools, 'request_pod_signature').handler(
-          { blobId: BLOB },
-          ctx,
-        ),
-      );
-    expect(out.txHash).toBeNull();
-    expect(out.message).toMatch(/did not complete/i);
+    await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);
+    await expect(
+      byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
+    ).resolves.toEqual({
+      status: 'error',
+      network: 'testnet',
+      error: 'Ledger disconnected',
+      message:
+        'Nothing was signed and the approval was spent: to retry, the user confirms again in a new message and you call approve_pod_transaction, then request_pod_signature.',
+    });
     await expect(
       byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
     ).rejects.toThrow(/not approved|already used/i);
   });
 
-  it('reports the wallet unreachable when no browser is connected to the session (approval still spent)', async () => {
+  it('keeps the approval when no browser is connected: nothing is sent', async () => {
     const { tools, sessions } = await makeTools();
     await sessions.prepared(USER, THREAD, BLOB, PREP);
     const ctx = ctxWithStoredBlob({
       frontend: frontend({ hasClient: () => false }),
     });
 
-    await byName(tools, 'approve_pod_transaction').handler(
-      { blobId: BLOB },
-      ctx,
-    );
-    const out = z
-      .object({ txHash: z.string().nullable(), message: z.string() })
-      .parse(
-        await byName(tools, 'request_pod_signature').handler(
-          { blobId: BLOB },
-          ctx,
-        ),
-      );
-    expect(out.txHash).toBeNull();
-    expect(out.message).toMatch(/did not complete/i);
+    await byName(tools, 'approve_pod_transaction').handler(approval(BLOB), ctx);
+    await expect(
+      byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
+    ).resolves.toMatchObject({
+      status: 'unavailable',
+      error: expect.stringMatching(/No Portal browser is connected/),
+      message: expect.stringMatching(/approval is kept/),
+    });
     expect(callAgActionMock).not.toHaveBeenCalled();
-    expect(await sessions.consume(USER, THREAD, BLOB)).toBe(false);
+    expect(await sessions.consume(USER, THREAD, BLOB)).toBe(true);
   });
 
   it('reports the wallet unreachable on a host without a realtime channel', async () => {
@@ -382,16 +451,32 @@ describe('create-path tools', () => {
     await sessions.prepared(USER, THREAD, BLOB, PREP);
     await sessions.approve(USER, THREAD, BLOB, LATER);
     const ctx = ctxWithStoredBlob({ frontend: undefined });
-    const out = z
-      .object({ txHash: z.string().nullable(), message: z.string() })
-      .parse(
-        await byName(tools, 'request_pod_signature').handler(
-          { blobId: BLOB },
-          ctx,
-        ),
-      );
-    expect(out.txHash).toBeNull();
-    expect(out.message).toMatch(/did not complete/i);
+    await expect(
+      byName(tools, 'request_pod_signature').handler({ blobId: BLOB }, ctx),
+    ).resolves.toMatchObject({
+      status: 'unavailable',
+      error: expect.stringMatching(/realtime connection/),
+    });
+  });
+
+  it('approve_pod_transaction requires every risk of the batch accepted word for word', async () => {
+    const { tools, sessions } = await makeTools();
+    await sessions.prepared(USER, THREAD, BLOB, PREP);
+    const [first, ...rest] = podBatchRisks();
+    const out = z.object({ approved: z.boolean(), message: z.string() }).parse(
+      await byName(tools, 'approve_pod_transaction').handler(
+        {
+          blobId: BLOB,
+          riskConfirmation: { confirmed: true, acceptedRisks: rest },
+        },
+        ctxWithStoredBlob(),
+      ),
+    );
+    expect(out.approved).toBe(false);
+    expect(out.message).toBe(
+      `Risk confirmation required before signing the batch of 4 messages: the user must accept, word for word, ${JSON.stringify(first)}`,
+    );
+    expect(await sessions.consume(USER, THREAD, BLOB)).toBe(false);
   });
 
   it('approve_pod_transaction refuses a batch not prepared in this conversation', async () => {
@@ -401,7 +486,7 @@ describe('create-path tools', () => {
       .object({ approved: z.boolean(), message: z.string() })
       .parse(
         await byName(tools, 'approve_pod_transaction').handler(
-          { blobId: BLOB },
+          approval(BLOB),
           ctxWithStoredBlob(),
         ),
       );
@@ -458,7 +543,7 @@ describe('create-path tools', () => {
       .object({ approved: z.boolean(), message: z.string() })
       .parse(
         await byName(tools, 'approve_pod_transaction').handler(
-          { blobId: prepared.blobId },
+          approval(prepared.blobId),
           turn('req-1'),
         ),
       );
@@ -477,7 +562,7 @@ describe('create-path tools', () => {
       .object({ approved: z.boolean() })
       .parse(
         await byName(tools, 'approve_pod_transaction').handler(
-          { blobId: prepared.blobId },
+          approval(prepared.blobId),
           turn('req-2'),
         ),
       );
@@ -605,30 +690,26 @@ function recordCalls(ctx: RuntimeContext): {
 }
 
 describe('the oracle never signs a POD creation', () => {
-  it('drives prepare → approve (next turn) → sign → confirm without the oracle signing, handing the wallet the gateway bytes unchanged', async () => {
+  it('drives prepare → approve (next turn) → sign → confirm without the oracle signing, handing the wallet the gateway messages unchanged', async () => {
     const blueprint = new KvBlueprintStore(createMemoryUserKv());
     await seedComplete(blueprint, THREAD);
-    const UNSIGNED = 'CgsKCQoHdW5zaWduZWQSABoA';
+    const gatewayMessages = podBatchMessages();
     // A realistic gateway authenticates to its server with a per-user UCAN
     // invocation. That is auth, not signing creation, and is allowed.
     const authMint = vi.fn(async () => 'auth-invocation');
     const { tools } = await makeTools({
       blueprint,
       gateway: mockGateway({
-        prepareUnsignedPodBatch: async (_input, gatewayCtx) => {
+        preparePodBatch: async (_input, gatewayCtx) => {
           await gatewayCtx.ucan.mintInvocation({
             did: 'did:web:mcp.ixo.example',
             capability: 'ixo:chain',
           });
-          return {
-            unsignedTx: UNSIGNED,
-            summary: 'Creates POD X',
-            messageCount: 3,
-          };
+          return { messages: gatewayMessages, summary: 'Creates POD X' };
         },
       }),
     });
-    callAgActionMock.mockResolvedValueOnce({ txHash: TX_HASH });
+    callAgActionMock.mockResolvedValueOnce(SIGNED);
 
     const base = makeRuntimeContext(
       { frontend: frontend() },
@@ -655,7 +736,7 @@ describe('the oracle never signs a POD creation', () => {
     // The user confirms in their next message.
     z.object({ approved: z.literal(true) }).parse(
       await byName(tools, 'approve_pod_transaction').handler(
-        { blobId: prepared.blobId },
+        approval(prepared.blobId),
         second.ctx,
       ),
     );
@@ -685,12 +766,12 @@ describe('the oracle never signs a POD creation', () => {
     expect(
       calls.filter((path) => SIGNING_METHOD.test(path.split('.').at(-1) ?? '')),
     ).toEqual([]);
-    // The wallet receives exactly the unsigned bytes the gateway produced:
-    // nothing between prepare and the wallet signs, wraps or re-encodes them.
+    // The wallet receives exactly the unsigned messages the gateway composed:
+    // nothing between prepare and the wallet signs, wraps or encodes them.
     expect(callAgActionMock).toHaveBeenCalledOnce();
-    expect(callAgActionMock.mock.calls[0]?.[0].args).toMatchObject({
-      unsignedTx: UNSIGNED,
-    });
+    expect(callAgActionMock.mock.calls[0]?.[0].args.messages).toEqual(
+      gatewayMessages,
+    );
     expect(calls).toContain('frontend.callAgAction');
   });
 });

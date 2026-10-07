@@ -10,6 +10,7 @@ export type { FieldSpec, MessageSpec, RiskLevel } from './catalog.js';
 export { classifyIntent, parseSlashCommand, resolveIntent } from './intent.js';
 export type { IntentResult } from './intent.js';
 export {
+  BatchIntentSchema,
   ChainIdSchema,
   DEFAULT_CHAIN_IDS,
   IntentActionMetadataSchema,
@@ -17,13 +18,19 @@ export {
   SIGN_TRANSACTION_ACTION_NAME,
   SignTransactionActionArgsSchema,
   SignTransactionActionResultSchema,
+  buildBatchSignTransactionActionArgs,
   buildSignTransactionActionArgs,
   normalizeWalletSignResult,
   signIxoTransactionWithWallet,
 } from './action.js';
 export type {
+  BatchIntent,
+  BatchSignTransactionActionArgs,
+  BuildSignTransactionOptions,
+  IntentActionMetadata,
   SignTransactionActionArgs,
   SignTransactionActionResult,
+  SingleSignTransactionActionArgs,
   WalletSignTransactionFn,
   WalletSigningOptions,
 } from './action.js';
@@ -49,6 +56,8 @@ export {
   LinkedClaimSchema,
   LinkedEntitySchema,
   LinkedResourceSchema,
+  MAX_BATCH_MESSAGES,
+  MAX_BATCH_SUMMARY_LENGTH,
   MintBatchSchema,
   NetworkSchema,
   PaymentSchema,
@@ -60,6 +69,7 @@ export {
   TimestampSchema,
   TokenBatchSchema,
   TokenDataSchema,
+  TransactionBatchSchema,
   TransactionDraftInputSchema,
   TransactionDraftSchema,
   UintSchema,
@@ -73,11 +83,18 @@ export type {
   Network,
   RiskConfirmation,
   TestnetReceipt,
+  TransactionBatch,
   TransactionDraft,
 } from './schemas.js';
 export {
   describeValidationError,
   validateMessage,
+  validateTransactionBatch,
   validateTransactionDraft,
 } from './validate.js';
-export type { ValidatedTransaction, ValidationOptions } from './validate.js';
+export type {
+  BatchMessageRoute,
+  ValidatedTransaction,
+  ValidatedTransactionBatch,
+  ValidationOptions,
+} from './validate.js';
