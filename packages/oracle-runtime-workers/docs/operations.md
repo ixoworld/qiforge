@@ -1332,6 +1332,57 @@ request header (`CF-*`, `X-Forwarded-*`, `X-Real-IP`, `True-Client-IP`,
 Proven end to end: device-flow sign-in, a JSON turn answered with a
 Responses-API id, a streaming turn delivering chunks as they are produced.
 
+## BYO model the provider refuses
+
+The pre-turn checks (credential present, token fresh, backend reachable)
+cannot tell whether the user's provider serves the selected model. The
+ChatGPT backend answers a model id the subscription does not offer with an
+immediate `400` and an empty body (logged as
+`[byo-chatgpt] backend 400 Bad Request: <empty body>`); an API-key provider
+answers `404 model_not_found` or a "does not exist" text. Every BYO model the
+adapter hands out (`createByoLlmAdapter`) is wrapped in
+`ByoModelFallbackChatModel` (`src/llm/byo-model-fallback.ts`), which turns
+that into a fallback instead of a failed turn:
+
+- **When it fires.** A BYO model call fails before the provider produced any
+  output (text, reasoning or a tool call) with an error
+  `isModelUnavailableError` (`src/llm/provider-error.ts`) accepts: an explicit
+  `model_not_found` / `unsupported_model` code or a "does not exist", "is not
+  supported", "unsupported model" text on a 400/403/404 or status-less error,
+  or a bare HTTP 400/404 that is nothing else known (not a context overflow,
+  not LangChain's `INVALID_TOOL_RESULTS`, not a billing / auth / rate-limit /
+  timeout / network / server text). A failure after output keeps the old
+  behaviour (`error` frame, `done { failed: true }`).
+- **What the client sees.** The same `error`-channel notice the pre-turn
+  fallbacks send — `kind: 'byo_fallback'`, `reason: 'model_unavailable'`,
+  `source: 'byo'`, `retryable: false`, plus `model` (the refused id) — e.g.
+  "Your ChatGPT subscription doesn't offer GPT-5.6 Terra, so this reply used
+  the platform model instead. Pick another model in your Personal Agent
+  settings." (API-key providers: "Your OpenAI API account doesn't offer …";
+  the catalog label when the id is catalogued, else the id). The wrapper
+  raises it as a LangChain custom event (`byo_fallback`); `runTurnFrames`
+  writes it as an `error` frame in stream order, ahead of the platform
+  model's reply, which answers the very same call; the turn ends with a plain
+  `done`. The client SDK treats an `error` frame as a callback only, so the
+  run continues.
+- **Scope.** The refusal is remembered per model id for the rest of the turn
+  (the adapter is per turn): later calls to that id — the main agent's next
+  steps, sub-agents and helpers asking for the same id — go to the platform
+  model directly. Other BYO ids of the turn (the helper roles' models) stay
+  on the user's account. Nothing is persisted: the next turn on that model
+  tries the provider again and falls back again, with the same notice.
+- **Logs.** One `[byo] <provider> refused model "<id>" (HTTP <status>): …`
+  warning per refused id per turn.
+- **Errors after the fallback.** A failure of the platform model answering
+  for the refused one is classified as a platform failure (and an operator
+  auth/billing fault is redacted), not blamed on the user's account.
+- **Limits.** The turn's context budget was sized from the BYO model's
+  window, and `runtime.context.byo` still reports the turn as BYO (the
+  history sanitizer and anything else reading it see a BYO ChatGPT turn). A
+  refusal on a model call made outside the streamed graph (attachment
+  extraction while the turn is prepared) still falls back, but the notice has
+  no stream to ride and is dropped.
+
 ## Known limits
 
 - The per-DID rate limit (100 requests / 60 s in the example config) is the

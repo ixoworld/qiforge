@@ -182,8 +182,15 @@ export {
 } from './llm/byo-service';
 export { handleByoRequest } from './llm/byo-routes';
 export {
+  ByoModelFallbackChatModel,
+  ByoModelFallbackState,
+  type ByoModelFallbackFields,
+} from './llm/byo-model-fallback';
+export {
   BYO_FALLBACK_KIND,
   buildByoFallbackNotice,
+  isModelUnavailableError,
+  type ByoFallbackNoticeOptions,
   type ByoFallbackNoticePayload,
   type ByoFallbackReason,
 } from './llm/provider-error';
