@@ -350,9 +350,10 @@ describe('streamRun', () => {
     expect(aborted.ended).toBe('aborted');
   });
 
-  it('renews the credentials once when a re-join is refused (401), then re-joins with the new ones', async () => {
+  it('renews the credentials once when a re-join is refused (401), then re-joins with the new ones (stage 1 only)', async () => {
     let token = 'inv-old';
     const seen: string[] = [];
+    const stages: number[] = [];
     let renewals = 0;
     let starts = 0;
     const result = await streamRun({
@@ -367,8 +368,9 @@ describe('streamRun', () => {
         if (token === 'inv-old') return response('', { status: 401 });
         return response(sse([msg(3, 'b'), done(4)]));
       },
-      onUnauthorized: () => {
+      onUnauthorized: (stage) => {
         renewals += 1;
+        stages.push(stage);
         token = 'inv-new';
       },
       onEvent: () => undefined,
@@ -376,14 +378,15 @@ describe('streamRun', () => {
     });
     expect(starts).toBe(1);
     expect(renewals).toBe(1);
+    expect(stages).toEqual([1]); // no delegation was minted
     expect(seen).toEqual(['inv-old', 'inv-new']);
     expect(result.ended).toBe('done');
     expect(result.text).toBe('ab');
   });
 
-  it('stops with `unauthorized` when the renewed credentials are refused too, without spinning through the re-join budget', async () => {
+  it('stops with `unauthorized` when the credentials are refused after both renewal stages, without spinning through the re-join budget', async () => {
     let joins = 0;
-    let renewals = 0;
+    const stages: number[] = [];
     const result = await streamRun({
       start: async () =>
         response(sse([runFrame('run-1'), msg(2, 'a')]), {
@@ -393,14 +396,14 @@ describe('streamRun', () => {
         joins += 1;
         return response('', { status: 403 });
       },
-      onUnauthorized: () => {
-        renewals += 1;
+      onUnauthorized: (stage) => {
+        stages.push(stage);
       },
       onEvent: () => undefined,
       rejoinDelayMs: () => 1,
     });
-    expect(renewals).toBe(1);
-    expect(joins).toBe(2);
+    expect(stages).toEqual([1, 2]);
+    expect(joins).toBe(3);
     expect(result.ended).toBe('unauthorized');
     expect(result.lastId).toBe(2);
   });
@@ -423,9 +426,9 @@ describe('streamRun', () => {
     expect(result.ended).toBe('unauthorized');
   });
 
-  it('renews again for a later refusal once a renewed re-join went through', async () => {
+  it('renews again, from stage 1, for a later refusal once a renewed re-join went through', async () => {
     let generation = 0;
-    let renewals = 0;
+    const stages: number[] = [];
     let joins = 0;
     const result = await streamRun({
       start: async () =>
@@ -439,20 +442,20 @@ describe('streamRun', () => {
         if (joins === 2) return response(sse([msg(3, 'b')])); // drops again
         return response(sse([msg(4, 'c'), done(5)]));
       },
-      onUnauthorized: () => {
-        renewals += 1;
+      onUnauthorized: (stage) => {
+        stages.push(stage);
         generation += 1;
       },
       onEvent: () => undefined,
       rejoinDelayMs: () => 1,
     });
     expect(generation).toBe(2);
-    expect(renewals).toBe(2);
+    expect(stages).toEqual([1, 1]);
     expect(result.ended).toBe('done');
     expect(result.text).toBe('abc');
   });
 
-  it('a resumed run whose first join is refused renews once, then reports `unauthorized`', async () => {
+  it('a resumed run whose join is refused through both renewal stages reports `unauthorized`', async () => {
     let joins = 0;
     let renewals = 0;
     const result = await streamRun({
@@ -469,9 +472,166 @@ describe('streamRun', () => {
       onEvent: () => undefined,
       resume: { runId: 'run-9', after: 0 },
     });
-    expect(joins).toBe(2);
-    expect(renewals).toBe(1);
+    expect(joins).toBe(3);
+    expect(renewals).toBe(2);
     expect(result.ended).toBe('unauthorized');
+  });
+
+  it('a re-join refused twice gets through after stage 2 (a fresh delegation)', async () => {
+    let joins = 0;
+    const stages: number[] = [];
+    const result = await streamRun({
+      start: async () =>
+        response(sse([runFrame('run-1'), msg(2, 'a')]), {
+          headers: { 'x-run-id': 'run-1' },
+        }),
+      join: async () => {
+        joins += 1;
+        // The fresh invocation is still proved by a revoked delegation.
+        if (!stages.includes(2)) return response('', { status: 401 });
+        return response(sse([msg(3, 'b'), done(4)]));
+      },
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+      rejoinDelayMs: () => 1,
+    });
+    expect(stages).toEqual([1, 2]);
+    expect(joins).toBe(3);
+    expect(result.ended).toBe('done');
+    expect(result.text).toBe('ab');
+  });
+
+  it('a refused POST is renewed (stage 1) and sent exactly once more', async () => {
+    let token = 'inv-old';
+    const starts: string[] = [];
+    const stages: number[] = [];
+    const result = await streamRun({
+      start: async () => {
+        starts.push(token);
+        if (token === 'inv-old')
+          return response('{"statusCode":401}', { status: 401 });
+        return response(sse([runFrame('run-1'), msg(2, 'hi'), done(3)]), {
+          headers: { 'x-run-id': 'run-1', 'x-request-id': 'req-2' },
+        });
+      },
+      join: async () => {
+        throw new Error('a complete stream is never re-joined');
+      },
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+        token = 'inv-new';
+      },
+      onEvent: () => undefined,
+    });
+    expect(starts).toEqual(['inv-old', 'inv-new']);
+    expect(stages).toEqual([1]);
+    expect(result).toMatchObject({
+      ended: 'done',
+      requestId: 'req-2',
+      text: 'hi',
+    });
+  });
+
+  it('a POST refused through both stages throws the refusal and was sent three times', async () => {
+    let starts = 0;
+    const stages: number[] = [];
+    const error = await streamRun({
+      start: async () => {
+        starts += 1;
+        return response('{"statusCode":401,"message":"expired"}', {
+          status: 401,
+        });
+      },
+      join: async () => response(''),
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e);
+    expect(starts).toBe(3);
+    expect(stages).toEqual([1, 2]);
+    expect(error).toBeInstanceOf(StreamRunStartError);
+    expect(error).toMatchObject({
+      status: 401,
+      body: '{"statusCode":401,"message":"expired"}',
+    });
+  });
+
+  it('a renewal that could not mint anything ends the attempt without repeating it', async () => {
+    let starts = 0;
+    const error = await streamRun({
+      start: async () => {
+        starts += 1;
+        return response('', { status: 401 });
+      },
+      join: async () => response(''),
+      onUnauthorized: () => false,
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e);
+    expect(starts).toBe(1);
+    expect(error).toBeInstanceOf(StreamRunStartError);
+
+    let joins = 0;
+    const result = await streamRun({
+      start: async () => {
+        throw new Error('resume must not POST');
+      },
+      join: async () => {
+        joins += 1;
+        return response('', { status: 401 });
+      },
+      onUnauthorized: () => false,
+      onEvent: () => undefined,
+      resume: { runId: 'run-9' },
+    });
+    expect(joins).toBe(1);
+    expect(result.ended).toBe('unauthorized');
+  });
+
+  it('a 403 that new credentials cannot fix ends the re-join without renewing', async () => {
+    let joins = 0;
+    const stages: number[] = [];
+    const result = await streamRun({
+      start: async () => {
+        throw new Error('resume must not POST');
+      },
+      join: async () => {
+        joins += 1;
+        return response(
+          JSON.stringify({ statusCode: 403, code: 'VFS_AUTH_FAILED' }),
+          { status: 403 },
+        );
+      },
+      onUnauthorized: (stage) => {
+        stages.push(stage);
+      },
+      onEvent: () => undefined,
+      resume: { runId: 'run-9' },
+    });
+    expect(joins).toBe(1);
+    expect(stages).toEqual([]);
+    expect(result.ended).toBe('unauthorized');
+  });
+
+  it("the user's abort while a refused POST is renewed ends the turn `aborted` without sending it again", async () => {
+    const ac = new AbortController();
+    let starts = 0;
+    const result = await streamRun({
+      start: async () => {
+        starts += 1;
+        return response('', { status: 401 });
+      },
+      join: async () => response(''),
+      onUnauthorized: () => {
+        ac.abort();
+      },
+      onEvent: () => undefined,
+      signal: ac.signal,
+    });
+    expect(starts).toBe(1);
+    expect(result.ended).toBe('aborted');
   });
 
   it("an error thrown by the caller's frame handler surfaces and is not treated as a drop", async () => {

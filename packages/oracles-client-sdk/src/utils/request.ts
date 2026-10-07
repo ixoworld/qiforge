@@ -53,7 +53,8 @@ export const request = async <T>(
       };
 
       throw new RequestError(errorData.message, {
-        status: errorData.statusCode,
+        // Not every refusal repeats its status in the body.
+        status: errorData.statusCode ?? response.status,
         error: errorData.error,
         message: errorData.message,
         outstandingClaims: errorData.outstandingClaims,

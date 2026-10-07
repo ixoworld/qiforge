@@ -72,6 +72,18 @@ export function setCachedDelegation(
   saveMap(map);
 }
 
+/** Forget one user's delegation to one oracle (it is being replaced). */
+export function removeCachedDelegation(
+  userDid: string,
+  oracleDid: string,
+): void {
+  const map = loadMap();
+  const key = cacheKey(userDid, oracleDid);
+  if (!(key in map)) return;
+  delete map[key];
+  saveMap(map);
+}
+
 export function clearDelegationCache(): void {
   localStorage.removeItem(STORAGE_KEY);
 }

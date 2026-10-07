@@ -10,6 +10,8 @@ import type { IBrowserTools } from '../../../types/browser-tool.type.js';
 import { OracleChat } from './oracle-chat.js';
 import { useSendMessage } from './use-send-message.js';
 
+type RenewOracleAuth = IOraclesContextProps['renewOracleAuth'];
+
 const API = 'https://oracle.test';
 const ORACLE = 'did:ixo:oracle';
 
@@ -34,6 +36,7 @@ function makeContext(
     authedRequest: vi.fn(),
     getDelegation: vi.fn(async () => 'delegation'),
     getInvocation: vi.fn(async () => 'inv-1'),
+    renewOracleAuth: vi.fn(async () => true),
     agActions: [],
     registeredAgActions: [],
     registerAgAction: vi.fn(),
@@ -177,13 +180,13 @@ describe('useSendMessage', () => {
 
   it('re-joins with a freshly minted invocation after a 401 and never repeats the POST', async () => {
     let current = 'inv-1';
+    const renewOracleAuth = vi.fn(async (_did: string, stage: 1 | 2) => {
+      if (stage === 1) current = 'inv-2';
+      return true;
+    });
     context = makeContext({
-      getInvocation: vi.fn(
-        async (_did: string, options?: { fresh?: boolean }) => {
-          if (options?.fresh) current = 'inv-2';
-          return current;
-        },
-      ),
+      getInvocation: vi.fn(async () => current),
+      renewOracleAuth,
     });
     respond = (call) => {
       if (call.method === 'POST') return openPost(call);
@@ -218,12 +221,17 @@ describe('useSendMessage', () => {
       'Bearer inv-1',
       'Bearer inv-2',
     ]);
+    // Told which credentials were refused; the delegation stage never ran.
+    expect(renewOracleAuth.mock.calls).toEqual([
+      [ORACLE, 1, { delegation: 'delegation', invocation: 'inv-1' }],
+    ]);
     expect(chat.run.ended).toBe('done');
     expect(chat.lastMessage?.content).toBe('hello world');
   });
 
-  it('surfaces a re-join that is refused even with renewed credentials', async () => {
-    context = makeContext();
+  it('surfaces a re-join that is refused after both renewal stages', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
     respond = (call) =>
       call.method === 'POST'
         ? openPost(call)
@@ -241,10 +249,82 @@ describe('useSendMessage', () => {
       await sending;
     });
 
-    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(2);
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(3);
+    expect(renewOracleAuth.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      [ORACLE, 1],
+      [ORACLE, 2],
+    ]);
     expect(chat.run.ended).toBe('unauthorized');
     expect(chat.status).toBe('error');
     expect(chat.error).toBeInstanceOf(Error);
+  });
+
+  it('a POST refused for its credentials is sent again once with renewed ones, and the message streams once', async () => {
+    let current = 'inv-1';
+    const renewOracleAuth = vi.fn(async (_did: string, stage: 1 | 2) => {
+      if (stage === 1) current = 'inv-2';
+      return true;
+    });
+    context = makeContext({
+      getInvocation: vi.fn(async () => current),
+      renewOracleAuth,
+    });
+    respond = (call) => {
+      if (call.method !== 'POST') return new Response('');
+      if (call.headers.authorization !== 'Bearer inv-2')
+        return Response.json(
+          { statusCode: 401, message: 'Invalid UCAN invocation' },
+          { status: 401 },
+        );
+      return openPost(call);
+    };
+    const chat = newChat();
+    const { result } = setup(chat);
+
+    let sending!: Promise<void>;
+    act(() => {
+      sending = result.current.sendMessage('hi');
+    });
+    await waitFor(() => expect(posts).toHaveLength(1));
+    posts[0]!.write(
+      frame('message', 2, { content: 'hello', timestamp: 't' }) +
+        frame('done', 3, { status: 'finished' }),
+    );
+    await act(async () => {
+      await sending;
+    });
+
+    const sent = calls.filter((c) => c.method === 'POST');
+    expect(sent.map((c) => c.headers.authorization)).toEqual([
+      'Bearer inv-1',
+      'Bearer inv-2',
+    ]);
+    expect(sent[1]!.body).toBe(sent[0]!.body);
+    expect(renewOracleAuth.mock.calls.map((call) => call[1])).toEqual([1]);
+    expect(chat.run.ended).toBe('done');
+    expect(chat.lastMessage?.content).toBe('hello');
+  });
+
+  it('a POST still refused after both stages fails the send with the refusal', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
+    respond = () =>
+      Response.json(
+        { statusCode: 401, message: 'Invalid UCAN invocation' },
+        { status: 401 },
+      );
+    const chat = newChat();
+    const { result } = setup(chat);
+
+    let failure: unknown;
+    await act(async () => {
+      failure = await result.current.sendMessage('hi').catch((e: unknown) => e);
+    });
+
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(3);
+    expect(renewOracleAuth.mock.calls.map((call) => call[1])).toEqual([1, 2]);
+    expect(failure).toMatchObject({ status: 401 });
+    expect(chat.status).toBe('error');
   });
 
   it('a resume that finishes waiting for its delegation after a send started leaves the send alone', async () => {

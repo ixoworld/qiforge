@@ -110,6 +110,26 @@ function ChatInterface() {
 
 `myWallet` stands for the host app's own UCAN signing. `createInvocation` is optional in the type, but the Workers runtime (`@ixo/oracle-runtime-workers`) authenticates a request only by its invocation (`Authorization: Bearer <invocation>`); a request carrying only the delegation gets 401 unless the oracle sets `UCAN_ALLOW_BARE_DELEGATION_AUTH=true`. The delegation must have an expiry.
 
+### Credentials and renewal
+
+Every request to an oracle carries two UCANs, both cached per user and oracle in `localStorage` and minted on demand (callers that miss the cache at the same moment share one mint):
+
+- the **delegation** (`x-ucan-delegation`): the user's grant to the oracle, long-lived. The oracle keeps the newest one it sees and mints its own downstream invocations from it. Minting one needs the user's key (a PIN or passkey on the Portal).
+- the **invocation** (`Authorization: Bearer …`): short-lived (minutes), it proves who is calling.
+
+When the oracle refuses a request for its credentials (401, or a 403 other than `VFS_AUTH_FAILED`), the SDK renews them in two stages and repeats the request after each:
+
+1. a fresh **invocation**;
+2. only if the request is refused again: a fresh **delegation**, then a fresh invocation.
+
+Still refused after stage 2, it gives up. Stage 2 never runs on a first refusal or when stage 1 got through, so the user is asked for their key only when the delegation itself is the problem. A delegation that stage 2 minted less than ten minutes ago is not replaced by another stage 2 (a refusal that soon is not fixed by asking again). Refusals that arrive together (several requests, the socket, a re-join) share one renewal, and a caller whose refused credentials were already replaced by another caller's renewal just repeats with the new ones. The runtime authenticates before a request reaches the user's data, so a refused request was never processed and repeating it is safe.
+
+This applies to `authedRequest` (every hook's REST calls), the turn's `POST /messages/:sessionId` (repeated only while it is refused; once accepted it is never sent again), every re-join of a running reply, and the realtime socket's CONNECT (a refusal of the credentials themselves; a failed session check is final).
+
+- `run.ended === 'unauthorized'` (`useChat`): a re-join of the running reply was refused after both stages (or for a reason new credentials cannot fix). The reply itself goes on and appears in the transcript once the conversation reloads. A message whose POST is still refused after both stages was not sent: `sendMessage` rejects with the refusal (`status` 401/403).
+- `useOraclesContext().renewOracleAuth(oracleDid, stage, refused?)` is the same renewal for a host's own requests: call stage 1 after a refusal and repeat, stage 2 only after the repeat was refused too, passing the credentials the refused request carried. It resolves `false` when there is nothing to repeat with. `getDelegation(oracleDid, { fresh: true })` and `getInvocation(oracleDid, { fresh: true })` mint without the staging.
+- `onDelegationRenewed(oracleDid, delegation)` (provider prop, optional) runs after stage 2 minted a delegation. The oracle already adopts the new delegation from the repeated request; use the hook to update anything else that holds the old one, such as a delegation deposited with `POST /delegation` (the oracle reads that copy for Matrix turns when it has none of its own).
+
 ## 📚 Documentation
 
 - **[Usage Guide](./docs/USAGE_GUIDE.md)** - Complete walkthrough with examples
@@ -246,7 +266,7 @@ import { useLiveAgent } from '@ixo/oracles-client-sdk/live-agent';
 ### Components
 
 - `OraclesProvider` - Required context provider
-- `useOraclesContext` - The provider's context (wallet, `authedRequest`, `agActions`, `registeredAgActions`)
+- `useOraclesContext` - The provider's context (wallet, `authedRequest`, `getDelegation`, `getInvocation`, `renewOracleAuth`, `agActions`, `registeredAgActions`)
 - `renderMessageContent` - Message renderer utility
 
 ### Types

@@ -151,8 +151,12 @@ export interface ChatRunState {
    * restarts; the kept text is shown), `failed`, or `disconnected` (the
    * client could not re-join; the reply lands in the transcript when the
    * runtime finishes it), or `unauthorized` (the runtime refused the
-   * re-join's credentials, also freshly minted ones; the chat's status is
-   * `error` and the reply lands in the transcript as with `disconnected`).
+   * re-join's credentials after both renewal stages — a fresh invocation,
+   * then a fresh delegation and invocation — or for a reason new
+   * credentials cannot fix; the chat's status is `error` and the reply
+   * lands in the transcript as with `disconnected`). A message whose POST
+   * is still refused after both stages was not sent: the send fails with
+   * the refusal's `RequestError` (status 401/403) instead.
    */
   ended:
     | 'done'
