@@ -7,6 +7,8 @@ import type { IBrowserTools } from '../../types/browser-tool.type.js';
 import type { IWebSocketConfig } from './types.js';
 import { useWebSocketEvents } from './use-websocket-events.js';
 
+type RenewOracleAuth = IOraclesContextProps['renewOracleAuth'];
+
 const ORACLE = 'did:ixo:oracle';
 
 /** The parts of a socket.io client socket the hook uses. */
@@ -64,6 +66,7 @@ function makeContext(
     authedRequest: vi.fn(),
     getDelegation: vi.fn(async () => 'delegation'),
     getInvocation: vi.fn(async () => 'inv-1'),
+    renewOracleAuth: vi.fn(async () => true),
     agActions: [],
     registeredAgActions: [],
     registerAgAction: vi.fn(),
@@ -112,55 +115,115 @@ describe('useWebSocketEvents', () => {
     });
   });
 
-  it('a CONNECT the server refused is retried once with a renewed invocation', async () => {
-    const getInvocation = vi.fn(async () => 'inv-1');
-    context = makeContext({ getInvocation });
+  it('a CONNECT refused for its credentials renews them in two stages, then stops', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
     renderHook(() => useWebSocketEvents(baseProps));
     await waitFor(() => expect(sockets).toHaveLength(1));
-    const { socket } = sockets[0]!;
+    const { socket, options } = sockets[0]!;
+    await authOf(options); // the first CONNECT's credentials
+    const refuse = () =>
+      act(async () => {
+        await socket.fire(
+          'connect_error',
+          new Error('Unauthorized: Invalid UCAN invocation: expired'),
+        );
+      });
 
     // socket.io destroys a socket whose CONNECT was refused: not active.
     socket.active = false;
-    await act(async () => {
-      await socket.fire(
-        'connect_error',
-        new Error('Unauthorized: invalid invocation'),
-      );
-    });
+    await refuse();
     await waitFor(() => expect(socket.connect).toHaveBeenCalledTimes(1));
-    expect(getInvocation).toHaveBeenCalledWith(ORACLE, { fresh: true });
-
-    // Refused again: no loop.
-    await act(async () => {
-      await socket.fire(
-        'connect_error',
-        new Error('Unauthorized: invalid invocation'),
-      );
+    expect(renewOracleAuth).toHaveBeenLastCalledWith(ORACLE, 1, {
+      delegation: 'delegation',
+      invocation: 'inv-1',
     });
-    expect(socket.connect).toHaveBeenCalledTimes(1);
+
+    // Refused again: the delegation stage, then one last CONNECT.
+    await refuse();
+    await waitFor(() => expect(socket.connect).toHaveBeenCalledTimes(2));
+    expect(renewOracleAuth).toHaveBeenLastCalledWith(
+      ORACLE,
+      2,
+      expect.anything(),
+    );
+
+    // Refused a third time: no loop.
+    await refuse();
+    expect(renewOracleAuth).toHaveBeenCalledTimes(2);
+    expect(socket.connect).toHaveBeenCalledTimes(2);
 
     // A transport failure (still active) is socket.io's own retry.
     socket.active = true;
     await act(async () => {
       await socket.fire('connect_error', new Error('xhr poll error'));
     });
-    expect(socket.connect).toHaveBeenCalledTimes(1);
+    expect(socket.connect).toHaveBeenCalledTimes(2);
   });
 
-  it('a CONNECT refused for a reason other than its credentials mints nothing', async () => {
-    const getInvocation = vi.fn(async () => 'inv-1');
-    context = makeContext({ getInvocation });
+  it('a CONNECT accepted after stage 1 never reaches the delegation stage, and earns the next refusal stage 1 again', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
     renderHook(() => useWebSocketEvents(baseProps));
     await waitFor(() => expect(sockets).toHaveLength(1));
     const { socket } = sockets[0]!;
-    getInvocation.mockClear();
+    socket.active = false;
+    const refuse = () =>
+      act(async () => {
+        await socket.fire(
+          'connect_error',
+          new Error('Unauthorized: Invalid UCAN invocation: expired'),
+        );
+      });
+
+    await refuse();
+    await waitFor(() => expect(socket.connect).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await socket.fire('connect');
+    });
+    await refuse();
+    await waitFor(() => expect(socket.connect).toHaveBeenCalledTimes(2));
+
+    expect(renewOracleAuth.mock.calls.map((call) => call[1])).toEqual([1, 1]);
+  });
+
+  it('does not connect again when nothing could be renewed', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => false);
+    context = makeContext({ renewOracleAuth });
+    renderHook(() => useWebSocketEvents(baseProps));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const { socket } = sockets[0]!;
+    socket.active = false;
+
+    await act(async () => {
+      await socket.fire(
+        'connect_error',
+        new Error('Unauthorized: Invalid UCAN invocation: expired'),
+      );
+    });
+    await waitFor(() => expect(renewOracleAuth).toHaveBeenCalledTimes(1));
+    expect(socket.connect).not.toHaveBeenCalled();
+  });
+
+  it('a CONNECT refused for a reason other than its credentials renews nothing', async () => {
+    const renewOracleAuth = vi.fn<RenewOracleAuth>(async () => true);
+    context = makeContext({ renewOracleAuth });
+    renderHook(() => useWebSocketEvents(baseProps));
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const { socket } = sockets[0]!;
 
     socket.active = false;
-    await act(async () => {
-      await socket.fire('connect_error', new Error('Session sess not found'));
-    });
+    for (const message of [
+      'Session sess not found',
+      'Unauthorized: session check failed',
+      'Unauthorized: token does not belong to the routed user',
+    ]) {
+      await act(async () => {
+        await socket.fire('connect_error', new Error(message));
+      });
+    }
 
-    expect(getInvocation).not.toHaveBeenCalled();
+    expect(renewOracleAuth).not.toHaveBeenCalled();
     expect(socket.connect).not.toHaveBeenCalled();
   });
 

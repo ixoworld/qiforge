@@ -2,6 +2,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
+import {
+  isCredentialRefusalMessage,
+  type AuthRenewalStage,
+  type RefusedCredentials,
+} from '../../utils/auth-renewal.js';
 import { useOraclesConfig } from '../use-oracles-config.js';
 import {
   executeBrowserToolCall,
@@ -22,7 +27,8 @@ export function useWebSocketEvents(
     props.oracleDid,
     props.overrides,
   );
-  const { wallet, getDelegation, getInvocation } = useOraclesContext();
+  const { wallet, getDelegation, getInvocation, renewOracleAuth } =
+    useOraclesContext();
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -87,17 +93,21 @@ export function useWebSocketEvents(
       // is treated like a bearer token; without a createInvocation callback
       // it is null and the handshake carries the delegation only.
       const oracleDid = props.oracleDid;
+      // The credentials the latest CONNECT carried, for the renewal.
+      let sent: RefusedCredentials = {};
       const newSocket = io(apiUrl, {
         query: { sessionId, userDid: wallet.did },
         auth: (cb) => {
           void Promise.all([getDelegation(oracleDid), getInvocation(oracleDid)])
             .then(([current, invocation]) => {
+              sent = { delegation: current ?? delegation, invocation };
               cb({
                 ucanDelegation: current ?? delegation,
                 ...(invocation && { invocation }),
               });
             })
             .catch(() => {
+              sent = { delegation, invocation: null };
               cb({ ucanDelegation: delegation });
             });
         },
@@ -108,15 +118,17 @@ export function useWebSocketEvents(
       socketRef.current = newSocket;
 
       // socket.io never retries a CONNECT the server refused (the socket is
-      // no longer `active`). A refusal of the credentials (the server's
-      // message starts with `Unauthorized`) renews the invocation once and
-      // connects again; any other refusal (an unknown session) is final.
-      // A connection that succeeds earns the next refusal its own renewal.
-      let renewedAfterRefusal = false;
+      // no longer `active`). A refusal of the credentials renews them
+      // (stage 1: a fresh invocation) and connects again; refused again,
+      // stage 2 (a fresh delegation, then a fresh invocation) and one last
+      // CONNECT. Any other refusal (an unknown session, a failed session
+      // check) is final. A connection that succeeds earns the next refusal
+      // its own renewal, starting again at stage 1.
+      let renewalStage: 0 | AuthRenewalStage = 0;
 
       // Connection event handlers
       newSocket.on('connect', () => {
-        renewedAfterRefusal = false;
+        renewalStage = 0;
         setIsConnected(true);
         setConnectionStatus('connected');
         setLastActivity(new Date().toISOString());
@@ -136,14 +148,15 @@ export function useWebSocketEvents(
         setLastActivity(new Date().toISOString());
         if (
           newSocket.active ||
-          !err.message.startsWith('Unauthorized') ||
-          renewedAfterRefusal ||
+          !isCredentialRefusalMessage(err.message) ||
+          renewalStage === 2 ||
           cancelled
         )
           return;
-        renewedAfterRefusal = true;
-        void getInvocation(oracleDid, { fresh: true }).then(() => {
-          if (!cancelled) newSocket.connect();
+        const stage: AuthRenewalStage = renewalStage === 0 ? 1 : 2;
+        renewalStage = stage;
+        void renewOracleAuth(oracleDid, stage, sent).then((renewed) => {
+          if (renewed && !cancelled) newSocket.connect();
         });
       });
 

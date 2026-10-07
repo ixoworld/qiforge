@@ -6,6 +6,11 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { useOraclesContext } from '../../../providers/oracles-provider/oracles-context.js';
 import { RequestError } from '../../../utils/request.js';
+import type {
+  AuthRenewalStage,
+  RefusedCredentials,
+  RenewAuth,
+} from '../../../utils/auth-renewal.js';
 import {
   streamRun,
   StreamRunStartError,
@@ -94,8 +99,14 @@ export function useSendMessage({
     overrides,
   );
   const apiUrl = overrides?.baseUrl ?? config.apiUrl;
-  const { wallet, authedRequest, agActions, getDelegation, getInvocation } =
-    useOraclesContext();
+  const {
+    wallet,
+    authedRequest,
+    agActions,
+    getDelegation,
+    getInvocation,
+    renewOracleAuth,
+  } = useOraclesContext();
 
   // Abort controller for canceling requests
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -133,24 +144,40 @@ export function useSendMessage({
   }, [detachStream]);
 
   /**
-   * Re-join credentials, read again for every attempt: an invocation lives
-   * minutes and a turn can outlive it. `renew` mints a new invocation when
-   * the runtime refused the cached one.
+   * A stream's credentials, read again for every attempt: an invocation
+   * lives minutes and a turn can outlive it. `first` (the credentials a
+   * send just read) serves the first attempt. `renew` is the context's
+   * two-stage renewal, told which credentials the refused attempt carried.
    */
-  const joinAuth = useCallback(
-    (did: string, turnDelegation: string) => ({
-      headers: async () => {
+  const streamAuth = useCallback(
+    (
+      did: string,
+      turnDelegation: string,
+      first?: { delegation: string; invocation: string | null },
+    ) => {
+      let pending = first;
+      let sent: RefusedCredentials = {};
+      const read = async (): Promise<{
+        delegation: string;
+        invocation: string | null;
+      }> => {
         const [delegation, invocation] = await Promise.all([
           getDelegation(did),
           getInvocation(did),
         ]);
-        return authHeaders(delegation ?? turnDelegation, invocation);
-      },
-      renew: async () => {
-        await getInvocation(did, { fresh: true });
-      },
-    }),
-    [getDelegation, getInvocation],
+        return { delegation: delegation ?? turnDelegation, invocation };
+      };
+      return {
+        headers: async () => {
+          const current = pending ?? (await read());
+          pending = undefined;
+          sent = current;
+          return authHeaders(current.delegation, current.invocation);
+        },
+        renew: (stage: AuthRenewalStage) => renewOracleAuth(did, stage, sent),
+      };
+    },
+    [getDelegation, getInvocation, renewOracleAuth],
   );
 
   // Abort function to cancel ongoing stream
@@ -254,7 +281,7 @@ export function useSendMessage({
         chat?.setStatus(
           'error',
           new Error(
-            'The oracle refused to reconnect this chat to the running reply (authorization expired). The reply appears once the conversation reloads.',
+            'The oracle refused to reconnect this chat to the running reply, also after its authorization was renewed. The reply appears once the conversation reloads.',
           ),
         );
       } else {
@@ -320,7 +347,7 @@ export function useSendMessage({
         resumed: 0,
         ended: null,
       });
-      const auth = joinAuth(oracleDid, delegation);
+      const auth = streamAuth(oracleDid, delegation);
       try {
         const result = await joinOracleRun({
           apiURL: apiUrl,
@@ -355,7 +382,7 @@ export function useSendMessage({
       sessionId,
       chatRef,
       delegationWithRetry,
-      joinAuth,
+      streamAuth,
       frameCallbacks,
       settleStream,
       refetchQueries,
@@ -460,13 +487,14 @@ export function useSendMessage({
           ended: null,
         });
 
-        const auth = joinAuth(oracleDid, delegation);
+        const auth = streamAuth(oracleDid, delegation, {
+          delegation,
+          invocation,
+        });
         const results = await askOracleStream({
           apiURL: apiUrl,
           message,
-          delegation,
-          invocation,
-          joinHeaders: auth.headers,
+          headers: auth.headers,
           onUnauthorized: auth.renew,
           sessionId,
           model,
@@ -731,7 +759,7 @@ const joinOracleRun = async (props: {
   runId: string;
   /** The credentials of each join attempt. */
   headers: () => Promise<Record<string, string>>;
-  onUnauthorized?: () => Promise<void>;
+  onUnauthorized?: RenewAuth;
   abortSignal?: AbortSignal;
   callbacks: RunFrameCallbacks;
 }): Promise<StreamRunResult> => {
@@ -751,13 +779,14 @@ const askOracleStream = async (props: {
   apiURL: string;
   message: string;
   sessionId: string;
-  /** The credentials of the POST that starts the turn. */
-  delegation: string;
-  invocation?: string | null;
-  /** The credentials of each re-join attempt (minted again as they expire). */
-  joinHeaders: () => Promise<Record<string, string>>;
-  /** A re-join was refused for its credentials: mint new ones. */
-  onUnauthorized?: () => Promise<void>;
+  /**
+   * The credentials of each attempt: the POST that starts the turn (and
+   * its repeats after a refusal of them) and every re-join (minted again as
+   * they expire).
+   */
+  headers: () => Promise<Record<string, string>>;
+  /** The POST or a re-join was refused for its credentials: renew them. */
+  onUnauthorized?: RenewAuth;
   /** Model id to answer with; omitted → the oracle's default model. */
   model?: string;
   metadata?: Record<string, unknown>;
@@ -780,12 +809,12 @@ const askOracleStream = async (props: {
   onRunStarted?: (runId: string) => void;
   callbacks: RunFrameCallbacks;
 }): Promise<StreamRunResult & { requestId: string }> => {
-  const headers = authHeaders(props.delegation, props.invocation);
   let requestId: string | null = null;
   let result: StreamRunResult;
   try {
     result = await streamRun({
       start: async () => {
+        const headers = await props.headers();
         const response = await fetch(
           `${props.apiURL}/messages/${props.sessionId}`,
           {
@@ -821,7 +850,7 @@ const askOracleStream = async (props: {
         }
         return response;
       },
-      join: joinRunRequest(props.apiURL, props.joinHeaders, props.abortSignal),
+      join: joinRunRequest(props.apiURL, props.headers, props.abortSignal),
       onUnauthorized: props.onUnauthorized,
       onEvent: frameHandler(props.callbacks),
       onDisconnect: props.callbacks.onDisconnect,
@@ -836,7 +865,10 @@ const askOracleStream = async (props: {
         parsed = { message: error.body || error.message };
       }
       throw withRequestId(
-        new RequestError(parsed.message ?? error.message, parsed),
+        new RequestError(parsed.message ?? error.message, {
+          ...parsed,
+          status: error.status,
+        }),
         requestId,
       );
     }

@@ -44,4 +44,14 @@ describe('request', () => {
     expect(error.code).toBeUndefined();
     expect(error.retryable).toBeUndefined();
   });
+
+  it('takes the status from the response when the body does not repeat it', async () => {
+    vi.stubGlobal(
+      'fetch',
+      reply({ message: 'A signed invocation is required.' }, 401),
+    );
+    const error = await request('https://o/x', 'GET').catch((e: unknown) => e);
+    if (!(error instanceof RequestError)) throw error;
+    expect(error.status).toBe(401);
+  });
 });

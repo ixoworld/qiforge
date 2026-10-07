@@ -17,17 +17,29 @@
  *   - a `done` frame with `partialText` (an interrupted / aborted / failed
  *     run) carries the reply text the runtime kept, which replaces the
  *     text shown;
- *   - a POST is never repeated: repeating it would send the message again;
+ *   - a POST is never repeated once the runtime accepted it: repeating it
+ *     would send the message again;
  *   - a frame whose id is not above the cursor was already applied (the
  *     runtime only replays frames after `after`) and is skipped;
- *   - a re-join refused for its credentials (401/403) renews them once
- *     (`onUnauthorized`) and tries again; a second refusal ends the stream
- *     `unauthorized` instead of spending the re-join budget on it.
+ *   - a POST or a re-join refused for its credentials (401/403) renews them
+ *     (`onUnauthorized`, stage 1: a fresh invocation) and is sent again; a
+ *     second refusal renews them once more (stage 2: a fresh delegation,
+ *     then a fresh invocation) and sends it a last time. A refused request
+ *     was never processed (the runtime authenticates before it reaches the
+ *     user's object), so the repeat cannot send a message twice. A re-join
+ *     still refused ends the stream `unauthorized` instead of spending the
+ *     re-join budget on it; a POST still refused throws
+ *     `StreamRunStartError` with the refusal's status.
  *
  * Against a runtime without durable runs (no `run` frame, no `x-run-id`)
  * this degrades to the previous behaviour: the stream ends when the
  * connection ends.
  */
+import {
+  isCredentialRefusalResponse,
+  withAuthRenewal,
+  type RenewAuth,
+} from './auth-renewal.js';
 import { parseSSEStream, type SSEEvent } from './sse-parser.js';
 
 /** The run as seen so far, handed to `onEvent` after each frame is applied. */
@@ -43,7 +55,11 @@ export interface RunStreamState {
 }
 
 export interface StreamRunInput {
-  /** Start the turn: `POST /messages/:sessionId` with the turn body. */
+  /**
+   * Start the turn: `POST /messages/:sessionId` with the turn body. Called
+   * again only after a refusal of its credentials, so it should build its
+   * credentials per call.
+   */
   start: () => Promise<Response>;
   /**
    * Re-join a run after a cursor: `GET /runs/:runId?after=<seq>`. Called
@@ -51,11 +67,13 @@ export interface StreamRunInput {
    */
   join: (runId: string, after: number) => Promise<Response>;
   /**
-   * A re-join was refused for its credentials (401/403): renew them so the
-   * next `join` sends fresh ones. Without it the first refusal ends the
-   * stream `unauthorized`.
+   * The POST or a re-join was refused for its credentials (401/403): renew
+   * them so the next attempt sends fresh ones. Stage 1 follows a first
+   * refusal, stage 2 a refusal of the attempt renewed by stage 1; resolve
+   * `false` when nothing could be renewed. Without it the first refusal
+   * is final.
    */
-  onUnauthorized?: () => void | Promise<void>;
+  onUnauthorized?: RenewAuth;
   onEvent: (
     event: SSEEvent,
     state: Readonly<RunStreamState>,
@@ -79,8 +97,9 @@ export interface StreamRunInput {
 export interface StreamRunResult extends RunStreamState {
   /**
    * How the stream ended. `unauthorized`: the runtime refused to let this
-   * client re-join the run, also with renewed credentials (the run itself
-   * goes on; its reply lands in the transcript).
+   * client re-join the run after both renewal stages (or for a reason new
+   * credentials cannot fix, or with nothing left to renew). The run itself
+   * goes on; its reply lands in the transcript.
    */
   ended: 'done' | 'aborted' | 'disconnected' | 'error' | 'unauthorized';
   /** The `done` frame's data, when one was received. */
@@ -196,20 +215,30 @@ export async function streamRun(
   const maxRejoins = input.maxRejoins ?? DEFAULT_MAX_REJOINS;
   const delayOf = input.rejoinDelayMs ?? defaultDelay;
 
+  /** Send a request, renewing its credentials (both stages) while they are refused. */
+  const withRenewal = async (
+    attempt: () => Promise<Response>,
+  ): Promise<Response> =>
+    (
+      await withAuthRenewal({
+        attempt,
+        isRefused: isCredentialRefusalResponse,
+        renew: input.onUnauthorized,
+        signal: input.signal,
+        discard: cancelBody,
+      })
+    ).outcome;
+
   /**
-   * One re-join, with one credential renewal when it is refused for them.
-   * The renewal is spent per refusal: a re-join that gets through earns the
-   * next refusal (a long turn outlives several credentials) its own renewal.
+   * One re-join, with the two renewal stages when it is refused for its
+   * credentials. The stages are spent per refusal: a re-join that gets
+   * through earns the next refusal (a long turn outlives several
+   * credentials) its own renewal, starting again at stage 1.
    */
   const join = async (runId: string): Promise<Response | 'unauthorized'> => {
-    const response = await input.join(runId, state.lastId);
+    const response = await withRenewal(() => input.join(runId, state.lastId));
     if (!isAuthRefusal(response)) return response;
-    void response.body?.cancel().catch(() => undefined);
-    if (!input.onUnauthorized || input.signal?.aborted) return 'unauthorized';
-    await input.onUnauthorized();
-    const renewed = await input.join(runId, state.lastId);
-    if (!isAuthRefusal(renewed)) return renewed;
-    void renewed.body?.cancel().catch(() => undefined);
+    cancelBody(response);
     return 'unauthorized';
   };
 
@@ -227,8 +256,14 @@ export async function streamRun(
     }
     outcome = await consume(response, state, input.onEvent, input.signal);
   } else {
-    const response = await input.start();
+    const response = await withRenewal(input.start);
     state.requestId = response.headers.get('x-request-id');
+    if (!response.ok && input.signal?.aborted) {
+      // The user stopped the turn while its credentials were renewed.
+      cancelBody(response);
+      const { done: _done, ...rest } = state;
+      return { ...rest, ended: 'aborted' };
+    }
     if (!response.ok) {
       // A failed start has no run; the caller reads the error body.
       const message = await response.text().catch(() => '');
@@ -292,8 +327,13 @@ export async function streamRun(
   };
 }
 
+/** The request was refused for its credentials, renewable or not. */
 function isAuthRefusal(response: Response): boolean {
   return response.status === 401 || response.status === 403;
+}
+
+function cancelBody(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
 }
 
 /**

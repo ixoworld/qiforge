@@ -47,6 +47,17 @@ budget (see [configuration](configuration.md#wrangler-config)).
   characters, else a fresh UUID. Owner-copy failures keep their own codes
   (see [user objects](#user-objects-and-the-owner-copy)), and so do errors a
   route throws on purpose with a status.
+- **Refused credentials.** The shell authenticates before the request
+  reaches the user object, so a 401 from it means nothing was processed;
+  the owner-copy 403s (`NO_VFS_DELEGATION`, `VFS_AUTH_FAILED`) are refused
+  before anything is written too. With a valid invocation, a delegation
+  that fails validation is ignored rather than refused (the request goes
+  on without it). `@ixo/oracles-client-sdk` repeats a refused request in
+  two stages — a fresh invocation, then a fresh delegation and invocation —
+  including a turn's `POST /messages/:id` (never repeated once accepted)
+  and the socket CONNECT; it does not renew for `VFS_AUTH_FAILED`. A new
+  delegation seen in `x-ucan-delegation` replaces the user object's stored
+  copy (`meta:delegation`), which header-less turns mint from.
 - **Socket upgrades.** `GET /socket.io/*` is unauthenticated until the
   socket.io CONNECT packet. Before any user object is addressed, the shell
   requires `userDid` to be a W3C DID of at most 512 characters (else 400)
