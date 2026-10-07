@@ -1,6 +1,0 @@
----
-'@ixo/oracle-runtime-workers': minor
-'@ixo/oracles-client-sdk': minor
----
-
-Anonymous feedback on a completed Agent reply. The runtime adds `POST /messages/:sessionId/:messageId/feedback`: the text is screened for direct identifiers and secrets, the message is checked in the caller's own database, and one Linear issue per reply is created with keyed pseudonyms and allowlisted coarse context only — never the prompt, the reply, tool data, the DID, raw ids, the IP or the user agent, and the text is neither stored nor logged. Per-user and per-IP limits, idempotent retries and bounded Linear retries are built in. Off until `FEEDBACK_LINEAR_API_KEY` and `FEEDBACK_HMAC_SECRET` are set; the transcript routes then advertise `capabilities.anonymousMessageFeedback`. The SDK's `useChat` gains `submitMessageFeedback`, `isAnonymousMessageFeedbackSupported`, `submittingFeedbackMessageId` and `messageFeedbackError`; the control stays hidden against runtimes that do not advertise the capability, and submitting never changes or refetches the messages. Every refusal carries a machine-readable `code` and a `retryable` flag (e.g. `FEEDBACK_IN_FLIGHT`, `FEEDBACK_ALREADY_SUBMITTED`), which the SDK's `RequestError` now exposes as `code` and `retryable` for any runtime error body that has them.

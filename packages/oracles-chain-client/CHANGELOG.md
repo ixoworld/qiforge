@@ -1,5 +1,12 @@
 # @ixo/oracles-chain-client
 
+## 2.1.3
+
+### Patch Changes
+
+- Updated dependencies [[`77012a8`](https://github.com/ixoworld/qiforge/commit/77012a8ef4ba6f2c5b7403635a1e6d232510cc69)]:
+  - @ixo/ucan@2.2.1
+
 ## 1.1.3
 
 ### Patch Changes
