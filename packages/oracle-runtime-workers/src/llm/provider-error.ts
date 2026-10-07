@@ -7,8 +7,10 @@
  * streams a reply.
  */
 
+import { isContextOverflowError } from '../core/context-window';
 import {
   BYO_PROVIDER_INFO,
+  BYO_PROVIDER_MODELS,
   isByoProvider,
   type ByoProvider,
 } from './byo-catalog';
@@ -20,6 +22,7 @@ export type ByoFallbackReason =
   | 'not_connected'
   | 'reconnect_required'
   | 'unreachable'
+  | 'model_unavailable'
   | 'error';
 
 export interface ByoFallbackNoticePayload {
@@ -28,19 +31,51 @@ export interface ByoFallbackNoticePayload {
   source: 'byo';
   provider?: ByoProvider;
   providerLabel?: string;
+  /** `model_unavailable` only: the provider-native id the provider refused. */
+  model?: string;
   reason: ByoFallbackReason;
   retryable: false;
   timestamp: string;
 }
 
+export interface ByoFallbackNoticeOptions {
+  /** `model_unavailable`: the provider-native model id that was refused. */
+  modelId?: string;
+}
+
+/** Catalog label of a provider-native BYO model id, else the id itself. */
+function byoModelLabel(provider: ByoProvider | undefined, modelId: string) {
+  const entry = provider
+    ? BYO_PROVIDER_MODELS[provider].find((m) => m.id === modelId)
+    : undefined;
+  return entry?.label ?? modelId;
+}
+
+/**
+ * The user's account as the `model_unavailable` sentence names it: the
+ * subscription is a plan, the API-key providers are accounts — the same
+ * wording the classified-error messages use (`fallbackMessage`).
+ */
+function byoAccountPhrase(
+  provider: ByoProvider | undefined,
+  providerLabel: string | undefined,
+): string {
+  if (provider === 'chatgpt') return 'Your ChatGPT subscription';
+  return providerLabel
+    ? `Your ${providerLabel} account`
+    : 'Your connected AI account';
+}
+
 export function buildByoFallbackNotice(
   reason: ByoFallbackReason,
   provider?: ByoProvider,
+  opts?: ByoFallbackNoticeOptions,
 ): ByoFallbackNoticePayload {
   const providerLabel = provider
     ? BYO_PROVIDER_INFO[provider].label
     : undefined;
   const account = providerLabel ?? 'your connected AI account';
+  const modelId = reason === 'model_unavailable' ? opts?.modelId : undefined;
   const message =
     reason === 'unreachable'
       ? `Your ${account} can't be reached from this oracle right now, so this reply is using the platform model instead.`
@@ -48,13 +83,16 @@ export function buildByoFallbackNotice(
         ? `Your ${account} connection has expired, so this reply is using the platform model instead. Reconnect it in your Personal Agent settings.`
         : reason === 'not_connected'
           ? `The model you selected needs a connected ${account}, so this reply is using the platform model instead. Connect it in your Personal Agent settings.`
-          : `Your connected AI account could not be used for this reply, so it is using the platform model instead.`;
+          : reason === 'model_unavailable'
+            ? `${byoAccountPhrase(provider, providerLabel)} doesn't offer ${modelId ? byoModelLabel(provider, modelId) : 'the model you selected'}, so this reply used the platform model instead. Pick another model in your Personal Agent settings.`
+            : `Your connected AI account could not be used for this reply, so it is using the platform model instead.`;
   return {
     error: message,
     kind: BYO_FALLBACK_KIND,
     source: 'byo',
     ...(provider && { provider }),
     ...(providerLabel && { providerLabel }),
+    ...(modelId && { model: modelId }),
     reason,
     retryable: false,
     timestamp: new Date().toISOString(),
@@ -216,6 +254,30 @@ function fallbackMessage(
   }
 }
 
+/**
+ * Failures of the platform model answering for a refused BYO model
+ * (byo-model-fallback.ts). The turn is still a BYO turn, but such a failure
+ * is the platform's: it must be classified (and redacted) as one, never
+ * blamed on the user's account. Identity-keyed, so the error object itself
+ * is left untouched.
+ */
+const PLATFORM_FALLBACK_FAILURES = new WeakSet<object>();
+
+export function markPlatformFallbackFailure(error: unknown): void {
+  if (error && typeof error === 'object') PLATFORM_FALLBACK_FAILURES.add(error);
+}
+
+/** The error, or one it wraps (`cause`, as LangChain's MiddlewareError does). */
+function isPlatformFallbackFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (!current || typeof current !== 'object') return false;
+    if (PLATFORM_FALLBACK_FAILURES.has(current)) return true;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return false;
+}
+
 export interface ClassifyLlmErrorContext {
   /** The BYO provider the failing turn ran on, when it was a BYO turn. */
   byoProvider?: ByoProvider | string | null;
@@ -228,7 +290,9 @@ export function classifyLlmError(
   const parts = extractErrorParts(error);
   const kind = detectKind(parts);
   const provider =
-    typeof ctx?.byoProvider === 'string' && isByoProvider(ctx.byoProvider)
+    typeof ctx?.byoProvider === 'string' &&
+    isByoProvider(ctx.byoProvider) &&
+    !isPlatformFallbackFailure(error)
       ? ctx.byoProvider
       : undefined;
   const providerLabel = provider
@@ -244,6 +308,79 @@ export function classifyLlmError(
     message: fallbackMessage(kind, provider, providerLabel),
     detail: parts.text,
   };
+}
+
+// ── Model refused by the user's own provider ─────────────────────────────
+
+/** Provider codes that name the model as the problem. */
+const MODEL_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
+  'model_not_found',
+  'unsupported_model',
+]);
+/**
+ * Provider texts that name the model as the problem: OpenAI's "The model `x`
+ * does not exist or you do not have access to it", the ChatGPT backend's
+ * "The 'x' model is not supported when using Codex with a ChatGPT account".
+ */
+const MODEL_UNAVAILABLE_TEXT =
+  /model_not_found|unsupported[_ ]model|model\b[^.\n]{0,120}\b(?:does not exist|is not supported|not available)/i;
+/** LangChain's code for a 400 about the request's tool messages. */
+const INVALID_TOOL_RESULTS = 'INVALID_TOOL_RESULTS';
+
+export interface ModelUnavailableOptions {
+  /**
+   * The failing call had already produced output (text, reasoning or a tool
+   * call). Such a failure is never this case: the reply is under way and
+   * the turn keeps today's error handling.
+   */
+  afterOutput?: boolean;
+}
+
+/**
+ * Whether a BYO model call failed because the user's provider does not
+ * serve the requested model — the ChatGPT backend answers an immediate
+ * `400` with an empty body for a model id the subscription does not offer.
+ *
+ * Positive: an explicit model code or text (`model_not_found`, "does not
+ * exist", "unsupported model", "is not supported") on a 400/403/404 or a
+ * status-less error; or a bare HTTP 400/404 that is nothing else this module
+ * or LangChain recognises (not a context overflow, not a malformed
+ * tool-result history, not a billing/auth/rate/timeout/network/server
+ * text). Never once the call produced output (`afterOutput`).
+ */
+export function isModelUnavailableError(
+  error: unknown,
+  opts?: ModelUnavailableOptions,
+): boolean {
+  if (opts?.afterOutput) return false;
+  const parts = extractErrorParts(error);
+  const { status, code, text } = parts;
+  if (
+    status !== undefined &&
+    status !== 400 &&
+    status !== 403 &&
+    status !== 404
+  ) {
+    return false;
+  }
+  if (
+    isContextOverflowError(error) ||
+    (error instanceof Error && error.name === 'ContextOverflowError')
+  ) {
+    return false;
+  }
+  if (code && MODEL_UNAVAILABLE_CODES.has(code)) return true;
+  if (MODEL_UNAVAILABLE_TEXT.test(text)) return true;
+  if (status !== 400 && status !== 404) return false;
+  if (
+    error &&
+    typeof error === 'object' &&
+    'lc_error_code' in error &&
+    error.lc_error_code === INVALID_TOOL_RESULTS
+  ) {
+    return false;
+  }
+  return detectKind(parts) === 'unknown';
 }
 
 const OPERATOR_FAULT_KINDS: ReadonlySet<LlmErrorKind> = new Set([

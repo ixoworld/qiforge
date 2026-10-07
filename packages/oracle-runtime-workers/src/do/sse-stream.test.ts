@@ -1,7 +1,19 @@
 import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
-import { ToolMessage } from '@langchain/core/messages';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import {
+  AIMessageChunk,
+  HumanMessage,
+  ToolMessage,
+} from '@langchain/core/messages';
+import { ChatGenerationChunk, type ChatResult } from '@langchain/core/outputs';
+import { FakeListChatModel } from '@langchain/core/utils/testing';
+import { createAgent } from 'langchain';
 import { describe, expect, it } from 'vitest';
 import { HarnessLimitError } from '../core/turn-budget';
+import {
+  ByoModelFallbackChatModel,
+  ByoModelFallbackState,
+} from '../llm/byo-model-fallback';
 import { createSseTurnStream, isImmediateFrame } from './sse-stream';
 
 async function* fakeEvents(): AsyncGenerator<unknown> {
@@ -707,5 +719,133 @@ describe('runTurnFrames abort classification', () => {
     ).text();
     expect(frames(sse)).not.toContain('error');
     expect(sse).toContain('"aborted":true');
+  });
+});
+
+describe('runTurnFrames BYO model refused by the provider', () => {
+  const frames = (sse: string) =>
+    sse
+      .split('\n\n')
+      .filter((f) => f.includes('event: '))
+      .map((f) => ({
+        event: /event: (\S+)/.exec(f)?.[1],
+        data: JSON.parse(/data: (.*)/.exec(f)?.[1] ?? '{}') as Record<
+          string,
+          unknown
+        >,
+      }));
+
+  /**
+   * The user's model: optionally streams some text, then fails the way the
+   * ChatGPT backend refuses a model the subscription does not serve.
+   */
+  class RefusingModel extends BaseChatModel {
+    calls = 0;
+
+    constructor(private readonly before: string = '') {
+      super({});
+    }
+
+    _llmType(): string {
+      return 'refusing';
+    }
+
+    async _generate(): Promise<ChatResult> {
+      this.calls += 1;
+      throw Object.assign(new Error('400 status code (no body)'), {
+        status: 400,
+      });
+    }
+
+    override async *_streamResponseChunks(): AsyncGenerator<ChatGenerationChunk> {
+      this.calls += 1;
+      if (this.before)
+        yield new ChatGenerationChunk({
+          text: this.before,
+          message: new AIMessageChunk({ content: this.before }),
+        });
+      throw Object.assign(new Error('400 status code (no body)'), {
+        status: 400,
+      });
+    }
+  }
+
+  async function runTurn(byo: RefusingModel, platform: FakeListChatModel) {
+    const model = new ByoModelFallbackChatModel({
+      provider: 'chatgpt',
+      modelId: 'gpt-6-luna',
+      byo,
+      platform: () => platform,
+      state: new ByoModelFallbackState(),
+      logger: {
+        log: () => undefined,
+        warn: () => undefined,
+        error: () => undefined,
+      },
+    });
+    const agent = createAgent({ model, tools: [] });
+    const stream = createSseTurnStream({
+      events: agent.streamEvents(
+        { messages: [new HumanMessage('hello')] },
+        { version: 'v2' },
+      ),
+      sessionId: 's1',
+      requestId: 'r1',
+      byoProvider: 'chatgpt',
+      abortController: new AbortController(),
+    });
+    return frames(await new Response(stream).text());
+  }
+
+  it('sends the byo_fallback notice, then the platform reply, and ends done (not failed)', async () => {
+    const byo = new RefusingModel();
+    const platform = new FakeListChatModel({
+      responses: ['Hello from the platform.'],
+    });
+    const out = await runTurn(byo, platform);
+
+    const noticeAt = out.findIndex((f) => f.event === 'error');
+    const firstMessageAt = out.findIndex((f) => f.event === 'message');
+    expect(noticeAt).toBeGreaterThanOrEqual(0);
+    expect(firstMessageAt).toBeGreaterThan(noticeAt);
+    expect(out.filter((f) => f.event === 'error')).toHaveLength(1);
+    expect(out[noticeAt]?.data).toMatchObject({
+      kind: 'byo_fallback',
+      reason: 'model_unavailable',
+      source: 'byo',
+      provider: 'chatgpt',
+      retryable: false,
+      sessionId: 's1',
+      requestId: 'r1',
+    });
+    expect(String(out[noticeAt]?.data.error)).toContain('gpt-6-luna');
+    expect(
+      out
+        .filter((f) => f.event === 'message')
+        .map((f) => f.data.content)
+        .join(''),
+    ).toBe('Hello from the platform.');
+    const done = out.at(-1);
+    expect(done?.event).toBe('done');
+    expect(done?.data.failed).toBeUndefined();
+    expect(byo.calls).toBe(1);
+  });
+
+  it('keeps today’s failed turn when the refusal comes after streamed text', async () => {
+    const byo = new RefusingModel('Partial ');
+    const platform = new FakeListChatModel({ responses: ['unused'] });
+    const out = await runTurn(byo, platform);
+
+    const error = out.find((f) => f.event === 'error');
+    expect(error?.data).toMatchObject({
+      kind: 'unknown',
+      source: 'byo',
+      provider: 'chatgpt',
+      detail: '400 status code (no body)',
+    });
+    expect(out.some((f) => f.data.kind === 'byo_fallback')).toBe(false);
+    expect(out.at(-1)?.event).toBe('done');
+    expect(out.at(-1)?.data).toMatchObject({ failed: true });
+    expect(byo.calls).toBe(1);
   });
 });

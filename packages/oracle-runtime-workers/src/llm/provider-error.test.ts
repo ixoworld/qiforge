@@ -4,7 +4,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  buildByoFallbackNotice,
   classifyLlmError,
+  isModelUnavailableError,
   isOperatorFault,
   redactOperatorFault,
 } from './provider-error';
@@ -87,5 +89,138 @@ describe('classifyLlmError', () => {
     // Retryable platform faults are the user's to see.
     const platformRate = classifyLlmError(new Error('429 too many requests'));
     expect(redactOperatorFault(platformRate)).toBe(platformRate);
+  });
+});
+
+describe('isModelUnavailableError', () => {
+  const httpError = (status: number, message: string, extra = {}) =>
+    Object.assign(new Error(message), { status, ...extra });
+
+  it('takes the ChatGPT backend’s empty 400 as a refused model', () => {
+    expect(
+      isModelUnavailableError(httpError(400, '400 status code (no body)')),
+    ).toBe(true);
+    // The status recovered from the message alone, as the SSE detail shows it.
+    expect(
+      isModelUnavailableError(new Error('400 status code (no body)')),
+    ).toBe(true);
+  });
+
+  it('takes a 404 model_not_found and the providers’ model texts', () => {
+    expect(
+      isModelUnavailableError(
+        httpError(404, 'The model `gpt-6-luna` does not exist', {
+          code: 'model_not_found',
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isModelUnavailableError(
+        httpError(
+          400,
+          "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isModelUnavailableError({
+        message: 'bad request',
+        error: { code: 'model_not_found' },
+      }),
+    ).toBe(true);
+  });
+
+  it('is never the case once the call produced output', () => {
+    expect(
+      isModelUnavailableError(httpError(400, '400 invalid request'), {
+        afterOutput: true,
+      }),
+    ).toBe(false);
+    expect(
+      isModelUnavailableError(
+        httpError(404, 'model_not_found', { code: 'model_not_found' }),
+        { afterOutput: true },
+      ),
+    ).toBe(false);
+  });
+
+  it('leaves other failures to classifyLlmError, kinds unchanged', () => {
+    const rate = httpError(429, '429 Too Many Requests');
+    expect(isModelUnavailableError(rate)).toBe(false);
+    expect(classifyLlmError(rate).kind).toBe('rate_limit');
+    const server = httpError(500, '500 Internal Server Error');
+    expect(isModelUnavailableError(server)).toBe(false);
+    expect(classifyLlmError(server).kind).toBe('server');
+    expect(
+      isModelUnavailableError(httpError(503, 'model is not available')),
+    ).toBe(false);
+    expect(isModelUnavailableError(httpError(401, 'invalid api key'))).toBe(
+      false,
+    );
+    // A bare 400 that is something else this module or LangChain knows.
+    expect(
+      isModelUnavailableError(
+        httpError(
+          400,
+          "This model's maximum context length is 128000 tokens.",
+          { code: 'context_length_exceeded' },
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isModelUnavailableError(
+        httpError(400, '400 tool_calls must be followed by tool messages', {
+          lc_error_code: 'INVALID_TOOL_RESULTS',
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isModelUnavailableError(httpError(400, '400 insufficient_quota')),
+    ).toBe(false);
+    // No status and no model text: not a refusal.
+    expect(isModelUnavailableError(new Error('socket hang up'))).toBe(false);
+  });
+});
+
+describe('buildByoFallbackNotice model_unavailable', () => {
+  it('names the subscription and the catalog label of the refused model', () => {
+    const notice = buildByoFallbackNotice('model_unavailable', 'chatgpt', {
+      modelId: 'gpt-5.6-terra',
+    });
+    expect(notice).toMatchObject({
+      kind: 'byo_fallback',
+      reason: 'model_unavailable',
+      source: 'byo',
+      provider: 'chatgpt',
+      model: 'gpt-5.6-terra',
+      retryable: false,
+    });
+    expect(notice.error).toBe(
+      "Your ChatGPT subscription doesn't offer GPT-5.6 Terra, so this reply used the platform model instead. Pick another model in your Personal Agent settings.",
+    );
+  });
+
+  it('names an API-key provider’s account, and an uncatalogued model by its id', () => {
+    const notice = buildByoFallbackNotice('model_unavailable', 'openai', {
+      modelId: 'gpt-6-luna',
+    });
+    expect(notice.error).toBe(
+      "Your OpenAI API account doesn't offer gpt-6-luna, so this reply used the platform model instead. Pick another model in your Personal Agent settings.",
+    );
+  });
+
+  it('leaves the pre-turn reasons as they were', () => {
+    const unreachable = buildByoFallbackNotice('unreachable', 'chatgpt');
+    expect(unreachable.reason).toBe('unreachable');
+    expect(unreachable.model).toBeUndefined();
+    expect(unreachable.error).toBe(
+      "Your ChatGPT (subscription) can't be reached from this oracle right now, so this reply is using the platform model instead.",
+    );
+    // A model id passed with another reason is ignored.
+    expect(
+      buildByoFallbackNotice('reconnect_required', 'chatgpt', {
+        modelId: 'gpt-5.6-luna',
+      }).model,
+    ).toBeUndefined();
   });
 });

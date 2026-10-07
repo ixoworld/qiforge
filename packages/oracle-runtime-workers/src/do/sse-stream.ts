@@ -20,6 +20,7 @@
  * that reconnects can ask for `?after=<id>`.
  */
 import {
+  BYO_FALLBACK_KIND,
   classifyLlmError,
   isOperatorFault,
   redactOperatorFault,
@@ -390,6 +391,15 @@ export async function runTurnFrames(
         metadata?: Record<string, unknown>;
         tags?: string[];
       };
+      if (evt.event === 'on_custom_event' && evt.name === BYO_FALLBACK_KIND) {
+        // A BYO model the provider refused mid-turn (byo-model-fallback.ts):
+        // the same `error`-channel notice the pre-turn fallbacks send, in
+        // stream order — ahead of the platform model's reply to that call.
+        const notice = evt.data;
+        if (notice && typeof notice === 'object')
+          write('error', { ...notice, sessionId, requestId });
+        continue;
+      }
       if (evt.event === 'on_chat_model_end') {
         if (isInternalModelEvent(evt)) continue;
         const output = (evt.data as { output?: AIMessageChunk })?.output;
