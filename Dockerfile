@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG NODE_VERSION=22.11.0
+ARG NODE_VERSION=24
 
 # Debian-based image (glibc) instead of Alpine (musl)
 FROM --platform=linux/amd64 node:${NODE_VERSION}-bookworm-slim AS debian-base
@@ -10,7 +10,7 @@ RUN apt-get update \
 # Setup pnpm and turbo on the debian base
 FROM --platform=linux/amd64 debian-base as base
 ENV CI=true
-RUN npm install pnpm@10.0.0 turbo --global
+RUN npm install pnpm@11.5.1 turbo --global
 RUN pnpm config set store-dir ~/.pnpm-store
 
 # Prune projects
