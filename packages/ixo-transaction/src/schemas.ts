@@ -379,6 +379,38 @@ export const TransactionDraftSchema = z
 export type TransactionDraft = z.infer<typeof TransactionDraftSchema>;
 
 /**
+ * The most messages one batch may carry. A batch is signed as one wallet
+ * transaction the user reviews as a whole, so the bound keeps that review
+ * (and the transaction's size) small. It is a review bound, not a gas
+ * figure: a batch within it can still run out of gas on chain.
+ */
+export const MAX_BATCH_MESSAGES = 16;
+
+/** The longest batch summary: one paragraph the wallet prompt can show. */
+export const MAX_BATCH_SUMMARY_LENGTH = 1000;
+
+/**
+ * A batch: several catalogued proto-JSON messages signed together in one
+ * wallet transaction (all or nothing on chain). Built by a caller that
+ * composes the messages itself (the POD creator's chain gateway), not routed
+ * from conversation — a conversational draft stays one message
+ * (`TransactionDraftSchema`). There is no testnet receipt: each caller owns
+ * its mainnet policy.
+ */
+export const TransactionBatchSchema = z
+  .object({
+    messages: z.array(ITrxMsgSchema).min(1).max(MAX_BATCH_MESSAGES),
+    /** What the batch does as a whole, for the user reviewing it. */
+    summary: z.string().trim().min(1).max(MAX_BATCH_SUMMARY_LENGTH),
+    memo: z.string().optional(),
+    network: NetworkSchema.default('testnet'),
+    riskConfirmation: RiskConfirmationSchema.optional(),
+  })
+  .strict();
+
+export type TransactionBatch = z.infer<typeof TransactionBatchSchema>;
+
+/**
  * The draft as a tool's input schema: the same fields, described for the
  * model, with no defaults, refinements or strictness. A tool host parses its
  * input with this before the handler runs; the handler then applies

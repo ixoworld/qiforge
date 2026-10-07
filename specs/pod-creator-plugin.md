@@ -198,6 +198,13 @@ Two further create‑path tools implement the approval gate: `approve_pod_transa
 explicit go‑ahead to the exact prepared `blobId`, and `request_pod_signature` spends it. The chain
 encoding sits behind an injected `ChainGateway`; the bundled default reports creation as unavailable.
 
+> **Superseded (2026‑10‑07):** the signing contract is now the ixo-transaction one. The gateway
+> returns proto-JSON messages (not an encoded `SignDoc`/`TxBody`), and `request_pod_signature` sends
+> the batch form of the `@ixo/ixo-transaction` `sign_transaction` action, answered by the same Portal
+> handler as `sign_ixo_transaction`; the unsigned-bytes → `{ txHash }` exchange in the table above
+> and in §8 is gone. See
+> `packages/oracle-runtime-workers/docs/pod-creator.md`.
+
 **`ctx.blobStore`** (`src/plugin-api/types.ts`) holds the unsigned‑tx bytes so the LLM never echoes
 raw transaction material — the tool returns a short `blobId`; the consuming tool resolves it
 server‑side, scoped to the user DID.

@@ -1,5 +1,14 @@
+import {
+  DEFAULT_CHAIN_IDS,
+  NetworkSchema,
+  type Network,
+} from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import type { RuntimeContext } from '../../plugin-api/types';
+import {
+  chainIdConfigSchema,
+  chainIdsFromConfig,
+} from '../ixo-transaction/chain-ids';
 
 /**
  * The network every pod-creator surface falls back to when the merged config
@@ -7,13 +16,16 @@ import type { RuntimeContext } from '../../plugin-api/types';
  * env schema always fills `NETWORK` (default `mainnet`), so in practice the
  * mainnet opt-in below is what keeps an unconfigured oracle off mainnet.
  */
-export const DEFAULT_NETWORK = 'testnet';
+export const DEFAULT_NETWORK: Network = 'testnet';
 
 /**
  * Plugin-owned env vars. The capsules registry URL and `NETWORK` are read as
  * siblings from the merged config (owned by the skills plugin / base schema),
  * so they are intentionally NOT redeclared here — two plugins declaring one
- * key would collide in the config-schema registry.
+ * key with different schemas would collide in the config-schema registry.
+ * The chain ids are the ixo-transaction plugin's own schema objects, which
+ * both plugins declare (one set of variables for every wallet-signing
+ * plugin; the composition treats the shared objects as one key).
  */
 export const podCreatorConfigSchema = z.object({
   /**
@@ -28,18 +40,23 @@ export const podCreatorConfigSchema = z.object({
       z.enum(['true', 'false']).transform((value) => value === 'true'),
     ])
     .default(false),
+  /** The chain id each network's signing request names. */
+  ...chainIdConfigSchema.shape,
 });
 
 /** Sibling env + plugin flags the tools read at request time. */
 const configReadSchema = z.object({
-  NETWORK: z.enum(['mainnet', 'testnet', 'devnet']).optional(),
+  NETWORK: NetworkSchema.optional(),
   POD_CREATOR_ALLOW_MAINNET:
     podCreatorConfigSchema.shape.POD_CREATOR_ALLOW_MAINNET.optional(),
+  ...chainIdConfigSchema.shape,
 });
 
 export interface PodCreatorConfig {
-  network: string;
+  network: Network;
   mainnetAllowed: boolean;
+  /** The chain id each network's signing request names. */
+  chainIds: Readonly<Record<Network, string>>;
 }
 
 /**
@@ -54,10 +71,15 @@ export function readPodCreatorConfig(ctx: RuntimeContext): PodCreatorConfig {
     ctx.logger.warn(
       '[pod-creator] config unreadable; defaulting to testnet with mainnet disabled',
     );
-    return { network: DEFAULT_NETWORK, mainnetAllowed: false };
+    return {
+      network: DEFAULT_NETWORK,
+      mainnetAllowed: false,
+      chainIds: DEFAULT_CHAIN_IDS,
+    };
   }
   return {
     network: parsed.data.NETWORK ?? DEFAULT_NETWORK,
     mainnetAllowed: parsed.data.POD_CREATOR_ALLOW_MAINNET ?? false,
+    chainIds: chainIdsFromConfig(parsed.data),
   };
 }

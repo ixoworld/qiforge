@@ -8,7 +8,6 @@
  * `@ixo/ixo-transaction` package, whose Portal half
  * (`@ixo/ixo-transaction/react`) answers the `sign_transaction` action.
  */
-import { ChainIdSchema, DEFAULT_CHAIN_IDS } from '@ixo/ixo-transaction';
 import { z } from 'zod';
 import { OraclePlugin } from '../../plugin-api/oracle-plugin';
 import type {
@@ -16,16 +15,13 @@ import type {
   PluginManifest,
   PluginTool,
 } from '../../plugin-api/types';
+import { chainIdConfigSchema, chainIdsFromConfig } from './chain-ids';
 import { createIxoTransactionTools } from './tools';
 
 /** Default time the user has to sign in their wallet. */
 export const DEFAULT_SIGN_TIMEOUT_MS = 120_000;
 /** Upper bound: well inside the turn's own deadline (`TURN_TIMEOUT_MS`, 10 min by default). */
 export const MAX_SIGN_TIMEOUT_MS = 300_000;
-
-function chainIdSetting(defaultId: string) {
-  return ChainIdSchema.default(defaultId);
-}
 
 const configSchema = z.object({
   /**
@@ -34,15 +30,8 @@ const configSchema = z.object({
    * oracle prepares testnet (and devnet) transactions only.
    */
   IXO_TRANSACTION_ALLOW_MAINNET: z.enum(['true', 'false']).default('false'),
-  /**
-   * The chain id each network's requests name; the Portal refuses a request
-   * for another chain than its wallet's. The defaults are what each
-   * network's RPC reports (`DEFAULT_CHAIN_IDS`); override after a chain
-   * upgrade changes the id.
-   */
-  IXO_TRANSACTION_CHAIN_ID_DEVNET: chainIdSetting(DEFAULT_CHAIN_IDS.devnet),
-  IXO_TRANSACTION_CHAIN_ID_TESTNET: chainIdSetting(DEFAULT_CHAIN_IDS.testnet),
-  IXO_TRANSACTION_CHAIN_ID_MAINNET: chainIdSetting(DEFAULT_CHAIN_IDS.mainnet),
+  /** The chain id each network's requests name (shared with the POD creator). */
+  ...chainIdConfigSchema.shape,
   /** How long `sign_ixo_transaction` waits for the wallet, in ms. */
   IXO_TRANSACTION_SIGN_TIMEOUT_MS: z.coerce
     .number()
@@ -124,11 +113,7 @@ export class IxoTransactionPlugin extends OraclePlugin {
     return createIxoTransactionTools({
       allowMainnet: config.IXO_TRANSACTION_ALLOW_MAINNET === 'true',
       signTimeoutMs: config.IXO_TRANSACTION_SIGN_TIMEOUT_MS,
-      chainIds: {
-        devnet: config.IXO_TRANSACTION_CHAIN_ID_DEVNET,
-        testnet: config.IXO_TRANSACTION_CHAIN_ID_TESTNET,
-        mainnet: config.IXO_TRANSACTION_CHAIN_ID_MAINNET,
-      },
+      chainIds: chainIdsFromConfig(config),
     });
   }
 }

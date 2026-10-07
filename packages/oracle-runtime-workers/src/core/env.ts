@@ -316,6 +316,10 @@ export function composeEnvSchema(
         );
       const previous = pluginOwnership.get(key);
       if (previous !== undefined && previous !== plugin.name) {
+        // Plugins that declare the very same schema object share the key on
+        // purpose (the wallet-signing chain ids): nothing is replaced, and
+        // the first declarer stays its owner.
+        if (merged.shape[key] === shape[key]) continue;
         logger.warn(
           `[boot] env key '${key}' is defined by both '${previous}' and '${plugin.name}'; '${plugin.name}' wins.`,
         );

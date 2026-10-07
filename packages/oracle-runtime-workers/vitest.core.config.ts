@@ -10,14 +10,15 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    // The editor, flows and ixo-transaction plugin tests are NOT here: they
-    // must run under workerd (the Workers-pool project in `vitest.config.ts`)
-    // because they prove the BlockNote markdown→blocks bridge,
-    // @ixo/editor/core and the wallet-signing round trip on the real runtime.
+    // The editor, flows, ixo-transaction and pod-creator plugin tests are NOT
+    // here: they must run under workerd (the Workers-pool project in
+    // `vitest.config.ts`) because they prove the BlockNote markdown→blocks
+    // bridge, @ixo/editor/core and the wallet-signing round trip on the real
+    // runtime.
     include: [
       'src/core/**/*.test.ts',
       'src/plugins/*.test.ts',
-      'src/plugins/!(editor|flows|ixo-transaction)/**/*.test.ts',
+      'src/plugins/!(editor|flows|ixo-transaction|pod-creator)/**/*.test.ts',
       'src/secrets/**/*.test.ts',
       'src/memory/**/*.test.ts',
       'src/llm/**/*.test.ts',

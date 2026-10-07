@@ -16,25 +16,27 @@ import {
   MESSAGE_CATALOG,
   QUERY_ONLY_MODULES,
   SIGN_TRANSACTION_ACTION_NAME,
-  SignTransactionActionResultSchema,
   TransactionDraftInputSchema,
   TransactionDraftSchema,
   buildSignTransactionActionArgs,
   classifyIntent,
   describeValidationError,
-  normalizeWalletSignResult,
   validateTransactionDraft,
   type Network,
-  type SignTransactionActionArgs,
+  type SingleSignTransactionActionArgs,
   type ITrxMsg,
   type TestnetReceipt,
 } from '@ixo/ixo-transaction';
-import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { z } from 'zod';
 import { tool } from '../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
 import { logActionToMatrix } from '../portal/action-log';
 import { recordTestnetReceipt, testnetReceiptProblem } from './receipts';
+import {
+  requestWalletSignature,
+  walletUnavailableReason,
+  type WalletSignatureOutcome,
+} from './wallet-signing';
 
 export interface IxoTransactionToolOptions {
   /** How long the wallet has to answer a signing request. */
@@ -87,15 +89,6 @@ export type SignIxoTransactionResult =
     }
   | { status: 'validation_error' | 'unavailable'; error: string };
 
-/** The client SDK's answer to an `action_call` for an action it has no handler for. */
-const MISSING_HANDLER = `Action tool ${SIGN_TRANSACTION_ACTION_NAME} not found`;
-
-/**
- * A wallet's refusal as its error text words it. SignX reports no structured
- * reason, so a refusal is recognised from the message.
- */
-const WALLET_REFUSAL = /\b(?:reject|denied|declin|cancel)/i;
-
 const RouteListToolSchema = z.object({
   messageType: z
     .string()
@@ -135,90 +128,24 @@ function listRoutes(messageType: string | undefined) {
   };
 }
 
-/** Map a settled bridge call (or its rejection) to the tool's status. */
-function settledResult(
-  args: SignTransactionActionArgs,
-  outcome: { ok: true; value: unknown } | { ok: false; error: string },
-  signTimeoutMs: number,
+/** The tool's status for a signing outcome: which network, chain and message. */
+function signResult(
+  args: SingleSignTransactionActionArgs,
+  outcome: WalletSignatureOutcome,
 ): SignIxoTransactionResult {
   const network = args.network;
   const typeUrl = args.intent.typeUrl;
-  if (outcome.ok && reportsUnknownOutcome(outcome.value)) {
-    // The bridge's own answer when none arrived: the deadline passed, the
-    // socket the request went to is gone, or the turn ended after the
-    // request was sent. The wallet may still have signed.
-    return {
-      status: 'timeout',
-      outcome: 'unknown',
-      network,
-      typeUrl,
-      // `outcome: 'unknown'` is what the tool-execution middleware reads: the
-      // write claim stays and the same draft is not dispatched again in this
-      // thread.
-      error: `The Portal wallet did not answer within ${signTimeoutMs / 1000} s, or its tab disconnected, and the request timed out. The outcome is unknown: the user may still sign it in their wallet. Do not send it again; ask the user whether it went through.`,
-    };
+  switch (outcome.status) {
+    case 'signed':
+    case 'failed':
+      return { ...outcome, network, chainId: args.chainId, typeUrl };
+    case 'rejected':
+    case 'error':
+    case 'timeout':
+      return { ...outcome, network, typeUrl };
+    case 'unavailable':
+      return outcome;
   }
-  if (outcome.ok) {
-    // The Portal handler answers with the result contract; anything else is
-    // a raw wallet response from a Portal with its own handler.
-    const contract = SignTransactionActionResultSchema.safeParse(outcome.value);
-    const summary = contract.success
-      ? contract.data
-      : normalizeWalletSignResult(outcome.value);
-    if (summary.delivered) {
-      return {
-        status: 'failed',
-        network,
-        chainId: args.chainId,
-        typeUrl,
-        code: summary.delivered.code,
-        ...(summary.delivered.transactionHash !== undefined
-          ? { transactionHash: summary.delivered.transactionHash }
-          : {}),
-        ...(summary.delivered.height !== undefined
-          ? { height: summary.delivered.height }
-          : {}),
-        error:
-          summary.error ??
-          `The transaction failed on chain with code ${summary.delivered.code}`,
-      };
-    }
-    if (!summary.success) {
-      return {
-        status: 'error',
-        network,
-        typeUrl,
-        error: summary.error ?? 'The wallet reported a failed transaction',
-      };
-    }
-    return {
-      status: 'signed',
-      network,
-      chainId: args.chainId,
-      typeUrl,
-      ...(summary.transactionHash !== undefined
-        ? { transactionHash: summary.transactionHash }
-        : {}),
-      ...(summary.code !== undefined ? { code: summary.code } : {}),
-      ...(summary.height !== undefined ? { height: summary.height } : {}),
-    };
-  }
-  if (outcome.error === MISSING_HANDLER) {
-    return {
-      status: 'unavailable',
-      error:
-        'This Portal does not handle wallet signing (no sign_transaction handler is registered), so nothing was sent to a wallet.',
-    };
-  }
-  // A rejected call carries only the Portal's error text (a delivered
-  // transaction comes back as `failed` above, with its code and hash), so a
-  // refusal is read from that text — never from a chain log.
-  return {
-    status: WALLET_REFUSAL.test(outcome.error) ? 'rejected' : 'error',
-    network,
-    typeUrl,
-    error: outcome.error,
-  };
 }
 
 /**
@@ -248,7 +175,7 @@ function testnetReceiptOf(input: unknown): TestnetReceipt | undefined {
 /** A signed testnet transaction gets a receipt the mainnet draft can cite. */
 async function withTestnetReceipt(
   ctx: RuntimeContext,
-  args: SignTransactionActionArgs,
+  args: SingleSignTransactionActionArgs,
   result: SignIxoTransactionResult,
 ): Promise<SignIxoTransactionResult> {
   const message = args.messages[0];
@@ -280,7 +207,7 @@ async function signIxoTransaction(
   ctx: RuntimeContext,
   options: IxoTransactionToolOptions,
 ): Promise<SignIxoTransactionResult> {
-  let args: SignTransactionActionArgs;
+  let args: SingleSignTransactionActionArgs;
   try {
     args = buildSignTransactionActionArgs(input, {
       allowMainnet: options.allowMainnet,
@@ -302,42 +229,18 @@ async function signIxoTransaction(
   if (receiptProblem !== null) {
     return { status: 'validation_error', error: receiptProblem };
   }
-
-  const sessionId = ctx.session.id;
-  const frontend = ctx.frontend;
-  if (!sessionId || !frontend) {
-    return {
-      status: 'unavailable',
-      error:
-        'Wallet signing needs a Portal session with a realtime connection, which this conversation does not have.',
-    };
-  }
-  if (!frontend.hasClient(sessionId)) {
-    return {
-      status: 'unavailable',
-      error:
-        "No Portal browser is connected to this session, so the transaction cannot reach the user's wallet. Ask the user to open the chat in the Portal.",
-    };
+  // Nothing to log in the room when the request cannot be sent at all.
+  const unavailable = walletUnavailableReason(ctx);
+  if (unavailable !== null) {
+    return { status: 'unavailable', error: unavailable };
   }
 
-  const toolCallId = `ixo_tx_${ctx.session.requestId || 'noreq'}_${crypto
-    .randomUUID()
-    .slice(0, 8)}`;
-  const outcome = await frontend
-    .callAgAction({
-      sessionId,
-      toolCallId,
-      toolName: SIGN_TRANSACTION_ACTION_NAME,
-      args,
-      timeoutMs: options.signTimeoutMs,
-      signal: ctx.abortSignal,
-    })
-    .then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error: errorText(error) }),
-    );
-  const settled = settledResult(args, outcome, options.signTimeoutMs);
-  const result = await withTestnetReceipt(ctx, args, settled);
+  const outcome = await requestWalletSignature(ctx, {
+    args,
+    callIdPrefix: 'ixo_tx',
+    timeoutMs: options.signTimeoutMs,
+  });
+  const result = await withTestnetReceipt(ctx, args, signResult(args, outcome));
   logActionToMatrix(ctx, {
     name: SIGN_TRANSACTION_ACTION_NAME,
     args,
