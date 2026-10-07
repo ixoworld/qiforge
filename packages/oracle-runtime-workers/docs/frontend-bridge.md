@@ -43,6 +43,10 @@ sequenceDiagram
   and per oracle deployment, so the session belongs to this user and this
   oracle by construction. A failing ownership lookup refuses the socket
   (`Unauthorized: session check failed`) instead of leaving it half-open.
+  `@ixo/oracles-client-sdk` renews its credentials (a fresh invocation,
+  then a fresh delegation and invocation) only for a refusal of the
+  credentials themselves; a failed session check, a failed auth check and
+  a token of another user are final.
 - **One socket per invocation.** The call goes to one authenticated socket
   of its session only, never to every tab: the one with the most recent
   client-originated socket.io event (a result, `ping`, `status`, …;

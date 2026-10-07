@@ -61,6 +61,7 @@ function makeContext(
     authedRequest,
     getDelegation: vi.fn(async () => 'delegation'),
     getInvocation: vi.fn(async () => null),
+    renewOracleAuth: vi.fn(async () => true),
     agActions: [],
     registeredAgActions: [],
     registerAgAction: vi.fn(),
