@@ -709,3 +709,56 @@ describe('runTurnFrames abort classification', () => {
     expect(sse).toContain('"aborted":true');
   });
 });
+
+describe('Responses terminal events', () => {
+  it('shows a refusal once when it is reported in both stream and end events', async () => {
+    async function* events() {
+      const output = {
+        content: [],
+        additional_kwargs: { refusal: 'I cannot do that.' },
+      };
+      yield {
+        event: 'on_chat_model_stream',
+        run_id: 'refusal',
+        data: { chunk: output },
+      };
+      yield { event: 'on_chat_model_end', run_id: 'refusal', data: { output } };
+    }
+    const completed: string[] = [];
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's',
+      requestId: 'r',
+      abortController: new AbortController(),
+      onComplete: (text) => {
+        completed.push(text);
+      },
+    });
+    const sse = await new Response(stream).text();
+    expect(completed).toEqual(['I cannot do that.']);
+    expect(sse.match(/I cannot do that\./g)).toHaveLength(1);
+  });
+  it('reports an incomplete response as a failure without completing the turn', async () => {
+    async function* events() {
+      yield {
+        event: 'on_chat_model_end',
+        run_id: 'incomplete',
+        data: { output: { response_metadata: { status: 'incomplete' } } },
+      };
+    }
+    let completed = false;
+    const stream = createSseTurnStream({
+      events: events(),
+      sessionId: 's',
+      requestId: 'r',
+      abortController: new AbortController(),
+      onComplete: () => {
+        completed = true;
+      },
+    });
+    const sse = await new Response(stream).text();
+    expect(completed).toBe(false);
+    expect(sse).toContain('event: error');
+    expect(sse).toContain('incomplete');
+  });
+});

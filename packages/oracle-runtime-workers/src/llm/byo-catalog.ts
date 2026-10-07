@@ -246,6 +246,30 @@ export interface ByoModelEntry {
  * mirroring the platform catalog's curation stance. Ids are the providers'
  * native API ids.
  */
+const GPT6_MODELS: readonly ByoModelEntry[] = [
+  {
+    id: 'gpt-6-luna',
+    label: 'GPT-6 Luna',
+    tier: 'everyday',
+    blurb: 'Fast assistance on your connected account.',
+    vision: true,
+  },
+  {
+    id: 'gpt-6.1-sol',
+    label: 'GPT-6.1 Sol',
+    tier: 'balanced',
+    blurb: 'Complex work at a balanced cost on your connected account.',
+    vision: true,
+  },
+  {
+    id: 'gpt-6-astra',
+    label: 'GPT-6 Astra',
+    tier: 'top',
+    blurb: 'Advanced reasoning on your connected account.',
+    vision: true,
+  },
+];
+
 export const BYO_PROVIDER_MODELS: Record<
   ByoProvider,
   readonly ByoModelEntry[]
@@ -274,6 +298,7 @@ export const BYO_PROVIDER_MODELS: Record<
       blurb: 'Runs on your ChatGPT plan — strongest for complex work.',
       vision: true,
     },
+    ...GPT6_MODELS,
   ],
   openai: [
     {
@@ -297,6 +322,7 @@ export const BYO_PROVIDER_MODELS: Record<
       blurb: "OpenAI's flagship, billed to your OpenAI account.",
       vision: true,
     },
+    ...GPT6_MODELS,
   ],
   anthropic: [
     {

@@ -253,6 +253,7 @@ export async function runTurnFrames(
   const toolCallMap = new Map<string, ToolCallPayload>();
   const actionCallMap = new Map<string, ActionCallPayload>();
   let fullContent = '';
+  const emittedRefusals = new Set<string>();
 
   const cap = input.toolOutputCapChars;
   const wireCap = (payload: unknown): unknown => {
@@ -393,6 +394,24 @@ export async function runTurnFrames(
       if (evt.event === 'on_chat_model_end') {
         if (isInternalModelEvent(evt)) continue;
         const output = (evt.data as { output?: AIMessageChunk })?.output;
+        if (output?.response_metadata?.status === 'incomplete') {
+          throw new Error(
+            'Model response was incomplete. The turn did not complete.',
+          );
+        }
+        const refusal = output?.additional_kwargs?.refusal;
+        if (
+          typeof refusal === 'string' &&
+          refusal &&
+          !emittedRefusals.has(evt.run_id)
+        ) {
+          emittedRefusals.add(evt.run_id);
+          fullContent += refusal;
+          write('message', {
+            content: refusal,
+            timestamp: new Date().toISOString(),
+          });
+        }
         for (const call of output?.tool_calls ?? []) {
           if (call.id)
             pendingCalls.set(call.id, {
@@ -543,6 +562,19 @@ export async function runTurnFrames(
         if (isInternalModelEvent(evt)) continue;
         const chunk = (evt.data as { chunk?: AIMessageChunk })?.chunk;
         if (!chunk) continue;
+        const refusal = chunk.additional_kwargs?.refusal;
+        if (
+          typeof refusal === 'string' &&
+          refusal &&
+          !emittedRefusals.has(evt.run_id)
+        ) {
+          emittedRefusals.add(evt.run_id);
+          fullContent += refusal;
+          write('message', {
+            content: refusal,
+            timestamp: new Date().toISOString(),
+          });
+        }
         const raw = chunk.additional_kwargs?.__raw_response as
           | {
               choices?: Array<{
