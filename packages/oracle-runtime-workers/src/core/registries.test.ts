@@ -6,6 +6,7 @@ import {
   SubAgentRegistry,
   ToolRegistry,
   createRegistries,
+  dropShadowingRequestEntries,
 } from './registries';
 import {
   makeBuildCtx,
@@ -199,6 +200,61 @@ describe('ToolRegistry', () => {
     // The shared registry keeps the boot-time names only; the turn's request
     // tools belong to that turn (one isolate serves every user).
     expect(reg.toolNames()).toEqual(['mutate_topic']);
+  });
+
+  it('reserves runtime-bound names against boot-time tools as well', async () => {
+    // The domain-context tools exist only on observe turns, so no boot check
+    // sees them: a plugin tool of the same name is dropped for the turn
+    // rather than bound twice, whichever hook contributed it.
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'docs',
+        getTools: () => [
+          makeTool('read_domain_document'),
+          makeTool('search_docs'),
+        ],
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [makeTool('refresh_domain_context')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const collected = await reg.collect(makeBuildCtx(), rtCtx);
+    const { tools } = dropShadowingRequestEntries({
+      tools: collected,
+      requestSubAgents: [],
+      reservedNames: ['search_docs'],
+      runtimeNames: ['read_domain_document', 'refresh_domain_context'],
+      logger: { warn },
+    });
+    expect(tools.map((t) => `${t.pluginName}:${t.tool.name}`)).toEqual([
+      'docs:search_docs',
+    ]);
+    expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringContaining(
+        'plugin "docs" tool "read_domain_document" dropped for this turn',
+      ),
+      expect.stringContaining(
+        'plugin "portal" request-time tool "refresh_domain_context" dropped',
+      ),
+    ]);
+    // Without runtime names a boot-time tool is never dropped.
+    expect(
+      dropShadowingRequestEntries({
+        tools: collected,
+        requestSubAgents: [],
+        reservedNames: ['read_domain_document', 'search_docs'],
+        logger: { warn },
+      }).tools.map((t) => t.tool.name),
+    ).toEqual([
+      'read_domain_document',
+      'search_docs',
+      'refresh_domain_context',
+    ]);
   });
 
   it('keeps the first of two request-time tools with one name and warns once', async () => {

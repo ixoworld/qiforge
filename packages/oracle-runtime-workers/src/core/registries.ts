@@ -327,22 +327,33 @@ function withoutShadowingRequestTools(
  * tools), or one an earlier request-time entry of the same turn already
  * claimed, is dropped with one warning naming the plugin. Sub-agents are
  * compared by the tool name they are bound under. Boot-time entries pass
- * through untouched; their collisions are a boot error
- * (`assertNoCollisions`).
+ * through untouched (their collisions are a boot error, `assertNoCollisions`)
+ * unless they take one of `runtimeNames`: tools the runtime binds only on
+ * some turns (so no boot check can see them), which win over a plugin tool
+ * of either origin.
  */
 export function dropShadowingRequestEntries(opts: {
   tools: readonly RegisteredTool[];
   requestSubAgents: readonly RegisteredSubAgent[];
   reservedNames: Iterable<string>;
+  /** Names the runtime binds this turn; reserved against boot-time tools too. */
+  runtimeNames?: Iterable<string>;
   logger: { warn(message: string): void };
 }): { tools: RegisteredTool[]; requestSubAgents: RegisteredSubAgent[] } {
-  const taken = new Set(opts.reservedNames);
+  const runtime = new Set(opts.runtimeNames);
+  const taken = new Set([...opts.reservedNames, ...runtime]);
   const drop = (pluginName: string, name: string, kind: string): void =>
     opts.logger.warn(
       `${LOG_PREFIX} plugin "${pluginName}" request-time ${kind} "${name}" dropped: the name is already taken this turn`,
     );
   const tools: RegisteredTool[] = [];
   for (const entry of opts.tools) {
+    if (entry.origin === 'boot' && runtime.has(entry.tool.name)) {
+      opts.logger.warn(
+        `${LOG_PREFIX} plugin "${entry.pluginName}" tool "${entry.tool.name}" dropped for this turn: the runtime binds a tool of that name`,
+      );
+      continue;
+    }
     if (entry.origin === 'request') {
       if (taken.has(entry.tool.name)) {
         drop(entry.pluginName, entry.tool.name, 'tool');

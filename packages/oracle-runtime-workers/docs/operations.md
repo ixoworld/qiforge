@@ -1472,3 +1472,66 @@ frame with `kind: budget_exhausted` and `retryable: false`, then `done`
 with `failed: true`. The client SDK reports it as a failed run; it never
 resubmits a POST by itself. Before raising a limit, check the run's usage
 and the tool marks for the loop that spent it.
+
+## Domain-context rollout diagnostics
+
+With `domainContext.mode: 'observe'` ([configuration](configuration.md#domain-context-observe-only-rollout)),
+every agent turn reports what domain context it was given, in two places:
+
+- a `router_update` frame (`router.update` on the SSE stream, mirrored to
+  the session's sockets) carrying `{ sessionId, requestId, domainContext }`
+  (`DomainContextRouterUpdate`), sent once the attempt starts streaming and
+  again when `read_domain_document` reads a document the turn had not read;
+- a row in the user's SQLite table `domain_context_runs` (`request_id`,
+  `session_id`, `provenance` JSON, `created_at`), one per request: a resumed
+  attempt or a later read replaces it. Deleting the session deletes its rows.
+
+`domainContext` lists one entry per domain, the oracle's first:
+
+| Field           | Meaning                                                                                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `did`           | The domain (the oracle's entity DID, or the subject).                                                                                                              |
+| `status`        | `verified`, `missing` (no `#dom` anchor), `unavailable` (lookup or read failed) or `invalid` (checks failed).                                                      |
+| `stale`         | The anchor is the last verified one, reused because a refresh failed.                                                                                              |
+| `cid`, `source` | The index CID and where the anchor came from: the Blocksync URL, or `durable-run-pin` on a resumed run (`source` is left out of the prompt block).                 |
+| `resolvedAt`    | When the anchor was resolved (ms). Left out of the prompt block, so the block stays cacheable.                                                                     |
+| `findings`      | Stable codes: validator findings, `unresolved:<check>`, resolver and pass-1 outcomes. Each code once, at most 32 entries; a cut list ends in `findings-truncated`. |
+| `capsule`       | A capsule manifest's static inspection, always `inspected-not-activated` when valid.                                                                               |
+| `documentsRead` | `{ id, cid }` of every linked document the turn read.                                                                                                              |
+| `assurance`     | Always `integrity-and-static-validation-only`: no live authority, time or revocation was checked.                                                                  |
+
+The record holds DIDs, CIDs, statuses and finding codes; never document
+bodies, credentials or reasoning (the run row's `domainPins` add the
+anchors' URIs). Common
+findings: `anchor-missing`, `anchor-stale`, `iid-unavailable`,
+`invalid-anchor-ambiguous`, `invalid-anchor-resources` (a malformed `#dom`
+resource, a `proof` that is not a CID or is over 128 characters, or a
+`serviceEndpoint` over 2,048 characters), `cid-mismatch`,
+`domain-identity-mismatch`, `unanchored-profile`, `index-too-large` (over
+64 KiB of frontmatter, a frontmatter list of more than 64 items at any depth,
+or nesting deeper than 16 levels; refused without linting), `resolution-timeout`,
+`pass1-timeout`, `pass1-document-unavailable`, `brief-over-budget`,
+`additional-pass1-documents-require-read`, `pinned-revision-unavailable`,
+`findings-truncated`. The read errors `document-origin-denied`,
+`private-reader-unavailable`, `invalid-ipfs-uri` and the like surface as
+findings only for the anchor's own index read; a pass-1 or linked document
+that fails for any reason is reported as `pass1-document-unavailable` (or,
+from `read_domain_document`, as an unavailable document) without the
+underlying code. The validator's `cid-verification` check is never listed as
+`unresolved:`: the runtime verifies the index and every linked document
+against its CID itself.
+
+A failure to write the row or to pin the run's anchors is logged as
+`[domain-context] …` and never fails the turn; neither does any domain
+failure: the turn runs with whatever verified context there is, under the
+existing capability checks.
+
+Before enabling observe mode for an oracle:
+
+- anchor a conforming `domain.md` at the oracle IID's `#dom` linked resource
+  (until then every turn reports the oracle domain as `missing`);
+- list the document hosts in `allowedOrigins`, and supply
+  `readPrivateDocument` if any private document lives outside the VFS;
+- keep in mind that Blocksync is trusted as the read projection of the
+  chain, and that a verified status is integrity and static validation,
+  not proof of live authority or constitutional adoption.

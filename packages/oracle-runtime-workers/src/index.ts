@@ -39,6 +39,7 @@ import { artifactSweepIntervalMs } from './artifacts/config';
 import { sweepExpiredArtifacts } from './artifacts/sweep';
 import { feedbackConfigFromEnv } from './feedback/config';
 import { LinearFeedbackSink } from './feedback/linear-sink';
+import type { DomainContextOptions } from './core/domain-context';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -56,6 +57,14 @@ export {
   createUserOracleDO,
   type OracleWorkerHooks,
 } from './do/user-oracle-do';
+export type {
+  DocumentRequest,
+  DomainCapsuleInspection,
+  DomainContextOptions,
+  DomainContextPins,
+  DomainContextProvenance,
+  DomainDocumentRead,
+} from './core/domain-context';
 export { createShell, type ListModelsOptions } from './shell/app';
 export { authenticate } from './shell/auth';
 export {
@@ -265,6 +274,12 @@ export interface CreateOracleWorkerOptions {
    * user object's ambient services.
    */
   hooks?: OracleWorkerHooks;
+  /**
+   * Observe-only domain context: the oracle's and the selected subject's
+   * anchored domain documents, verified by CID and handed to the model as
+   * retrieved data. Default off. See docs/configuration.md.
+   */
+  domainContext?: DomainContextOptions;
 }
 
 export interface OracleWorker {
@@ -341,6 +356,7 @@ export function createOracleWorker(
   const UserOracleDO = createUserOracleDO({
     core: coreFor,
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
+    ...(opts.domainContext ? { domainContext: opts.domainContext } : {}),
   });
 
   return {

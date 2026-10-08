@@ -38,7 +38,8 @@ export interface TurnBody {
     editorRoomId?: string;
     spaceId?: string;
     sessionRunId?: string;
-    currentEntityDid?: string;
+    /** `null` clears the selected subject; omitted keeps it. */
+    currentEntityDid?: string | null;
   };
   tools?: Array<{
     name: string;

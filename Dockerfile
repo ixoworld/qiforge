@@ -10,7 +10,7 @@ RUN apt-get update \
 # Setup pnpm and turbo on the debian base
 FROM --platform=linux/amd64 debian-base as base
 ENV CI=true
-RUN npm install pnpm@11.5.1 turbo --global
+RUN npm install pnpm@11.10.0 turbo --global
 RUN pnpm config set store-dir ~/.pnpm-store
 
 # Prune projects

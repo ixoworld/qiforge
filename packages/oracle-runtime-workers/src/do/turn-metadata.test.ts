@@ -116,4 +116,26 @@ describe('metadata → state (Node agent-builder rules)', () => {
       ).loadedPlugins,
     ).toEqual([EDITOR_PLUGIN_NAME]);
   });
+
+  it('an explicit null clears the subject while omission keeps it', () => {
+    const selected = priorMetadataState({
+      currentEntityDid: 'did:ixo:entity:previous',
+    });
+    const cleared = parseTurnMetadata(
+      JSON.stringify({ currentEntityDid: null }),
+    );
+    expect(cleared).toEqual({ currentEntityDid: null });
+    expect(metadataBuildState(cleared, selected).currentEntityDid).toBeNull();
+    expect(metadataGraphInput(cleared, selected).currentEntityDid).toBeNull();
+    expect(metadataBuildState({}, selected).currentEntityDid).toBe(
+      'did:ixo:entity:previous',
+    );
+    expect(metadataGraphInput({}, selected)).not.toHaveProperty(
+      'currentEntityDid',
+    );
+    // A cleared checkpoint reads back as no subject.
+    expect(
+      priorMetadataState({ currentEntityDid: null }).currentEntityDid,
+    ).toBeUndefined();
+  });
 });

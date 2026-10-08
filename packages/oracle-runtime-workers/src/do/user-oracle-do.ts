@@ -192,6 +192,7 @@ import {
   type TurnIdentity,
   type TurnRequest,
   type TurnResult,
+  type DomainContextRouterUpdate,
   type MemorySchemaDebug,
   TURN_INTERRUPTED_MARKER,
   type JsonString,
@@ -275,6 +276,14 @@ import {
 } from '../core/middlewares/context-guard';
 import { fetchOpenRouterContextLengths } from '../core/openrouter-pricing';
 import { ResultStore, resultStoreKnobs } from './result-store';
+import {
+  DomainContextResolver,
+  type DomainContextOptions,
+  type DomainContextPins,
+  type DomainContextProvenance,
+} from '../core/domain-context';
+import { DomainContextStore } from './domain-context-store';
+import { EVENT_NAMES } from '../core/runtime-context';
 import { artifactStorageConfig } from '../artifacts/config';
 import {
   ArtifactStore,
@@ -333,6 +342,8 @@ interface TurnBuildRun {
   resumed: boolean;
   /** The reply text the user already received (resumed attempts). */
   continuation: string | null;
+  /** Domain anchors the run started with (resumed attempts keep them). */
+  domainPins?: DomainContextPins;
 }
 
 /**
@@ -536,6 +547,11 @@ export interface OracleWorkerHooks {
 export interface UserOracleDOOptions {
   core: (env: OracleWorkerEnv) => RuntimeCore;
   hooks?: OracleWorkerHooks;
+  /**
+   * Observe-only domain context (docs/configuration.md). Absent or `off`:
+   * no lookups, no prompt block, no tools.
+   */
+  domainContext?: DomainContextOptions;
 }
 
 interface StoredDelegation {
@@ -741,6 +757,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * bounded lanes. Lives as long as the object.
      */
     private readonly toolScheduler = new ToolScheduler();
+    /**
+     * Domain-context anchors and documents, cached for every session of this
+     * object; `refresh_domain_context` invalidates entries here.
+     */
+    private readonly domainResolver = new DomainContextResolver();
+    /** Per-turn domain-context provenance (`domain_context_runs`). */
+    private domainContextStore: DomainContextStore | null = null;
     private runs: RunCoordinator | null = null;
     private readonly runConfig: RunDurabilityConfig = runDurabilityConfig(
       this.env,
@@ -1641,6 +1664,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       });
       await this.resultStore.setup();
       this.attachmentTextCache = new AttachmentTextCacheStore(liveDb, console);
+      // Constructing it touches no SQL. Only an observe turn records (and so
+      // creates `domain_context_runs`); a session delete never creates it but
+      // still removes rows an earlier observe deployment left behind.
+      this.domainContextStore = new DomainContextStore(liveDb, console);
       // The store exists whenever the bucket is bound, so artefacts made
       // earlier stay readable, revocable and deleted with their session after
       // the public origin is removed; only new ones need it.
@@ -1894,6 +1921,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.resultStore = null;
       this.artifacts = null;
       this.attachmentTextCache = null;
+      this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
       // no scheduler boots again instead of reading a closed connection.
       this.taskScheduler = null;
@@ -2758,6 +2786,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           .catch((err: unknown) => {
             console.warn(
               `[user-do] could not delete the artefacts of ${sessionId}; their links expire on schedule: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+        await this.domainContextStore
+          ?.deleteForSession(sessionId)
+          .catch((err: unknown) => {
+            console.warn(
+              `[domain-context] could not delete the provenance of ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
             );
           });
         await this.ctx.storage.delete(contextStatsKey(sessionId));
@@ -4283,6 +4318,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         toolOutputCapChars,
         delivery,
         usage,
+        domainContext,
       } = await this.prepareTurn(
         req,
         {
@@ -4298,9 +4334,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           abortController: live.abort,
           resumed: !freshInput,
           continuation: freshInput ? null : live.continuation,
+          ...(stored.domainPins ? { domainPins: stored.domainPins } : {}),
         },
       );
       const sessionId = req.sessionId;
+      // The anchors this run read are pinned on its row, so a resumed
+      // attempt reads the same document revisions.
+      if (
+        domainContext &&
+        JSON.stringify(domainContext.pins) !==
+          JSON.stringify(stored.domainPins ?? {})
+      ) {
+        stored.domainPins = domainContext.pins;
+        const request = JSON.stringify(stored);
+        try {
+          await this.runStore!.update(live.runId, { request });
+          live.record.request = request;
+        } catch (error) {
+          console.warn(
+            `[domain-context] could not pin the anchors of run ${live.runId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       const sink = {
         emit: (eventName: string, payload: Record<string, unknown>) => {
           if (live.buffer.isClosed) return;
@@ -4313,6 +4368,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       // (the turn's deadline timer among them) run however the attempt ends.
       try {
         this.events.register(sessionId, sink);
+        if (domainContext)
+          await this.reportDomainContext(req, domainContext.provenance);
         if (byoNotice)
           sink.emit('error', {
             ...byoNotice,
@@ -5489,6 +5546,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         contextBudget,
         turnBudget: budget,
         delivery,
+        // Observe-only domain context, on the object's shared resolver (the
+        // one `refresh_domain_context` invalidates); a resumed run reads the
+        // anchors it pinned.
+        ...(opts.domainContext
+          ? {
+              domainContext: opts.domainContext,
+              domainResolver: this.domainResolver,
+              onDomainProvenance: (provenance: DomainContextProvenance[]) =>
+                void this.reportDomainContext(req, provenance),
+              ...(run.domainPins ? { domainPins: run.domainPins } : {}),
+            }
+          : {}),
         ambient: {
           ...ambient,
           llm: meteredLlm,
@@ -5657,7 +5726,30 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         /** The budget's usage so far (JSON), stored with the run's end. */
         usage: (): string => JSON.stringify(budget.snapshot()),
         delivery,
+        domainContext: built.domainContext,
       };
+    }
+
+    /**
+     * A turn's domain-context provenance: a `router_update` frame for the
+     * client and the session's sockets, and a `domain_context_runs` row.
+     * Diagnostics only — nothing here can fail the turn.
+     */
+    private async reportDomainContext(
+      req: TurnRequest,
+      provenance: DomainContextProvenance[],
+    ): Promise<void> {
+      const update: DomainContextRouterUpdate = {
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        domainContext: provenance,
+      };
+      this.events.emit(EVENT_NAMES.router, { ...update });
+      await this.domainContextStore?.record(
+        req.sessionId,
+        req.requestId,
+        provenance,
+      );
     }
 
     /**
