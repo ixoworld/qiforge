@@ -1,5 +1,13 @@
 # @ixo/oracle-runtime-workers
 
+## 0.16.0
+
+### Minor Changes
+
+- [#346](https://github.com/ixoworld/qiforge/pull/346) [`e0d4737`](https://github.com/ixoworld/qiforge/commit/e0d47377a9a4bd9953942e125b913c5861cb54dd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - `POST /channels/turn` refusals now carry a machine-readable `code` next to `message` (`{ code, message }`); `delegation_required` and `room_not_ready` answer `428` instead of `409`.
+  A channel turn's delegation is checked before the user object boots: it must exist and have more than 900 s left, and a boot failing with `NO_VFS_DELEGATION` also answers `428 delegation_required` instead of a retried `503`.
+  Any other failure still answers `503`, now with `code: 'unavailable'`, and is logged as `[channels] turn failed unexpectedly: <name>: <message>`.
+
 ## 0.15.0
 
 ### Minor Changes
