@@ -19,7 +19,9 @@ graph LR
 
 Turns reach a user object from four places: the Portal and other HTTP
 clients (`POST /messages/:id`, SSE), Matrix rooms through the gateway, IXO
-Channels (`POST /channels/turn`, [channels](channels.md)), and the task
+Channels (`POST /channels/turn`, [channels](channels.md); a channel turn
+is admitted only under a stored delegation with more than 900 s left,
+checked before the object boots, else `428 delegation_required`), and the task
 scheduler's alarm — which also runs the tasks the owner-only
 [Topic deliverable API](#topic-deliverable-api) creates. Every one of them
 is a durable run in the same object

@@ -58,7 +58,11 @@ export async function authenticateChannel(
     token.length > 32_000 ||
     headers.get('x-auth-type')?.toLowerCase() !== 'ucan'
   )
-    throw new ChannelError(401, 'A channel UCAN invocation is required');
+    throw new ChannelError(
+      401,
+      'A channel UCAN invocation is required',
+      'unauthorized',
+    );
   const validator = await createUCANValidator({
     serverDid: config.oracleDid,
     rootIssuers: ['*'],
@@ -88,7 +92,11 @@ export async function authenticateChannel(
     chain[1] !== config.channelDid ||
     result.invoker !== config.channelDid
   )
-    throw new ChannelError(401, 'Invalid user-rooted channel invocation');
+    throw new ChannelError(
+      401,
+      'Invalid user-rooted channel invocation',
+      'unauthorized',
+    );
   const now = Math.floor(Date.now() / 1000);
   const invocation = await parseDelegation(token);
   const proof = invocation.proofs[0];
@@ -109,6 +117,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       401,
       'A bounded, direct user channel grant is required',
+      'unauthorized',
     );
   if (
     !result.expiration ||
@@ -121,6 +130,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       401,
       'Channel invocations must expire within 60 seconds',
+      'unauthorized',
     );
   const nb = result.capability?.nb;
   if (
@@ -130,7 +140,11 @@ export async function authenticateChannel(
     nb.bindingRevision !== input.bindingRevision ||
     nb.oracleDid !== config.oracleDid
   )
-    throw new ChannelError(403, 'Channel scope does not match this request');
+    throw new ChannelError(
+      403,
+      'Channel scope does not match this request',
+      'scope_mismatch',
+    );
   const hash = await channelRequestHash(raw);
   if (
     result.facts?.length !== 1 ||
@@ -140,6 +154,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       403,
       'Invocation does not authorize this request body',
+      'scope_mismatch',
     );
   return {
     userDid,
@@ -168,7 +183,11 @@ export function channelAuthConfig(
   >,
 ): ChannelAuthConfig {
   if (!env.CHANNEL_SERVICE_DID)
-    throw new ChannelError(503, 'Channels are not configured');
+    throw new ChannelError(
+      503,
+      'Channels are not configured',
+      'not_configured',
+    );
   const resolver = createCompositeDIDResolver([
     sharedIxoDIDResolver(env.BLOCKSYNC_GRAPHQL_URL),
     channelWebResolver,
@@ -204,15 +223,23 @@ export async function assertActiveChannelBinding(
   >,
 ): Promise<void> {
   if (!identity.channel)
-    throw new ChannelError(403, 'Channel identity is required');
+    throw new ChannelError(
+      403,
+      'Channel identity is required',
+      'identity_required',
+    );
   if (!env.AUTH_HUB_CHANNEL_SERVICE_KEY || (!env.AUTH_HUB && !env.AUTH_HUB_URL))
-    throw new ChannelError(503, 'Channel binding validation is not configured');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is not configured',
+      'not_configured',
+    );
   const url = new URL(
     '/api/internal/channels/validate-binding',
     env.AUTH_HUB_URL ?? 'https://auth-hub.internal',
   );
   if (url.protocol !== 'https:')
-    throw new ChannelError(503, 'Auth Hub requires HTTPS');
+    throw new ChannelError(503, 'Auth Hub requires HTTPS', 'not_configured');
   const request = new Request(url, {
     method: 'POST',
     headers: {
@@ -235,15 +262,31 @@ export async function assertActiveChannelBinding(
       ? env.AUTH_HUB.fetch(request)
       : fetch(request));
   } catch {
-    throw new ChannelError(503, 'Channel binding validation is unavailable');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is unavailable',
+      'binding_check_unavailable',
+    );
   }
   if (!response.ok)
-    throw new ChannelError(503, 'Channel binding validation is unavailable');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is unavailable',
+      'binding_check_unavailable',
+    );
   const parsed = BindingVerdict.safeParse(await response.json());
   if (!parsed.success)
-    throw new ChannelError(503, 'Invalid channel binding validation response');
+    throw new ChannelError(
+      503,
+      'Invalid channel binding validation response',
+      'binding_check_unavailable',
+    );
   if (!parsed.data.active)
-    throw new ChannelError(403, 'Channel binding is inactive');
+    throw new ChannelError(
+      403,
+      'Channel binding is inactive',
+      'binding_inactive',
+    );
 }
 
 /**

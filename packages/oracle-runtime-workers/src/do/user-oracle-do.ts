@@ -4,6 +4,7 @@ import {
   ChannelError,
   channelRequestHash,
   channelOrigin,
+  delegationRequiredError,
   requireChannelDelegation,
   type ChannelTurnInput,
   type ChannelTurnOutcome,
@@ -311,7 +312,11 @@ import type {
   FeedbackSettlement,
   FeedbackTarget,
 } from '../feedback/contract';
-import { resolveTurnDelegation, WorkersUcanService } from './ucan-service';
+import {
+  readDelegation,
+  resolveTurnDelegation,
+  WorkersUcanService,
+} from './ucan-service';
 import type { UcanDelegation } from '../plugin-api/types';
 
 /** What one attempt's agent build reads from the request body. */
@@ -540,6 +545,17 @@ interface StoredDelegation {
   at: number;
 }
 
+/** The user's delegation as the object holds it in memory. */
+interface CachedDelegation {
+  raw: string;
+  /**
+   * Unix seconds: the delegation's effective expiry. Taken from where the
+   * delegation arrived (the shell's validation, the deposit record) or read
+   * off the token itself; absent only when the token cannot be parsed.
+   */
+  expiration?: number;
+}
+
 interface FlushResult {
   uploaded: boolean;
   /** Raw file size (skips) or bytes sent upstream (uploads). */
@@ -761,7 +777,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * events of one request (a soft then a hard prune) never race.
      */
     private contextStatsWrites: Promise<void> = Promise.resolve();
-    private readonly delegations = new Map<string, { raw: string }>();
+    private readonly delegations = new Map<string, CachedDelegation>();
     /** Epoch-ms until which a room-state delegation lookup is not retried. */
     private delegationMissUntil = 0;
     private dirty = false;
@@ -977,9 +993,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           this.delegations.get(identity.userDid)?.raw ??
           (await this.ctx.storage.get<StoredDelegation>(META_DELEGATION))?.raw;
         delegationReplaced = known !== identity.ucanDelegation;
-        this.delegations.set(identity.userDid, {
-          raw: identity.ucanDelegation,
-        });
+        const cached = this.delegations.get(identity.userDid);
+        if (
+          cached?.raw !== identity.ucanDelegation ||
+          typeof cached.expiration !== 'number'
+        )
+          this.delegations.set(
+            identity.userDid,
+            await this.delegationRecord(
+              identity.ucanDelegation,
+              identity.ucanDelegationExpiration,
+            ),
+          );
         // Remember a new one for turns that arrive without the header.
         if (delegationReplaced)
           await this.ctx.storage.put(META_DELEGATION, {
@@ -1125,7 +1150,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const cached =
         await this.ctx.storage.get<StoredDelegation>(META_DELEGATION);
       if (live(cached)) {
-        this.delegations.set(userDid, { raw: cached.raw });
+        this.delegations.set(
+          userDid,
+          await this.delegationRecord(cached.raw, cached.expiration),
+        );
         return;
       }
       if (Date.now() < this.delegationMissUntil) return;
@@ -1156,7 +1184,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             }
           : null;
         if (live(deposited)) {
-          this.delegations.set(userDid, { raw: deposited.raw });
+          this.delegations.set(
+            userDid,
+            await this.delegationRecord(deposited.raw, deposited.expiration),
+          );
           await this.ctx.storage.put(META_DELEGATION, deposited);
           console.log(
             `[user-do] delegation for ${userDid} loaded from the deposited room state (header-less turn)`,
@@ -1169,6 +1200,31 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         );
       }
       this.delegationMissUntil = Date.now() + DELEGATION_MISS_TTL_MS;
+    }
+
+    /**
+     * The in-memory record of a delegation: the expiry where it arrived
+     * stated one (the shell validated the token and read it off the chain),
+     * else the token's own effective expiry along its proof chain. A token
+     * that cannot be parsed keeps no expiry; channel turns refuse it.
+     */
+    private async delegationRecord(
+      raw: string,
+      expiration: number | undefined,
+    ): Promise<CachedDelegation> {
+      if (typeof expiration === 'number' && Number.isFinite(expiration))
+        return { raw, expiration };
+      try {
+        const grant = await readDelegation(raw);
+        return typeof grant.expiration === 'number'
+          ? { raw, expiration: grant.expiration }
+          : { raw };
+      } catch (err) {
+        console.warn(
+          `[user-do] could not read the expiry of a delegation: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { raw };
+      }
     }
 
     private async boot(userDid: string): Promise<void> {
@@ -1616,7 +1672,12 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
           const room = await this.gateway.resolveUserRoom(identity.userDid);
-          if (!room) throw new ChannelError(409, 'Companion room is not ready');
+          if (!room)
+            throw new ChannelError(
+              428,
+              'Companion room is not ready',
+              'room_not_ready',
+            );
           return (
             await this.createSession(identity, {
               roomId: room.roomId,
@@ -1633,7 +1694,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             !room ||
             session.roomId !== room.roomId
           )
-            throw new ChannelError(404, 'Companion session not found');
+            throw new ChannelError(
+              404,
+              'Companion session not found',
+              'session_not_found',
+            );
           const encryption = await this.gateway.getRoomStateEvent(
             room.roomId,
             'm.room.encryption',
@@ -1645,11 +1710,17 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             !('algorithm' in parsed) ||
             parsed.algorithm !== 'm.megolm.v1.aes-sha2'
           )
-            throw new ChannelError(409, 'Companion room must be encrypted');
+            throw new ChannelError(
+              409,
+              'Companion room must be encrypted',
+              'room_not_encrypted',
+            );
         },
+        // Checked again as the run starts: admission may have waited.
         requireDelegation: async (identity) =>
           requireChannelDelegation(
-            !!this.delegations.get(identity.userDid)?.raw,
+            this.delegations.get(identity.userDid),
+            Math.floor(Date.now() / 1000),
           ),
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
@@ -2558,16 +2629,52 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           throw new ChannelError(
             403,
             'Channel grants cannot become tool authority',
+            'channel_grant_not_tool_authority',
           );
         // The shell (the only caller) checked the binding just before.
-        await this.ready(identity);
+        // The delegation is checked BEFORE the object boots: a cold boot
+        // loads the owner copy under it, and a user without a usable one
+        // must get `delegation_required`, not a boot failure. Hydration
+        // reads the cached copy, then the deposited room state (throttled
+        // after a miss); an in-memory one that no longer passes is
+        // re-read too, in case a newer deposit did not reach this object.
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        try {
+          requireChannelDelegation(
+            this.delegations.get(identity.userDid),
+            nowSeconds,
+          );
+        } catch {
+          await this.hydrateDelegation(identity.userDid);
+          requireChannelDelegation(
+            this.delegations.get(identity.userDid),
+            nowSeconds,
+          );
+        }
+        try {
+          await this.ready(identity);
+        } catch (error) {
+          // A delegation that lacks the file-storage grant over
+          // `/.oracles` cannot load the owner copy: the user must
+          // authorize again, exactly as without a delegation. (Boot throws
+          // the failure as its RPC envelope, so it is parsed, not matched
+          // by class.)
+          if (parseOwnerCopyFailure(error)?.code === 'NO_VFS_DELEGATION')
+            throw delegationRequiredError();
+          throw error;
+        }
         return {
           ok: true,
           result: await this.channelTurns!.submit(identity, input, requestHash),
         };
       } catch (error) {
         if (error instanceof ChannelError)
-          return { ok: false, status: error.status, message: error.message };
+          return {
+            ok: false,
+            status: error.status,
+            code: error.code,
+            message: error.message,
+          };
         throw error;
       }
     }
@@ -2891,7 +2998,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       raw: string,
       expiration?: number,
     ): Promise<void> {
-      this.delegations.set(userDid, { raw });
+      this.delegations.set(
+        userDid,
+        await this.delegationRecord(raw, expiration),
+      );
       this.delegationMissUntil = 0;
       await this.ctx.storage.put(META_DELEGATION, {
         raw,
@@ -3001,12 +3111,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         await this.ctx.storage.get<StoredDelegation>(META_DELEGATION);
       const inMemory = this.delegations.get(userDid);
       if (inMemory) {
+        const expiration = inMemory.expiration ?? stored?.expiration;
         return {
           present: true,
           source: 'memory',
-          ...(typeof stored?.expiration === 'number'
-            ? { expiration: stored.expiration }
-            : {}),
+          ...(typeof expiration === 'number' ? { expiration } : {}),
         };
       }
       if (stored?.raw) {
@@ -4076,7 +4185,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (live.attemptSource !== 'begin')
           await assertChannelAttemptAllowed(req.identity, this.env);
         requireChannelDelegation(
-          !!this.delegations.get(req.identity.userDid)?.raw,
+          this.delegations.get(req.identity.userDid),
+          Math.floor(Date.now() / 1000),
         );
       }
       // An attempt that starts from `admitting` never reached the agent (the

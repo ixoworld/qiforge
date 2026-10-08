@@ -139,6 +139,20 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Longest error message an unexpected channel failure logs. */
+const CHANNEL_FAILURE_LOG_CHARS = 300;
+
+/** `<name>: <message>` of an unexpected channel failure, the message bounded. */
+function describeChannelFailure(err: unknown): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  const message = errorText(err);
+  return `${name}: ${
+    message.length > CHANNEL_FAILURE_LOG_CHARS
+      ? `${message.slice(0, CHANNEL_FAILURE_LOG_CHARS)}…`
+      : message
+  }`;
+}
+
 /** The rejection an in-flight RPC gets when `ctx.abort()` resets its object. */
 function isAbortRejection(err: unknown): boolean {
   return /debug reset requested|reset requested by the debug route|durable object reset|no longer active|aborted/i.test(
@@ -405,16 +419,21 @@ export function createShell(
   app.post('/channels/turn', async (c) => {
     try {
       if (!c.env.CHANNEL_SERVICE_DID)
-        return c.json({ message: 'Channels are not configured' }, 503);
+        throw new ChannelError(
+          503,
+          'Channels are not configured',
+          'not_configured',
+        );
       const raw = await readChannelBody(c.req.raw);
       let json: unknown;
       try {
         json = JSON.parse(raw);
       } catch {
-        throw new ChannelError(400, 'Invalid JSON request');
+        throw new ChannelError(400, 'Invalid JSON request', 'invalid_request');
       }
       const parsed = ChannelTurnBody.safeParse(json);
-      if (!parsed.success) throw new ChannelError(400, 'Invalid channel turn');
+      if (!parsed.success)
+        throw new ChannelError(400, 'Invalid channel turn', 'invalid_request');
       const identity = await authenticateChannel(
         c.req.raw.headers,
         raw,
@@ -431,7 +450,7 @@ export function createShell(
           })
         ).success
       )
-        throw new ChannelError(429, 'Too many requests');
+        throw new ChannelError(429, 'Too many requests', 'rate_limited');
       await assertActiveChannelBinding(identity, c.env);
       const outcome = await userStub(c.env, identity.userDid).channelTurn(
         identity,
@@ -439,7 +458,10 @@ export function createShell(
         await channelRequestHash(raw),
       );
       if (!outcome.ok)
-        return c.json({ message: outcome.message }, outcome.status);
+        return c.json(
+          { code: outcome.code, message: outcome.message },
+          outcome.status,
+        );
       const result = outcome.result;
       return c.json(
         result,
@@ -447,9 +469,20 @@ export function createShell(
       );
     } catch (error) {
       if (error instanceof ChannelError)
-        return c.json({ message: error.message }, error.status);
+        return c.json(
+          { code: error.code, message: error.message },
+          error.status,
+        );
+      // The cause only, never the request or its tokens: a 503 the gateway
+      // retries must leave a trace of why it happened.
+      console.error(
+        `[channels] turn failed unexpectedly: ${describeChannelFailure(error)}`,
+      );
       return c.json(
-        { message: 'Channel turn is temporarily unavailable' },
+        {
+          code: 'unavailable',
+          message: 'Channel turn is temporarily unavailable',
+        },
         503,
       );
     }
@@ -1084,7 +1117,7 @@ export function createShell(
     // Thrown on purpose with a status and a message meant for the client.
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof ChannelError)
-      return c.json({ message: err.message }, err.status);
+      return c.json({ code: err.code, message: err.message }, err.status);
     const requestId = errorRequestId(c.req.header('x-request-id'));
     console.error(
       `[shell] ${c.req.method} ${loggedRoute(c)} failed (request ${requestId}):`,

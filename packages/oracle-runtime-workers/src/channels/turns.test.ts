@@ -1,7 +1,10 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { ChannelTurnsTestDO } from './test-do';
-import type { ChannelTurnInput } from './contract';
+import {
+  CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+  type ChannelTurnInput,
+} from './contract';
 import type { ReplyPlan } from '../delivery/types';
 import { RUN_RETENTION_MS } from '../do/run-store';
 
@@ -22,6 +25,14 @@ const message: ChannelTurnInput = {
   remoteMessageRef: `hmac:${'a'.repeat(64)}`,
   message: 'Help me plan',
   context: { kind: 'companion' },
+};
+
+const delegationRequired = {
+  ok: false,
+  status: 428,
+  code: 'delegation_required',
+  message:
+    'Companion delegation required: the user must authorize this oracle again',
 };
 
 describe('durable channel requests', () => {
@@ -121,6 +132,7 @@ describe('durable channel requests', () => {
     const expired = {
       ok: false,
       status: 410,
+      code: 'response_expired',
       message:
         'Channel response has expired; this request cannot execute again',
     };
@@ -142,6 +154,7 @@ describe('durable channel requests', () => {
     ).resolves.toEqual({
       ok: false,
       status: 409,
+      code: 'request_conflict',
       message: 'This request ID already belongs to another message',
     });
     expect(await stub.count()).toBe(1);
@@ -166,6 +179,7 @@ describe('durable channel requests', () => {
     ).resolves.toEqual({
       ok: false,
       status: 404,
+      code: 'session_not_found',
       message: 'Session not owned',
     });
     expect(await stub.count()).toBe(0);
@@ -243,18 +257,81 @@ describe('durable channel requests', () => {
     if (!admitted.ok) throw new Error('Turn rejected');
     await stub.finish(admitted.result.runId);
     await stub.revokeDelegation();
-    expect(await stub.submit({ ...message, requestId: 'wa:two' })).toEqual({
-      ok: false,
-      status: 409,
-      message:
-        'Companion delegation required: the user must authorize this oracle again',
-    });
+    expect(await stub.submit({ ...message, requestId: 'wa:two' })).toEqual(
+      delegationRequired,
+    );
     expect(await stub.count()).toBe(1);
     expect((await stub.mirrors()).user).toBe(1);
     expect(await stub.submit(message)).toMatchObject({
       ok: true,
       result: { status: 'finished', text: 'One answer' },
     });
+  });
+
+  it.each([
+    { name: 'expired', left: -60 },
+    {
+      name: 'exactly at the margin',
+      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+    },
+    {
+      name: 'inside the margin',
+      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 1,
+    },
+  ])(
+    'refuses a new turn under a delegation $name (428 delegation_required)',
+    async ({ name, left }) => {
+      const stub = env.CHANNEL_TURNS_TEST.getByName(`delegation-${name}`);
+      await stub.setDelegation({
+        raw: 'grant',
+        expiration: Math.floor(Date.now() / 1000) + left,
+      });
+      expect(await stub.submit(message)).toEqual(delegationRequired);
+      expect(await stub.count()).toBe(0);
+      expect((await stub.mirrors()).user).toBe(0);
+    },
+  );
+
+  it('refuses a delegation whose expiry is unknown', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-no-expiry');
+    await stub.setDelegation({ raw: 'grant' });
+    expect(await stub.submit(message)).toEqual(delegationRequired);
+    expect(await stub.count()).toBe(0);
+  });
+
+  it('admits a turn under a delegation with more than the margin left', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-valid');
+    await stub.setDelegation({
+      raw: 'grant',
+      expiration:
+        Math.floor(Date.now() / 1000) +
+        CHANNEL_DELEGATION_MIN_REMAINING_SECONDS +
+        60,
+    });
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it('refuses a second session for a bound channel (409 session_conflict)', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('session-conflict');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(
+      await stub.submit({
+        ...message,
+        requestId: 'wa:two',
+        sessionId: '$channel-session-other',
+      }),
+    ).toEqual({
+      ok: false,
+      status: 409,
+      code: 'session_conflict',
+      message: 'This channel already has another session',
+    });
+    expect(await stub.count()).toBe(1);
   });
 });
 
@@ -299,7 +376,12 @@ describe('channel polls', () => {
         requestId: 'wa:late',
         sessionId: first.result.sessionId,
       }),
-    ).toEqual({ ok: false, status: 404, message: 'Session deleted' });
+    ).toEqual({
+      ok: false,
+      status: 404,
+      code: 'session_not_found',
+      message: 'Session deleted',
+    });
     expect(await stub.count()).toBe(1);
   });
 

@@ -23,7 +23,10 @@ interface ReceiptRow extends Record<string, string | number | null> {
 export interface ChannelTurnsHost {
   createSession(identity: TurnIdentity, markerTxnId: string): Promise<string>;
   assertSession(identity: TurnIdentity, sessionId: string): Promise<void>;
-  /** Throws a `ChannelError` when the user has no stored delegation for this oracle. */
+  /**
+   * Throws a `ChannelError` (428 `delegation_required`) when the user has no
+   * usable delegation for this oracle: none, or one too close to expiry.
+   */
   requireDelegation(identity: TurnIdentity): Promise<void>;
   getRun(runId: string): Promise<RunRecord | undefined>;
   /** The Reply Plan (JSON) a finished run was built into, if any. */
@@ -167,6 +170,7 @@ export class ChannelTurns {
       throw new ChannelError(
         403,
         'Channel identity does not match this request',
+        'identity_mismatch',
       );
     const runId = `channel_${await channelRequestHash(JSON.stringify([input.bindingId, input.requestId]))}`;
     // Checked before a receipt is written: the receipt of a pruned run is
@@ -175,6 +179,7 @@ export class ChannelTurns {
       throw new ChannelError(
         410,
         'Channel response has expired; this request cannot execute again',
+        'response_expired',
       );
     const admitted = await this.db.run(
       `INSERT OR IGNORE INTO channel_requests
@@ -191,6 +196,7 @@ export class ChannelTurns {
       throw new ChannelError(
         409,
         'This request ID already belongs to another message',
+        'request_conflict',
       );
     let sessionId = receipt.session_id;
     // The session is checked when this request is bound to it, and again
@@ -203,7 +209,11 @@ export class ChannelTurns {
         [input.bindingId],
       );
       if (binding && input.sessionId && binding.session_id !== input.sessionId)
-        throw new ChannelError(409, 'This channel already has another session');
+        throw new ChannelError(
+          409,
+          'This channel already has another session',
+          'session_conflict',
+        );
       sessionId =
         binding?.session_id ??
         input.sessionId ??
