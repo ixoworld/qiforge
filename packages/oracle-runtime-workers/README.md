@@ -91,7 +91,7 @@ Every variable, binding and migration is explained in
 | `POST/GET /sessions`, `POST/GET /messages/:id`        | The chat API                                          |
 | `GET /runs/:runId`, `GET /sessions/:id/messages`      | Re-join a durable run; one page of a transcript       |
 | `/delegation`, `/models`, `/socket.io/`, `/byo-llm/*` | Delegation, models, realtime channel, BYO LLM         |
-| `POST /channels/turn`                                 | IXO Channels ingress (its own channel UCAN policy)    |
+| `POST /channels/turn`                                 | IXO Channels ingress; refusals carry a `code`         |
 | `POST /messages/:sessionId/:messageId/feedback`       | Anonymous feedback on a reply (when configured)       |
 | `/topic-deliverables/:operationId`                    | Owner-only Topic deliverables (when enabled)          |
 | `GET /a/:id`, `GET /a/:id/data`                       | Artefact links opened from chat apps (public)         |

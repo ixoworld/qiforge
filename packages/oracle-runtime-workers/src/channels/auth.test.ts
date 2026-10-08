@@ -309,7 +309,11 @@ describe('active channel binding', () => {
     try {
       await expect(
         assertActiveChannelBinding(identity, config),
-      ).rejects.toThrow('unavailable');
+      ).rejects.toMatchObject({
+        status: 503,
+        code: 'binding_check_unavailable',
+        message: 'Channel binding validation is unavailable',
+      });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -336,7 +340,7 @@ describe('active channel binding', () => {
       );
       expect(revoked).toBeInstanceOf(ChannelError);
       expect(revoked).not.toBeInstanceOf(RunAttemptDeferred);
-      expect(revoked).toMatchObject({ status: 403 });
+      expect(revoked).toMatchObject({ status: 403, code: 'binding_inactive' });
       await expect(
         assertChannelAttemptAllowed(identity, config),
       ).resolves.toBeUndefined();

@@ -7,6 +7,7 @@ import { ChannelTurns } from './turns';
 import {
   channelRequestHash,
   requireChannelDelegation,
+  type ChannelDelegation,
   type ChannelTurnInput,
   type ChannelTurnOutcome,
   ChannelError,
@@ -32,13 +33,14 @@ export class ChannelTurnsTestDO extends DurableObject {
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
         if (!sessionId.startsWith('$channel-session-'))
-          throw new ChannelError(404, 'Session not owned');
+          throw new ChannelError(404, 'Session not owned', 'session_not_found');
         if ((await this.deletedSessions()).includes(sessionId))
-          throw new ChannelError(404, 'Session deleted');
+          throw new ChannelError(404, 'Session deleted', 'session_not_found');
       },
       requireDelegation: async () =>
         requireChannelDelegation(
-          (await this.ctx.storage.get<boolean>('delegation-revoked')) !== true,
+          await this.delegation(),
+          Math.floor(this.nowMs / 1000),
         ),
       getRun: (runId) => runs.get(runId),
       getPlan: (runId) => runs.getPlan(runId),
@@ -99,7 +101,12 @@ export class ChannelTurnsTestDO extends DurableObject {
       return { ok: true, result };
     } catch (error) {
       if (error instanceof ChannelError)
-        return { ok: false, status: error.status, message: error.message };
+        return {
+          ok: false,
+          status: error.status,
+          code: error.code,
+          message: error.message,
+        };
       throw error;
     }
   }
@@ -161,6 +168,24 @@ export class ChannelTurnsTestDO extends DurableObject {
 
   async revokeDelegation(): Promise<void> {
     await this.ctx.storage.put('delegation-revoked', true);
+  }
+
+  /** The user's delegation from now on (an expiry in unix seconds). */
+  async setDelegation(delegation: ChannelDelegation): Promise<void> {
+    await this.ctx.storage.delete('delegation-revoked');
+    await this.ctx.storage.put('delegation', delegation);
+  }
+
+  /** None once revoked; else the one set, else one valid for an hour. */
+  private async delegation(): Promise<ChannelDelegation | undefined> {
+    if ((await this.ctx.storage.get<boolean>('delegation-revoked')) === true)
+      return undefined;
+    return (
+      (await this.ctx.storage.get<ChannelDelegation>('delegation')) ?? {
+        raw: 'grant',
+        expiration: Math.floor(this.nowMs / 1000) + 3600,
+      }
+    );
   }
 
   async expire(ms: number): Promise<void> {

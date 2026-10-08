@@ -15,7 +15,19 @@ import { DoSqliteDatabase } from '../sqlite/database';
 import { SqliteSaver } from '../sqlite/sqlite-saver';
 import { createUserOracleDO } from './user-oracle-do';
 import { MigratingOwnerStore } from '../owner-store/migrating-store';
-import { VfsNoDelegationError } from '../owner-store/ixo-vfs-store';
+import {
+  VfsNoDelegationError,
+  VfsRequestError,
+} from '../owner-store/ixo-vfs-store';
+import {
+  createDelegation,
+  generateKeypair,
+  serializeDelegation,
+} from '@ixo/ucan';
+import {
+  CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+  type ChannelTurnInput,
+} from '../channels/contract';
 
 import type { SqliteTestDO } from '../sqlite/test-do';
 import { AIMessage, HumanMessage } from '@langchain/core/messages';
@@ -1490,10 +1502,258 @@ describe('alarm and boot wiring', () => {
   });
 });
 
+/** Unix seconds `seconds` from now. */
+const secondsFromNow = (seconds: number): number =>
+  Math.floor(Date.now() / 1000) + seconds;
+
+/** A real serialized delegation from the user, expiring at `expiration`. */
+async function delegationToken(expiration: number): Promise<string> {
+  const user = await generateKeypair();
+  const oracle = await generateKeypair();
+  return serializeDelegation(
+    await createDelegation({
+      issuer: user.signer,
+      audience: oracle.did,
+      capabilities: [{ can: 'memory/*', with: 'ixo:memory' }],
+      expiration,
+    }),
+  );
+}
+
+const channelInput: ChannelTurnInput = {
+  provider: 'whatsapp',
+  bindingId: 'chb_lifecycle',
+  bindingRevision: 1,
+  requestId: 'wa:lifecycle',
+  remoteMessageRef: `hmac:${'c'.repeat(64)}`,
+  message: 'Hello',
+  context: { kind: 'companion' },
+};
+
+const channelIdentity = {
+  userDid: USER_DID,
+  channel: {
+    callerDid: 'did:web:channels.test',
+    provider: 'whatsapp' as const,
+    bindingId: channelInput.bindingId,
+    bindingRevision: 1,
+  },
+};
+
+const delegationRequired = {
+  ok: false,
+  status: 428,
+  code: 'delegation_required',
+  message:
+    'Companion delegation required: the user must authorize this oracle again',
+};
+
+/** What the shell's `/delegation` deposit stored for this user. */
+async function storeDelegation(
+  h: UserObjectHarness,
+  expiration: number,
+): Promise<void> {
+  await h.storage.put('meta:delegation', {
+    raw: 'deposited-grant',
+    at: Date.now(),
+    expiration,
+  });
+}
+
+/**
+ * Replace the object's channel admission by `submit` once it boots, so a
+ * test observes whether a turn got past the delegation check and the boot.
+ */
+function admitAfterBoot(h: UserObjectHarness) {
+  const submit = vi.fn(async () => ({ status: 'queued' }));
+  const ready: unknown = h.field('ready');
+  if (typeof ready !== 'function') throw new Error('no ready');
+  Reflect.set(h.host, 'ready', async (...args: unknown[]) => {
+    await Reflect.apply(ready, h.host, args);
+    Reflect.set(h.host, 'channelTurns', { submit });
+  });
+  return submit;
+}
+
+describe('channel turn admission', () => {
+  it('refuses a user without a delegation with 428 before the object boots', async () => {
+    await withObject('channel-no-delegation', {}, async (h) => {
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      expect(h.db()).toBeNull();
+      expect(h.store.load).not.toHaveBeenCalled();
+      expect(await h.storage.get('meta:userDid')).toBeUndefined();
+      expect(submit).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    { name: 'expired', left: -60 },
+    {
+      name: 'inside the margin',
+      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 30,
+    },
+  ])(
+    'refuses a stored delegation $name with 428 before the object boots',
+    async ({ name, left }) => {
+      await withObject(`channel-delegation-${name}`, {}, async (h) => {
+        await storeDelegation(h, secondsFromNow(left));
+        const submit = admitAfterBoot(h);
+        expect(
+          await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+        ).toEqual(delegationRequired);
+        expect(h.db()).toBeNull();
+        expect(h.store.load).not.toHaveBeenCalled();
+        expect(submit).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('admits a turn under a stored delegation with more than the margin left', async () => {
+    await withObject('channel-delegation-valid', {}, async (h) => {
+      await storeDelegation(
+        h,
+        secondsFromNow(CHANNEL_DELEGATION_MIN_REMAINING_SECONDS + 60),
+      );
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({ ok: true, result: { status: 'queued' } });
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(h.db()).not.toBeNull();
+    });
+  });
+
+  it('refuses a delegation that lapsed while the object stayed warm', async () => {
+    await withObject('channel-delegation-lapsed', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toMatchObject({ ok: true });
+      // Still held in memory, but now inside the margin.
+      Reflect.set(
+        h.host,
+        'delegations',
+        new Map([
+          [
+            USER_DID,
+            { raw: 'deposited-grant', expiration: secondsFromNow(60) },
+          ],
+        ]),
+      );
+      await storeDelegation(h, secondsFromNow(60));
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      expect(submit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('answers 428 delegation_required when the delegation cannot load the owner copy', async () => {
+    await withObject('channel-no-vfs-capability', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      h.store.load.mockRejectedValue(
+        new VfsNoDelegationError(USER_DID, 'no-capability'),
+      );
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      expect(h.store.load).toHaveBeenCalledTimes(1);
+      expect(submit).not.toHaveBeenCalled();
+    });
+  });
+
+  it('lets any other boot failure propagate (the shell answers 503 unavailable)', async () => {
+    await withObject('channel-boot-failure', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      h.store.load.mockRejectedValue(
+        new VfsRequestError(401, '', 'VFS rejected the oracle'),
+      );
+      admitAfterBoot(h);
+      await expect(
+        h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).rejects.toThrow('VFS_AUTH_FAILED');
+    });
+  });
+
+  it('a deposited delegation makes a refused turn admissible at once', async () => {
+    await withObject('channel-delegation-deposit', {}, async (h) => {
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      // What `POST /delegation` hands the object after storing the deposit
+      // (the room-state re-read after the miss above is throttled).
+      await h.call(
+        'setDelegation',
+        USER_DID,
+        'deposited-grant',
+        secondsFromNow(3600),
+      );
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({ ok: true, result: { status: 'queued' } });
+      expect(submit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each([
+    { name: 'long-lived', left: 3600, admitted: true },
+    { name: 'short-lived', left: 600, admitted: false },
+  ])(
+    "reads a $name delegation's expiry off the token when none is stated",
+    async ({ name, left, admitted }) => {
+      await withObject(`channel-token-expiry-${name}`, {}, async (h) => {
+        const expiration = secondsFromNow(left);
+        await h.call(
+          'setDelegation',
+          USER_DID,
+          await delegationToken(expiration),
+        );
+        const delegations = h.field('delegations');
+        expect(
+          delegations instanceof Map && delegations.get(USER_DID),
+        ).toMatchObject({ expiration });
+        admitAfterBoot(h);
+        const outcome = await h.call(
+          'channelTurn',
+          channelIdentity,
+          channelInput,
+          'hash',
+        );
+        expect(outcome).toEqual(
+          admitted
+            ? { ok: true, result: { status: 'queued' } }
+            : delegationRequired,
+        );
+      });
+    },
+  );
+
+  it('answers 428 room_not_ready while the user has no Companion room', async () => {
+    await withObject('channel-room-not-ready', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({
+        ok: false,
+        status: 428,
+        code: 'room_not_ready',
+        message: 'Companion room is not ready',
+      });
+    });
+  });
+});
+
 describe('channel turns', () => {
   it('does not check the binding again after the shell did', async () => {
     await withObject('channel-turn-binding', {}, async (h) => {
       await h.ready();
+      await h.call('setDelegation', USER_DID, 'grant', secondsFromNow(3600));
       const submit = vi.fn(async () => ({ status: 'accepted' }));
       Reflect.set(h.host, 'channelTurns', { submit });
       const outcome = await h.call(
@@ -1518,7 +1778,9 @@ describe('channel turns', () => {
         Reflect.set(
           h.host,
           'delegations',
-          new Map([[USER_DID, { raw: 'grant' }]]),
+          new Map([
+            [USER_DID, { raw: 'grant', expiration: secondsFromNow(3600) }],
+          ]),
         );
         const prepared = vi.fn(async () => {
           throw new Error('agent build reached');

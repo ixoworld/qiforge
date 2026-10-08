@@ -106,9 +106,12 @@ async function signedTurn() {
   };
 }
 
+type ChannelTurnStub = (identity: { userDid: string }) => Promise<unknown>;
+
 function environment(
   turn: Awaited<ReturnType<typeof signedTurn>>,
   limited: boolean,
+  channelTurn?: ChannelTurnStub,
 ) {
   const authHubCalls: string[] = [];
   const limiterKeys: string[] = [];
@@ -135,6 +138,7 @@ function environment(
       get: () => ({
         channelTurn: async (identity: { userDid: string }) => {
           turns.push(identity.userDid);
+          if (channelTurn) return channelTurn(identity);
           return {
             ok: true,
             result: { status: 'completed', requestId: input.requestId },
@@ -195,5 +199,72 @@ describe('POST /channels/turn retries', () => {
     const [first, second] = await Promise.all([send(), send()]);
     expect([first.status, second.status]).toEqual([200, 200]);
     expect(turns).toEqual([USER_DID, USER_DID]);
+  });
+});
+
+describe('POST /channels/turn error bodies', () => {
+  const send = (
+    turn: Awaited<ReturnType<typeof signedTurn>>,
+    env: ReturnType<typeof environment>['env'],
+    body = turn.raw,
+  ) =>
+    createShell().request(
+      '/channels/turn',
+      { method: 'POST', headers: turn.headers, body },
+      env,
+    );
+
+  it('answers invalid JSON with 400 invalid_request', async () => {
+    const turn = await signedTurn();
+    const { env, turns } = environment(turn, false);
+    const res = await send(turn, env, '{not json');
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      code: 'invalid_request',
+      message: 'Invalid JSON request',
+    });
+    expect(turns).toEqual([]);
+  });
+
+  it("passes the object's refusal on as { code, message } with its status", async () => {
+    const turn = await signedTurn();
+    const { env } = environment(turn, false, async () => ({
+      ok: false,
+      status: 428,
+      code: 'delegation_required',
+      message:
+        'Companion delegation required: the user must authorize this oracle again',
+    }));
+    const res = await send(turn, env);
+    expect(res.status).toBe(428);
+    expect(await res.json()).toEqual({
+      code: 'delegation_required',
+      message:
+        'Companion delegation required: the user must authorize this oracle again',
+    });
+  });
+
+  it('answers an unexpected failure with 503 unavailable and logs its cause, bounded', async () => {
+    const turn = await signedTurn();
+    const cause = new Error(`owner copy failed: ${'x'.repeat(500)}`);
+    cause.name = 'OwnerCopyUnavailableError';
+    const { env } = environment(turn, false, async () => {
+      throw cause;
+    });
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await send(turn, env);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      code: 'unavailable',
+      message: 'Channel turn is temporarily unavailable',
+    });
+    expect(logged).toHaveBeenCalledTimes(1);
+    const line = String(logged.mock.calls[0]?.[0]);
+    expect(line).toBe(
+      `[channels] turn failed unexpectedly: OwnerCopyUnavailableError: ${cause.message.slice(0, 300)}…`,
+    );
+    // Nothing from the request: no token, no message text.
+    expect(line).not.toContain(turn.headers.authorization.slice(7, 40));
+    expect(line).not.toContain(input.message);
   });
 });
