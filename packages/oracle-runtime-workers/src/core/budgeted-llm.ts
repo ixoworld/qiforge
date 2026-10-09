@@ -2,7 +2,9 @@
  * The turn's LLM adapter, metered: every model it hands out carries a
  * callback that reserves the call against the `TurnBudget` before the
  * provider is contacted and settles the reservation to the provider's
- * reported usage when the call ends. Helper models (summarizer, attachment
+ * reported usage when the call ends. The reservation refuses a call only
+ * once the turn is aborted or past its deadline; the tokens are accounted
+ * for the turn's usage report, never limited. Helper models (summarizer, attachment
  * extraction, a plugin's own `ctx.llm.get`) are covered the same way as the
  * main model, since they all come from this adapter.
  *
@@ -149,7 +151,10 @@ function reportedTotalTokens(output: LLMResult): number | undefined {
 
 class TurnBudgetHandler extends BaseCallbackHandler {
   name = 'TurnBudgetHandler';
-  /** A refused reservation must fail the model call, not be logged and ignored. */
+  /**
+   * A refused reservation (aborted turn, passed deadline) must fail the
+   * model call, not be logged and ignored.
+   */
   raiseError = true;
   awaitHandlers = true;
   private readonly reservations = new Map<
@@ -277,7 +282,7 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     // is the exception: the summarizer swallows the failure, the turn goes on
     // with its history unchanged and does not try again (summarization.ts),
     // so its reservation — the whole history it was handed — is given back
-    // instead of starving the rest of the turn.
+    // rather than reported as usage of the turn.
     if (reservation?.summary)
       this.options.budget.releaseModel(reservation.tokens);
   }

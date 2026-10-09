@@ -306,7 +306,7 @@ export async function runTurnFrames(
     ...(input.runId ? { runId: input.runId } : {}),
   });
 
-  // The turn hit its budget (tokens, tool attempts, deadline): the abort
+  // The turn hit its budget (tool attempts, deadline): the abort
   // was the harness's, not the user's, so the client gets a terminal
   // `error` naming the limit before `done` — not a silent "aborted".
   const limitFailure = (limit: HarnessLimitError) => {

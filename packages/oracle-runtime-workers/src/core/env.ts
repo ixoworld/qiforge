@@ -187,12 +187,12 @@ export const baseEnvSchema = z.object({
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
   /**
-   * The turn budget (docs/plans/workers-harness-hardening.md): cumulative
-   * model tokens across the main agent, sub-agents and helper models; tool
-   * attempts; and the wall-clock deadline. Exhaustion ends the turn and keeps
-   * the work done so far. Parsed by `turnLimitsFromEnv`.
+   * The turn budget (docs/plans/workers-harness-hardening.md): tool attempts
+   * across the main agent and its sub-agents, and the wall-clock deadline.
+   * Exhaustion ends the turn and keeps the work done so far. Model tokens are
+   * accounted and logged per turn but never limited. Parsed by
+   * `turnLimitsFromEnv`.
    */
-  TURN_MAX_TOKENS: z.coerce.number().int().positive().default(500_000),
   TURN_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(120),
   TURN_TIMEOUT_MS: z.coerce
     .number()

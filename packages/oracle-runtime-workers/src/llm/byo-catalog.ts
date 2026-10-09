@@ -382,6 +382,8 @@ export const BYO_DEFAULT_MODEL: Record<ByoProvider, string> = {
  * A role absent here falls back to the platform provider (deliberately:
  * `embedding` everywhere — none of these providers is wired for the runtime's
  * embedding path — and `vision` on DeepSeek, whose chat models are text-only).
+ * `main` and `summarizer` are not listed: both are the turn's selected model
+ * (`byoModelForRole`), so the history is summarized on the user's provider.
  */
 export const BYO_ROLE_MODELS: Record<
   ByoProvider,
@@ -447,6 +449,7 @@ export const BYO_ROLE_MODELS: Record<
  */
 const KNOWN_MODEL_ROLES: ReadonlySet<string> = new Set([
   'main',
+  'summarizer',
   'skills',
   'subagent',
   'vision',
@@ -460,16 +463,16 @@ const KNOWN_MODEL_ROLES: ReadonlySet<string> = new Set([
 
 /**
  * Resolve the provider-native model id for a role on a BYO turn.
- * `main` uses the turn's selected model; other roles use the translation
- * table. `null` → the role is not served by this provider and the caller
- * must fall back to the platform adapter.
+ * `main` and `summarizer` use the turn's selected model; other roles use the
+ * translation table. `null` → the role is not served by this provider and
+ * the caller must fall back to the platform adapter.
  */
 export function byoModelForRole(
   provider: ByoProvider,
   role: ProviderModelRole | string,
   mainModelId: string,
 ): string | null {
-  if (role === 'main') return mainModelId;
+  if (role === 'main' || role === 'summarizer') return mainModelId;
   const map = BYO_ROLE_MODELS[provider];
   const direct = map[role as ProviderModelRole];
   if (direct) return direct;

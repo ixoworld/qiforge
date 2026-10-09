@@ -3,8 +3,12 @@
  * (`context-window.ts`) so that they scale with the model:
  *
  *   - `summarizeAtTokens`  — the history is condensed once it is this large
- *                            (default half the window; Hermes fires at 50%),
- *                            never above what the summarizer may read;
+ *                            (default 60% of the window, whatever its size;
+ *                            never above the request cap nor above what the
+ *                            summarizer reads, which only binds below a
+ *                            ~34k window). The summary is written by the
+ *                            turn's own model (the `summarizer` role), so no
+ *                            second window bounds it;
  *   - `pruneAtTokens`      — above this, old tool results are demoted to
  *                            one-liners in the request (no model call, no
  *                            state change) before the model sees them;
@@ -24,7 +28,7 @@ import { NOOP_LOGGER } from './utils';
 export const CHARS_PER_TOKEN = 4;
 
 export interface ContextKnobs {
-  /** Fraction of the window at which the history is summarized (default 0.5). */
+  /** Fraction of the window at which the history is summarized (default 0.6). */
   summarizeFraction: number;
   /** Fraction of the window above which old tool results are pruned per request (default 0.35). */
   pruneFraction: number;
@@ -47,7 +51,7 @@ export interface ContextKnobs {
 }
 
 export const DEFAULT_CONTEXT_KNOBS: ContextKnobs = {
-  summarizeFraction: 0.5,
+  summarizeFraction: 0.6,
   pruneFraction: 0.35,
   resultCapFraction: 0.12,
   resultCapMaxChars: 200_000,
@@ -66,13 +70,11 @@ export interface ContextBudget {
   requestCapTokens: number;
   outputReserveTokens: number;
   /**
-   * The summarizer's own input limit (what it may read to write the summary):
-   * the smaller of what the main model's request cap and the summarizing
-   * model's own request cap leave, less a margin for the summary prompt.
+   * The summarizer's input limit (what it may read to write the summary):
+   * the main model's request cap less a margin for the summary prompt. The
+   * summarizer is the main model, so its request has the same room.
    */
   summaryInputTokens: number;
-  /** The summarizing model's window, when the host resolved it. */
-  summaryWindowTokens?: number;
   summarizeTriggerMessages?: number;
   keepMessages: number;
 }
@@ -170,34 +172,31 @@ function requestCapFor(
 }
 
 /**
- * The budget for a turn on `resolution.model`. `summarizer` is the window of
- * the model that writes the summary (the `routing` role), resolved the same
- * way: the history it is handed is bounded by its own window too, not only
- * by the main model's. Omitted, the main model's window alone bounds it.
+ * The budget for a turn on `resolution.model`, from that model's window
+ * alone: the summary is written by the same model (the `summarizer` role),
+ * so no other window bounds what it reads.
  */
 export function contextBudgetFor(
   resolution: ContextWindowResolution,
   knobs: ContextKnobs = DEFAULT_CONTEXT_KNOBS,
-  summarizer?: ContextWindowResolution,
 ): ContextBudget {
   const window = resolution.tokens;
   const { requestCapTokens, outputReserveTokens } = requestCapFor(
     window,
     knobs,
   );
-  const summaryRequestCap = summarizer
-    ? Math.min(
-        requestCapTokens,
-        requestCapFor(summarizer.tokens, knobs).requestCapTokens,
-      )
-    : requestCapTokens;
+  // The summarizer keeps only the newest `summaryInputTokens` of what it is
+  // asked to condense (LangChain trims with `strategy: 'last'`; the summary
+  // prompt needs its own room in the request) and drops the rest unread —
+  // the earlier summary first. Summarizing therefore starts no later than
+  // that limit, so the thread's memory is never lost unread. With the
+  // default knobs this only binds below a window of ~34.3k tokens (60% of
+  // the window exceeds 95% less the reply reserve and the prompt margin);
+  // above it the trigger is the plain fraction.
   const summaryInputTokens = Math.max(
     1_000,
-    summaryRequestCap - SUMMARY_PROMPT_MARGIN_TOKENS,
+    requestCapTokens - SUMMARY_PROMPT_MARGIN_TOKENS,
   );
-  // The summarizer keeps only the newest `summaryInputTokens` of what it is
-  // asked to condense and drops the rest unread — the earlier summary first.
-  // Summarizing starts no later than that, so nothing is lost unsummarized.
   const summarizeAtTokens = Math.min(
     Math.floor(window * knobs.summarizeFraction),
     requestCapTokens,
@@ -220,7 +219,6 @@ export function contextBudgetFor(
     requestCapTokens,
     outputReserveTokens,
     summaryInputTokens,
-    ...(summarizer ? { summaryWindowTokens: summarizer.tokens } : {}),
     ...(knobs.summarizeTriggerMessages !== undefined
       ? { summarizeTriggerMessages: knobs.summarizeTriggerMessages }
       : {}),
@@ -284,5 +282,5 @@ export function messageToolCallTokens(
 }
 
 export function describeBudget(b: ContextBudget): string {
-  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}${b.summaryWindowTokens !== undefined ? ` (summarizer window ${b.summaryWindowTokens})` : ''}`;
+  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
 }

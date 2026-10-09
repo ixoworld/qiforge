@@ -1039,7 +1039,8 @@ describe('createMainAgent', () => {
     }),
     new AIMessage({ id: `r${i}`, content: `answer ${i}` }),
   ];
-  // 32k window: summarizeAt 16,000 tokens, pruneAt 11,200, cap 15,360 chars.
+  // 32k window: summarizeAt 18,400 tokens (60% would be 19,200; clamped to
+  // what the summarizer reads), pruneAt 11,200, cap 15,360 chars.
   const budget = contextBudgetFor({
     model: 'm',
     tokens: 32_000,
@@ -1072,7 +1073,7 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('read_result');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[context] model=m window=32000 (override) summarizeAt=16000 pruneAt=11200 resultCap=15360c',
+        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 resultCap=15360c',
       ),
     );
 
@@ -1110,7 +1111,7 @@ describe('createMainAgent', () => {
       availablePlugins: core.availablePlugins,
       llm: {
         get: (role) =>
-          (role === 'routing'
+          (role === 'summarizer'
             ? summarizer
             : new FakeToolCallingModel({
                 toolCalls: [],
@@ -1129,11 +1130,11 @@ describe('createMainAgent', () => {
       contextBudget: budget,
     });
 
-    // 6 past turns × 12k-char results ≈ 18k tokens > summarizeAt (16k) with
-    // only 25 messages — the legacy 20-message trigger would have fired at
-    // 8k chars; here the token trigger is what fires.
+    // 6 past turns × 14k-char results ≈ 21k tokens > summarizeAt (18.4k)
+    // with only 25 messages — the legacy 20-message trigger would have fired
+    // at 8k chars; here the token trigger is what fires.
     const history = Array.from({ length: 6 }, (_, i) =>
-      pastTurn(i, 12_000),
+      pastTurn(i, 14_000),
     ).flat();
     const result = (await agent.invoke(
       { messages: [...history, new HumanMessage('and now?')] },
@@ -1193,7 +1194,7 @@ describe('createMainAgent tool execution', () => {
   async function build(
     plugin: OraclePlugin,
     script: Script,
-    limits = { tokens: 1_000_000, tools: 20, durationMs: 60_000 },
+    limits = { tools: 20, durationMs: 60_000 },
   ) {
     const core = bootCore([plugin]);
     await core.warm();
@@ -1257,7 +1258,7 @@ describe('createMainAgent tool execution', () => {
     const { agent } = await build(
       plugin,
       [[{ name: 'get_flaky', args: {}, id: 'r1' }], []],
-      { tokens: 1_000_000, tools: 1, durationMs: 60_000 },
+      { tools: 1, durationMs: 60_000 },
     );
     await expect(
       agent.invoke(
@@ -1679,7 +1680,7 @@ class RecordingSummarizer extends FakeListChatModel {
   }
 }
 
-/** The scripted models, with `routing` (the summarizer) replaced. */
+/** The scripted models, with the `summarizer` role replaced. */
 function llmWith(
   summarizer: BaseChatModel,
   scripts: Partial<Record<string, Script>>,
@@ -1687,7 +1688,7 @@ function llmWith(
   const scripted = scriptedLlm(scripts);
   return {
     get: (role, params) =>
-      role === 'routing' ? summarizer : scripted.get(role, params),
+      role === 'summarizer' ? summarizer : scripted.get(role, params),
   };
 }
 
@@ -1714,17 +1715,18 @@ describe('createMainAgent — summaries', () => {
       manifest: makeManifest({ title: 'Probe', visibility: 'always' }),
       getTools: () => [makeTool('get_probe', { handler: async () => 'ok' })],
     });
-  // A 64k main window summarizes at 32k tokens; the summarizer has 16k.
+  // A 24k window, keeping the last two messages: the summarizer reads at
+  // most 12,800 tokens (the request cap less the summary prompt's room), so
+  // summarizing starts there rather than at 60% of the window (14,400).
   const budget = contextBudgetFor(
-    { model: 'main', tokens: 64_000, origin: 'override' },
-    DEFAULT_CONTEXT_KNOBS,
-    { model: 'routing', tokens: 16_000, origin: 'override' },
+    { model: 'main', tokens: 24_000, origin: 'override' },
+    { ...DEFAULT_CONTEXT_KNOBS, keepMessages: 2 },
   );
-  // ~36k tokens: over the trigger.
+  // ~15k tokens: over the trigger, and more than the summarizer reads.
   const history = () =>
-    Array.from({ length: 6 }, (_, i) => pastTurn(i, 24_000)).flat();
+    Array.from({ length: 5 }, (_, i) => pastTurn(i, 12_000)).flat();
 
-  it("hands the summarizer no more than its own model's window", async () => {
+  it('hands the summarizer no more than the budget lets it read', async () => {
     const core = bootCore([probe()]);
     await core.warm();
     const summarizer = new RecordingSummarizer();
@@ -1742,14 +1744,101 @@ describe('createMainAgent — summaries', () => {
       { messages: [...history(), new HumanMessage('and now?')] },
       { configurable: { thread_id: 'summary-window' } },
     )) as { messages: BaseMessage[] };
+    expect(budget.summaryInputTokens).toBe(12_800);
     expect(summarizer.inputs).toHaveLength(1);
     expect(Math.ceil(summarizer.inputs[0]!.length / 4)).toBeLessThanOrEqual(
-      16_000,
+      budget.summaryInputTokens,
     );
     expect(result.messages.filter(isSummarizationMessage)).toHaveLength(1);
   });
 
-  it('tries a failing summary once per turn and gives its tokens back, so the turn completes', async () => {
+  it('starts summarizing on a small window before the summarizer would drop the oldest history', async () => {
+    // The clamp: the trigger is what the summarizer reads, not 60%.
+    expect(budget.summarizeAtTokens).toBe(budget.summaryInputTokens);
+    expect(budget.summarizeAtTokens).toBeLessThan(Math.floor(24_000 * 0.6));
+    const core = bootCore([probe()]);
+    await core.warm();
+    const summarizer = new RecordingSummarizer();
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, llmWith(summarizer, {})),
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+    });
+    // ~13.1k tokens: past the clamped trigger (12,800) and below 60% of the
+    // window (14,400), so only the clamp makes it summarize. The newest
+    // result stays in the kept tail; the ~8k before it fit what the
+    // summarizer reads, so the oldest turn reaches it.
+    const justOver = [
+      ...Array.from({ length: 4 }, (_, i) => pastTurn(i, 8_000)).flat(),
+      new AIMessage({
+        id: 'a9',
+        content: '',
+        tool_calls: [{ id: 'c9', name: 'get_probe', args: { i: 9 } }],
+      }),
+      new ToolMessage({
+        id: 't9',
+        tool_call_id: 'c9',
+        name: 'get_probe',
+        content: `9:${'w'.repeat(20_000)}`,
+      }),
+    ];
+    const result = (await agent.invoke(
+      { messages: [...justOver, new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'summary-clamp' } },
+    )) as { messages: BaseMessage[] };
+    expect(summarizer.inputs).toHaveLength(1);
+    // Everything it was asked to condense was read, the oldest turn included.
+    expect(summarizer.inputs[0]).toContain('question 0');
+    expect(summarizer.inputs[0]).toContain(`0:${'w'.repeat(100)}`);
+    expect(result.messages.filter(isSummarizationMessage)).toHaveLength(1);
+  });
+
+  it('summarizes with the turn’s main model, the per-request choice included', async () => {
+    const core = bootCore([probe()]);
+    await core.warm();
+    const requested: { role: ModelRole; model?: unknown }[] = [];
+    const summarizer = new RecordingSummarizer();
+    const scripted = scriptedLlm({});
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, {
+        get: (role, params) => {
+          requested.push({ role, model: params?.model });
+          return role === 'summarizer'
+            ? summarizer
+            : scripted.get(role, params);
+        },
+      }),
+      requestCtx: { ...requestCtx, model: 'anthropic/claude-sonnet-5' },
+      state: {},
+      contextBudget: budget,
+    });
+    await agent.invoke(
+      { messages: [...history(), new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'summary-main-model' } },
+    );
+    expect(summarizer.inputs).toHaveLength(1);
+    // Resolved like `main`: the same role-independent model choice.
+    expect(requested).toContainEqual({
+      role: 'summarizer',
+      model: 'anthropic/claude-sonnet-5',
+    });
+    expect(requested).toContainEqual({
+      role: 'main',
+      model: 'anthropic/claude-sonnet-5',
+    });
+    expect(requested.some((r) => r.role === 'routing')).toBe(false);
+  });
+
+  it('tries a failing summary once per turn and gives its tokens back, and the turn completes', async () => {
     const core = bootCore([probe()]);
     await core.warm();
     const script: Script = [
@@ -1757,42 +1846,43 @@ describe('createMainAgent — summaries', () => {
       [{ name: 'get_probe', args: { step: 2 }, id: 's2' }],
       [],
     ];
-    const run = async (tokens: number) => {
-      const summarizer = new RecordingSummarizer(
-        new Error("400 This model's maximum context length is 16000 tokens"),
-      );
-      const turnBudget = new TurnBudget({
-        tokens,
-        tools: 20,
-        durationMs: 60_000,
-      });
-      const reserve = vi.spyOn(turnBudget, 'reserveModel');
-      const metered = budgetedLlm(llmWith(summarizer, { main: script }), {
-        budget: turnBudget,
-        outputReserveTokens: budget.outputReserveTokens,
-      });
-      const { agent } = await createMainAgent({
-        registries: core.registries,
-        identity: core.identity,
-        config: core.validatedEnv,
-        availablePlugins: core.availablePlugins,
-        ambient: ambientFor(core, metered),
-        requestCtx,
-        state: {},
-        contextBudget: budget,
-        turnBudget,
-      });
-      const result = (await agent.invoke(
-        { messages: [...history(), new HumanMessage('and now?')] },
-        {
-          configurable: { thread_id: `summary-fails-${tokens}` },
-          callbacks: [metered.callback],
-        },
-      )) as { messages: BaseMessage[] };
-      return { result, summarizer, turnBudget, reserve };
-    };
-
-    const { result, summarizer, turnBudget, reserve } = await run(10_000_000);
+    // A 64k window (summarizes at 38,400 tokens) and ~42k tokens of
+    // history: over the trigger, and still a request that fits once the
+    // summary has failed.
+    const roomy = contextBudgetFor(
+      { model: 'main', tokens: 64_000, origin: 'override' },
+      DEFAULT_CONTEXT_KNOBS,
+    );
+    const summarizer = new RecordingSummarizer(
+      new Error("400 This model's maximum context length is 16000 tokens"),
+    );
+    const turnBudget = new TurnBudget({ tools: 20, durationMs: 60_000 });
+    const reserve = vi.spyOn(turnBudget, 'reserveModel');
+    const metered = budgetedLlm(llmWith(summarizer, { main: script }), {
+      budget: turnBudget,
+      outputReserveTokens: roomy.outputReserveTokens,
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, metered),
+      requestCtx,
+      state: {},
+      contextBudget: roomy,
+      turnBudget,
+    });
+    const history = Array.from({ length: 7 }, (_, i) =>
+      pastTurn(i, 24_000),
+    ).flat();
+    const result = (await agent.invoke(
+      { messages: [...history, new HumanMessage('and now?')] },
+      {
+        configurable: { thread_id: 'summary-fails' },
+        callbacks: [metered.callback],
+      },
+    )) as { messages: BaseMessage[] };
     expect(summarizer.inputs).toHaveLength(1);
     // The summary and the three model steps were reserved; only the steps
     // are still charged.
@@ -1806,10 +1896,6 @@ describe('createMainAgent — summaries', () => {
         .map((m) => m.content),
     ).toEqual(['ok', 'ok']);
     expect(result.messages.some(isSummarizationMessage)).toBe(false);
-
-    // A limit that only the model steps fit: the turn still completes.
-    const tight = await run(steps + 1_000);
-    expect(toolMessages(tight.result.messages).slice(-2)).toHaveLength(2);
   }, 30_000);
 
   it('a summary written mid-turn keeps the turn: an identical write after it is still refused', async () => {
@@ -1852,7 +1938,7 @@ describe('createMainAgent — summaries', () => {
       ),
       requestCtx,
       state: {},
-      // 40k window (summarize at 20k tokens), keeping only the last two
+      // 40k window (summarize at 24k tokens), keeping only the last two
       // messages: the big result pushes the history over the trigger and
       // the summary condenses the turn's first write away.
       contextBudget: contextBudgetFor(

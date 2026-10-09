@@ -35,7 +35,7 @@ import { turnLimitsFromEnv } from '../core/turn-budget';
 import { SessionsStore, UNTITLED_SESSION } from '../sqlite/sessions-store';
 import { RunCoordinator, type LiveRun } from './run-coordinator';
 import { RunStore } from './run-store';
-import { OPENROUTER_MODEL_MAP } from '../core/llm';
+import { DEFAULT_MODEL_ID, OPENROUTER_MODEL_MAP } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
 import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
 import { RunBuffer } from './run-buffer';
@@ -1282,7 +1282,7 @@ describe('turn preparation wiring', () => {
     });
   });
 
-  it("bounds the summariser by its own model's window and hands the router lazy, capability-aware inputs", async () => {
+  it("derives the context budget from the main model's window alone and hands the router lazy, capability-aware inputs", async () => {
     await withObject('turn-summary-window', {}, async (h) => {
       const { resolve, router } = await bootedForTurns(h);
       const prepared = await h.call(
@@ -1291,9 +1291,12 @@ describe('turn preparation wiring', () => {
         { message: portalTurn.message },
         attemptRun(),
       );
-      expect(resolve.mock.calls.map(([model]) => model)).toContain(
-        OPENROUTER_MODEL_MAP.routing,
-      );
+      // The summary is written by the main model: no second window (the
+      // helper `routing` model's) is resolved for it.
+      expect(resolve.mock.calls.map(([model]) => model)).toEqual([
+        DEFAULT_MODEL_ID,
+      ]);
+      expect(OPENROUTER_MODEL_MAP.routing).not.toBe(DEFAULT_MODEL_ID);
       const input = router.mock.calls[0]?.[0];
       expect(typeof input?.hidden).toBe('function');
       expect(typeof input?.hasCapability).toBe('function');

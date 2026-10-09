@@ -60,6 +60,12 @@ describe('byoModelForRole (role translation)', () => {
     );
   });
 
+  it('summarizer resolves to the turn model on every provider, like main', () => {
+    for (const provider of BYO_PROVIDERS)
+      for (const { id } of BYO_PROVIDER_MODELS[provider])
+        expect(byoModelForRole(provider, 'summarizer', id)).toBe(id);
+  });
+
   it('served roles translate through the provider map', () => {
     expect(byoModelForRole('chatgpt', 'subagent', 'gpt-5.6-terra')).toBe(
       'gpt-5.6-luna',

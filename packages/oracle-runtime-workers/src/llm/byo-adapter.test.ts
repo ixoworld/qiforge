@@ -83,6 +83,37 @@ describe('createByoLlmAdapter', () => {
     expect(calls).toEqual([]);
   });
 
+  it('summarizes on the turn model with the user key, for every provider, never on the platform', () => {
+    const { adapter: platform, calls } = platformStub();
+    const turns: { credential: ByoCredential; mainModelId: string }[] = [
+      { credential: OPENAI_CRED, mainModelId: 'gpt-5.6-sol' },
+      { credential: CHATGPT_CRED, mainModelId: 'gpt-5.6-terra' },
+      {
+        credential: { provider: 'anthropic', apiKey: 'sk-ant' },
+        mainModelId: 'claude-sonnet-5',
+      },
+      {
+        credential: { provider: 'gemini', apiKey: 'g-key' },
+        mainModelId: 'gemini-3.1-pro',
+      },
+      {
+        credential: { provider: 'deepseek', apiKey: 'sk-ds' },
+        mainModelId: 'deepseek-v4-pro',
+      },
+    ];
+    for (const turn of turns) {
+      const byo = createByoLlmAdapter(platform, turn);
+      const summarizer = byo.get('summarizer', {
+        model: `byo:${turn.credential.provider}/${turn.mainModelId}`,
+      });
+      expect(summarizer).toBeInstanceOf(ByoModelFallbackChatModel);
+      if (!(summarizer instanceof ByoModelFallbackChatModel))
+        throw new Error('unreachable');
+      expect(summarizer.byoModel).toMatchObject({ model: turn.mainModelId });
+    }
+    expect(calls).toEqual([]);
+  });
+
   it('translates non-main roles through the provider role map', () => {
     const { adapter: platform } = platformStub();
     const byo = createByoLlmAdapter(platform, {

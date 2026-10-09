@@ -21,10 +21,7 @@ function adapterOf(model: FakeListChatModel): LlmAdapter {
 
 describe('budgetedLlm', () => {
   it('reserves every model call the adapter hands out and settles reported usage', async () => {
-    const budget = new TurnBudget(
-      { tokens: 10_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const metered = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
       {
@@ -57,10 +54,7 @@ describe('budgetedLlm', () => {
   });
 
   it('counts a call reported through both registrations once', async () => {
-    const budget = new TurnBudget(
-      { tokens: 10_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const metered = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
       {
@@ -75,31 +69,46 @@ describe('budgetedLlm', () => {
     expect(budget.snapshot().modelCalls).toBe(1);
   });
 
-  it('fails the call that would pass the token limit before the provider is contacted', async () => {
-    const budget = new TurnBudget(
-      { tokens: 150, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+  it('never fails a call on the tokens the turn has accounted, and keeps reporting them', async () => {
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const metered = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
       {
         budget,
-        outputReserveTokens: 100,
+        // A reply reserve far beyond any per-turn token limit the runtime
+        // ever had: every call still reaches the provider.
+        outputReserveTokens: 2_000_000,
       },
     );
     const model = metered.get('main');
-    await model.invoke([new HumanMessage('short')]);
-    await expect(model.invoke([new HumanMessage('again')])).rejects.toThrow(
+    for (let i = 0; i < 5; i += 1)
+      await expect(
+        model.invoke([new HumanMessage('h'.repeat(400_000))]),
+      ).resolves.toBeDefined();
+    const usage = budget.snapshot();
+    expect(usage.modelCalls).toBe(5);
+    // 5 × (100,000 estimated input + 4 + the 2,000,000 reserve).
+    expect(usage.tokens).toBe(5 * (100_000 + 4 + 2_000_000));
+  });
+
+  it('still refuses a call once the turn is past its deadline', async () => {
+    let now = 0;
+    const budget = new TurnBudget({ tools: 10, durationMs: 1_000 }, () => now);
+    const metered = budgetedLlm(
+      adapterOf(new FakeListChatModel({ responses: ['hi'] })),
+      { budget, outputReserveTokens: 10 },
+    );
+    const model = metered.get('main');
+    await model.invoke([new HumanMessage('in time')]);
+    now = 1_000;
+    await expect(model.invoke([new HumanMessage('late')])).rejects.toThrow(
       HarnessLimitError,
     );
     expect(budget.snapshot().modelCalls).toBe(1);
   });
 
   it('refuses a call once the turn is aborted', async () => {
-    const budget = new TurnBudget(
-      { tokens: 10_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const controller = new AbortController();
     const metered = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
@@ -117,10 +126,7 @@ describe('budgetedLlm', () => {
   });
 
   it('gives back the reservation of a failed summary, and keeps that of any other failed call', async () => {
-    const budget = new TurnBudget(
-      { tokens: 100_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const metered = budgetedLlm(
       adapterOf(new FailingChatModel({ responses: [] })),
       { budget, outputReserveTokens: 100 },
@@ -139,10 +145,7 @@ describe('budgetedLlm', () => {
   });
 
   it('never settles to a negative or non-finite reported usage', () => {
-    const budget = new TurnBudget(
-      { tokens: 10_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const handler = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
       { budget, outputReserveTokens: 100 },
@@ -179,10 +182,7 @@ describe('budgetedLlm', () => {
   });
 
   it('estimates a tool list once per turn and charges the same as before', () => {
-    const budget = new TurnBudget(
-      { tokens: 1_000_000, tools: 10, durationMs: 60_000 },
-      () => 0,
-    );
+    const budget = new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0);
     const handler = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['hi'] })),
       { budget, outputReserveTokens: 0 },
@@ -268,10 +268,7 @@ describe('budgetedLlm call trace', () => {
     const log = logger();
     const model = new GatedChatModel({ responses: ['unused'] });
     const metered = budgetedLlm(adapterOf(model), {
-      budget: new TurnBudget(
-        { tokens: 100_000, tools: 10, durationMs: 600_000 },
-        () => 0,
-      ),
+      budget: new TurnBudget({ tools: 10, durationMs: 600_000 }, () => 0),
       outputReserveTokens: 10,
       logger: log,
     });
@@ -316,10 +313,7 @@ describe('budgetedLlm call trace', () => {
     const metered = budgetedLlm(
       adapterOf(new FakeListChatModel({ responses: ['x'] })),
       {
-        budget: new TurnBudget(
-          { tokens: 1_000_000, tools: 10, durationMs: 60_000 },
-          () => 0,
-        ),
+        budget: new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0),
         outputReserveTokens: 10,
         signal: turn.signal,
       },
@@ -345,10 +339,7 @@ describe('budgetedLlm call trace', () => {
     const failing = budgetedLlm(
       adapterOf(new FailingChatModel({ responses: ['x'] })),
       {
-        budget: new TurnBudget(
-          { tokens: 1_000_000, tools: 10, durationMs: 60_000 },
-          () => 0,
-        ),
+        budget: new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0),
         outputReserveTokens: 10,
         logger: log,
       },
@@ -364,10 +355,7 @@ describe('budgetedLlm call trace', () => {
     const turn = new AbortController();
     const model = new GatedChatModel({ responses: ['unused'] });
     const metered = budgetedLlm(adapterOf(model), {
-      budget: new TurnBudget(
-        { tokens: 1_000_000, tools: 10, durationMs: 60_000 },
-        () => 0,
-      ),
+      budget: new TurnBudget({ tools: 10, durationMs: 60_000 }, () => 0),
       outputReserveTokens: 10,
       signal: turn.signal,
       logger: log,
