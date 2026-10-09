@@ -8,7 +8,12 @@ import { type HistoryData, historyQueryOptions } from './history-query.js';
 import type { IMessage } from './types.js';
 
 type Page = HistoryPage<IMessage>;
-const m = (id: string): IMessage => ({ id, type: 'ai', content: id });
+const m = (id: string): IMessage => ({
+  id,
+  type: 'ai',
+  content: id,
+  createdAt: `2026-10-09T08:00:00.000Z#${id}`,
+});
 
 /** A four-turn transcript served two turns per page, newest page first. */
 function server(): (url: string) => Promise<Page> {
@@ -64,6 +69,9 @@ describe('historyQueryOptions', () => {
       'h4',
       'a4',
     ]);
+    // The runtime's saved time rides along untouched.
+    for (const x of flattenPages(loaded.pages))
+      expect(x.createdAt).toBe(`2026-10-09T08:00:00.000Z#${x.id}`);
 
     // Leaving the page and coming back refetches: it must start at the newest
     // turns again (no cursor), then walk back through the pages that were loaded.

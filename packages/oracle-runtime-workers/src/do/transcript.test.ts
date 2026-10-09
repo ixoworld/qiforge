@@ -676,3 +676,71 @@ describe('transcript and the turn-time note', () => {
     ]);
   });
 });
+
+describe('createdAt', () => {
+  it("is each message's own saved time, taken from the saver's timestamp kwarg", async () => {
+    const { messages } = await transformTranscript([
+      new HumanMessage({
+        id: 'h1',
+        content: 'when?',
+        additional_kwargs: { timestamp: '2026-10-09T08:00:00.000Z' },
+      }),
+      new AIMessage({
+        id: 'a1',
+        content: '',
+        tool_calls: [{ id: 'call-1', name: 'lookup', args: {} }],
+        additional_kwargs: { timestamp: '2026-10-09T08:00:04.000Z' },
+      }),
+      new ToolMessage({
+        id: 't1',
+        tool_call_id: 'call-1',
+        name: 'lookup',
+        content: 'found',
+        additional_kwargs: { timestamp: '2026-10-09T08:00:05.000Z' },
+      }),
+      new AIMessage({
+        id: 'r1',
+        content: 'now',
+        additional_kwargs: { timestamp: '2026-10-09T08:00:09.000Z' },
+      }),
+    ]);
+    expect(messages.map((m) => [m.type, m.createdAt])).toEqual([
+      ['human', '2026-10-09T08:00:00.000Z'],
+      ['ai', '2026-10-09T08:00:04.000Z'],
+      ['ai', '2026-10-09T08:00:09.000Z'],
+    ]);
+    // The folded tool result does not move the calling reply's time.
+    expect(messages[1]?.toolCalls?.[0]?.output).toBeTruthy();
+  });
+
+  it('is absent when the saver has not stamped the message', async () => {
+    const { messages } = await transformTranscript([
+      new HumanMessage({ id: 'h1', content: 'hi' }),
+      new AIMessage({
+        id: 'a1',
+        content: 'hello',
+        additional_kwargs: { timestamp: '' },
+      }),
+    ]);
+    expect(messages).toHaveLength(2);
+    for (const m of messages) expect(m).not.toHaveProperty('createdAt');
+  });
+
+  it('is listed on a paged transcript too', async () => {
+    const stamped = turn(1).map((m, i) => {
+      m.additional_kwargs = {
+        ...m.additional_kwargs,
+        timestamp: `2026-10-09T08:00:0${i}.000Z`,
+      };
+      return m;
+    });
+    const page = await pageThreadTranscript(rowSource(stamped), 'thread', {
+      limit: 1,
+    });
+    expect(page.messages.map((m) => m.createdAt)).toEqual([
+      '2026-10-09T08:00:00.000Z',
+      '2026-10-09T08:00:01.000Z',
+      '2026-10-09T08:00:03.000Z',
+    ]);
+  });
+});

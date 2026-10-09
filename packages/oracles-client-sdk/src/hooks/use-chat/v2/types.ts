@@ -126,6 +126,12 @@ export interface IMessage {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /**
+   * When the message was first saved, ISO 8601. Present on history messages
+   * from a runtime that reports it (`@ixo/oracle-runtime-workers` 0.17 and
+   * later); absent while a reply is still streaming.
+   */
+  createdAt?: string;
   /** First attachment — kept for clients that only read the singular field. */
   attachment?: Attachment;
   attachments?: Attachment[];
