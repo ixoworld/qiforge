@@ -14,6 +14,7 @@ import {
   isByoProvider,
   type ByoProvider,
 } from './byo-catalog';
+import { findProviderStall, type ProviderStallError } from './stream-liveness';
 
 /** `kind` value for the BYO degradation notice. */
 export const BYO_FALLBACK_KIND = 'byo_fallback';
@@ -283,12 +284,27 @@ export interface ClassifyLlmErrorContext {
   byoProvider?: ByoProvider | string | null;
 }
 
+/**
+ * What the user is told about a stalled call (`ProviderStallError`): a stall
+ * mid-reply reads differently from a model that never started.
+ */
+function stallMessage(stall: ProviderStallError): string {
+  return stall.phase === 'stream'
+    ? 'The model stopped responding mid-reply. Please try again.'
+    : 'The model did not start responding. Please try again.';
+}
+
 export function classifyLlmError(
   error: unknown,
   ctx?: ClassifyLlmErrorContext,
 ): ClassifiedLlmError {
-  const parts = extractErrorParts(error);
-  const kind = detectKind(parts);
+  // A stall is found through the wrappers (the OpenAI SDK's
+  // `APIConnectionError`, LangChain's middleware errors) by its `cause`.
+  const stall = findProviderStall(error);
+  const parts: ErrorParts = stall
+    ? { text: stall.message }
+    : extractErrorParts(error);
+  const kind: LlmErrorKind = stall ? 'timeout' : detectKind(parts);
   const provider =
     typeof ctx?.byoProvider === 'string' &&
     isByoProvider(ctx.byoProvider) &&
@@ -305,7 +321,9 @@ export function classifyLlmError(
     ...(providerLabel && { providerLabel }),
     ...(parts.status !== undefined && { status: parts.status }),
     retryable: RETRYABLE_KINDS.has(kind),
-    message: fallbackMessage(kind, provider, providerLabel),
+    message: stall
+      ? stallMessage(stall)
+      : fallbackMessage(kind, provider, providerLabel),
     detail: parts.text,
   };
 }

@@ -69,6 +69,7 @@ import {
   langsmithEnvFromWorkerEnv,
   llmEnvFromWorkerEnv,
   resolveLangsmithTracing,
+  streamLivenessFromEnv,
   type LangsmithTracingDecision,
   type OpenRouterLlmAdapter,
   DEFAULT_MODEL_ID,
@@ -5196,6 +5197,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 credential: byoTurn.credential,
                 mainModelId: byoTurn.mainModelId,
                 chatGptBackend: byoTurn.chatGptBackend,
+                streamLiveness: streamLivenessFromEnv(core.validatedEnv, 'byo'),
               },
               console,
             ),
@@ -5461,6 +5463,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         budget,
         outputReserveTokens: contextBudget.outputReserveTokens,
         signal: abortController.signal,
+        logger: console,
       });
       const deadline = setTimeout(() => {
         if (abortController.signal.aborted) return;
@@ -5477,6 +5480,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       }, turnLimits.durationMs);
       turnDisposables.add(async () => {
         clearTimeout(deadline);
+        // Heartbeats of model calls that never reported an end.
+        meteredLlm.dispose();
         const usage = budget.snapshot();
         console.log(
           `[harness] turn ${req.requestId} usage: ~${usage.tokens} tokens (${usage.reportedTokens} reported over ${usage.modelCalls} model calls), ${usage.toolAttempts} tool attempts, ${usage.elapsedMs} ms`,

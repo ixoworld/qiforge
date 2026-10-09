@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toolEffectOf } from '../../core/middlewares/tool-marks';
 import { makeBuildCtx, makeRuntimeContext } from '../../core/test-fixtures';
 import { FirecrawlPlugin } from './firecrawl.plugin';
 import {
@@ -84,6 +85,21 @@ describe('FirecrawlPlugin (Workers port)', () => {
     ]);
     // The MCP client is lazy — declaring the sub-agent opens no connection.
     expect(clientRecords.length).toBe(0);
+  });
+
+  it('declares both proxied tools as reads', () => {
+    const plugin = new FirecrawlPlugin();
+    const [agent] = plugin.getSubAgents(
+      makeBuildCtx({ config: { FIRECRAWL_MCP_URL: FIRECRAWL_URL } }),
+    );
+    const tools = Array.isArray(agent?.tools) ? agent.tools : [];
+    expect(tools).toHaveLength(2);
+    // Neither name has a read prefix nor an MCP readOnlyHint: without the
+    // declared effect both would be classified as writes.
+    expect(tools.map((t) => [t.name, toolEffectOf(t)])).toEqual([
+      ['firecrawl_search', 'read'],
+      ['firecrawl_scrape', 'read'],
+    ]);
   });
 
   it('proxies a validated search call to the upstream MCP tool over streamable HTTP', async () => {

@@ -10,6 +10,7 @@ import {
   isOperatorFault,
   redactOperatorFault,
 } from './provider-error';
+import { ProviderStallError } from './stream-liveness';
 
 describe('classifyLlmError', () => {
   it('maps HTTP statuses and provider codes to kinds', () => {
@@ -42,6 +43,47 @@ describe('classifyLlmError', () => {
       source: 'platform',
       detail: 'weird',
     });
+  });
+
+  it('classifies a provider stall as a retryable timeout that names the stall', () => {
+    const midReply = new ProviderStallError({
+      phase: 'stream',
+      idleMs: 90_000,
+      elapsedMs: 130_000,
+      bytesSeen: 2048,
+      label: 'openrouter subagent openai/gpt-5.6-luna',
+    });
+    expect(classifyLlmError(midReply)).toMatchObject({
+      kind: 'timeout',
+      source: 'platform',
+      retryable: true,
+      message: 'The model stopped responding mid-reply. Please try again.',
+      detail: midReply.message,
+    });
+    // Before the first byte, wrapped the way the OpenAI SDK wraps a failed
+    // fetch (APIConnectionError with the original as `cause`).
+    const beforeFirstByte = new Error('Connection error.', {
+      cause: new ProviderStallError({
+        phase: 'first-byte',
+        idleMs: 90_000,
+        elapsedMs: 91_000,
+        bytesSeen: 0,
+        label: 'openrouter main openai/gpt-5.6-luna',
+      }),
+    });
+    const classified = classifyLlmError(beforeFirstByte, {
+      byoProvider: 'openai',
+    });
+    expect(classified).toMatchObject({
+      kind: 'timeout',
+      source: 'byo',
+      provider: 'openai',
+      retryable: true,
+      message: 'The model did not start responding. Please try again.',
+    });
+    expect(classified.status).toBeUndefined();
+    // The stall is never mistaken for a refused model.
+    expect(isModelUnavailableError(beforeFirstByte)).toBe(false);
   });
 
   it('attributes BYO turns to the provider with a human label', () => {

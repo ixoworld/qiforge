@@ -3,6 +3,19 @@ import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { ChatOpenAI } from '@langchain/openai';
 import { Client } from 'langsmith';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
+import {
+  livenessFetchFor,
+  livenessModelFields,
+  type StreamLivenessSettings,
+} from '../llm/stream-liveness';
+import {
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
+  LLM_HEADERS_TIMEOUT_MS_DEFAULT,
+  LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
+  LLM_STREAM_RETRIES_DEFAULT,
+  LLM_STREAM_RETRIES_MAX,
+  TURN_TIMEOUT_MS_DEFAULT,
+} from './env';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
 import { NOOP_LOGGER } from './utils';
@@ -505,6 +518,73 @@ export interface LlmEnv {
   LLM_PROVIDER?: LlmProvider;
   /** Required when `LLM_PROVIDER=nebius`. */
   NEBIUS_API_KEY?: string;
+  /** Model-call liveness budgets (defaults in `env.ts`). */
+  LLM_HEADERS_TIMEOUT_MS?: number;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: number;
+  LLM_STREAM_RETRIES?: number;
+  /** The turn deadline the stall retries are clamped to. */
+  TURN_TIMEOUT_MS?: number;
+}
+
+/** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
+export interface StreamLivenessEnv {
+  LLM_HEADERS_TIMEOUT_MS?: unknown;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: unknown;
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: unknown;
+  LLM_STREAM_RETRIES?: unknown;
+  TURN_TIMEOUT_MS?: unknown;
+}
+
+/** A whole number at least `min` (a number or a numeric string), else undefined. */
+function wholeNumber(value: unknown, min: number): number | undefined {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : Number.NaN;
+  return Number.isInteger(n) && n >= min ? n : undefined;
+}
+
+/**
+ * The liveness budgets of a model lane: `platform` (OpenRouter / Nebius,
+ * idle `LLM_STREAM_IDLE_TIMEOUT_MS`) or `byo` (the user's own provider, idle
+ * `LLM_BYO_STREAM_IDLE_TIMEOUT_MS`). Unset or invalid values take the
+ * defaults in `env.ts`.
+ *
+ * Retries are clamped so every attempt the guard may make fits the turn:
+ * the largest count up to `LLM_STREAM_RETRIES` (at most 5) with
+ * `(retries + 1) × (headers + idle) ≤ TURN_TIMEOUT_MS`, never below 0. A
+ * retry that cannot finish before the deadline would only end in
+ * `budget_exhausted` after a wasted second request. With the defaults the
+ * platform lane keeps one retry (2 × 210 s) and BYO lanes get none (420 s).
+ */
+export function streamLivenessFromEnv(
+  env: StreamLivenessEnv,
+  lane: 'platform' | 'byo',
+): StreamLivenessSettings {
+  const headersTimeoutMs =
+    wholeNumber(env.LLM_HEADERS_TIMEOUT_MS, 1) ??
+    LLM_HEADERS_TIMEOUT_MS_DEFAULT;
+  const idleTimeoutMs =
+    lane === 'platform'
+      ? (wholeNumber(env.LLM_STREAM_IDLE_TIMEOUT_MS, 1) ??
+        LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT)
+      : (wholeNumber(env.LLM_BYO_STREAM_IDLE_TIMEOUT_MS, 1) ??
+        LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT);
+  const configured = Math.min(
+    wholeNumber(env.LLM_STREAM_RETRIES, 0) ?? LLM_STREAM_RETRIES_DEFAULT,
+    LLM_STREAM_RETRIES_MAX,
+  );
+  const turnTimeoutMs =
+    wholeNumber(env.TURN_TIMEOUT_MS, 1) ?? TURN_TIMEOUT_MS_DEFAULT;
+  const fitting =
+    Math.floor(turnTimeoutMs / (headersTimeoutMs + idleTimeoutMs)) - 1;
+  return {
+    headersTimeoutMs,
+    idleTimeoutMs,
+    retries: Math.max(0, Math.min(configured, fitting)),
+  };
 }
 
 /**
@@ -529,6 +609,29 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     ORACLE_NAME: str('ORACLE_NAME'),
     LLM_PROVIDER: str('LLM_PROVIDER') === 'nebius' ? 'nebius' : 'openrouter',
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
+    ...platformStreamLivenessEnv(env),
+  };
+}
+
+/** The platform lane's liveness keys of `env`, as numbers (unset when absent or invalid). */
+export function platformStreamLivenessEnv(
+  env: StreamLivenessEnv,
+): Pick<
+  LlmEnv,
+  | 'LLM_HEADERS_TIMEOUT_MS'
+  | 'LLM_STREAM_IDLE_TIMEOUT_MS'
+  | 'LLM_STREAM_RETRIES'
+  | 'TURN_TIMEOUT_MS'
+> {
+  const headers = wholeNumber(env.LLM_HEADERS_TIMEOUT_MS, 1);
+  const idle = wholeNumber(env.LLM_STREAM_IDLE_TIMEOUT_MS, 1);
+  const retries = wholeNumber(env.LLM_STREAM_RETRIES, 0);
+  const turnTimeout = wholeNumber(env.TURN_TIMEOUT_MS, 1);
+  return {
+    ...(headers !== undefined ? { LLM_HEADERS_TIMEOUT_MS: headers } : {}),
+    ...(idle !== undefined ? { LLM_STREAM_IDLE_TIMEOUT_MS: idle } : {}),
+    ...(retries !== undefined ? { LLM_STREAM_RETRIES: retries } : {}),
+    ...(turnTimeout !== undefined ? { TURN_TIMEOUT_MS: turnTimeout } : {}),
   };
 }
 
@@ -560,7 +663,10 @@ function asRecord(value: unknown): Record<string, unknown> {
  * Build the platform LLM adapter from validated config, selecting the
  * provider by `LLM_PROVIDER` (`openrouter` default | `nebius`). `ChatOpenAI`
  * speaks to both OpenAI-compatible endpoints over `fetch`, so it runs
- * unchanged on Workers. Every model is created with `maxRetries: 2`.
+ * unchanged on Workers. Every model is created with `maxRetries: 2` and the
+ * stream liveness guard (`src/llm/stream-liveness.ts`) as its `fetch`, with
+ * the platform lane's budgets (`LLM_HEADERS_TIMEOUT_MS`,
+ * `LLM_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`).
  *
  * OpenRouter role handling mirrors the Node provider:
  *   - `main` → `DEFAULT_MODEL` (or the catalog default), with the OpenRouter
@@ -584,6 +690,7 @@ export function createLlmAdapter(
 ): OpenRouterLlmAdapter {
   if (env.LLM_PROVIDER === 'nebius') return createNebiusAdapter(env, logger);
   const defaultModelId = getDefaultModelId(env);
+  const liveness = streamLivenessFromEnv(env, 'platform');
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
 
@@ -636,6 +743,7 @@ export function createLlmAdapter(
     return new ChatOpenAI({
       temperature: 0.8,
       maxRetries: 2,
+      ...livenessModelFields(liveness),
       apiKey: env.OPEN_ROUTER_API_KEY,
       ...rest,
       model,
@@ -643,6 +751,12 @@ export function createLlmAdapter(
       configuration: {
         baseURL: OPENROUTER_BASE_URL,
         ...configuration,
+        fetch: livenessFetchFor({
+          settings: liveness,
+          label: `openrouter ${String(role)} ${model}`,
+          logger,
+          callerFetch: configuration.fetch,
+        }),
         defaultHeaders: { ...headers, ...overrideHeaders },
       },
       modelKwargs: {
@@ -687,6 +801,7 @@ function createNebiusAdapter(
 
   const modelForRole = (role: ModelRole): string =>
     NEBIUS_MODEL_MAP[role as ProviderModelRole] ?? NEBIUS_MODEL_MAP.subagent;
+  const liveness = streamLivenessFromEnv(env, 'platform');
 
   const get = (role: ModelRole, params?: ChatOpenAIFields): BaseChatModel => {
     const {
@@ -701,17 +816,25 @@ function createNebiusAdapter(
     logger.debug?.(
       `[llm] creating model — provider=nebius, role=${String(role)}, model=${model}`,
     );
+    const configuration = asRecord(paramsConfiguration);
     return new ChatOpenAI({
       // Cold for classification (guard), platform default otherwise.
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
+      ...livenessModelFields(liveness),
       apiKey,
       __includeRawResponse: true,
       ...rest,
       model,
       configuration: {
         baseURL: NEBIUS_BASE_URL,
-        ...asRecord(paramsConfiguration),
+        ...configuration,
+        fetch: livenessFetchFor({
+          settings: liveness,
+          label: `nebius ${String(role)} ${model}`,
+          logger,
+          callerFetch: configuration.fetch,
+        }),
       },
     });
   };
