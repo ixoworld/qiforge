@@ -9,11 +9,17 @@
  * The same handler is also put in the graph's run config (`callbacks`) so a
  * model the host constructed elsewhere and passed in directly is still
  * charged; a call reported through both paths is counted once.
+ *
+ * The handler also traces each call for operators: `[llm] start` and
+ * `[llm] end … in N ms` at debug level, and `[llm] … still running after
+ * N s` every minute while a call is open, so a stalled call can be told
+ * from a long one. Only the role, model id and tags are logged — never
+ * message content or credentials.
  */
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { LLMResult } from '@langchain/core/outputs';
-import type { ChatOpenAIFields, ModelRole } from '../plugin-api/types';
+import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import {
   estimateContentTokens,
   messageContentTokens,
@@ -21,6 +27,13 @@ import {
 } from './context-budget';
 import type { LlmAdapter } from './runtime-context';
 import type { TurnBudget } from './turn-budget';
+import { NOOP_LOGGER } from './utils';
+
+/** How often an open model call is reported as still running. */
+export const LLM_HEARTBEAT_MS = 60_000;
+
+/** Metadata key `budgetedLlm` stamps on the models it hands out. */
+const ROLE_METADATA_KEY = 'oracle_model_role';
 
 export interface BudgetedLlmOptions {
   budget: TurnBudget;
@@ -28,11 +41,19 @@ export interface BudgetedLlmOptions {
   outputReserveTokens: number;
   /** The turn's abort signal: a call after the abort is refused before it starts. */
   signal?: AbortSignal;
+  /** Receives the per-call trace (`[llm] start` / `end` / still running). */
+  logger?: Logger;
 }
 
 export interface BudgetedLlm extends LlmAdapter {
   /** Put this in the run config's `callbacks` as well. */
   readonly callback: BaseCallbackHandler;
+  /**
+   * End of the turn: clears every heartbeat still open and the abort
+   * listener. LangChain reports no end for a stream its consumer stopped
+   * reading early, and a live interval keeps the object resident.
+   */
+  dispose(): void;
 }
 
 /**
@@ -137,9 +158,75 @@ class TurnBudgetHandler extends BaseCallbackHandler {
   >();
   /** Tool-schema estimate per tool list, for this turn (see `toolListKey`). */
   private readonly toolTokens = new Map<string, number>();
+  /** Open calls, for the trace: what they are, when they started, their heartbeat. */
+  private readonly open = new Map<
+    string,
+    {
+      what: string;
+      started: number;
+      heartbeat: ReturnType<typeof setInterval>;
+    }
+  >();
+  private readonly logger: Logger;
+  private readonly onAbort = (): void => this.closeAll();
 
   constructor(private readonly options: BudgetedLlmOptions) {
     super();
+    this.logger = options.logger ?? NOOP_LOGGER;
+    // A call the abort cut short may never report its end; its heartbeat
+    // must not outlive the turn (a live timer keeps the object resident).
+    options.signal?.addEventListener('abort', this.onAbort, { once: true });
+  }
+
+  dispose(): void {
+    this.closeAll();
+    this.options.signal?.removeEventListener('abort', this.onAbort);
+  }
+
+  private traceStart(
+    runId: string,
+    extraParams: Record<string, unknown> | undefined,
+    tags: string[] | undefined,
+    metadata: Record<string, unknown> | undefined,
+  ): void {
+    const role = metadata?.[ROLE_METADATA_KEY];
+    const invocation = extraParams?.invocation_params;
+    const invocationModel =
+      invocation && typeof invocation === 'object' && 'model' in invocation
+        ? invocation.model
+        : undefined;
+    const model =
+      typeof invocationModel === 'string'
+        ? invocationModel
+        : typeof metadata?.ls_model_name === 'string'
+          ? metadata.ls_model_name
+          : 'unknown';
+    const what = `role=${typeof role === 'string' ? role : 'unknown'} model=${model}`;
+    this.logger.debug?.(
+      `[llm] start ${what} tags=${(tags ?? []).join(',') || '-'}`,
+    );
+    const started = Date.now();
+    const heartbeat = setInterval(() => {
+      this.logger.log(
+        `[llm] ${what} still running after ${Math.round((Date.now() - started) / 1000)} s`,
+      );
+    }, LLM_HEARTBEAT_MS);
+    this.open.set(runId, { what, started, heartbeat });
+  }
+
+  private traceEnd(runId: string, outcome: 'end' | 'error'): void {
+    const call = this.open.get(runId);
+    if (!call) return;
+    clearInterval(call.heartbeat);
+    this.open.delete(runId);
+    this.logger.debug?.(
+      `[llm] ${outcome} ${call.what} in ${Date.now() - call.started} ms`,
+    );
+  }
+
+  private closeAll(): void {
+    for (const call of this.open.values()) clearInterval(call.heartbeat);
+    this.open.clear();
   }
 
   handleChatModelStart(
@@ -148,7 +235,7 @@ class TurnBudgetHandler extends BaseCallbackHandler {
     runId: string,
     _parentRunId?: string,
     extraParams?: Record<string, unknown>,
-    _tags?: string[],
+    tags?: string[],
     metadata?: Record<string, unknown>,
   ): void {
     // The handler can reach the same call twice (model-level and run-level
@@ -167,9 +254,12 @@ class TurnBudgetHandler extends BaseCallbackHandler {
       tokens,
       summary: metadata?.lc_source === SUMMARIZATION_SOURCE,
     });
+    // Traced only once admitted: a refused call never starts a heartbeat.
+    this.traceStart(runId, extraParams, tags, metadata);
   }
 
   handleLLMEnd(output: LLMResult, runId: string): void {
+    this.traceEnd(runId, 'end');
     const reservation = this.reservations.get(runId);
     if (reservation === undefined) return;
     this.reservations.delete(runId);
@@ -179,6 +269,7 @@ class TurnBudgetHandler extends BaseCallbackHandler {
   }
 
   handleLLMError(_error: unknown, runId: string): void {
+    this.traceEnd(runId, 'error');
     const reservation = this.reservations.get(runId);
     this.reservations.delete(runId);
     // A failed call keeps its reservation: the provider may have consumed
@@ -214,8 +305,21 @@ export function budgetedLlm(
   const callback = new TurnBudgetHandler(options);
   return {
     callback,
+    dispose: () => callback.dispose(),
     get(role: ModelRole, params?: ChatOpenAIFields): BaseChatModel {
-      const model = adapter.get(role, params);
+      // The role rides on the model's run metadata, for the call trace. It
+      // goes in through the constructor params: `ChatOpenAI.bindTools`
+      // rebuilds the model from them, dropping anything set afterwards. The
+      // instance is stamped too, for adapters that ignore params.
+      const callerMetadata: unknown = params?.metadata;
+      const metadata = {
+        ...(callerMetadata && typeof callerMetadata === 'object'
+          ? callerMetadata
+          : {}),
+        [ROLE_METADATA_KEY]: String(role),
+      };
+      const model = adapter.get(role, { ...params, metadata });
+      model.metadata = { ...model.metadata, ...metadata };
       attach(model, callback);
       return model;
     },

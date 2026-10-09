@@ -542,11 +542,79 @@ a sixth identical read (`TURN_MAX_IDENTICAL_WRITES` / `TURN_MAX_IDENTICAL_READS`
 in the table above); the model gets the earlier outcome instead. A tool
 that declares `repeatable: true` (the Portal's browser tools and AG-UI
 actions: a UI step such as scrolling, where the same arguments again is a new
-action) is capped like a read, whatever its `effect`.
+action) is capped like a read, whatever its `effect`. A plugin that proxies
+an upstream MCP read under its own name (Firecrawl's `firecrawl_search` and
+`firecrawl_scrape`) loses the upstream `readOnlyHint` and usually falls
+outside the read-name convention, so it must declare `effect: 'read'` on the
+`tool()` itself, or every call is scheduled, claimed and capped as a write.
 
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test
 without importing the Worker bootstrap.
+
+## Model-call liveness
+
+Every model call — main agent, sub-agents, helper models, platform and BYO
+alike — goes through a `fetch` guard (`src/llm/stream-liveness.ts`) that
+watches the raw response bytes. Without it nothing bounds one call below
+`TURN_TIMEOUT_MS`: the OpenAI SDK's request timeout only covers the wait for
+headers (10 minutes by default), and LangChain retries only on a thrown
+error, never on a stream that went quiet.
+
+| Variable                         | Default  | Meaning                                                                                                                                                                          |
+| -------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLM_HEADERS_TIMEOUT_MS`         | `120000` | Time to response headers.                                                                                                                                                        |
+| `LLM_STREAM_IDLE_TIMEOUT_MS`     | `90000`  | Longest silence between body bytes, and before the first one, on the platform lane (OpenRouter, Nebius).                                                                         |
+| `LLM_BYO_STREAM_IDLE_TIMEOUT_MS` | `300000` | The same on BYO lanes (the user's own OpenAI, Anthropic, Gemini, DeepSeek or ChatGPT subscription).                                                                              |
+| `LLM_STREAM_RETRIES`             | `1`      | Whole-request retries for a call that stalled before its first body byte (headers or first byte), `0`–`5`. `0` disables them; clamped per lane to fit `TURN_TIMEOUT_MS` (below). |
+
+Any byte resets the idle clock, SSE comments included. That is why the two
+lanes differ: OpenRouter sends `: OPENROUTER PROCESSING` comments while the
+upstream model is busy, so a quiet OpenRouter stream really is stuck and
+the platform lane can be strict; a direct provider may send nothing at all
+while a model reasons, so BYO lanes get 300 s. The 90 s platform budget is
+generous against what was measured on 2026-10-09 on `openai/gpt-5.6-luna`
+through OpenRouter with reasoning effort high and medium: a
+`: OPENROUTER PROCESSING` comment every ≈ 0.5 s while the model reasons
+(longest gap 0.48 s), response headers in ≈ 1 s, and the first content token
+after 7–8 s. There is deliberately no cap
+on a call's total duration: a long sub-agent reply that keeps streaming is
+legitimate, and the turn deadline still bounds the turn. Reference points:
+OpenAI's Codex CLI uses a 300 s stream idle timeout with up to 5 stream and
+4 request retries; OpenRouter sends keep-alive comments and Anthropic `ping`
+events while a model works; the OpenAI and Anthropic SDKs both default to a
+10-minute request timeout.
+
+Calls the runtime makes without streaming — the session title, the group-chat
+summary (`summarizeObservedMessages`) and the platform model's answer when
+a BYO model is refused — get one JSON body at the end of the generation, so
+for them the headers and idle budgets bound the whole generation: 120 s to
+headers, then 90 s (platform) or 300 s (BYO) until the body starts. A longer
+generation is re-sent once and then fails. These calls are short, so this is
+accepted rather than special-cased.
+
+The guard owns stall retries. A retry re-sends the identical request, and
+only when nothing has reached the caller yet (the guard resolves `fetch`
+only once the first body byte is in) and the request body can be sent again.
+A stall after bytes were forwarded fails the call at once (`kind: timeout`,
+"The model stopped responding mid-reply"): the caller already consumed part
+of the reply, so it cannot be retried transparently. A stall the guard gave
+up on is not retried again by LangChain (`maxRetries: 2` still applies to
+every other retryable failure), so `LLM_STREAM_RETRIES` is the whole stall
+budget. The SDK's own `timeout` is set to `(retries + 1) × (headers + idle) +
+5 s` — a backstop that replaces the 10-minute default and never fires before
+the guard has decided.
+
+Retries are clamped per lane so the stall budget fits the turn: the
+effective retries are the largest number, `0` up to `LLM_STREAM_RETRIES`,
+for which `(retries + 1) × (headers + idle) ≤ TURN_TIMEOUT_MS`. A retry that
+could not finish before the turn deadline would only end in
+`budget_exhausted` after a wasted second request. With the defaults
+(`TURN_TIMEOUT_MS` 600 s): the platform lane keeps its retry (2 × 210 s =
+420 s worst case before a stalled call fails); the BYO lane gets none (one
+attempt of 120 s + 300 s = 420 s worst case). Raising `TURN_TIMEOUT_MS` to
+840 s or more gives BYO its retry back. What operators see is in
+[operations](operations.md#model-calls-liveness-and-the-call-trace).
 
 ## Domain context (observe-only rollout)
 

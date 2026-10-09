@@ -228,6 +228,15 @@ export interface OracleWorkerEnv {
   /** Display markup for `GET /models` prices (default 1.6). */
   MODEL_PRICE_MARKUP?: string;
   MAIN_REASONING_EFFORT?: string;
+  /**
+   * Model-call liveness (docs/configuration.md): ms to response headers
+   * (default 120000), ms of silence between body bytes on the platform lane
+   * (90000) and on BYO lanes (300000), retries before the first byte (1).
+   */
+  LLM_HEADERS_TIMEOUT_MS?: string;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: string;
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: string;
+  LLM_STREAM_RETRIES?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
   /** Turn budget: cumulative model tokens (default 500000), tool attempts (120), deadline in ms (600000). */

@@ -28,6 +28,7 @@ import {
   ByoModelFallbackChatModel,
   ByoModelFallbackState,
 } from './byo-model-fallback';
+import type { StreamLivenessSettings } from './stream-liveness';
 
 export interface ByoTurnResolution {
   credential: ByoCredential;
@@ -35,6 +36,8 @@ export interface ByoTurnResolution {
   mainModelId: string;
   /** ChatGPT lane only: backend/proxy the requests go to. */
   chatGptBackend?: ChatGptBackendConfig;
+  /** The BYO lane's liveness budgets (`streamLivenessFromEnv(env, 'byo')`). */
+  streamLiveness?: StreamLivenessSettings;
 }
 
 export function createByoLlmAdapter(
@@ -68,6 +71,9 @@ export function createByoLlmAdapter(
           modelId,
           role,
           chatGptBackend: turn.chatGptBackend,
+          ...(turn.streamLiveness
+            ? { streamLiveness: turn.streamLiveness }
+            : {}),
           params: rest,
           logger,
         }),

@@ -204,6 +204,9 @@ export function createFirecrawlTools(
       name: FIRECRAWL_SEARCH_TOOL,
       description: SEARCH_DESCRIPTION,
       schema: searchSchema,
+      // Fetches public pages and changes nothing: safe to run again after a
+      // reset, and outside the write lane and its claims.
+      effect: 'read',
     },
   );
 
@@ -221,6 +224,9 @@ export function createFirecrawlTools(
       name: FIRECRAWL_SCRAPE_TOOL,
       description: SCRAPE_DESCRIPTION,
       schema: scrapeSchema,
+      // Fetches public pages and changes nothing: safe to run again after a
+      // reset, and outside the write lane and its claims.
+      effect: 'read',
     },
   );
 

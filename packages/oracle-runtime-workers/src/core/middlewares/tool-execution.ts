@@ -29,6 +29,7 @@ import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import type { ToolLane, ToolScheduler } from '../tool-scheduler';
+import { findProviderStall } from '../../llm/stream-liveness';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
 import { NOOP_LOGGER } from '../utils';
 
@@ -148,6 +149,9 @@ export function isUncertainOutcome(
 ): boolean {
   if (signal?.aborted) return true;
   if (isHarnessLimitError(error)) return true;
+  // A tool whose own model call stalled (stream-liveness.ts) stopped at an
+  // unknown point of its work.
+  if (findProviderStall(error)) return true;
   if (!(error instanceof Error)) return false;
   if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
   if (
@@ -273,9 +277,22 @@ export function createToolExecutionMiddleware(
       // Refused before waiting for a slot: a turn over its limit takes no
       // more slots. The slot wait itself ends with the abort signal.
       budget.check(options.signal);
+      // Every completed call leaves a trace (a sub-agent's inner tools
+      // included), timed from when it got its slot.
+      const run = async (): Promise<Awaited<ReturnType<typeof handler>>> => {
+        const started = Date.now();
+        const output = await handler(request);
+        const ms = Date.now() - started;
+        logger.debug?.(
+          ToolMessage.isInstance(output) && output.status === 'error'
+            ? `[tool-execution] ${toolName} (${callId}): returned an error in ${ms} ms`
+            : `[tool-execution] ${toolName} (${callId}): ok in ${ms} ms`,
+        );
+        return output;
+      };
       return scheduler.run(lane, options.signal, async () => {
         budget.reserveTool(options.signal);
-        if (lane !== 'write' || !claims) return handler(request);
+        if (lane !== 'write' || !claims) return run();
         const fingerprint = await operationKey(toolName, toolCall.args);
         const claim = await claims.claimWrite({
           fingerprint,
@@ -295,7 +312,7 @@ export function createToolExecutionMiddleware(
           });
         }
         try {
-          const output = await handler(request);
+          const output = await run();
           const uncertain = uncertainResultReason(output);
           if (uncertain !== null) {
             logger.warn(

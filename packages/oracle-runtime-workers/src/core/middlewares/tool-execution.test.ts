@@ -1,6 +1,7 @@
 import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ProviderStallError } from '../../llm/stream-liveness';
 import { ToolScheduler } from '../tool-scheduler';
 import { HarnessLimitError, TurnBudget } from '../turn-budget';
 import {
@@ -101,6 +102,20 @@ describe('isUncertainOutcome', () => {
     expect(isUncertainOutcome(new Error('anything'), controller.signal)).toBe(
       true,
     );
+  });
+
+  it('is true for a tool whose own model call stalled, wrapped or not', () => {
+    const stall = new ProviderStallError({
+      phase: 'stream',
+      idleMs: 90_000,
+      elapsedMs: 100_000,
+      bytesSeen: 10,
+      label: 'openrouter subagent m',
+    });
+    expect(isUncertainOutcome(stall)).toBe(true);
+    expect(
+      isUncertainOutcome(new Error('Connection error.', { cause: stall })),
+    ).toBe(true);
   });
 
   it('is false for a failure the service reported', () => {
@@ -430,6 +445,37 @@ describe('createToolExecutionMiddleware', () => {
     });
     expect(ran).toBe(true);
     expect(shared.rows.size).toBe(0);
+  });
+
+  it('leaves a debug trace of every completed call', async () => {
+    const logger = {
+      log: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const { wrap } = middlewareFor({ logger });
+    await wrap(requestFor('get_page'), async () => okResult('get_page'));
+    await wrap(
+      requestFor('send'),
+      async () =>
+        new ToolMessage({
+          tool_call_id: 'call_send',
+          name: 'send',
+          content: 'invalid recipient',
+          status: 'error',
+        }),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] get_page \(call_get_page\): ok in \d+ ms$/,
+      ),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] send \(call_send\): returned an error in \d+ ms$/,
+      ),
+    );
   });
 
   it('never claims reads or sub-agent dispatches', async () => {

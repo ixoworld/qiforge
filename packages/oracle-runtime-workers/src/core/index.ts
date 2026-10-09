@@ -29,6 +29,7 @@ import { baseEnvSchema, composeEnvSchema, validateEnv } from './env';
 import {
   createLlmAdapter,
   openRouterAttributionHeaders,
+  platformStreamLivenessEnv,
   type OpenRouterLlmAdapter,
 } from './llm';
 import {
@@ -678,6 +679,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
         | 'high'
         | undefined,
       ORACLE_NAME: String(validated.config.ORACLE_NAME),
+      ...platformStreamLivenessEnv(validated.config),
     },
     logger,
   );

@@ -1426,6 +1426,38 @@ that can handle the requested parameters` is the memory engine's own
 | An admin tool (or its whole plugin) is missing for a user; `[main-agent] admin tools withheld from <did>` | `GET /debug/delegation`; the grants the user issued                                                             | Expected without the grant: the user delegates `admin-tool/invoke` on `ixo:qiforge:admin-tool/<plugin>[/<tool>]` (architecture → Admin-plane tools).                                 |
 | `Network connection lost` on a gateway RPC                                                                | Gateway just restarted                                                                                          | Expected once per restart; waited sends retry by themselves.                                                                                                                         |
 
+## Model calls: liveness and the call trace
+
+Every model call is traced (`src/core/budgeted-llm.ts`) and runs behind the
+stream liveness guard ([configuration](configuration.md#model-call-liveness)).
+The trace never carries message content, tokens or credentials — only the
+role, the model id, the tags and timings.
+
+| Line                                                                                          | Level | Meaning                                                                                                               |
+| --------------------------------------------------------------------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
+| `[llm] start role=<role> model=<id> tags=<tags>`                                              | debug | A call admitted by the turn budget.                                                                                   |
+| `[llm] end role=… model=… in N ms` / `[llm] error role=… model=… in N ms`                     | debug | The call returned or failed.                                                                                          |
+| `[llm] role=… model=… still running after N s`                                                | info  | Every 60 s while a call is open. A working long call shows it too: pair it with the absence of a stall line below.    |
+| `[llm] <label>: first byte after N ms`                                                        | debug | Time to the first body byte (`<label>` is `<lane> <role> <model>`, e.g. `openrouter subagent openai/gpt-5.6-luna`).   |
+| `[llm] <label>: no response for N s, retrying (attempt k)` / `no bytes for N s, retrying (…)` | warn  | A stall before anything reached the caller; the identical request is re-sent.                                         |
+| `[llm] <label>: no response/no bytes for N s; giving up after k attempts`                     | warn  | The retries are spent; the call fails (`kind: timeout`, "The model did not start responding").                        |
+| `[llm] <label>: no bytes for N s after B bytes (… s into the call); failing it — …`           | warn  | A stall mid-reply. Never retried: the call fails at once (`kind: timeout`, "The model stopped responding mid-reply"). |
+| `[tool-execution] <tool> (<callId>): ok in N ms` / `returned an error in N ms`                | debug | A tool call (a sub-agent's inner tools included) completed, timed from when it got its slot.                          |
+
+A stall looks like this in the tail: `[llm] start …`, one or more `still
+running` heartbeats, then a `no bytes` warning and `[llm] error … in N ms`
+— and the client gets an `error` frame with `kind: timeout`,
+`retryable: true`. A healthy long call shows the heartbeats and then
+`[llm] end`. Before these budgets existed a silent stream ran to the
+600 s turn deadline (`kind: budget_exhausted`); now it fails within one idle
+budget once bytes have flowed, or after `(retries + 1)` waits before that
+(retries clamped to fit the turn deadline: with the defaults one retry on
+the platform lane, none on BYO lanes; see
+[configuration](configuration.md#model-call-liveness)).
+The client may resubmit; nothing is resubmitted for it. A tool whose own
+model call stalls fails with an outcome treated as unknown, so a write it
+was making keeps its claim (below).
+
 ## Write claims and turn usage
 
 `turn_write_claims` (in the user's run ledger, next to `turn_runs` and
