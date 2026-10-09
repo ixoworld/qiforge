@@ -3,7 +3,8 @@
  *
  *  - `editorRoomId` / `spaceId` / `currentEntityDid` update the thread's
  *    checkpointed value when the request carries them, otherwise the prior
- *    value stands;
+ *    value stands; an explicit `currentEntityDid: null` clears the selected
+ *    subject (omitting it keeps the prior one);
  *  - `sessionRunId` follows the room: a request that names the editor room
  *    also defines its session run, and "no run" must not fall back to one
  *    remembered from an earlier flow — so it is written whenever
@@ -13,7 +14,8 @@
  *    pass the capability gate without an explicit `load_capability` step.
  *
  * Metadata crosses the Durable Object boundary as a JSON string; only string
- * values are honoured, anything else is ignored.
+ * values are honoured (and `null` for `currentEntityDid`), anything else is
+ * ignored.
  */
 
 export const EDITOR_PLUGIN_NAME = 'editor';
@@ -22,7 +24,8 @@ export interface TurnMetadata {
   editorRoomId?: string;
   spaceId?: string;
   sessionRunId?: string;
-  currentEntityDid?: string;
+  /** `null`: the request cleared the selected subject. */
+  currentEntityDid?: string | null;
 }
 
 const KEYS = [
@@ -48,6 +51,7 @@ export function parseTurnMetadata(json: string | undefined): TurnMetadata {
     const value = record[key];
     if (typeof value === 'string' && value.length > 0) out[key] = value;
   }
+  if (record.currentEntityDid === null) out.currentEntityDid = null;
   return out;
 }
 
@@ -101,7 +105,7 @@ export function metadataBuildState(
   editorRoomId?: string;
   sessionRunId?: string;
   spaceId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
   loadedPlugins: string[];
 } {
   const loaded = prior.loadedPlugins ?? [];
@@ -110,7 +114,10 @@ export function metadataBuildState(
     sessionRunId:
       meta.editorRoomId !== undefined ? meta.sessionRunId : prior.sessionRunId,
     spaceId: meta.spaceId ?? prior.spaceId,
-    currentEntityDid: meta.currentEntityDid ?? prior.currentEntityDid,
+    currentEntityDid:
+      meta.currentEntityDid !== undefined
+        ? meta.currentEntityDid
+        : prior.currentEntityDid,
     loadedPlugins: editorContextActive(meta, prior)
       ? Array.from(new Set([...loaded, EDITOR_PLUGIN_NAME]))
       : loaded,
@@ -125,7 +132,7 @@ export function metadataGraphInput(
   editorRoomId?: string;
   sessionRunId?: string;
   spaceId?: string;
-  currentEntityDid?: string;
+  currentEntityDid?: string | null;
   loadedPlugins?: string[];
 } {
   return {

@@ -21,6 +21,7 @@ import type {
   FeedbackSettlement,
   FeedbackTarget,
 } from '../feedback/contract';
+import type { DomainContextProvenance } from '../core/domain-context';
 /**
  * Cross-object contracts for the Workers runtime.
  *
@@ -439,6 +440,18 @@ export interface ContextStatus {
   };
   /** Present when a session was asked for; null when that session is unknown. */
   session?: SessionContextStatus | null;
+}
+
+/**
+ * The `router_update` frame (`router.update` on the SSE stream) that reports
+ * a turn's domain context: one entry per domain the turn looked up (the
+ * oracle's, then the subject's), with CIDs, status and findings. Other
+ * `router_update` frames (a queued run, plugin steps) carry other fields.
+ */
+export interface DomainContextRouterUpdate {
+  sessionId: string;
+  requestId: string;
+  domainContext: DomainContextProvenance[];
 }
 
 export interface RunSummary {

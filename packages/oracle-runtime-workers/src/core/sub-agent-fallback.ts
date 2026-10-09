@@ -55,6 +55,11 @@ export interface CollectSubAgentsInput {
    * in name collisions.
    */
   passthroughTools?: StructuredTool[];
+  /**
+   * Runtime context appended to every sub-agent's system prompt (the turn's
+   * domain-context block), so a sub-agent works from what the main agent saw.
+   */
+  contextPrompt?: string;
   /** Middlewares every sub-agent's inner graph gets in addition to its own. */
   extraMiddleware?: AgentMiddleware[];
   /**
@@ -170,6 +175,7 @@ export async function collectSubAgentsWithFallback(
     fallbackContext,
     toAgentSpec,
     passthroughTools,
+    contextPrompt,
     subAgents,
     extraMiddleware,
     resultCap,
@@ -197,9 +203,15 @@ export async function collectSubAgentsWithFallback(
               resultCap,
               dispatchMiddleware,
             );
-        const withPassthrough: AgentSpec = passthroughTools?.length
-          ? { ...spec, passthroughTools }
+        const withContext: AgentSpec = contextPrompt
+          ? {
+              ...spec,
+              systemPrompt: `${spec.systemPrompt}\n\n${contextPrompt}`,
+            }
           : spec;
+        const withPassthrough: AgentSpec = passthroughTools?.length
+          ? { ...withContext, passthroughTools }
+          : withContext;
         return createSubagentAsTool(
           withPassthrough,
           withPassthrough.forwardTools

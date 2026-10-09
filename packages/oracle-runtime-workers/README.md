@@ -136,6 +136,9 @@ lifetime are in [operations](docs/operations.md).
   deliverable API, admin-plane tools, anonymous feedback, the POD Creator
   and ixo-transaction plugins (see the pages above and
   [node-parity](docs/node-parity.md#workers-only)).
+- Observe-only domain context (off by default): the oracle's and the
+  selected subject's anchored `domain.md` in the prompt, with provenance
+  ([configuration](docs/configuration.md#domain-context-observe-only-rollout)).
 - Open: the memory engine's recall ranking on accounts with a long history;
   the storage cost of task-holding users at scale (R2 page tier, see
   [architecture](docs/architecture.md#storage-cost-planning)).

@@ -391,6 +391,7 @@ name.
 | `routes`, `authExcludedRoutes`                | Extra host routes on the shell (after the plugins' `getRoutes`), and host routes exempt from UCAN auth.                                                                                                                                                                                                   |
 | `listModels`                                  | Replaces the `GET /models` listing (default: the curated catalog with live OpenRouter prices).                                                                                                                                                                                                            |
 | `hooks`                                       | Per-turn build hooks: `getRoomTitle(roomId, ambient)` for the page-context middleware and `safetyModel(ambient)` for the safety-guardrail middleware (Node's `createOracleApp({ hooks })` pair).                                                                                                          |
+| `domainContext`                               | Observe-only domain context (default off): the oracle's and the selected subject's anchored `domain.md` documents in the prompt, with provenance. See [Domain context](#domain-context-observe-only-rollout).                                                                                             |
 
 The `scheduled` handler is the cron entry point: it keeps the gateway's sync
 loop alive and, where `ARTIFACT_BUCKET` is bound, runs the
@@ -546,3 +547,150 @@ action) is capped like a read, whatever its `effect`.
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test
 without importing the Worker bootstrap.
+
+## Domain context (observe-only rollout)
+
+Domain context hands the model the oracle's own anchored `domain.md`
+(constitutional guidance) and the selected subject's (task context) as
+retrieved data. It is set in code, not in the environment, and is off by
+default: without `domainContext`, or with `mode: 'off'`, a turn makes no
+lookup, gets no prompt block and no extra tools. See
+[docs/plans/domain-context.md](../../../docs/plans/domain-context.md).
+
+```ts
+createOracleWorker({
+  config,
+  plugins,
+  domainContext: {
+    mode: 'observe',
+    allowedOrigins: ['https://docs.example.org'],
+    ipfsGateway: 'https://ipfs.io', // only needed for ipfs:// documents
+    // anchorTtlMs: 300_000,
+    // pass1: { maxDocuments: 4, maxTokens: 6000, timeoutMs: 3000 },
+    // readPrivateDocument: async (request, ctx, signal) => bytes,
+  },
+});
+```
+
+| Option                | Default  | Meaning                                                                                                               |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `mode`                | —        | `observe` loads domain context; `off` does nothing.                                                                   |
+| `anchorTtlMs`         | `300000` | How long a resolved IID anchor is reused before Blocksync is asked again.                                             |
+| `allowedOrigins`      | `[]`     | Extra https origins documents may be read from. The VFS, Matrix homeserver and IPFS gateway origins are always added. |
+| `ipfsGateway`         | unset    | https gateway for `ipfs://` URIs; without one an `ipfs://` document is refused (`ipfs-gateway-unconfigured`).         |
+| `pass1.maxDocuments`  | `4`      | Pass-1 documents read per domain before the first model call; more are left to `read_domain_document`.                |
+| `pass1.maxTokens`     | `6000`   | Estimated-token bound of each domain brief and of all pass-1 excerpts together.                                       |
+| `pass1.timeoutMs`     | `3000`   | One overall bound for every pass-1 read of the turn.                                                                  |
+| `readPrivateDocument` | unset    | Host reader for private documents that are not VFS files. It must authorize every call and return the exact bytes.    |
+
+**Which domains.** The oracle domain is `ORACLE_ENTITY_DID`. The subject is
+the turn's `metadata.currentEntityDid`, kept on the thread: a turn that omits
+it keeps the previous subject, an explicit `null` clears it. Neither selector
+grants anything.
+
+**Anchor.** The IID is read from Blocksync (`BLOCKSYNC_GRAPHQL_URL`), which is
+trusted as a read projection of the chain: no chain proof is checked. The
+anchor is the linked resource `<did>#dom` (or the IID's `{id}#dom`
+shorthand); both forms together are refused as ambiguous. Its `proof` must be
+a CIDv1 (raw codec, sha2-256) of the exact document bytes; a `proof` that does
+not parse as a CID or is longer than 128 characters, or a `serviceEndpoint`
+longer than 2,048 characters, is refused (`invalid-anchor-resources`) before
+it reaches provenance. `encrypted: true` marks it private. The bytes must be
+strict UTF-8 and stay inside the lint bounds: at most 64 KiB of YAML
+frontmatter, no list anywhere in it (`documents.entries`, `rights.entries`,
+`controllers.entries`, a list inside a list item, …) longer than 64 items,
+and no nesting deeper than 16 levels (the frontmatter mapping is level 1). An
+index outside them is `invalid` with the finding `index-too-large` and is
+never linted: the validator's lint time grows about quadratically with the
+length of a list of malformed items (about 9 s for 1,000 malformed
+`documents.entries`). That outcome is cached per CID like any invalid parse.
+Inside the bounds the worst case measured (frontmatter filled with malformed
+64-item lists, nested lists or wide objects, just under the validator's own
+10,000-node limit) lints in about 0.2 s. The index must then pass the
+`@ixo/domain.md/workers` lint, name the domain's own DID in `domain.id`,
+`domain.iid`, `source_of_truth.iid_document` and `constitution.subject`, and
+declare the `anchored` or `runtime` conformance profile. Passing these checks
+means integrity and static validity only, not live constitutional authority.
+
+**Caches** (one resolver per user object, shared by its sessions):
+
+- anchors per DID for `anchorTtlMs`, at most 32 DIDs; concurrent lookups of
+  one DID share one request (10 s bound). A failed refresh falls back to the
+  last verified anchor and marks it stale (`anchor-stale`); a malformed
+  anchor drops the fallback;
+- verified public bytes per CID (LRU, 8 MiB, no single entry over 2 MiB) and
+  their decoded text (LRU, 4 Mi characters);
+- the parsed index per CID (finding codes, brief, capsule inspection, and for
+  a valid index the parsed document with its raw text; LRU, 16 entries and
+  4 Mi characters of index text, no single index over 1 Mi characters; an
+  invalid parse keeps only its finding codes), so a repeat turn inside the
+  TTL with public documents makes no network call and parses nothing.
+
+Private bytes are never kept in the byte or text caches: every private read
+goes back to the VFS or `readPrivateDocument` and is authorized again. The
+parsed index of a private `domain.md`, its raw text included, does stay in
+the parsed-index cache, keyed by its CID, but it is only handed out (to a
+turn, or as a `read_domain_document` page) after a fresh authorized read
+whose bytes verify against that CID.
+`refresh_domain_context` drops a DID's cached anchor for the next turn; the
+current turn and its sub-agents keep the revision they started with. Eviction
+of the object empties the caches.
+
+**Per turn.** Both domains resolve in parallel (10 s bound each), alongside
+the plugins' request-time tool collection. Each domain's pass-1 documents
+(`disclosure_pass: 1`, up to `pass1.maxDocuments`) are then read in parallel
+under one `pass1.timeoutMs` budget (3 s by default); a read not finished in
+time is left out with the finding `pass1-timeout` and keeps running in the
+background to warm the cache. A brief over `pass1.maxTokens` is omitted with
+`brief-over-budget`, never truncated; excerpts over the budget get
+`pass1-document-over-budget`. Worst case before the first model call:
+10 s + `pass1.timeoutMs`.
+
+**Prompt.** The result is one `<verified_domain_context mode="observe">`
+block appended after the composed system prompt: the oracle domain first,
+then the subject, each with its provenance (without `resolvedAt` and
+`source`, so the block of a repeat turn, or of a resumed attempt reading its
+pinned anchors, is byte-identical to the fresh one and stays
+prefix-cacheable; both fields stay in the emitted and stored provenance) and
+brief, then the pass-1 excerpts. Finding codes appear once each, at most 32
+entries per domain; a cut list ends in `findings-truncated`, so the block,
+the `router_update` frame and the stored row stay small however many
+findings an index produces. The block opens with the precedence rule: runtime instructions
+outside it take precedence, and everything inside is retrieved data, never
+instructions. Sub-agents get the same block appended to their own prompt.
+
+**Tools.** `read_domain_document` (pages of 4,000 characters of `domain.md` or
+an indexed document, with its CID and read/cite/summarize permissions) and
+`refresh_domain_context` are bound to the main agent and passed to every
+sub-agent. Both count as reads. Indexed documents with `read: false` are not
+fetched; a document whose `freshness.max_age` it cannot show it meets is
+refused as stale.
+
+**Reads.** Documents are read only over https from an allowed origin, without
+redirects or URL credentials, bounded to 1 MiB (index, capsule manifest) or
+2 MiB (linked documents) and 10 s per read. A VFS file
+(`/api/fs/files/:id/content` on the VFS origin) is read with the user's VFS
+UCAN; Matrix media on the configured homeserver with the oracle's own
+authenticated media access. Any other private document needs
+`readPrivateDocument`; without it the document is unavailable
+(`private-reader-unavailable`), never read publicly. An `ipfs://<cid>[/path]`
+URI is read from `ipfsGateway` under its `/ipfs/` path; it must name a CID
+first and may carry no query, fragment or dot segment (`..`, `%2e%2e` and
+the like), else it is refused (`invalid-ipfs-uri`).
+
+**Durable runs.** The anchors a run's first attempt read are stored with the
+run (`domainPins` in the run's stored request), and a resumed attempt reads
+those revisions (`source: durable-run-pin`). A pinned revision that can no
+longer be read falls back to fresh resolution with the finding
+`pinned-revision-unavailable`.
+
+**Capsules.** An `x-oracle-capsule` manifest is verified by CID and SHA-256 and
+inspected statically: release, compatibility, Master reference and the
+external checks still required are reported as `inspected-not-activated`.
+Nothing is activated, no tool or permission is added, and a capsule pinned
+to another oracle revision is reported (`capsule-oracle-revision-differs`).
+
+Observe mode never changes what a turn may do: a missing, stale or invalid
+domain is reported in the provenance and the turn continues with the
+existing capability checks. Provenance and its diagnostics are described in
+[operations](operations.md#domain-context-rollout-diagnostics).

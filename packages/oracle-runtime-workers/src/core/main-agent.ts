@@ -81,6 +81,7 @@ import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
+import { prepareDomainContext } from './domain-context';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
@@ -149,6 +150,10 @@ export async function createMainAgent(
     contextBudget,
     delivery,
     hooks,
+    domainContext,
+    domainResolver,
+    domainPins,
+    onDomainProvenance,
   } = args;
   const surface: SessionSurface | undefined =
     delivery?.kind === 'chat'
@@ -294,17 +299,38 @@ export async function createMainAgent(
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
   // slower of the two — not their sum — gates the build.
+  //
+  // Observe-only domain context loads alongside them: the oracle's and the
+  // subject's anchored domain documents become a prompt block and two
+  // read tools. It grants nothing and gates nothing (see domain-context/).
   const bootSubAgents = registries.subAgents.collectBoot(buildCtx);
-  const [allCollectedTools, requestSubAgents] = await Promise.all([
+  const [allCollectedTools, requestSubAgents, domain] = await Promise.all([
     registries.tools.collect(buildCtx, rtCtx),
     registries.subAgents.collectRequest(rtCtx),
+    domainContext?.mode === 'observe' && domainResolver
+      ? prepareDomainContext({
+          options: domainContext,
+          resolver: domainResolver,
+          ctx: rtCtx,
+          oracleDid: identity.entityDid,
+          subjectDid: state.currentEntityDid,
+          signal: abortSignal ?? new AbortController().signal,
+          ...(domainPins ? { pins: domainPins } : {}),
+          ...(onDomainProvenance ? { onProvenance: onDomainProvenance } : {}),
+        })
+      : undefined,
   ]);
+  const domainTools = domain?.tools ?? [];
   // A request-time tool or sub-agent never takes a name the server already
   // uses this turn, so a client-declared name cannot shadow a server tool or
-  // overwrite its effect and repeatable classification below.
+  // overwrite its effect and repeatable classification below. The domain
+  // tools exist only on observe turns, so a boot-time plugin tool of the same
+  // name cannot be caught at boot: it is dropped for those turns instead of
+  // being bound twice.
   const unshadowed = dropShadowingRequestEntries({
     tools: allCollectedTools,
     requestSubAgents,
+    runtimeNames: domainTools.map((t) => t.name),
     reservedNames: [
       ...META_TOOL_NAMES,
       READ_RESULT_TOOL_NAME,
@@ -457,6 +483,8 @@ export async function createMainAgent(
   const repetitionCaps = repetitionCapsFromEnv(config);
   const innerToolEffects = new Map<string, 'read' | 'write'>();
   const innerRepeatable = new Set<string>();
+  // The domain tools only read documents (and drop a cached anchor).
+  for (const t of domainTools) innerToolEffects.set(t.name, 'read');
   for (const { subAgent } of subAgentEntries)
     for (const tool of Array.isArray(subAgent.tools) ? subAgent.tools : []) {
       innerToolEffects.set(tool.name, toolEffectOf(tool));
@@ -491,6 +519,11 @@ export async function createMainAgent(
     subAgents: subAgentEntries,
     dispatchMiddleware,
     ...(resultCap ? { resultCap } : {}),
+    // Sub-agents see the same domain context: its block on their prompt,
+    // its tools beside their own.
+    ...(domain
+      ? { passthroughTools: domainTools, contextPrompt: domain.prompt }
+      : {}),
   });
 
   // Effect of every tool the model can call (durable runs: what may run
@@ -498,6 +531,7 @@ export async function createMainAgent(
   // is opaque, hence a write.
   const toolEffects = new Map<string, 'read' | 'write'>();
   for (const t of metaTools) toolEffects.set(t.name, 'read');
+  for (const t of domainTools) toolEffects.set(t.name, 'read');
   for (const { tool } of turnTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const { tool } of allTools)
@@ -540,6 +574,7 @@ export async function createMainAgent(
     ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
     ...subAgentTools,
+    ...domainTools,
   ];
 
   // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
@@ -792,7 +827,7 @@ export async function createMainAgent(
     })
     .map(({ guide }) => guide);
 
-  const systemPrompt = await composePrompt({
+  const composedPrompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
     browserTools,
@@ -815,6 +850,11 @@ export async function createMainAgent(
     ),
     operatingGuides,
   });
+  // The domain block goes last: it frames its documents as retrieved data
+  // that never outranks the instructions above it.
+  const systemPrompt = domain?.prompt
+    ? `${composedPrompt}\n\n${domain.prompt}`
+    : composedPrompt;
 
   // ── 8. Model ────────────────────────────────────────────────────────────
   // A per-request model (already allow-list-validated by the caller) wins
@@ -842,6 +882,14 @@ export async function createMainAgent(
     toolEffects,
     subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
+    ...(domain
+      ? {
+          domainContext: {
+            provenance: domain.provenance,
+            pins: domain.pins,
+          },
+        }
+      : {}),
   };
 }
 
