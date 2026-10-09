@@ -1,6 +1,6 @@
 {
   "name": "@ixo/ixo-transaction",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": false,
   "description": "Runtime-neutral catalog, intent routing and strict validation for IXO transactions, plus the Portal wallet-signing hook used by the QiForge ixo-transaction plugin",
   "publishConfig": {
@@ -40,7 +40,7 @@
   },
   "peerDependencies": {
     "@ixo/impactxclient-sdk": "^3.0.0",
-    "@ixo/oracles-client-sdk": "^1.5.0",
+    "@ixo/oracles-client-sdk": "^1.6.0",
     "react": ">=18.0.0"
   },
   "peerDependenciesMeta": {
