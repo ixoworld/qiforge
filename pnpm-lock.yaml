@@ -665,8 +665,8 @@ importers:
         specifier: workspace:*
         version: link:../common
       '@ixo/domain.md':
-        specifier: github:ixoworld/domain.md#d76496fa622821de6caedf26d59bac2d593542ba&path:packages/cli
-        version: https://codeload.github.com/ixoworld/domain.md/tar.gz/d76496fa622821de6caedf26d59bac2d593542ba#path:packages/cli
+        specifier: ^0.3.1
+        version: 0.3.1
       '@ixo/editor':
         specifier: 6.0.1
         version: 6.0.1(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@42.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
@@ -3385,9 +3385,8 @@ packages:
   '@ixo/did-provider-x@0.1.1':
     resolution: {integrity: sha512-7Xs0iZ7AdNF+mIESFp2o/gzoeiIl9iT6GkG1YV5j5MhlKqBDwVZTY7rE7nsFhy14B3pkleq1iFmRBdjdJmMO6w==}
 
-  '@ixo/domain.md@https://codeload.github.com/ixoworld/domain.md/tar.gz/d76496fa622821de6caedf26d59bac2d593542ba#path:packages/cli':
-    resolution: {gitHosted: true, integrity: sha512-6KnCmc7YikCi5zfvggR2eeUI8w0jK3HaLkZjMUY+zwdNv0Dqihw8FPRhDDdOUYMoFr2sUSC+Ox2dq3HtEALEow==, path: packages/cli, tarball: https://codeload.github.com/ixoworld/domain.md/tar.gz/d76496fa622821de6caedf26d59bac2d593542ba}
-    version: 0.3.0
+  '@ixo/domain.md@0.3.1':
+    resolution: {integrity: sha512-0FBq7QSd0Yq6QAjwBOlbiyoH1tUmfCM880bkOWK3z8fZn76qwC6gY06wN9W6dok8gHGAHckCu+ejDyyPZYCCVQ==}
     engines: {node: '>=20.10.0'}
     hasBin: true
 
@@ -15529,7 +15528,7 @@ snapshots:
       - debug
       - supports-color
 
-  '@ixo/domain.md@https://codeload.github.com/ixoworld/domain.md/tar.gz/d76496fa622821de6caedf26d59bac2d593542ba#path:packages/cli':
+  '@ixo/domain.md@0.3.1':
     dependencies:
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
