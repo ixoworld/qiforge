@@ -50,6 +50,13 @@ export interface MessageDto {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /**
+   * When the message was first saved, ISO 8601: the saver's
+   * `additional_kwargs.timestamp`, which is also the listing's order key. The
+   * turn's admission time for the user's message; for a reply, the time its
+   * step was first checkpointed. Later saves never move it.
+   */
+  createdAt?: string;
   attachment?: AttachmentMeta;
   attachments?: AttachmentMeta[];
   metadata?: { 'org.ixo.qi.origin': ChannelOrigin };
@@ -203,6 +210,8 @@ export async function transformTranscript(
         }
       }
       if (reasoning) dto.reasoning = reasoning;
+      if (typeof kw.timestamp === 'string' && kw.timestamp.length > 0)
+        dto.createdAt = kw.timestamp;
       if (attachment) dto.attachment = attachment;
       if (attachments?.length) dto.attachments = attachments;
       if (message.type === 'human') {

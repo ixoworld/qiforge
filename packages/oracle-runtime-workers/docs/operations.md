@@ -222,6 +222,15 @@ context, every earlier message still lists (Node parity) and only the
 summary message itself is hidden. `GET /debug/sessions/:id` reports the
 counts.
 
+Every listed message (both routes) carries `createdAt`, ISO 8601: the
+saver's first-save stamp (`additional_kwargs.timestamp`, the value the
+listing is ordered by). For the user's message that is the turn's admission
+time — on a Matrix turn, after the inbox debounce, not the event's
+`origin_server_ts`; for a reply it is the time its model step was first
+checkpointed, so a reply's time is its own and later saves never move it.
+Messages imported from a Node owner copy written before August 2026 can
+share one time: that saver re-stamped every message on every save.
+
 ### Turns: threads are sessions
 
 A room message is answered inside a thread, never in the main timeline, and
