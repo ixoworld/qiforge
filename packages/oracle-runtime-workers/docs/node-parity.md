@@ -371,6 +371,11 @@ the deprecated Node runtime:
 - **Plugin state in the user's file** (`ctx.kv`) —
   [architecture](architecture.md#plugin-state-in-the-users-file-ctxkv).
 - **The `IxoTransactionPlugin`** — [ixo-transaction](ixo-transaction.md).
+- **Model-call liveness** — the stream guard on every model call
+  (`LLM_HEADERS_TIMEOUT_MS`, `LLM_STREAM_IDLE_TIMEOUT_MS`,
+  `LLM_BYO_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`) and the `[llm]`
+  call trace; Node relied on the SDK's headers-only timeout and the turn
+  deadline — [configuration](configuration.md#model-call-liveness).
 
 The portable-work and AgentWake adapters exist on both runtimes, over each
 runtime's own task shape (`portableWorkFromTaskRecord` /
