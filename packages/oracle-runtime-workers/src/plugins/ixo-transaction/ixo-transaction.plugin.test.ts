@@ -170,7 +170,6 @@ async function runTurn(
           hooks: {
             toolExecution: createToolExecutionMiddleware({
               budget: new TurnBudget({
-                tokens: 1_000_000,
                 tools: 20,
                 durationMs: 60_000,
               }),

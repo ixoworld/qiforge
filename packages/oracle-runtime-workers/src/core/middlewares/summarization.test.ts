@@ -254,11 +254,10 @@ describe('createSummarizationMiddleware — with a context budget', () => {
   }
 
   it('hands the summarizer the earlier summary along with the history after it', async () => {
-    // A 64k main model summarized by a model with a 16k window.
+    // A 64k model: summarizes at 38,400 tokens, reads at most 48,800.
     const budget = contextBudgetFor(
       { model: 'main', tokens: 64_000, origin: 'catalog' },
       DEFAULT_CONTEXT_KNOBS,
-      { model: 'routing', tokens: 16_000, origin: 'catalog' },
     );
     const model = new RecordingModel({ responses: ['the new gist'] });
     const mw = createSummarizationMiddleware({

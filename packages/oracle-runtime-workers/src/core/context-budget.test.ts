@@ -21,7 +21,7 @@ describe('contextKnobs', () => {
     expect(contextKnobs({})).toEqual(DEFAULT_CONTEXT_KNOBS);
     const knobs = contextKnobs(
       {
-        CONTEXT_SUMMARIZE_FRACTION: '0.6',
+        CONTEXT_SUMMARIZE_FRACTION: '0.7',
         CONTEXT_PRUNE_FRACTION: '1.5',
         CONTEXT_RESULT_CAP_FRACTION: '0.1',
         CONTEXT_OUTPUT_RESERVE_TOKENS: '4000',
@@ -32,7 +32,7 @@ describe('contextKnobs', () => {
     );
     expect(knobs).toEqual({
       ...DEFAULT_CONTEXT_KNOBS,
-      summarizeFraction: 0.6,
+      summarizeFraction: 0.7,
       resultCapFraction: 0.1,
       outputReserveTokens: 4000,
       summarizeTriggerMessages: 40,
@@ -77,13 +77,14 @@ describe('contextBudgetFor', () => {
       windowTokens: 32_000,
       outputReserveTokens: 8_000,
       requestCapTokens: 22_400,
-      summarizeAtTokens: 16_000,
+      // 60% would be 19,200: clamped to what the summarizer reads.
+      summarizeAtTokens: 18_400,
       pruneAtTokens: 11_200,
       resultCapChars: 15_360,
     });
     expect(mid).toMatchObject({
       requestCapTokens: 113_600,
-      summarizeAtTokens: 64_000,
+      summarizeAtTokens: 76_800,
       pruneAtTokens: 44_800,
       resultCapChars: 61_440,
     });
@@ -91,7 +92,7 @@ describe('contextBudgetFor', () => {
     // 480,000 chars.
     expect(big).toMatchObject({
       requestCapTokens: 942_000,
-      summarizeAtTokens: 500_000,
+      summarizeAtTokens: 600_000,
       pruneAtTokens: 350_000,
       resultCapChars: 200_000,
     });
@@ -134,80 +135,72 @@ describe('contextBudgetFor', () => {
     expect(at(100_000).summarizeTriggerMessages).toBeUndefined();
   });
 
-  it('never starts summarizing above what the summarizer may read', () => {
-    for (const main of [16_000, 32_000, 128_000, 400_000, 1_000_000])
-      for (const summarizer of [undefined, 16_000, 131_072, 1_000_000]) {
-        const b = contextBudgetFor(
-          { model: 'main', tokens: main, origin: 'catalog' },
-          DEFAULT_CONTEXT_KNOBS,
-          summarizer === undefined
-            ? undefined
-            : { model: 'routing', tokens: summarizer, origin: 'catalog' },
-        );
-        expect(b.summarizeAtTokens).toBeLessThanOrEqual(b.summaryInputTokens);
-        expect(b.pruneAtTokens).toBeLessThanOrEqual(b.summarizeAtTokens);
-      }
+  it("summarizes at 60% of the main model's window, whatever its size", () => {
+    // The mainnet default model: 1,050,000 tokens.
+    const large = at(1_050_000);
+    expect(large).toMatchObject({
+      windowTokens: 1_050_000,
+      outputReserveTokens: 8_000,
+      requestCapTokens: 989_500,
+      summarizeAtTokens: 630_000,
+      pruneAtTokens: 367_500,
+      summaryInputTokens: 985_500,
+    });
+    expect(describeBudget(large)).toBe(
+      'model=m window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500',
+    );
+    const small = at(64_000);
+    expect(small).toMatchObject({
+      requestCapTokens: 52_800,
+      summarizeAtTokens: 38_400,
+      pruneAtTokens: 22_400,
+      summaryInputTokens: 48_800,
+    });
+    for (const window of [64_000, 131_072, 400_000, 1_050_000])
+      expect(at(window).summarizeAtTokens).toBe(Math.floor(window * 0.6));
   });
 
-  it("bounds what the summarizer reads by the summarizing model's own window", () => {
-    const main = { model: 'main', tokens: 400_000, origin: 'catalog' } as const;
-    const routing = {
-      model: 'routing',
-      tokens: 131_072,
-      origin: 'catalog',
-    } as const;
-    const unbounded = contextBudgetFor(main);
-    // The main model's cap alone: 95% of 400k, less the reply reserve and
-    // the summary prompt margin.
-    expect(unbounded.summaryInputTokens).toBe(368_000);
-    const bounded = contextBudgetFor(main, DEFAULT_CONTEXT_KNOBS, routing);
-    // 95% of 131,072 less the same reserve and margin.
-    expect(bounded.summaryInputTokens).toBe(112_518);
-    expect(bounded.summaryWindowTokens).toBe(131_072);
-    // The history is condensed before it outgrows what the summarizer can
-    // read: summarizing (and pruning) starts no later than its input limit.
-    expect(bounded.summarizeAtTokens).toBe(112_518);
-    expect(bounded.pruneAtTokens).toBe(112_518);
-    // The request cap, the reply reserve and the result cap are the main
-    // model's.
-    expect({
-      ...bounded,
-      summaryInputTokens: 0,
-      summaryWindowTokens: 0,
-      summarizeAtTokens: 0,
-      pruneAtTokens: 0,
-    }).toEqual({
-      ...unbounded,
-      summaryInputTokens: 0,
-      summaryWindowTokens: 0,
-      summarizeAtTokens: 0,
-      pruneAtTokens: 0,
+  it('never starts summarizing above what the summarizer may read', () => {
+    const windows = [
+      4_000, 16_000, 24_000, 32_000, 34_000, 34_300, 35_000, 64_000, 128_000,
+      131_072, 400_000, 1_000_000, 1_050_000,
+    ];
+    for (const window of windows) {
+      const b = at(window);
+      expect(b.summarizeAtTokens).toBeLessThanOrEqual(b.summaryInputTokens);
+      expect(b.summarizeAtTokens).toBeLessThanOrEqual(b.requestCapTokens);
+      expect(b.pruneAtTokens).toBeLessThanOrEqual(b.summarizeAtTokens);
+    }
+    // Also with a raised fraction: the trigger stops at the summary input.
+    for (const window of windows) {
+      const b = contextBudgetFor(
+        { model: 'm', tokens: window, origin: 'catalog' },
+        { ...DEFAULT_CONTEXT_KNOBS, summarizeFraction: 1 },
+      );
+      expect(b.summarizeAtTokens).toBe(b.summaryInputTokens);
+    }
+  });
+
+  it('clamps the trigger to the summary input only below a ~34.3k window', () => {
+    // 60% of the window is above 95% of it less the reply reserve and the
+    // summary prompt margin: the clamp holds the earlier summary in what
+    // the summarizer reads.
+    expect(at(16_000)).toMatchObject({
+      outputReserveTokens: 4_000,
+      requestCapTokens: 11_200,
+      summaryInputTokens: 7_200,
+      summarizeAtTokens: 7_200,
     });
-    expect(describeBudget(bounded)).toContain(
-      'summaryInput=112518 (summarizer window 131072)',
-    );
-    // A summarizer with the larger window never raises the bound.
-    expect(
-      contextBudgetFor(
-        { ...main, tokens: 32_000 },
-        DEFAULT_CONTEXT_KNOBS,
-        routing,
-      ).summaryInputTokens,
-    ).toBe(at(32_000).summaryInputTokens);
-    // A 16k summarizer: 95% less a quarter-window reserve and the margin.
-    expect(
-      contextBudgetFor(main, DEFAULT_CONTEXT_KNOBS, {
-        ...routing,
-        tokens: 16_000,
-      }).summaryInputTokens,
-    ).toBe(7_200);
-    // The floor holds below that.
-    expect(
-      contextBudgetFor(main, DEFAULT_CONTEXT_KNOBS, {
-        ...routing,
-        tokens: 4_000,
-      }).summaryInputTokens,
-    ).toBe(1_000);
+    expect(at(32_000)).toMatchObject({
+      requestCapTokens: 22_400,
+      summaryInputTokens: 18_400,
+      summarizeAtTokens: 18_400,
+    });
+    // From ~34.3k up the plain fraction applies.
+    for (const window of [34_300, 35_000, 64_000, 128_000, 1_050_000])
+      expect(at(window).summarizeAtTokens).toBe(Math.floor(window * 0.6));
+    // The summarizer's input floor holds for the smallest windows.
+    expect(at(4_000).summaryInputTokens).toBe(1_000);
   });
 });
 

@@ -73,7 +73,6 @@ import {
   type LangsmithTracingDecision,
   type OpenRouterLlmAdapter,
   DEFAULT_MODEL_ID,
-  OPENROUTER_MODEL_MAP,
 } from '../core/llm';
 import { renderTurnTimeNote } from '../core/prompt-composer';
 import { TURN_TIME_NOTE_KWARG, withTurnTimeNote } from '../core/turn-time-note';
@@ -98,7 +97,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { AmbientServices, LlmAdapter } from '../core/runtime-context';
 import { chatGptBackendFromEnv } from '../llm/byo-client';
 import { createByoLlmAdapter } from '../llm/byo-adapter';
-import { byoModelForRole, isByoModelId } from '../llm/byo-catalog';
+import { isByoModelId } from '../llm/byo-catalog';
 import { handleByoRequest } from '../llm/byo-routes';
 import {
   WorkersByoService,
@@ -636,7 +635,11 @@ function lastAiText(messages: BaseMessage[]): string {
 }
 
 /** Id of the final assistant message (what `POST /messages` reports as `message.id`). */
-/** `turn_runs.usage` for `/debug/runs`; a row written before the column existed, or an unreadable one, is null. */
+/**
+ * `turn_runs.usage` for `/debug/runs`; a row written before the column
+ * existed, or an unreadable one, is null. A `limits.tokens` a row from an
+ * older runtime still carries is ignored: tokens are no longer limited.
+ */
 function parseUsage(raw: string | null): TurnUsage | null {
   if (!raw) return null;
   try {
@@ -659,7 +662,6 @@ function parseUsage(raw: string | null): TurnUsage | null {
       toolAttempts: num('toolAttempts'),
       elapsedMs: num('elapsedMs'),
       limits: {
-        tokens: limit('tokens'),
         tools: limit('tools'),
         durationMs: limit('durationMs'),
       },
@@ -670,7 +672,6 @@ function parseUsage(raw: string | null): TurnUsage | null {
       usage.modelCalls === undefined ||
       usage.toolAttempts === undefined ||
       usage.elapsedMs === undefined ||
-      usage.limits.tokens === undefined ||
       usage.limits.tools === undefined ||
       usage.limits.durationMs === undefined
     )
@@ -682,7 +683,6 @@ function parseUsage(raw: string | null): TurnUsage | null {
       toolAttempts: usage.toolAttempts,
       elapsedMs: usage.elapsedMs,
       limits: {
-        tokens: usage.limits.tokens,
         tools: usage.limits.tools,
         durationMs: usage.limits.durationMs,
       },
@@ -4699,15 +4699,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const window = await this.contextWindows.resolve(modelId, {
         ...(byoProvider ? { byoProvider } : {}),
       });
-      const budget = contextBudgetFor(
-        window,
-        contextKnobs(this.env, console),
-        await this.contextWindows.resolve(
-          llm && isProviderAdapter(llm)
-            ? llm.modelForRole('routing')
-            : OPENROUTER_MODEL_MAP.routing,
-        ),
-      );
+      const budget = contextBudgetFor(window, contextKnobs(this.env, console));
       const stats = (await this.resultStore?.stats()) ?? {
         rows: 0,
         sqliteBytes: 0,
@@ -5066,27 +5058,6 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     }
 
     /**
-     * The model that summarises the turn's history (the `routing` role): its
-     * window bounds what the summariser is handed.
-     */
-    private summaryModelId(
-      platform: LlmAdapter,
-      byoTurn: ByoTurnState | null,
-    ): string {
-      if (byoTurn)
-        return (
-          byoModelForRole(
-            byoTurn.credential.provider,
-            'routing',
-            byoTurn.mainModelId,
-          ) ?? OPENROUTER_MODEL_MAP.routing
-        );
-      return isProviderAdapter(platform)
-        ? platform.modelForRole('routing')
-        : OPENROUTER_MODEL_MAP.routing;
-    }
-
-    /**
      * Build one attempt's agent and input (`buildTurn`). A build that fails
      * part-way leaves nothing behind: the cleanups it registered run (the
      * turn's deadline timer would otherwise keep the object resident for
@@ -5216,13 +5187,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const windowResolution = await this.contextWindows.resolve(mainModelId, {
         ...(byoTurn ? { byoProvider: byoTurn.provider } : {}),
       });
+      // The summary is written by the main model too (the `summarizer`
+      // role), so the main model's window is the only one that counts.
       const contextBudget = contextBudgetFor(
         windowResolution,
         contextKnobs(this.env, console),
-        await this.contextWindows.resolve(
-          this.summaryModelId(baseAmbient.llm, byoTurn),
-          byoTurn ? { byoProvider: byoTurn.provider } : {},
-        ),
       );
       if (
         req.client === 'matrix' &&
@@ -5452,8 +5421,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         continuation: run.continuation,
         logger: console,
       });
-      // The turn's budget (turn-budget.ts): model calls are charged by the
-      // metered adapter every model of this turn comes from, tool calls by
+      // The turn's budget (turn-budget.ts): model tokens are accounted (for
+      // the usage line below, never limited) by the metered adapter every
+      // model of this turn comes from, tool calls are charged by
       // the execution middleware below, and the deadline aborts the run
       // with the limit as the reason (the stream reports it as a terminal
       // error, not as a user abort).

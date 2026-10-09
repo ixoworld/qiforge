@@ -621,8 +621,8 @@ describe('createSseTurnStream turn budget', () => {
       // name and message and moves the original into `cause`.
       const original = new HarnessLimitError(
         'budget_exhausted',
-        'tokens',
-        'The turn reached its token limit.',
+        'tools',
+        'The turn reached its tool-call limit.',
       );
       const wrapped = new Error(original.message, { cause: original });
       wrapped.name = original.name;
@@ -637,7 +637,7 @@ describe('createSseTurnStream turn budget', () => {
     const out = frames(await new Response(stream).text());
     expect(out.find((f) => f.event === 'error')?.data).toMatchObject({
       kind: 'budget_exhausted',
-      limit: 'tokens',
+      limit: 'tools',
       retryable: false,
     });
     expect(out.at(-1)?.data).toMatchObject({ failed: true });

@@ -8,22 +8,30 @@
  *
  * Resolution order, first hit wins:
  *
- *   1. an operator override for the exact model id (`MODEL_CONTEXT_OVERRIDES`);
- *   2. the OpenRouter `/models` listing (the same cached fetch that serves
+ *   1. a window **learned** from the provider (below);
+ *   2. an operator override for the exact model id (`MODEL_CONTEXT_OVERRIDES`,
+ *      optional — nothing needs one);
+ *   3. the OpenRouter `/models` listing (the same cached fetch that serves
  *      the price catalog) — for OpenRouter ids directly, and for BYO
  *      provider-native ids through the vendor prefix (`gpt-…` → `openai/gpt-…`);
- *   3. the deployment default (`MODEL_CONTEXT_TOKENS`, 100k unless set).
+ *   4. the built-in table (`BUILTIN_CONTEXT_WINDOWS` in `llm.ts`: the
+ *      curated catalog's `contextTokens` plus every other id the runtime
+ *      sends), looked up the same way — so an unreachable catalogue does not
+ *      shrink a known model to the default;
+ *   5. the deployment default (`MODEL_CONTEXT_TOKENS`, 100k unless set), only
+ *      for a model nothing above knows.
  *
- * On top of that, a window is **learned downwards**: when a provider rejects
- * a request as too long and names its limit, that smaller number is kept for
- * the model (persistently, when the host supplies a store) and wins over the
- * catalog from then on. A provider's error is the one source that is never
+ * A window is **learned downwards**: when a provider rejects a request as
+ * too long and names its limit, that smaller number is kept for the model
+ * (persistently, when the host supplies a store) and wins over every other
+ * source from then on. A provider's error is the one source that is never
  * wrong about its own limit; nothing is ever learned upwards.
  *
  * Modelled on Hermes Agent's `get_model_context_length` chain, trimmed to the
  * sources this runtime has.
  */
 import type { Logger } from '../plugin-api/types';
+import { BUILTIN_CONTEXT_WINDOWS } from './llm';
 import { NOOP_LOGGER } from './utils';
 
 export const DEFAULT_CONTEXT_TOKENS = 100_000;
@@ -35,6 +43,7 @@ export type ContextWindowOrigin =
   | 'override'
   | 'learned'
   | 'catalog'
+  | 'builtin'
   | 'default';
 
 export interface ContextWindowResolution {
@@ -42,7 +51,7 @@ export interface ContextWindowResolution {
   model: string;
   tokens: number;
   origin: ContextWindowOrigin;
-  /** The catalog id that answered, when the catalog did. */
+  /** The catalog (or built-in table) id that answered, when one did. */
   catalogId?: string;
 }
 
@@ -61,15 +70,20 @@ export interface ContextWindowResolverOptions {
   config: ContextWindowConfig;
   /** OpenRouter model id → context window (tokens). */
   catalog: () => Promise<ReadonlyMap<string, number>>;
+  /**
+   * Known model id → context window (tokens), consulted after the catalogue
+   * with the same candidate ids. Default {@link BUILTIN_CONTEXT_WINDOWS}.
+   */
+  builtin?: ReadonlyMap<string, number>;
   learned?: LearnedWindowStore;
   logger?: Logger;
 }
 
 /**
  * `MODEL_CONTEXT_OVERRIDES="openai/gpt-5.6-luna=400000, gpt-5.6-terra=1000000"`
- * — comma-separated `<model id>=<tokens>`; malformed entries are skipped
- * with a warning. `MODEL_CONTEXT_TOKENS` is the default for models nothing
- * else knows (min 16k).
+ * — optional, comma-separated `<model id>=<tokens>`; malformed entries are
+ * skipped with a warning. `MODEL_CONTEXT_TOKENS` is the default for models
+ * nothing else knows (min 16k).
  */
 export function contextWindowConfig(
   env: Record<string, unknown>,
@@ -212,8 +226,14 @@ export class ContextWindowResolver {
     const base = await this.baseline(model, opts.byoProvider);
     const learned = await this.learned(model);
     if (learned !== undefined && learned < base.tokens) {
+      this.logger.debug?.(
+        `[context] ${model}: window ${learned} (learned; ${base.origin} says ${base.tokens})`,
+      );
       return { ...base, tokens: learned, origin: 'learned' };
     }
+    this.logger.debug?.(
+      `[context] ${model}: window ${base.tokens} (${base.origin}${base.catalogId ? ` ${base.catalogId}` : ''})`,
+    );
     return base;
   }
 
@@ -235,12 +255,19 @@ export class ContextWindowResolver {
         `[context] model catalog unavailable: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    const candidates = catalogCandidates(model, byoProvider);
     if (catalog) {
-      for (const candidate of catalogCandidates(model, byoProvider)) {
+      for (const candidate of candidates) {
         const tokens = catalog.get(candidate);
         if (tokens !== undefined && isWindow(tokens))
           return { model, tokens, origin: 'catalog', catalogId: candidate };
       }
+    }
+    const builtin = this.options.builtin ?? BUILTIN_CONTEXT_WINDOWS;
+    for (const candidate of candidates) {
+      const tokens = builtin.get(candidate);
+      if (tokens !== undefined && isWindow(tokens))
+        return { model, tokens, origin: 'builtin', catalogId: candidate };
     }
     return { model, tokens: config.defaultTokens, origin: 'default' };
   }

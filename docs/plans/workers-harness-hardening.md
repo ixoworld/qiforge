@@ -26,6 +26,13 @@ re-asked with a fabricated "authorization override".
    `retryable: false`) and a `done` with `failed: true`; checkpoints and
    tool results already produced are kept. `TURN_RECURSION_LIMIT` stays the
    separate guard against a runaway graph.
+
+   > **Superseded (token limit).** Model tokens are still counted and
+   > reported (`[harness] turn … usage`, `turn_runs.usage`) but no longer
+   > limit a turn: `TURN_MAX_TOKENS` is removed (ignored if still set) and
+   > the error's `limit` is `'tools' | 'time'`. The tool-attempt cap and the
+   > deadline remain. See `packages/oracle-runtime-workers/docs/configuration.md#turn-budgets-and-tool-execution`.
+
 2. **Bounded concurrency per user object** (`tool-scheduler.ts`). Writes run
    one at a time across every session and turn of the object; reads up to
    four at a time; sub-agent dispatches up to four, in their own lane so a

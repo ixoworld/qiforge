@@ -13,7 +13,6 @@ describe('turnLimitsFromEnv', () => {
     expect(turnLimitsFromEnv({})).toEqual(DEFAULT_TURN_LIMITS);
     expect(
       turnLimitsFromEnv({
-        TURN_MAX_TOKENS: 'lots',
         TURN_MAX_TOOL_CALLS: -3,
         TURN_TIMEOUT_MS: '',
       }),
@@ -23,16 +22,28 @@ describe('turnLimitsFromEnv', () => {
   it('accepts numbers and numeric strings', () => {
     expect(
       turnLimitsFromEnv({
-        TURN_MAX_TOKENS: 1000,
         TURN_MAX_TOOL_CALLS: '7',
         TURN_TIMEOUT_MS: '2500.9',
       }),
-    ).toEqual({ tokens: 1000, tools: 7, durationMs: 2500 });
+    ).toEqual({ tools: 7, durationMs: 2500 });
+  });
+
+  it('has no token limit, whatever a deployment still sets', () => {
+    const env: Record<string, string> = {
+      TURN_MAX_TOKENS: '1000',
+      TURN_MAX_TOOL_CALLS: '7',
+    };
+    const limits = turnLimitsFromEnv(env);
+    expect(limits).toEqual({
+      tools: 7,
+      durationMs: DEFAULT_TURN_LIMITS.durationMs,
+    });
+    expect(Object.keys(limits)).not.toContain('tokens');
   });
 });
 
 describe('TurnBudget', () => {
-  const limits = { tokens: 1000, tools: 2, durationMs: 5_000 };
+  const limits = { tools: 2, durationMs: 5_000 };
 
   it('reserves an estimate for a model call and settles it to the reported usage', () => {
     const budget = new TurnBudget(limits, () => 0);
@@ -50,25 +61,28 @@ describe('TurnBudget', () => {
     });
   });
 
-  it('refuses the model call that would pass the token limit, keeping the count', () => {
+  it('never refuses a model call on its token count, however large, and still reports every token', () => {
     const budget = new TurnBudget(limits, () => 0);
-    budget.reserveModel(500, 100);
-    expect(() => budget.reserveModel(500, 100)).toThrow(HarnessLimitError);
-    const failure = (() => {
-      try {
-        budget.reserveModel(500, 100);
-        return undefined;
-      } catch (error) {
-        return error;
-      }
-    })();
-    expect(isHarnessLimitError(failure)).toBe(true);
-    expect(failure).toMatchObject({
-      kind: 'budget_exhausted',
-      limit: 'tokens',
-      retryable: false,
+    // Far beyond the 500,000 a turn was once capped at: a long thread
+    // re-sends its whole history on every call.
+    const calls = 40;
+    const perCall = 989_500;
+    for (let i = 0; i < calls; i += 1) {
+      const reservation = budget.reserveModel(perCall, 8_000);
+      expect(reservation).toBe(perCall + 8_000);
+      budget.settleModel(reservation, perCall + 1_000);
+    }
+    expect(budget.snapshot()).toMatchObject({
+      tokens: calls * (perCall + 1_000),
+      reportedTokens: calls * (perCall + 1_000),
+      modelCalls: calls,
     });
-    expect(budget.snapshot().tokens).toBe(600);
+    // Unsettled reservations of any size are admitted too.
+    expect(() =>
+      budget.reserveModel(Number.MAX_SAFE_INTEGER, 8_000),
+    ).not.toThrow();
+    expect(budget.snapshot().modelCalls).toBe(calls + 1);
+    expect(budget.snapshot().limits).toEqual(limits);
   });
 
   it('ignores unusable provider usage and gives back only what was reserved', () => {

@@ -657,8 +657,17 @@ export async function createMainAgent(
     // (the middleware tags its call). The model itself keeps whatever
     // transport its provider needs — forcing it non-streaming broke the
     // ChatGPT backend, which accepts streamed requests only.
+    //
+    // The summary is written by the turn's own model (the `summarizer`
+    // role resolves to the `main` model on every lane, the per-request
+    // choice included), so it reads whatever the turn's window holds and a
+    // BYO turn's history stays on the user's provider. The platform adapter
+    // gives the role the helper calls' reasoning effort, not the reply's.
     createSummarizationMiddleware({
-      model: resolveModel('routing'),
+      model: resolveModel(
+        'summarizer',
+        requestCtx.model ? { model: requestCtx.model } : undefined,
+      ),
       logger: ambient.logger,
       // Window-derived thresholds when the host resolved a budget: summarize
       // at a fraction of the model's window (tokens only, unless the

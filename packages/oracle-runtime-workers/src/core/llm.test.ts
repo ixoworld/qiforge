@@ -1,13 +1,24 @@
 import { HumanMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  BYO_PROVIDER_MODELS,
+  BYO_PROVIDERS,
+  BYO_ROLE_MODELS,
+} from '../llm/byo-catalog';
 import { createByoChatModel } from '../llm/byo-client';
+import {
+  catalogCandidates,
+  MAX_CONTEXT_TOKENS,
+  MIN_CONTEXT_TOKENS,
+} from './context-window';
 import {
   findProviderStall,
   livenessRequestTimeoutMs,
   ProviderStallError,
 } from '../llm/stream-liveness';
 import {
+  BUILTIN_CONTEXT_WINDOWS,
   createLlmAdapter,
   llmEnvFromWorkerEnv,
   streamLivenessFromEnv,
@@ -16,7 +27,10 @@ import {
   listModelCatalog,
   MODEL_CATALOG,
   MODEL_INPUT_CAPS,
+  NEBIUS_MODEL_MAP,
+  OPENROUTER_MAIN_FALLBACKS,
   OPENROUTER_MODEL_MAP,
+  type ProviderModelRole,
 } from './llm';
 
 describe('MODEL_CATALOG', () => {
@@ -50,6 +64,98 @@ describe('MODEL_CATALOG', () => {
     // A catalog entry that says it reads images accepts image input.
     for (const entry of MODEL_CATALOG)
       expect(getModelCapabilities(entry.id).image).toBe(entry.vision);
+  });
+});
+
+describe('built-in context windows', () => {
+  it('gives every catalog entry a sane window, and carries it into the table', () => {
+    for (const entry of MODEL_CATALOG) {
+      expect(Number.isInteger(entry.contextTokens)).toBe(true);
+      // The resolver's sane-window range: a typo (4096, an extra zero) fails.
+      expect(entry.contextTokens).toBeGreaterThanOrEqual(MIN_CONTEXT_TOKENS);
+      expect(entry.contextTokens).toBeLessThanOrEqual(MAX_CONTEXT_TOKENS);
+      expect(BUILTIN_CONTEXT_WINDOWS.get(entry.id)).toBe(entry.contextTokens);
+    }
+  });
+
+  it('knows every chat model id the platform role maps send', () => {
+    const chatIds = (map: Record<ProviderModelRole, string>): string[] =>
+      Object.entries(map)
+        .filter(([role, id]) => role !== 'embedding' && id !== '')
+        .map(([, id]) => id);
+    const sent = [
+      ...chatIds(OPENROUTER_MODEL_MAP),
+      ...OPENROUTER_MAIN_FALLBACKS,
+      ...chatIds(NEBIUS_MODEL_MAP),
+    ];
+    expect(sent.length).toBeGreaterThan(10);
+    const unknown = sent.filter(
+      (id) => !((BUILTIN_CONTEXT_WINDOWS.get(id) ?? 0) > 0),
+    );
+    expect(unknown).toEqual([]);
+  });
+
+  it('knows every BYO model id under the key the resolver looks it up by', () => {
+    const unknown: string[] = [];
+    for (const provider of BYO_PROVIDERS)
+      for (const id of [
+        ...Object.values(BYO_ROLE_MODELS[provider]),
+        ...BYO_PROVIDER_MODELS[provider].map((m) => m.id),
+      ])
+        if (
+          !catalogCandidates(id, provider).some(
+            (candidate) => (BUILTIN_CONTEXT_WINDOWS.get(candidate) ?? 0) > 0,
+          )
+        )
+          unknown.push(`${provider} ${id}`);
+    expect(unknown).toEqual([]);
+  });
+});
+
+describe('summarizer role', () => {
+  it('is the main model on the OpenRouter lane, a per-request choice included, at the helper reasoning effort', () => {
+    const adapter = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: 'k',
+      DEFAULT_MODEL: 'anthropic/claude-sonnet-5',
+      MAIN_REASONING_EFFORT: 'high',
+    });
+    expect(adapter.modelForRole('summarizer')).toBe(
+      'anthropic/claude-sonnet-5',
+    );
+    expect(adapter.modelForRole('summarizer')).toBe(
+      adapter.modelForRole('main'),
+    );
+    expect(adapter.modelForRole('routing')).toBe(OPENROUTER_MODEL_MAP.routing);
+
+    const summarizer = adapter.get('summarizer');
+    expect(summarizer).toBeInstanceOf(ChatOpenAI);
+    if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(summarizer.model).toBe('anthropic/claude-sonnet-5');
+    // Helper effort, not the reply's; no fallback model list.
+    expect(summarizer.modelKwargs).toMatchObject({
+      reasoning: { effort: 'medium' },
+    });
+    expect(summarizer.modelKwargs?.models).toBeUndefined();
+    const main = adapter.get('main');
+    if (!(main instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(main.modelKwargs).toMatchObject({ reasoning: { effort: 'high' } });
+
+    const chosen = adapter.get('summarizer', { model: 'openai/gpt-5.6-sol' });
+    if (!(chosen instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(chosen.model).toBe('openai/gpt-5.6-sol');
+  });
+
+  it('is the main model on the Nebius lane', () => {
+    const adapter = createLlmAdapter({
+      OPEN_ROUTER_API_KEY: '',
+      LLM_PROVIDER: 'nebius',
+      NEBIUS_API_KEY: 'n',
+    });
+    expect(NEBIUS_MODEL_MAP.summarizer).toBe(NEBIUS_MODEL_MAP.main);
+    expect(adapter.modelForRole('summarizer')).toBe(NEBIUS_MODEL_MAP.main);
+    const summarizer = adapter.get('summarizer');
+    if (!(summarizer instanceof ChatOpenAI)) throw new Error('unreachable');
+    expect(summarizer.model).toBe(NEBIUS_MODEL_MAP.main);
   });
 });
 

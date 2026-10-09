@@ -428,31 +428,73 @@ Every context limit of a turn is a fraction of the model's own context
 window, resolved per model (`docs/plans/context-budgets.md`). What an
 operator sees:
 
-- **The window.** `[context] model=… window=N (origin) …` on every turn.
-  `origin` is `override` (`MODEL_CONTEXT_OVERRIDES`), `catalog` (the
-  OpenRouter `/models` listing, BYO-native ids under their vendor prefix),
+- **The window.** On every turn:
+
+  ```
+  [context] model=openai/gpt-5.6-luna window=1050000 (catalog) summarizeAt=630000 pruneAt=367500 resultCap=200000c requestCap=989500 reserve=8000 summaryInput=985500
+  ```
+
+  `origin` (in brackets) is the source that answered, first hit wins:
   `learned` (a provider's "too long" error named a smaller limit; kept in
-  the object's KV as `ctxwin:<model>`), or `default`
-  (`MODEL_CONTEXT_TOKENS`, 100k). `GET /debug/context?model=<id>` shows the
-  resolution and every derived threshold.
-- **New models.** Nothing to add here: a model listed by OpenRouter gets its
-  window from the catalog at the next refresh (once per isolate-hour). The
-  only manual step for a new selectable model is the runtime's allow-list,
-  `MODEL_CATALOG` in `src/core/llm.ts`, plus its entry in
-  `MODEL_INPUT_CAPS` (`src/core/llm.test.ts` requires one per catalog id,
-  unique ids and exactly one default); check `origin` on `/debug/context`
-  afterwards, and pin the id in `MODEL_CONTEXT_OVERRIDES` only when it
-  shows `default` (a model OpenRouter does not list).
-- **Summarization** fires at the smaller of 50% of the window (tokens,
-  chars/4) and what the summarizer may read, keeps the last 10 messages,
-  and no longer counts messages (set `CONTEXT_SUMMARIZE_MESSAGES` to add
-  that trigger back). What the summarizer reads is bounded by the main
-  model's window and by the window of the model that writes the summary
-  (the routing model), with the same margins; `summaryInput` on
-  `/debug/context` shows the bound. Starting no later than that bound means
-  the summarizer reads the earlier summary and everything after it instead
-  of dropping the oldest messages unread (a 400k main model with a
-  131,072-token summarizer summarizes, and prunes, from about 112k tokens).
+  the object's KV as `ctxwin:<model>`), `override`
+  (`MODEL_CONTEXT_OVERRIDES`, optional), `catalog` (the live OpenRouter
+  `/models` listing, BYO-native ids under their vendor prefix), `builtin`
+  (the runtime's own table, `BUILTIN_CONTEXT_WINDOWS` in
+  `src/core/llm.ts`), or `default` (`MODEL_CONTEXT_TOKENS`, 100k).
+  `GET /debug/context?model=<id>` shows the resolution (and the id that
+  answered, `catalogId`) and every derived threshold; the resolver logs the
+  answering source at debug level too.
+
+- **`builtin` instead of `catalog`** means the live listing did not answer
+  for that model: the fetch failed or timed out (3 s; a failure is retried
+  after 60 s, see _Catalog fetch_ below), or OpenRouter does not list the
+  id (Nebius ids, `claude-haiku-4-5` and other provider-native BYO ids
+  OpenRouter spells differently). The window is still the model's own, so
+  nothing needs doing; if it persists for an OpenRouter model, check the
+  `[context] model catalog unavailable` warnings. `default` means nobody
+  knows the model: every threshold is then a fraction of 100k, so add the
+  id to the built-in table (or pin it in `MODEL_CONTEXT_OVERRIDES`).
+- **New models.** A new selectable model goes into the runtime's
+  allow-list, `MODEL_CATALOG` in `src/core/llm.ts`, with its
+  `contextTokens` (required: the compiler refuses an entry without it; take
+  OpenRouter's `context_length`) and its entry in `MODEL_INPUT_CAPS`
+  (`src/core/llm.test.ts` requires one per catalog id, unique ids, exactly
+  one default and a positive window). A model id the runtime sends outside
+  the catalog (a role map, Nebius, a BYO model) goes into
+  `NON_CATALOG_CONTEXT_WINDOWS` next to it; the same test fails when one is
+  missing. Check `origin` on `/debug/context` afterwards. The live catalog
+  still wins over the table, so a window OpenRouter changes is picked up at
+  the next refresh (once per isolate-hour) without a release.
+- **Summarization** fires at 60% of the main model's window whatever its
+  size (tokens, chars/4; never above the request cap nor above what the
+  summarizer reads), keeps the last 10
+  messages, and no longer counts messages (set `CONTEXT_SUMMARIZE_MESSAGES`
+  to add that trigger back). A 1,050,000-token window summarizes at
+  630,000, a 128k one at 76,800. The summary is written by the turn's own
+  model (the `summarizer` role: the same model id and lane as `main` — the
+  platform default, a per-request choice, or the BYO model on the user's
+  own key; on OpenRouter at `medium` reasoning effort), so no second, smaller window
+  bounds it. The summarizer reads at most `summaryInput` (the request cap
+  less 4000 tokens for its prompt; LangChain keeps the newest part), so
+  the trigger never exceeds `summaryInput`: summarizing starts before the
+  earlier summary could be dropped unread, and the thread's memory is
+  carried forward. This only binds below a window of about 34.3k tokens
+  (the 32k drill pin summarizes at 18,400 instead of 19,200; a low
+  `MODEL_CONTEXT_TOKENS` or a window learned small from a provider error
+  behaves the same) or with a raised `CONTEXT_SUMMARIZE_FRACTION`; every
+  window in the built-in table (128k and up) gets the plain 60%.
+- **Spend envelope.** There is no per-turn token limit any more. On a
+  1,050,000-token window a single request can reach about 630,000 input
+  tokens before the history is summarized (and up to the request cap,
+  989,500, while one turn grows past the trigger). The only per-turn
+  bounds left are `TURN_MAX_TOOL_CALLS` (120 tool attempts) and
+  `TURN_TIMEOUT_MS` (600 s), so the worst case is roughly 120 model calls
+  × ~630k input tokens in one turn. A summary now runs on the main model
+  too: at the trigger it reads ~630k input tokens on the turn's model,
+  where it used to read ~112k on `openai/gpt-oss-120b`. BYO users pay all
+  of this on their own key, and a long thread can hit their provider's
+  per-minute input-token limits (a rate-limit error on their account).
+  Watch the `[harness] turn … usage` line and `turn_runs.usage` for it.
   A mid-turn summary's record of the turn's calls (`turn_carry`) survives
   the checkpoint save, keeping the newest calls that fit 64 KiB of JSON
   (`TURN_CARRY_MAX_CHARS`). A failed
@@ -1497,10 +1539,14 @@ receipt, delete its row; do not clear rows merely to make a retry pass.
 `turn_runs.usage` carries the turn's usage once the run ended: estimated
 and provider-reported tokens, model calls, tool attempts and elapsed time
 (`[harness] turn <requestId> usage: …` in the logs). Estimates, not an
-invoice.
+invoice. Tokens are reported only: no token count ends a turn (there is no
+token limit; `TURN_MAX_TOKENS` is gone and ignored if still set), so a
+large figure here is a long thread re-sent on every model call, not a
+failure. Rows written by an older runtime still carry `limits.tokens`;
+`/debug/runs` ignores it.
 
-A turn that ends on a budget or deadline shows on the wire as an `error`
-frame with `kind: budget_exhausted` and `retryable: false`, then `done`
+A turn that ends on its tool-attempt cap or deadline shows on the wire as an `error`
+frame with `kind: budget_exhausted`, `limit: tools | time` and `retryable: false`, then `done`
 with `failed: true`. The client SDK reports it as a failed run; it never
 resubmits a POST by itself. Before raising a limit, check the run's usage
 and the tool marks for the loop that spent it.

@@ -36,10 +36,7 @@ const okResult = (name: string) =>
 function middlewareFor(
   overrides: Partial<Parameters<typeof createToolExecutionMiddleware>[0]> = {},
 ) {
-  const budget = new TurnBudget(
-    { tokens: 1_000_000, tools: 5, durationMs: 60_000 },
-    () => 0,
-  );
+  const budget = new TurnBudget({ tools: 5, durationMs: 60_000 }, () => 0);
   const claims = makeClaimStore();
   const middleware = createToolExecutionMiddleware({
     budget,

@@ -239,8 +239,7 @@ export interface OracleWorkerEnv {
   LLM_STREAM_RETRIES?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
-  /** Turn budget: cumulative model tokens (default 500000), tool attempts (120), deadline in ms (600000). */
-  TURN_MAX_TOKENS?: string;
+  /** Turn budget: tool attempts (default 120) and deadline in ms (600000). */
   TURN_MAX_TOOL_CALLS?: string;
   TURN_TIMEOUT_MS?: string;
   /** Repetition guard: identical successful writes (default 1) and reads (5) per turn. */

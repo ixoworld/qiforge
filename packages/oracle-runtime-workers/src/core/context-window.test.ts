@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { BUILTIN_CONTEXT_WINDOWS } from './llm';
 import {
   catalogCandidates,
   contextWindowConfig,
@@ -139,18 +140,18 @@ describe('ContextWindowResolver', () => {
     });
   });
 
-  it('serves the default when the catalog is unavailable, without throwing', async () => {
+  it('serves the default when neither the catalog nor the table answers, without throwing', async () => {
     const r = resolver({
       catalog: async () => {
         throw new Error('network');
       },
+      builtin: new Map(),
     });
     expect(await r.resolve('openai/gpt-5.6-luna')).toMatchObject({
       tokens: DEFAULT_CONTEXT_TOKENS,
       origin: 'default',
     });
   });
-
   it('learns a smaller window from a provider error, persists it, and never learns upwards', async () => {
     const learned = memoryLearned();
     const r = resolver({ learned });
@@ -205,6 +206,127 @@ describe('ContextWindowResolver', () => {
       tokens: 50_000,
       origin: 'learned',
     });
+  });
+});
+
+describe('ContextWindowResolver — the built-in table', () => {
+  const BUILTIN = new Map<string, number>([
+    ['openai/gpt-5.6-luna', 1_050_000],
+    ['anthropic/claude-haiku-4-5', 200_000],
+    ['Qwen/Qwen3-235B-A22B-Thinking-2507', 262_144],
+  ]);
+  const unreachable = async (): Promise<never> => {
+    throw new Error('network');
+  };
+
+  it('answers when the catalog is unreachable', async () => {
+    const r = resolver({ catalog: unreachable, builtin: BUILTIN });
+    expect(await r.resolve('openai/gpt-5.6-luna')).toMatchObject({
+      tokens: 1_050_000,
+      origin: 'builtin',
+      catalogId: 'openai/gpt-5.6-luna',
+    });
+    expect(await r.resolve('Qwen/Qwen3-235B-A22B-Thinking-2507')).toMatchObject(
+      { tokens: 262_144, origin: 'builtin' },
+    );
+  });
+
+  it('answers when the catalog does not list the id', async () => {
+    const r = resolver({ builtin: BUILTIN });
+    // The live catalog lists Anthropic's model as `claude-haiku-4.5`.
+    expect(
+      await r.resolve('claude-haiku-4-5', { byoProvider: 'anthropic' }),
+    ).toMatchObject({
+      tokens: 200_000,
+      origin: 'builtin',
+      catalogId: 'anthropic/claude-haiku-4-5',
+    });
+  });
+
+  it('finds a BYO provider-native id through the vendor prefix, as the catalog does', async () => {
+    const r = resolver({ catalog: unreachable, builtin: BUILTIN });
+    expect(
+      await r.resolve('gpt-5.6-luna', { byoProvider: 'chatgpt' }),
+    ).toMatchObject({
+      model: 'gpt-5.6-luna',
+      tokens: 1_050_000,
+      origin: 'builtin',
+      catalogId: 'openai/gpt-5.6-luna',
+    });
+    expect(await r.resolve('byo:openai/gpt-5.6-luna')).toMatchObject({
+      origin: 'builtin',
+    });
+  });
+
+  it('loses to the live catalog', async () => {
+    const r = resolver({ builtin: BUILTIN });
+    expect(await r.resolve('openai/gpt-5.6-luna')).toMatchObject({
+      tokens: 400_000,
+      origin: 'catalog',
+    });
+  });
+
+  it('loses to an operator override, and an override beats the catalog', async () => {
+    const r = resolver({
+      builtin: BUILTIN,
+      config: contextWindowConfig({
+        MODEL_CONTEXT_OVERRIDES:
+          'openai/gpt-5.6-luna=300000, anthropic/claude-haiku-4-5=150000',
+      }),
+    });
+    expect(await r.resolve('openai/gpt-5.6-luna')).toMatchObject({
+      tokens: 300_000,
+      origin: 'override',
+    });
+    expect(await r.resolve('anthropic/claude-haiku-4-5')).toMatchObject({
+      tokens: 150_000,
+      origin: 'override',
+    });
+  });
+
+  it('loses to a learned window, as the catalog and an override do', async () => {
+    const learned = memoryLearned();
+    learned.map.set('openai/gpt-5.6-luna', 120_000);
+    learned.map.set('anthropic/claude-sonnet-5', 64_000);
+    const r = resolver({ catalog: unreachable, builtin: BUILTIN, learned });
+    expect(await r.resolve('openai/gpt-5.6-luna')).toMatchObject({
+      tokens: 120_000,
+      origin: 'learned',
+    });
+    const withCatalog = resolver({ builtin: BUILTIN, learned });
+    expect(
+      await withCatalog.resolve('anthropic/claude-sonnet-5'),
+    ).toMatchObject({ tokens: 64_000, origin: 'learned' });
+  });
+
+  it('leaves the default to an id nobody knows', async () => {
+    const r = resolver({
+      builtin: BUILTIN,
+      config: contextWindowConfig({ MODEL_CONTEXT_TOKENS: '64000' }),
+    });
+    expect(await r.resolve('acme/unknown-model')).toMatchObject({
+      tokens: 64_000,
+      origin: 'default',
+    });
+    expect(await r.resolve('unknown-model')).toMatchObject({
+      origin: 'default',
+    });
+  });
+
+  it('defaults to the runtime table and logs which source answered', async () => {
+    const debug = vi.fn();
+    const r = new ContextWindowResolver({
+      config: contextWindowConfig({}),
+      catalog: unreachable,
+      logger: { ...silent, debug },
+    });
+    expect(await r.resolve('openai/gpt-oss-120b')).toMatchObject({
+      tokens: BUILTIN_CONTEXT_WINDOWS.get('openai/gpt-oss-120b'),
+      origin: 'builtin',
+    });
+    expect(debug).toHaveBeenCalledWith(
+      '[context] openai/gpt-oss-120b: window 131072 (builtin openai/gpt-oss-120b)',
+    );
   });
 });
 

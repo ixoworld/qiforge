@@ -655,9 +655,10 @@ Future improvements, in the order they pay off:
    raise `MATRIX_SEND_RATE_PER_SECOND` with the homeserver's consent) before
    the mirror traffic of ~10,000 daily users saturates one object.
 4. **Shorter loaded time per turn.** The model wait is billed as loaded
-   time. Long tool chains belong in sub-agents, after-turn work (titles,
-   history indexing) should not extend the tail, and a cheaper routing model
-   for the summariser keeps that call short.
+   time. Long tool chains belong in sub-agents, and after-turn work (titles,
+   history indexing) should not extend the tail. The summary is written by
+   the turn's own model (the `summarizer` role), at 60% of its window, so on
+   a large window it runs rarely but each call reads a large history.
 5. **Resident task holders.** A recurring task keeps its user's working copy
    resident; once task users are a large share of storage, a lighter
    representation for idle-but-scheduled users (the R2 tier again, or a
@@ -847,8 +848,9 @@ cannot change. A revision requires a new task.
 
 The agent binds no tools and rejects model-emitted tool calls. Preparation
 excludes personal preferences, memory, plugin hooks, page context, attachment
-processing and capability routing. Model selection, token and time budgets,
-checkpoints and delivery recovery continue to use the existing runtime.
+processing and capability routing. Model selection, token accounting, the
+tool-attempt and time budgets, checkpoints and delivery recovery continue to
+use the existing runtime.
 The output is generated text, not proof that the user's goal was achieved
 or that a reviewer accepted it.
 

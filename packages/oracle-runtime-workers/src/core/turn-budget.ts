@@ -1,13 +1,8 @@
 /**
  * One turn's resource budget, shared by the main agent, every sub-agent it
  * dispatches and the helper models (summarizer, attachment extraction) the
- * turn's LLM adapter hands out. Three limits:
+ * turn's LLM adapter hands out. Two limits:
  *
- *   - `tokens`     — cumulative model tokens. A call reserves an estimate
- *                    (chars/4 of what it sends plus the output reserve) before
- *                    it starts and settles to the provider's reported usage
- *                    when the call ends, so the counter is an estimate only
- *                    while a call is in flight.
  *   - `tools`      — tool attempts, counting a sub-agent dispatch and each
  *                    retry of a read.
  *   - `durationMs` — wall clock since the budget was created (the turn's
@@ -15,6 +10,17 @@
  *
  * Exhaustion is terminal for the turn: `HarnessLimitError` is not retryable
  * and the work already done (checkpoints, tool results) is kept.
+ *
+ * Model tokens are accounted, never limited: a call reserves an estimate
+ * (chars/4 of what it sends plus the output reserve) before it starts and
+ * settles to the provider's reported usage when the call ends, so the
+ * counter is an estimate only while a call is in flight. The count is
+ * reported for observability (the host logs it at the end of the turn and
+ * keeps it with the run) and never fails a turn, however large it gets:
+ * every call re-sends the whole history, so a turn on a long thread
+ * legitimately sums to many times the context window. A turn is bounded
+ * by its tool attempts and its deadline, and each request by the context
+ * budget (`context-budget.ts`).
  *
  * Token counts are estimates reconciled against provider usage, never a
  * billing figure; `TURN_RECURSION_LIMIT` stays the separate guard against a
@@ -25,7 +31,7 @@ export class HarnessLimitError extends Error {
 
   constructor(
     readonly kind: 'budget_exhausted',
-    readonly limit: 'tokens' | 'tools' | 'time',
+    readonly limit: 'tools' | 'time',
     message: string,
   ) {
     super(message);
@@ -33,13 +39,9 @@ export class HarnessLimitError extends Error {
   }
 }
 
-const LIMITS: ReadonlySet<string> = new Set(['tokens', 'tools', 'time']);
-
 function limitOf(error: Error): HarnessLimitError['limit'] | undefined {
   const value: unknown = Reflect.get(error, 'limit');
-  return value === 'tokens' || value === 'tools' || value === 'time'
-    ? value
-    : undefined;
+  return value === 'tools' || value === 'time' ? value : undefined;
 }
 
 /**
@@ -54,7 +56,7 @@ export function harnessLimitOf(error: unknown): HarnessLimitError | undefined {
   for (let depth = 0; depth < 32 && current instanceof Error; depth += 1) {
     if (current instanceof HarnessLimitError) return current;
     const limit = limitOf(current);
-    if (current.name === 'HarnessLimitError' && limit && LIMITS.has(limit))
+    if (current.name === 'HarnessLimitError' && limit)
       return new HarnessLimitError('budget_exhausted', limit, current.message);
     current = current.cause;
   }
@@ -67,8 +69,6 @@ export function isHarnessLimitError(error: unknown): boolean {
 }
 
 export interface TurnLimits {
-  /** Cumulative model tokens (estimated input + reserved output, settled to usage). */
-  tokens: number;
   /** Tool attempts, sub-agent dispatches included. */
   tools: number;
   /** Wall-clock deadline for the turn. */
@@ -76,14 +76,12 @@ export interface TurnLimits {
 }
 
 export const DEFAULT_TURN_LIMITS: TurnLimits = {
-  tokens: 500_000,
   tools: 120,
   durationMs: 600_000,
 };
 
 /** Parse the `TURN_*` env knobs; anything unusable keeps its default. */
 export function turnLimitsFromEnv(env: {
-  TURN_MAX_TOKENS?: number | string;
   TURN_MAX_TOOL_CALLS?: number | string;
   TURN_TIMEOUT_MS?: number | string;
 }): TurnLimits {
@@ -93,7 +91,6 @@ export function turnLimitsFromEnv(env: {
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
   };
   return {
-    tokens: positive(env.TURN_MAX_TOKENS, DEFAULT_TURN_LIMITS.tokens),
     tools: positive(env.TURN_MAX_TOOL_CALLS, DEFAULT_TURN_LIMITS.tools),
     durationMs: positive(env.TURN_TIMEOUT_MS, DEFAULT_TURN_LIMITS.durationMs),
   };
@@ -134,6 +131,8 @@ export class TurnBudget {
   /**
    * Reserve a model call before it starts. Returns the reservation so the
    * caller can settle it against the provider's usage once the call ends.
+   * Only an aborted turn or a passed deadline refuses the call: the token
+   * count itself is never a reason to.
    */
   reserveModel(
     estimatedInputTokens: number,
@@ -141,14 +140,12 @@ export class TurnBudget {
     signal?: AbortSignal,
   ): number {
     this.check(signal);
-    // A NaN would poison the counter for the rest of the turn (every later
-    // comparison with the limit is false): an unusable number counts as 0.
+    // A NaN would poison the reported count for the rest of the turn: an
+    // unusable number counts as 0.
     const usable = (n: number): number =>
       Number.isFinite(n) ? Math.max(0, n) : 0;
     const reservation =
       usable(estimatedInputTokens) + usable(outputReserveTokens);
-    if (this.tokens + reservation > this.limits.tokens)
-      this.fail('tokens', 'token');
     this.tokens += reservation;
     this.modelCalls += 1;
     return reservation;
