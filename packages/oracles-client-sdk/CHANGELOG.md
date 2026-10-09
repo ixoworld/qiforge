@@ -1,5 +1,11 @@
 # @ixo/oracles-client-sdk
 
+## 1.6.0
+
+### Minor Changes
+
+- [#353](https://github.com/ixoworld/qiforge/pull/353) [`2565b32`](https://github.com/ixoworld/qiforge/commit/2565b32441055e4531371009e1318cf0cb486d39) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Every message in the chat history (`GET /messages/:id` and the paged `GET /sessions/:id/messages`) now carries `createdAt`: the ISO 8601 time the message was first saved (the saver's `additional_kwargs.timestamp`, also the listing's order key) — the turn's admission time for the user's message, the time its step was first checkpointed for a reply, unchanged by later saves. The client SDK's `IMessage` declares the optional field; the history path already passed it through.
+
 ## 1.5.0
 
 ### Minor Changes

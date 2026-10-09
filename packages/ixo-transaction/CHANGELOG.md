@@ -1,5 +1,12 @@
 # @ixo/ixo-transaction
 
+## 1.0.0
+
+### Patch Changes
+
+- Updated dependencies [[`2565b32`](https://github.com/ixoworld/qiforge/commit/2565b32441055e4531371009e1318cf0cb486d39)]:
+  - @ixo/oracles-client-sdk@1.6.0
+
 ## 0.1.0
 
 ### Minor Changes
