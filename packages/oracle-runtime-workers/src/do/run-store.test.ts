@@ -276,7 +276,7 @@ describe('RunStore', () => {
     });
   });
 
-  it('claims a write until its outcome is known, warns once, and lets a later run repeat it', async () => {
+  it('keeps unknown writes blocked across turns and retention until authenticated reconciliation', async () => {
     const s = stub('runs-claims');
     await s.setNow(T0);
     const fp = 'a'.repeat(64);
@@ -300,7 +300,7 @@ describe('RunStore', () => {
       }),
     ).toEqual({ status: 'claimed' });
     // Outcome unknown (no release): another session of the user is blocked
-    // and the claim is now owned by the run that was warned.
+    // and the claim retains the originating run as its owner.
     const blocked = await s.claimWrite({
       fingerprint: fp,
       toolName: 'send_message',
@@ -313,7 +313,7 @@ describe('RunStore', () => {
     });
     expect((await s.listClaims())[0]).toMatchObject({
       state: 'warned',
-      runId: 'r2',
+      runId: 'r1',
     });
     // The warned run stays blocked; only its owner could release it.
     expect(
@@ -326,9 +326,9 @@ describe('RunStore', () => {
         })
       ).status,
     ).toBe('blocked');
-    await s.releaseWrite(fp, 'r1');
+    await s.releaseWrite(fp, 'r2');
     expect(await s.listClaims()).toHaveLength(1);
-    // A later run, after the warning, runs the write again.
+    // Neither a different run nor elapsed retention proves absence of an effect.
     expect(
       (
         await s.claimWrite({
@@ -338,17 +338,59 @@ describe('RunStore', () => {
           sessionId: 's1',
         })
       ).status,
-    ).toBe('claimed');
+    ).toBe('blocked');
     expect((await s.listClaims())[0]).toMatchObject({
-      state: 'pending',
-      runId: 'r3',
+      state: 'warned',
+      runId: 'r1',
     });
-    // The claim survives a reopen and is dropped with the run retention.
+    // The claim survives a reopen and run retention.
     await s.reopen();
     expect(await s.listClaims()).toHaveLength(1);
     await s.setNow(T0 + RUN_RETENTION_MS + 1);
     await s.reopen();
+    expect(await s.listClaims()).toHaveLength(1);
+    expect(
+      await s.reconcileWrite(fp, {
+        expectedRunId: 'wrong',
+        evidenceRef: 'provider:lookup:1',
+        outcome: 'not-applied',
+        authorizeRetry: true,
+      }),
+    ).toBe(false);
+    expect(
+      await s.reconcileWrite(fp, {
+        expectedRunId: 'r1',
+        evidenceRef: 'provider:lookup:1',
+        outcome: 'unknown',
+        authorizeRetry: false,
+      }),
+    ).toBe(true);
+    expect(
+      await s.reconcileWrite(fp, {
+        expectedRunId: 'r1',
+        evidenceRef: 'provider:lookup:1',
+        outcome: 'not-applied',
+        authorizeRetry: true,
+      }),
+    ).toBe(false);
+    expect(await s.listClaims()).toHaveLength(1);
+    expect(
+      await s.reconcileWrite(fp, {
+        expectedRunId: 'r1',
+        evidenceRef: 'provider:lookup:2',
+        outcome: 'not-applied',
+        authorizeRetry: true,
+      }),
+    ).toBe(true);
     expect(await s.listClaims()).toEqual([]);
+    expect(
+      await s.claimWrite({
+        fingerprint: fp,
+        toolName: 'send_message',
+        runId: 'r4',
+        sessionId: 's1',
+      }),
+    ).toEqual({ status: 'claimed' });
   });
 
   it('survives a reopen (state is in SQLite, not memory) and prunes ended runs past retention', async () => {
@@ -484,11 +526,24 @@ describe('channel runs over the SQLite store', () => {
   });
 });
 
-it('prunes ended runs set-based in one transaction, leaving exactly what per-run pruning left', async () => {
+it('prunes ended runs set-based while retaining every unknown external-write claim', async () => {
   const s = stub('prune-equivalence');
   const { legacy, current, transactions, receiptPlan } =
     await s.pruneEquivalence();
-  expect(current).toEqual(legacy);
+  expect(current).toEqual({
+    ...legacy,
+    turn_write_claims: [
+      ...legacy.turn_write_claims,
+      {
+        fingerprint: 'old',
+        run_id: 'x',
+        session_id: 's',
+        started_at: '2026-09-13T10:00:00.000Z',
+        state: 'pending',
+        tool_name: 't',
+      },
+    ],
+  });
   expect(transactions).toBe(1);
   // What survives: fresh and active runs, every tombstone, and the
   // receipts of runs that are not tombstoned.
@@ -508,7 +563,10 @@ it('prunes ended runs set-based in one transaction, leaving exactly what per-run
       'ch-never-begun',
     ].sort(),
   );
-  expect(current.turn_write_claims).toHaveLength(1);
+  expect(current.turn_write_claims.map((claim) => claim.fingerprint)).toEqual([
+    'new',
+    'old',
+  ]);
   // The receipt sweep walks the receipts and looks tombstones up by key.
   expect(receiptPlan.join('\n')).toMatch(/SCAN channel_requests/);
   expect(receiptPlan.join('\n')).toMatch(/SEARCH t USING PRIMARY KEY/);

@@ -369,7 +369,16 @@ describe('before-action approval flow', () => {
     await s.tick(Date.now());
     const turns = await s.turnRequests();
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.message).toContain('fix the title first');
+    expect(turns[0]?.message).not.toContain('fix the title first');
+    expect(await s.approvalReceipts(created.id)).toEqual([
+      expect.objectContaining({
+        taskId: created.id,
+        actorDid: 'did:ixo:taskstestuser',
+        decision: 'approve',
+        note: 'fix the title first',
+        digest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }),
+    ]);
     expect(turns[0]?.message).toContain('Publish the post.');
     t = await s.get(created.id);
     expect(t?.status).toBe('completed');
@@ -1337,7 +1346,7 @@ describe('approval: the approved run executes on the alarm', () => {
     await s.tick(Date.now());
     const turns = await s.turnRequests();
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.message).toContain('fix the title first');
+    expect(turns[0]?.message).not.toContain('fix the title first');
     const task = await s.get(created.id);
     expect(task?.status).toBe('completed');
     expect(task?.lastResult?.ok).toBe(true);
@@ -1363,7 +1372,10 @@ describe('approval: the approved run executes on the alarm', () => {
 
     await s.tick(Date.now());
     expect(await s.turnRequests()).toHaveLength(1);
-    expect((await s.turnRequests())[0]?.message).toContain('go');
+    expect((await s.turnRequests())[0]?.message).not.toContain(
+      'approved this run with a note',
+    );
+    expect((await s.approvalReceipts(created.id))[0]?.note).toBe('go');
     expect((await s.get(created.id))?.status).toBe('completed');
 
     // Neither another tick nor another reset runs it again.
@@ -1883,6 +1895,190 @@ describe('dedicated rooms by cadence', () => {
 });
 
 describe('approval requests across a reset', () => {
+  it.each(['approval', 'schedule'] as const)(
+    'fences a due snapshot when %s changes before the ledger transaction',
+    async (change) => {
+      const s = stub(`run-snapshot-${change}`);
+      await s.init();
+      const at = inOneMinute();
+      const task = await s.create({
+        title: 'Fenced fire',
+        intent: 'Run frozen inputs.',
+        schedule: { kind: 'once', at },
+        approval: 'never',
+        dedicatedRoom: 'no',
+      });
+      await s.blockNextTransaction();
+      const ticking = s.tick(Date.parse(at) + 1);
+      await waitFor(() => s.isTransactionBlocked());
+      if (change === 'approval')
+        await s.update(task.id, { approval: 'before-action' });
+      else
+        await s.update(task.id, {
+          schedule: {
+            kind: 'once',
+            at: new Date(Date.parse(at) + 3600000).toISOString(),
+          },
+        });
+      await s.releaseTransaction();
+      await ticking;
+      await s.tick(Date.parse(at) + 2);
+      expect(await s.turnRequests()).toEqual([]);
+      expect(
+        (await s.runsFor(task.id)).filter(
+          (run) => run.detail !== 'approval requested',
+        ),
+      ).toEqual([]);
+      const current = await s.get(task.id);
+      expect(current).toMatchObject(
+        change === 'approval'
+          ? { approval: 'before-action' }
+          : { nextRunAt: new Date(Date.parse(at) + 3600000).toISOString() },
+      );
+    },
+  );
+  it('recovers a reset before the first approval message reaches Matrix', async () => {
+    const s = stub('approval-reset-before-send');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Before send',
+      intent: 'Publish once.',
+      dedicatedRoom: 'no',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('hang-before-send');
+    void s.tick(Date.parse(at) + 1);
+    await waitFor(async () => Boolean((await s.get(task.id))?.approvalRequest));
+    const pending = await s.get(task.id);
+    expect(pending?.approvalRequest?.delivery).toBe('pending');
+    expect(pending?.nextRunAt).toBeDefined();
+    expect(
+      (await s.sentMessages()).filter((message) =>
+        message.body.includes('needs your approval'),
+      ),
+    ).toEqual([]);
+    await s.simulateReset();
+    await s.setSendBehavior('ok');
+    await s.tick(Date.parse(pending!.nextRunAt!));
+    expect((await s.get(task.id))?.approvalRequest).toEqual({
+      ...pending?.approvalRequest,
+      delivery: 'delivered',
+    });
+    expect(
+      (await s.sentMessages()).filter((message) =>
+        message.body.includes('needs your approval'),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        txnId: `task-approval-${task.id}-${pending?.approvalRequest?.id}`,
+      }),
+    ]);
+    expect(await s.turnRequests()).toEqual([]);
+  });
+  it('reissues legacy timestamp approvals rather than executing or stranding them', async () => {
+    const s = stub('approval-legacy-migration');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Legacy approval',
+      intent: 'Publish.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.runSql(
+      `UPDATE tasks SET next_run_at = NULL, pending_approval_at = ?, approved_at = ?, approval_request_json = NULL WHERE id = ?`,
+      [at, Date.now(), task.id],
+    );
+    await s.simulateReset();
+    await s.tick(Date.now() + 1);
+    expect(await s.turnRequests()).toEqual([]);
+    expect((await s.get(task.id))?.approvalRequest?.id).toBeDefined();
+    expect((await s.get(task.id))?.approvalRequest?.delivery).toBe('delivered');
+  });
+  it('invalidates the exact request when inputs change before or after approval', async () => {
+    const s = stub('approval-revision-bound');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Frozen inputs',
+      intent: 'Publish version one.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.tick(Date.parse(at) + 1);
+    const first = (await s.get(task.id))?.approvalRequest;
+    expect(first?.digest).toMatch(/^[a-f0-9]{64}$/);
+    await s.update(task.id, { intent: 'Publish version two.' });
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, first?.id),
+    ).toEqual({ resolved: false });
+    await s.tick(Date.now() + 1);
+    const second = (await s.get(task.id))?.approvalRequest;
+    expect(second?.id).not.toBe(first?.id);
+    expect(second?.digest).not.toBe(first?.digest);
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, second?.id),
+    ).toEqual({ resolved: true });
+    await s.update(task.id, { intent: 'Publish version three.' });
+    await s.tick(Date.now() + 1);
+    expect(await s.turnRequests()).toEqual([]);
+    expect((await s.get(task.id))?.intent).toBe('Publish version three.');
+    expect((await s.get(task.id))?.approvalRequest?.id).not.toBe(second?.id);
+  });
+
+  it('does not overwrite an edit made while an approval message is in flight', async () => {
+    const s = stub('approval-edit-during-send');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Edit in flight',
+      intent: 'Original.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('hang');
+    void s.tick(Date.parse(at) + 1);
+    await waitFor(async () => Boolean((await s.get(task.id))?.approvalRequest));
+    const originalId = (await s.get(task.id))?.approvalRequest?.id;
+    await s.update(task.id, { intent: 'Replacement.' });
+    await s.releaseSends();
+    expect((await s.get(task.id))?.intent).toBe('Replacement.');
+    expect(
+      await s.resolveApproval(task.id, 'approve', undefined, originalId),
+    ).toEqual({ resolved: false });
+    expect(await s.turnRequests()).toEqual([]);
+  });
+
+  it('retries a failed approval delivery after restart with the persisted occurrence and request id', async () => {
+    const s = stub('approval-delivery-retry');
+    await s.init();
+    const at = inOneMinute();
+    const task = await s.create({
+      title: 'Retry delivery',
+      intent: 'Publish once.',
+      schedule: { kind: 'once', at },
+      approval: 'before-action',
+    });
+    await s.setSendBehavior('fail');
+    await s.tick(Date.parse(at) + 1);
+    const pending = (await s.get(task.id))?.approvalRequest;
+    expect(pending?.delivery).toBe('pending');
+    const retryAt = (await s.get(task.id))?.nextRunAt;
+    expect(retryAt).toBeDefined();
+    await s.simulateReset();
+    await s.setSendBehavior('ok');
+    await s.tick(Date.parse(retryAt!));
+    const delivered = (await s.get(task.id))?.approvalRequest;
+    expect(delivered).toEqual({ ...pending, delivery: 'delivered' });
+    expect(
+      (await s.sentMessages()).find((message) =>
+        message.body.includes('needs your approval'),
+      )?.txnId,
+    ).toBe(`task-approval-${task.id}-${pending?.id}`);
+    expect(await s.turnRequests()).toEqual([]);
+  });
   it('a request sent just before a reset is not posted again by the next tick', async () => {
     const s = stub('approval-reset-mid-send');
     await s.init();
@@ -1893,14 +2089,19 @@ describe('approval requests across a reset', () => {
       schedule: { kind: 'once', at },
       approval: 'before-action',
     });
-    // The send reaches the room, then the object resets before the
-    // request is recorded on the task.
+    // The send reaches Matrix, then the object resets before acknowledgement.
     await s.setSendBehavior('hang');
     void s.tick(Date.parse(at) + 1);
     await waitFor(async () =>
       (await s.sentMessages()).some((m) =>
         m.body.includes('needs your approval'),
       ),
+    );
+    const before = await s.get(created.id);
+    expect(before?.approvalRequest?.delivery).toBe('pending');
+    expect(before?.nextRunAt).toBeDefined();
+    expect((await s.requestedAlarms()).at(-1)).toBe(
+      Date.parse(before!.nextRunAt!),
     );
     await s.simulateReset();
     await s.setSendBehavior('ok');
@@ -1909,6 +2110,13 @@ describe('approval requests across a reset', () => {
       m.body.includes('needs your approval'),
     );
     expect(requests).toHaveLength(1);
-    expect(pendingApprovalOf((await s.get(created.id))!)).toBeDefined();
+    const recovered = await s.get(created.id);
+    expect(recovered?.approvalRequest).toEqual({
+      ...before?.approvalRequest,
+      delivery: 'delivered',
+    });
+    expect(recovered?.nextRunAt).toBeUndefined();
+    expect(pendingApprovalOf(recovered!)).toBeDefined();
+    expect(await s.turnRequests()).toEqual([]);
   });
 });

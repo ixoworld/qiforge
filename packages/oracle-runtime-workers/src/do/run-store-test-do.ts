@@ -227,6 +227,16 @@ export class RunStoreTestDO extends DurableObject {
   async listClaims(): Promise<WriteClaimRecord[]> {
     return (await this.runStore()).listClaims();
   }
+  async reconcileWrite(
+    fingerprint: string,
+    input: Parameters<RunStore['reconcileWrite']>[2],
+  ): Promise<boolean> {
+    return (await this.runStore()).reconcileWrite(
+      fingerprint,
+      'did:ixo:test-owner',
+      input,
+    );
+  }
 
   /** Close the database so the next call re-opens it (a fresh `RunStore`, setup again). */
   async reopen(): Promise<void> {

@@ -147,17 +147,58 @@ describe('SandboxPlugin (Workers port)', () => {
     );
   });
 
-  it('mints the full header set: Bearer + X-Auth-Type + X-Skills-Invocation + x-os-* + x-us-*', async () => {
-    const plugin = new SandboxPlugin({ mcpClientFactory: factory });
-    await plugin.getRequestTools(makeCtx());
+  it('does not infer MCP read effects from a read-looking tool name without an upstream hint', async () => {
+    upstream.push({
+      name: 'list_external',
+      description: 'upstream text',
+      schema: z.object({}),
+      invoke: async () => 'result',
+    });
+    upstream.push({
+      name: 'trusted_read',
+      description: 'upstream read text',
+      annotations: { readOnlyHint: true },
+      schema: z.object({}),
+      invoke: async () => 'result',
+    });
+    const tools = await new SandboxPlugin({
+      mcpClientFactory: factory,
+    }).getRequestTools(makeCtx());
+    expect(tools.find((tool) => tool.name === 'list_external')).toMatchObject({
+      effect: 'write',
+      description: 'upstream text',
+    });
+    expect(tools.find((tool) => tool.name === 'trusted_read')).toMatchObject({
+      effect: 'read',
+      annotations: { readOnlyHint: true },
+    });
+  });
+
+  it('lists definitions without credentials and sends only host-selected credentials at execution', async () => {
+    const plugin = new SandboxPlugin({
+      mcpClientFactory: factory,
+      selectCredentials: async () => ({
+        user: ['MY_KEY'],
+        oracle: ['API_KEY'],
+      }),
+    });
+    const ctx = makeCtx();
+    const tools = await plugin.getRequestTools(ctx);
 
     expect(capturedConfigs.length).toBe(1);
     expect(headersOf(capturedConfigs[0])).toEqual({
       Authorization: 'Bearer sandbox-token',
       'X-Auth-Type': 'ucan',
       'X-Skills-Invocation': 'skills-token',
+    });
+    await tools
+      .find((tool) => tool.name === 'sandbox_run')
+      ?.handler({ code: 'echo hi' }, ctx);
+    expect(headersOf(capturedConfigs[1])).toEqual({
+      Authorization: 'Bearer sandbox-token',
+      'X-Auth-Type': 'ucan',
+      'X-Skills-Invocation': 'skills-token',
       'x-os-api_key': 'os-value',
-      'x-os-other_key': 'second',
       'x-us-my_key': 'user-secret',
     });
   });

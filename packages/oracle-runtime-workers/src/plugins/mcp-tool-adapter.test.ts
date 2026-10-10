@@ -66,6 +66,23 @@ describe('mcpToolZodSchema', () => {
 });
 
 describe('adaptMcpClientTools', () => {
+  it('retains upstream MCP annotations from the SDK metadata', () => {
+    const annotations = {
+      readOnlyHint: false,
+      idempotentHint: false,
+      title: 'Exact upstream',
+    };
+    const [adapted] = adaptMcpClientTools([
+      {
+        name: 'get_and_send',
+        description: 'verbatim',
+        metadata: { annotations },
+        schema: z.object({}),
+        invoke: async () => 'ok',
+      },
+    ]);
+    expect(adapted?.annotations).toEqual(annotations);
+  });
   it('keeps name and description verbatim and forwards invoke unchanged', async () => {
     const seen: unknown[] = [];
     const [adapted] = adaptMcpClientTools([

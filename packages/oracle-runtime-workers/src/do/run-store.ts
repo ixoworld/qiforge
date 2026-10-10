@@ -26,6 +26,10 @@
  */
 import type { DoSqliteDatabase } from '../sqlite/database';
 import type { PackedSegment } from './run-buffer';
+import {
+  WriteReconciliationSchema,
+  type WriteReconciliation,
+} from './write-reconciliation';
 
 export type RunStatus =
   | 'queued'
@@ -147,7 +151,7 @@ export interface RunRecord {
 /**
  * A write whose outcome the ledger still has to account for (tool-execution.ts).
  * `pending`: started, no known outcome yet. `warned`: an identical write was
- * refused since and the model was told; a later turn may run it again.
+ * refused since and the model was told. Both require explicit reconciliation.
  */
 export interface WriteClaimRecord {
   fingerprint: string;
@@ -500,6 +504,11 @@ export class RunStore {
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_turn_write_claims_started ON turn_write_claims(started_at)`,
     );
+    await this.db.run(`CREATE TABLE IF NOT EXISTS turn_write_reconciliations (
+      fingerprint TEXT NOT NULL, run_id TEXT NOT NULL, actor_did TEXT NOT NULL,
+      evidence_ref TEXT NOT NULL, outcome TEXT NOT NULL, authorize_retry INTEGER NOT NULL,
+      reconciled_at TEXT NOT NULL, PRIMARY KEY (fingerprint, run_id, evidence_ref)
+    ) WITHOUT ROWID`);
     await this.pruneEnded();
   }
 
@@ -512,9 +521,6 @@ export class RunStore {
    */
   private async pruneEnded(): Promise<void> {
     const cutoff = new Date(this.now() - RUN_RETENTION_MS).toISOString();
-    await this.db.run(`DELETE FROM turn_write_claims WHERE started_at < ?`, [
-      cutoff,
-    ]);
     const stale = `SELECT run_id FROM turn_runs WHERE ${STALE_RUN_FILTER}`;
     if (await this.db.get(`${stale} LIMIT 1`, [cutoff]))
       await this.db.transaction(async () => {
@@ -868,9 +874,8 @@ export class RunStore {
   /**
    * Claim a write before it runs. `claimed` when no identical write is
    * outstanding. `blocked` when one is: a `pending` claim becomes `warned`
-   * (owned by this run, so the same turn stays blocked); a claim already
-   * `warned` by an earlier run is released to this run — the user was told
-   * and asked again.
+   * (the original execution remains its owner). A different turn or an old
+   * run retention deadline never proves that an external effect did not occur.
    */
   async claimWrite(input: {
     fingerprint: string;
@@ -896,17 +901,10 @@ export class RunStore {
     if (inserted.changes === 1) return { status: 'claimed' };
     const existing = await this.getClaim(input.fingerprint);
     if (!existing) return { status: 'claimed' };
-    if (existing.state === 'warned' && existing.runId !== input.runId) {
-      await this.db.run(
-        `UPDATE turn_write_claims SET run_id = ?, session_id = ?, started_at = ?, state = 'pending' WHERE fingerprint = ?`,
-        [input.runId, input.sessionId, this.iso(), input.fingerprint],
-      );
-      return { status: 'claimed' };
-    }
     if (existing.state === 'pending')
       await this.db.run(
-        `UPDATE turn_write_claims SET state = 'warned', run_id = ? WHERE fingerprint = ? AND state = 'pending'`,
-        [input.runId, input.fingerprint],
+        `UPDATE turn_write_claims SET state = 'warned' WHERE fingerprint = ? AND state = 'pending'`,
+        [input.fingerprint],
       );
     return {
       status: 'blocked',
@@ -942,5 +940,53 @@ export class RunStore {
        FROM turn_write_claims ORDER BY started_at ASC`,
     );
     return rows.map(toClaim);
+  }
+
+  /** Called only by the authenticated owner RPC, never a model tool. */
+  async reconcileWrite(
+    fingerprint: string,
+    actorDid: string,
+    input: WriteReconciliation,
+  ): Promise<boolean> {
+    const decision = WriteReconciliationSchema.parse(input);
+    await this.setup();
+    return this.db.transaction(async () => {
+      const previous = await this.db.get<{
+        outcome: string;
+        authorize_retry: number;
+        actor_did: string;
+      }>(
+        `SELECT outcome, authorize_retry, actor_did FROM turn_write_reconciliations
+         WHERE fingerprint = ? AND run_id = ? AND evidence_ref = ?`,
+        [fingerprint, decision.expectedRunId, decision.evidenceRef],
+      );
+      if (
+        previous &&
+        (previous.outcome !== decision.outcome ||
+          previous.authorize_retry !== (decision.authorizeRetry ? 1 : 0) ||
+          previous.actor_did !== actorDid)
+      )
+        return false;
+      if (previous) return true;
+      const claim = await this.getClaim(fingerprint);
+      if (!claim || claim.runId !== decision.expectedRunId) return false;
+      await this.db.run(
+        `INSERT OR IGNORE INTO turn_write_reconciliations
+        (fingerprint, run_id, actor_did, evidence_ref, outcome, authorize_retry, reconciled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          fingerprint,
+          claim.runId,
+          actorDid,
+          decision.evidenceRef,
+          decision.outcome,
+          decision.authorizeRetry ? 1 : 0,
+          this.iso(),
+        ],
+      );
+      if (decision.authorizeRetry)
+        await this.releaseWrite(fingerprint, claim.runId);
+      return true;
+    });
   }
 }
