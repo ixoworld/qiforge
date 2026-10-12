@@ -29,6 +29,8 @@ import { briefBody, record } from './document';
 import { boundFindings } from './findings';
 import { decode, INDEX_MAX_BYTES, verifyBytes } from './integrity';
 import { LruMap } from './lru';
+import type { Logger } from '../../plugin-api/types';
+import { NOOP_LOGGER } from '../utils';
 import type {
   DocumentRequest,
   DomainAnchor,
@@ -189,8 +191,11 @@ export class DomainContextResolver {
     weigh: parsedWeight,
   });
 
-  constructor(opts: { now?: () => number } = {}) {
+  private readonly logger: Logger;
+
+  constructor(opts: { now?: () => number; logger?: Logger } = {}) {
     this.now = opts.now ?? Date.now;
+    this.logger = opts.logger ?? NOOP_LOGGER;
   }
 
   /**
@@ -374,6 +379,13 @@ export class DomainContextResolver {
 
   private failed(snapshot: DomainSnapshot, error: unknown): DomainSnapshot {
     const code = errorCode(error, 'resolution-failed');
+    // A failure outside the finding vocabulary is a runtime fault (a thrown
+    // TypeError, a provider's message), not a property of the domain: the
+    // provenance only carries the fallback code, so the cause goes to the log.
+    if (errorCode(error, '') === '')
+      this.logger.warn(
+        `[domain-context] resolution of ${snapshot.did} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     const failed: DomainSnapshot = {
       ...snapshot,
       status: INVALID_PATTERN.test(code) ? 'invalid' : 'unavailable',
