@@ -762,7 +762,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * Domain-context anchors and documents, cached for every session of this
      * object; `refresh_domain_context` invalidates entries here.
      */
-    private readonly domainResolver = new DomainContextResolver();
+    private readonly domainResolver = new DomainContextResolver({
+      logger: console,
+    });
     /** Per-turn domain-context provenance (`domain_context_runs`). */
     private domainContextStore: DomainContextStore | null = null;
     private runs: RunCoordinator | null = null;

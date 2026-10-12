@@ -1600,6 +1600,7 @@ or nesting deeper than 16 levels; refused without linting), `resolution-timeout`
 `pass1-timeout`, `pass1-document-unavailable`, `brief-over-budget`,
 `additional-pass1-documents-require-read`, `pinned-revision-unavailable`,
 `findings-truncated`. The read errors `document-origin-denied`,
+`document-redirect-refused` (a 3xx answer: redirects are never followed),
 `private-reader-unavailable`, `invalid-ipfs-uri` and the like surface as
 findings only for the anchor's own index read; a pass-1 or linked document
 that fails for any reason is reported as `pass1-document-unavailable` (or,
@@ -1608,7 +1609,11 @@ underlying code. The validator's `cid-verification` check is never listed as
 `unresolved:`: the runtime verifies the index and every linked document
 against its CID itself.
 
-A failure to write the row or to pin the run's anchors is logged as
+A resolution that fails outside that vocabulary — a thrown `TypeError`, a
+provider's own message — is reported as `resolution-failed` and the cause
+goes to the log as `[domain-context] resolution of <did> failed: <message>`
+(the provenance frame never carries it). A failure to write the row or to
+pin the run's anchors is logged as
 `[domain-context] …` and never fails the turn; neither does any domain
 failure: the turn runs with whatever verified context there is, under the
 existing capability checks.

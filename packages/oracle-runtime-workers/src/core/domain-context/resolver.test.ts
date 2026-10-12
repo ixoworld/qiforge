@@ -17,6 +17,7 @@ import { record } from './document';
 import { boundFindings, FINDINGS_TRUNCATED, MAX_FINDINGS } from './findings';
 import { cidOf } from './integrity';
 import { LruMap } from './lru';
+import { NOOP_LOGGER } from '../utils';
 import {
   DomainContextResolver,
   MAX_FRONTMATTER_BYTES,
@@ -47,6 +48,44 @@ function deferred<T>() {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('DomainContextResolver: failures outside the finding vocabulary', () => {
+  it('reports resolution-failed and logs the cause', async () => {
+    const warn = vi.fn();
+    const transport: DomainTransport = {
+      isPublic: () => true,
+      resolve: async () => {
+        throw new TypeError(
+          'Invalid redirect value, must be one of "follow" or "manual"',
+        );
+      },
+      read: async () => new Uint8Array(),
+    };
+    const snapshot = await new DomainContextResolver({
+      logger: { ...NOOP_LOGGER, warn },
+    }).load(did, transport);
+    expect(snapshot.status).toBe('unavailable');
+    expect(snapshot.findings).toContain('resolution-failed');
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('Invalid redirect value');
+  });
+
+  it('does not log a failure that is itself a finding code', async () => {
+    const warn = vi.fn();
+    const transport: DomainTransport = {
+      isPublic: () => true,
+      resolve: async () => {
+        throw new Error('iid-unavailable');
+      },
+      read: async () => new Uint8Array(),
+    };
+    const snapshot = await new DomainContextResolver({
+      logger: { ...NOOP_LOGGER, warn },
+    }).load(did, transport);
+    expect(snapshot.findings).toContain('iid-unavailable');
+    expect(warn).not.toHaveBeenCalled();
+  });
 });
 
 describe('DomainContextResolver: verification', () => {

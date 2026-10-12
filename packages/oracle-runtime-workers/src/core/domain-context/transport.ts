@@ -2,8 +2,10 @@
  * The network edge of domain context: the IID anchor lookup on Blocksync and
  * document reads. Reads go only to https origins on an allowlist (configured
  * origins, the VFS, the Matrix homeserver, the IPFS gateway), never follow
- * redirects, never carry URL credentials and never buffer more than the
- * request's byte bound. Private documents are read through the user's VFS
+ * redirects (a 3xx answer is refused: workerd has no `redirect: 'error'`, so
+ * every request is made with `redirect: 'manual'` and the status checked),
+ * never carry URL credentials and never buffer more than the request's byte
+ * bound. Private documents are read through the user's VFS
  * UCAN bearer or the host's `readPrivateDocument` adapter.
  */
 import { CID } from 'multiformats/cid';
@@ -20,6 +22,32 @@ import type {
   DomainContextOptions,
   DomainTransport,
 } from './types';
+
+/** What `createDomainTransport` needs beyond the runtime context; tests inject a fetch. */
+export interface DomainTransportDeps {
+  /** Default: the global `fetch`, looked up per call. */
+  fetch?: typeof fetch;
+}
+
+/**
+ * A request that never follows a redirect. `redirect: 'error'` does not
+ * exist on workerd (it throws a TypeError before any network call), so the
+ * request is made with `redirect: 'manual'`, which hands back the 3xx
+ * answer itself, and any 3xx is refused with `code`, its body cancelled.
+ */
+export async function fetchWithoutRedirects(
+  fetcher: typeof fetch,
+  input: string | URL,
+  init: RequestInit,
+  code: string,
+): Promise<Response> {
+  const response = await fetcher(input, { ...init, redirect: 'manual' });
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(code);
+  }
+  return response;
+}
 
 /** Bound of one document read when the caller's signal does not end it sooner. */
 export const DOCUMENT_READ_TIMEOUT_MS = 10_000;
@@ -136,7 +164,12 @@ function positiveNumber(value: unknown, fallback: number): number {
 export function createDomainTransport(
   options: DomainContextOptions,
   ctx: RuntimeContext,
+  deps: DomainTransportDeps = {},
 ): DomainTransport {
+  // Never keep the bare global: workerd rejects `fetch` invoked with a
+  // foreign `this`, and a test may stub the global after this is built.
+  const fetcher: typeof fetch =
+    deps.fetch ?? ((input, init) => globalThis.fetch(input, init));
   const blocksync =
     typeof ctx.config.BLOCKSYNC_GRAPHQL_URL === 'string'
       ? ctx.config.BLOCKSYNC_GRAPHQL_URL
@@ -222,13 +255,17 @@ export function createDomainTransport(
 
     async resolve(did, signal) {
       if (!blocksync) throw new Error('iid-unavailable');
-      const response = await fetch(blocksync, {
-        method: 'POST',
-        redirect: 'error',
-        signal,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ query: IID_QUERY, variables: { id: did } }),
-      });
+      const response = await fetchWithoutRedirects(
+        fetcher,
+        blocksync,
+        {
+          method: 'POST',
+          signal,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ query: IID_QUERY, variables: { id: did } }),
+        },
+        'iid-unavailable',
+      );
       const body = iidResponse.safeParse(
         JSON.parse(
           new TextDecoder().decode(
@@ -332,7 +369,12 @@ export function createDomainTransport(
         headers.Authorization = `Bearer ${credentials.accessToken}`;
       }
       return boundedBytes(
-        await fetch(url, { headers, redirect: 'error', signal }),
+        await fetchWithoutRedirects(
+          fetcher,
+          url,
+          { headers, signal },
+          'document-redirect-refused',
+        ),
         request.maxBytes,
       );
     },

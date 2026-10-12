@@ -16,8 +16,44 @@ export { RealtimeTestDO } from '../src/realtime/test-do';
 export { RunStoreTestDO } from '../src/do/run-store-test-do';
 export { ResultStoreTestDO } from '../src/do/result-store-test-do';
 
+/**
+ * Stub endpoints behind the `LOOPBACK` service binding (this worker bound to
+ * itself), so a test can drive production code through workerd's real
+ * `fetch` — its request validation included — instead of a stubbed global.
+ * Paths under `/domain-context-stub/` play Blocksync and a document host for
+ * the domain-context transport.
+ */
+async function domainContextStub(request: Request): Promise<Response | null> {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  if (!path.startsWith('/domain-context-stub/')) return null;
+  const redirectTo = (target: string) =>
+    new Response(null, {
+      status: 302,
+      headers: { location: new URL(target, url).href },
+    });
+  if (path === '/domain-context-stub/graphql' && request.method === 'POST') {
+    const body = await request.json<{ variables?: { id?: string } }>();
+    const id = body.variables?.id ?? '';
+    // An IID without a `#dom` resource: the anchor is missing, not failed.
+    return Response.json({
+      data: { iids: { nodes: [{ id, linkedResource: [] }] } },
+    });
+  }
+  if (path === '/domain-context-stub/graphql-redirect')
+    return redirectTo('/domain-context-stub/graphql');
+  if (path === '/domain-context-stub/doc.md')
+    return new Response('hello from loopback');
+  if (path === '/domain-context-stub/redirect')
+    return redirectTo('/domain-context-stub/doc.md');
+  return new Response('not found', { status: 404 });
+}
+
 export default {
-  async fetch(): Promise<Response> {
-    return new Response('oracle-runtime-workers test worker', { status: 200 });
+  async fetch(request: Request): Promise<Response> {
+    return (
+      (await domainContextStub(request)) ??
+      new Response('oracle-runtime-workers test worker', { status: 200 })
+    );
   },
 };

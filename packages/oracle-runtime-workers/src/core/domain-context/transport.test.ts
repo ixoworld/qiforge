@@ -118,8 +118,50 @@ describe('createDomainTransport: origin policy', () => {
     const bytes = await transport.read(request('https://docs.example/x'));
     expect(new TextDecoder().decode(bytes)).toBe('hello');
     const init = fetcher.mock.calls[0]?.[1];
-    expect(init?.redirect).toBe('error');
+    // workerd has no `redirect: 'error'`: the request is made with
+    // `'manual'` and a 3xx answer is refused by the transport itself.
+    expect(init?.redirect).toBe('manual');
     expect(new Headers(init?.headers).has('authorization')).toBe(false);
+  });
+
+  it('refuses a redirected document instead of following it', async () => {
+    const fetcher = stubFetch(
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://docs.example/elsewhere' },
+        }),
+    );
+    const transport = createDomainTransport(options, context());
+    await expect(
+      transport.read(request('https://docs.example/x')),
+    ).rejects.toThrow('document-redirect-refused');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a redirected Blocksync answer as an unavailable IID', async () => {
+    const fetcher = stubFetch(
+      () =>
+        new Response(null, {
+          status: 301,
+          headers: { location: 'https://iid.example/elsewhere' },
+        }),
+    );
+    const transport = createDomainTransport(options, context());
+    await expect(transport.resolve(did)).rejects.toThrow('iid-unavailable');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses an injected fetch in place of the global one', async () => {
+    const global = stubFetch(() => new Response('global'));
+    const injected = vi.fn<typeof fetch>(async () => new Response('injected'));
+    const transport = createDomainTransport(options, context(), {
+      fetch: injected,
+    });
+    const bytes = await transport.read(request('https://docs.example/x'));
+    expect(new TextDecoder().decode(bytes)).toBe('injected');
+    expect(injected).toHaveBeenCalledTimes(1);
+    expect(global).not.toHaveBeenCalled();
   });
 
   it('maps ipfs:// to the configured gateway and refuses path tricks', async () => {
@@ -323,7 +365,7 @@ describe('createDomainTransport: IID anchor lookup', () => {
     const cid = await cidOf(fixtureBytes);
     const fetcher = stubFetch((url, init) => {
       expect(url).toBe(BLOCKSYNC);
-      expect(init?.redirect).toBe('error');
+      expect(init?.redirect).toBe('manual');
       return iidResponse([
         {
           id: '{id}#other',
