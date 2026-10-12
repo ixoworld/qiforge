@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.17.1
+
+### Patch Changes
+
+- [#355](https://github.com/ixoworld/qiforge/pull/355) [`07fc091`](https://github.com/ixoworld/qiforge/commit/07fc091f99d9d279d840b6f63e9ee9b021b9eecd) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Domain context resolved every anchor as `unavailable` / `resolution-failed` on Cloudflare: the transport asked `fetch` for `redirect: 'error'`, which workerd refuses with a TypeError before any network call. Requests are now made with `redirect: 'manual'` and a 3xx answer is refused by the transport itself (`iid-unavailable` for the Blocksync lookup, the new `document-redirect-refused` for a document read), so redirects are still never followed. A resolution failure that is not a finding code is now logged as `[domain-context] resolution of <did> failed: <message>`. The transport accepts an injected `fetch`, and a workerd test drives it through a loopback service binding so the request options reach the real runtime.
+
 ## 0.17.0
 
 ### Minor Changes
