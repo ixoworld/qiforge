@@ -1,11 +1,3 @@
-export {
-  buildSemanticConformanceVariants,
-} from './conformance.js';
-export type {
-  SemanticConformanceVariant,
-  SemanticConformanceVariantKind,
-} from './conformance.js';
-
 export { runDecisionProviderBakeoff } from './benchmark.js';
 export type {
   DecisionBenchmarkCase,
@@ -26,6 +18,7 @@ export type { DecisionLimits } from './validation.js';
 
 export {
   DEFAULT_DECISION_TIMEOUT_MS,
+  DecisionNotApplicableError,
   DecisionProviderUnavailableError,
   DecisionRuntime,
   UNAVAILABLE_DECISION_EVALUATOR,
@@ -35,6 +28,48 @@ export type {
   DecisionLookup,
   DecisionRuntimeLogger,
 } from './runtime.js';
+
+export {
+  AmbiguousDecisionProviderError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
+  HOST_DECISION_PROVIDER_ID,
+} from './provider-router.js';
+export type {
+  DecisionProviderPolicy,
+  DecisionProviderRegistration,
+  DecisionProviderResolution,
+} from './provider-router.js';
+
+export {
+  StaleDecisionSubjectError,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
+  digestFinalDecisionSubject,
+} from './final-subject.js';
+export type {
+  DecisionAuthorityReceipt,
+  DecisionExecution,
+  DecisionExecutionReceipt,
+  FinalDecisionSubject,
+  FinalDecisionSubjectBinding,
+  FinalDecisionSubjectValue,
+} from './final-subject.js';
+
+export { measureDecisionQuestionIsolation } from './conformance.js';
+export type {
+  DecisionQuestionIsolationObservation,
+  DecisionQuestionIsolationReport,
+} from './conformance.js';
+
+export { buildSemanticConformanceVariants } from './semantic-conformance.js';
+export type {
+  SemanticConformanceVariant,
+  SemanticConformanceVariantKind,
+} from './semantic-conformance.js';
 
 export {
   CloudflareJevDecisionAdapter,
@@ -103,18 +138,23 @@ export type {
   ChoiceDecisionAnswer,
   ChoiceDecisionQuestion,
   DecisionAdapter,
-  DecisionCalibrationProfile,
-  DecisionCalibrationPrimitive,
   DecisionAnswer,
+  DecisionApplicability,
+  DecisionCalibrationPrimitive,
+  DecisionCalibrationProfile,
+  DecisionCalibrationProvenance,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
   DecisionInferenceDialect,
+  DecisionJudgmentMethod,
+  DecisionJudgmentProvenance,
   DecisionModelPinning,
   DecisionProviderCapabilities,
   DecisionProviderOptions,
   DecisionProviderProvenance,
   DecisionProviderResult,
+  DecisionProviderSelection,
   DecisionQuestion,
   DecisionRegistration,
   DecisionRequest,

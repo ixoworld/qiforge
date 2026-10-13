@@ -20,6 +20,8 @@ export const HOOK_TYPES = [
 
 export interface ActionSummary {
   action: string;
+  /** See {@link actionCategory}. */
+  category: string;
   summary: string;
   whenToUse: string[];
   tags: string[];
@@ -146,16 +148,32 @@ function outputFields(def: ActionDefinition): ActionField[] {
   }));
 }
 
+/**
+ * An action's category: the namespace in its name — the part after "qi/" up
+ * to the first dot ("qi/claim.submit" → "claim", "qi/governance.transaction.send-funds"
+ * → "governance"); an action outside the "qi/" namespace is its own category
+ * ("oracle"). The registry declares no category, so the name is the only
+ * stable source.
+ */
+export function actionCategory(type: string): string {
+  const local = type.startsWith('qi/') ? type.slice('qi/'.length) : type;
+  const dot = local.indexOf('.');
+  return (dot > 0 ? local.slice(0, dot) : local).toLowerCase();
+}
+
 export function listActions(filter?: {
   category?: string;
   tag?: string;
 }): ActionSummary[] {
+  const category = filter?.category?.toLowerCase();
   const result: ActionSummary[] = [];
   for (const def of getAllActions()) {
     const overlay = overlayFor(def);
     if (filter?.tag && !(overlay.tags ?? []).includes(filter.tag)) continue;
+    if (category && actionCategory(def.type) !== category) continue;
     result.push({
       action: def.type,
+      category: actionCategory(def.type),
       summary: overlay.summary ?? '',
       whenToUse: overlay.whenToUse ?? [],
       tags: overlay.tags ?? [],

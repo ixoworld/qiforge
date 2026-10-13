@@ -62,6 +62,7 @@ describe('Databricks decision adapters', () => {
 
     const result = await adapter.evaluate(request);
     expect(result.provenance).toEqual({
+      method: { kind: 'provider-native' },
       apiDialect: 'databricks-ai-decide-v1',
       functionVersion: '1.0',
       modelPinning: 'mutable',

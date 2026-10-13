@@ -41,6 +41,35 @@ describe('bounded decisions', () => {
     });
   });
 
+  it('validates explicit applicability metadata', () => {
+    const questions = {
+      route: { kind: 'boolean' as const, instructions: 'Use a tool?' },
+    };
+
+    expect(() =>
+      validateDecisionRequest({
+        state: { text: 'delegated task unavailable' },
+        applicability: {
+          applicable: false,
+          evidenceComplete: false,
+          reason: 'Encrypted agent message is not observable.',
+        },
+        questions,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validateDecisionRequest({
+        state: {},
+        applicability: {
+          applicable: true,
+          evidenceComplete: false,
+          reason: '   ',
+        },
+        questions,
+      }),
+    ).toThrow(/reason must be non-empty/);
+  });
+
   it('accepts scalar state as well as structured state', () => {
     expect(() =>
       validateDecisionRequest({
@@ -185,6 +214,78 @@ describe('bounded decisions', () => {
         },
       }),
     ).toThrow(/0 to 1/);
+  });
+
+  it('validates judgment method and calibration provenance', () => {
+    const request = routeDecision.prepare({ text: 'file my taxes' });
+    const answers = {
+      work: { kind: 'boolean' as const, probabilityTrue: 0.95 },
+      service: {
+        kind: 'choice' as const,
+        value: 'tax',
+        confidence: 0.9,
+        probabilities: { tax: 0.9, none: 0.1 },
+      },
+    };
+    const provenance = {
+      method: {
+        kind: 'specialized',
+        name: 'L2',
+        artifactRef: 'head:qwen3-4b:route:v3',
+      },
+      calibration: {
+        method: 'temperature-scaling',
+        artifactRef: 'cal:route:v3',
+        workload: 'support-routing',
+        evaluatedAt: '2026-09-24T00:00:00.000Z',
+        ece: 0.04,
+        brier: 0.12,
+      },
+    };
+
+    expect(
+      validateDecisionProviderResult(request, { answers, provenance })
+        .provenance,
+    ).toEqual(provenance);
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers,
+        provenance: { method: { kind: '' } },
+      }),
+    ).toThrow(/method kind/);
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers,
+        provenance: { method: { kind: 'raw', artifactRef: ' ' } },
+      }),
+    ).toThrow(/method artifactRef/);
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers,
+        provenance: {
+          method: { kind: 'calibrated' },
+          calibration: { method: 'isotonic', brier: Number.NaN },
+        },
+      }),
+    ).toThrow(/calibration brier/);
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers,
+        provenance: {
+          method: { kind: 'calibrated' },
+          calibration: { method: 'isotonic', evaluatedAt: 'last week' },
+        },
+      }),
+    ).toThrow(/evaluatedAt/);
+    expect(() =>
+      validateDecisionProviderResult(request, {
+        answers,
+        provenance: {
+          method: { kind: 'calibrated' },
+          calibration: { method: 'isotonic', workload: '' },
+        },
+      }),
+    ).toThrow(/calibration workload/);
   });
 
   it('fills omitted probabilities with zero and returns a copy', () => {

@@ -17,8 +17,13 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { ChatOpenAI } from '@langchain/openai';
 import type { ChatOpenAIFields, Logger } from '../plugin-api/types';
-import type { ProviderModelRole } from '../core/llm';
+import { streamLivenessFromEnv, type ProviderModelRole } from '../core/llm';
 import type { ByoCredential } from './byo-catalog';
+import {
+  livenessFetchFor,
+  livenessModelFields,
+  type StreamLivenessSettings,
+} from './stream-liveness';
 
 /** OpenAI-compatible base URLs for the API-key providers that need one. */
 export const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
@@ -133,6 +138,11 @@ export interface CreateByoChatModelArgs {
   logger?: Logger;
   /** ChatGPT lane only: where requests go (default: the real backend). */
   chatGptBackend?: ChatGptBackendConfig;
+  /**
+   * Liveness budgets for this model's calls (default: the BYO lane's
+   * defaults, see `streamLivenessFromEnv`).
+   */
+  streamLiveness?: StreamLivenessSettings;
 }
 
 const NOOP: Logger = {
@@ -164,17 +174,35 @@ export function createByoChatModel(
   // "Thinking..." for a minute before any error surfaces. Two attempts keep
   // transient-blip resilience while failing fast enough to report.
   const maxRetries = 2;
+  // Every call runs behind the stream liveness guard with the BYO lane's
+  // budgets: a direct provider may stay silent while a model reasons, so
+  // its idle budget is longer than the platform lane's.
+  const liveness = args.streamLiveness ?? streamLivenessFromEnv({}, 'byo');
+  const callerConfiguration = asRecord(params?.configuration);
+  const guardedFetch = (base?: typeof fetch): typeof fetch =>
+    livenessFetchFor({
+      settings: liveness,
+      label: `byo:${credential.provider} ${String(role)} ${modelId}`,
+      logger,
+      callerFetch: callerConfiguration.fetch,
+      ...(base ? { base } : {}),
+    });
 
   switch (credential.provider) {
     case 'openai':
       return new ChatOpenAI({
         __includeRawResponse: true,
         maxRetries,
+        ...livenessModelFields(liveness),
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
         temperature: undefined,
         topP: undefined,
+        configuration: {
+          ...callerConfiguration,
+          fetch: guardedFetch(),
+        },
       });
 
     case 'deepseek':
@@ -182,12 +210,14 @@ export function createByoChatModel(
         temperature,
         __includeRawResponse: true,
         maxRetries,
+        ...livenessModelFields(liveness),
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
         configuration: {
           baseURL: DEEPSEEK_BASE_URL,
-          ...asRecord(params?.configuration),
+          ...callerConfiguration,
+          fetch: guardedFetch(),
         },
       });
 
@@ -196,12 +226,14 @@ export function createByoChatModel(
         temperature,
         __includeRawResponse: true,
         maxRetries,
+        ...livenessModelFields(liveness),
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
         configuration: {
           baseURL: GEMINI_OPENAI_COMPAT_BASE_URL,
-          ...asRecord(params?.configuration),
+          ...callerConfiguration,
+          fetch: guardedFetch(),
         },
       });
 
@@ -211,6 +243,7 @@ export function createByoChatModel(
       return new ChatOpenAI({
         __includeRawResponse: true,
         maxRetries,
+        ...livenessModelFields(liveness),
         ...params,
         model: modelId,
         apiKey: credential.apiKey,
@@ -218,7 +251,8 @@ export function createByoChatModel(
         topP: undefined,
         configuration: {
           baseURL: ANTHROPIC_OPENAI_COMPAT_BASE_URL,
-          ...asRecord(params?.configuration),
+          ...callerConfiguration,
+          fetch: guardedFetch(),
         },
       });
 
@@ -232,7 +266,7 @@ export function createByoChatModel(
       // distinct headers upstream — send both. The backend rejects sampling
       // params (`temperature`/`top_p`) the way the standard API does for
       // reasoning models, and reports request errors with an EMPTY body —
-      // hence the diagnostic fetch.
+      // hence the diagnostic fetch, inside the liveness guard.
       const sessionId = crypto.randomUUID();
       return new ChatOpenAI({
         __includeRawResponse: true,
@@ -249,6 +283,7 @@ export function createByoChatModel(
         // Effort + human-readable reasoning summaries, exactly the pair the
         // Codex clients send — summaries feed the portal's thinking stream.
         reasoning: { effort: 'medium', summary: 'auto' },
+        ...livenessModelFields(liveness),
         ...params,
         model: modelId,
         apiKey: credential.oauth.accessToken,
@@ -257,8 +292,8 @@ export function createByoChatModel(
         topP: undefined,
         configuration: {
           baseURL: backend.baseUrl,
-          fetch: chatGptDiagnosticFetch(logger),
-          ...asRecord(params?.configuration),
+          ...callerConfiguration,
+          fetch: guardedFetch(chatGptDiagnosticFetch(logger)),
           defaultHeaders: {
             ...chatGptBackendHeaders(backend),
             'ChatGPT-Account-ID': credential.oauth.accountId,

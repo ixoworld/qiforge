@@ -242,6 +242,7 @@ async function withAdmissionHost(
       byoProvider: undefined,
       toolOutputCapChars: 10_000,
       delivery: { kind: 'stream' } satisfies DeliveryProfile,
+      usage: () => '{"tokens":0}',
     }));
     Object.assign(host, {
       db,
@@ -524,4 +525,151 @@ describe('UserOracleDO admission recovery', () => {
       },
     );
   });
+});
+
+describe('UserOracleDO run rows without an admission handler', () => {
+  it('records an agent turn at once and never rewrites its request', async () => {
+    await withAdmissionHost('admission-none', undefined, async (setup) => {
+      const req = turn();
+      const request = await call(
+        setup.host,
+        'runRequestJson',
+        req,
+        storedRunRequest(req),
+      );
+      if (typeof request !== 'string') throw new Error('no request JSON');
+      expect(JSON.parse(request).disposition).toEqual({ kind: 'agent' });
+      await setup.runStore.create({
+        runId: 'run',
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        client: req.client,
+        status: 'running',
+        request,
+        checkpointId: null,
+        instanceId: 'test',
+      });
+      const record = await setup.runStore.get('run');
+      if (!record) throw new Error('Missing run');
+      const update = vi.spyOn(setup.runStore, 'update');
+      const live: LiveRun = {
+        runId: 'run',
+        sessionId: req.sessionId,
+        requestId: req.requestId,
+        record,
+        buffer: new RunBuffer({
+          flushMs: 60_000,
+          flushBytes: 100_000,
+          onPack: () => undefined,
+        }),
+        abort: new AbortController(),
+        continuation: null,
+        done: Promise.resolve({ status: 'finished', text: '' }),
+        resolve: () => undefined,
+        attemptInFlight: true,
+      };
+      await call(setup.host, 'runAttempt', live, false);
+      await live.buffer.close();
+      expect(update).not.toHaveBeenCalled();
+      // A fresh attempt runs the agent with the user's message.
+      expect(setup.streamed).toHaveLength(1);
+      expect(setup.streamed[0]).not.toBeNull();
+    });
+  });
+
+  it('keeps admission for a turn a declared handler may answer', async () => {
+    await withAdmissionHost(
+      'admission-declared',
+      () => ({ kind: 'pass' }),
+      async (setup) => {
+        const portal = turn();
+        const group = turn({
+          client: 'matrix',
+          sessionId: '$thread',
+          roomKind: 'group',
+        });
+        const json = async (req: TurnRequest) =>
+          JSON.parse(
+            String(
+              await call(
+                setup.host,
+                'runRequestJson',
+                req,
+                storedRunRequest(req),
+              ),
+            ),
+          );
+        expect((await json(portal)).disposition).toBeUndefined();
+        expect((await json(group)).disposition).toEqual({ kind: 'agent' });
+      },
+    );
+  });
+});
+
+describe('UserOracleDO direct reads and the room mirror', () => {
+  it.each([
+    { client: 'portal' as const, mirrored: 1 },
+    { client: 'channel' as const, mirrored: 0 },
+  ])(
+    'a $client direct read is mirrored by the object $mirrored time(s)',
+    async ({ client, mirrored }) => {
+      await withAdmissionHost(
+        `direct-read-mirror-${client}`,
+        () => ({ kind: 'pass' }),
+        async (setup) => {
+          // The channel mirror is the required kind: its failure rejects.
+          const replayToRoom = vi.fn(async (request: TurnRequest) => {
+            if (request.client === 'channel')
+              throw new Error('gateway unavailable');
+          });
+          Object.assign(setup.host, { replayToRoom });
+          const req = turn({ client, sessionId: '$session' });
+          await setup.runStore.create({
+            runId: 'run',
+            sessionId: req.sessionId,
+            requestId: req.requestId,
+            client,
+            status: 'running',
+            request: JSON.stringify(storedRunRequest(req)),
+            checkpointId: null,
+            instanceId: 'test',
+          });
+          const record = await setup.runStore.get('run');
+          if (!record) throw new Error('Missing run');
+          const live: LiveRun = {
+            runId: 'run',
+            sessionId: req.sessionId,
+            requestId: req.requestId,
+            record,
+            buffer: new RunBuffer({
+              flushMs: 60_000,
+              flushBytes: 100_000,
+              onPack: () => undefined,
+            }),
+            abort: new AbortController(),
+            continuation: null,
+            done: Promise.resolve({ status: 'finished', text: '' }),
+            resolve: () => undefined,
+            attemptInFlight: true,
+          };
+          const outcome = await call(
+            setup.host,
+            'runDirectRead',
+            live,
+            req,
+            {
+              kind: 'direct-read',
+              text: 'Flow is waiting.',
+              title: 'Flow status',
+              messageId: 'direct:$session:request:ai',
+            },
+            () => undefined,
+          );
+          await live.buffer.close();
+          expect(outcome).toMatchObject({ status: 'finished' });
+          expect(replayToRoom).toHaveBeenCalledTimes(mirrored);
+        },
+      );
+    },
+  );
 });

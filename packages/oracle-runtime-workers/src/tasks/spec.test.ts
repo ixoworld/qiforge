@@ -2,6 +2,7 @@
  * Task spec markdown — gray-matter frontmatter round-trip and id minting.
  */
 import { agentWakeDedupeKey } from '@ixo/common/work';
+import matter from 'gray-matter';
 import { describe, expect, it } from 'vitest';
 import type { OracleTaskRecord } from '../plugin-api/types';
 import {
@@ -74,6 +75,30 @@ describe('task spec markdown', () => {
     });
     expect(parsed.frontmatter.approval).toBe('before-action');
     expect(parsed.frontmatter.status).toBe('paused');
+  });
+
+  it('leaves gray-matter’s module-wide content cache untouched', () => {
+    // gray-matter caches every distinct input string forever when it is
+    // called without options; every task save renders a new spec, so a
+    // cached parse per save would grow the isolate's heap without bound.
+    const cacheSize = (): number => {
+      const cache: unknown = Reflect.get(matter, 'cache');
+      return cache !== null && typeof cache === 'object'
+        ? Object.keys(cache).length
+        : 0;
+    };
+    const before = cacheSize();
+    for (let i = 0; i < 25; i += 1) {
+      const markdown = renderTaskSpec(
+        record({
+          intent: `Distinct intent ${i}`,
+          updatedAt: new Date(Date.UTC(2026, 0, 15, 6, i)).toISOString(),
+        }),
+      );
+      expect(parseTaskSpec(markdown).intent).toBe(`Distinct intent ${i}`);
+      expect(specIntentOf(markdown)).toBe(`Distinct intent ${i}`);
+    }
+    expect(cacheSize()).toBe(before);
   });
 
   it('rejects a spec whose frontmatter drifted from the schema', () => {

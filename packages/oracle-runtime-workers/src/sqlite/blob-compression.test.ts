@@ -22,8 +22,13 @@ import {
   MIN_COMPRESS_BYTES,
   readBlobText,
 } from './blob-codec';
-import { compactStep, finishCompaction } from './blob-compactor';
+import {
+  COMPACT_STEP_MAX_BYTES,
+  compactStep,
+  finishCompaction,
+} from './blob-compactor';
 import { DoSqliteDatabase } from './database';
+import { CHUNK_SIZE } from './do-vfs';
 import { SqliteSaver } from './sqlite-saver';
 import type { SqliteTestDO } from './test-do';
 
@@ -323,6 +328,159 @@ describe('blob compactor', () => {
       });
       expect(vacuumed).toBe('full');
       expect(db.fileSize).toBeLessThan(before);
+      await db.close();
+    });
+  });
+
+  /**
+   * A legacy file of large plain-JSON rows (≈ 500 KB) in the messages and
+   * writes tables, plus one checkpoint row (≈ 3.9 MB) bigger than any byte
+   * budget used below.
+   */
+  async function seedLargeLegacy(db: DoSqliteDatabase): Promise<void> {
+    const saver = new SqliteSaver(db);
+    await saver.setup();
+    for (let i = 0; i < 12; i++) {
+      await db.run(
+        `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+         VALUES ('lt', '', 'cp', ?, 'tool', 'c', ?, '2026-01-01T00:00:00.000Z')`,
+        [`M${i}`, encoder.encode(bigText(`message-${i}`, 400))],
+      );
+      await db.run(
+        `INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value)
+         VALUES ('lt', '', 'cp', 'task', ?, 'tools', 'json', ?)`,
+        [i, encoder.encode(bigText(`write-${i}`, 400))],
+      );
+    }
+    await db.run(
+      `INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)
+       VALUES ('lt', '', 'cp', NULL, 'json', ?, '{}')`,
+      [encoder.encode(bigText('checkpoint', 3000))],
+    );
+  }
+
+  async function blobDigests(db: DoSqliteDatabase): Promise<string[]> {
+    const out: string[] = [];
+    for (const [table, column] of [
+      ['messages', 'message'],
+      ['checkpoints', 'checkpoint'],
+      ['writes', 'value'],
+    ] as const) {
+      const rows = await db.exec<{ rowid: number; digest: string }>(
+        `SELECT rowid, hex(${column}) AS digest FROM ${table} ORDER BY rowid`,
+      );
+      for (const row of rows) out.push(`${table}/${row.rowid}/${row.digest}`);
+    }
+    return out;
+  }
+
+  it('bounds the legacy bytes one step reads by a byte budget, at least one row, and ends exactly where an unbounded run does', async () => {
+    const MAX_BYTES = 1024 * 1024;
+    const ROW_BYTES = 400 * 1024;
+    await runInDurableObject(stub('bc-bounded'), async (_i, state) => {
+      const bounded = await DoSqliteDatabase.open(state, 'bounded.db');
+      const unbounded = await DoSqliteDatabase.open(state, 'unbounded.db');
+      await seedLargeLegacy(bounded);
+      await seedLargeLegacy(unbounded);
+
+      let cursors = {};
+      let steps = 0;
+      let rewritten = 0;
+      for (;;) {
+        // The caller's row budget is generous; the byte budget decides.
+        const step = await compactStep(bounded, 300, cursors, {
+          maxBytes: MAX_BYTES,
+        });
+        cursors = step.cursors;
+        rewritten += step.rewritten;
+        steps += 1;
+        // Progress every step; more than one row only within the budget.
+        expect({
+          madeProgress: step.done || step.examined >= 1,
+          withinBudget: step.examined <= 1 || step.examinedBytes <= MAX_BYTES,
+        }).toEqual({ madeProgress: true, withinBudget: true });
+        if (step.done) break;
+        expect(steps).toBeLessThan(40);
+      }
+      // 24 rows of ≈ 500 KB under a 1 MiB budget: two a step; the
+      // oversized checkpoint row alone in its own.
+      expect(steps).toBeGreaterThanOrEqual(Math.ceil(24 / 2) + 1);
+      expect(rewritten).toBe(25);
+
+      const all = await compactStep(unbounded, 300, {}, { maxBytes: Infinity });
+      expect(all.done).toBe(true);
+      expect(all.rewritten).toBe(25);
+      expect(all.examinedBytes).toBeGreaterThan(24 * ROW_BYTES);
+      expect(await blobDigests(bounded)).toEqual(await blobDigests(unbounded));
+      for (const db of [bounded, unbounded]) {
+        const check = await db.get<{ integrity_check: string }>(
+          'PRAGMA integrity_check',
+        );
+        expect(check?.integrity_check).toBe('ok');
+        await db.close();
+      }
+    });
+  });
+
+  it('applies a default byte budget when the caller passes only a row budget', async () => {
+    await runInDurableObject(stub('bc-default-budget'), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'default.db');
+      const saver = new SqliteSaver(db);
+      await saver.setup();
+      // 40 rows of 512 KiB = 20 MiB of legacy blobs.
+      for (let i = 0; i < 40; i++) {
+        await db.run(
+          `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+           VALUES ('lt', '', 'cp', ?, 'tool', 'c', ?, '2026-01-01T00:00:00.000Z')`,
+          [`D${i}`, encoder.encode(bigText(`default-${i}`, 512))],
+        );
+      }
+      const step = await compactStep(db, 300, {});
+      expect(step.done).toBe(false);
+      expect(step.examined).toBeGreaterThan(0);
+      expect(step.examined).toBeLessThan(40);
+      expect(step.examinedBytes).toBeLessThanOrEqual(COMPACT_STEP_MAX_BYTES);
+      await db.close();
+    });
+  });
+
+  it('reads only the rows a step examines, not every candidate behind them', async () => {
+    const MAX_BYTES = 1024 * 1024;
+    await runInDurableObject(stub('bc-step-reads'), async (_i, state) => {
+      // A clean cache of four chunks and a tiny page cache: every blob a
+      // step touches is read from storage again.
+      const db = await DoSqliteDatabase.open(state, 'reads.db', {
+        cachePages: 64,
+      });
+      await db.run('PRAGMA cache_size = 16');
+      const saver = new SqliteSaver(db);
+      await saver.setup();
+      for (let i = 0; i < 24; i++) {
+        await db.run(
+          `INSERT INTO messages (thread_id, checkpoint_ns, checkpoint_id, message_id, message_type, message_content, message, created_at)
+           VALUES ('lt', '', 'cp', ?, 'tool', 'c', ?, '2026-01-01T00:00:00.000Z')`,
+          [`R${i}`, encoder.encode(bigText(`reads-${i}`, 400))],
+        );
+      }
+      let cursors = {};
+      for (let steps = 0; ; steps++) {
+        expect(steps).toBeLessThan(40);
+        const before = db.vfsStats().rowsRead;
+        const step = await compactStep(db, 300, cursors, {
+          maxBytes: MAX_BYTES,
+        });
+        const read = db.vfsStats().rowsRead - before;
+        cursors = step.cursors;
+        if (step.done) break;
+        // Each examined row is read, then its overflow chain again when the
+        // rewrite frees it; one more row may be read to find the budget's
+        // end. Reading every remaining candidate is several times that.
+        const chunksPerRow =
+          Math.ceil(step.examinedBytes / step.examined / CHUNK_SIZE) + 1;
+        expect(read).toBeLessThanOrEqual(
+          (2 * step.examined + 1) * chunksPerRow + 8,
+        );
+      }
       await db.close();
     });
   });

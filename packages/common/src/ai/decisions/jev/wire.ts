@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type {
   DecisionAnswer,
+  DecisionModelPinning,
+  DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
   DecisionRequest,
@@ -11,6 +13,42 @@ import type {
 export const JEV_MODEL_CLOUDFLARE = 'typesafe/jev';
 /** Model id accepted by the OpenRouter decisions endpoint. */
 export const JEV_MODEL_OPENROUTER = 'typesafe/jev-1.13';
+
+/**
+ * Judgment method declared by the Cloudflare-hosted Jev adapters: the
+ * provider's own method, with no calibration claim the adapter could back.
+ * The method name is attached only for the Cloudflare Jev model id the
+ * adapters default to; any other model (`DECISION_MODEL`, the `model` option)
+ * is recorded as plain `provider-native`, since its method is not known here.
+ * A new object per call, so a caller mutating one result cannot change the
+ * next.
+ */
+export function cloudflareJevProvenance(
+  model: string,
+): DecisionProviderProvenance {
+  return model === JEV_MODEL_CLOUDFLARE
+    ? { method: { kind: 'provider-native', name: 'typesafe-system-one' } }
+    : { method: { kind: 'provider-native' } };
+}
+
+/**
+ * Inference provenance of a `systemone-v1` exchange: the model or service the
+ * adapter requested and, separately, the model the backend reported answering
+ * with, since a routed service may answer with a different backend.
+ */
+export function systemOneInferenceProvenance(
+  requestedModel: string,
+  returnedModel: string | undefined,
+  modelPinning: DecisionModelPinning,
+): Omit<DecisionProviderProvenance, 'method' | 'calibration'> {
+  return {
+    apiDialect: 'systemone-v1',
+    requestedModel,
+    ...(returnedModel ? { returnedModel } : {}),
+    modelPinning,
+    providerArtifactRef: requestedModel,
+  };
+}
 
 export type JevProviderName = 'cloudflare' | 'openrouter' | 'databricks';
 

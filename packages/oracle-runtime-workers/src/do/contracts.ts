@@ -16,6 +16,12 @@ import type { AttachmentInput } from '../attachments/types';
 import type { RealtimeStatus } from '../realtime/realtime-endpoint';
 import type { TierFlushResult, TierStatus } from '../sqlite/do-vfs';
 import type { OwnedArtifact } from '../artifacts/store';
+import type {
+  FeedbackReservation,
+  FeedbackSettlement,
+  FeedbackTarget,
+} from '../feedback/contract';
+import type { DomainContextProvenance } from '../core/domain-context';
 /**
  * Cross-object contracts for the Workers runtime.
  *
@@ -186,6 +192,30 @@ export interface OracleWorkerEnv {
    */
   RATE_LIMIT?: RateLimit;
   /**
+   * Optional rate-limit binding for anonymous feedback, keyed per client IP
+   * pseudonym (declare it with `simple: { limit: 3, period: 60 }`). Without
+   * it the per-IP check uses `RATE_LIMIT`'s limit under a feedback-only key.
+   */
+  FEEDBACK_RATE_LIMIT?: RateLimit;
+
+  // --- anonymous response feedback (docs/configuration.md) ------------------
+  // Read by the shell only (`src/feedback/config.ts`); never part of the
+  // validated config plugins receive. Off unless the key and secret are set.
+  /** Linear API key allowed to create issues in the feedback team. */
+  FEEDBACK_LINEAR_API_KEY?: string;
+  /** At least 32 characters; derives the user/session/message pseudonyms. */
+  FEEDBACK_HMAC_SECRET?: string;
+  /** Linear team (default: Studio). */
+  FEEDBACK_LINEAR_TEAM_ID?: string;
+  /** Linear project (default: "User Feedback from Portal"). */
+  FEEDBACK_LINEAR_PROJECT_ID?: string;
+  /** Optional comma-separated Linear label ids. */
+  FEEDBACK_LINEAR_LABEL_IDS?: string;
+  /** Linear GraphQL endpoint override (default `https://api.linear.app/graphql`). */
+  FEEDBACK_LINEAR_API_URL?: string;
+  /** Release or commit identifier shown in feedback issues (default `unknown`). */
+  QIFORGE_BUILD_VERSION?: string;
+  /**
    * Workers AI binding. Optional: `DECISION_PROVIDER=cloudflare-jev` runs the
    * Jev model through it instead of the account credentials. Declare it with
    * `"ai": { "binding": "AI" }` in the wrangler config.
@@ -198,10 +228,18 @@ export interface OracleWorkerEnv {
   /** Display markup for `GET /models` prices (default 1.6). */
   MODEL_PRICE_MARKUP?: string;
   MAIN_REASONING_EFFORT?: string;
+  /**
+   * Model-call liveness (docs/configuration.md): ms to response headers
+   * (default 120000), ms of silence between body bytes on the platform lane
+   * (90000) and on BYO lanes (300000), retries before the first byte (1).
+   */
+  LLM_HEADERS_TIMEOUT_MS?: string;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: string;
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: string;
+  LLM_STREAM_RETRIES?: string;
   /** LangGraph steps one turn may take before `GraphRecursionError` (default 600; Node hard-codes 200). */
   TURN_RECURSION_LIMIT?: string;
-  /** Turn budget: cumulative model tokens (default 500000), tool attempts (120), deadline in ms (600000). */
-  TURN_MAX_TOKENS?: string;
+  /** Turn budget: tool attempts (default 120) and deadline in ms (600000). */
   TURN_MAX_TOOL_CALLS?: string;
   TURN_TIMEOUT_MS?: string;
   /** Repetition guard: identical successful writes (default 1) and reads (5) per turn. */
@@ -412,6 +450,18 @@ export interface ContextStatus {
   session?: SessionContextStatus | null;
 }
 
+/**
+ * The `router_update` frame (`router.update` on the SSE stream) that reports
+ * a turn's domain context: one entry per domain the turn looked up (the
+ * oracle's, then the subject's), with CIDs, status and findings. Other
+ * `router_update` frames (a queued run, plugin steps) carry other fields.
+ */
+export interface DomainContextRouterUpdate {
+  sessionId: string;
+  requestId: string;
+  domainContext: DomainContextProvenance[];
+}
+
 export interface RunSummary {
   runId: string;
   sessionId: string;
@@ -610,6 +660,16 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     input: ChannelTurnInput,
     requestHash: string,
   ): Promise<ChannelTurnOutcome>;
+  /**
+   * A poll of a channel request whose run exists, answered by a warm
+   * object; `null` = admit it through `channelTurn` (after the binding
+   * check).
+   */
+  channelPoll(
+    identity: TurnIdentity,
+    input: ChannelTurnInput,
+    requestHash: string,
+  ): Promise<ChannelTurnOutcome | null>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**
@@ -649,6 +709,20 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   ): Promise<
     { ok: true; json: JsonString } | { ok: false; status: 400; message: string }
   >;
+  /**
+   * Anonymous feedback (src/feedback/): validate the target message in this
+   * user's database and reserve its idempotency marker. Never sees the text.
+   */
+  reserveMessageFeedback(
+    identity: TurnIdentity,
+    target: FeedbackTarget,
+  ): Promise<FeedbackReservation>;
+  /** Record the delivery, keep the earlier submission's, or release the reservation. */
+  settleMessageFeedback(
+    identity: TurnIdentity,
+    target: FeedbackTarget,
+    outcome: FeedbackSettlement,
+  ): Promise<void>;
   abortTurn(sessionId: string): Promise<boolean>;
   /** The session's active (queued/running/recovering) run, if any. */
   sessionRun(
@@ -699,9 +773,12 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
   /**
    * Drop the working copy (pages + caches) so the next access re-imports from
    * the owner store. Simulates eviction/loss of the DO cache in tests and is
-   * the "user deleted their file upstream" path.
+   * the "user deleted their file upstream" path. `userDid` is the caller the
+   * shell authenticated, so an object that never booted boots for it.
    */
-  resetWorkingCopy(): Promise<{ reloadedFromOwnerStore: boolean }>;
+  resetWorkingCopy(
+    identity?: TurnIdentity,
+  ): Promise<{ reloadedFromOwnerStore: boolean }>;
   /** Run one R2 page-tier eviction pass now (debug routes; `force` ignores recency). */
   tierFlush(opts?: {
     force?: boolean;
@@ -763,6 +840,16 @@ export interface CreateRoomOptions {
 }
 
 /**
+ * Deadline for one gateway media download, from opening it to the last byte
+ * (the gateway's default applies when omitted). Only the timeout crosses the
+ * RPC: an `AbortSignal` cannot, so the caller stops a transfer early by
+ * cancelling the returned stream.
+ */
+export interface MediaDownloadDeadline {
+  timeoutMs?: number;
+}
+
+/**
  * RPC surface of `MatrixGatewayDO`. User objects call it for anything that
  * needs the bot identity (sending, media, room lookups); the shell calls
  * `ensureStarted()` on boot/health so the sync loop is running. The
@@ -780,9 +867,13 @@ export interface MatrixGatewayObject extends Rpc.DurableObjectBranded {
   downloadEventMediaStream(
     roomId: string,
     eventId: string,
+    opts?: MediaDownloadDeadline,
   ): Promise<MediaStream | null>;
   /** Authenticated media download of an `mxc://` URI, as a stream. */
-  downloadMxcMediaStream(mxc: string): Promise<ReadableStream<Uint8Array>>;
+  downloadMxcMediaStream(
+    mxc: string,
+    opts?: MediaDownloadDeadline,
+  ): Promise<ReadableStream<Uint8Array>>;
   /** Forcibly reset the gateway object like a platform host drain (debug routes only). The call itself rejects. */
   debugAbortObject(): Promise<void>;
   /** Stop the bot (operator/debug; `ensureStarted`/cron brings it back). */

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import {
   createUnsignedUcanAdapter,
@@ -6,7 +6,15 @@ import {
 } from '../../core/runtime-context';
 import { makeRuntimeContext } from '../../core/test-fixtures';
 import type { RuntimeContext } from '../../plugin-api/types';
-import type { ComposioSessionTool } from './composio-tools';
+import { McpCallTimeoutError } from '../mcp-call-timeout';
+import {
+  COMPOSIO_DEFS_CACHE_MAX_ENTRIES,
+  COMPOSIO_TOOL_DEFS_TTL_MS,
+  COMPOSIO_TOOL_TIMEOUT_MS,
+  createComposioTools,
+  type ComposioDefsCache,
+  type ComposioSessionTool,
+} from './composio-tools';
 import { ComposioPlugin } from './composio.plugin';
 
 /** Captured `new Composio(...)` constructor options + session user ids. */
@@ -154,6 +162,69 @@ describe('ComposioPlugin (Workers port)', () => {
     expect(result).toEqual({ found: [], input: { query: 'finance' } });
   });
 
+  describe('call bounds', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Make the search tool's upstream call never settle. */
+    function hangSearch(): void {
+      sessionTools = sessionTools.map((t) =>
+        t.name === 'COMPOSIO_SEARCH_TOOLS'
+          ? { ...t, invoke: () => new Promise<never>(() => undefined) }
+          : t,
+      );
+    }
+
+    it(`gives up on a call that never answers after ${COMPOSIO_TOOL_TIMEOUT_MS / 1000} s`, async () => {
+      hangSearch();
+      const plugin = new ComposioPlugin();
+      const ctx = makeCtx();
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      vi.useFakeTimers();
+      let outcome: unknown = 'pending';
+      void Promise.resolve(search?.handler({ query: 'x' }, ctx)).then(
+        () => {
+          outcome = 'resolved';
+        },
+        (error: unknown) => {
+          outcome = error;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(COMPOSIO_TOOL_TIMEOUT_MS - 1_000);
+      expect(outcome).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(outcome).toBeInstanceOf(McpCallTimeoutError);
+    });
+
+    it('stops waiting as soon as the turn is cancelled', async () => {
+      hangSearch();
+      const plugin = new ComposioPlugin();
+      const turn = new AbortController();
+      const ctx = Object.assign(makeCtx(), { abortSignal: turn.signal });
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      const pending = Promise.resolve(search?.handler({ query: 'x' }, ctx));
+      const reason = new Error('turn cancelled');
+      turn.abort(reason);
+      await expect(pending).rejects.toBe(reason);
+    });
+
+    it('leaves no timer behind after a call that answers', async () => {
+      const plugin = new ComposioPlugin();
+      const ctx = makeCtx();
+      const tools = await plugin.getRequestTools(ctx);
+      const search = tools.find((t) => t.name === 'COMPOSIO_SEARCH_TOOLS');
+
+      vi.useFakeTimers();
+      await search?.handler({ query: 'finance' }, ctx);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it('normalizes the COMPOSIO_MULTI_EXECUTE_TOOL envelope', async () => {
     const plugin = new ComposioPlugin();
     const ctx = makeCtx();
@@ -184,5 +255,144 @@ describe('ComposioPlugin (Workers port)', () => {
     );
     expect(tools).toEqual([]);
     expect(composioCtorArgs).toHaveLength(0);
+  });
+});
+
+describe('createComposioTools - tool-definition cache eviction', () => {
+  const userId = 'did:ixo:cache-user';
+  const cacheKey = `${BASE_URL}::${userId}`;
+
+  const baseOpts = {
+    apiKey: 'ck-test',
+    baseUrl: BASE_URL,
+    ucanInvocation: 'composio-inv-token',
+    userId,
+  };
+
+  /** Past expiry plus the one-TTL stale-serving grace. */
+  function pastGrace(): number {
+    return Date.now() - COMPOSIO_TOOL_DEFS_TTL_MS - 1;
+  }
+
+  const staleDef = { name: 'STALE', description: 'stale', schema: undefined };
+
+  it('evicts a long-expired entry before opening its replacement session', async () => {
+    const defsCache: ComposioDefsCache = new Map([
+      [cacheKey, { defs: [staleDef], expiresAt: pastGrace() }],
+    ]);
+    let entryPresentAtOpen: boolean | undefined;
+
+    const tools = await createComposioTools({
+      ...baseOpts,
+      defsCache,
+      sessionFactory: async () => {
+        entryPresentAtOpen = defsCache.has(cacheKey);
+        return sessionTools;
+      },
+    });
+
+    expect(entryPresentAtOpen).toBe(false);
+    expect(tools.map((t) => t.name)).not.toContain('STALE');
+    expect(defsCache.get(cacheKey)?.defs.map((d) => d.name)).toEqual([
+      'COMPOSIO_SEARCH_TOOLS',
+      'COMPOSIO_MULTI_EXECUTE_TOOL',
+    ]);
+  });
+
+  it('still evicts the long-expired entry when the replacement session fails', async () => {
+    const defsCache: ComposioDefsCache = new Map([
+      [cacheKey, { defs: [staleDef], expiresAt: pastGrace() }],
+    ]);
+
+    await expect(
+      createComposioTools({
+        ...baseOpts,
+        defsCache,
+        sessionFactory: async () => {
+          throw new Error('composio unavailable');
+        },
+      }),
+    ).rejects.toThrow('composio unavailable');
+
+    expect(defsCache.has(cacheKey)).toBe(false);
+  });
+
+  it('evicts another tenant long-expired entry on lookup', async () => {
+    const otherKey = `${BASE_URL}::did:ixo:one-off`;
+    const defsCache: ComposioDefsCache = new Map([
+      [otherKey, { defs: [staleDef], expiresAt: pastGrace() }],
+      [
+        cacheKey,
+        {
+          defs: [staleDef],
+          expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
+        },
+      ],
+    ]);
+
+    await createComposioTools({ ...baseOpts, defsCache });
+
+    expect(defsCache.has(otherKey)).toBe(false);
+  });
+
+  it('leaves live entries untouched and serves them without opening a session', async () => {
+    const live = {
+      defs: [staleDef],
+      expiresAt: Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS,
+    };
+    const defsCache: ComposioDefsCache = new Map([[cacheKey, live]]);
+    const sessionFactory = vi.fn(async () => sessionTools);
+
+    const tools = await createComposioTools({
+      ...baseOpts,
+      defsCache,
+      sessionFactory,
+    });
+
+    expect(tools.map((t) => t.name)).toEqual(['STALE']);
+    expect(defsCache.get(cacheKey)).toBe(live);
+    expect(sessionFactory).not.toHaveBeenCalled();
+  });
+
+  it('keeps a recently expired entry for its stale-while-refresh serve', async () => {
+    const recentlyExpired = { defs: [staleDef], expiresAt: Date.now() - 1 };
+    const defsCache: ComposioDefsCache = new Map([[cacheKey, recentlyExpired]]);
+    const sessionFactory = vi.fn(async () => {
+      throw new Error('composio unavailable');
+    });
+    const warn = vi.fn();
+
+    const tools = await createComposioTools({
+      ...baseOpts,
+      defsCache,
+      sessionFactory,
+      logger: { warn },
+    });
+
+    expect(tools.map((t) => t.name)).toEqual(['STALE']);
+    expect(defsCache.get(cacheKey)).toBe(recentlyExpired);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
+  });
+
+  it('still caps the cache, evicting the soonest-to-expire entries first', async () => {
+    const base = Date.now() + COMPOSIO_TOOL_DEFS_TTL_MS;
+    const defsCache: ComposioDefsCache = new Map();
+    for (let i = 0; i < COMPOSIO_DEFS_CACHE_MAX_ENTRIES; i++) {
+      defsCache.set(`${BASE_URL}::filler-${i}`, {
+        defs: [staleDef],
+        expiresAt: base + i,
+      });
+    }
+
+    await createComposioTools({
+      ...baseOpts,
+      defsCache,
+      sessionFactory: async () => sessionTools,
+    });
+
+    expect(defsCache.size).toBe(COMPOSIO_DEFS_CACHE_MAX_ENTRIES);
+    expect(defsCache.has(`${BASE_URL}::filler-0`)).toBe(false);
+    expect(defsCache.has(`${BASE_URL}::filler-1`)).toBe(true);
+    expect(defsCache.has(cacheKey)).toBe(true);
   });
 });

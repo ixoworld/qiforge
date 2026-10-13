@@ -43,6 +43,73 @@ export type MessageContent =
   | IComponentMetadata
   | Array<string | IComponentMetadata>;
 
+/**
+ * Anonymous feedback on one completed Agent reply. The context is a fixed
+ * allowlist of coarse values; the runtime refuses anything else.
+ */
+export type AnonymousMessageFeedbackSurface = 'workspace' | 'agentSidebar';
+export type AnonymousMessageFeedbackTheme = 'dark' | 'light';
+export type AnonymousMessageFeedbackDeviceClass =
+  | 'mobile'
+  | 'tablet'
+  | 'desktop';
+export type AnonymousMessageFeedbackViewportBucket =
+  | 'compact'
+  | 'medium'
+  | 'wide';
+export type AnonymousMessageFeedbackNetwork =
+  | 'mainnet'
+  | 'testnet'
+  | 'devnet'
+  | 'unknown';
+
+export interface AnonymousMessageFeedbackContext {
+  surface: AnonymousMessageFeedbackSurface;
+  /** Language with an optional region only: `en`, `en-GB`, `es-419`. */
+  locale: string;
+  theme: AnonymousMessageFeedbackTheme;
+  deviceClass: AnonymousMessageFeedbackDeviceClass;
+  viewportBucket: AnonymousMessageFeedbackViewportBucket;
+  network: AnonymousMessageFeedbackNetwork;
+  /** A release (`1.4.0`, `1.5.0-rc.2`, `1.4.0+4f2ea36`) or a commit sha, at most 40 characters. */
+  portalBuildVersion?: string;
+}
+
+export interface AnonymousMessageFeedbackSubmission {
+  /** A UUID v4 the client generates once per submission and reuses on retry. */
+  submissionId: string;
+  /** 1–2000 characters, free of personal identifiers and secrets. */
+  feedback: string;
+  context: AnonymousMessageFeedbackContext;
+}
+
+export interface AnonymousMessageFeedbackResponse {
+  submissionId: string;
+  status: 'submitted';
+  submittedAt: string;
+}
+
+/**
+ * The `code` on a refused feedback submission (`RequestError.code`).
+ * `FEEDBACK_IN_FLIGHT`, `FEEDBACK_RATE_LIMITED` and `FEEDBACK_DELIVERY_FAILED`
+ * are `retryable`: send the same submission again later.
+ */
+export type AnonymousMessageFeedbackErrorCode =
+  | 'FEEDBACK_DISABLED'
+  | 'FEEDBACK_INVALID'
+  | 'FEEDBACK_EMPTY'
+  | 'FEEDBACK_TARGET_NOT_FOUND'
+  | 'FEEDBACK_IN_FLIGHT'
+  | 'FEEDBACK_ALREADY_SUBMITTED'
+  | 'FEEDBACK_CONTAINS_PERSONAL_DATA'
+  | 'FEEDBACK_RATE_LIMITED'
+  | 'FEEDBACK_DELIVERY_FAILED';
+
+/** Optional features a runtime advertises with the transcript. */
+export interface ChatCapabilities {
+  anonymousMessageFeedback?: boolean;
+}
+
 export interface IMessage {
   id: string;
   content: MessageContent;
@@ -59,6 +126,12 @@ export interface IMessage {
   reasoning?: string;
   isComplete?: boolean;
   isReasoning?: boolean;
+  /**
+   * When the message was first saved, ISO 8601. Present on history messages
+   * from a runtime that reports it (`@ixo/oracle-runtime-workers` 0.17 and
+   * later); absent while a reply is still streaming.
+   */
+  createdAt?: string;
   /** First attachment — kept for clients that only read the singular field. */
   attachment?: Attachment;
   attachments?: Attachment[];
@@ -83,9 +156,22 @@ export interface ChatRunState {
    * user stopped it), `interrupted` (the runtime gave up after repeated
    * restarts; the kept text is shown), `failed`, or `disconnected` (the
    * client could not re-join; the reply lands in the transcript when the
-   * runtime finishes it).
+   * runtime finishes it), or `unauthorized` (the runtime refused the
+   * re-join's credentials after both renewal stages — a fresh invocation,
+   * then a fresh delegation and invocation — or for a reason new
+   * credentials cannot fix; the chat's status is `error` and the reply
+   * lands in the transcript as with `disconnected`). A message whose POST
+   * is still refused after both stages was not sent: the send fails with
+   * the refusal's `RequestError` (status 401/403) instead.
    */
-  ended: 'done' | 'aborted' | 'interrupted' | 'failed' | 'disconnected' | null;
+  ended:
+    | 'done'
+    | 'aborted'
+    | 'interrupted'
+    | 'failed'
+    | 'disconnected'
+    | 'unauthorized'
+    | null;
 }
 
 export const IDLE_RUN_STATE: ChatRunState = {

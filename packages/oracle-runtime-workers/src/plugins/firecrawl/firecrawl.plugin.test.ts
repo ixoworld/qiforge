@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toolEffectOf } from '../../core/middlewares/tool-marks';
 import { makeBuildCtx, makeRuntimeContext } from '../../core/test-fixtures';
 import { FirecrawlPlugin } from './firecrawl.plugin';
 import {
@@ -86,6 +87,21 @@ describe('FirecrawlPlugin (Workers port)', () => {
     expect(clientRecords.length).toBe(0);
   });
 
+  it('declares both proxied tools as reads', () => {
+    const plugin = new FirecrawlPlugin();
+    const [agent] = plugin.getSubAgents(
+      makeBuildCtx({ config: { FIRECRAWL_MCP_URL: FIRECRAWL_URL } }),
+    );
+    const tools = Array.isArray(agent?.tools) ? agent.tools : [];
+    expect(tools).toHaveLength(2);
+    // Neither name has a read prefix nor an MCP readOnlyHint: without the
+    // declared effect both would be classified as writes.
+    expect(tools.map((t) => [t.name, toolEffectOf(t)])).toEqual([
+      ['firecrawl_search', 'read'],
+      ['firecrawl_scrape', 'read'],
+    ]);
+  });
+
   it('proxies a validated search call to the upstream MCP tool over streamable HTTP', async () => {
     const plugin = new FirecrawlPlugin();
     const [agent] = plugin.getSubAgents(
@@ -102,10 +118,12 @@ describe('FirecrawlPlugin (Workers port)', () => {
     const upstreamSearch = upstreamTools.find(
       (t) => t.name === FIRECRAWL_SEARCH_MCP_NAME,
     );
-    expect(upstreamSearch?.invoke).toHaveBeenCalledWith({
-      query: 'gold spot price USD',
-      limit: 3,
-    });
+    // The second argument carries the MCP request timeout; without it the
+    // MCP SDK ends the call at its 60 s default.
+    expect(upstreamSearch?.invoke).toHaveBeenCalledWith(
+      { query: 'gold spot price USD', limit: 3 },
+      { metadata: { timeoutMs: 120_000 } },
+    );
     expect(result).toEqual({
       hits: [],
       input: { query: 'gold spot price USD', limit: 3 },

@@ -1,6 +1,5 @@
 import {
   createCompositeDIDResolver,
-  createIxoDIDResolver,
   createWebDIDResolver,
   createUCANValidator,
   defineCapability,
@@ -11,6 +10,10 @@ import {
 import { z } from 'zod';
 import type { OracleWorkerEnv, TurnIdentity } from '../do/contracts';
 import { RunAttemptDeferred } from '../do/run-coordinator';
+import {
+  IXO_DID_RESOLUTION_CACHE_TTL_MS,
+  sharedIxoDIDResolver,
+} from '../shell/auth';
 import {
   ChannelError,
   type ChannelTurnInput,
@@ -55,14 +58,25 @@ export async function authenticateChannel(
     token.length > 32_000 ||
     headers.get('x-auth-type')?.toLowerCase() !== 'ucan'
   )
-    throw new ChannelError(401, 'A channel UCAN invocation is required');
+    throw new ChannelError(
+      401,
+      'A channel UCAN invocation is required',
+      'unauthorized',
+    );
   const validator = await createUCANValidator({
     serverDid: config.oracleDid,
     rootIssuers: ['*'],
     didResolver: config.didResolver,
     requireExpiration: true,
-    // Durable receipts allow identical retries across isolates.
-    invocationStore: { has: async () => false, add: async () => undefined },
+    // No replay marks: a poll repeats its exact body and may reuse an
+    // invocation, also concurrently. The durable receipt keyed by
+    // (user, binding, requestId) and the request hash in the invocation's
+    // facts make every repeat return the same run instead of a new one.
+    invocationStore: {
+      has: async () => false,
+      add: async () => undefined,
+      addIfAbsent: async () => true,
+    },
   });
   const result = await validator.validate(
     token,
@@ -78,7 +92,11 @@ export async function authenticateChannel(
     chain[1] !== config.channelDid ||
     result.invoker !== config.channelDid
   )
-    throw new ChannelError(401, 'Invalid user-rooted channel invocation');
+    throw new ChannelError(
+      401,
+      'Invalid user-rooted channel invocation',
+      'unauthorized',
+    );
   const now = Math.floor(Date.now() / 1000);
   const invocation = await parseDelegation(token);
   const proof = invocation.proofs[0];
@@ -99,6 +117,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       401,
       'A bounded, direct user channel grant is required',
+      'unauthorized',
     );
   if (
     !result.expiration ||
@@ -111,6 +130,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       401,
       'Channel invocations must expire within 60 seconds',
+      'unauthorized',
     );
   const nb = result.capability?.nb;
   if (
@@ -120,7 +140,11 @@ export async function authenticateChannel(
     nb.bindingRevision !== input.bindingRevision ||
     nb.oracleDid !== config.oracleDid
   )
-    throw new ChannelError(403, 'Channel scope does not match this request');
+    throw new ChannelError(
+      403,
+      'Channel scope does not match this request',
+      'scope_mismatch',
+    );
   const hash = await channelRequestHash(raw);
   if (
     result.facts?.length !== 1 ||
@@ -130,6 +154,7 @@ export async function authenticateChannel(
     throw new ChannelError(
       403,
       'Invocation does not authorize this request body',
+      'scope_mismatch',
     );
   return {
     userDid,
@@ -142,12 +167,30 @@ export async function authenticateChannel(
   };
 }
 
-export function channelAuthConfig(env: OracleWorkerEnv): ChannelAuthConfig {
+/**
+ * did:web documents (a channel service identity) resolved for every channel
+ * request, shared per isolate: successful lookups are cached as long as
+ * did:ixo keys, failures never, and concurrent lookups share one request.
+ */
+const channelWebResolver = createWebDIDResolver({
+  cacheTtlMs: IXO_DID_RESOLUTION_CACHE_TTL_MS,
+});
+
+export function channelAuthConfig(
+  env: Pick<
+    OracleWorkerEnv,
+    'CHANNEL_SERVICE_DID' | 'BLOCKSYNC_GRAPHQL_URL' | 'ORACLE_DID'
+  >,
+): ChannelAuthConfig {
   if (!env.CHANNEL_SERVICE_DID)
-    throw new ChannelError(503, 'Channels are not configured');
+    throw new ChannelError(
+      503,
+      'Channels are not configured',
+      'not_configured',
+    );
   const resolver = createCompositeDIDResolver([
-    createIxoDIDResolver({ indexerUrl: env.BLOCKSYNC_GRAPHQL_URL }),
-    createWebDIDResolver(),
+    sharedIxoDIDResolver(env.BLOCKSYNC_GRAPHQL_URL),
+    channelWebResolver,
   ]);
   return {
     oracleDid: env.ORACLE_DID,
@@ -180,15 +223,23 @@ export async function assertActiveChannelBinding(
   >,
 ): Promise<void> {
   if (!identity.channel)
-    throw new ChannelError(403, 'Channel identity is required');
+    throw new ChannelError(
+      403,
+      'Channel identity is required',
+      'identity_required',
+    );
   if (!env.AUTH_HUB_CHANNEL_SERVICE_KEY || (!env.AUTH_HUB && !env.AUTH_HUB_URL))
-    throw new ChannelError(503, 'Channel binding validation is not configured');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is not configured',
+      'not_configured',
+    );
   const url = new URL(
     '/api/internal/channels/validate-binding',
     env.AUTH_HUB_URL ?? 'https://auth-hub.internal',
   );
   if (url.protocol !== 'https:')
-    throw new ChannelError(503, 'Auth Hub requires HTTPS');
+    throw new ChannelError(503, 'Auth Hub requires HTTPS', 'not_configured');
   const request = new Request(url, {
     method: 'POST',
     headers: {
@@ -211,15 +262,96 @@ export async function assertActiveChannelBinding(
       ? env.AUTH_HUB.fetch(request)
       : fetch(request));
   } catch {
-    throw new ChannelError(503, 'Channel binding validation is unavailable');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is unavailable',
+      'binding_check_unavailable',
+    );
   }
   if (!response.ok)
-    throw new ChannelError(503, 'Channel binding validation is unavailable');
+    throw new ChannelError(
+      503,
+      'Channel binding validation is unavailable',
+      'binding_check_unavailable',
+    );
   const parsed = BindingVerdict.safeParse(await response.json());
   if (!parsed.success)
-    throw new ChannelError(503, 'Invalid channel binding validation response');
+    throw new ChannelError(
+      503,
+      'Invalid channel binding validation response',
+      'binding_check_unavailable',
+    );
   if (!parsed.data.active)
-    throw new ChannelError(403, 'Channel binding is inactive');
+    throw new ChannelError(
+      403,
+      'Channel binding is inactive',
+      'binding_inactive',
+    );
+}
+
+/**
+ * How long an isolate trusts an Auth Hub "active" verdict for one binding
+ * revision and user. A revoked binding is therefore noticed by new
+ * admissions at most this late: inside the lifetime of the channel grant
+ * that authorized the request (at most 300 s, `authenticateChannel`), and
+ * attempts that start later (dequeued, recovered) check again uncached.
+ */
+export const CHANNEL_BINDING_CACHE_TTL_MS = 60_000;
+/** Verdicts an isolate keeps at most; the oldest makes room. */
+export const CHANNEL_BINDING_CACHE_MAX_ENTRIES = 1_000;
+
+/** Positive verdicts only (key → epoch ms it expires); a refusal is never kept. */
+const activeBindings = new Map<string, number>();
+
+/** Forget every cached verdict (tests). */
+export function clearChannelBindingCache(): void {
+  activeBindings.clear();
+}
+
+/**
+ * `assertActiveChannelBinding` for an admission through the shell, with an
+ * "active" verdict cached per isolate for `CHANNEL_BINDING_CACHE_TTL_MS`,
+ * keyed by the oracle, provider, binding, binding revision and user. An
+ * inactive binding (403) or an unavailable Auth Hub (503) is never cached.
+ * Returns whether the Auth Hub was asked.
+ */
+export async function assertActiveChannelBindingCached(
+  identity: TurnIdentity,
+  env: Parameters<typeof assertActiveChannelBinding>[1],
+  now: number = Date.now(),
+): Promise<'cached' | 'checked'> {
+  const channel = identity.channel;
+  const key = channel
+    ? JSON.stringify([
+        env.ORACLE_DID,
+        channel.provider,
+        channel.bindingId,
+        channel.bindingRevision,
+        identity.userDid,
+      ])
+    : null;
+  if (key) {
+    const until = activeBindings.get(key);
+    if (until !== undefined) {
+      if (until > now) return 'cached';
+      activeBindings.delete(key);
+    }
+  }
+  await assertActiveChannelBinding(identity, env);
+  if (!key) return 'checked';
+  if (activeBindings.size >= CHANNEL_BINDING_CACHE_MAX_ENTRIES) {
+    for (const [cached, until] of activeBindings)
+      if (until <= now) activeBindings.delete(cached);
+    // Still full: drop the oldest entry (Map keeps insertion order).
+    const oldest = activeBindings.keys().next();
+    if (
+      activeBindings.size >= CHANNEL_BINDING_CACHE_MAX_ENTRIES &&
+      !oldest.done
+    )
+      activeBindings.delete(oldest.value);
+  }
+  activeBindings.set(key, now + CHANNEL_BINDING_CACHE_TTL_MS);
+  return 'checked';
 }
 
 /**

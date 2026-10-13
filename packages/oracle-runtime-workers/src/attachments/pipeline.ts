@@ -6,18 +6,23 @@
  *  1. classify + route each attachment by the selected model's native input
  *     capabilities (`send-native` / `parse-local` / `model-extract`);
  *  2. NATIVE lane: download, sniff, base64 into LangChain content blocks on
- *     the human message (cumulative 50 MB budget; any failure or budget
- *     overflow falls that file back to extraction so a bad download never
- *     drops the whole message); the original is archived to the sandbox in
- *     the background;
- *  3. EXTRACT lane: sequential (so the running download total is enforced
- *     before the next fetch), plain text read locally, everything else
+ *     the human message; the original is archived to the sandbox in the
+ *     background. A failed download falls back to extraction so a bad
+ *     download never drops the whole message; a file that is itself refused
+ *     (empty, over the budget) is noted, and one whose content is not what it
+ *     claims goes to the extract lane with its bytes — never downloaded a
+ *     second time, never sent as a native block;
+ *  3. EXTRACT lane: sequential, plain text read locally, everything else
  *     described / transcribed / extracted by the helper model, then archived
  *     to the sandbox — when the archive succeeds the text handed to the model
  *     is truncated to 500 chars and points at the sandbox copy (the agent's
  *     file tools read the rest), exactly as on Node;
  *  4. every attachment's metadata lands on the human message so transcripts
  *     render file chips regardless of which lane consumed it.
+ *
+ * Both lanes share one `MAX_TOTAL_SIZE` download budget (`DownloadBudget`):
+ * declared sizes are checked against what is left before a download, and
+ * each download is cut off at what is left.
  */
 import type { MessageContent } from '@langchain/core/messages';
 import type { ModelInputCapabilities } from '../core/llm';
@@ -31,6 +36,8 @@ import {
 } from './content-blocks';
 import {
   ALLOWED_URI_SCHEMES,
+  AttachmentRejectedError,
+  AttachmentTooLargeError,
   loadAttachmentBytes,
   MAX_FILE_SIZE,
   MAX_TOTAL_SIZE,
@@ -118,22 +125,67 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** One attachment through the extract lane (Node's `processAttachment`). */
+const BUDGET_EXCEEDED = 'Total attachment size budget exceeded';
+
+/**
+ * The turn's download budget: `MAX_TOTAL_SIZE` across every attachment,
+ * both lanes. A file is checked against what is left before its download
+ * (declared size) and fetched under a cap of what is left, so a download
+ * never runs past the budget and an over-budget file is never fetched twice.
+ */
+class DownloadBudget {
+  private used = 0;
+
+  get remaining(): number {
+    return Math.max(0, MAX_TOTAL_SIZE - this.used);
+  }
+
+  /** The bytes of `attachment`, counted against the budget. */
+  async load(
+    attachment: AttachmentInput,
+    params: PrepareAttachmentsParams,
+    deps: AttachmentPipelineDeps,
+  ): Promise<{ bytes: Uint8Array; mimetype: string; sniffed: boolean }> {
+    if (attachment.size && attachment.size > MAX_FILE_SIZE)
+      throw new AttachmentTooLargeError('File exceeds maximum size');
+    const remaining = this.remaining;
+    if (remaining === 0 || (attachment.size && attachment.size > remaining))
+      throw new AttachmentRejectedError(BUDGET_EXCEEDED);
+    const cap = Math.min(MAX_FILE_SIZE, remaining);
+    try {
+      const loaded = await loadAttachmentBytes(
+        attachment,
+        params.roomId,
+        deps.source,
+        { fetchImpl: deps.fetchImpl, signal: deps.signal, maxBytes: cap },
+      );
+      this.used += loaded.bytes.length;
+      return loaded;
+    } catch (error) {
+      // Cut off by the budget rather than by the per-file cap.
+      if (error instanceof AttachmentTooLargeError && cap < MAX_FILE_SIZE)
+        throw new AttachmentRejectedError(BUDGET_EXCEEDED);
+      throw error;
+    }
+  }
+}
+
+/**
+ * One attachment through the extract lane (Node's `processAttachment`).
+ * `preloaded` is the file the native lane already downloaded.
+ */
 async function extractOne(
   attachment: AttachmentInput,
-  currentTotal: number,
+  budget: DownloadBudget,
   params: PrepareAttachmentsParams,
   deps: AttachmentPipelineDeps,
-): Promise<{ text: string; downloaded: number; usage?: ExtractionUsage }> {
+  preloaded?: Uint8Array,
+): Promise<{ text: string; usage?: ExtractionUsage }> {
   const safeName = sanitizeAttachmentFilename(attachment.filename);
   if (!attachment.eventId && !attachment.mxcUri)
     throw new Error('Either mxcUri or eventId must be provided');
   if (attachment.mxcUri && !ALLOWED_URI_SCHEMES.test(attachment.mxcUri))
     throw new Error('Invalid URI scheme');
-  if (attachment.size && attachment.size > MAX_FILE_SIZE)
-    throw new Error('File exceeds maximum size');
-  if (attachment.size && currentTotal + attachment.size > MAX_TOTAL_SIZE)
-    throw new Error('Total attachment size budget exceeded');
 
   const category: FileCategory = categorizeFile(attachment.mimetype);
   if (category === 'unsupported') {
@@ -142,16 +194,11 @@ async function extractOne(
     );
     return {
       text: `[File "${safeName}" (${attachment.mimetype}) is not a supported file type and could not be processed]`,
-      downloaded: 0,
     };
   }
 
-  const { bytes } = await loadAttachmentBytes(
-    attachment,
-    params.roomId,
-    deps.source,
-    { fetchImpl: deps.fetchImpl, signal: deps.signal },
-  );
+  const bytes =
+    preloaded ?? (await budget.load(attachment, params, deps)).bytes;
   verifyMagicBytes(bytes, category, attachment, (m) =>
     deps.logger.warn(`[attachments] ${m}`),
   );
@@ -198,7 +245,7 @@ async function extractOne(
   }
 
   if (!deps.sandbox) {
-    return { text, downloaded: bytes.length, ...(usage ? { usage } : {}) };
+    return { text, ...(usage ? { usage } : {}) };
   }
   const destPath = `${SANDBOX_OUTPUT_PREFIX}/${safeName}`;
   try {
@@ -245,7 +292,6 @@ async function extractOne(
         : `\n\n[Full file saved to sandbox at ${actualPath}]`;
       return {
         text: text.slice(0, SANDBOX_TRUNCATE_LIMIT) + paths,
-        downloaded: bytes.length,
         ...(usage ? { usage } : {}),
       };
     }
@@ -254,7 +300,6 @@ async function extractOne(
       : `\n\n[File also saved to sandbox at ${actualPath}]`;
     return {
       text: text + suffix,
-      downloaded: bytes.length,
       ...(usage ? { usage } : {}),
     };
   } catch (error) {
@@ -263,7 +308,6 @@ async function extractOne(
     );
     return {
       text: `${text}\n\n[Warning: sandbox upload failed — file content is included above]`,
-      downloaded: bytes.length,
       ...(usage ? { usage } : {}),
     };
   }
@@ -290,7 +334,14 @@ export async function prepareAttachments(
   }
 
   const nativeCandidates: AttachmentInput[] = [];
-  const extractQueue: AttachmentInput[] = [];
+  // A file the native lane already refused (empty, over budget) carries the
+  // reason and is noted; one it downloaded but will not send carries its
+  // bytes. Neither is downloaded again.
+  const extractQueue: Array<{
+    attachment: AttachmentInput;
+    refused?: Error;
+    preloaded?: Uint8Array;
+  }> = [];
   for (const attachment of params.attachments) {
     const kind = classifyAttachment(attachment);
     const strategy = routeAttachment(kind, params.caps);
@@ -298,31 +349,33 @@ export async function prepareAttachments(
       `[attachments] "${attachment.filename}" (${attachment.mimetype}) kind=${kind} model=${params.model} → ${strategy}`,
     );
     if (strategy === 'send-native') nativeCandidates.push(attachment);
-    else extractQueue.push(attachment);
+    else extractQueue.push({ attachment });
   }
 
+  const budget = new DownloadBudget();
   const natives: NativeAttachment[] = [];
-  let nativeBytesTotal = 0;
   for (const attachment of nativeCandidates) {
     try {
-      const { bytes, mimetype } = await loadAttachmentBytes(
+      const { bytes, mimetype, sniffed } = await budget.load(
         attachment,
-        params.roomId,
-        deps.source,
-        { fetchImpl: deps.fetchImpl, signal: deps.signal },
+        params,
+        deps,
       );
-      if (nativeBytesTotal + bytes.length > MAX_TOTAL_SIZE) {
-        deps.logger.warn(
-          `[attachments] native budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB) exceeded at "${attachment.filename}" — falling back to extraction`,
-        );
-        extractQueue.push(attachment);
-        continue;
-      }
-      nativeBytesTotal += bytes.length;
+      // Only a file whose bytes are what it claims goes to the model as a
+      // block: a sniffed type is classified on its own (a PDF named `.png`
+      // is a document), and a kind other than the claimed one goes through
+      // the extract lane, whose content check notes the mismatch.
       const kind = classifyAttachment({
         mimetype,
-        filename: attachment.filename,
+        filename: sniffed ? '' : attachment.filename,
       });
+      if (kind !== classifyAttachment(attachment)) {
+        deps.logger.warn(
+          `[attachments] "${attachment.filename}" claims ${attachment.mimetype} but is ${mimetype} — not sent natively`,
+        );
+        extractQueue.push({ attachment, preloaded: bytes });
+        continue;
+      }
       natives.push({
         kind: kind === 'image' ? 'image' : 'file',
         mimeType: mimetype,
@@ -349,10 +402,17 @@ export async function prepareAttachments(
         });
       }
     } catch (error) {
+      if (error instanceof AttachmentRejectedError) {
+        deps.logger.warn(
+          `[attachments] "${attachment.filename}" refused: ${errorMessage(error)}`,
+        );
+        extractQueue.push({ attachment, refused: error });
+        continue;
+      }
       deps.logger.warn(
         `[attachments] native load failed for "${attachment.filename}", falling back to extraction: ${errorMessage(error)}`,
       );
-      extractQueue.push(attachment);
+      extractQueue.push({ attachment });
     }
   }
 
@@ -366,23 +426,19 @@ export async function prepareAttachments(
         '[attachments] sandbox archive unavailable for this turn — originals are not archived',
       );
     }
-    let downloadedTotal = 0;
-    for (const attachment of extractQueue) {
+    for (const { attachment, refused, preloaded } of extractQueue) {
       const meta = metaFor(attachment);
       let text: string;
       try {
+        if (refused) throw refused;
         const result = await extractOne(
           attachment,
-          downloadedTotal,
+          budget,
           params,
           deps,
+          preloaded,
         );
-        downloadedTotal += result.downloaded;
-        if (downloadedTotal > MAX_TOTAL_SIZE) {
-          throw new Error(
-            `Total downloaded size (${Math.round(downloadedTotal / 1024 / 1024)} MB) exceeds budget (${Math.round(MAX_TOTAL_SIZE / 1024 / 1024)} MB)`,
-          );
-        }
+        // Counted as soon as it is paid for, whatever happens next.
         if (result.usage) {
           usage.cost += result.usage.cost ?? 0;
           usage.promptTokens += result.usage.promptTokens ?? 0;

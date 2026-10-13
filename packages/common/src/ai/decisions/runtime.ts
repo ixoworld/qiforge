@@ -1,17 +1,43 @@
 import { RunnableLambda } from '@langchain/core/runnables';
 import type { z } from 'zod';
+import {
+  DecisionNotApplicableError,
+  DecisionProviderUnavailableError,
+} from './errors.js';
+import {
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
+  HOST_DECISION_PROVIDER_ID,
+} from './provider-router.js';
 import type {
   DecisionAdapter,
+  DecisionApplicability,
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
+  DecisionJudgmentMethod,
+  DecisionJudgmentProvenance,
+  DecisionProviderProvenance,
   DecisionRegistration,
   DecisionRequest,
 } from './types.js';
 import {
   validateDecisionProviderResult,
   validateDecisionRequest,
+  validateDecisionTimeoutMs,
 } from './validation.js';
+
+export {
+  DecisionNotApplicableError,
+  DecisionProviderUnavailableError,
+} from './errors.js';
+
+const FULLY_APPLICABLE: DecisionApplicability = {
+  applicable: true,
+  evidenceComplete: true,
+};
+
+const PROVIDER_NATIVE: DecisionJudgmentMethod = { kind: 'provider-native' };
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
@@ -42,21 +68,31 @@ export interface DecisionEvaluator {
   ): Promise<DecisionEvaluation>;
 }
 
-export class DecisionProviderUnavailableError extends Error {
-  constructor() {
-    super(
-      'No DecisionAdapter is configured. Set DECISION_PROVIDER (openrouter-jev or cloudflare-jev), pass a decisionAdapter to the runtime, or configure a test decision mock.',
-    );
-    this.name = 'DecisionProviderUnavailableError';
-  }
-}
-
 export class DecisionRuntime implements DecisionEvaluator {
+  private readonly providers?: DecisionProviderRouter;
+
+  /**
+   * `providers` is either a provider router (several configured providers and
+   * a selection policy) or a single adapter, which is registered as the
+   * default provider with id `HOST_DECISION_PROVIDER_ID` (`host`), the same
+   * id and selection the Workers runtime records for `decisionAdapter`.
+   */
   constructor(
     private readonly registry?: DecisionLookup,
-    private readonly adapter?: DecisionAdapter,
+    providers?: DecisionAdapter | DecisionProviderRouter,
     private readonly logger?: DecisionRuntimeLogger,
-  ) {}
+  ) {
+    if (providers instanceof DecisionProviderRouter) {
+      this.providers = providers;
+    } else if (providers) {
+      this.providers = new DecisionProviderRouter(
+        new DecisionProviderRegistry([
+          { id: HOST_DECISION_PROVIDER_ID, adapter: providers },
+        ]),
+        { defaultProviderId: HOST_DECISION_PROVIDER_ID },
+      );
+    }
+  }
 
   async evaluate<TSchema extends z.ZodType>(
     definition: DecisionDefinition<TSchema>,
@@ -96,17 +132,39 @@ export class DecisionRuntime implements DecisionEvaluator {
     request: DecisionRequest,
     options?: DecisionEvaluateOptions,
   ): Promise<DecisionEvaluation> {
-    if (!this.adapter) throw new DecisionProviderUnavailableError();
-
     // `defineDecision` already validates inside `prepare`; this second pass is
     // the safety net for hand-written `DecisionRegistration.prepare`
     // implementations so no adapter ever receives an unbounded request.
     validateDecisionRequest(request);
 
+    // Abstain before any provider is selected or called: missing evidence
+    // must never come back as a negative semantic answer.
+    const applicability = request.applicability ?? FULLY_APPLICABLE;
+    if (!applicability.applicable || !applicability.evidenceComplete) {
+      throw new DecisionNotApplicableError(applicability);
+    }
+
+    const resolution = this.providers?.resolve(
+      registration.name,
+      options?.providerId,
+    );
+    if (!resolution) throw new DecisionProviderUnavailableError();
+    const providerId = resolution.provider.id;
+    const providerSelection = resolution.selectedBy;
+    const adapter = resolution.provider.adapter;
+
     const timeoutMs =
       options?.timeoutMs ??
       registration.timeoutMs ??
       DEFAULT_DECISION_TIMEOUT_MS;
+    // Covers per-call timeouts and hand-written registrations, which do not
+    // go through `defineDecision`.
+    validateDecisionTimeoutMs(
+      timeoutMs,
+      options?.timeoutMs !== undefined
+        ? 'The evaluation'
+        : `Decision "${registration.name}"`,
+    );
     const controller = new AbortController();
     const sourceSignal = options?.signal;
 
@@ -116,7 +174,6 @@ export class DecisionRuntime implements DecisionEvaluator {
     const forwardAbort = () => controller.abort(sourceSignal?.reason);
     sourceSignal?.addEventListener('abort', forwardAbort, { once: true });
 
-    const adapter = this.adapter;
     const started = Date.now();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const run = async (): Promise<DecisionEvaluation> => {
@@ -151,7 +208,7 @@ export class DecisionRuntime implements DecisionEvaluator {
 
       const latencyMs = Date.now() - started;
       this.logger?.debug?.(
-        `[decisions] name=${registration.name} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
+        `[decisions] name=${registration.name} providerId=${providerId} selection=${providerSelection} provider=${adapter.provider} model=${adapter.model} latencyMs=${latencyMs}`,
       );
 
       return {
@@ -159,19 +216,18 @@ export class DecisionRuntime implements DecisionEvaluator {
           name: registration.name,
           version: registration.version,
         },
+        providerId,
+        providerSelection,
         provider: adapter.provider,
         model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
-        provenance:
-          result.provenance ??
-          {
-            apiDialect: 'custom',
-            requestedModel: adapter.model,
-            ...(result.modelVersion
-              ? { returnedModel: result.modelVersion }
-              : {}),
-            modelPinning: 'unknown',
-          },
+        applicability: { ...applicability },
+        judgment: judgmentProvenance(
+          adapter,
+          result.provenance,
+          result.modelVersion,
+          registration.version,
+        ),
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
@@ -201,10 +257,11 @@ export class DecisionRuntime implements DecisionEvaluator {
             ...options?.metadata,
             decision_name: registration.name,
             decision_version: registration.version,
+            decision_provider_id: providerId,
+            decision_provider_selection: providerSelection,
             decision_provider: adapter.provider,
             decision_model: adapter.model,
-            decision_api_dialect:
-              adapter.capabilities?.apiDialect ?? 'custom',
+            decision_api_dialect: adapter.capabilities?.apiDialect ?? 'custom',
           },
           ...(options?.callbacks !== undefined && {
             callbacks: options.callbacks,
@@ -218,6 +275,47 @@ export class DecisionRuntime implements DecisionEvaluator {
       sourceSignal?.removeEventListener('abort', forwardAbort);
     }
   }
+}
+
+/**
+ * Builds the evaluation's judgment record. An adapter that declares no method
+ * is recorded as provider-native, which makes no claim that its confidence is
+ * calibrated. Inference fields the adapter leaves out come from its declared
+ * `capabilities` and `model`, or are recorded as `custom` / `unknown`, so a
+ * record never implies a pinned backend nobody asserted. Every nested object
+ * is copied, so a caller mutating one evaluation cannot change the next.
+ */
+function judgmentProvenance(
+  adapter: DecisionAdapter,
+  provenance: DecisionProviderProvenance | undefined,
+  modelVersion: string | undefined,
+  questionSetVersion: string,
+): DecisionJudgmentProvenance {
+  const returnedModel = provenance?.returnedModel ?? modelVersion;
+  return {
+    method: { ...(provenance?.method ?? PROVIDER_NATIVE) },
+    ...(provenance?.calibration
+      ? { calibration: { ...provenance.calibration } }
+      : {}),
+    apiDialect:
+      provenance?.apiDialect ?? adapter.capabilities?.apiDialect ?? 'custom',
+    requestedModel: provenance?.requestedModel ?? adapter.model,
+    ...(returnedModel ? { returnedModel } : {}),
+    ...(provenance?.functionVersion
+      ? { functionVersion: provenance.functionVersion }
+      : {}),
+    modelPinning:
+      provenance?.modelPinning ??
+      adapter.capabilities?.modelPinning ??
+      'unknown',
+    ...(provenance?.providerArtifactRef
+      ? { providerArtifactRef: provenance.providerArtifactRef }
+      : {}),
+    ...(provenance?.calibrationProfileRef
+      ? { calibrationProfileRef: provenance.calibrationProfileRef }
+      : {}),
+    questionSetVersion,
+  };
 }
 
 /**

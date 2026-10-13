@@ -151,7 +151,8 @@ async function main(): Promise<void> {
       extra: { DRILL_TOOLS: 'true' },
     });
     // Pin the default model's window so the fraction-derived thresholds are
-    // reachable in a few turns (32k → summarize at 16k tokens, cap 15,360 chars).
+    // reachable in a few turns (32k → summarize at 18,400 tokens, what the
+    // summarizer reads, below 60% of the window; cap 15,360 chars).
     localDefaultModel =
       provisioned.devVars.DEFAULT_MODEL || 'openai/gpt-5.6-luna';
     await provisionDevVars({
@@ -270,7 +271,7 @@ async function main(): Promise<void> {
           );
           assert.ok(w >= 16_000, `window ${w}`);
           assert.ok(
-            ['override', 'catalog', 'learned', 'default'].includes(
+            ['override', 'catalog', 'builtin', 'learned', 'default'].includes(
               status.window.origin,
             ),
           );
@@ -288,7 +289,13 @@ async function main(): Promise<void> {
           );
           assert.equal(
             status.budget.summarizeAtTokens,
-            Math.min(Math.floor(w * 0.5), status.budget.requestCapTokens),
+            // 60% of the window, never above the request cap nor above what
+            // the summarizer reads (the request cap less 4000 for its prompt).
+            Math.min(
+              Math.floor(w * 0.6),
+              status.budget.requestCapTokens,
+              Math.max(1_000, status.budget.requestCapTokens - 4_000),
+            ),
           );
           assert.equal(
             status.budget.pruneAtTokens,
@@ -465,8 +472,9 @@ async function main(): Promise<void> {
         assert.equal(before.session.prunes, 0);
 
         // Each turn adds a result of ~85% of the cap (under it, so nothing is
-        // truncated) ≈ 0.1 × window tokens: the summarize threshold (0.5 ×
-        // window) is crossed within about five turns; the request passes the
+        // truncated) ≈ 0.1 × window tokens: the summarize threshold (0.6 ×
+        // window, clamped to what the summarizer reads — 18,400 at the 32k
+        // pin) is crossed within about six turns; the request passes the
         // prune threshold (0.35 × window, system prompt and schemas included)
         // earlier, and only results outside the kept tail are demoted.
         const resultChars = Math.floor(budget.budget.resultCapChars * 0.85);

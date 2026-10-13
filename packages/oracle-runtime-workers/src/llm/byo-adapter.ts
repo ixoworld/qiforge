@@ -11,13 +11,24 @@
  *
  * The credential is captured in this closure only; it never appears on the
  * request context, graph state, or trace metadata.
+ *
+ * Every BYO model it hands out is wrapped in `ByoModelFallbackChatModel`:
+ * a model the provider refuses (`isModelUnavailableError`) is answered by
+ * the platform model for the rest of the turn, behind a `byo_fallback`
+ * notice. The refusal state lives in this adapter, so it is per turn.
  */
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
 import type { LlmAdapter } from '../core/runtime-context';
+import { NOOP_LOGGER } from '../core/utils';
 import { byoModelForRole, type ByoCredential } from './byo-catalog';
 import { createByoChatModel, type ChatGptBackendConfig } from './byo-client';
+import {
+  ByoModelFallbackChatModel,
+  ByoModelFallbackState,
+} from './byo-model-fallback';
+import type { StreamLivenessSettings } from './stream-liveness';
 
 export interface ByoTurnResolution {
   credential: ByoCredential;
@@ -25,6 +36,8 @@ export interface ByoTurnResolution {
   mainModelId: string;
   /** ChatGPT lane only: backend/proxy the requests go to. */
   chatGptBackend?: ChatGptBackendConfig;
+  /** The BYO lane's liveness budgets (`streamLivenessFromEnv(env, 'byo')`). */
+  streamLiveness?: StreamLivenessSettings;
 }
 
 export function createByoLlmAdapter(
@@ -32,6 +45,7 @@ export function createByoLlmAdapter(
   turn: ByoTurnResolution,
   logger?: Logger,
 ): LlmAdapter {
+  const fallbackState = new ByoModelFallbackState();
   return {
     get(role: ModelRole, params?: ChatOpenAIFields): BaseChatModel {
       const modelId = byoModelForRole(
@@ -46,13 +60,26 @@ export function createByoLlmAdapter(
       // Strip a caller-supplied `model` (for `main` it carries the `byo:` id,
       // which is not a wire id) — the translated id wins.
       const { model: _model, ...rest } = params ?? {};
-      return createByoChatModel({
-        credential: turn.credential,
+      // Wrapped even after a refusal this turn: the wrapper then goes straight
+      // to the platform model and attributes that model's failures to the
+      // platform, not to the user's account.
+      return new ByoModelFallbackChatModel({
+        provider: turn.credential.provider,
         modelId,
-        role,
-        chatGptBackend: turn.chatGptBackend,
-        params: rest,
-        logger,
+        byo: createByoChatModel({
+          credential: turn.credential,
+          modelId,
+          role,
+          chatGptBackend: turn.chatGptBackend,
+          ...(turn.streamLiveness
+            ? { streamLiveness: turn.streamLiveness }
+            : {}),
+          params: rest,
+          logger,
+        }),
+        platform: () => platform.get(role, rest),
+        state: fallbackState,
+        logger: logger ?? NOOP_LOGGER,
       });
     },
   };

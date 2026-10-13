@@ -38,11 +38,11 @@ OPEN_ROUTER_API_KEY=
 # it would preload per turn without acting; on preloads it for that turn.
 # CAPABILITY_ROUTER=shadow
 
-# Turn budget (docs/plans/workers-harness-hardening.md): cumulative model
-# tokens, tool attempts and the wall-clock deadline of one turn, shared by the
-# main agent, its sub-agents and the helper models. Defaults 500000 / 120 /
-# 600000 (10 min); exhaustion ends the turn with a terminal error frame.
-# TURN_MAX_TOKENS=500000
+# Turn budget (docs/plans/workers-harness-hardening.md): tool attempts and the
+# wall-clock deadline of one turn, shared by the main agent and its
+# sub-agents. Defaults 120 / 600000 (10 min); exhaustion ends the turn with a
+# terminal error frame. Model tokens are accounted and logged per turn, never
+# limited.
 # TURN_MAX_TOOL_CALLS=120
 # TURN_TIMEOUT_MS=600000
 # Repetition guard: identical successful calls (same tool, same arguments) one

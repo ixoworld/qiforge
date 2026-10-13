@@ -72,6 +72,33 @@ export interface InvocationStore {
   add(cid: string, ttlMs?: number): Promise<void>;
 
   /**
+   * Mark an invocation CID as used only if it is not marked yet, as ONE
+   * atomic step. Resolves `true` when this call placed the mark and `false`
+   * when the CID was already marked.
+   *
+   * Optional, but recommended: when present the validator places the mark
+   * before it verifies the token, so concurrent presentations of one
+   * invocation (also across instances sharing the store) can never both
+   * succeed. Without it the validator falls back to `has()` + `add()`,
+   * which only serialises presentations that go through the same store
+   * object in the same process.
+   *
+   * @param cid - The CID of the invocation
+   * @param ttlMs - Time-to-live in milliseconds (the token's remaining
+   *   lifetime; undefined for a token without expiry)
+   */
+  addIfAbsent?(cid: string, ttlMs?: number): Promise<boolean>;
+
+  /**
+   * Remove the mark of an invocation CID. The validator calls it to release
+   * a mark placed by `addIfAbsent()` when the token then fails validation,
+   * so a rejected attempt does not use up the token. A store that implements
+   * `addIfAbsent()` without `delete()` keeps the mark of a failed attempt.
+   * @param cid - The CID of the invocation
+   */
+  delete?(cid: string): Promise<void>;
+
+  /**
    * Remove expired entries (optional cleanup method)
    */
   cleanup?(): Promise<void>;

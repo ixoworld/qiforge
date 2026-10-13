@@ -210,6 +210,50 @@ describe('SandboxPlugin (Workers port)', () => {
     ]);
   });
 
+  it('sandbox_write_blob reports a returned success:false as a failure', async () => {
+    upstream = upstream.map((t) =>
+      t.name === 'sandbox_write_file'
+        ? {
+            ...t,
+            invoke: async () =>
+              JSON.stringify({ success: false, error: 'path rejected' }),
+          }
+        : t,
+    );
+    const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+    const ctx = makeCtx();
+    const blobId = await ctx.blobStore.put({
+      userDid: ctx.user.did,
+      name: 'invocation',
+      value: 'tok',
+    });
+    const tools = await plugin.getRequestTools(ctx);
+    const raw = await tools
+      .find((t) => t.name === 'sandbox_write_blob')
+      ?.handler({ blobId, path: '/workspace/data/skill/ucan_token' }, ctx);
+    const result: unknown = JSON.parse(typeof raw === 'string' ? raw : '{}');
+
+    expect(result).toMatchObject({ success: false });
+    expect(JSON.stringify(result)).toContain('path rejected');
+  });
+
+  it('sandbox_write_blob counts bytesWritten in UTF-8 bytes', async () => {
+    const plugin = new SandboxPlugin({ mcpClientFactory: factory });
+    const ctx = makeCtx();
+    const blobId = await ctx.blobStore.put({
+      userDid: ctx.user.did,
+      name: 'invocation',
+      value: 'é€',
+    });
+    const tools = await plugin.getRequestTools(ctx);
+    const raw = await tools
+      .find((t) => t.name === 'sandbox_write_blob')
+      ?.handler({ blobId, path: '/workspace/data/x' }, ctx);
+    const result: unknown = JSON.parse(typeof raw === 'string' ? raw : '{}');
+
+    expect(result).toMatchObject({ success: true, bytesWritten: 5 });
+  });
+
   it('contributes no tools (and never connects) when no invocation can be minted', async () => {
     const plugin = new SandboxPlugin({ mcpClientFactory: factory });
     const tools = await plugin.getRequestTools(

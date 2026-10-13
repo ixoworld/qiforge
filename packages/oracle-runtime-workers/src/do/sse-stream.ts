@@ -20,10 +20,12 @@
  * that reconnects can ask for `?after=<id>`.
  */
 import {
+  BYO_FALLBACK_KIND,
   classifyLlmError,
   isOperatorFault,
   redactOperatorFault,
 } from '../llm/provider-error';
+import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { type AIMessageChunk, ToolMessage } from '@langchain/core/messages';
 import { harnessLimitOf, type HarnessLimitError } from '../core/turn-budget';
 import { RunBuffer, type RunFrame } from './run-buffer';
@@ -304,7 +306,7 @@ export async function runTurnFrames(
     ...(input.runId ? { runId: input.runId } : {}),
   });
 
-  // The turn hit its budget (tokens, tool attempts, deadline): the abort
+  // The turn hit its budget (tool attempts, deadline): the abort
   // was the harness's, not the user's, so the client gets a terminal
   // `error` naming the limit before `done` — not a silent "aborted".
   const limitFailure = (limit: HarnessLimitError) => {
@@ -389,6 +391,15 @@ export async function runTurnFrames(
         metadata?: Record<string, unknown>;
         tags?: string[];
       };
+      if (evt.event === 'on_custom_event' && evt.name === BYO_FALLBACK_KIND) {
+        // A BYO model the provider refused mid-turn (byo-model-fallback.ts):
+        // the same `error`-channel notice the pre-turn fallbacks send, in
+        // stream order — ahead of the platform model's reply to that call.
+        const notice = evt.data;
+        if (notice && typeof notice === 'object')
+          write('error', { ...notice, sessionId, requestId });
+        continue;
+      }
       if (evt.event === 'on_chat_model_end') {
         if (isInternalModelEvent(evt)) continue;
         const output = (evt.data as { output?: AIMessageChunk })?.output;
@@ -468,7 +479,12 @@ export async function runTurnFrames(
         const action = actionCallMap.get(evt.run_id);
         if (action) {
           const parsed = safeParseToolContent(output?.content);
-          const failed = parsed?.success === false || Boolean(parsed?.error);
+          // An unknown outcome (FRONTEND_OUTCOME_UNKNOWN) is not a failure:
+          // the action may have run, so the client must not offer a retry.
+          // It ends as `done` with the unknown result as its output.
+          const failed =
+            !reportsUnknownOutcome(parsed) &&
+            (parsed?.success === false || Boolean(parsed?.error));
           write('action_call', {
             ...action,
             output: text,
@@ -619,13 +635,12 @@ export async function runTurnFrames(
     const limit =
       harnessLimitOf(error) ?? harnessLimitOf(abortController.signal.reason);
     if (limit) return limitFailure(limit);
-    // The run's signal is the authority: LangGraph rethrows the signal's
-    // reason (whatever the aborter passed), not always an `AbortError`.
-    const aborted =
-      abortController.signal.aborted ||
-      (error instanceof Error &&
-        (error.name === 'AbortError' || /abort/i.test(error.message)));
-    if (aborted) {
+    // The run's signal is the only authority: LangGraph rethrows the
+    // signal's reason (whatever the aborter passed), not always an
+    // `AbortError`, while an `AbortError` or "aborted" message with the
+    // signal untouched is a provider or tool timing out — a failure the
+    // client must see as one.
+    if (abortController.signal.aborted) {
       flushOrphans();
       doneFrame({ aborted: true });
       return { status: 'aborted', fullText: fullContent };
@@ -720,7 +735,9 @@ export function createSseSubscriberStream(
       for (const frame of input.replay) write(frame);
       if (closed) return;
       if (input.buffer && !input.buffer.isClosed) {
-        unsubscribe = input.buffer.subscribe(write);
+        // A buffer that closes without a `done` (it never should) still
+        // ends the response instead of leaving it on heartbeats.
+        unsubscribe = input.buffer.subscribe(write, finish);
       } else {
         if (input.trailer)
           write({

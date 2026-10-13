@@ -140,6 +140,14 @@ describe('CloudflareJevDecisionAdapter', () => {
 
     expect(result).toEqual({
       modelVersion: 'jev-1.13.0',
+      provenance: {
+        method: { kind: 'provider-native', name: 'typesafe-system-one' },
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev',
+        returnedModel: 'jev-1.13.0',
+        modelPinning: 'mutable',
+        providerArtifactRef: 'typesafe/jev',
+      },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.98 },
         service: {
@@ -154,13 +162,6 @@ describe('CloudflareJevDecisionAdapter', () => {
           confidence: 0.82,
           probabilities: { 0: 0.1, 1: 0.4, 2: 0.5 },
         },
-      },
-      provenance: {
-        apiDialect: 'systemone-v1',
-        requestedModel: 'typesafe/jev',
-        returnedModel: 'jev-1.13.0',
-        modelPinning: 'mutable',
-        providerArtifactRef: 'typesafe/jev',
       },
       usage: { inputTokens: 100, outputTokens: 20 },
     });
@@ -221,6 +222,42 @@ describe('CloudflareJevDecisionAdapter', () => {
       model: 'typesafe/jev-next',
     });
     expect(adapter.model).toBe('typesafe/jev-next');
+  });
+
+  it('names the Jev method only for the default Cloudflare model, in a fresh object per call', async () => {
+    const answer = () =>
+      successResponse({ answers: { work: { type: 'noul', noul: 0.5 } } });
+    const defaultModel = new CloudflareJevDecisionAdapter({
+      accountId: 'account-1',
+      apiToken: 'token',
+      fetch: vi.fn<typeof fetch>(async () => answer()),
+    });
+    const otherModel = new CloudflareJevDecisionAdapter({
+      accountId: 'account-1',
+      apiToken: 'token',
+      model: 'typesafe/jev-next',
+      fetch: vi.fn<typeof fetch>(async () => answer()),
+    });
+
+    const first = await defaultModel.evaluate(booleanRequest);
+    if (!first.provenance) throw new Error('provenance missing');
+    first.provenance.method.name = 'tampered';
+    const second = await defaultModel.evaluate(booleanRequest);
+
+    expect(second.provenance).toEqual({
+      method: { kind: 'provider-native', name: 'typesafe-system-one' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev',
+    });
+    expect(second.provenance?.method).not.toBe(first.provenance.method);
+    await expect(otherModel.evaluate(booleanRequest)).resolves.toMatchObject({
+      provenance: { method: { kind: 'provider-native' } },
+    });
+    expect(
+      (await otherModel.evaluate(booleanRequest)).provenance?.method,
+    ).not.toHaveProperty('name');
   });
 
   it('does not expose projected state in HTTP errors', async () => {

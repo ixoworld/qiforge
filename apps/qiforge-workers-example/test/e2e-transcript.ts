@@ -44,6 +44,7 @@ interface Dto {
   id: string;
   type: 'ai' | 'human';
   content: string;
+  createdAt?: string;
   toolCalls?: Array<{
     id: string;
     name: string;
@@ -185,6 +186,22 @@ async function main(): Promise<void> {
         assert.ok(
           legacy.some((m) => m.toolCalls?.some((t) => t.output)),
           'the weather turn should carry a folded tool result',
+        );
+        // Every message carries the time it was first saved, in order, and
+        // a second read reports the same times.
+        const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+        for (const m of legacy)
+          assert.match(m.createdAt ?? '', iso, `createdAt on ${m.id}`);
+        for (let i = 1; i < legacy.length; i += 1)
+          assert.ok(
+            legacy[i]!.createdAt! >= legacy[i - 1]!.createdAt!,
+            `createdAt is non-decreasing at ${i}`,
+          );
+        const again = (await client.listMessages(sid)).messages as Dto[];
+        assert.deepEqual(
+          again.map((m) => m.createdAt),
+          legacy.map((m) => m.createdAt),
+          'createdAt is stable across reads',
         );
       },
     );

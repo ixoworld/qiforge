@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { SecretsAdapter } from '../core/runtime-context';
+import { makeRuntimeContext } from '../core/test-fixtures';
 import { createSecretsAdapter } from '../do/secrets-adapter';
+import { BYO_SECRET_NAMES } from '../llm/byo-catalog';
+import { WorkersByoService } from '../llm/byo-service';
+import { SandboxPlugin } from '../plugins/sandbox/sandbox.plugin';
 import { decryptJwe, encryptJwe, type JWK } from './jwe';
 import { decryptWithPin } from './pin-cipher';
 import {
@@ -274,5 +279,91 @@ describe('decryptWithPin (account-room key cipher)', () => {
     await expect(
       decryptWithPin(PIN_CIPHERTEXT, 'x'.repeat(33)),
     ).rejects.toThrow(/invalid key length/);
+  });
+});
+
+describe('one room-state read per secrets consumer', () => {
+  const SANDBOX_URL = 'https://sandbox.example/mcp';
+
+  /** A sandbox connect over the real adapter, recording the secrets it forwards. */
+  async function connectSandbox(
+    secrets: SecretsAdapter,
+  ): Promise<Record<string, string>> {
+    const forwarded: Record<string, string>[] = [];
+    const plugin = new SandboxPlugin({
+      authBuilder: async (inputs) => {
+        forwarded.push(inputs.userSecrets);
+        return { Authorization: 'Bearer sandbox-token' };
+      },
+      mcpClientFactory: () => ({
+        getTools: async () => [],
+        close: async () => undefined,
+      }),
+    });
+    const ctx = makeRuntimeContext(
+      {},
+      {
+        ambient: { secrets, config: { SANDBOX_MCP_URL: SANDBOX_URL } },
+        runConfig: {
+          context: {
+            user: {
+              did: 'did:ixo:user1',
+              matrixUserId: '@u:server',
+              ucanDelegation: { raw: 'delegation' },
+            },
+            session: {
+              id: 'session-1',
+              client: 'matrix',
+              requestId: 'req-1',
+              roomId: ROOM,
+            },
+          },
+        },
+      },
+    );
+    await plugin.getRequestTools(ctx);
+    const last = forwarded.at(-1);
+    if (!last) throw new Error('the sandbox never built its headers');
+    return last;
+  }
+
+  it('a sandbox connect reads room state once, and a rotated secret is seen on the next connect', async () => {
+    const gateway = new MockGateway();
+    await seedSecret(gateway, 'API_KEY', 'v1');
+    const adapter = createSecretsAdapter(makeService(gateway));
+
+    expect(await connectSandbox(adapter)).toEqual({ API_KEY: 'v1' });
+    expect(gateway.calls.getRoomState).toBe(1);
+
+    await seedSecret(gateway, 'API_KEY', 'v2');
+    expect(await connectSandbox(adapter)).toEqual({ API_KEY: 'v2' });
+    expect(gateway.calls.getRoomState).toBe(2);
+  });
+
+  it('BYO credentials are read with one room-state read', async () => {
+    const gateway = new MockGateway();
+    await seedSecret(gateway, BYO_SECRET_NAMES.openai, 'sk-user');
+    await seedSecret(gateway, 'UNRELATED', 'x');
+    const store = new Map<string, string>();
+    const byo = new WorkersByoService({
+      probeFetch: async () => new Response('{}', { status: 404 }),
+      enabled: true,
+      secrets: makeService(gateway),
+      resolveRoomId: async () => ROOM,
+      store: {
+        get: async (key) => store.get(key),
+        put: async (key, value) => {
+          store.set(key, value);
+        },
+        delete: async (key) => {
+          store.delete(key);
+        },
+      },
+    });
+
+    await expect(byo.getCredentials('did:ixo:user1')).resolves.toEqual({
+      openai: { provider: 'openai', apiKey: 'sk-user' },
+    });
+    expect(gateway.calls.getRoomState).toBe(1);
   });
 });

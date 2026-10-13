@@ -7,6 +7,7 @@ forwards it to the right object.
 ```mermaid
 graph LR
     Client[Portal / SDK / curl] -->|HTTP + SSE, UCAN auth| Shell[Hono shell]
+    Channels[IXO Channels gateway] -->|POST /channels/turn, channel UCAN| Shell
     Shell -->|per user DID| UserDO[UserOracleDO × N users]
     Matrix[(Matrix homeserver)] <-->|/sync, E2EE| Gateway[MatrixGatewayDO × 1]
     Gateway -->|decrypted turn| UserDO
@@ -16,59 +17,22 @@ graph LR
 
 ## The objects
 
-### Supplied-context tasks
-
-A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
-when it creates a task through `ctx.tasks`. The task must run once with
-`approval: 'never'`. The adapter must obtain authorization for the supplied
-text before creation. This profile does not provide an authorization UI or
-an HTTP task endpoint.
-
-The scheduler persists the profile in the task row and its Markdown spec.
-It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
-Before original or resumed execution, the runtime checks the owner, task,
-run, session, profile and exact task input. The profile and task inputs
-cannot change. A revision requires a new task.
-
-The agent binds no tools and rejects model-emitted tool calls. Preparation
-excludes personal preferences, memory, plugin hooks, page context, attachment
-processing and capability routing. Model selection, token and time budgets,
-checkpoints and delivery recovery continue to use the existing runtime.
-The output is generated text, not proof that the user's goal was achieved
-or that a reviewer accepted it.
-
-The scheduler re-checks the policy on every original and recovered turn, not
-only at creation: a row that is not one-shot with `approval: 'never'` is
-refused, however it was written. A turn without the profile on a restricted
-task's `task:<id>` session is refused as well.
-
-Around the turn, the profile is read from the task row (never from a
-request) and keeps the source and result inside the turn:
-
-- No session title. The `task:<id>` session keeps its placeholder title; the
-  `session-title` model (the platform adapter, outside the turn's metered
-  model and budget) is never called.
-- No memory indexing. No task-run session is sent to the memory engine —
-  not on the next session create, not on a realtime drain, not on delete.
-  The next session create indexes the user's latest conversation instead.
-- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
-  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
-  own env-driven tracer is outside this switch: it attaches only when
-  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
-  that runs restricted tasks must not rely on that variable being hidden.
-- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
-  `get_task` returns metadata only (no intent, no result text) and
-  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
-  only cancelled.
-
-A task row whose profile this runtime does not know (written by a newer
-runtime) is skipped: it is never listed, scheduled or run, the other tasks
-keep working, and any turn on its session is refused.
-
-Before rolling back to a runtime that predates this profile, cancel or drain
-all restricted tasks. An older scheduler ignores the new profile column
-and can execute a pending restricted task with its ordinary tool set; it
-also titles, indexes and traces task sessions as ordinary ones.
+Turns reach a user object from four places: the Portal and other HTTP
+clients (`POST /messages/:id`, SSE), Matrix rooms through the gateway, IXO
+Channels (`POST /channels/turn`, [channels](channels.md); a NEW channel
+request is admitted only under a stored delegation with more than 900 s
+left, else `428 delegation_required`, while a poll of a run that exists
+answers its status, from a warm object without an Auth Hub call; Matrix is
+off the channel path: the session marker of a binding's first message is
+the only Matrix send a turn waits for, and the Companion room mirrors are
+owed by the request's receipt and sent in the background), and the task
+scheduler's alarm — which also runs the tasks the owner-only
+[Topic deliverable API](#topic-deliverable-api) creates. Every one of them
+is a durable run in the same object
+([operations](operations.md#turns-durable-runs)). How a reply is
+shaped for a chat surface is in [chat delivery](chat-delivery.md); browser
+tools and AG-UI actions over the socket are in
+[frontend bridge](frontend-bridge.md).
 
 ### `UserOracleDO` — one per user DID
 
@@ -82,6 +46,51 @@ writes about 5 chunk rows instead of 30–80 page rows.
 The object runs the agent turn (LangChain `createAgent`) and streams SSE
 straight from the object. It is single-threaded, which replaces the Node
 runtime's per-user ref-counting, busy-timeouts and cron locks outright.
+
+**Request admission.** Before the agent is prepared, a turn is offered to
+every plugin's `getRequestAdmission(ctx)`, in the order the plugins were
+loaded (`src/core/request-admission.ts`). A handler answers `pass` or
+`{ kind: 'handled', text, title }`, a deterministic authorized read that
+becomes the reply without a model call; the first `handled` wins (an empty
+text or title, a title over 200 or a text over 100,000 characters is
+refused as invalid). Handlers
+see a redacted config (the core settings without `OPEN_ROUTER_API_KEY`, the
+Matrix password and recovery phrase or `CLOUDFLARE_API_TOKEN`, plus their
+own plugin's keys), get `REQUEST_ADMISSION_TIMEOUT_MS` each (default 2 s;
+a late handler counts as `pass`), and are skipped for a turn with
+attachments, a scheduled task run and a Matrix group-room turn
+(`admissionApplies`, `src/do/user-oracle-do.ts`). The outcome is stored on
+the durable run as its disposition (`admitting`, `agent` or `direct-read`,
+inside the run's stored request), so a recovered attempt repeats an
+interrupted admission, replays a recorded direct read, or resumes the
+agent. A thrown or invalid answer ends the run `failed` with an `error`
+frame of `kind: 'request_admission'`
+([operations](operations.md#turns-durable-runs)). Plugins can also add
+per-turn middleware with `getRequestMiddlewares(ctx)`, collected afresh for
+each ordinary agent turn after the boot-time middleware. The plugin-author
+contract is in
+[`docs/architecture/request-admission.md`](../../../docs/architecture/request-admission.md)
+at the repo root.
+
+**Turn time and the prompt cache.** The system prompt carries the date
+only: `**Current date:** <weekday>, <YYYY-MM-DD> (<timezone>)`
+(`formatDateContext`, `src/core/prompt-composer.ts`; an invalid timezone
+falls back to UTC and is not printed). It therefore stays byte-identical
+across the turns of a day and the provider's prompt cache reaches past it.
+The exact time rides on the user's own message instead: the turn's human
+message starts with `Current time: <weekday>, <date> <HH:MM> (<timezone>)`
+(`renderTurnTimeNote`), and the note is recorded verbatim under the
+`turn_time_note` kwarg (`src/core/turn-time-note.ts`). The model sees when
+every message was sent; the transcript (`GET /messages/:id`, paged
+transcripts), session titles and memory indexing read the message through
+`visibleText` / `visibleContent` (`src/do/transcript.ts`), which take the
+note off again. A supplied-context task's input gets no note, so it stays
+exactly as supplied.
+
+**Shared registries, per-turn data.** The tool and sub-agent registries are
+built once per isolate and shared by every turn of every user, so they hold
+no request-time data. A turn's request-time tools are returned to that turn
+only, and `load_capability` lists the tools of the turn that calls it.
 
 **Capability gate.** On-demand plugin tools and sub-agents are bound at
 build time but hidden from the model until the thread has loaded their plugin
@@ -188,17 +197,33 @@ action guard still applies to an admin tool's real-world effect).
 model round trip. With `CAPABILITY_ROUTER=on` the turn build
 (`prepareTurn`) first evaluates the shared `capabilityRouteDecision`
 (`src/core/capability-router.ts`) over the user's message and the on-demand
-plugins the thread has not loaded, and hands the routed plugin to
+plugins the thread has not loaded — leaving out every plugin whose
+`requires` the turn's delegation does not grant, and computing the hidden
+plugins only when it actually evaluates — and hands the routed plugin to
 `createMainAgent` as `preloadedPlugins`. The gate admits its tools and tool
 handlers see it in `ctx.loadedPlugins` for that turn only: the preload is
 never written to the checkpointed `loadedPlugins` channel, which stays the
 monotonic record of what `load_capability` loaded. The router fails open — a
-missing provider, a timeout or a malformed verdict preloads nothing and warns
+missing provider, an ambiguous multi-provider configuration (no route or
+default for `runtime.route-capabilities`), a timeout or a malformed verdict
+preloads nothing and warns
 `[capability-router] … status=fallback reason=<error name>`; a preload logs
 `[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
 the same evaluation under `waitUntil` without awaiting it, logs
 `[capability-router-shadow] … wouldPreload=[…]`, and after the turn compares
 the prediction with what the turn actually loaded (`agree=<bool>`).
+
+**Operating guides.** A plugin's working rules (`OraclePlugin.operatingGuide`,
+plain markdown starting at a `###` heading) are never part of the manifest,
+the Tier-1 capability block or `list_capabilities`. The system prompt
+carries the guides of the plugins in use when the turn starts — loaded on
+the thread (the checkpointed `loadedPlugins`) or `always` visible — that
+are not `silent` and that the user's delegation can use. A one-turn router
+preload does not change the system prompt (it would enter it and leave it
+again on the next turn, breaking the prompt cache); `load_capability`
+returns the guide instead, for a plugin it loads now and for one the router
+only preloaded, at most once per turn however often the plugin is loaded.
+A plugin loaded mid-turn has its guide in the prompt from the next turn on.
 
 ### `MatrixGatewayDO` — one per oracle
 
@@ -237,7 +262,10 @@ The subclass adds only what is specific to the oracle:
   user object's turn ledger (`src/do/matrix-turn-ledger.ts`) guarantees a
   turn never runs twice for one event;
 - user ↔ oracle room resolution from DIDs (alias on the user's own
-  homeserver, see [operations](operations.md#rooms-and-aliases));
+  homeserver, see [operations](operations.md#rooms-and-aliases)), and the
+  reverse: a room's canonical alias names its owner only when the alias's
+  own server resolves it to that room (`src/matrix/room-alias.ts`), since
+  room state can carry any alias;
 - dedicated `[Task] <title>` rooms;
 - user SQLite snapshots as encrypted room media (`m.ixo.media_upload` +
   `m.ixo.media_state`, wire-identical to the Node runtime — read-only legacy
@@ -314,8 +342,30 @@ system of record.
   [operations → user objects](operations.md#user-objects-and-the-owner-copy).
 - Blobs are gzipped per row (`sqlite/blob-codec.ts`; gzip magic detected on
   read, so uncompressed legacy rows coexist) and a background compactor
-  rewrites and `VACUUM`s files imported from the Node runtime. Nothing is
-  pruned or summarised. A Node-written `.db` loads here; a compressed file
+  rewrites and `VACUUM`s files imported from the Node runtime, one
+  transaction per step of at most 300 rows and 8 MiB of blobs
+  (`COMPACT_STEP_MAX_BYTES`; a step always takes at least one row). A step
+  reads one candidate row at a time and stops before the row that would
+  cross the budget, so it never loads more than it examines (that row is
+  read again as the first of the next step). Nothing
+  is pruned or summarised.
+- **One connection, one transaction at a time.** `DoSqliteDatabase`
+  serialises its connection: a statement issued outside `transaction()`
+  waits for another chain's open transaction to commit or roll back
+  instead of running inside it, so a rollback (including the retry after a
+  cold miss) never discards a write its caller already saw succeed. A
+  transaction's own statements, and `withoutTransactions()` callbacks, run
+  straight away; nested transactions are savepoints. The rule for callers:
+  a transaction body issues statements only and never awaits work another
+  chain started that itself needs the database — that would wait forever.
+- **Checkpoint messages are updated in place.** The checkpointer keeps a
+  message row's rowid while the order along the message array holds, and
+  gzips a message object once while its JSON is unchanged; from the first
+  new or reordered message on, rows are written as before, and a
+  checkpoint's messages are read back `ORDER BY rowid`. Migration 002 drops
+  `idx_messages_thread_id` and `idx_messages_checkpoint_id` (every put
+  rewrote the latter); the one query that used the former runs the same
+  `thread_id` search on a remaining index. A Node-written `.db` loads here; a compressed file
   is no longer readable by the Node runtime.
 
 ### R2 page tier
@@ -347,21 +397,40 @@ What makes it cheap and fast:
   alarm at most every six hours, rewrites whole segments (one PUT, plus one
   GET when the segment already existed), and deletes the evicted rows in
   the same storage transaction as the map update — a crash leaves at worst
-  an orphan object, swept later, never a hole.
+  an orphan object, swept later, never a hole. The pass holds the database
+  lock only to plan, to read one segment's rows and to commit that
+  segment, never across R2 I/O, so a turn that starts mid-pass runs. Each
+  commit re-checks what could have changed while the lock was released:
+  rows rewritten meanwhile stay hot, and a truncation, import, rename,
+  delete, materialize, file reopen, moved segment entry or newly opened
+  snapshot ends the pass and queues its upload for deletion.
+- **Orphans are swept weekly, by shape.** The sweep lists the object's
+  prefix one page (1,000 keys) per step, from a persisted schedule
+  (`vfs2_tier_sweep`: at most every seven days, resuming where the last
+  step stopped across restarts), and deletes only unreferenced keys shaped
+  like segments (`<object id>/<file>/<segno>.<gen>`) — the result store
+  keeps `<object id>/results/…` objects in the same bucket. It never runs
+  while a pass has uploads in flight, no pass starts during it, and no
+  object is deleted while a snapshot or a whole-file export or checksum is
+  reading.
 - **Cold reads cannot block, so they retry.** The VFS is synchronous. A
   read of a cold page records a miss and fails the statement with
   `SQLITE_IOERR`; `DoSqliteDatabase` fetches the missed segments (plus one
   of read-ahead), pins them in memory for the retry, and re-runs the
   statement — or rolls back and re-runs the whole transaction, which is
-  why the checkpointer's and stores' callbacks only issue statements. Pins
+  why the checkpointer's and stores' callbacks only issue statements. A
+  fetch whose response arrives after a pass rewrote that segment checks the
+  map again and fetches the generation it now points at (up to 4 times),
+  so a stale segment is never served. Pins
   are released into the LRU when the statement or transaction ends; a
   statement needing more than `TIER_MISS_PIN_BYTES` worth of cold data
   (32 MiB) fails with a clear error rather than thrashing.
 - **Writes never miss.** SQLite writes reused free-list pages without
   reading them, so a page written over a cold chunk becomes a **partial
-  row** (`vfs2_chunks.mask` names its valid pages); the missing pages come
-  from the R2 slot when read, and the next eviction merges the row into
-  its segment.
+  row** (`vfs2_chunks.mask` names its valid pages); a read whose pages the
+  partial row holds is served from it with no R2 call, the missing pages
+  come from the R2 slot when read, and the next eviction merges the row
+  into its segment.
 - **Chunk 0 never moves.** `sqlite3_open_v2` reads the file header before
   any statement could retry.
 - **Snapshots stay consistent.** The flush pins a snapshot-time copy of the
@@ -389,6 +458,71 @@ length in one pass, the upload in the second): 98 GETs and 14.8 s for the
 50 segments, against 15.1 s for the same file before the tier. A 2 MB user
 went from 32 rows to 1 in 2 s with no measurable turn difference.
 
+### Plugin state in the user's file (`ctx.kv`)
+
+A plugin whose state must outlive the in-memory plugin instance — which lives
+per isolate and knows nothing of eviction — writes it through `ctx.kv`
+(`UserKvSurface`): namespaced JSON rows in the `user_kv` table of the user's
+own SQLite file (`src/sqlite/user-kv-store.ts`). The rows travel with the
+owner copy, so they survive eviction and a cold start, and leave with the file.
+Each entry can carry an idle TTL and a per-namespace LRU cap (the semantics of
+an in-memory bounded map); `update` is an atomic read-modify-write inside a
+SQLite transaction. Namespaces are a naming convention, not isolation: every
+plugin sees the same surface and can read or write any namespace. Plugins are
+trusted code the operator chose to load; nothing here protects one plugin's
+rows from another. The POD Creator plugin keeps its blueprints and create
+sessions there ([pod-creator](pod-creator.md)). Hosts without it leave
+`ctx.kv` undefined; `createMemoryUserKv()` (`src/core/user-kv.ts`) is the
+in-memory implementation for tests.
+
+**Hard caps.** The rows sit in the same file as the user's LangGraph
+checkpoints, sessions and transcript, and that file is the owner copy:
+exported daily, re-imported on a cold start. The per-write options are the
+plugin's choice, so on their own they bound nothing. Both implementations
+enforce four caps that no option lifts (`USER_KV_LIMITS` in
+`src/core/user-kv.ts`, exported to plugins as `USER_KV_MAX_*`):
+
+| Cap                                 | Value   | Counts                                                              |
+| ----------------------------------- | ------- | ------------------------------------------------------------------- |
+| `USER_KV_MAX_VALUE_BYTES`           | 256 KiB | UTF-8 bytes of one value's JSON                                     |
+| `USER_KV_MAX_ENTRIES_PER_NAMESPACE` | 10,000  | rows in one namespace                                               |
+| `USER_KV_MAX_TOTAL_ENTRIES`         | 50,000  | rows across all namespaces                                          |
+| `USER_KV_MAX_TOTAL_BYTES`           | 32 MiB  | UTF-8 bytes of namespace, key and value JSON, summed over every row |
+
+A `maxEntries` above the per-namespace cap is rejected with a `RangeError`,
+not clamped. A value above the byte cap is refused before anything is
+written. Otherwise the write, and the trim its own `maxEntries` asks for,
+run first; then, inside the same transaction, the store is measured. If a
+cap is broken, expired rows of every namespace are swept once and the store
+measured again; if it is still broken, the call rejects with
+`UserKvLimitError` (`limit`: `value` / `namespace-entries` / `entries` /
+`bytes`, plus `max`, `actual` and `namespace`) and the transaction rolls
+back: the write and its trim are undone, the previous value stays, and
+nothing is evicted to make room — the runtime cannot tell which plugin's
+rows are expendable. Only a measure the write grew is checked: a
+new key for the entry counts, a bigger value than the row it replaces for
+the byte total (a replaced row keeps its namespace and key). Replacing a
+key therefore counts only the difference in size, and a file already above a cap (written before the caps existed) can still
+shrink, replace in place and delete. `delete`, and `update` returning
+`undefined`, are never refused.
+
+Each row carries `bytes`: the UTF-8 bytes of its namespace, key and value
+JSON together (`userKvRowBytes`, computed in JS with the same encoder as the
+per-value check). Names count because each may be 512 UTF-16 characters, up
+to 3 UTF-8 bytes each — about 3 KB of names per row, about 150 MB over
+50,000 rows — which a value-only total would let past the 32 MiB cap.
+`idx_user_kv_bytes` covers the
+store-wide `COUNT(*)` + `SUM(bytes)`, so the measure reads that index, not
+the values; the namespace count uses `idx_user_kv_recency`, and the sweep
+`idx_user_kv_expiry`. A write that adds no key and no bytes skips the
+measure. `setup()` upgrades a table from an older build in place (the
+harness and live objects keep their files across releases): if
+`PRAGMA table_info(user_kv)` has no `bytes`, it adds the column and fills it
+with `length(CAST(namespace AS BLOB)) + length(CAST(key AS BLOB)) +
+length(CAST(value AS BLOB))` in one transaction, then creates the
+indexes idempotently. The constructor's `limits` option exists for tests;
+`UserOracleDO` constructs the store without it.
+
 ### What fills a user's file
 
 Measured on a devnet user after ~350 sessions / 2,500 messages (26 MB
@@ -399,12 +533,16 @@ plain-text column the Node schema declares, plus the gzipped blob that is
 the only copy anything reads). Checkpoints are kept at 10 per thread
 (`DEFAULT_MAX_CHECKPOINTS_PER_THREAD`).
 
-Candidates deliberately not done yet, in order of payoff: cap or
-de-duplicate large tool outputs; a full-text index (our wa-sqlite build has
-no FTS5); native DO SQLite instead of the in-isolate WASM engine (removes
-the ~16 MB per-object heap, loses raw-file export); a resume of the turn
-after an isolate reset (the checkpointer already saves every step, but a
-tool mid-flight at the reset would run twice).
+Candidates deliberately not done yet, in order of payoff: de-duplicate the
+plain-text and blob copies of each message; a full-text index (our wa-sqlite
+build has no FTS5); native DO SQLite instead of the in-isolate WASM engine
+(removes the ~16 MB per-object heap, loses raw-file export). Two earlier
+candidates are done: a tool result above the context cap is truncated at
+the tool boundary, so the checkpoint and the transcript carry the capped
+text and the whole text is kept for 24 h in `tool_results` or R2
+([context budgets](operations.md#turns-context-budgets)); and a turn cut
+off by an isolate reset resumes from its checkpoint without repeating a
+write tool ([durable runs](operations.md#turns-durable-runs)).
 
 ## Object lifetime and cost
 
@@ -428,7 +566,18 @@ deleted $1.00 per million.
   keeping it costs $0.0056 a month; wiping and re-importing it costs ≈
   $0.0009 per cycle, about five days of storage. Hence `IDLE_EVICT_MS` is
   five days: a daily user is never wiped, a lapsed one costs nothing after
-  the fifth day.
+  the fifth day. The five-day clock counts only the user's own requests —
+  the object's alarm, flushes and debug or operator calls do not keep it
+  alive — and the last access is persisted at most hourly, so an instance
+  that unloads can lose up to an hour of it. A tiered copy is wiped despite
+  its pending tier pass, R2 prefix included (the exact rules are in
+  [operations → user objects](operations.md#user-objects-and-the-owner-copy)).
+- **Few storage writes per turn.** A warm object keeps the last access,
+  the user's Matrix id, the dirty mark and the flush deadline in memory:
+  the first turn of a debounce window writes the delegation (only when it
+  changed), the dirty mark and the flush deadline to the object's KV, and
+  a later turn writes none of them. A turn writes its run row twice, when
+  it starts and when it ends (usage included).
 - **Concurrency, not sessions, is the memory limit.** Only loaded objects
   occupy the isolate: with the 4 MiB chunk cache and streamed flush/import a
   turn holds roughly 10–20 MB, so several turns run concurrently per server.
@@ -465,23 +614,23 @@ Assumptions per daily user: 10 turns a day; an object loaded ~40 s per turn
 turn; ~15 shell requests and ~40 console lines per turn; a 100 MB average
 resident working copy.
 
-| Monthly cost line            | What it pays for                                                                                                | 100 users     | 1,000         | 10,000        | 100,000       |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- | ------------- | ------------- | ------------- |
-| Workers Paid base            | the account plan                                                                                                | $5            | $5            | $5            | $5            |
-| DO loaded time, gateway      | one bot object resident around the clock (fixed)                                                                | $0            | $4            | $4            | $4            |
-| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work                                                             | $1            | $14           | $187          | $1,915        |
-| DO requests                  | shell→object calls, gateway RPCs, alarms, pings                                                                 | $0            | $0.4          | $5            | $54           |
-| SQLite rows written          | checkpoints, sessions, tasks, meta                                                                              | $0            | $0            | $0            | $310          |
-| SQLite rows read             | object boots and turn reads                                                                                     | $0            | $0            | $0            | $0            |
-| SQLite storage, tier OFF     | resident working copies, all in the object (100 MB average)                                                     | $1            | $19           | $199          | $1,999        |
-| SQLite storage, tier ON      | the hot set only (~5 MB per user)                                                                               | $0.10         | $1            | $10           | $100          |
-| R2 storage, tier ON          | the cold ~95 MB per user at $0.015/GB-month                                                                     | $0.14         | $1.43         | $14           | $143          |
-| R2 operations, tier ON       | the two-pass daily export (2 GETs per cold segment) + the eviction pass (a GET and a PUT per rewritten segment) | $0.35         | $3.5          | $35           | $351          |
-| Worker requests + CPU        | the HTTP shell, auth, rate limiting                                                                             | $0            | $0            | $13           | $158          |
-| Workers Logs                 | observability events from console output                                                                        | $0            | $0            | $60           | $708          |
-| **Total, tier OFF**          |                                                                                                                 | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
-| **Total, tier ON**           |                                                                                                                 | **~$7**       | **~$29**      | **~$330**     | **~$3,750**   |
-| Per user per month, OFF / ON |                                                                                                                 | $0.07 / $0.07 | $0.04 / $0.03 | $0.05 / $0.03 | $0.05 / $0.04 |
+| Monthly cost line            | What it pays for                                                                                                                                                     | 100 users     | 1,000         | 10,000        | 100,000       |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ------------- | ------------- | ------------- |
+| Workers Paid base            | the account plan                                                                                                                                                     | $5            | $5            | $5            | $5            |
+| DO loaded time, gateway      | one bot object resident around the clock (fixed)                                                                                                                     | $0            | $4            | $4            | $4            |
+| DO loaded time, user objects | the turn itself: model wait, tools, after-turn work                                                                                                                  | $1            | $14           | $187          | $1,915        |
+| DO requests                  | shell→object calls, gateway RPCs, alarms, pings                                                                                                                      | $0            | $0.4          | $5            | $54           |
+| SQLite rows written          | checkpoints, sessions, tasks, meta                                                                                                                                   | $0            | $0            | $0            | $310          |
+| SQLite rows read             | object boots and turn reads                                                                                                                                          | $0            | $0            | $0            | $0            |
+| SQLite storage, tier OFF     | resident working copies, all in the object (100 MB average)                                                                                                          | $1            | $19           | $199          | $1,999        |
+| SQLite storage, tier ON      | the hot set only (~5 MB per user)                                                                                                                                    | $0.10         | $1            | $10           | $100          |
+| R2 storage, tier ON          | the cold ~95 MB per user at $0.015/GB-month                                                                                                                          | $0.14         | $1.43         | $14           | $143          |
+| R2 operations, tier ON       | the two-pass daily export (2 GETs per cold segment) + the eviction pass (a GET and a PUT per rewritten segment) + the weekly orphan sweep (one list per tiered user) | $0.35         | $3.5          | $35           | $351          |
+| Worker requests + CPU        | the HTTP shell, auth, rate limiting                                                                                                                                  | $0            | $0            | $13           | $158          |
+| Workers Logs                 | observability events from console output                                                                                                                             | $0            | $0            | $60           | $708          |
+| **Total, tier OFF**          |                                                                                                                                                                      | **~$7**       | **~$42**      | **~$470**     | **~$5,150**   |
+| **Total, tier ON**           |                                                                                                                                                                      | **~$7**       | **~$29**      | **~$330**     | **~$3,750**   |
+| Per user per month, OFF / ON |                                                                                                                                                                      | $0.07 / $0.07 | $0.04 / $0.03 | $0.05 / $0.03 | $0.05 / $0.04 |
 
 How to read it:
 
@@ -492,7 +641,11 @@ How to read it:
 - **The gateway is a throughput limit before it is a cost.** Its loaded time
   is fixed at ≈ $4 whatever the user count, but one object with a
   3-messages-per-second Matrix send budget cannot mirror the traffic of
-  10,000-plus daily users.
+  10,000-plus daily users. Channel turns no longer wait on it (their room
+  mirrors are sent in the background and retried from the user object's
+  alarm), so a saturated or failing gateway delays the Companion room
+  transcript, not the WhatsApp reply; only a binding's first message waits
+  for its session marker.
 - **Logs are the avoidable line.** At the current verbosity they are the
   third-largest cost at scale.
 
@@ -510,9 +663,10 @@ Future improvements, in the order they pay off:
    raise `MATRIX_SEND_RATE_PER_SECOND` with the homeserver's consent) before
    the mirror traffic of ~10,000 daily users saturates one object.
 4. **Shorter loaded time per turn.** The model wait is billed as loaded
-   time. Long tool chains belong in sub-agents, after-turn work (titles,
-   history indexing) should not extend the tail, and a cheaper routing model
-   for the summariser keeps that call short.
+   time. Long tool chains belong in sub-agents, and after-turn work (titles,
+   history indexing) should not extend the tail. The summary is written by
+   the turn's own model (the `summarizer` role), at 60% of its window, so on
+   a large window it runs rarely but each call reads a large history.
 5. **Resident task holders.** A recurring task keeps its user's working copy
    resident; once task users are a large share of storage, a lighter
    representation for idle-but-scheduled users (the R2 tier again, or a
@@ -576,19 +730,25 @@ and an object stops hibernating or a request dies with an opaque error.
 
 - **No timer may outlive a request.** A pending `setTimeout`/`setInterval`
   keeps a Durable Object resident and blocks WebSocket hibernation.
-  `@ixo/ucan`'s invocation store used to start an hourly sweep interval per
-  validator; `shell/auth.ts` shares one store per isolate with auto-cleanup
-  off. Tools register cleanups with `RuntimeContext.onTurnEnd`. With debug
+  `@ixo/ucan`'s default invocation store starts an hourly sweep interval per
+  validator; `shell/auth.ts` and `channels/auth.ts` hand their validators a
+  no-op store instead. Tools register cleanups with `RuntimeContext.onTurnEnd`. With debug
   routes on, `GET /debug/realtime` → `pendingTimers` lists every live timer
   with its creation stack.
 - **No MCP client may outlive a call.** A streamable-HTTP MCP client keeps a
   server→client stream open for as long as it exists, which counts as
   in-flight I/O: the object never hibernates and is billed around the
   clock. Clients connect, call and close per invocation (memory and sandbox
-  at turn end, firecrawl per call). Never hand the MCP SDK a tool timeout
-  either — its per-request timer pins the object for the whole window;
-  every upstream call races our own always-cleared timer
-  (`src/plugins/mcp-call-timeout.ts`).
+  at turn end, firecrawl per call). Never hand LangChain a tool timeout
+  (`defaultToolTimeout`, a numeric `timeout` in the call config) either —
+  it becomes an `AbortSignal.timeout` that is never cleared and pins the
+  object for the whole window. The MCP request's own timeout is different:
+  the MCP SDK clears its timer when the response arrives, and its default
+  is 60 s, so `adaptMcpClientTools` (`src/plugins/mcp-tool-adapter.ts`)
+  invokes every MCP tool with `{ metadata: { timeoutMs } }` — sandbox
+  180 s, memory 420 s, Firecrawl 120 s. Every upstream call also races our
+  own always-cleared timer (`src/plugins/mcp-call-timeout.ts`), which
+  closes the client when it fires.
 - **Never store the global `fetch`.** workerd rejects `fetch` called with a
   foreign `this` ("Illegal invocation"). Wrap it:
   `(input, init) => globalThis.fetch(input, init)`. matrix-js-sdk clients
@@ -607,6 +767,154 @@ and an object stops hibernating or a request dies with an opaque error.
   waited sends retry with the same transaction id (`src/do/gateway-retry.ts`).
 - **DO SQL** allows at most 100 bound parameters per statement and dislikes
   `LIKE` patterns; wa-sqlite's heap never shrinks (~16 MiB steady state).
+- **A cache on a plugin instance is shared by every user of the isolate.**
+  It must be keyed per user and bounded, or one-off users accumulate for the
+  isolate's lifetime. The composio plugin's tool-definition cache
+  (`src/plugins/composio/composio-tools.ts`) keys entries by base URL and
+  user, keeps them 5 minutes (`COMPOSIO_TOOL_DEFS_TTL_MS`), serves an expired
+  entry for one more TTL while a background refresh runs, and prunes
+  everything older on every lookup and every write — including when the
+  replacement session open fails and nothing is written — with a hard cap
+  of 1,000 users (`COMPOSIO_DEFS_CACHE_MAX_ENTRIES`, soonest-to-expire
+  evicted first).
+
+- **An `AbortSignal` cannot cross a Durable Object RPC.** A deadline the
+  other object must honour travels as a number (`timeoutMs`), and a caller
+  that reads a stream stops the far side by cancelling the stream (the
+  Matrix media downloads do both).
+
+### What the shell relies on from `@ixo/ucan`
+
+`src/shell/auth.ts` (HTTP and socket CONNECT) and `src/channels/auth.ts`
+(`POST /channels/turn`) validate with `@ixo/ucan`. The behaviour they
+depend on:
+
+- **The authorised capability.** `validate()` checks the resource against,
+  and reports, the capability ucanto actually proved — not the
+  invocation's first one — and its `nb` is read through the capability's
+  `nb` schema, so undeclared caveat fields are not returned. The channel
+  capability declares every caveat field the channel validator reads.
+- **Expiry over the whole chain.** `validate()` reports the earliest expiry
+  across the verified authorization; `validateDelegation()` the earliest
+  expiry and the latest not-before across every proof (a future not-before
+  is `UNAUTHORIZED`). The shell caps an invocation at
+  `UCAN_AUTH_MAX_TTL_SECONDS` from that value.
+- **No replay marks.** The validator can reserve an invocation's CID before
+  it verifies it (`InvocationStore.addIfAbsent`), but neither validator in
+  the runtime keeps marks: both hand it a no-op store (`has` → false,
+  `addIfAbsent` → true), which also keeps the library from building its
+  default store with an hourly `setInterval`. An auth invocation is a
+  bearer token, reusable on any number of requests, also concurrently,
+  until it expires (`UCAN_AUTH_MAX_TTL_SECONDS` bounds that). The shell
+  caches a valid invocation's verdict per isolate, keyed by the token's
+  SHA-256, until the invocation expires (a delegation's for at most
+  3 minutes; at most 5,000 entries each, oldest dropped first), and
+  concurrent requests carrying a token not yet in the cache share one
+  verification (`pendingInvocations`); a failed verification reaches only
+  the callers already waiting on it, and the next request verifies again.
+  A token whose verdict left the cache is simply verified again. On the
+  channel route a repeated body is idempotent by its `requestId`.
+- **Key resolution.** The did:ixo resolver aborts after 3 s
+  (`DEFAULT_IXO_RESOLVER_TIMEOUT_MS`, also when a custom `fetch` ignores
+  the signal) and turns only Ed25519 keys into `did:key`s; other
+  verification methods are skipped. The did:web resolver uses plain HTTP
+  only for `localhost`, `127.0.0.1` and `[::1]`, also aborts after 3 s, and
+  both resolvers read the global `fetch` at lookup time. The channel route
+  keeps one did:web resolver per isolate for its service identity, cached
+  60 s like did:ixo keys (failures never cached). The runtime keeps one
+  did:ixo resolver per isolate and Blocksync URL (`sharedIxoDIDResolver`,
+  used by the shell and the channel validator) with the resolver's cache on
+  for 60 s (`IXO_DID_RESOLUTION_CACHE_TTL_MS`): concurrent lookups of one
+  DID share a request, and failures are never cached. A key rotated out of
+  a DID document on-chain is therefore still trusted by a new validation
+  for up to 60 s, and a verdict already cached stays valid until that
+  invocation expires (at most `UCAN_AUTH_MAX_TTL_SECONDS`) or, for a
+  delegation, for at most 3 minutes.
+
+## Tasks
+
+Scheduled tasks live in the user's own SQLite file and run from the
+object's alarm as durable runs; the run ledger, delivery rounds and what the
+user sees are in [operations](operations.md#tasks-the-run-ledger).
+Supplied-context tasks, the Topic deliverables built on them, and two
+export adapters use the same scheduler and task records.
+
+### Supplied-context tasks
+
+A trusted adapter can set `executionProfile: 'supplied-context-markdown'`
+when it creates a task through `ctx.tasks`. The task must run once with
+`approval: 'never'`. The adapter must obtain authorization for the supplied
+text before creation. The profile has no authorization UI and no generic
+HTTP task endpoint; the one HTTP surface that creates such tasks is the
+owner-only [Topic deliverable API](#topic-deliverable-api) below.
+
+The scheduler persists the profile in the task row and its Markdown spec.
+It uses the existing alarm, task-run ledger and `UserOracleDO.runTurn` path.
+Before original or resumed execution, the runtime checks the owner, task,
+run, session, profile and exact task input. The profile and task inputs
+cannot change. A revision requires a new task.
+
+The agent binds no tools and rejects model-emitted tool calls. Preparation
+excludes personal preferences, memory, plugin hooks, page context, attachment
+processing and capability routing. Model selection, token accounting, the
+tool-attempt and time budgets, checkpoints and delivery recovery continue to
+use the existing runtime.
+The output is generated text, not proof that the user's goal was achieved
+or that a reviewer accepted it.
+
+The scheduler re-checks the policy on every original and recovered turn, not
+only at creation: a row that is not one-shot with `approval: 'never'` is
+refused, however it was written. A turn without the profile on a restricted
+task's `task:<id>` session is refused as well.
+
+Around the turn, the profile is read from the task row (never from a
+request) and keeps the source and result inside the turn:
+
+- No session title. The `task:<id>` session keeps its placeholder title; the
+  `session-title` model (the platform adapter, outside the turn's metered
+  model and budget) is never called.
+- No memory indexing. No task-run session is sent to the memory engine —
+  not on the next session create, not on a realtime drain, not on delete.
+  The next session create indexes the user's latest conversation instead.
+- No tracing. The turn gets no LangSmith tracer and no tracing metadata,
+  whatever `LANGSMITH_TRACING` or `LANGSMITH_TRACED_DIDS` say. LangChain's
+  own env-driven tracer is outside this switch: it attaches only when
+  `LANGSMITH_TRACING=true` is visible through `process.env`, so a deployment
+  that runs restricted tasks must not rely on that variable being hidden.
+- Task tools. `list_my_tasks` and `get_task` label the task `restricted`;
+  `get_task` returns metadata only (no intent, no result text) and
+  `suggest_spec_fix` refuses. The task cannot be updated, paused or resumed —
+  only cancelled.
+
+A task row whose profile this runtime does not know (written by a newer
+runtime) is skipped: it is never listed, scheduled or run, the other tasks
+keep working, and any turn on its session is refused.
+
+Before rolling back to a runtime that predates this profile, cancel or drain
+all restricted tasks. An older scheduler ignores the new profile column
+and can execute a pending restricted task with its ordinary tool set; it
+also titles, indexes and traces task sessions as ordinary ones.
+
+### Portable work and wake adapters
+
+Two pure functions exported from the package root turn a task record into
+the provider-neutral contracts of `@ixo/common/work`, each validated with
+its schema before it is returned (a record that does not fit throws a
+`ZodError`). Nothing in the runtime calls them yet; they are for hosts that
+hand work or wake-ups to another system (`src/tasks/spec.ts`):
+
+- `portableWorkFromTaskRecord(record)` → a `PortableWorkDefinition`
+  (`version: 1`, the task's `title` and `intent`). Owner, schedule,
+  approvals, credentials and execution state are left out on purpose; the
+  schema also refuses reserved authority, credential and execution-state
+  keys in `configurationDefaults` (`PORTABLE_WORK_RESERVED_CONFIGURATION_KEYS`).
+- `agentWakeFromTaskRecord(record, principal, occurredAt)` → a notify-only
+  `AgentWake` for one scheduled occurrence (`wakeId`
+  `task:<id>@<occurredAt>`, `source: 'task'`, `resourceRef: task:<id>`,
+  `observedRevision` = the record's `updatedAt`, `reason: 'scheduled-run'`,
+  `notifyOnly: true`). `principal` must be a DID and `occurredAt` an ISO
+  datetime. A wake carries no authority: the scheduler still re-reads the
+  task before it runs anything.
 
 ### Topic deliverable API
 
@@ -703,8 +1011,8 @@ Known limits:
 - Authentication is the shell's UCAN invocation with the existing `*`
   capability on `ixo:oracle`. The invocation is not bound to the method, path
   or body, and it works as a short-lived bearer token: its verdict is cached
-  per isolate until it expires and replay tracking is per isolate, never
-  global (`src/shell/auth.ts`). Anyone holding a captured
+  per isolate until it expires and no replay marks are kept
+  (`src/shell/auth.ts`). Anyone holding a captured
   invocation can, until it expires (`UCAN_AUTH_MAX_TTL_SECONDS`, default
   900 s), read the deliverable's Markdown and issue Start or cancel for the
   same owner.

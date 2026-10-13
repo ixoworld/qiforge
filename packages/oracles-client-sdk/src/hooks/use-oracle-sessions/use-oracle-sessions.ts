@@ -19,7 +19,7 @@ export const useOracleSessions = (
   overrides?: UseOracleSessionsOptions,
 ) => {
   const queryClient = useQueryClient();
-  const { authedRequest } = useOraclesContext();
+  const { wallet, authedRequest } = useOraclesContext();
 
   const { config, isReady: isConfigReady } = useOraclesConfig(
     oracleDid,
@@ -47,7 +47,9 @@ export const useOracleSessions = (
     readonly unknown[],
     number
   >({
-    queryKey: ['oracle-sessions', oracleDid, limit],
+    // The user is part of the key: the query client outlives an account
+    // switch, and a list cached for one user is never shown to another.
+    queryKey: ['oracle-sessions', oracleDid, limit, wallet?.did],
     queryFn: async ({ pageParam }) => {
       const offset = pageParam ?? 0;
       const params = new URLSearchParams();

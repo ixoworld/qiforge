@@ -3,6 +3,7 @@ import {
   createMiddleware,
   ToolInvocationError,
   toolRetryMiddleware,
+  type AgentMiddleware,
   type StructuredTool,
 } from 'langchain';
 import type {
@@ -19,8 +20,8 @@ import {
   type CapabilityRequirement,
   type Tier1Entry,
 } from './manifest';
-import { buildMetaTools } from './meta-tools';
-import { buildReadResultTool } from './read-result-tool';
+import { buildMetaTools, META_TOOL_NAMES } from './meta-tools';
+import { buildReadResultTool, READ_RESULT_TOOL_NAME } from './read-result-tool';
 import { describeBudget } from './context-budget';
 import { createContextGuardMiddleware } from './middlewares/context-guard';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
@@ -51,22 +52,27 @@ function isToolInvocationError(error: unknown): boolean {
 }
 import {
   composePrompt,
-  formatTimeContext,
+  formatDateContext,
   formatUserPreferences,
   PORTAL_CAPABILITY,
 } from './prompt-composer';
-import { formatByPlugin, type ManifestRegistry } from './registries';
+import {
+  dropShadowingRequestEntries,
+  formatByPlugin,
+  turnToolSummaries,
+  type ManifestRegistry,
+} from './registries';
 import {
   buildPluginContext,
   buildRuntimeContext,
   type RunConfig,
   type RuntimeStateInput,
 } from './runtime-context';
-import { MainAgentGraphState, type BrowserToolCall } from './state';
+import { MainAgentGraphState } from './state';
 import { toolEffectOf } from './middlewares/tool-marks';
 import { isHarnessLimitError } from './turn-budget';
 import { collectSubAgentsWithFallback } from './sub-agent-fallback';
-import { computeSubAgentToolName } from './subagent-as-tool';
+import { computeSubAgentToolName, scopeToolCallIds } from './subagent-as-tool';
 import { resolveTurnToolAccess, withoutWithheldExamples } from './tool-access';
 import { wrapPluginTool } from './wrap-plugin-tool';
 import { renderSurfaceSection } from '../delivery/prompt';
@@ -75,6 +81,7 @@ import { CREATE_ARTIFACT_TOOL } from '../artifacts/tool';
 import type { SessionSurface } from '../plugin-api/types';
 
 import { taskExecutionProfile } from './execution-profile';
+import { prepareDomainContext } from './domain-context';
 
 const PLUGIN_LOGGER_COMPONENT = 'main-agent';
 
@@ -114,21 +121,6 @@ function selectByVisibility(
 }
 
 /**
- * Names of the browser tools the client declared on this request. The array
- * comes straight off the wire, so an entry without a usable name is skipped
- * rather than rendered as "undefined".
- */
-function browserToolNames(
-  browserTools: BrowserToolCall[] | undefined,
-): string[] {
-  return (browserTools ?? []).flatMap((entry) =>
-    typeof entry?.name === 'string' && entry.name.length > 0
-      ? [entry.name]
-      : [],
-  );
-}
-
-/**
  * Build a compiled main agent from the runtime's registries plus per-request
  * context. Same pipeline as the Node runtime — tools from the registries
  * (boot cache + request hooks, collected concurrently with per-plugin failure
@@ -158,6 +150,10 @@ export async function createMainAgent(
     contextBudget,
     delivery,
     hooks,
+    domainContext,
+    domainResolver,
+    domainPins,
+    onDomainProvenance,
   } = args;
   const surface: SessionSurface | undefined =
     delivery?.kind === 'chat'
@@ -243,8 +239,9 @@ export async function createMainAgent(
   // What the turn treats as loaded: the thread's checkpointed plugins plus the
   // router's one-turn preload. Only the RuntimeContext and the gate see this
   // union; the graph state keeps the checkpointed list alone.
+  const threadLoaded: ReadonlySet<string> = new Set(state.loadedPlugins ?? []);
   const loadedSet = new Set<string>([
-    ...(state.loadedPlugins ?? []),
+    ...threadLoaded,
     ...(preloadedPlugins ?? []),
   ]);
   // Carry the prior request state (browserTools, agActions, …) into the
@@ -302,10 +299,53 @@ export async function createMainAgent(
   // Tool and sub-agent collection are independent request-time fan-outs
   // (each may open network connections); run them concurrently so the
   // slower of the two — not their sum — gates the build.
-  const [collectedTools, collectedSubAgents] = await Promise.all([
+  //
+  // Observe-only domain context loads alongside them: the oracle's and the
+  // subject's anchored domain documents become a prompt block and two
+  // read tools. It grants nothing and gates nothing (see domain-context/).
+  const bootSubAgents = registries.subAgents.collectBoot(buildCtx);
+  const [allCollectedTools, requestSubAgents, domain] = await Promise.all([
     registries.tools.collect(buildCtx, rtCtx),
-    registries.subAgents.collect(buildCtx, rtCtx),
+    registries.subAgents.collectRequest(rtCtx),
+    domainContext?.mode === 'observe' && domainResolver
+      ? prepareDomainContext({
+          options: domainContext,
+          resolver: domainResolver,
+          ctx: rtCtx,
+          oracleDid: identity.entityDid,
+          subjectDid: state.currentEntityDid,
+          signal: abortSignal ?? new AbortController().signal,
+          ...(domainPins ? { pins: domainPins } : {}),
+          ...(onDomainProvenance ? { onProvenance: onDomainProvenance } : {}),
+        })
+      : undefined,
   ]);
+  const domainTools = domain?.tools ?? [];
+  // A request-time tool or sub-agent never takes a name the server already
+  // uses this turn, so a client-declared name cannot shadow a server tool or
+  // overwrite its effect and repeatable classification below. The domain
+  // tools exist only on observe turns, so a boot-time plugin tool of the same
+  // name cannot be caught at boot: it is dropped for those turns instead of
+  // being bound twice.
+  const unshadowed = dropShadowingRequestEntries({
+    tools: allCollectedTools,
+    requestSubAgents,
+    runtimeNames: domainTools.map((t) => t.name),
+    reservedNames: [
+      ...META_TOOL_NAMES,
+      READ_RESULT_TOOL_NAME,
+      ...turnTools.map(({ tool }) => tool.name),
+      ...allCollectedTools
+        .filter(({ origin }) => origin === 'boot')
+        .map(({ tool }) => tool.name),
+      ...bootSubAgents.map(({ subAgent }) =>
+        computeSubAgentToolName(subAgent.name),
+      ),
+    ],
+    logger: ambient.logger,
+  });
+  const collectedTools = unshadowed.tools;
+  const collectedSubAgents = [...bootSubAgents, ...unshadowed.requestSubAgents];
   // The user's delegation decides what the model may see, by one rule: a
   // manifest's `requires` per plugin (below), a tool's plane per tool here.
   const hasCapability = (resource: string, action: string): boolean =>
@@ -330,21 +370,29 @@ export async function createMainAgent(
     ambient.logger.log(
       `[main-agent] admin tools withheld from ${requestCtx.user.did} (delegation does not grant them): ${[...toolAccess.withheldToolNames].join(', ')}`,
     );
+  const manifestEntries = registries.manifests.collect();
+  // Plugins whose `manifest.requires` this user's delegation does not grant:
+  // the gate hides and refuses their tools, the prompt leaves them out.
+  const unmetRequirements = new Map<string, CapabilityRequirement[]>();
+  for (const { pluginName, manifest } of manifestEntries) {
+    const missing = unmetManifestRequirements(manifest, hasCapability);
+    if (missing.length > 0) unmetRequirements.set(pluginName, missing);
+  }
   // The router predicts before the tools are collected (see
-  // `routableCandidates`): its preload of a plugin left with nothing is void,
-  // for the gate and for what handlers see as loaded.
+  // `routableCandidates`): its preload of a plugin left with nothing, or of
+  // one whose requirements the delegation does not meet, is void, for the
+  // gate and for what handlers see as loaded.
   const turnPreloads = preloadedPlugins
     ? new Set(
         [...preloadedPlugins].filter(
-          (pluginName) => !toolAccess.hiddenPlugins.has(pluginName),
+          (pluginName) =>
+            !toolAccess.hiddenPlugins.has(pluginName) &&
+            !unmetRequirements.has(pluginName),
         ),
       )
     : undefined;
   for (const pluginName of preloadedPlugins ?? [])
-    if (
-      !turnPreloads?.has(pluginName) &&
-      !(state.loadedPlugins ?? []).includes(pluginName)
-    )
+    if (!turnPreloads?.has(pluginName) && !threadLoaded.has(pluginName))
       loadedSet.delete(pluginName);
 
   // The per-turn tool-surface line. Request tools are named in full (there
@@ -359,15 +407,7 @@ export async function createMainAgent(
   ambient.logger.debug?.(
     `[main-agent] full tool surface: ${formatByPlugin(allTools) || '∅'}`,
   );
-  const manifestEntries = registries.manifests.collect();
   const manifestViz = visibilityIndex(registries.manifests);
-  // Plugins whose `manifest.requires` this user's delegation does not grant:
-  // the gate hides and refuses their tools, the prompt leaves them out.
-  const unmetRequirements = new Map<string, CapabilityRequirement[]>();
-  for (const { pluginName, manifest } of manifestEntries) {
-    const missing = unmetManifestRequirements(manifest, hasCapability);
-    if (missing.length > 0) unmetRequirements.set(pluginName, missing);
-  }
   if (unmetRequirements.size > 0)
     ambient.logger.log(
       `[main-agent] not usable by ${requestCtx.user.did} (authorization lacks what they require): ${[...unmetRequirements.keys()].join(', ')}`,
@@ -391,8 +431,15 @@ export async function createMainAgent(
   const metaTools = [
     ...buildMetaTools({
       manifestRegistry: registries.manifests,
-      toolRegistry: registries.tools,
-      toolAccess,
+      // This turn's own collection (the shared registry holds no request
+      // tools), already cut to what the delegation reaches.
+      toolRegistry: turnToolSummaries(toolAccess.tools),
+      toolAccess: {
+        ...toolAccess,
+        preloadedOnly: new Set(
+          [...(turnPreloads ?? [])].filter((name) => !threadLoaded.has(name)),
+        ),
+      },
     }),
     // Pages through tool results the result cap saved whole (result-cap.ts);
     // its chunks stay well under the cap so a page is never capped itself.
@@ -428,6 +475,37 @@ export async function createMainAgent(
   // ── 5. Sub-agents — bind all at compile time; gating happens at runtime ─
   // Sub-agents share the tool namespace with plugin tools, so they go through
   // the same `CapabilityGateMiddleware` filter as plugin tools.
+  //
+  // Each dispatch's inner graph gets the main agent's tool middlewares —
+  // scoped to the dispatch, so two dispatches whose models reuse a call id
+  // are kept apart (`scopeToolCallIds`) — and the same identical-call caps,
+  // its own tools classified by their declared effect.
+  const repetitionCaps = repetitionCapsFromEnv(config);
+  const innerToolEffects = new Map<string, 'read' | 'write'>();
+  const innerRepeatable = new Set<string>();
+  // The domain tools only read documents (and drop a cached anchor).
+  for (const t of domainTools) innerToolEffects.set(t.name, 'read');
+  for (const { subAgent } of subAgentEntries)
+    for (const tool of Array.isArray(subAgent.tools) ? subAgent.tools : []) {
+      innerToolEffects.set(tool.name, toolEffectOf(tool));
+      if (tool.repeatable) innerRepeatable.add(tool.name);
+    }
+  const subAgentGuard = createToolRepetitionGuardMiddleware({
+    logger: ambient.logger,
+    maxIdenticalReads: repetitionCaps.reads,
+    maxIdenticalWrites: repetitionCaps.writes,
+    effectOf: (name) =>
+      innerRepeatable.has(name)
+        ? 'read'
+        : (innerToolEffects.get(name) ?? 'write'),
+  });
+  const dispatchMiddleware = (dispatch: string): AgentMiddleware[] => [
+    ...(hooks?.toolMiddlewares ?? []).map((m) => scopeToolCallIds(m, dispatch)),
+    subAgentGuard,
+    ...(hooks?.toolExecution
+      ? [scopeToolCallIds(hooks.toolExecution, dispatch)]
+      : []),
+  ];
   const subAgentTools = await collectSubAgentsWithFallback({
     registry: registries.subAgents,
     buildCtx,
@@ -439,15 +517,13 @@ export async function createMainAgent(
     sharedFactory,
     fallbackContext,
     subAgents: subAgentEntries,
-    ...(hooks?.toolMiddlewares || hooks?.toolExecution
-      ? {
-          extraMiddleware: [
-            ...(hooks.toolMiddlewares ?? []),
-            ...(hooks.toolExecution ? [hooks.toolExecution] : []),
-          ],
-        }
-      : {}),
+    dispatchMiddleware,
     ...(resultCap ? { resultCap } : {}),
+    // Sub-agents see the same domain context: its block on their prompt,
+    // its tools beside their own.
+    ...(domain
+      ? { passthroughTools: domainTools, contextPrompt: domain.prompt }
+      : {}),
   });
 
   // Effect of every tool the model can call (durable runs: what may run
@@ -455,6 +531,7 @@ export async function createMainAgent(
   // is opaque, hence a write.
   const toolEffects = new Map<string, 'read' | 'write'>();
   for (const t of metaTools) toolEffects.set(t.name, 'read');
+  for (const t of domainTools) toolEffects.set(t.name, 'read');
   for (const { tool } of turnTools)
     toolEffects.set(tool.name, toolEffectOf(tool));
   for (const { tool } of allTools)
@@ -462,7 +539,6 @@ export async function createMainAgent(
   for (const t of subAgentTools) toolEffects.set(t.name, 'write');
   // Tools whose identical call is a new action (a browser step), which the
   // repetition guard caps like a read whatever their effect.
-  const repetitionCaps = repetitionCapsFromEnv(config);
   const repeatableToolNames = new Set(
     allTools.filter(({ tool }) => tool.repeatable).map(({ tool }) => tool.name),
   );
@@ -498,6 +574,7 @@ export async function createMainAgent(
     ...onDemandTools.map(wrap),
     ...silentTools.map(wrap),
     ...subAgentTools,
+    ...domainTools,
   ];
 
   // Lookups used by `CapabilityGateMiddleware` to gate on-demand plugins
@@ -580,8 +657,17 @@ export async function createMainAgent(
     // (the middleware tags its call). The model itself keeps whatever
     // transport its provider needs — forcing it non-streaming broke the
     // ChatGPT backend, which accepts streamed requests only.
+    //
+    // The summary is written by the turn's own model (the `summarizer`
+    // role resolves to the `main` model on every lane, the per-request
+    // choice included), so it reads whatever the turn's window holds and a
+    // BYO turn's history stays on the user's provider. The platform adapter
+    // gives the role the helper calls' reasoning effort, not the reply's.
     createSummarizationMiddleware({
-      model: resolveModel('routing'),
+      model: resolveModel(
+        'summarizer',
+        requestCtx.model ? { model: requestCtx.model } : undefined,
+      ),
       logger: ambient.logger,
       // Window-derived thresholds when the host resolved a budget: summarize
       // at a fraction of the model's window (tokens only, unless the
@@ -717,15 +803,40 @@ export async function createMainAgent(
 
   // Browser tools never surface through `search_skills` / `list_capabilities`,
   // so the prompt names them per turn and says whether the capability gate
-  // still hides them (portal is on-demand by default).
+  // still hides them (portal is on-demand by default). Only the ones bound
+  // this turn are named: a declaration the portal plugin refused, or one
+  // dropped above for taking a server tool's name, never reaches the model.
   const browserTools = {
-    names: browserToolNames(state.browserTools),
+    names: allTools
+      .filter(
+        ({ origin, pluginName }) =>
+          origin === 'request' && pluginName === PORTAL_CAPABILITY,
+      )
+      .map(({ tool }) => tool.name),
     bound:
       manifestViz.get(PORTAL_CAPABILITY) === 'always' ||
       loadedSet.has(PORTAL_CAPABILITY),
   };
 
-  const systemPrompt = await composePrompt({
+  // Operating guides of the plugins in use when the turn starts — loaded on
+  // the thread or `always` visible — and usable by this delegation. A router
+  // preload lasts one turn: its guide would enter the prompt and leave it
+  // again on the next turn, so it comes with `load_capability` instead, as
+  // does the guide of a plugin loaded mid-turn (here from the next turn on).
+  const operatingGuides = registries.manifests
+    .operatingGuides()
+    .filter(({ pluginName }) => {
+      const visibility = manifestViz.get(pluginName) ?? 'on-demand';
+      return (
+        visibility !== 'silent' &&
+        (visibility === 'always' || threadLoaded.has(pluginName)) &&
+        !unmetRequirements.has(pluginName) &&
+        !toolAccess.hiddenPlugins.has(pluginName)
+      );
+    })
+    .map(({ guide }) => guide);
+
+  const composedPrompt = await composePrompt({
     identity,
     capabilityBlock: tier1.block,
     browserTools,
@@ -733,7 +844,9 @@ export async function createMainAgent(
     operationalMode: hooks?.operationalMode ?? DEFAULT_OPERATIONAL_MODE,
     userPreferencesContext: formatUserPreferences(state.userPreferences),
     userContext: state.userContext,
-    timeContext: formatTimeContext(
+    // The day only: the prompt must stay byte-identical across the turns
+    // of a session for the provider's prompt cache to reach past it.
+    timeContext: formatDateContext(
       requestCtx.user.timezone,
       requestCtx.user.currentTime,
     ),
@@ -744,7 +857,13 @@ export async function createMainAgent(
       delivery,
       turnTools.some(({ tool }) => tool.name === CREATE_ARTIFACT_TOOL),
     ),
+    operatingGuides,
   });
+  // The domain block goes last: it frames its documents as retrieved data
+  // that never outranks the instructions above it.
+  const systemPrompt = domain?.prompt
+    ? `${composedPrompt}\n\n${domain.prompt}`
+    : composedPrompt;
 
   // ── 8. Model ────────────────────────────────────────────────────────────
   // A per-request model (already allow-list-validated by the caller) wins
@@ -772,6 +891,14 @@ export async function createMainAgent(
     toolEffects,
     subAgentToolNames: new Set(subAgentTools.map((t) => t.name)),
     context: runConfig.context,
+    ...(domain
+      ? {
+          domainContext: {
+            provenance: domain.provenance,
+            pins: domain.pins,
+          },
+        }
+      : {}),
   };
 }
 

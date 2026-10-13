@@ -17,6 +17,12 @@ import type {
   PluginTool,
 } from '../plugin-api/types';
 import type { DeliveryProfile } from '../delivery/types';
+import type {
+  DomainContextOptions,
+  DomainContextPins,
+  DomainContextProvenance,
+  DomainContextResolver,
+} from './domain-context';
 import type { Registries } from './registries';
 import type { AmbientServices, RunConfigContext } from './runtime-context';
 import type { TMainAgentGraphState } from './state';
@@ -180,6 +186,20 @@ export interface MainAgentArgs {
    */
   delivery?: DeliveryProfile;
   hooks?: MainAgentHooks;
+  /**
+   * Observe-only domain context. Loaded only when `mode` is `observe` and a
+   * resolver is given; absent or `off` leaves the build unchanged.
+   */
+  domainContext?: DomainContextOptions;
+  /** The anchor cache, one per user object and shared by its sessions. */
+  domainResolver?: DomainContextResolver;
+  /** Anchors a resumed durable run started with: the same revisions again. */
+  domainPins?: DomainContextPins;
+  /**
+   * Called with the turn's updated provenance when `read_domain_document`
+   * reads a document the turn had not read yet.
+   */
+  onDomainProvenance?: (provenance: DomainContextProvenance[]) => void;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -206,4 +226,12 @@ export interface MainAgentBuildResult {
    * middlewares and sub-agents see the same channel the Node runtime provides.
    */
   context: RunConfigContext;
+  /**
+   * What the turn was given as domain context (present when it loaded):
+   * the provenance to emit and record, and the anchors to pin on the run.
+   */
+  domainContext?: {
+    provenance: DomainContextProvenance[];
+    pins: DomainContextPins;
+  };
 }

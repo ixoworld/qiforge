@@ -1,6 +1,10 @@
 import type {
   ChoiceDecisionAnswer,
   DecisionAnswer,
+  DecisionApplicability,
+  DecisionInferenceDialect,
+  DecisionModelPinning,
+  DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
   DecisionRequest,
@@ -26,12 +30,42 @@ export const DEFAULT_DECISION_LIMITS: DecisionLimits = {
 
 const PROBABILITY_SUM_TOLERANCE = 0.05;
 
+/**
+ * Largest delay `setTimeout` honours. Larger values (and 0, negatives, NaN,
+ * Infinity) make the timer fire at once, which would fail every evaluation
+ * as "timed out".
+ */
+const MAX_DECISION_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * Throws a RangeError unless `timeoutMs` is an integer from 1 to 2^31−1.
+ * `source` names where the value came from, for the error message.
+ */
+export function validateDecisionTimeoutMs(
+  timeoutMs: number,
+  source: string,
+): void {
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > MAX_DECISION_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      `${source} timeoutMs must be an integer from 1 to ${MAX_DECISION_TIMEOUT_MS}, got ${String(timeoutMs)}.`,
+    );
+  }
+}
+
 export function validateDecisionRequest(
   request: DecisionRequest,
   limits: DecisionLimits = DEFAULT_DECISION_LIMITS,
 ): void {
   if (!request || typeof request !== 'object') {
     throw new Error('Decision request must be an object.');
+  }
+
+  if (request.applicability !== undefined) {
+    validateApplicability(request.applicability);
   }
 
   const questionEntries = Object.entries(request.questions ?? {});
@@ -103,10 +137,153 @@ export function validateDecisionProviderResult(
     answers[key] = validateAnswer(key, question, answer);
   }
 
+  if (result.provenance !== undefined) {
+    validateProvenance(result.provenance);
+  }
+
   return {
     ...result,
     answers,
   };
+}
+
+function validateApplicability(applicability: DecisionApplicability): void {
+  if (
+    typeof applicability !== 'object' ||
+    applicability === null ||
+    typeof applicability.applicable !== 'boolean' ||
+    typeof applicability.evidenceComplete !== 'boolean'
+  ) {
+    throw new Error(
+      'Decision applicability must declare boolean applicable and evidenceComplete values.',
+    );
+  }
+  assertOptionalNonEmpty(
+    applicability.reason,
+    'Decision applicability reason must be non-empty when supplied.',
+  );
+}
+
+/**
+ * Provenance is provider output like the answers, so it is checked rather
+ * than trusted: an adapter cannot claim an empty method or a calibration
+ * with impossible metrics.
+ */
+function validateProvenance(provenance: DecisionProviderProvenance): void {
+  const method: unknown = provenance?.method;
+  if (
+    typeof method !== 'object' ||
+    method === null ||
+    !('kind' in method) ||
+    typeof method.kind !== 'string' ||
+    !method.kind.trim()
+  ) {
+    throw new Error('Decision judgment method kind must be non-empty.');
+  }
+  assertOptionalNonEmpty(
+    provenance.method.name,
+    'Decision judgment method name must be non-empty when supplied.',
+  );
+  assertOptionalNonEmpty(
+    provenance.method.artifactRef,
+    'Decision judgment method artifactRef must be non-empty when supplied.',
+  );
+
+  validateInferenceProvenance(provenance);
+
+  const calibration = provenance.calibration;
+  if (calibration === undefined) return;
+  if (typeof calibration.method !== 'string' || !calibration.method.trim()) {
+    throw new Error('Decision calibration method must be non-empty.');
+  }
+  for (const [name, value] of [
+    ['ece', calibration.ece],
+    ['brier', calibration.brier],
+  ] as const) {
+    if (
+      value !== undefined &&
+      (typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+    ) {
+      throw new Error(
+        `Decision calibration ${name} must be a finite non-negative number.`,
+      );
+    }
+  }
+  for (const [name, value] of [
+    ['artifactRef', calibration.artifactRef],
+    ['workload', calibration.workload],
+    ['version', calibration.version],
+  ] as const) {
+    assertOptionalNonEmpty(
+      value,
+      `Decision calibration ${name} must be non-empty when supplied.`,
+    );
+  }
+  if (
+    calibration.evaluatedAt !== undefined &&
+    (typeof calibration.evaluatedAt !== 'string' ||
+      Number.isNaN(Date.parse(calibration.evaluatedAt)))
+  ) {
+    throw new Error(
+      'Decision calibration evaluatedAt must be a valid timestamp.',
+    );
+  }
+}
+
+// Records keyed by the union, so adding a dialect or pinning class to the type
+// without listing it here fails the build.
+const INFERENCE_DIALECTS: Record<DecisionInferenceDialect, true> = {
+  'systemone-v1': true,
+  'databricks-ai-decide-v1': true,
+  'openai-decisions': true,
+  'native-classifier': true,
+  custom: true,
+};
+
+const MODEL_PINNINGS: Record<DecisionModelPinning, true> = {
+  pinned: true,
+  mutable: true,
+  unknown: true,
+};
+
+function isKeyOf(record: object, value: unknown): boolean {
+  return typeof value === 'string' && Object.hasOwn(record, value);
+}
+
+function validateInferenceProvenance(
+  provenance: DecisionProviderProvenance,
+): void {
+  if (
+    provenance.apiDialect !== undefined &&
+    !isKeyOf(INFERENCE_DIALECTS, provenance.apiDialect)
+  ) {
+    throw new Error('Decision provenance apiDialect is not a known dialect.');
+  }
+  if (
+    provenance.modelPinning !== undefined &&
+    !isKeyOf(MODEL_PINNINGS, provenance.modelPinning)
+  ) {
+    throw new Error(
+      'Decision provenance modelPinning must be pinned, mutable or unknown.',
+    );
+  }
+  for (const [name, value] of [
+    ['requestedModel', provenance.requestedModel],
+    ['returnedModel', provenance.returnedModel],
+    ['functionVersion', provenance.functionVersion],
+    ['providerArtifactRef', provenance.providerArtifactRef],
+    ['calibrationProfileRef', provenance.calibrationProfileRef],
+  ] as const) {
+    assertOptionalNonEmpty(
+      value,
+      `Decision provenance ${name} must be non-empty when supplied.`,
+    );
+  }
+}
+
+function assertOptionalNonEmpty(value: unknown, message: string): void {
+  if (value === undefined) return;
+  if (typeof value !== 'string' || !value.trim()) throw new Error(message);
 }
 
 function validateQuestion(

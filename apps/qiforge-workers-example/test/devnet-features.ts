@@ -34,6 +34,7 @@ import {
   waitFor,
   type HarnessAccount,
 } from './lib/harness';
+import { signIxoTransactionWithWallet } from '@ixo/ixo-transaction';
 import { SocketIoClient } from './lib/socket-client';
 
 const ORACLE_URL =
@@ -2859,6 +2860,94 @@ async function main(): Promise<void> {
   );
 
   await step(
+    'realtime: a browser tool call runs on exactly one of two tabs of the session, and /health advertises the frontend bridge',
+    async () => {
+      const health = (await (await fetch(`${ORACLE_URL}/health`)).json()) as {
+        frontendTools?: unknown;
+      };
+      assert.deepEqual(health.frontendTools, {
+        protocolVersion: 2,
+        execution: 'single-socket',
+        timeoutOutcome: 'unknown',
+      });
+      const c = await client();
+      const s = await c.createSession();
+      const tabs: SocketIoClient[] = [];
+      const stops: Array<() => void> = [];
+      const served: string[] = [];
+      try {
+        for (const name of ['older-tab', 'newer-tab']) {
+          const invocation = await mintAuthInvocation(user, ORACLE_DID);
+          const { client: tab, outcome } = await socketFor(s, { invocation });
+          assert.ok(
+            outcome.ok,
+            `${name} connect failed: ${outcome.ok ? '' : outcome.error}`,
+          );
+          tabs.push(tab);
+          stops.push(
+            tab.serveFrontendTools(async ({ toolName }) => {
+              served.push(`${name}:${toolName}`);
+              if (toolName === 'get_tab_secret') return { secret: name };
+              throw new Error(`unexpected tool ${toolName}`);
+            }),
+          );
+        }
+        const r = await c.stream(
+          s,
+          'Call the get_tab_secret browser tool exactly once and reply with ONLY the exact secret string it returns, nothing else.',
+          {
+            body: {
+              tools: [
+                {
+                  name: 'get_tab_secret',
+                  description:
+                    "Returns the secret string of the user's browser tab.",
+                  schema: {
+                    type: 'object',
+                    properties: {},
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            },
+          },
+        );
+        assert.ok(
+          doneTools(r.events).includes('get_tab_secret'),
+          `no get_tab_secret call; tools: ${toolCalls(r.events).join(', ') || '(none)'}; errors: ${toolErrors(r.events).join(' | ')}`,
+        );
+        const calls = tabs.map(
+          (tab) =>
+            tab.events.filter((e) => e.name === 'browser_tool_call').length,
+        );
+        // Every invocation reached one tab: the counts add up to the calls
+        // the model made, and the older tab received none of them.
+        assert.equal(
+          calls[0],
+          0,
+          `the older tab received ${calls[0]} call(s); served: ${served.join(', ')}`,
+        );
+        assert.ok((calls[1] ?? 0) >= 1, `served: ${served.join(', ')}`);
+        const ids = tabs[1]!.events
+          .filter((e) => e.name === 'browser_tool_call')
+          .map((e) => (e.payload as { toolCallId?: string }).toolCallId);
+        assert.equal(
+          new Set(ids).size,
+          ids.length,
+          `invocation ids repeat: ${ids.join(', ')}`,
+        );
+        assert.ok(
+          r.text.includes('newer-tab'),
+          `reply lacks the executing tab's secret: "${r.text.slice(0, 200)}"`,
+        );
+      } finally {
+        for (const stop of stops) stop();
+        for (const tab of tabs) tab.close();
+      }
+    },
+  );
+
+  await step(
     'realtime: an AG-UI action runs through call_ag-ui_agent and its result returns from the browser',
     async () => {
       const c = await client();
@@ -2925,6 +3014,91 @@ async function main(): Promise<void> {
           `browser served: ${JSON.stringify(served)}`,
         );
         assert.match(r.text, /RENDERED/i);
+      } finally {
+        stop();
+        sock.close();
+      }
+    },
+  );
+
+  await step(
+    'realtime: sign_ixo_transaction sends sign_transaction to the browser wallet and the signed hash returns',
+    async () => {
+      const c = await client();
+      const s = await c.createSession();
+      const invocation = await mintAuthInvocation(user, ORACLE_DID);
+      const { client: sock, outcome } = await socketFor(s, { invocation });
+      assert.ok(
+        outcome.ok,
+        `connect failed: ${outcome.ok ? '' : outcome.error}`,
+      );
+      const txHash = createHash('sha256')
+        .update(tag)
+        .digest('hex')
+        .toUpperCase();
+      const signed: unknown[] = [];
+      // The Portal's handler (`@ixo/ixo-transaction/react`) without the
+      // proto decoding: the same argument and message validation and chain
+      // check, with a wallet that records what it was asked to sign.
+      const stop = sock.serveFrontendTools(async ({ kind, toolName, args }) => {
+        if (kind !== 'agui' || toolName !== 'sign_transaction')
+          throw new Error(`unexpected ${kind} tool ${toolName}`);
+        const result = await signIxoTransactionWithWallet(
+          args,
+          async (messages) => {
+            signed.push(...messages);
+            return { code: 0, height: 1, transactionHash: txHash };
+          },
+          // The devnet harness's testnet chain (what the plugin defaults to).
+          { walletChainId: 'pandora-8' },
+        );
+        if (!result.success) throw new Error(result.error);
+        return result;
+      });
+      try {
+        const draft = {
+          command: '/ixo token retire',
+          network: 'testnet',
+          value: {
+            owner: user.address,
+            tokens: [{ id: `CARBON-${tag}`, amount: '10' }],
+            jurisdiction: 'ZA',
+            reason: `e2e ${tag}`,
+          },
+          riskConfirmation: {
+            confirmed: true,
+            acceptedRisks: [
+              'Permanently retires (burns) impact credits. Irreversible.',
+            ],
+          },
+        };
+        const r = await c.stream(
+          s,
+          `Load the ixo-transaction capability, then call sign_ixo_transaction once with exactly these arguments: ${JSON.stringify(draft)}. I have read and accept the listed risk. When it returns, reply with the transaction hash only.`,
+        );
+        assert.ok(
+          doneTools(r.events).includes('sign_ixo_transaction'),
+          `no sign_ixo_transaction call; tools: ${toolCalls(r.events).join(', ') || '(none)'}; reply: "${r.text.slice(0, 200)}"`,
+        );
+        const action = sock.events.find((e) => e.name === 'action_call');
+        assert.ok(
+          action,
+          `socket saw no action_call; events: ${sock.events.map((e) => e.name).join(', ')}`,
+        );
+        assert.equal(
+          (action.payload as { toolName?: string }).toolName,
+          'sign_transaction',
+        );
+        assert.deepEqual(signed, [
+          {
+            typeUrl: '/ixo.token.v1beta1.MsgRetireToken',
+            value: draft.value,
+          },
+        ]);
+        assert.ok(
+          r.text.includes(txHash),
+          `reply lacks the signed hash ${txHash}: "${r.text.slice(0, 200)}"`,
+        );
       } finally {
         stop();
         sock.close();

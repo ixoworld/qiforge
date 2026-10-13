@@ -3,7 +3,12 @@
  * (`context-window.ts`) so that they scale with the model:
  *
  *   - `summarizeAtTokens`  — the history is condensed once it is this large
- *                            (default half the window; Hermes fires at 50%);
+ *                            (default 60% of the window, whatever its size;
+ *                            never above the request cap nor above what the
+ *                            summarizer reads, which only binds below a
+ *                            ~34k window). The summary is written by the
+ *                            turn's own model (the `summarizer` role), so no
+ *                            second window bounds it;
  *   - `pruneAtTokens`      — above this, old tool results are demoted to
  *                            one-liners in the request (no model call, no
  *                            state change) before the model sees them;
@@ -23,7 +28,7 @@ import { NOOP_LOGGER } from './utils';
 export const CHARS_PER_TOKEN = 4;
 
 export interface ContextKnobs {
-  /** Fraction of the window at which the history is summarized (default 0.5). */
+  /** Fraction of the window at which the history is summarized (default 0.6). */
   summarizeFraction: number;
   /** Fraction of the window above which old tool results are pruned per request (default 0.35). */
   pruneFraction: number;
@@ -46,7 +51,7 @@ export interface ContextKnobs {
 }
 
 export const DEFAULT_CONTEXT_KNOBS: ContextKnobs = {
-  summarizeFraction: 0.5,
+  summarizeFraction: 0.6,
   pruneFraction: 0.35,
   resultCapFraction: 0.12,
   resultCapMaxChars: 200_000,
@@ -64,7 +69,11 @@ export interface ContextBudget {
   resultCapChars: number;
   requestCapTokens: number;
   outputReserveTokens: number;
-  /** The summarizer's own input limit (what it may read to write the summary). */
+  /**
+   * The summarizer's input limit (what it may read to write the summary):
+   * the main model's request cap less a margin for the summary prompt. The
+   * summarizer is the main model, so its request has the same room.
+   */
   summaryInputTokens: number;
   summarizeTriggerMessages?: number;
   keepMessages: number;
@@ -142,12 +151,14 @@ export function contextKnobs(
   };
 }
 
-/** The budget for a turn on `resolution.model`. */
-export function contextBudgetFor(
-  resolution: ContextWindowResolution,
-  knobs: ContextKnobs = DEFAULT_CONTEXT_KNOBS,
-): ContextBudget {
-  const window = resolution.tokens;
+/** Tokens the summary prompt and its framing need on top of the history it reads. */
+const SUMMARY_PROMPT_MARGIN_TOKENS = 4_000;
+
+/** What a request to a model with `window` may hold, the reply reserve left out. */
+function requestCapFor(
+  window: number,
+  knobs: ContextKnobs,
+): { requestCapTokens: number; outputReserveTokens: number } {
   // The reply reserve can never eat a small window: cap it at a quarter.
   const outputReserveTokens = Math.min(
     knobs.outputReserveTokens,
@@ -157,9 +168,39 @@ export function contextBudgetFor(
     1_000,
     Math.floor(window * knobs.requestFraction) - outputReserveTokens,
   );
+  return { requestCapTokens, outputReserveTokens };
+}
+
+/**
+ * The budget for a turn on `resolution.model`, from that model's window
+ * alone: the summary is written by the same model (the `summarizer` role),
+ * so no other window bounds what it reads.
+ */
+export function contextBudgetFor(
+  resolution: ContextWindowResolution,
+  knobs: ContextKnobs = DEFAULT_CONTEXT_KNOBS,
+): ContextBudget {
+  const window = resolution.tokens;
+  const { requestCapTokens, outputReserveTokens } = requestCapFor(
+    window,
+    knobs,
+  );
+  // The summarizer keeps only the newest `summaryInputTokens` of what it is
+  // asked to condense (LangChain trims with `strategy: 'last'`; the summary
+  // prompt needs its own room in the request) and drops the rest unread —
+  // the earlier summary first. Summarizing therefore starts no later than
+  // that limit, so the thread's memory is never lost unread. With the
+  // default knobs this only binds below a window of ~34.3k tokens (60% of
+  // the window exceeds 95% less the reply reserve and the prompt margin);
+  // above it the trigger is the plain fraction.
+  const summaryInputTokens = Math.max(
+    1_000,
+    requestCapTokens - SUMMARY_PROMPT_MARGIN_TOKENS,
+  );
   const summarizeAtTokens = Math.min(
     Math.floor(window * knobs.summarizeFraction),
     requestCapTokens,
+    summaryInputTokens,
   );
   const pruneAtTokens = Math.min(
     Math.floor(window * knobs.pruneFraction),
@@ -177,7 +218,7 @@ export function contextBudgetFor(
     ),
     requestCapTokens,
     outputReserveTokens,
-    summaryInputTokens: Math.max(1_000, requestCapTokens - 4_000),
+    summaryInputTokens,
     ...(knobs.summarizeTriggerMessages !== undefined
       ? { summarizeTriggerMessages: knobs.summarizeTriggerMessages }
       : {}),
@@ -196,6 +237,50 @@ export function estimateContentTokens(content: unknown): number {
   }
 }
 
+/**
+ * Per-message memo of the chars/4 estimates: every model step of a turn
+ * re-estimates the whole history (the context guard, the turn budget, the
+ * summarizer's trigger), and the history is the same message objects from
+ * step to step. An entry is reused only while the message still holds the
+ * same `content` / `tool_calls` values it was computed from.
+ */
+interface MessageEstimate {
+  content: unknown;
+  contentTokens: number;
+  toolCalls?: { value: unknown; tokens: number };
+}
+
+const messageEstimates = new WeakMap<object, MessageEstimate>();
+
+function estimateOf(message: { content: unknown }): MessageEstimate {
+  const cached = messageEstimates.get(message);
+  if (cached && cached.content === message.content) return cached;
+  const fresh: MessageEstimate = {
+    content: message.content,
+    contentTokens: estimateContentTokens(message.content),
+  };
+  messageEstimates.set(message, fresh);
+  return fresh;
+}
+
+/** `estimateContentTokens(message.content)`, memoised per message. */
+export function messageContentTokens(message: { content: unknown }): number {
+  return estimateOf(message).contentTokens;
+}
+
+/** `estimateContentTokens(toolCalls)` for `message`'s tool calls, memoised per message. */
+export function messageToolCallTokens(
+  message: { content: unknown },
+  toolCalls: unknown,
+): number {
+  const entry = estimateOf(message);
+  if (entry.toolCalls && entry.toolCalls.value === toolCalls)
+    return entry.toolCalls.tokens;
+  const tokens = estimateContentTokens(toolCalls);
+  entry.toolCalls = { value: toolCalls, tokens };
+  return tokens;
+}
+
 export function describeBudget(b: ContextBudget): string {
-  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens}`;
+  return `model=${b.model} window=${b.windowTokens} (${b.origin}) summarizeAt=${b.summarizeAtTokens} pruneAt=${b.pruneAtTokens} resultCap=${b.resultCapChars}c requestCap=${b.requestCapTokens} reserve=${b.outputReserveTokens} summaryInput=${b.summaryInputTokens}`;
 }

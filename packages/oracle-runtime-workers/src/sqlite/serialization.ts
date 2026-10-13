@@ -12,6 +12,20 @@
  * and LangGraph `Send` objects. `stringify` is fast-safe-stringify's
  * circular-safe variant, typed.
  */
+import { TURN_TIME_NOTE_KWARG } from '../core/turn-time-note';
+
+/**
+ * `additional_kwargs` key of the tool calls a mid-turn summary carries for
+ * the turn it condensed (core/middlewares/turn-boundary.ts).
+ */
+export const TURN_CARRY_KWARG = 'turn_carry';
+
+/**
+ * JSON characters of a carry kept on a stored message. Each carried result
+ * is already cut short by the summarizer; the cap bounds how many calls a
+ * long turn can pile onto one row. The newest calls are kept.
+ */
+export const TURN_CARRY_MAX_CHARS = 64 * 1024;
 
 type Replacer = (this: unknown, key: string, value: unknown) => unknown;
 
@@ -243,6 +257,10 @@ export interface CleanAdditionalKwargs {
   oracleName: string;
   /** Provenance marker set by LangChain middlewares (e.g. `"summarization"`). */
   lc_source?: string;
+  /** The exact time note the turn's content starts with (see core/turn-time-note.ts). */
+  turn_time_note?: string;
+  /** Tool calls of the turn a mid-turn summary condensed (newest kept, capped). */
+  turn_carry?: unknown[];
   reasoning?: string;
   reasoningDetails?: ReasoningDetail[];
   attachment?: AttachmentMeta;
@@ -302,6 +320,21 @@ function extractReasoning(additionalKwargs: Record<string, unknown>): {
     : { reasoning };
 }
 
+/** The newest entries of a carry list whose JSON fits `TURN_CARRY_MAX_CHARS`. */
+function cappedTurnCarry(value: unknown): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const kept: unknown[] = [];
+  let chars = 2; // the brackets
+  for (let i = value.length - 1; i >= 0; i--) {
+    const entry: unknown = value[i];
+    const size = (JSON.stringify(entry) ?? '').length + (kept.length ? 1 : 0);
+    if (chars + size > TURN_CARRY_MAX_CHARS) break;
+    chars += size;
+    kept.unshift(entry);
+  }
+  return kept;
+}
+
 /**
  * Reduce a message's `additional_kwargs` to the persisted allowlist. An
  * existing `timestamp` is preserved: every checkpoint `put` rewrites every
@@ -324,6 +357,13 @@ export function cleanAdditionalKwargs(
   };
   if (typeof additionalKwargs.lc_source === 'string')
     cleaned.lc_source = additionalKwargs.lc_source;
+  // Kept so readers can take the note off the stored content again.
+  const turnTimeNote = additionalKwargs[TURN_TIME_NOTE_KWARG];
+  if (typeof turnTimeNote === 'string')
+    cleaned[TURN_TIME_NOTE_KWARG] = turnTimeNote;
+  // Kept so a run resumed after the summary still knows what this turn ran.
+  const carry = cappedTurnCarry(additionalKwargs[TURN_CARRY_KWARG]);
+  if (carry !== undefined) cleaned[TURN_CARRY_KWARG] = carry;
   if (isAttachmentMeta(additionalKwargs.attachment))
     cleaned.attachment = additionalKwargs.attachment;
   if (

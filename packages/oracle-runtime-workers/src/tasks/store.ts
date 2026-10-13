@@ -6,8 +6,12 @@
  *
  *   tasks(id PK, title, spec, schedule_json, status, approval, created_at,
  *         updated_at, next_run_at, last_run_at, last_result_json,
- *         consecutive_failures, pending_approval_at)
- *   task_runs(run_id PK, task_id, started_at, finished_at, ok, detail)
+ *         consecutive_failures, pending_approval_at, delivery_room_id,
+ *         execution_profile, topic_operation_id, topic_request_json,
+ *         approved_at, approval_note)
+ *   task_runs(run_id PK, task_id, started_at, finished_at, ok, detail,
+ *             state, completed_at, txn_id, room_id, result_text, attempts,
+ *             retry_at)
  *
  * The `spec` column is the full markdown artifact (gray-matter frontmatter +
  * intent body, see `spec.ts`); the sibling columns are the query index the
@@ -40,12 +44,18 @@ import {
 } from './spec';
 
 /**
- * A stored task. Extends the plugin-api record with the approval marker:
+ * A stored task. Extends the plugin-api record with the approval markers:
  * a `before-action` task whose run request is waiting on the user carries
- * `pendingApprovalAt` (ISO of when the request was posted).
+ * `pendingApprovalAt` (ISO of when the request was posted); once the user
+ * approves, `approvedAt` (and the user's `approvalNote`) mark a run the next
+ * alarm executes. The approval columns are written only by `approve` /
+ * `claimApproval`, never by `save`, so a stale copy cannot erase or revive
+ * an approval; a task that stops being active drops it.
  */
 export interface TaskRecord extends OracleTaskRecord {
   pendingApprovalAt?: string;
+  approvedAt?: string;
+  approvalNote?: string;
   topicOperationId?: string;
   topicRequest?: TopicDeliverableRequest;
 }
@@ -134,6 +144,8 @@ type TaskRow = {
   execution_profile: string | null;
   topic_operation_id: string | null;
   topic_request_json: string | null;
+  approved_at: number | bigint | null;
+  approval_note: string | null;
 };
 
 type RunRow = {
@@ -171,9 +183,29 @@ const RUN_COLUMN_UPGRADES: ReadonlyArray<readonly [string, string]> = [
   ['retry_at', 'INTEGER'],
 ];
 
+/**
+ * Run rows kept per task: the newest, plus any still open. Older closed rows
+ * are deleted when a new run starts, so the audit trail (and the owner copy
+ * it travels in) stops growing with the task's age.
+ */
+export const MAX_RUNS_KEPT_PER_TASK = 50;
+
+/** Run states that close a run; nothing re-reads a closed run's result. */
+const CLOSED_RUN_STATES = `('delivered', 'failed', 'interrupted')`;
+
+/**
+ * Whether the run row's task is a Topic deliverable: its stored result IS
+ * the product (read back through the owner's Topic API), so it is kept.
+ */
+const RUN_OF_TOPIC_TASK = `EXISTS (SELECT 1 FROM tasks
+  WHERE tasks.id = task_runs.task_id AND tasks.topic_operation_id IS NOT NULL)`;
+
+/** Columns `insert` writes (the approval columns start NULL). */
 const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_at,
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
   delivery_room_id, execution_profile, topic_operation_id, topic_request_json`;
+
+const TASK_SELECT = `${TASK_COLUMNS}, approved_at, approval_note`;
 
 /**
  * Rows this runtime may load: no execution profile (an ordinary task) or one
@@ -248,6 +280,10 @@ function rowToRecord(row: TaskRow): TaskRecord {
   }
   if (row.pending_approval_at !== null) {
     record.pendingApprovalAt = row.pending_approval_at;
+  }
+  if (row.approved_at !== null) {
+    record.approvedAt = new Date(Number(row.approved_at)).toISOString();
+    if (row.approval_note !== null) record.approvalNote = row.approval_note;
   }
   if (row.delivery_room_id !== null) {
     record.deliveryRoomId = row.delivery_room_id;
@@ -333,9 +369,14 @@ export class TasksStore {
     const columns = await this.db.exec<{ name: string }>(
       `PRAGMA table_info(tasks)`,
     );
-    for (const name of ['topic_operation_id', 'topic_request_json']) {
+    for (const [name, type] of [
+      ['topic_operation_id', 'TEXT'],
+      ['topic_request_json', 'TEXT'],
+      ['approved_at', 'INTEGER'],
+      ['approval_note', 'TEXT'],
+    ] as const) {
       if (!columns.some((c) => c.name === name))
-        await this.db.run(`ALTER TABLE tasks ADD COLUMN ${name} TEXT`);
+        await this.db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
     }
     await this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_topic_operation ON tasks(topic_operation_id) WHERE topic_operation_id IS NOT NULL`,
@@ -378,6 +419,13 @@ export class TasksStore {
       `CREATE INDEX IF NOT EXISTS idx_task_runs_open ON task_runs(state)
        WHERE state IN ('running', 'delivering')`,
     );
+    // The next delivery round (`minRetryAt`, on every wake computation):
+    // only parked rows carry `retry_at`, and closing a run clears it, so
+    // this index holds the handful of parked rows, never the history.
+    await this.db.run(
+      `CREATE INDEX IF NOT EXISTS idx_task_runs_retry ON task_runs(state, retry_at)
+       WHERE retry_at IS NOT NULL`,
+    );
   }
 
   async insert(record: TaskRecord): Promise<void> {
@@ -388,26 +436,66 @@ export class TasksStore {
     );
   }
 
-  /** Full-row rewrite keyed by id. The spec markdown is re-rendered on every save. */
+  /**
+   * Full-row rewrite keyed by id. The spec markdown is re-rendered on every
+   * save. The approval columns are left as stored, except that a task saved
+   * as anything but `active` drops its approved run.
+   */
   async save(record: TaskRecord): Promise<void> {
     await this.setup();
     const { changes } = await this.db.run(
       `UPDATE tasks SET title = ?, spec = ?, schedule_json = ?, status = ?, approval = ?,
          created_at = ?, updated_at = ?, next_run_at = ?, last_run_at = ?,
          last_result_json = ?, consecutive_failures = ?, pending_approval_at = ?,
-         delivery_room_id = ?, execution_profile = ?, topic_operation_id = ?, topic_request_json = ?
+         delivery_room_id = ?, execution_profile = ?, topic_operation_id = ?, topic_request_json = ?,
+         approved_at = CASE WHEN ? = 'active' THEN approved_at END,
+         approval_note = CASE WHEN ? = 'active' THEN approval_note END
        WHERE id = ? AND (topic_operation_id IS NULL OR status != 'cancelled' OR ? = 'cancelled')`,
-      [...recordParams(record), record.id, record.status],
+      [
+        ...recordParams(record),
+        record.status,
+        record.status,
+        record.id,
+        record.status,
+      ],
     );
     if (changes === 0) {
       throw new Error(`task ${record.id} not found`);
     }
   }
 
+  /**
+   * Mark an approved run of an active task for the alarm: it runs once the
+   * alarm reaches `atMs`. False when the task is not active.
+   */
+  async approve(id: string, atMs: number, note?: string): Promise<boolean> {
+    await this.setup();
+    const { changes } = await this.db.run(
+      `UPDATE tasks SET approved_at = ?, approval_note = ? WHERE id = ? AND status = 'active'`,
+      [atMs, note ?? null, id],
+    );
+    return changes > 0;
+  }
+
+  /**
+   * Take the approved run of a task for execution: clears the marker and
+   * reports whether there was one. Called in the transaction that opens the
+   * run's ledger row, so an approval runs at most once.
+   */
+  async claimApproval(id: string): Promise<boolean> {
+    await this.setup();
+    const { changes } = await this.db.run(
+      `UPDATE tasks SET approved_at = NULL, approval_note = NULL
+       WHERE id = ? AND approved_at IS NOT NULL`,
+      [id],
+    );
+    return changes > 0;
+  }
+
   async get(id: string): Promise<TaskRecord | null> {
     await this.setup();
     const row = await this.db.get<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM tasks WHERE id = ?`,
+      `SELECT ${TASK_SELECT} FROM tasks WHERE id = ?`,
       [id],
     );
     return row === undefined || !this.loadable(row) ? null : rowToRecord(row);
@@ -432,7 +520,7 @@ export class TasksStore {
   async getTopicOperation(operationId: string): Promise<TaskRecord | null> {
     await this.setup();
     const row = await this.db.get<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM tasks WHERE topic_operation_id = ?`,
+      `SELECT ${TASK_SELECT} FROM tasks WHERE topic_operation_id = ?`,
       [operationId],
     );
     return row === undefined || !this.loadable(row) ? null : rowToRecord(row);
@@ -458,7 +546,7 @@ export class TasksStore {
   async list(): Promise<TaskRecord[]> {
     await this.setup();
     const rows = await this.db.exec<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM tasks ORDER BY created_at, id`,
+      `SELECT ${TASK_SELECT} FROM tasks ORDER BY created_at, id`,
     );
     return rows.filter((row) => this.loadable(row)).map(rowToRecord);
   }
@@ -472,27 +560,51 @@ export class TasksStore {
     return row?.n ?? 0;
   }
 
-  /** Earliest pending deadline (ms epoch) over active loadable tasks, or null. */
-  async minNextRunAt(): Promise<number | null> {
+  /**
+   * Earliest pending deadline (ms epoch) over active loadable tasks — the
+   * next scheduled run or an approved run — or null. Tasks in `exclude`
+   * (their run is executing or being recovered; whoever ends it re-arms)
+   * are left out.
+   */
+  async minNextRunAt(exclude: readonly string[] = []): Promise<number | null> {
     await this.setup();
+    const excluded =
+      exclude.length > 0
+        ? `AND id NOT IN (${exclude.map(() => '?').join(', ')})`
+        : '';
     const row = await this.db.get<{ next: number | bigint | null }>(
-      `SELECT MIN(next_run_at) AS next FROM tasks
-       WHERE status = 'active' AND next_run_at IS NOT NULL AND ${KNOWN_PROFILE_SQL}`,
-      [...TASK_EXECUTION_PROFILES],
+      `SELECT MIN(at) AS next FROM (
+         SELECT next_run_at AS at FROM tasks
+         WHERE status = 'active' AND next_run_at IS NOT NULL AND ${KNOWN_PROFILE_SQL} ${excluded}
+         UNION ALL
+         SELECT approved_at AS at FROM tasks
+         WHERE status = 'active' AND approved_at IS NOT NULL AND ${KNOWN_PROFILE_SQL} ${excluded}
+       )`,
+      [
+        ...TASK_EXECUTION_PROFILES,
+        ...exclude,
+        ...TASK_EXECUTION_PROFILES,
+        ...exclude,
+      ],
     );
     if (row === undefined || row.next === null) return null;
     return Number(row.next);
   }
 
-  /** Active loadable tasks whose next run is due at or before `nowMs`, earliest first. */
+  /**
+   * Active loadable tasks with a scheduled run or an approved run due at or
+   * before `nowMs`, earliest first.
+   */
   async due(nowMs: number): Promise<TaskRecord[]> {
     await this.setup();
     const rows = await this.db.exec<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM tasks
-       WHERE status = 'active' AND next_run_at IS NOT NULL AND next_run_at <= ?
+      `SELECT ${TASK_SELECT} FROM tasks
+       WHERE status = 'active'
+         AND ((next_run_at IS NOT NULL AND next_run_at <= ?)
+           OR (approved_at IS NOT NULL AND approved_at <= ?))
          AND ${KNOWN_PROFILE_SQL}
-       ORDER BY next_run_at, id`,
-      [nowMs, ...TASK_EXECUTION_PROFILES],
+       ORDER BY MIN(COALESCE(next_run_at, approved_at), COALESCE(approved_at, next_run_at)), id`,
+      [nowMs, nowMs, ...TASK_EXECUTION_PROFILES],
     );
     return rows.map(rowToRecord);
   }
@@ -514,6 +626,30 @@ export class TasksStore {
         entry.retryAt ?? null,
       ],
     );
+    await this.pruneRuns(entry.taskId);
+  }
+
+  /**
+   * Keep the task's newest `MAX_RUNS_KEPT_PER_TASK` rows and every open one;
+   * drop the result text closed ordinary runs still carry (rows written
+   * before closing a run cleared it). Uses the (task_id, started_at) index.
+   */
+  private async pruneRuns(taskId: string): Promise<void> {
+    await this.db.run(
+      `DELETE FROM task_runs
+       WHERE task_id = ? AND (state IS NULL OR state NOT IN ('running', 'delivering'))
+         AND run_id NOT IN (
+           SELECT run_id FROM task_runs WHERE task_id = ?
+           ORDER BY started_at DESC, run_id DESC LIMIT ?
+         )`,
+      [taskId, taskId, MAX_RUNS_KEPT_PER_TASK],
+    );
+    await this.db.run(
+      `UPDATE task_runs SET result_text = NULL
+       WHERE task_id = ? AND result_text IS NOT NULL
+         AND state IN ${CLOSED_RUN_STATES} AND NOT ${RUN_OF_TOPIC_TASK}`,
+      [taskId],
+    );
   }
 
   /**
@@ -533,9 +669,16 @@ export class TasksStore {
        VALUES (?, ?, ?, 'running', ?, 0)`,
       [run.runId, run.taskId, run.startedAt, run.txnId],
     );
+    await this.pruneRuns(run.taskId);
   }
 
-  /** Move a run's row along its life (one row write; only the given fields change). */
+  /**
+   * Move a run's row along its life (one row write; only the given fields
+   * change). Closing a run (`delivered` / `failed` / `interrupted`) also
+   * clears its delivery retry time and, unless the task is a Topic
+   * deliverable, its stored result text: nothing reads a closed ordinary
+   * run's result again (the task row keeps the summary).
+   */
   async updateRun(
     runId: string,
     patch: {
@@ -588,6 +731,17 @@ export class TasksStore {
     if (patch.retryAt !== undefined) {
       sets.push('retry_at = ?');
       params.push(patch.retryAt);
+    }
+    const closing =
+      patch.state === 'delivered' ||
+      patch.state === 'failed' ||
+      patch.state === 'interrupted';
+    if (closing) {
+      if (patch.retryAt === undefined) sets.push('retry_at = NULL');
+      if (patch.resultText === undefined)
+        sets.push(
+          `result_text = CASE WHEN ${RUN_OF_TOPIC_TASK} THEN result_text END`,
+        );
     }
     if (sets.length === 0) return;
     params.push(runId);
@@ -643,6 +797,8 @@ export class TasksStore {
   /** Earliest pending delivery retry (ms epoch) over open runs, or null. */
   async minRetryAt(): Promise<number | null> {
     await this.setup();
+    // `retry_at IS NOT NULL` matches `idx_task_runs_retry`'s WHERE, which is
+    // what lets SQLite use that partial index.
     const row = await this.db.get<{ next: number | bigint | null }>(
       `SELECT MIN(retry_at) AS next FROM task_runs
        WHERE state = 'delivering' AND retry_at IS NOT NULL`,

@@ -44,10 +44,13 @@ export default defineConfig({
     // (`pnpm test:core`). The editor and flows plugins are the exception:
     // their tests MUST run under workerd — they prove the BlockNote
     // markdown→blocks bridge (jsdom→linkedom shim) and the @ixo/editor/core
-    // compiler on the real runtime — so they stay in this pool.
+    // compiler on the real runtime — so they stay in this pool. So do the
+    // ixo-transaction and pod-creator tests: they drive the plugins through
+    // the real plugin API, capability gate and realtime call registry inside
+    // workerd, wallet-signing round trip included.
     exclude: [
       'src/plugins/*.test.ts',
-      'src/plugins/!(editor|flows)/**/*.test.ts',
+      'src/plugins/!(editor|flows|ixo-transaction|pod-creator)/**/*.test.ts',
       // Plain-Node suite (fake fetch); runs in vitest.core.config.ts.
       'src/memory/**/*.test.ts',
       '**/node_modules/**',

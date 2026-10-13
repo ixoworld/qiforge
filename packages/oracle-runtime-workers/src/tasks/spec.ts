@@ -97,6 +97,15 @@ export interface ParsedTaskSpec {
   intent: string;
 }
 
+/**
+ * Options for every gray-matter call. Called WITHOUT options, gray-matter
+ * stores each distinct input string (plus a Buffer copy of it) in a
+ * module-wide cache that is never cleared; every task save renders a new
+ * spec, so that cache would grow for the life of the isolate. Any options
+ * object, even an empty one, bypasses it.
+ */
+const MATTER_OPTIONS = {};
+
 /** JSON round-trip: YAML cannot serialise `undefined` values (`timezone?`). */
 function toPlainSchedule(schedule: OracleTaskSchedule): OracleTaskSchedule {
   return JSON.parse(JSON.stringify(schedule)) as OracleTaskSchedule;
@@ -116,12 +125,16 @@ export function renderTaskSpec(record: OracleTaskRecord): string {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
-  return matter.stringify(`${record.intent.trim()}\n`, frontmatter);
+  return matter.stringify(
+    `${record.intent.trim()}\n`,
+    frontmatter,
+    MATTER_OPTIONS,
+  );
 }
 
 /** Parse a spec markdown back into frontmatter + intent. Throws on schema drift. */
 export function parseTaskSpec(markdown: string): ParsedTaskSpec {
-  const parsed = matter(markdown);
+  const parsed = matter(markdown, MATTER_OPTIONS);
   const data: unknown = parsed.data;
   return {
     frontmatter: SpecFrontmatterSchema.parse(data),
@@ -131,7 +144,7 @@ export function parseTaskSpec(markdown: string): ParsedTaskSpec {
 
 /** The intent body of a spec without validating the frontmatter. */
 export function specIntentOf(markdown: string): string {
-  return matter(markdown).content.trim();
+  return matter(markdown, MATTER_OPTIONS).content.trim();
 }
 
 /**

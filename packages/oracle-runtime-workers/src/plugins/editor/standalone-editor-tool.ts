@@ -23,6 +23,7 @@ import {
   requireToolPlane,
 } from '../../plugin-api/tool-plane';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
+import { sharedDocumentSource, type DocumentOpener } from './content-session';
 import { createContentTools } from './content-tools';
 import { buildAppConfig, EDITOR_AGENT_TOOL_NAME } from './editor-agent';
 import type { BlocknoteToolsConfig } from './editor-config';
@@ -90,6 +91,11 @@ export interface CreateStandaloneEditorToolOptions {
   toolsConfig: BlocknoteToolsConfig;
   /** The contributing plugin: names an admin content tool's capability. */
   pluginName: string;
+  /**
+   * Opens the target document. Defaults to the matrix-crdt opener; tests
+   * pass an in-memory one.
+   */
+  openDocument?: DocumentOpener;
 }
 
 /**
@@ -148,6 +154,7 @@ export function createStandaloneEditorTool(
         return JSON.stringify(notAMember(roomId));
       }
 
+      let documents: ReturnType<typeof sharedDocumentSource> | undefined;
       try {
         const matrixClient = await resolveEditorMatrixClient({
           baseUrl: opts.toolsConfig.matrix.baseUrl,
@@ -156,13 +163,19 @@ export function createStandaloneEditorTool(
           matrixClient: opts.toolsConfig.matrixClient,
         });
 
-        const contentTools = createContentTools({
-          matrixClient,
-          appConfig: buildAppConfig(opts.toolsConfig, {
-            type: 'id',
-            value: roomId,
-          }),
-        });
+        // One session for the whole run: the room cannot change identity
+        // within a call, so every content tool reuses the same open doc.
+        documents = sharedDocumentSource(
+          {
+            matrixClient,
+            appConfig: buildAppConfig(opts.toolsConfig, {
+              type: 'id',
+              value: roomId,
+            }),
+          },
+          opts.openDocument,
+        );
+        const contentTools = createContentTools({ documents });
         const boundTools = toStructuredTools(
           contentTools,
           ctx,
@@ -176,9 +189,12 @@ export function createStandaloneEditorTool(
           middleware: [],
         });
 
-        const result = await agent.invoke({
-          messages: [new HumanMessage(task)],
-        });
+        // The turn's signal stops the inner agent's model calls and document
+        // writes when the user cancels or the turn times out.
+        const result = await agent.invoke(
+          { messages: [new HumanMessage(task)] },
+          { signal: ctx.abortSignal },
+        );
         const messages = result.messages as BaseMessage[];
         const text = lastMessageContent(messages);
 
@@ -206,11 +222,16 @@ export function createStandaloneEditorTool(
           },
         });
       } catch (err) {
+        // A cancelled turn is not a document error: let the cancellation
+        // propagate.
+        if (ctx.abortSignal.aborted) throw err;
         const message = err instanceof Error ? err.message : String(err);
         ctx.logger.error(
           `[editor] standalone failed for ${roomId}: ${message}`,
         );
         return `Error opening the document ${roomId}: ${message}`;
+      } finally {
+        await documents?.close();
       }
     },
     {

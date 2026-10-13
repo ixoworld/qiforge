@@ -8,6 +8,7 @@ import {
   JEV_MODEL_OPENROUTER,
   JevDecisionError,
   parseJevResult,
+  systemOneInferenceProvenance,
   toJevQuestions,
 } from './wire.js';
 
@@ -105,11 +106,12 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
     return {
       ...result,
       provenance: {
-        apiDialect: 'systemone-v1',
-        requestedModel: this.model,
-        ...(result.modelVersion ? { returnedModel: result.modelVersion } : {}),
-        modelPinning: 'pinned',
-        providerArtifactRef: this.model,
+        method: { kind: 'provider-native' },
+        ...systemOneInferenceProvenance(
+          this.model,
+          result.modelVersion,
+          this.capabilities.modelPinning,
+        ),
       },
     };
   }

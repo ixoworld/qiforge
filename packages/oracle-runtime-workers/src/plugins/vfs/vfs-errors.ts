@@ -55,6 +55,26 @@ export class VfsHttpError extends Error {
   }
 }
 
+/**
+ * A download refused because the file is larger than the caller's in-memory
+ * cap. Raised from the advertised `content-length` (or while streaming, when
+ * the header is absent) so the bytes are never fully buffered.
+ */
+export class VfsContentTooLargeError extends VfsHttpError {
+  readonly limitBytes: number;
+
+  constructor(limitBytes: number, sizeBytes?: number) {
+    const size = sizeBytes !== undefined ? `${sizeBytes} bytes` : 'too large';
+    super({
+      status: 413,
+      message: `The file is ${size}; the limit for this operation is ${limitBytes} bytes.`,
+      raw: '',
+    });
+    this.name = 'VfsContentTooLargeError';
+    this.limitBytes = limitBytes;
+  }
+}
+
 /** A UCAN auth failure raised before (or instead of) an HTTP round-trip. */
 export class VfsAuthError extends Error {
   readonly kind: VfsAuthErrorKind;
@@ -133,6 +153,8 @@ export function mapVfsError(
       ? noAccessMessage(ctx.oracleDid)
       : "Couldn't get filesystem access right now.";
   }
+
+  if (err instanceof VfsContentTooLargeError) return err.message;
 
   if (err instanceof VfsHttpError) {
     switch (err.status) {

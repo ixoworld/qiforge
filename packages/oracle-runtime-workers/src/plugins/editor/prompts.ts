@@ -42,7 +42,8 @@ Tool results carry a \`code\` you must act on:
 - \`block_not_found\` — the id is stale. Re-read the document and use current ids.
 - \`not_a_member\` — the document is not the user's. Say so plainly. Do not retry.
 - \`no_document\` — no document is open and no room id was given. Return the code; do not invent a room id.
-- \`flush_timeout\` — the edit could **not** be confirmed as saved. Treat it as not applied and say so.
+- \`write_not_saved\` — the edit could **not** be confirmed as saved: the document service did not acknowledge it, so it may or may not have landed. Say so; do not claim it succeeded. Do not repeat it in this task — further edits in this task are refused too. In a later request, re-read the document first and apply the edit again only if it is missing.
+- \`error\` after an edit — the document service refused it outright (for example, the change was too large): nothing was stored. Say so; do not claim it succeeded, and never send the same change again unchanged — split a large change into smaller edits.
 
 Never present a refusal as a success, and never silently retry a refusal.`;
 

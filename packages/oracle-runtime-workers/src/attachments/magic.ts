@@ -56,6 +56,38 @@ const MAGIC_MIME_CATEGORIES: Record<string, FileCategory[]> = {
   'video/mp4': ['video', 'audio'],
 };
 
+/**
+ * Signatures that mark a container rather than one format: the bytes are
+ * consistent with every claim listed here, and the claim is the more precise
+ * type (a `.docx` is a zip archive, a HEIC photo an ISO-BMFF `ftyp` box).
+ */
+const CONTAINER_CLAIMS: Record<string, (claimed: string) => boolean> = {
+  'application/zip': (claimed) =>
+    claimed.startsWith('application/vnd.openxmlformats-officedocument.') ||
+    claimed.startsWith('application/vnd.oasis.opendocument.') ||
+    claimed === 'application/epub+zip',
+  'application/msword': (claimed) =>
+    claimed === 'application/vnd.ms-excel' ||
+    claimed === 'application/vnd.ms-powerpoint',
+  'video/mp4': (claimed) =>
+    /^image\/(heic|heif|avif)(-sequence)?$/.test(claimed) ||
+    /^audio\/(mp4|m4a|x-m4a)$/.test(claimed) ||
+    /^video\/(quicktime|3gpp2?)$/.test(claimed),
+  'image/webp': (claimed) =>
+    /^audio\/(wav|wave|x-wav)$/.test(claimed) ||
+    /^video\/(avi|x-msvideo)$/.test(claimed),
+  'video/webm': (claimed) =>
+    claimed === 'audio/webm' || /^(audio|video)\/x-matroska$/.test(claimed),
+};
+
+/** Whether a sniffed container type is consistent with the client's more precise claim. */
+export function containerMatchesClaim(
+  sniffed: string,
+  claimed: string,
+): boolean {
+  return CONTAINER_CLAIMS[sniffed]?.(claimed.toLowerCase()) ?? false;
+}
+
 /** The MIME a file's magic bytes announce, or null when no signature matches. */
 export function detectMimeFromMagicBytes(bytes: Uint8Array): string | null {
   if (bytes.length < 4) return null;
@@ -124,6 +156,7 @@ export function verifyMagicBytes(
     );
     return;
   }
+  if (containerMatchesClaim(detected, attachment.mimetype)) return;
   const allowed = MAGIC_MIME_CATEGORIES[detected];
   if (!allowed || !allowed.includes(claimedCategory)) {
     throw new Error(

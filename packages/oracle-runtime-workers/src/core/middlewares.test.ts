@@ -13,8 +13,13 @@ import {
   createToolRepetitionGuardMiddleware,
   createToolValidationMiddleware,
 } from './middlewares';
+import { isCapabilityGateRefusal } from './middlewares/capability-gate';
 import { SUMMARY_PREFIX } from './middlewares/summarization';
 import { repetitionCapsFromEnv } from './middlewares/tool-repetition-guard';
+import {
+  turnCarryKwargs,
+  type CarriedToolCall,
+} from './middlewares/turn-boundary';
 
 type Visibility = NonNullable<PluginManifest['visibility']>;
 
@@ -247,6 +252,82 @@ describe('createCapabilityGateMiddleware', () => {
       }
       expect(warn).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+describe('createCapabilityGateMiddleware — loads that no longer hold, withheld tools', () => {
+  function gate() {
+    const mw = createCapabilityGateMiddleware({
+      preloadedPlugins: new Set(['ops']),
+      pluginByToolName: new Map([
+        ['probe_run', 'probe'],
+        ['ops_reset', 'ops'],
+      ]),
+      visibilityByToolName: new Map<string, Visibility>([
+        ['probe_run', 'on-demand'],
+        ['ops_reset', 'on-demand'],
+      ]),
+      withheldToolNames: new Set(['ops_reset']),
+    });
+    const { wrapModelCall, wrapToolCall } = mw;
+    if (!wrapModelCall || !wrapToolCall) throw new Error('gate hooks missing');
+    const callTool = async (name: string, loadedPlugins: string[]) => {
+      const handler = vi.fn().mockResolvedValue('ran');
+      const result = await wrapToolCall(
+        {
+          toolCall: { name, args: {}, id: 'tc-1' },
+          tool: { name },
+          state: { messages: [], loadedPlugins },
+          runtime: {},
+        } as never,
+        handler as never,
+      );
+      return { ran: handler.mock.calls.length > 0, result };
+    };
+    const exposed = async (loadedPlugins: string[]) => {
+      const handler = vi.fn().mockResolvedValue({ ok: true });
+      await wrapModelCall(
+        {
+          state: { loadedPlugins },
+          tools: [{ name: 'probe_run' }, { name: 'ops_reset' }],
+        } as never,
+        handler as never,
+      );
+      return (
+        handler.mock.calls[0]?.[0] as { tools: Array<{ name: string }> }
+      ).tools.map((t) => t.name);
+    };
+    return { callTool, exposed };
+  }
+
+  it('refuses a tool whose plugin the thread no longer has loaded, as a load refusal', async () => {
+    const { callTool, exposed } = gate();
+    expect((await callTool('probe_run', ['probe'])).ran).toBe(true);
+    expect(await exposed(['probe'])).toEqual(['probe_run']);
+    // The same thread state without the plugin (a reset thread, a state
+    // restored from before the load): hidden and refused again.
+    const after = await callTool('probe_run', []);
+    expect(after.ran).toBe(false);
+    expect(after.result).toBeInstanceOf(ToolMessage);
+    expect(isCapabilityGateRefusal(after.result as ToolMessage)).toBe(true);
+    expect(await exposed([])).toEqual([]);
+  });
+
+  it('never runs or shows a withheld tool, loaded and preloaded or not, and does not name its capability', async () => {
+    const { callTool, exposed } = gate();
+    for (const loaded of [[], ['ops']]) {
+      const { ran, result } = await callTool('ops_reset', loaded);
+      expect(ran).toBe(false);
+      const refusal = result as ToolMessage;
+      expect(refusal.status).toBe('error');
+      expect(String(refusal.content)).toBe(
+        'Tool "ops_reset" is not available in this conversation, so the call was not run.',
+      );
+      // Not a load refusal: loading cannot make it available, and the
+      // repetition guard treats it as the failure it is.
+      expect(isCapabilityGateRefusal(refusal)).toBe(false);
+      expect(await exposed(loaded)).not.toContain('ops_reset');
+    }
   });
 });
 
@@ -494,6 +575,52 @@ describe('createToolRepetitionGuardMiddleware', () => {
       expect(fresh.handler).toHaveBeenCalledOnce();
     });
 
+    /** The summary the summarizer writes when it condenses part of the current turn. */
+    const midTurnSummary = (calls: CarriedToolCall[]) =>
+      new HumanMessage({
+        content: `${SUMMARY_PREFIX} The user asked to write a file.`,
+        additional_kwargs: {
+          lc_source: 'summarization',
+          ...turnCarryKwargs(calls),
+        },
+      });
+
+    it('remembers a failure a mid-turn summary condensed away', async () => {
+      const { run, handler } = retry([
+        midTurnSummary([
+          {
+            name: 'write_file',
+            args: { content: 'x', path: '/workspace/tmp/x.js' },
+            status: 'error',
+            result: 'Path must be under /workspace/data/.',
+          },
+        ]),
+        new AIMessage('let me try again'),
+      ]);
+      const result = (await run()) as ToolMessage;
+      expect(handler).not.toHaveBeenCalled();
+      expect(String(result.content)).toContain(
+        'Path must be under /workspace/data/.',
+      );
+    });
+
+    it('a later user message still opens a new turn after a mid-turn summary', async () => {
+      const { run, handler } = retry([
+        midTurnSummary([
+          {
+            name: 'write_file',
+            args: { path: '/workspace/tmp/x.js', content: 'x' },
+            status: 'error',
+            result: 'denied',
+          },
+        ]),
+        new AIMessage('That path is not allowed.'),
+        new HumanMessage('I changed the policy, try again'),
+      ]);
+      await run();
+      expect(handler).toHaveBeenCalledOnce();
+    });
+
     it('honours an explicit lookback inside the turn', async () => {
       const { run, handler } = retry(
         [
@@ -630,6 +757,81 @@ describe('createToolRepetitionGuardMiddleware', () => {
           )
         ).ran,
       ).toBe(false);
+    });
+
+    it('counts a write a mid-turn summary condensed away', async () => {
+      const { wrap } = guard();
+      const args = { to: 'alice', text: 'hi' };
+      const summary = new HumanMessage({
+        content: `${SUMMARY_PREFIX} Sending a message.`,
+        additional_kwargs: {
+          lc_source: 'summarization',
+          ...turnCarryKwargs([
+            {
+              name: 'send_message',
+              args: { text: 'hi', to: 'alice' },
+              status: 'success',
+              result: 'sent, id m-1',
+            },
+          ]),
+        },
+      });
+      const again = await call(wrap, 'send_message', args, [
+        summary,
+        ...ran('get_status', {}, 'ok'),
+      ]);
+      expect(again.ran).toBe(false);
+      expect(String(again.result.content)).toContain('sent, id m-1');
+      // The same summary without the carried calls (written at a turn
+      // boundary) opens nothing and remembers nothing.
+      const plain = new HumanMessage({
+        content: `${SUMMARY_PREFIX} Sending a message.`,
+        additional_kwargs: { lc_source: 'summarization' },
+      });
+      expect((await call(wrap, 'send_message', args, [plain])).ran).toBe(true);
+    });
+
+    it('matches arguments whatever their key order, at any depth, and never across different values', async () => {
+      const { wrap } = guard();
+      const history = [
+        new HumanMessage('go'),
+        ...ran('send_message', {
+          to: 'alice',
+          meta: { b: 2, a: [1, { y: 'z', x: 'w' }] },
+        }),
+      ];
+      expect(
+        (
+          await call(
+            wrap,
+            'send_message',
+            { meta: { a: [1, { x: 'w', y: 'z' }], b: 2 }, to: 'alice' },
+            history,
+          )
+        ).ran,
+      ).toBe(false);
+      // Whitespace inside a value is part of the value: another write.
+      expect(
+        (
+          await call(
+            wrap,
+            'send_message',
+            { to: 'alice ', meta: { b: 2, a: [1, { y: 'z', x: 'w' }] } },
+            history,
+          )
+        ).ran,
+      ).toBe(true);
+      // Array order is part of the value too.
+      expect(
+        (
+          await call(
+            wrap,
+            'send_message',
+            { to: 'alice', meta: { b: 2, a: [{ y: 'z', x: 'w' }, 1] } },
+            history,
+          )
+        ).ran,
+      ).toBe(true);
     });
 
     it('allows five identical reads per turn, then refuses the sixth', async () => {

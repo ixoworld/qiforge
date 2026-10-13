@@ -24,10 +24,12 @@
  * counted as tool attempts and scheduled in their own lane, never
  * fingerprinted.
  */
+import { reportsUnknownOutcome } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
 import { type AgentMiddleware, createMiddleware } from 'langchain';
 import type { Logger } from '../../plugin-api/types';
 import type { ToolLane, ToolScheduler } from '../tool-scheduler';
+import { findProviderStall } from '../../llm/stream-liveness';
 import { isHarnessLimitError, type TurnBudget } from '../turn-budget';
 import { NOOP_LOGGER } from '../utils';
 
@@ -94,11 +96,13 @@ export function uncertainWriteToolResult(toolName: string): string {
 
 /**
  * Transport error codes (Node / undici `code`s; workerd only has them in the
- * message) and the editor's unconfirmed save. Any of them can follow a
- * request that reached the service, so none proves the effect did not happen.
+ * message) and the editor's undelivered write (`write_not_saved`: the
+ * homeserver kept failing, and a send that failed with a server error may
+ * still have landed). Any of them can follow a request that reached the
+ * service, so none proves the effect did not happen.
  */
 const UNCERTAIN_CODES =
-  'ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)|flush_timeout';
+  'ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|UND_ERR_(?:SOCKET|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|BODY_TIMEOUT)|write_not_saved';
 const UNCERTAIN_CODE = new RegExp(`^(?:${UNCERTAIN_CODES})$`, 'i');
 
 /**
@@ -145,6 +149,9 @@ export function isUncertainOutcome(
 ): boolean {
   if (signal?.aborted) return true;
   if (isHarnessLimitError(error)) return true;
+  // A tool whose own model call stalled (stream-liveness.ts) stopped at an
+  // unknown point of its work.
+  if (findProviderStall(error)) return true;
   if (!(error instanceof Error)) return false;
   if (error.name === 'AbortError' || error.name === 'TimeoutError') return true;
   if (
@@ -214,7 +221,8 @@ function reportedFailure(
 
 /**
  * Why a RETURNED tool result leaves a write's outcome unknown, or null when
- * it does not. Only an error-shaped result counts — an error-status
+ * it does not. A JSON result whose `outcome` is `'unknown'` says so itself.
+ * Otherwise only an error-shaped result counts — an error-status
  * ToolMessage, a JSON failure (`reportedFailure`), or text that opens with
  * `Error` / `Failed` — and only when what it reports is the uncertain kind
  * `isUncertainOutcome` recognises in a thrown error (a timeout, a transport
@@ -227,6 +235,9 @@ export function uncertainResultReason(output: unknown): string | null {
   let failure: { text: string; serverStatus: boolean } | null = null;
   try {
     const parsed: unknown = JSON.parse(text);
+    // A result that says so itself (the frontend bridge's
+    // FRONTEND_OUTCOME_UNKNOWN, or a client reporting the same).
+    if (reportsUnknownOutcome(parsed)) return 'outcome unknown';
     if (isRecord(parsed)) failure = reportedFailure(parsed);
   } catch {
     // Not JSON: plain text, judged below.
@@ -266,9 +277,22 @@ export function createToolExecutionMiddleware(
       // Refused before waiting for a slot: a turn over its limit takes no
       // more slots. The slot wait itself ends with the abort signal.
       budget.check(options.signal);
+      // Every completed call leaves a trace (a sub-agent's inner tools
+      // included), timed from when it got its slot.
+      const run = async (): Promise<Awaited<ReturnType<typeof handler>>> => {
+        const started = Date.now();
+        const output = await handler(request);
+        const ms = Date.now() - started;
+        logger.debug?.(
+          ToolMessage.isInstance(output) && output.status === 'error'
+            ? `[tool-execution] ${toolName} (${callId}): returned an error in ${ms} ms`
+            : `[tool-execution] ${toolName} (${callId}): ok in ${ms} ms`,
+        );
+        return output;
+      };
       return scheduler.run(lane, options.signal, async () => {
         budget.reserveTool(options.signal);
-        if (lane !== 'write' || !claims) return handler(request);
+        if (lane !== 'write' || !claims) return run();
         const fingerprint = await operationKey(toolName, toolCall.args);
         const claim = await claims.claimWrite({
           fingerprint,
@@ -288,7 +312,7 @@ export function createToolExecutionMiddleware(
           });
         }
         try {
-          const output = await handler(request);
+          const output = await run();
           const uncertain = uncertainResultReason(output);
           if (uncertain !== null) {
             logger.warn(

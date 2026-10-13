@@ -38,7 +38,8 @@ const APPROVAL_FIELD_DESCRIPTION =
   'fires it does NOT execute — it posts an approval request into the ' +
   "user's oracle room and waits. The user approves or declines by replying " +
   'there; record the decision with `resolve_task_approval` — approval ' +
-  'executes the run and delivers its result, a decline drops it.';
+  'starts the run in the background (its result is posted to the room when ' +
+  'it finishes), a decline drops it.';
 
 const taskInputShape = {
   title: z.string().min(1).max(120),
@@ -378,7 +379,7 @@ function resolveTaskApproval(): PluginTool {
           outcome: args.outcome,
           note:
             args.outcome === 'approved'
-              ? "Decision recorded and the run was executed — its result was delivered to the user's room. Confirm to the user."
+              ? "Approved — the run is starting now in the background; its result will be posted to the user's room when it finishes. Tell the user it is running; do not claim a result yet."
               : 'Decision recorded — the pending run was dropped and nothing was executed.',
         };
       } catch (err) {
@@ -388,7 +389,7 @@ function resolveTaskApproval(): PluginTool {
     {
       name: 'resolve_task_approval',
       description:
-        "Record the user's decision on a task run that is waiting for approval. 'approved' EXECUTES the run immediately (the result is delivered to the user's room); 'declined' drops it without running. Call this when the user answers a pending approval request — pass their requested tweaks in `note`.",
+        "Record the user's decision on a task run that is waiting for approval. 'approved' starts the run right away in the background (its result is posted to the user's room when it finishes); 'declined' drops it without running. Call this when the user answers a pending approval request — pass their requested tweaks in `note`.",
       schema: resolveApprovalInput,
     },
   );

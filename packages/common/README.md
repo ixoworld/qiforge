@@ -2,17 +2,36 @@
 
 ## Overview
 
-The `@ixo/common` package serves as a foundational library for the ixo-oracles ecosystem, providing shared utilities, AI capabilities, and core services. It integrates with Matrix for communication and state management, OpenAI for AI capabilities, and provides various tools for document processing and semantic analysis.
+The `@ixo/common` package holds the contracts QiForge runtimes and clients share — bounded semantic Decisions, the frontend bridge wire contract, portable work and AgentWake — plus the AI utilities and Matrix-backed services the deprecated Node runtime (`@ixo/oracle-runtime`) is built on.
+
+The Workers runtime (`@ixo/oracle-runtime-workers`) imports only the three contract subpaths (`@ixo/common/ai/decisions`, `@ixo/common/ai/frontend-bridge`, `@ixo/common/work`); they run on workerd as well as Node.
 
 ## Table of Contents
 
-1. [Getting Started](#getting-started)
+1. [Entry points](#entry-points)
+2. [Getting Started](#getting-started)
    - [Installation](#installation)
    - [Basic Usage](#basic-usage)
-2. [Core Components](#core-components)
+3. [Shared contracts](#shared-contracts)
+   - [Decisions](#decisions-ixocommonaidecisions)
+   - [Frontend bridge](#frontend-bridge-ixocommonaifrontend-bridge)
+   - [Portable work and AgentWake](#portable-work-and-agentwake-ixocommonwork)
+4. [Core Components](#core-components)
    - [AI Module](#ai-module)
    - [Services](#services)
-3. [Documentation](#documentation)
+5. [Documentation](#documentation)
+
+## Entry points
+
+| Import                           | What it holds                                                                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `@ixo/common`                    | Everything below, plus the services (`SessionManagerService`, `EnvService`, the memory engine client) and utils.                    |
+| `@ixo/common/ai`                 | AI utilities, semantic router, LangChain tools and frontend tool callers, models, checkpointer; re-exports the two `ai/*` subpaths. |
+| `@ixo/common/ai/decisions`       | The bounded semantic Decision module.                                                                                               |
+| `@ixo/common/ai/frontend-bridge` | The frontend bridge wire contract.                                                                                                  |
+| `@ixo/common/work`               | `PortableWorkDefinition` and `AgentWake` schemas.                                                                                   |
+
+The package's `./*` export maps `@ixo/common/<path>` to `dist/<path>.js`, so a directory such as `services` is not importable by its directory name; import from the root instead.
 
 ## Getting Started
 
@@ -31,72 +50,40 @@ yarn add @ixo/common
 
 ### Environment Setup
 
-The package requires several environment variables:
-
-```env
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_key
-
-# Matrix Configuration
-MATRIX_ORACLE_ADMIN_ACCESS_TOKEN=your_matrix_token
-
-# Optional Tools Configuration
-TAVILY_API_KEY=your_tavily_key  # For web search capabilities
-```
+The contract subpaths read no environment. The AI utilities read `process.env` when they are called: `LLM_PROVIDER` with `OPEN_ROUTER_API_KEY` or `NEBIUS_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` (models), `TAVILY_API_KEY` (web search), `SESSION_TITLE_MODEL` (session titles), and `IXO_GURU_QUERY_ENDPOINT`, `GURU_ASSISTANCE_API_TOKEN`, `ORACLE_DID` (the IXO Guru tool).
 
 ### Basic Usage
 
 ```typescript
-// Services for Matrix room and session management
-import {
-  RoomManagerService,
-  SessionManagerService,
-} from '@ixo/common/services';
+// AI utilities (root or @ixo/common/ai)
+import { createSemanticRouter, docSplitter } from '@ixo/common/ai';
 
-// Initialize services
-const sessionManager = new SessionManagerService();
-const roomManager = new RoomManagerService();
-
-// Create or get a Matrix room
-const roomId = await roomManager.getOrCreateRoom({
-  did: 'user-did',
-  oracleName: 'oracle-name',
-  userAccessToken: 'matrix-token',
-});
-
-// Manage chat sessions
-const session = await sessionManager.createSession({
-  did: 'user-did',
-  oracleName: 'oracle-name',
-  matrixAccessToken: 'matrix-token',
-});
-
-// AI utilities
-import {
-  docSplitter,
-  checkDocRelevance,
-  createSemanticRouter,
-  webSearchTool,
-} from '@ixo/common/ai';
-
-// Process documents
 const chunks = await docSplitter('Long text content...');
 
-// Check document relevance
-const isRelevant = await checkDocRelevance({
-  doc: 'document content',
-  query: 'search query',
-});
-
-// Create semantic routes
-const router = createSemanticRouter({
-  routes: {
+const intentRouter = createSemanticRouter(
+  {
     generateBlog: 'if the intent is blog',
     generatePost: 'if the intent is post',
   },
-  basedOn: ['intent'],
-});
+  ['intent'],
+);
 ```
+
+## Shared contracts
+
+### Decisions (`@ixo/common/ai/decisions`)
+
+Bounded semantic Decisions are side-effect-free, typed judgments over explicitly projected state: a Decision answers a finite question, and deterministic application code decides what follows. The module holds `defineDecision`, `DecisionRuntime`, provider routing (`DecisionProviderRegistry`, `DecisionProviderRouter`, `HOST_DECISION_PROVIDER_ID`, `AmbiguousDecisionProviderError`), applicability (`DecisionNotApplicableError`), Final Decision Subject binding (`canonicalizeFinalDecisionSubject`, `digestFinalDecisionSubject`, `createDecisionAuthorityReceipt`, `createDecisionExecutionReceipt`, `assertFinalDecisionSubjectUnchanged`, `StaleDecisionSubjectError`), the `measureDecisionQuestionIsolation` conformance probe, the Jev adapters (OpenRouter, Cloudflare, Workers AI), env-driven provider resolution (`resolveDecisionAdapter`, `decisionProviderEnvShape`) and the capability-router Decision.
+
+The design, the runtime invariants and how to choose a provider are in [`docs/architecture/decisions.md`](../../docs/architecture/decisions.md); the Workers env variables and the `createOracleWorker({ decisionProviders, decisionProviderPolicy })` options are in the runtime's [`configuration.md`](../oracle-runtime-workers/docs/configuration.md#decisions).
+
+### Frontend bridge (`@ixo/common/ai/frontend-bridge`)
+
+The wire contract for browser tools (`browser_tool_call` → `tool_result`) and AG-UI actions (`action_call` → `action_call_result`): `FRONTEND_BRIDGE` (what `GET /health` advertises under `frontendTools`: protocol version 2, single-socket execution, unknown outcome on timeout), `frontendOutcomeUnknown` and `FRONTEND_OUTCOME_UNKNOWN` (the result of a call whose answer never arrived), `frontendInvocationId` (`<caller id>:<uuid>`), `reportsUnknownOutcome` and `summarizeFrontendResult` (identifiers and status only, for action logs). It has no dependencies. `callFrontendTool`, `callBrowserTool` and `callAgAction` in `@ixo/common/ai` follow it; the last two accept `onInvocation`. The Workers behaviour is in [`frontend-bridge.md`](../oracle-runtime-workers/docs/frontend-bridge.md).
+
+### Portable work and AgentWake (`@ixo/common/work`)
+
+Provider-neutral Zod schemas. `PortableWorkDefinitionSchema` describes reusable work by definition only (title, intent, outcome, definition of done, rubric refs, suggested roles and capabilities, scalar `configurationDefaults`); it rejects duplicate list entries and any key in `PORTABLE_WORK_RESERVED_CONFIGURATION_KEYS` (authority, credentials, approvals, execution state). `AgentWakeSchema` is a notify-only wake envelope (`notifyOnly: true`), `AgentWakeAcknowledgementSchema` its acknowledgement (`received`, `duplicate`, `superseded`), and `agentWakeDedupeKey` keys a wake by principal and wake id. The Workers task adapter validates its output against these schemas.
 
 ## Core Components
 
@@ -106,7 +93,7 @@ The AI module provides a comprehensive suite of AI-powered tools and utilities:
 
 - **Document Processing**
   - Text splitting and chunking
-  - Document relevance checking
+  - Document relevance checking (`doc-relevance-checker.ts` has only a default export, so `checkDocRelevance` is not reachable through the package entry points)
   - File loading and format conversion
   - Similarity search filtering
 
@@ -120,6 +107,9 @@ The AI module provides a comprehensive suite of AI-powered tools and utilities:
   - Vector similarity search
   - Document retrieval tools
 
+- **Frontend tool callers**
+  - `callFrontendTool`, `callBrowserTool`, `callAgAction` (see [Frontend bridge](#frontend-bridge-ixocommonaifrontend-bridge))
+
 - **Utility Functions**
   - YAML/JSON conversion
   - Document stringification
@@ -127,14 +117,11 @@ The AI module provides a comprehensive suite of AI-powered tools and utilities:
 
 ### Services
 
-Core services for Matrix integration and state management:
+Services used by the deprecated Node runtime (exported from the root):
 
-- **Room Manager**
-  - Matrix room creation and retrieval
-  - DID-based room management
-  - Access control and validation
+- **Memory engine client** (`MemoryEngineService`)
 
-- **Session Manager**
+- **Session Manager** (`SessionManagerService`, constructed with a database sync service)
   - Chat session management
   - AI-powered session titling
   - Matrix state persistence
@@ -171,19 +158,21 @@ export type Schema = typeof envSchema;
 
 ```typescript
 // src/services/env/env.ts
-import { type Schema } from 'zod/v3';
-import { EnvService } from './env.service';
+import { EnvService } from '@ixo/common';
+import { type Schema } from './schema';
 
 const envService = EnvService.getInstance<Schema>();
 
 export default envService;
 ```
 
+`getInstance` throws until `EnvService.initialize` has run, so this module must be loaded after step 3.
+
 #### 3. Initialize in Application Entry Point
 
 ```typescript
 // src/main.ts or src/app.ts
-import { EnvService } from '@ixo/common/services/env';
+import { EnvService } from '@ixo/common';
 import { envSchema } from './services/env/schema';
 
 async function bootstrap() {

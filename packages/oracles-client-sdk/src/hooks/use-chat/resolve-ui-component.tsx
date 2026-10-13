@@ -60,7 +60,9 @@ export const resolveUIComponent = (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let Component: React.FC<any>;
 
-  if (component.name in componentsMap) {
+  // Own keys only: a name like `constructor` or `toString` (from a plugin or
+  // the model) must not resolve to an Object prototype member.
+  if (Object.hasOwn(componentsMap, component.name)) {
     // Use custom component if it exists
     Component = componentsMap[component.name]!;
   } else {

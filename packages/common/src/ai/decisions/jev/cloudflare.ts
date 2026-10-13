@@ -5,9 +5,11 @@ import type {
   DecisionRequest,
 } from '../types.js';
 import {
+  cloudflareJevProvenance,
   JEV_MODEL_CLOUDFLARE,
   JevDecisionError,
   parseJevResult,
+  systemOneInferenceProvenance,
   toJevQuestions,
 } from './wire.js';
 
@@ -116,11 +118,12 @@ export class CloudflareJevDecisionAdapter implements DecisionAdapter {
     return {
       ...result,
       provenance: {
-        apiDialect: 'systemone-v1',
-        requestedModel: this.model,
-        ...(result.modelVersion ? { returnedModel: result.modelVersion } : {}),
-        modelPinning: 'mutable',
-        providerArtifactRef: this.model,
+        ...cloudflareJevProvenance(this.model),
+        ...systemOneInferenceProvenance(
+          this.model,
+          result.modelVersion,
+          this.capabilities.modelPinning,
+        ),
       },
     };
   }

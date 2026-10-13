@@ -87,7 +87,13 @@ export interface ComposePromptInput {
   userPreferencesContext: string;
   /** Memory-engine context blocks. */
   userContext: UserContextData | undefined;
-  /** Time context (timezone + current time). */
+  /**
+   * Date context (`formatDateContext`): the day and the user's timezone. Only
+   * values stable for a whole day belong here — the system prompt opens
+   * every request, so anything that changes per turn would stop the
+   * provider's prompt cache at this point on every turn. The exact time
+   * rides on the turn's own message (`renderTurnTimeNote`).
+   */
   timeContext: string;
   /** Currently-viewed entity DID, if any. */
   currentEntityDid: string;
@@ -100,7 +106,16 @@ export interface ComposePromptInput {
    * Portal turns, which render a streamed document.
    */
   surfaceBlock?: string;
+  /**
+   * Operating guides of the plugins the turn starts with in use, already in
+   * their final order (`OraclePlugin.operatingGuide`). Rendered after every
+   * other section, under one heading; empty renders nothing.
+   */
+  operatingGuides?: readonly string[];
 }
+
+/** Heading of the section that carries the in-use plugins' operating guides. */
+export const OPERATING_GUIDES_HEADING = '## Capabilities in use';
 
 /** Headers used for each populated memory-context sub-section. */
 const CONTEXT_SECTION_LABELS: Record<ContextSlot, string> = {
@@ -434,7 +449,7 @@ const TEMPLATE = `{{{ORACLE_SECTION}}}
 {{{CONTEXT_BLOCK}}}
 {{/CONTEXT_BLOCK}}
 
-**Current time:** {{TIME_CONTEXT}}
+**Current date:** {{TIME_CONTEXT}}
 {{#CURRENT_ENTITY_DID}}
 
 **Current entity:** {{CURRENT_ENTITY_DID}}
@@ -496,15 +511,95 @@ export async function composePrompt(
     USER_PREFERENCES_CONTEXT: input.userPreferencesContext,
   });
 
+  // After the stable sections: the set changes only when a plugin is loaded,
+  // so the prefix before it stays cacheable across that change too.
+  const guides = (input.operatingGuides ?? []).filter((g) => g.trim() !== '');
+  const withGuides =
+    guides.length > 0
+      ? `${rendered}\n${OPERATING_GUIDES_HEADING}\n\n${guides.join('\n\n')}\n`
+      : rendered;
+
   if (input.degradedServicesBlock && input.degradedServicesBlock.length > 0) {
-    return `${rendered}\n\n---\n\n## Degraded services\n\n${input.degradedServicesBlock}\n`;
+    return `${withGuides}\n\n---\n\n## Degraded services\n\n${input.degradedServicesBlock}\n`;
   }
-  return rendered;
+  return withGuides;
+}
+
+interface ZonedParts {
+  weekday: string;
+  date: string;
+  time: string;
+  /** The IANA zone the parts are in: the one asked for, or `UTC` when it is not a zone. */
+  zone: string;
+}
+
+/** `instant` as calendar parts in `timeZone`, or in UTC when that is not a usable zone. */
+function zonedParts(instant: Date, timeZone: string | undefined): ZonedParts {
+  const zone = timeZone?.trim() || 'UTC';
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      weekday: 'long',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(instant);
+  } catch {
+    if (zone === 'UTC') throw new RangeError('Invalid date');
+    return zonedParts(instant, 'UTC');
+  }
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? '';
+  return {
+    weekday: part('weekday'),
+    date: `${part('year')}-${part('month')}-${part('day')}`,
+    time: `${part('hour')}:${part('minute')}`,
+    zone,
+  };
+}
+
+function parseInstant(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
+  const instant = new Date(value);
+  return Number.isNaN(instant.getTime()) ? undefined : instant;
 }
 
 /**
- * Format a (timezone, currentTime) pair into a stable prompt block. Public so
- * forks driving their own `composePrompt` calls can re-use it.
+ * The system prompt's date line: the day in the user's timezone and the
+ * zone (`Saturday, 2026-10-03 (Europe/Berlin)`). Nothing finer than the day,
+ * so the prompt stays byte-identical across the turns of a day. A timezone
+ * that is not an IANA zone is not rendered; the day is then UTC's.
+ */
+export function formatDateContext(
+  timezone: string | undefined,
+  currentTime: string | undefined,
+): string {
+  const instant = parseInstant(currentTime);
+  if (!instant) return 'Not available.';
+  const { weekday, date, zone } = zonedParts(instant, timezone);
+  return `${weekday}, ${date} (${zone})`;
+}
+
+/**
+ * The exact time for the turn's own message (`Current time: Saturday,
+ * 2026-10-03 14:05 (Europe/Berlin)`): it belongs on the message the user
+ * sent this turn, where it is part of the history from then on, not in the
+ * system prompt that opens every request. Pure: same inputs, same text.
+ */
+export function renderTurnTimeNote(now: Date, timezone?: string): string {
+  if (Number.isNaN(now.getTime())) return 'Current time: not available.';
+  const { weekday, date, time, zone } = zonedParts(now, timezone);
+  return `Current time: ${weekday}, ${date} ${time} (${zone})`;
+}
+
+/**
+ * Format a (timezone, currentTime) pair into a prompt block, time included.
+ * Kept for forks driving their own `composePrompt` calls; the runtime's own
+ * prompt uses `formatDateContext`, which does not change within a day.
  */
 export function formatTimeContext(
   timezone: string | undefined,

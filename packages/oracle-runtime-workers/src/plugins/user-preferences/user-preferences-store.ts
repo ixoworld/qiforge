@@ -86,20 +86,8 @@ export class UserPreferencesStore implements UserPreferencesSurface {
    * user without preferences costs one state read per TTL, not per turn.
    */
   async get(roomId: string): Promise<UserPreferences | undefined> {
-    const hit = this.cache.get(roomId);
-    if (hit && hit.expiresAt > this.now()) return hit.value;
-
-    let decoded: unknown;
     try {
-      const json = await this.access.getRoomStateEvent(
-        roomId,
-        ROOM_STATE_EVENT_TYPE,
-        USER_PREFS_STATE_KEY,
-      );
-      decoded =
-        json === null
-          ? null
-          : await decodeRoomStateContent(JSON.parse(json) as unknown);
+      return await this.load(roomId);
     } catch (error) {
       this.logger?.warn(
         `[user-preferences] failed to load prefs for room ${roomId}: ${
@@ -108,7 +96,41 @@ export class UserPreferencesStore implements UserPreferencesSurface {
       );
       return undefined;
     }
+  }
 
+  /**
+   * The room's preferences: `undefined` when no event exists yet or the
+   * stored payload is unreadable (logged); THROWS when the gateway read
+   * itself fails, so a caller about to overwrite the event can tell "nothing
+   * stored" from "could not look".
+   */
+  private async load(
+    roomId: string,
+  ): Promise<StoredUserPreferences | undefined> {
+    const hit = this.cache.get(roomId);
+    if (hit && hit.expiresAt > this.now()) return hit.value;
+
+    const json = await this.access.getRoomStateEvent(
+      roomId,
+      ROOM_STATE_EVENT_TYPE,
+      USER_PREFS_STATE_KEY,
+    );
+    if (json === null) {
+      this.remember(roomId, undefined);
+      return undefined;
+    }
+
+    let decoded: unknown;
+    try {
+      decoded = await decodeRoomStateContent(JSON.parse(json) as unknown);
+    } catch (error) {
+      this.logger?.warn(
+        `[user-preferences] unreadable prefs payload for room ${roomId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
     if (decoded === null) {
       this.remember(roomId, undefined);
       return undefined;
@@ -128,13 +150,16 @@ export class UserPreferencesStore implements UserPreferencesSurface {
    * Merge `partial` into the stored preferences (only the provided fields
    * change; `undefined` values are ignored rather than clearing a field) and
    * persist the result with a fresh `updatedAt`. Returns the merged record.
-   * An empty `partial` is a no-op that returns the current record.
+   * An empty `partial` is a no-op that returns the current record. Throws —
+   * without writing — when the current preferences cannot be read, so a
+   * transient gateway failure never replaces the stored fields with only the
+   * new ones. A payload that exists but cannot be decoded is replaced.
    */
   async set(
     roomId: string,
     partial: Partial<UserPreferences>,
   ): Promise<UserPreferences> {
-    const current = (await this.get(roomId)) ?? {};
+    const current = (await this.load(roomId)) ?? {};
     const provided = Object.fromEntries(
       Object.entries(partial).filter(([, value]) => value !== undefined),
     );

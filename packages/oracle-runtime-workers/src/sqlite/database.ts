@@ -27,6 +27,7 @@ import {
   DoVfs,
   DoVfsError,
   isDoVfs,
+  type Exclusive,
   VACUUM_FILE_SUFFIX,
   VFS_PAGE_SIZE,
   type DoVfsOptions,
@@ -91,16 +92,35 @@ export function vfsNameForObject(ctx: DoSqliteContext): string {
   return `do-${ctx.id.toString()}`;
 }
 
+/**
+ * The async chain holding the connection mutex: a top-level transaction, a
+ * `withoutTransactions()` callback, or one statement issued outside both.
+ * `inTx` is set from BEGIN until COMMIT/ROLLBACK has run. `held` turns
+ * false on release, so a promise chain that outlives its holder (started
+ * inside, still running afterwards) queues like any other caller instead
+ * of borrowing a lock that is no longer its own.
+ */
+interface MutexFrame {
+  held: boolean;
+  inTx: boolean;
+}
+
 export class DoSqliteDatabase {
   private db: number | null;
+  /** Open transaction levels on the connection (1 = BEGIN, +1 per savepoint). */
   private txDepth = 0;
   private savepointSeq = 0;
-  /** Serialises top-level transactions (see `transaction()`). */
+  /**
+   * The connection mutex (see `withMutex()`): transactions, statements
+   * issued outside a transaction, and `withoutTransactions()` callbacks
+   * queue on it, so a statement never runs inside another chain's open
+   * transaction.
+   */
   private txQueue: Promise<void> = Promise.resolve();
   /** Serialises individual statements on this connection (see `serialized()`). */
   private opQueue: Promise<void> = Promise.resolve();
-  /** Set while inside a transaction's async chain — nested calls become savepoints. */
-  private readonly txContext = new AsyncLocalStorage<{ depth: number }>();
+  /** The frame of the chain that holds the mutex, visible to everything it awaits. */
+  private readonly holder = new AsyncLocalStorage<MutexFrame>();
 
   private constructor(
     private readonly runtime: SqliteRuntime,
@@ -252,16 +272,57 @@ export class DoSqliteDatabase {
     sql: string,
     params?: SqlParams,
   ): Promise<T[]> {
-    return this.serialized(() =>
-      this.retryingColdMisses(() => this.execUnlocked<T>(sql, params)),
+    return this.withMutex(() =>
+      this.serialized(() =>
+        this.retryingColdMisses(() => this.execUnlocked<T>(sql, params)),
+      ),
     );
   }
 
   /** Run a statement that produces no rows of interest; returns the change count. */
   async run(sql: string, params?: SqlParams): Promise<RunResult> {
-    return this.serialized(() =>
-      this.retryingColdMisses(() => this.runUnlocked(sql, params)),
+    return this.withMutex(() =>
+      this.serialized(() =>
+        this.retryingColdMisses(() => this.runUnlocked(sql, params)),
+      ),
     );
+  }
+
+  /** The caller's mutex frame, when its async chain holds the mutex right now. */
+  private ownFrame(): MutexFrame | undefined {
+    const frame = this.holder.getStore();
+    return frame?.held === true ? frame : undefined;
+  }
+
+  /**
+   * Run `fn` holding the connection mutex. Re-entrant: a chain that already
+   * holds it (a transaction body, a `withoutTransactions()` callback, and
+   * everything they await) runs `fn` at once; any other chain queues until
+   * the holder is done — a statement issued while another chain's
+   * transaction is open runs after its COMMIT or ROLLBACK, never inside it.
+   *
+   * A holder must not await work that another chain started and that
+   * itself needs the mutex: that work waits for the holder, the holder for
+   * the work.
+   */
+  private async withMutex<T>(
+    fn: (frame: MutexFrame) => Promise<T>,
+  ): Promise<T> {
+    const own = this.ownFrame();
+    if (own !== undefined) return fn(own);
+    const previous = this.txQueue;
+    let release: () => void = () => undefined;
+    this.txQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    const frame: MutexFrame = { held: true, inTx: false };
+    try {
+      return await this.holder.run(frame, () => fn(frame));
+    } finally {
+      frame.held = false;
+      release();
+    }
   }
 
   /**
@@ -271,8 +332,7 @@ export class DoSqliteDatabase {
    * retried by `transaction()` instead.
    */
   private async retryingColdMisses<T>(op: () => Promise<T>): Promise<T> {
-    if (this.txContext.getStore() !== undefined || this.txDepth > 0)
-      return op();
+    if (this.ownFrame()?.inTx === true) return op();
     let pinned = false;
     try {
       for (let attempt = 0; ; attempt++) {
@@ -382,44 +442,21 @@ export class DoSqliteDatabase {
   }
 
   /**
-   * Run `fn` inside a transaction. Top-level transactions are **serialised**
-   * through a mutex — a Durable Object is single-threaded but async, and
-   * LangGraph issues `put`/`putWrites` concurrently, so two callers awaiting
-   * `BEGIN` at the same time would otherwise collide ("cannot start a
-   * transaction within a transaction"). True nesting (a `transaction()` call
-   * made *inside* `fn`'s async chain) is detected with AsyncLocalStorage and
-   * becomes a SAVEPOINT. Commits when `fn` resolves, rolls back and rethrows
-   * when it rejects. The VFS flushes committed pages to storage atomically
-   * when SQLite releases the write lock at COMMIT.
+   * Run `fn` inside a transaction. Top-level transactions hold the
+   * connection mutex (see `withMutex()`) from BEGIN to COMMIT/ROLLBACK — a
+   * Durable Object is single-threaded but async, and LangGraph issues
+   * `put`/`putWrites` concurrently, so two callers awaiting `BEGIN` at the
+   * same time would otherwise collide ("cannot start a transaction within a
+   * transaction"), and a statement from another chain would join the open
+   * transaction. True nesting (a `transaction()` call made *inside* `fn`'s
+   * async chain) is detected with AsyncLocalStorage and becomes a
+   * SAVEPOINT. Commits when `fn` resolves, rolls back and rethrows when it
+   * rejects. The VFS flushes committed pages to storage atomically when
+   * SQLite releases the write lock at COMMIT.
    */
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.txContext.getStore() !== undefined) {
-      const savepoint = `sp_${++this.savepointSeq}`;
-      await this.run(`SAVEPOINT ${savepoint}`);
-      this.txDepth++;
-      try {
-        const result = await fn();
-        this.txDepth--;
-        await this.run(`RELEASE ${savepoint}`);
-        return result;
-      } catch (error) {
-        this.txDepth--;
-        try {
-          await this.run(`ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
-        } catch {
-          // The original error is more useful than a rollback failure.
-        }
-        throw error;
-      }
-    }
-
-    const previous = this.txQueue;
-    let release: () => void = () => undefined;
-    this.txQueue = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
+    if (this.ownFrame()?.inTx === true) return this.savepoint(fn);
+    return this.withMutex(async (frame) => {
       // A cold page inside `fn` fails a statement with SQLITE_IOERR; the
       // transaction is rolled back, the segment(s) fetched and pinned, and
       // `fn` re-run from the top (it must be re-runnable: the checkpointer's
@@ -429,27 +466,7 @@ export class DoSqliteDatabase {
       try {
         for (let attempt = 0; ; attempt++) {
           try {
-            return await this.txContext.run({ depth: 1 }, async () => {
-              await this.run('BEGIN IMMEDIATE');
-              this.txDepth++;
-              try {
-                const result = await fn();
-                this.txDepth--;
-                await this.run('COMMIT');
-                // Misses a statement swallowed (see `retryingColdMisses`)
-                // must not trigger a retry of some later, unrelated error.
-                this.vfs.clearMisses();
-                return result;
-              } catch (error) {
-                this.txDepth--;
-                try {
-                  await this.run('ROLLBACK');
-                } catch {
-                  // The original error is more useful than a rollback failure.
-                }
-                throw error;
-              }
-            });
+            return await this.transactionAttempt(frame, fn);
           } catch (error) {
             if (
               !this.vfs.hasMisses() ||
@@ -464,34 +481,76 @@ export class DoSqliteDatabase {
       } finally {
         if (pinned) this.vfs.releasePins();
       }
+    });
+  }
+
+  /** One BEGIN … COMMIT of `fn`, rolled back when anything in it fails. */
+  private async transactionAttempt<T>(
+    frame: MutexFrame,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    await this.run('BEGIN IMMEDIATE');
+    frame.inTx = true;
+    this.txDepth = 1;
+    try {
+      const result = await fn();
+      await this.run('COMMIT');
+      // Misses a statement swallowed (see `retryingColdMisses`) must not
+      // trigger a retry of some later, unrelated error.
+      this.vfs.clearMisses();
+      return result;
+    } catch (error) {
+      // Also after a failed COMMIT: SQLite keeps the transaction open when
+      // a deferred constraint fails it. When SQLite already rolled back on
+      // its own, this ROLLBACK fails harmlessly.
+      try {
+        await this.run('ROLLBACK');
+      } catch {
+        // The original error is more useful than a rollback failure.
+      }
+      throw error;
     } finally {
-      release();
+      // Only now: until ROLLBACK/COMMIT has run, the transaction is open.
+      frame.inTx = false;
+      this.txDepth = 0;
+    }
+  }
+
+  /** A nested `transaction()`: a SAVEPOINT inside the caller's transaction. */
+  private async savepoint<T>(fn: () => Promise<T>): Promise<T> {
+    const savepoint = `sp_${++this.savepointSeq}`;
+    await this.run(`SAVEPOINT ${savepoint}`);
+    this.txDepth++;
+    try {
+      const result = await fn();
+      await this.run(`RELEASE ${savepoint}`);
+      return result;
+    } catch (error) {
+      try {
+        await this.run(`ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+      } catch {
+        // The original error is more useful than a rollback failure.
+      }
+      throw error;
+    } finally {
+      this.txDepth--;
     }
   }
 
   /**
-   * Run `fn` while HOLDING the transaction mutex without opening a
-   * transaction — for statements SQLite refuses to run inside one (`VACUUM`).
-   * Transactions started elsewhere queue behind it; statements inside `fn`
-   * still serialise through the per-statement queue as usual.
+   * Run `fn` while HOLDING the connection mutex without opening a
+   * transaction — for statements SQLite refuses to run inside one
+   * (`VACUUM`) and for work no transaction may interleave with. Transactions
+   * and statements of other chains queue behind it; statements, nested
+   * `withoutTransactions()` and transactions inside `fn` run at once.
    */
   async withoutTransactions<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.txContext.getStore() !== undefined) {
+    if (this.ownFrame()?.inTx === true) {
       throw new DoVfsError(
         'withoutTransactions() cannot run inside a transaction',
       );
     }
-    const previous = this.txQueue;
-    let release: () => void = () => undefined;
-    this.txQueue = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-    }
+    return this.withMutex(() => fn());
   }
 
   /**
@@ -542,16 +601,23 @@ export class DoSqliteDatabase {
     return this.vfs.tierEnabled;
   }
 
-  /** One eviction pass; holds the transaction mutex so no write interleaves. */
+  /**
+   * One eviction pass. It holds the connection mutex only for its short
+   * synchronous steps (plan, read a segment's rows, commit a segment) and
+   * never across R2 I/O, so a turn that starts mid-pass is not held up
+   * for the rest of it (see `DoVfs.tierFlush`).
+   */
   async tierFlush(
     opts: { force?: boolean; maxSegments?: number } = {},
   ): Promise<TierFlushResult> {
-    if (this.txDepth > 0)
+    if (this.ownFrame()?.inTx === true)
       throw new DoVfsError('tierFlush() is not allowed inside a transaction');
-    return this.withoutTransactions(() =>
-      this.vfs.tierFlush(this.fileName, opts),
-    );
+    return this.vfs.tierFlush(this.fileName, opts, this.exclusive);
   }
+
+  /** Runs a synchronous VFS step holding the connection mutex. */
+  private readonly exclusive: Exclusive = <T>(step: () => T): Promise<T> =>
+    this.withoutTransactions(async () => step());
 
   /** Persist the chunks touched since the last call (call at the end of a turn). */
   recordAccess(): void {
@@ -571,7 +637,7 @@ export class DoSqliteDatabase {
 
   /** Pull every cold chunk back into storage (the file is then fully hot). */
   async materializeTier(): Promise<{ chunks: number }> {
-    if (this.txDepth > 0)
+    if (this.ownFrame()?.inTx === true)
       throw new DoVfsError(
         'materializeTier() is not allowed inside a transaction',
       );
@@ -695,7 +761,7 @@ export class DoSqliteDatabase {
    * the file is open. Transiently needs 2× the file in DO storage.
    */
   async compact(): Promise<{ beforeBytes: number; afterBytes: number }> {
-    if (this.txDepth > 0)
+    if (this.ownFrame()?.inTx === true)
       throw new DoVfsError('compact() is not allowed inside a transaction');
     const target = `${this.fileName}${VACUUM_FILE_SUFFIX}`;
     return this.withoutTransactions(async () => {

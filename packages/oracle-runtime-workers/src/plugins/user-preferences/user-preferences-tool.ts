@@ -11,7 +11,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { FORMALITY_LEVELS } from './schema';
+import { FORMALITY_LEVELS, MAX_TONE_LENGTH } from './schema';
 
 export const SET_USER_PREFERENCES_TOOL_NAME = 'set_user_preferences';
 
@@ -46,10 +46,11 @@ export const setUserPreferencesSchema = z.object({
     ),
   tone: z
     .string()
+    .max(MAX_TONE_LENGTH)
     .optional()
     .describe(
       "Short tone label your future self will see at the top of every prompt (e.g. 'playful and warm', " +
-        "'concise and dry', 'patient teacher'). Pick descriptive words, not vague ones.",
+        `'concise and dry', 'patient teacher'). Pick descriptive words, not vague ones. Max ${MAX_TONE_LENGTH} characters.`,
     ),
   formality: z
     .enum(FORMALITY_LEVELS)

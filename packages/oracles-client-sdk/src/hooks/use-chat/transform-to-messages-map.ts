@@ -60,8 +60,9 @@ export default function transformToMessagesMap({
         content.push(componentMetadata);
       } else {
         // For browser tools and regular tool calls
+        // Own keys only (a tool named `constructor` has no custom component).
         const hasCustomComponent =
-          uiComponents && toolCall.name in uiComponents;
+          uiComponents && Object.hasOwn(uiComponents, toolCall.name);
 
         const componentMetadata: IComponentMetadata = {
           name: hasCustomComponent

@@ -28,10 +28,18 @@ import {
   type OracleWorkerHooks,
 } from './do/user-oracle-do';
 import { MatrixGatewayDO } from './matrix/gateway-do';
-import { createShell, gateway, type PluginRoute } from './shell/app';
+import {
+  createShell,
+  gateway,
+  type ListModelsOptions,
+  type PluginRoute,
+} from './shell/app';
 import type { RouteExclusion } from './shell/auth';
 import { artifactSweepIntervalMs } from './artifacts/config';
 import { sweepExpiredArtifacts } from './artifacts/sweep';
+import { feedbackConfigFromEnv } from './feedback/config';
+import { LinearFeedbackSink } from './feedback/linear-sink';
+import type { DomainContextOptions } from './core/domain-context';
 
 export * from './plugin-api';
 export * from './plugins';
@@ -49,7 +57,15 @@ export {
   createUserOracleDO,
   type OracleWorkerHooks,
 } from './do/user-oracle-do';
-export { createShell } from './shell/app';
+export type {
+  DocumentRequest,
+  DomainCapsuleInspection,
+  DomainContextOptions,
+  DomainContextPins,
+  DomainContextProvenance,
+  DomainDocumentRead,
+} from './core/domain-context';
+export { createShell, type ListModelsOptions } from './shell/app';
 export { authenticate } from './shell/auth';
 export {
   createRuntimeCore,
@@ -68,23 +84,53 @@ export {
 // --- bounded semantic decisions --------------------------------------------
 // `defineDecision` and the plugin-facing types come with `./plugin-api` above.
 export {
+  AmbiguousDecisionProviderError,
   CloudflareJevDecisionAdapter,
   DECISION_PROVIDERS,
+  DecisionNotApplicableError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   DecisionProviderUnavailableError,
   DecisionRegistry,
   DecisionRuntime,
+  HOST_DECISION_PROVIDER_ID,
   JevDecisionError,
   OpenRouterJevDecisionAdapter,
+  StaleDecisionSubjectError,
   UNAVAILABLE_DECISION_EVALUATOR,
   WorkersAiJevDecisionAdapter,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
   decisionProviderEnvShape,
+  digestFinalDecisionSubject,
+  measureDecisionQuestionIsolation,
   resolveDecisionAdapter,
   type CloudflareJevAdapterOptions,
+  type DecisionApplicability,
+  type DecisionAuthorityReceipt,
+  type DecisionCalibrationProvenance,
   type DecisionEvaluator,
+  type DecisionExecution,
+  type DecisionExecutionReceipt,
+  type DecisionJudgmentMethod,
+  type DecisionJudgmentProvenance,
   type DecisionLookup,
   type DecisionProviderConfigIssue,
   type DecisionProviderName,
+  type DecisionProviderPolicy,
+  type DecisionProviderProvenance,
+  type DecisionProviderRegistration,
+  type DecisionProviderResolution,
+  type DecisionProviderSelection,
+  type DecisionQuestionIsolationObservation,
+  type DecisionQuestionIsolationReport,
   type DecisionRuntimeLogger,
+  type FinalDecisionSubject,
+  type FinalDecisionSubjectBinding,
+  type FinalDecisionSubjectValue,
   type JevProviderName,
   type OpenRouterJevAdapterOptions,
   type RegisteredDecision,
@@ -145,8 +191,15 @@ export {
 } from './llm/byo-service';
 export { handleByoRequest } from './llm/byo-routes';
 export {
+  ByoModelFallbackChatModel,
+  ByoModelFallbackState,
+  type ByoModelFallbackFields,
+} from './llm/byo-model-fallback';
+export {
   BYO_FALLBACK_KIND,
   buildByoFallbackNotice,
+  isModelUnavailableError,
+  type ByoFallbackNoticeOptions,
   type ByoFallbackNoticePayload,
   type ByoFallbackReason,
 } from './llm/provider-error';
@@ -183,26 +236,50 @@ export interface CreateOracleWorkerOptions {
    */
   manifestOverrides?: RuntimeCoreOptions['manifestOverrides'];
   /**
-   * Host-supplied bounded Decision adapter (Node's `createOracleApp` option
-   * of the same name). Wins over the `DECISION_PROVIDER` env configuration;
-   * without either, every `ctx.decisions` call rejects as unavailable.
+   * Single host-supplied Decision adapter, registered as provider `host`.
+   * Wins over the `DECISION_PROVIDER` env configuration; without any
+   * provider, every `ctx.decisions` call rejects as unavailable. Mutually
+   * exclusive with `decisionProviders`.
    */
   decisionAdapter?: DecisionAdapter;
+  /**
+   * Host-configured Decision providers, registered beside the env-selected
+   * one (id = the `DECISION_PROVIDER` value). Adapters are built once per
+   * oracle, outside any `env`; a provider that needs a Worker binding comes
+   * from `DECISION_PROVIDER`.
+   */
+  decisionProviders?: RuntimeCoreOptions['decisionProviders'];
+  /**
+   * Default and exact per-Decision routes over the registered providers. The
+   * env-selected provider is the default unless this names another.
+   */
+  decisionProviderPolicy?: RuntimeCoreOptions['decisionProviderPolicy'];
   /** Extra host routes mounted on the shell. */
   routes?: PluginRoute[];
   /** Host routes exempt from UCAN auth. */
   authExcludedRoutes?: RouteExclusion[];
   /**
    * Overrides for the model catalog exposed on `GET /models`. Default: the
-   * curated catalog with live OpenRouter prices (`listModels`).
+   * curated catalog with live OpenRouter prices (`listModels`). The second
+   * argument carries the request's `waitUntil` (for background work such as
+   * a price refresh); an override may ignore it.
    */
-  listModels?: (env: OracleWorkerEnv) => unknown | Promise<unknown>;
+  listModels?: (
+    env: OracleWorkerEnv,
+    options?: ListModelsOptions,
+  ) => unknown | Promise<unknown>;
   /**
    * Host hooks for the per-turn agent build — the Node runtime's
    * `opts.hooks.getRoomTitle` / `safetyModel`, resolved per turn against the
    * user object's ambient services.
    */
   hooks?: OracleWorkerHooks;
+  /**
+   * Observe-only domain context: the oracle's and the selected subject's
+   * anchored domain documents, verified by CID and handed to the model as
+   * retrieved data. Default off. See docs/configuration.md.
+   */
+  domainContext?: DomainContextOptions;
 }
 
 export interface OracleWorker {
@@ -239,6 +316,8 @@ export function createOracleWorker(
         manifestOverrides: opts.manifestOverrides,
         env,
         decisionAdapter: opts.decisionAdapter,
+        decisionProviders: opts.decisionProviders,
+        decisionProviderPolicy: opts.decisionProviderPolicy,
         logger: console,
       });
       cores.set(env, core);
@@ -251,16 +330,22 @@ export function createOracleWorker(
     let app = apps.get(env);
     if (!app) {
       const core = coreFor(env);
+      // Validated with the core: half-configured feedback fails the boot.
+      const feedback = feedbackConfigFromEnv(env);
       app = createShell({
         routes: [...core.pluginRoutes, ...(opts.routes ?? [])],
         authExcludedRoutes: [
           ...core.authExcludedRoutes,
           ...(opts.authExcludedRoutes ?? []),
         ],
-        listModels: opts.listModels ?? ((e) => listModels(e)),
+        listModels: opts.listModels ?? ((e, options) => listModels(e, options)),
         banner: {
           name: opts.config.name,
           description: opts.config.description,
+        },
+        feedback: feedback && {
+          config: feedback,
+          sink: new LinearFeedbackSink(feedback.linear),
         },
       });
       apps.set(env, app);
@@ -271,6 +356,7 @@ export function createOracleWorker(
   const UserOracleDO = createUserOracleDO({
     core: coreFor,
     ...(opts.hooks ? { hooks: opts.hooks } : {}),
+    ...(opts.domainContext ? { domainContext: opts.domainContext } : {}),
   });
 
   return {

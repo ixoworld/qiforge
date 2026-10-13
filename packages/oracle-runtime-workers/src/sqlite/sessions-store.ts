@@ -201,15 +201,23 @@ export class SessionsStore {
       params.push(excludeIdPrefix.length, excludeIdPrefix);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    params.push(limit, offset);
     const rows = await this.db.exec<SessionRowWithTotal>(
       `SELECT ${SESSION_COLUMNS}, COUNT(*) OVER() AS total
        FROM sessions ${where}
        ORDER BY last_updated_at DESC, rowid DESC
        LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
+    );
+    const first = rows[0];
+    if (first !== undefined)
+      return { sessions: rows.map(rowToSession), total: first.total };
+    // A page past the last row carries no window count: count separately.
+    if (offset <= 0) return { sessions: [], total: 0 };
+    const count = await this.db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM sessions ${where}`,
       params,
     );
-    return { sessions: rows.map(rowToSession), total: rows[0]?.total ?? 0 };
+    return { sessions: [], total: Number(count?.n ?? 0) };
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | undefined> {

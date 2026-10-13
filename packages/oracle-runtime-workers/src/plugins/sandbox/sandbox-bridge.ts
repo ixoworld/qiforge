@@ -1,6 +1,7 @@
 import { MultiServerMCPClient } from '@langchain/mcp-adapters';
 import type { RuntimeContext } from '../../plugin-api/types';
 import { base64ToBytes } from '../base64';
+import { withCallTimeout } from '../mcp-call-timeout';
 import { adaptMcpClientTools } from '../mcp-tool-adapter';
 import { createDefaultAuthBuilder, SANDBOX_RUN_TOOL_NAME } from './sandbox-mcp';
 import type {
@@ -12,14 +13,33 @@ import type {
 /** Upstream tool name the sandbox MCP surfaces for byte-perfect file writes. */
 export const SANDBOX_WRITE_FILE_TOOL_NAME = 'sandbox_write_file';
 
-/** Per-call timeout for the sandbox MCP client (matches sandbox.plugin.ts). */
-const SANDBOX_MCP_TIMEOUT_MS = 180_000;
+/**
+ * Per-call timeout for every sandbox MCP tool call. It is the MCP request's
+ * own timeout (as `metadata.timeoutMs`, see `mcp-tool-adapter.ts`) and is
+ * also enforced with {@link withCallTimeout}, which closes the client on
+ * expiry; never as the client's `defaultToolTimeout`.
+ */
+export const SANDBOX_MCP_TIMEOUT_MS = 180_000;
+
+/**
+ * Largest file the bridge moves in either direction. A transfer is buffered
+ * whole in the isolate several times over (base64 text in the MCP result,
+ * its decoded bytes, the upload copy), so the cap keeps one transfer far
+ * below the 128 MB isolate limit. Equal to the VFS vision-read cap.
+ */
+export const MAX_SANDBOX_TRANSFER_BYTES = 10 * 1024 * 1024;
 
 /** Only destination the sandbox accepts for `sandbox_write_file` writes. */
 export const WORKSPACE_DATA_PREFIX = '/workspace/data/';
 
 /** Sentinel echoed by the read command when the source file is absent. */
 export const SANDBOX_NO_FILE_SENTINEL = '__SANDBOX_NOFILE__';
+
+/**
+ * Sentinel echoed by the read command, followed by the size in bytes, when
+ * the source file exceeds {@link MAX_SANDBOX_TRANSFER_BYTES}.
+ */
+export const SANDBOX_TOO_LARGE_SENTINEL = '__SANDBOX_TOOLARGE__';
 
 /**
  * Shown when the user hasn't authorized the oracle to use the sandbox — the
@@ -41,7 +61,10 @@ export const defaultSandboxMcpClientFactory: SandboxMcpClientFactory = (
 ) => {
   const client = new MultiServerMCPClient(config);
   const wrapper: SandboxMcpClientLike = {
-    getTools: async () => adaptMcpClientTools(await client.getTools(), console),
+    getTools: async () =>
+      adaptMcpClientTools(await client.getTools(), console, {
+        requestTimeoutMs: SANDBOX_MCP_TIMEOUT_MS,
+      }),
     close: () => client.close(),
   };
   return wrapper;
@@ -201,7 +224,6 @@ export async function getSandboxBridge(
         headers,
       },
     },
-    defaultToolTimeout: SANDBOX_MCP_TIMEOUT_MS,
     useStandardContentBlocks: true,
   });
 
@@ -236,23 +258,57 @@ export async function getSandboxBridge(
     };
   }
 
-  return { run, writeFile, close };
+  // Each invocation is bounded by a timer that is always cleared; on timeout
+  // the client is closed so the abandoned request cannot keep the object
+  // busy.
+  const bounded = (t: SandboxMcpTool): SandboxMcpTool => ({
+    ...t,
+    invoke: (input: unknown) =>
+      withCallTimeout(
+        () => t.invoke(input),
+        SANDBOX_MCP_TIMEOUT_MS,
+        `sandbox tool ${t.name}`,
+        close,
+      ),
+  });
+
+  return { run: bounded(run), writeFile: bounded(writeFile), close };
+}
+
+/**
+ * Shell command that prints the file as one base64 line, or a sentinel when
+ * it is missing or larger than {@link MAX_SANDBOX_TRANSFER_BYTES}. The size
+ * is checked inside the sandbox so an oversized file is never encoded or
+ * sent. `sandboxPath` must already have passed {@link hasShellUnsafeChars}.
+ */
+export function sandboxReadCommand(sandboxPath: string): string {
+  const p = `'${sandboxPath}'`;
+  return [
+    `if [ ! -f ${p} ]; then echo ${SANDBOX_NO_FILE_SENTINEL};`,
+    `else s=$(stat -c%s ${p});`,
+    `if [ "$s" -gt ${MAX_SANDBOX_TRANSFER_BYTES} ]; then echo ${SANDBOX_TOO_LARGE_SENTINEL}:$s;`,
+    `else base64 -w0 ${p}; fi; fi`,
+  ].join(' ');
 }
 
 /**
  * Read a file out of the sandbox as bytes, base64-hopping over `sandbox_run`
  * so binary content survives the transport. Non-throwing — a missing file, a
- * failed command, and undecodable output all come back as `{ error }` with an
- * agent-facing message.
+ * file over {@link MAX_SANDBOX_TRANSFER_BYTES}, a failed command, and
+ * undecodable output all come back as `{ error }` with an agent-facing
+ * message.
  */
 export async function readSandboxFile(
   bridge: Pick<SandboxBridge, 'run'>,
   sandboxPath: string,
 ): Promise<{ bytes: Uint8Array } | { error: string }> {
+  if (hasShellUnsafeChars(sandboxPath)) {
+    return {
+      error: `The sandbox path contains characters I can't safely handle (quotes or newlines).`,
+    };
+  }
   const read = readSandboxResult(
-    await bridge.run.invoke({
-      code: `test -f '${sandboxPath}' && base64 -w0 '${sandboxPath}' || echo ${SANDBOX_NO_FILE_SENTINEL}`,
-    }),
+    await bridge.run.invoke({ code: sandboxReadCommand(sandboxPath) }),
   );
   if (!read.ok) {
     return {
@@ -262,6 +318,19 @@ export async function readSandboxFile(
   const stdout = read.output.trim();
   if (stdout === SANDBOX_NO_FILE_SENTINEL) {
     return { error: `No file at \`${sandboxPath}\` in the sandbox.` };
+  }
+  if (stdout.startsWith(`${SANDBOX_TOO_LARGE_SENTINEL}:`)) {
+    const size = stdout.slice(SANDBOX_TOO_LARGE_SENTINEL.length + 1);
+    return {
+      error: `\`${sandboxPath}\` is ${size} bytes; files moved out of the sandbox are limited to ${MAX_SANDBOX_TRANSFER_BYTES} bytes.`,
+    };
+  }
+  // Defence in depth for a sandbox that ignored the size check: base64
+  // inflates by 4/3, so anything longer decodes past the cap.
+  if (stdout.length > Math.ceil(MAX_SANDBOX_TRANSFER_BYTES / 3) * 4) {
+    return {
+      error: `\`${sandboxPath}\` is larger than the ${MAX_SANDBOX_TRANSFER_BYTES}-byte limit for files moved out of the sandbox.`,
+    };
   }
   try {
     return { bytes: base64ToBytes(stdout) };

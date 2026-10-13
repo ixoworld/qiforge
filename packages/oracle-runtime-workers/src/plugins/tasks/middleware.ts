@@ -8,9 +8,10 @@
  *   - There are no dedicated task rooms or room→session bindings — pending
  *     approvals live on the task records themselves (`pendingApprovalAt`), so
  *     the gate reads them straight off `OracleTasksSurface.list()`.
- *   - The gate never resolves an approval itself: on Workers, resolving an
- *     approval EXECUTES the run (a full agent turn), which does not belong
- *     inside a model-call wrapper. Plain yes/no replies are still classified
+ *   - The gate never resolves an approval itself: resolving an approval
+ *     starts the run (a full agent turn, on the user object's alarm), which
+ *     is the model's call to make through the tool, not a model-call
+ *     wrapper's. Plain yes/no replies are still classified
  *     deterministically (`classifyReplyFast`) — the classification shapes the
  *     hint, and the model records the decision through the
  *     `resolve_task_approval` tool.
@@ -22,6 +23,10 @@ import type { BaseMessage } from '@langchain/core/messages';
 import { createMiddleware, type AgentMiddleware } from 'langchain';
 import type { Logger, OracleTasksSurface } from '../../plugin-api/types';
 import { pendingApprovalOf } from '../../tasks/store';
+import {
+  stripTurnTimeNote,
+  TURN_TIME_NOTE_KWARG,
+} from '../../core/turn-time-note';
 
 const APPROVE = new Set([
   'yes',
@@ -114,7 +119,7 @@ export async function computeApprovalHint(
   if (only && decision === 'approved') {
     return (
       `\n\n[Task approval gate] The user's reply APPROVES the pending run of task ${only.id} ("${only.title}"). ` +
-      'Call `resolve_task_approval` with outcome "approved" NOW — approval executes the run and delivers its result — then confirm to the user.'
+      'Call `resolve_task_approval` with outcome "approved" NOW — approval starts the run, and its result is posted to the room when it finishes — then tell the user it is running.'
     );
   }
   if (only && decision === 'rejected') {
@@ -128,7 +133,7 @@ export async function computeApprovalHint(
     .join(', ');
   return (
     `\n\n[Task approval gate] ${pending.length} task run(s) are waiting for the user's approval: ${listing}. ` +
-    'If this reply decides one of them (possibly with tweaks), call `resolve_task_approval` with the outcome — "approved" executes the run (pass requested tweaks in `note`), "declined" drops it. ' +
+    'If this reply decides one of them (possibly with tweaks), call `resolve_task_approval` with the outcome — "approved" starts the run (pass requested tweaks in `note`), "declined" drops it. ' +
     'Otherwise answer normally and remind the user of the pending approval.'
   );
 }
@@ -144,12 +149,20 @@ export function userDidFromContext(context: unknown): string | undefined {
   return typeof did === 'string' && did.length > 0 ? did : undefined;
 }
 
-/** Text of the latest HumanMessage — string content or joined text parts. */
+/**
+ * Text of the latest HumanMessage — string content or joined text parts —
+ * as the user sent it: without the turn time note the runtime puts in front.
+ */
 export function lastHumanText(messages: BaseMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!message || message.type !== 'human') continue;
-    return textOfContent(message.content);
+    return textOfContent(
+      stripTurnTimeNote(
+        message.content,
+        message.additional_kwargs?.[TURN_TIME_NOTE_KWARG],
+      ),
+    );
   }
   return null;
 }

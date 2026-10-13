@@ -5,6 +5,11 @@
  * renders the Markdown with DOM calls only (`textContent`, never
  * `innerHTML`), so nothing in a document can run script. Images render as
  * links: loading them would tell a third party the page was opened.
+ *
+ * The page script is one static string: nothing in it is built from code
+ * the bundler compiled, so what the browser runs (and the CSP hash pins) is
+ * exactly this text. Every pattern it runs is linear in its input; the tests
+ * evaluate the parsing part of the text itself.
  */
 
 export const VIEWER_STYLE = String.raw`
@@ -40,6 +45,286 @@ footer { margin-top: 16px; font-size: 0.8rem; color: var(--muted); }
 export const VIEWER_SCRIPT = String.raw`
 (function () {
   'use strict';
+  // ── Inline and block parsing: pure, linear in its input ──
+  // A document is model output and may carry text shaped by anything the
+  // model read, so no line may make the reader's tab backtrack for seconds:
+  // every closer is found by a forward search whose start only moves on.
+
+  // The inline constructs of a paragraph, left to right, in one pass: code
+  // spans (a backtick run closed by a run of the same length), **, __, ~~,
+  // *, _ (not inside a word), images, links, <https://...> and bare http(s)
+  // URLs.
+  function scanInline(value) {
+    var tokens = [];
+    var n = value.length;
+    var word = /[A-Za-z0-9_]/;
+    var space = /\s/;
+    // Backtick runs: start, length, and per length the runs in order.
+    var runStart = [];
+    var runLength = [];
+    var runsOfLength = {};
+    var runCursor = {};
+    var runAt = {};
+    for (var r = 0; r < n; r++) {
+      if (value.charAt(r) !== '\x60') continue;
+      var length = 1;
+      while (r + length < n && value.charAt(r + length) === '\x60') length++;
+      runAt[r] = runStart.length;
+      if (!runsOfLength[length]) {
+        runsOfLength[length] = [];
+        runCursor[length] = 0;
+      }
+      runsOfLength[length].push(runStart.length);
+      runStart.push(r);
+      runLength.push(length);
+      r += length - 1;
+    }
+    // The next closer at or after the last query of each kind (-1: none).
+    var nextStrong = -2;
+    var nextUnder = -2;
+    var nextTilde = -2;
+    var nextStar = -2;
+    var nextEmUnder = -2;
+    var nextBracket = -2;
+    var nextAngle = -2;
+    var nextUrlEnd = -2;
+    // The target scanned after the last ]( (every opener before it shares it).
+    var targetOf = -1;
+    var targetAt = 0;
+    var targetEnd = -1;
+    var i = 0;
+    while (i < n) {
+      var c = value.charAt(i);
+      var after = value.charAt(i + 1);
+      if (c === '\x60' && runAt[i] !== undefined) {
+        var run = runAt[i];
+        var k = runLength[run];
+        var same = runsOfLength[k];
+        while (runCursor[k] < same.length && same[runCursor[k]] <= run)
+          runCursor[k]++;
+        if (runCursor[k] < same.length) {
+          var closer = runStart[same[runCursor[k]]];
+          tokens.push({
+            kind: 'code',
+            start: i,
+            end: closer + k,
+            text: value.slice(i + k, closer),
+            href: '',
+          });
+          i = closer + k;
+          continue;
+        }
+        i += k;
+        continue;
+      }
+      if ((c === '*' || c === '_' || c === '~') && after === c) {
+        var pair = c + c;
+        var found = c === '*' ? nextStrong : c === '_' ? nextUnder : nextTilde;
+        if (found !== -1 && found < i + 3) found = value.indexOf(pair, i + 3);
+        if (c === '*') nextStrong = found;
+        else if (c === '_') nextUnder = found;
+        else nextTilde = found;
+        if (found !== -1) {
+          tokens.push({
+            kind: c === '~' ? 'del' : 'strong',
+            start: i,
+            end: found + 2,
+            text: value.slice(i + 2, found),
+            href: '',
+          });
+          i = found + 2;
+          continue;
+        }
+      }
+      if (c === '*' && i + 1 < n && after !== '*' && !space.test(after)) {
+        if (nextStar !== -1 && nextStar < i + 2)
+          nextStar = value.indexOf('*', i + 2);
+        if (nextStar !== -1) {
+          tokens.push({
+            kind: 'em',
+            start: i,
+            end: nextStar + 1,
+            text: value.slice(i + 1, nextStar),
+            href: '',
+          });
+          i = nextStar + 1;
+          continue;
+        }
+      }
+      if (
+        c === '_' &&
+        i + 1 < n &&
+        after !== '_' &&
+        !space.test(after) &&
+        (i === 0 || !word.test(value.charAt(i - 1)))
+      ) {
+        if (nextEmUnder !== -1 && nextEmUnder < i + 2) {
+          nextEmUnder = value.indexOf('_', i + 2);
+          while (
+            nextEmUnder !== -1 &&
+            nextEmUnder + 1 < n &&
+            word.test(value.charAt(nextEmUnder + 1))
+          )
+            nextEmUnder = value.indexOf('_', nextEmUnder + 1);
+        }
+        if (nextEmUnder !== -1) {
+          tokens.push({
+            kind: 'em',
+            start: i,
+            end: nextEmUnder + 1,
+            text: value.slice(i + 1, nextEmUnder),
+            href: '',
+          });
+          i = nextEmUnder + 1;
+          continue;
+        }
+      }
+      var open = c === '[' ? i : c === '!' && after === '[' ? i + 1 : -1;
+      if (open !== -1) {
+        if (nextBracket !== -1 && nextBracket < open + 1)
+          nextBracket = value.indexOf(']', open + 1);
+        var close = nextBracket;
+        var image = open !== i;
+        if (
+          close !== -1 &&
+          (image || close > open + 1) &&
+          value.charAt(close + 1) === '(' &&
+          targetOf !== close
+        ) {
+          // The target: no spaces or parentheses, except balanced (…) pairs.
+          var at = close + 2;
+          for (;;) {
+            var ch = value.charAt(at);
+            if (at < n && ch !== '(' && ch !== ')' && !space.test(ch)) {
+              at++;
+              continue;
+            }
+            if (ch === '(') {
+              var inner = at + 1;
+              while (inner < n) {
+                var ic = value.charAt(inner);
+                if (ic === '(' || ic === ')' || space.test(ic)) break;
+                inner++;
+              }
+              if (value.charAt(inner) === ')') {
+                at = inner + 1;
+                continue;
+              }
+            }
+            break;
+          }
+          var end = -1;
+          if (at > close + 2) {
+            if (value.charAt(at) === ')') end = at + 1;
+            else if (space.test(value.charAt(at))) {
+              var quote = at;
+              while (quote < n && space.test(value.charAt(quote))) quote++;
+              if (value.charAt(quote) === '"') {
+                var shut = value.indexOf('"', quote + 1);
+                if (shut !== -1 && value.charAt(shut + 1) === ')') end = shut + 2;
+              }
+            }
+          }
+          targetOf = close;
+          targetAt = at;
+          targetEnd = end;
+        }
+        if (
+          close !== -1 &&
+          targetOf === close &&
+          targetEnd !== -1 &&
+          (image || close > open + 1)
+        ) {
+          tokens.push({
+            kind: image ? 'image' : 'link',
+            start: i,
+            end: targetEnd,
+            text: value.slice(open + 1, close),
+            href: value.slice(close + 2, targetAt),
+          });
+          i = targetEnd;
+          continue;
+        }
+      }
+      var scheme = value.startsWith('https://', c === '<' ? i + 1 : i)
+        ? 8
+        : value.startsWith('http://', c === '<' ? i + 1 : i)
+          ? 7
+          : 0;
+      if (c === '<' && scheme > 0) {
+        if (nextAngle !== -1 && nextAngle < i + 1 + scheme) {
+          nextAngle = i + 1 + scheme;
+          while (
+            nextAngle < n &&
+            value.charAt(nextAngle) !== '>' &&
+            !space.test(value.charAt(nextAngle))
+          )
+            nextAngle++;
+          if (nextAngle >= n) nextAngle = -1;
+        }
+        if (
+          nextAngle !== -1 &&
+          nextAngle > i + 1 + scheme &&
+          value.charAt(nextAngle) === '>'
+        ) {
+          var target = value.slice(i + 1, nextAngle);
+          tokens.push({
+            kind: 'url',
+            start: i,
+            end: nextAngle + 1,
+            text: target,
+            href: target,
+          });
+          i = nextAngle + 1;
+          continue;
+        }
+      }
+      if (c === 'h' && scheme > 0) {
+        if (nextUrlEnd !== -1 && nextUrlEnd < i + scheme) {
+          nextUrlEnd = i + scheme;
+          while (nextUrlEnd < n && !/[\s<>()]/.test(value.charAt(nextUrlEnd)))
+            nextUrlEnd++;
+        }
+        // Trailing punctuation is the sentence's, not the URL's.
+        var last = nextUrlEnd - 1;
+        while (last > i + scheme && /[.,;:!?'"]/.test(value.charAt(last))) last--;
+        if (last > i + scheme) {
+          var url = value.slice(i, last + 1);
+          tokens.push({
+            kind: 'url',
+            start: i,
+            end: last + 1,
+            text: url,
+            href: url,
+          });
+          i = last + 1;
+          continue;
+        }
+      }
+      i++;
+    }
+    return tokens;
+  }
+
+  // A Markdown ATX heading (## Title ##): its level and text, or null.
+  function parseHeading(line) {
+    var match = /^(#{1,6})[ \t]+(.*)$/.exec(line);
+    if (!match) return null;
+    var text = match[2].trimEnd();
+    // A closing run of #s is dropped when a space sets it apart (or it is
+    // all there is); # C# keeps its #.
+    var cut = text.length;
+    while (cut > 0 && text.charAt(cut - 1) === '#') cut--;
+    if (cut === 0) text = '';
+    else if (cut < text.length && /[ \t]/.test(text.charAt(cut - 1)))
+      text = text.slice(0, cut).trimEnd();
+    return { level: match[1].length, text: text };
+  }
+
+  // The |---|:---:| line under a table's header row.
+  var DIVIDER =
+    /^[ \t]*(?:\|[ \t]*)?:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*(?:\|[ \t]*)?$/;
+  // ── End of parsing ──
   var article = document.getElementById('doc');
   var status = document.getElementById('status');
   var actions = document.getElementById('actions');
@@ -82,47 +367,29 @@ export const VIEWER_SCRIPT = String.raw`
     }
   }
 
-  var INLINE = new RegExp(
-    '(' + TICK + '+)([\\s\\S]*?[^' + TICK + '])\\1(?!' + TICK + ')' +
-    '|\\*\\*([\\s\\S]+?)\\*\\*' +
-    '|__([\\s\\S]+?)__' +
-    '|~~([\\s\\S]+?)~~' +
-    '|\\*([^\\s*][\\s\\S]*?)\\*' +
-    '|(?<![\\w])_([^\\s_][\\s\\S]*?)_(?![\\w])' +
-    '|!\\[([^\\]]*)\\]\\(((?:[^()\\s]|\\([^()\\s]*\\))+)(?:\\s+"[^"]*")?\\)' +
-    '|\\[([^\\]]+)\\]\\(((?:[^()\\s]|\\([^()\\s]*\\))+)(?:\\s+"[^"]*")?\\)' +
-    '|<(https?:\\/\\/[^>\\s]+)>' +
-    '|(https?:\\/\\/[^\\s<>()]+[^\\s<>().,;:!?\'"])',
-    'g'
-  );
-
   function inline(value, parent) {
+    var tokens = scanInline(value);
     var last = 0;
-    var match;
-    INLINE.lastIndex = 0;
-    var found = [];
-    while ((match = INLINE.exec(value)) !== null) found.push(match);
-    for (var i = 0; i < found.length; i++) {
-      var m = found[i];
-      if (m.index > last) text(value.slice(last, m.index), parent);
-      last = m.index + m[0].length;
-      if (m[1]) parent.appendChild(el('code', m[2]));
-      else if (m[3] !== undefined || m[4] !== undefined) inline(m[3] !== undefined ? m[3] : m[4], parent.appendChild(el('strong')));
-      else if (m[5] !== undefined) inline(m[5], parent.appendChild(el('del')));
-      else if (m[6] !== undefined || m[7] !== undefined) inline(m[6] !== undefined ? m[6] : m[7], parent.appendChild(el('em')));
-      else if (m[9] !== undefined) {
-        var image = link(m[9], parent);
-        if (image) image.textContent = 'Image: ' + (m[8] || m[9]);
-        else text(m[8] || '', parent);
-      } else if (m[11] !== undefined) {
-        var anchor = link(m[11], parent);
-        if (anchor) inline(m[10], anchor);
-        else inline(m[10], parent);
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      if (t.start > last) text(value.slice(last, t.start), parent);
+      last = t.end;
+      if (t.kind === 'code') parent.appendChild(el('code', t.text));
+      else if (t.kind === 'strong') inline(t.text, parent.appendChild(el('strong')));
+      else if (t.kind === 'del') inline(t.text, parent.appendChild(el('del')));
+      else if (t.kind === 'em') inline(t.text, parent.appendChild(el('em')));
+      else if (t.kind === 'image') {
+        var image = link(t.href, parent);
+        if (image) image.textContent = 'Image: ' + (t.text || t.href);
+        else text(t.text || '', parent);
+      } else if (t.kind === 'link') {
+        var anchor = link(t.href, parent);
+        if (anchor) inline(t.text, anchor);
+        else inline(t.text, parent);
       } else {
-        var bare = m[12] || m[13];
-        var auto = link(bare, parent);
-        if (auto) auto.textContent = bare;
-        else text(bare, parent);
+        var auto = link(t.href, parent);
+        if (auto) auto.textContent = t.href;
+        else text(t.href, parent);
       }
     }
     if (last < value.length) text(value.slice(last), parent);
@@ -131,11 +398,9 @@ export const VIEWER_SCRIPT = String.raw`
   var LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
   var FENCE = new RegExp('^\\s*(' + TICK + '{3,}|~{3,})');
   var RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-  var HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
-  var DIVIDER = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
 
   function isBlockStart(line, next) {
-    return FENCE.test(line) || HEADING.test(line) || RULE.test(line) || /^\s*>/.test(line) || LIST.test(line) ||
+    return FENCE.test(line) || parseHeading(line) !== null || RULE.test(line) || /^\s*>/.test(line) || LIST.test(line) ||
       (line.indexOf('|') !== -1 && next !== undefined && DIVIDER.test(next));
   }
   function cells(line) {
@@ -196,8 +461,8 @@ export const VIEWER_SCRIPT = String.raw`
         parent.appendChild(el('pre')).appendChild(el('code', body.join('\n')));
         continue;
       }
-      var heading = line.match(HEADING);
-      if (heading) { inline(heading[2], parent.appendChild(el('h' + heading[1].length))); i++; continue; }
+      var heading = parseHeading(line);
+      if (heading) { inline(heading.text, parent.appendChild(el('h' + heading.level))); i++; continue; }
       if (RULE.test(line)) { parent.appendChild(el('hr')); i++; continue; }
       if (/^\s*>/.test(line)) {
         var quoted = [];

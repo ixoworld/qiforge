@@ -6,6 +6,7 @@ import {
   SubAgentRegistry,
   ToolRegistry,
   createRegistries,
+  dropShadowingRequestEntries,
 } from './registries';
 import {
   makeBuildCtx,
@@ -160,6 +161,118 @@ describe('ToolRegistry', () => {
       (await reg.collect(makeBuildCtx(), rtCtx)).map((c) => c.tool.name),
     ).toEqual(['agui_baseline', 'agui_submit', 'agui_cancel']);
     expect(requestCalls).toBe(1);
+  });
+
+  const warningLogger = () => {
+    const warn = vi.fn();
+    return {
+      warn,
+      rtCtx: makeRuntimeContext({
+        logger: { log: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+      }),
+    };
+  };
+
+  it('drops a request-time tool that shadows a server tool, with one warning, and the turn goes on', async () => {
+    // A client-declared browser tool must not take the name of a server
+    // tool (the model would call one while the runtime ran the other), and a
+    // client release that declares one must not break every turn either.
+    const reg = new ToolRegistry();
+    const serverTool = makeTool('mutate_topic');
+    reg.register(makePlugin({ name: 'topics', getTools: () => [serverTool] }));
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [makeTool('mutate_topic'), makeTool('open_url')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const tools = await reg.collect(makeBuildCtx(), rtCtx);
+    expect(tools.map((t) => `${t.pluginName}:${t.tool.name}`)).toEqual([
+      'topics:mutate_topic',
+      'portal:open_url',
+    ]);
+    expect(tools[0]?.tool).toBe(serverTool);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(
+      /request tool "mutate_topic" of plugin "portal" dropped .* plugin "topics"/,
+    );
+    // The shared registry keeps the boot-time names only; the turn's request
+    // tools belong to that turn (one isolate serves every user).
+    expect(reg.toolNames()).toEqual(['mutate_topic']);
+  });
+
+  it('reserves runtime-bound names against boot-time tools as well', async () => {
+    // The domain-context tools exist only on observe turns, so no boot check
+    // sees them: a plugin tool of the same name is dropped for the turn
+    // rather than bound twice, whichever hook contributed it.
+    const reg = new ToolRegistry();
+    reg.register(
+      makePlugin({
+        name: 'docs',
+        getTools: () => [
+          makeTool('read_domain_document'),
+          makeTool('search_docs'),
+        ],
+      }),
+    );
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [makeTool('refresh_domain_context')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const collected = await reg.collect(makeBuildCtx(), rtCtx);
+    const { tools } = dropShadowingRequestEntries({
+      tools: collected,
+      requestSubAgents: [],
+      reservedNames: ['search_docs'],
+      runtimeNames: ['read_domain_document', 'refresh_domain_context'],
+      logger: { warn },
+    });
+    expect(tools.map((t) => `${t.pluginName}:${t.tool.name}`)).toEqual([
+      'docs:search_docs',
+    ]);
+    expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+      expect.stringContaining(
+        'plugin "docs" tool "read_domain_document" dropped for this turn',
+      ),
+      expect.stringContaining(
+        'plugin "portal" request-time tool "refresh_domain_context" dropped',
+      ),
+    ]);
+    // Without runtime names a boot-time tool is never dropped.
+    expect(
+      dropShadowingRequestEntries({
+        tools: collected,
+        requestSubAgents: [],
+        reservedNames: ['read_domain_document', 'search_docs'],
+        logger: { warn },
+      }).tools.map((t) => t.tool.name),
+    ).toEqual([
+      'read_domain_document',
+      'search_docs',
+      'refresh_domain_context',
+    ]);
+  });
+
+  it('keeps the first of two request-time tools with one name and warns once', async () => {
+    const reg = new ToolRegistry();
+    const first = makeTool('open_url');
+    reg.register(
+      makePlugin({
+        name: 'portal',
+        getRequestTools: () => [first, makeTool('open_url')],
+      }),
+    );
+    const { warn, rtCtx } = warningLogger();
+    const tools = await reg.collect(makeBuildCtx(), rtCtx);
+    expect(tools.map((t) => t.tool)).toEqual([first]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain(
+      'request tool "open_url" of plugin "portal" dropped',
+    );
   });
 });
 

@@ -24,7 +24,22 @@ export interface RawMcpClientTool {
   name: string;
   description: string;
   schema?: unknown;
-  invoke(input: unknown): Promise<unknown>;
+  invoke(
+    input: unknown,
+    config?: { metadata?: Record<string, unknown> },
+  ): Promise<unknown>;
+}
+
+export interface AdaptMcpClientToolsOptions {
+  /**
+   * Timeout of each tool call's MCP request. `@langchain/mcp-adapters` reads
+   * `metadata.timeoutMs` and hands it to the MCP SDK as the request's
+   * `timeout`, a timer the SDK clears when the response arrives; without it
+   * the SDK's 60 s default applies. Never pass a numeric `timeout` in the
+   * call config instead: LangChain turns that into `AbortSignal.timeout`,
+   * whose timer outlives the call.
+   */
+  requestTimeoutMs?: number;
 }
 
 /** An upstream MCP tool with its schema normalised to Zod. */
@@ -77,11 +92,17 @@ export function mcpToolZodSchema(
 export function adaptMcpClientTools(
   tools: RawMcpClientTool[],
   logger: Logger = NOOP_LOGGER,
+  options: AdaptMcpClientToolsOptions = {},
 ): AdaptedMcpTool[] {
+  const { requestTimeoutMs } = options;
+  const config =
+    requestTimeoutMs === undefined
+      ? undefined
+      : { metadata: { timeoutMs: requestTimeoutMs } };
   return tools.map((t) => ({
     name: t.name,
     description: t.description,
     schema: mcpToolZodSchema(t.schema, t.name, logger),
-    invoke: (input: unknown) => t.invoke(input),
+    invoke: (input: unknown) => t.invoke(input, config),
   }));
 }

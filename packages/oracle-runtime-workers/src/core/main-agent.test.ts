@@ -12,13 +12,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { ModelRole } from '../plugin-api/types';
 import { createRuntimeCore, type RuntimeCore } from './index';
-import { contextBudgetFor } from './context-budget';
+import { contextBudgetFor, DEFAULT_CONTEXT_KNOBS } from './context-budget';
+import { budgetedLlm } from './budgeted-llm';
+import type { ToolMark } from '../do/run-store';
+import {
+  createToolMarksMiddleware,
+  toolEffectOf,
+  type ToolMarkStore,
+} from './middlewares/tool-marks';
 import { createMainAgent } from './main-agent';
 import type { ContextGuardEvent } from './middlewares/context-guard';
 import { isSummarizationMessage } from './middlewares/summarization';
 import { SkillsPlugin } from './plugins/skills';
 import { PortalPlugin } from '../plugins/portal';
 import { WeatherPlugin } from './plugins/weather';
+import { FlowsPlugin } from '../plugins/flows/flows.plugin';
+import { FLOWS_OPERATING_GUIDE } from '../plugins/flows/prompts';
 import { createNoopAmbient, type AmbientServices } from './runtime-context';
 import {
   makeClaimStore,
@@ -309,9 +318,12 @@ describe('createMainAgent', () => {
     expect(systemPrompt).toContain('- **skills** — ');
     expect(systemPrompt).not.toContain('- **weather** — ');
     expect(systemPrompt).toContain('Always greet the user in French.');
+    // The day and the zone only: the exact time would change the prompt
+    // on every turn.
     expect(systemPrompt).toContain(
-      '**Current time:** 2026-08-25T10:00:00Z (Europe/Berlin)',
+      '**Current date:** Tuesday, 2026-08-25 (Europe/Berlin)',
     );
+    expect(systemPrompt).not.toContain('10:00');
 
     const config = { configurable: { thread_id: 'sess-1' } };
     const result = (await agent.invoke(
@@ -739,6 +751,103 @@ describe('createMainAgent', () => {
     expect(await promptFor({})).not.toContain('## Browser tools this turn');
   });
 
+  it('never lets a browser-declared name stand in for a server tool or a meta-tool', async () => {
+    let writes = 0;
+    const notes = makePlugin({
+      name: 'notes',
+      manifest: makeManifest({
+        title: 'Notes',
+        summary: 'Records notes.',
+        visibility: 'always',
+      }),
+      getTools: () => [
+        makeTool('record_note', {
+          handler: async () => {
+            writes += 1;
+            return `recorded #${writes}`;
+          },
+        }),
+        // Declared a write although its name reads like a read.
+        makeTool('get_note_count', { effect: 'write' }),
+      ],
+    });
+    const core = bootCore([notes, new PortalPlugin()]);
+    await core.warm();
+    const browserTools = [
+      { name: 'record_note', description: 'Shadow', schema: {} },
+      { name: 'get_note_count', description: 'Shadow', schema: {} },
+      { name: 'load_capability', description: 'Shadow', schema: {} },
+      { name: 'open_url', description: 'Open a URL', schema: {} },
+    ];
+    const note = (id: string) => ({
+      name: 'record_note',
+      args: { text: 'buy milk' },
+      id,
+    });
+    const warn = vi.fn();
+    const ambient = createNoopAmbient({
+      config: core.validatedEnv,
+      identity: core.identity,
+      availablePlugins: core.availablePlugins,
+      llm: scriptedLlm({ main: [[note('c1')], [note('c2')], []] }),
+      logger: {
+        log: () => undefined,
+        warn,
+        error: () => undefined,
+        debug: () => undefined,
+        verbose: () => undefined,
+      },
+    });
+    const { agent, boundToolNames, toolEffects, systemPrompt } =
+      await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient,
+        requestCtx,
+        state: { browserTools, loadedPlugins: ['portal'] },
+        checkpointer: new MemorySaver(),
+      });
+
+    const count = (name: string) =>
+      boundToolNames.filter((bound) => bound === name).length;
+    expect(count('record_note')).toBe(1);
+    expect(count('get_note_count')).toBe(1);
+    expect(count('load_capability')).toBe(1);
+    expect(count('open_url')).toBe(1);
+    expect(toolEffects.get('get_note_count')).toBe('write');
+    expect(toolEffects.get('load_capability')).toBe('read');
+    expect(systemPrompt).toContain(
+      "The Portal exposed these browser-side tools for this turn (they act on the user's screen): open_url",
+    );
+    // A clash with a server tool is dropped by the registry as the tools are
+    // collected; one with a meta-tool by the agent build. Each names the
+    // plugin and the tool.
+    for (const name of ['record_note', 'get_note_count', 'load_capability'])
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(
+          new RegExp(`"portal".*"${name}"|"${name}".*"portal"`),
+        ),
+      );
+
+    // The server's handler runs, and its identical write stays capped: the
+    // browser tool's `repeatable` flag did not reach the server tool's name.
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Note: buy milk.')] },
+      { configurable: { thread_id: 'shadow' } },
+    )) as { messages: BaseMessage[] };
+    const byId = new Map(
+      toolMessages(result.messages).map((m) => [m.tool_call_id, m]),
+    );
+    expect(String(byId.get('c1')?.content)).toBe('recorded #1');
+    expect(byId.get('c2')?.status).toBe('error');
+    expect(String(byId.get('c2')?.content)).toContain(
+      'would repeat its effect',
+    );
+    expect(writes).toBe(1);
+  });
+
   it('runs a sub-agent as a tool and forwards its tool calls into the parent history', async () => {
     const core = bootCore([new WeatherPlugin()]);
     const llm = scriptedLlm({
@@ -930,7 +1039,8 @@ describe('createMainAgent', () => {
     }),
     new AIMessage({ id: `r${i}`, content: `answer ${i}` }),
   ];
-  // 32k window: summarizeAt 16,000 tokens, pruneAt 11,200, cap 15,360 chars.
+  // 32k window: summarizeAt 18,400 tokens (60% would be 19,200; clamped to
+  // what the summarizer reads), pruneAt 11,200, cap 15,360 chars.
   const budget = contextBudgetFor({
     model: 'm',
     tokens: 32_000,
@@ -963,7 +1073,7 @@ describe('createMainAgent', () => {
     expect(boundToolNames).toContain('read_result');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        '[context] model=m window=32000 (override) summarizeAt=16000 pruneAt=11200 resultCap=15360c',
+        '[context] model=m window=32000 (override) summarizeAt=18400 pruneAt=11200 resultCap=15360c',
       ),
     );
 
@@ -1001,7 +1111,7 @@ describe('createMainAgent', () => {
       availablePlugins: core.availablePlugins,
       llm: {
         get: (role) =>
-          (role === 'routing'
+          (role === 'summarizer'
             ? summarizer
             : new FakeToolCallingModel({
                 toolCalls: [],
@@ -1020,11 +1130,11 @@ describe('createMainAgent', () => {
       contextBudget: budget,
     });
 
-    // 6 past turns × 12k-char results ≈ 18k tokens > summarizeAt (16k) with
-    // only 25 messages — the legacy 20-message trigger would have fired at
-    // 8k chars; here the token trigger is what fires.
+    // 6 past turns × 14k-char results ≈ 21k tokens > summarizeAt (18.4k)
+    // with only 25 messages — the legacy 20-message trigger would have fired
+    // at 8k chars; here the token trigger is what fires.
     const history = Array.from({ length: 6 }, (_, i) =>
-      pastTurn(i, 12_000),
+      pastTurn(i, 14_000),
     ).flat();
     const result = (await agent.invoke(
       { messages: [...history, new HumanMessage('and now?')] },
@@ -1084,7 +1194,7 @@ describe('createMainAgent tool execution', () => {
   async function build(
     plugin: OraclePlugin,
     script: Script,
-    limits = { tokens: 1_000_000, tools: 20, durationMs: 60_000 },
+    limits = { tools: 20, durationMs: 60_000 },
   ) {
     const core = bootCore([plugin]);
     await core.warm();
@@ -1148,7 +1258,7 @@ describe('createMainAgent tool execution', () => {
     const { agent } = await build(
       plugin,
       [[{ name: 'get_flaky', args: {}, id: 'r1' }], []],
-      { tokens: 1_000_000, tools: 1, durationMs: 60_000 },
+      { tools: 1, durationMs: 60_000 },
     );
     await expect(
       agent.invoke(
@@ -1548,4 +1658,788 @@ describe('supplied-context Markdown execution', () => {
       'Tools are forbidden',
     );
   });
+});
+
+// ── Turn-building hardening ─────────────────────────────────────────────────
+
+/** A summarizer model that records what it was handed, and can fail. */
+class RecordingSummarizer extends FakeListChatModel {
+  readonly inputs: string[] = [];
+
+  constructor(private readonly failure?: Error) {
+    super({ responses: ['the gist'] });
+  }
+
+  override async _generate(
+    ...args: Parameters<FakeListChatModel['_generate']>
+  ): ReturnType<FakeListChatModel['_generate']> {
+    const [messages] = args;
+    this.inputs.push(messages.map((m) => String(m.content)).join('\n'));
+    if (this.failure) throw this.failure;
+    return super._generate(...args);
+  }
+}
+
+/** The scripted models, with the `summarizer` role replaced. */
+function llmWith(
+  summarizer: BaseChatModel,
+  scripts: Partial<Record<string, Script>>,
+): AmbientServices['llm'] {
+  const scripted = scriptedLlm(scripts);
+  return {
+    get: (role, params) =>
+      role === 'summarizer' ? summarizer : scripted.get(role, params),
+  };
+}
+
+describe('createMainAgent — summaries', () => {
+  /** A past turn whose tool result is `chars` long. */
+  const pastTurn = (i: number, chars: number): BaseMessage[] => [
+    new HumanMessage({ id: `h${i}`, content: `question ${i}` }),
+    new AIMessage({
+      id: `a${i}`,
+      content: '',
+      tool_calls: [{ id: `c${i}`, name: 'get_probe', args: { i } }],
+    }),
+    new ToolMessage({
+      id: `t${i}`,
+      tool_call_id: `c${i}`,
+      name: 'get_probe',
+      content: `${i}:${'w'.repeat(chars)}`,
+    }),
+    new AIMessage({ id: `r${i}`, content: `answer ${i}` }),
+  ];
+  const probe = () =>
+    makePlugin({
+      name: 'probe',
+      manifest: makeManifest({ title: 'Probe', visibility: 'always' }),
+      getTools: () => [makeTool('get_probe', { handler: async () => 'ok' })],
+    });
+  // A 24k window, keeping the last two messages: the summarizer reads at
+  // most 12,800 tokens (the request cap less the summary prompt's room), so
+  // summarizing starts there rather than at 60% of the window (14,400).
+  const budget = contextBudgetFor(
+    { model: 'main', tokens: 24_000, origin: 'override' },
+    { ...DEFAULT_CONTEXT_KNOBS, keepMessages: 2 },
+  );
+  // ~15k tokens: over the trigger, and more than the summarizer reads.
+  const history = () =>
+    Array.from({ length: 5 }, (_, i) => pastTurn(i, 12_000)).flat();
+
+  it('hands the summarizer no more than the budget lets it read', async () => {
+    const core = bootCore([probe()]);
+    await core.warm();
+    const summarizer = new RecordingSummarizer();
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, llmWith(summarizer, {})),
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+    });
+    const result = (await agent.invoke(
+      { messages: [...history(), new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'summary-window' } },
+    )) as { messages: BaseMessage[] };
+    expect(budget.summaryInputTokens).toBe(12_800);
+    expect(summarizer.inputs).toHaveLength(1);
+    expect(Math.ceil(summarizer.inputs[0]!.length / 4)).toBeLessThanOrEqual(
+      budget.summaryInputTokens,
+    );
+    expect(result.messages.filter(isSummarizationMessage)).toHaveLength(1);
+  });
+
+  it('starts summarizing on a small window before the summarizer would drop the oldest history', async () => {
+    // The clamp: the trigger is what the summarizer reads, not 60%.
+    expect(budget.summarizeAtTokens).toBe(budget.summaryInputTokens);
+    expect(budget.summarizeAtTokens).toBeLessThan(Math.floor(24_000 * 0.6));
+    const core = bootCore([probe()]);
+    await core.warm();
+    const summarizer = new RecordingSummarizer();
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, llmWith(summarizer, {})),
+      requestCtx,
+      state: {},
+      contextBudget: budget,
+    });
+    // ~13.1k tokens: past the clamped trigger (12,800) and below 60% of the
+    // window (14,400), so only the clamp makes it summarize. The newest
+    // result stays in the kept tail; the ~8k before it fit what the
+    // summarizer reads, so the oldest turn reaches it.
+    const justOver = [
+      ...Array.from({ length: 4 }, (_, i) => pastTurn(i, 8_000)).flat(),
+      new AIMessage({
+        id: 'a9',
+        content: '',
+        tool_calls: [{ id: 'c9', name: 'get_probe', args: { i: 9 } }],
+      }),
+      new ToolMessage({
+        id: 't9',
+        tool_call_id: 'c9',
+        name: 'get_probe',
+        content: `9:${'w'.repeat(20_000)}`,
+      }),
+    ];
+    const result = (await agent.invoke(
+      { messages: [...justOver, new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'summary-clamp' } },
+    )) as { messages: BaseMessage[] };
+    expect(summarizer.inputs).toHaveLength(1);
+    // Everything it was asked to condense was read, the oldest turn included.
+    expect(summarizer.inputs[0]).toContain('question 0');
+    expect(summarizer.inputs[0]).toContain(`0:${'w'.repeat(100)}`);
+    expect(result.messages.filter(isSummarizationMessage)).toHaveLength(1);
+  });
+
+  it('summarizes with the turn’s main model, the per-request choice included', async () => {
+    const core = bootCore([probe()]);
+    await core.warm();
+    const requested: { role: ModelRole; model?: unknown }[] = [];
+    const summarizer = new RecordingSummarizer();
+    const scripted = scriptedLlm({});
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, {
+        get: (role, params) => {
+          requested.push({ role, model: params?.model });
+          return role === 'summarizer'
+            ? summarizer
+            : scripted.get(role, params);
+        },
+      }),
+      requestCtx: { ...requestCtx, model: 'anthropic/claude-sonnet-5' },
+      state: {},
+      contextBudget: budget,
+    });
+    await agent.invoke(
+      { messages: [...history(), new HumanMessage('and now?')] },
+      { configurable: { thread_id: 'summary-main-model' } },
+    );
+    expect(summarizer.inputs).toHaveLength(1);
+    // Resolved like `main`: the same role-independent model choice.
+    expect(requested).toContainEqual({
+      role: 'summarizer',
+      model: 'anthropic/claude-sonnet-5',
+    });
+    expect(requested).toContainEqual({
+      role: 'main',
+      model: 'anthropic/claude-sonnet-5',
+    });
+    expect(requested.some((r) => r.role === 'routing')).toBe(false);
+  });
+
+  it('tries a failing summary once per turn and gives its tokens back, and the turn completes', async () => {
+    const core = bootCore([probe()]);
+    await core.warm();
+    const script: Script = [
+      [{ name: 'get_probe', args: { step: 1 }, id: 's1' }],
+      [{ name: 'get_probe', args: { step: 2 }, id: 's2' }],
+      [],
+    ];
+    // A 64k window (summarizes at 38,400 tokens) and ~42k tokens of
+    // history: over the trigger, and still a request that fits once the
+    // summary has failed.
+    const roomy = contextBudgetFor(
+      { model: 'main', tokens: 64_000, origin: 'override' },
+      DEFAULT_CONTEXT_KNOBS,
+    );
+    const summarizer = new RecordingSummarizer(
+      new Error("400 This model's maximum context length is 16000 tokens"),
+    );
+    const turnBudget = new TurnBudget({ tools: 20, durationMs: 60_000 });
+    const reserve = vi.spyOn(turnBudget, 'reserveModel');
+    const metered = budgetedLlm(llmWith(summarizer, { main: script }), {
+      budget: turnBudget,
+      outputReserveTokens: roomy.outputReserveTokens,
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(core, metered),
+      requestCtx,
+      state: {},
+      contextBudget: roomy,
+      turnBudget,
+    });
+    const history = Array.from({ length: 7 }, (_, i) =>
+      pastTurn(i, 24_000),
+    ).flat();
+    const result = (await agent.invoke(
+      { messages: [...history, new HumanMessage('and now?')] },
+      {
+        configurable: { thread_id: 'summary-fails' },
+        callbacks: [metered.callback],
+      },
+    )) as { messages: BaseMessage[] };
+    expect(summarizer.inputs).toHaveLength(1);
+    // The summary and the three model steps were reserved; only the steps
+    // are still charged.
+    const reservations = reserve.mock.results.map((r) => Number(r.value));
+    expect(reservations).toHaveLength(4);
+    const steps = reservations.slice(1).reduce((a, b) => a + b, 0);
+    expect(turnBudget.snapshot().tokens).toBe(steps);
+    expect(
+      toolMessages(result.messages)
+        .slice(-2)
+        .map((m) => m.content),
+    ).toEqual(['ok', 'ok']);
+    expect(result.messages.some(isSummarizationMessage)).toBe(false);
+  }, 30_000);
+
+  it('a summary written mid-turn keeps the turn: an identical write after it is still refused', async () => {
+    let writes = 0;
+    const notes = makePlugin({
+      name: 'notes',
+      manifest: makeManifest({ title: 'Notes', visibility: 'always' }),
+      getTools: () => [
+        makeTool('record_note', {
+          handler: async () => {
+            writes += 1;
+            return `recorded #${writes}`;
+          },
+        }),
+        makeTool('get_big', { handler: async () => 'b'.repeat(84_000) }),
+      ],
+    });
+    const core = bootCore([notes]);
+    await core.warm();
+    const note = (id: string) => ({
+      name: 'record_note',
+      args: { text: 'buy milk' },
+      id,
+    });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        llmWith(new FakeListChatModel({ responses: ['the gist'] }), {
+          main: [
+            [note('n1')],
+            [{ name: 'get_big', args: {}, id: 'b1' }],
+            [note('n2')],
+            [],
+          ],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      // 40k window (summarize at 24k tokens), keeping only the last two
+      // messages: the big result pushes the history over the trigger and
+      // the summary condenses the turn's first write away.
+      contextBudget: contextBudgetFor(
+        { model: 'm', tokens: 40_000, origin: 'override' },
+        { ...DEFAULT_CONTEXT_KNOBS, keepMessages: 2 },
+      ),
+    });
+    const result = (await agent.invoke(
+      {
+        messages: [
+          new HumanMessage('Note: buy milk, then check the big file.'),
+        ],
+      },
+      { configurable: { thread_id: 'mid-turn-summary' } },
+    )) as { messages: BaseMessage[] };
+    expect(result.messages.some(isSummarizationMessage)).toBe(true);
+    expect(writes).toBe(1);
+    const second = toolMessages(result.messages).find(
+      (m) => m.tool_call_id === 'n2',
+    );
+    expect(second?.status).toBe('error');
+    expect(String(second?.content)).toContain('would repeat its effect');
+  }, 30_000);
+});
+
+describe('createMainAgent — sub-agent dispatches', () => {
+  const pingSchema = z.object({ to: z.string() });
+  function pinger(runs: { pings: string[] }) {
+    return makePlugin({
+      name: 'pinger',
+      manifest: makeManifest({ title: 'Pinger', visibility: 'always' }),
+      getSubAgents: () => [
+        makeSubAgent('Ping Agent', {
+          tools: [
+            makeTool('send_ping', {
+              schema: pingSchema,
+              handler: async (args) => {
+                const { to } = pingSchema.parse(args);
+                runs.pings.push(to);
+                return `pinged ${to}`;
+              },
+            }),
+          ],
+          forwardTools: true,
+        }),
+      ],
+    });
+  }
+
+  it("caps a sub-agent's identical writes like the main agent's", async () => {
+    const runs = { pings: [] as string[] };
+    const core = bootCore([pinger(runs)]);
+    await core.warm();
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'call_ping_agent', args: { task: 'Ping a.' }, id: 'p1' }],
+            [],
+          ],
+          subagent: [
+            [{ name: 'send_ping', args: { to: 'a' }, id: 's1' }],
+            [{ name: 'send_ping', args: { to: 'a' }, id: 's2' }],
+            [],
+          ],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+    });
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Ping a.')] },
+      { configurable: { thread_id: 'subagent-cap' } },
+    )) as { messages: BaseMessage[] };
+    expect(runs.pings).toEqual(['a']);
+    const repeated = toolMessages(result.messages).find(
+      (m) => m.tool_call_id === 'p1_s2',
+    );
+    expect(String(repeated?.content)).toContain('would repeat its effect');
+  });
+
+  it('classifies the tools of a sub-agent built by a factory by their declared effect', async () => {
+    let polls = 0;
+    const poller = makePlugin({
+      name: 'poller',
+      manifest: makeManifest({ title: 'Poller', visibility: 'always' }),
+      getSubAgents: () => [
+        makeSubAgent('Poll Agent', {
+          tools: () => [
+            makeTool('poll_job', {
+              effect: 'read',
+              handler: async () => `pending ${(polls += 1)}`,
+            }),
+          ],
+        }),
+      ],
+    });
+    const core = bootCore([poller]);
+    await core.warm();
+    const poll = (id: string) => ({ name: 'poll_job', args: { job: 'j' }, id });
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'call_poll_agent', args: { task: 'Poll j.' }, id: 'p1' }],
+            [],
+          ],
+          subagent: [[poll('s1')], [poll('s2')], [poll('s3')], []],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+    });
+    await agent.invoke(
+      { messages: [new HumanMessage('Poll job j.')] },
+      { configurable: { thread_id: 'subagent-factory' } },
+    );
+    // A read may repeat within the cap; a write would have run once.
+    expect(polls).toBe(3);
+  });
+
+  it('keeps the tool marks of two dispatches apart when their models reuse a call id', async () => {
+    const runs = { pings: [] as string[] };
+    const core = bootCore([pinger(runs)]);
+    await core.warm();
+    const marks = new Map<string, ToolMark>();
+    const store: ToolMarkStore = {
+      async startMark(input) {
+        const key = `${input.runId}:${input.toolCallId}`;
+        const existing = marks.get(key);
+        if (existing) return existing;
+        marks.set(key, {
+          ...input,
+          startedAt: 'now',
+          doneAt: null,
+          outcome: null,
+          attempts: 1,
+        });
+        return undefined;
+      },
+      async bumpMark() {},
+      async finishMark(runId, toolCallId, outcome) {
+        const mark = marks.get(`${runId}:${toolCallId}`);
+        if (mark) Object.assign(mark, { doneAt: 'now', outcome });
+      },
+    };
+    const { agent } = await createMainAgent({
+      registries: core.registries,
+      identity: core.identity,
+      config: core.validatedEnv,
+      availablePlugins: core.availablePlugins,
+      ambient: ambientFor(
+        core,
+        scriptedLlm({
+          main: [
+            [{ name: 'call_ping_agent', args: { task: 'Ping a.' }, id: 'p1' }],
+            [{ name: 'call_ping_agent', args: { task: 'Ping b.' }, id: 'p2' }],
+            [],
+          ],
+          // Every dispatch is a new conversation: the model numbers its
+          // calls from scratch, so both use `s1`.
+          subagent: [[{ name: 'send_ping', args: { to: 'x' }, id: 's1' }], []],
+        }),
+      ),
+      requestCtx,
+      state: {},
+      checkpointer: new MemorySaver(),
+      hooks: {
+        toolMiddlewares: [
+          createToolMarksMiddleware({
+            runId: 'run-1',
+            store,
+            effectOf: (name) => toolEffectOf({ name }),
+          }),
+        ],
+      },
+    });
+    const result = (await agent.invoke(
+      { messages: [new HumanMessage('Ping twice.')] },
+      { configurable: { thread_id: 'subagent-marks' } },
+    )) as { messages: BaseMessage[] };
+    expect(runs.pings).toEqual(['x', 'x']);
+    expect([...marks.keys()]).toEqual(
+      expect.arrayContaining([
+        'run-1:p1',
+        'run-1:p2',
+        'run-1:p1/s1',
+        'run-1:p2/s1',
+      ]),
+    );
+    // The forwarded results carry the model's own id, under the dispatch prefix.
+    expect(
+      toolMessages(result.messages)
+        .filter((m) => m.name === 'send_ping')
+        .map((m) => [m.tool_call_id, m.content]),
+    ).toEqual([
+      ['p1_s1', 'pinged x'],
+      ['p2_s1', 'pinged x'],
+    ]);
+  });
+});
+
+describe('createMainAgent — per-turn isolation and a stable prompt', () => {
+  it("load_capability lists the building turn's request tools, even when another turn's build finishes in between", async () => {
+    let releaseA: () => void = () => undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const dyn = makePlugin({
+      name: 'dyn',
+      manifest: makeManifest({ title: 'Dynamic', visibility: 'on-demand' }),
+      getRequestTools: async (rtCtx) => {
+        if (rtCtx.user.did === 'did:ixo:a') await gateA;
+        return [makeTool(`dyn_${rtCtx.user.did.slice(-1)}`)];
+      },
+    });
+    const core = bootCore([dyn]);
+    await core.warm();
+    const build = (did: string) =>
+      createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(
+          core,
+          scriptedLlm({
+            main: [
+              [
+                {
+                  name: 'load_capability',
+                  args: { names: ['dyn'] },
+                  id: 'l1',
+                },
+              ],
+              [],
+            ],
+          }),
+        ),
+        requestCtx: { ...requestCtx, user: { ...requestCtx.user, did } },
+        state: {},
+        checkpointer: new MemorySaver(),
+      });
+    // A's collection is still waiting when B's build completes; A finishes last.
+    const pendingA = build('did:ixo:a');
+    const b = await build('did:ixo:b');
+    releaseA();
+    const a = await pendingA;
+    const listed = async (built: Awaited<typeof b>, thread: string) => {
+      const result = (await built.agent.invoke(
+        { messages: [new HumanMessage('load dyn')] },
+        { configurable: { thread_id: thread } },
+      )) as { messages: BaseMessage[] };
+      const [entry] = JSON.parse(
+        String(toolMessages(result.messages)[0]?.content),
+      ) as Array<{ tools: Array<{ name: string }> }>;
+      return entry?.tools.map((t) => t.name);
+    };
+    expect(await listed(b, 'iso-b')).toEqual(['dyn_b']);
+    expect(await listed(a, 'iso-a')).toEqual(['dyn_a']);
+  });
+
+  it('builds a byte-identical system prompt for two turns of the same day', async () => {
+    const core = bootCore();
+    await core.warm();
+    const promptAt = async (currentTime: string, requestId: string) =>
+      (
+        await createMainAgent({
+          registries: core.registries,
+          identity: core.identity,
+          config: core.validatedEnv,
+          availablePlugins: core.availablePlugins,
+          ambient: ambientFor(core, scriptedLlm({})),
+          requestCtx: {
+            user: { ...requestCtx.user, currentTime },
+            session: { ...requestCtx.session, requestId },
+          },
+          state: {},
+        })
+      ).systemPrompt;
+    const first = await promptAt('2026-08-25T08:00:00.000Z', 'req-1');
+    const second = await promptAt('2026-08-25T08:00:07.412Z', 'req-2');
+    expect(second).toBe(first);
+  });
+});
+
+describe('createMainAgent — plugin operating guides', () => {
+  const GUIDE = '### Probe mode\n\nAlways probe twice before reporting.';
+  const guided = (
+    name: string,
+    guide: string | undefined,
+    overrides: Parameters<typeof makeManifest>[0] = {},
+    tools = [makeTool(`${name}_run`)],
+  ) =>
+    makePlugin({
+      name,
+      manifest: makeManifest({
+        title: name,
+        summary: `The ${name} plugin.`,
+        visibility: 'on-demand',
+        ...overrides,
+      }),
+      ...(guide !== undefined ? { operatingGuide: guide } : {}),
+      getTools: () => tools,
+    });
+
+  const promptOf = async (
+    plugins: OraclePlugin[],
+    options: {
+      loaded?: string[];
+      preloaded?: string[];
+      currentTime?: string;
+      requestId?: string;
+    } = {},
+  ) => {
+    const core = bootCore(plugins);
+    await core.warm();
+    return (
+      await createMainAgent({
+        registries: core.registries,
+        identity: core.identity,
+        config: core.validatedEnv,
+        availablePlugins: core.availablePlugins,
+        ambient: ambientFor(core, scriptedLlm({})),
+        requestCtx: {
+          user: {
+            ...requestCtx.user,
+            currentTime: options.currentTime ?? requestCtx.user.currentTime,
+          },
+          session: {
+            ...requestCtx.session,
+            requestId: options.requestId ?? 'req-1',
+          },
+        },
+        state: { loadedPlugins: options.loaded ?? [] },
+        ...(options.preloaded
+          ? { preloadedPlugins: new Set(options.preloaded) }
+          : {}),
+      })
+    ).systemPrompt;
+  };
+
+  it('contributes nothing while the plugin is not loaded, and its guide after every other section once it is', async () => {
+    const off = await promptOf([guided('probe', GUIDE)]);
+    expect(off).not.toContain('Probe mode');
+    expect(off).not.toContain('## Capabilities in use');
+
+    const on = await promptOf([guided('probe', GUIDE)], { loaded: ['probe'] });
+    expect(on.endsWith(`## Capabilities in use\n\n${GUIDE}\n`)).toBe(true);
+    expect(on.indexOf('## Operational mode')).toBeLessThan(
+      on.indexOf('## Capabilities in use'),
+    );
+    // Everything before the guides is the prompt of the turn without them.
+    expect(on.startsWith(off)).toBe(true);
+  });
+
+  it('gives byte-identical prompts on consecutive turns with the same loaded plugins, guides in name order', async () => {
+    const plugins = () => [
+      guided('zeta', '### Zeta mode\n\nZ.'),
+      guided('alpha', '### Alpha mode\n\nA.'),
+    ];
+    const first = await promptOf(plugins(), {
+      loaded: ['zeta', 'alpha'],
+      currentTime: '2026-08-25T08:00:00.000Z',
+      requestId: 'req-1',
+    });
+    const second = await promptOf(plugins(), {
+      loaded: ['alpha', 'zeta'],
+      currentTime: '2026-08-25T08:03:41.120Z',
+      requestId: 'req-2',
+    });
+    expect(second).toBe(first);
+    expect(first.indexOf('### Alpha mode')).toBeLessThan(
+      first.indexOf('### Zeta mode'),
+    );
+  });
+
+  it("keeps a router preload's guide out of the system prompt, which stays as it was", async () => {
+    const preloaded = await promptOf([guided('probe', GUIDE)], {
+      preloaded: ['probe'],
+    });
+    expect(preloaded).not.toContain(GUIDE);
+    expect(preloaded).toBe(await promptOf([guided('probe', GUIDE)]));
+  });
+
+  it('never shows the guide of a plugin the delegation cannot use, loaded or preloaded', async () => {
+    const unmet = await promptOf(
+      [
+        guided('files', '### Files mode\n\nF.', {
+          requires: [{ resource: 'ixo:filesystem', action: 'fs/read' }],
+        }),
+      ],
+      { loaded: ['files'], preloaded: ['files'] },
+    );
+    expect(unmet).not.toContain('Files mode');
+    const withheld = await promptOf(
+      [
+        guided('ops', '### Ops mode\n\nO.', {}, [
+          makeTool('ops_reset', { plane: 'admin' }),
+        ]),
+      ],
+      { loaded: ['ops'], preloaded: ['ops'] },
+    );
+    expect(withheld).not.toContain('Ops mode');
+    expect(withheld).not.toContain('## Capabilities in use');
+  });
+
+  it('leaves the prompt exactly as before for a plugin without a guide', async () => {
+    const plain = await promptOf([guided('probe', undefined)], {
+      loaded: ['probe'],
+    });
+    const blank = await promptOf([guided('probe', '   \n ')], {
+      loaded: ['probe'],
+    });
+    const notLoaded = await promptOf([guided('probe', undefined)]);
+    expect(plain).toBe(notLoaded);
+    expect(blank).toBe(notLoaded);
+  });
+
+  it('the flows plugin supplies its operating contract as its guide, outside the manifest', () => {
+    const flows = new FlowsPlugin();
+    expect(flows.operatingGuide).toBe(FLOWS_OPERATING_GUIDE);
+    expect(JSON.stringify(flows.manifest)).not.toContain('Flow Builder mode');
+  });
+
+  it('reports every guide size at boot and warns about one over the ceiling', () => {
+    const log = vi.fn();
+    const warn = vi.fn();
+    createRuntimeCore({
+      config: { name: 'X' },
+      plugins: [
+        guided('probe', GUIDE),
+        guided('huge', `### Huge\n\n${'h'.repeat(12_100)}`),
+      ],
+      env: makeEnv(),
+      logger: { log, warn, error: vi.fn() },
+    });
+    const line = log.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.startsWith('[boot] operating guides:'));
+    expect(line).toBe(
+      `[boot] operating guides: huge=12110 chars (~3028 tokens), probe=${GUIDE.length} chars (~${Math.ceil(GUIDE.length / 4)} tokens)`,
+    );
+    const warnings = warn.mock.calls.map((c) => String(c[0]));
+    expect(warnings.filter((w) => w.includes('operating guide of'))).toEqual([
+      "[boot] operating guide of 'huge' is ~3028 tokens (over 3000); it is in the system prompt of every turn that has the plugin loaded",
+    ]);
+  });
+
+  it.each([
+    {
+      verbose: false,
+      expected: [
+        '[boot] manifest lint: 3 soft warning(s) (wordy=2, chatty=1); set BOOT_LINT_VERBOSE=true to list them',
+      ],
+    },
+    {
+      verbose: true,
+      expected: [
+        '[boot] [wordy] whenToUse[0]: is 140 chars (recommended ≤ 100).',
+        '[boot] [wordy] whenToUse[1]: is 140 chars (recommended ≤ 100).',
+        '[boot] [chatty] whenToUse[0]: is 140 chars (recommended ≤ 100).',
+      ],
+    },
+  ])(
+    'collapses the manifest soft warnings into one summary line unless BOOT_LINT_VERBOSE (verbose: $verbose)',
+    ({ verbose, expected }) => {
+      const warn = vi.fn();
+      const long = 'w'.repeat(140);
+      createRuntimeCore({
+        config: { name: 'X' },
+        plugins: [
+          guided('wordy', undefined, { whenToUse: [long, long] }),
+          guided('chatty', undefined, { whenToUse: [long] }),
+          guided('tidy', undefined),
+        ],
+        env: {
+          ...makeEnv(),
+          ...(verbose ? { BOOT_LINT_VERBOSE: 'true' } : {}),
+        },
+        logger: { log: vi.fn(), warn, error: vi.fn() },
+      });
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter(
+            (w) => w.includes('whenToUse') || w.includes('manifest lint'),
+          ),
+      ).toEqual(expected);
+    },
+  );
 });

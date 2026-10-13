@@ -15,7 +15,10 @@ const listActionsSchema = z.object({
   category: z
     .string()
     .optional()
-    .describe('Filter to actions in this category.'),
+    .describe(
+      'Filter to actions in this category: the part of the action name after "qi/" and before the first dot ' +
+        '(e.g. "claim", "email", "governance", "oracle"). Each listed action reports its category.',
+    ),
   tag: z.string().optional().describe('Filter to actions carrying this tag.'),
 });
 

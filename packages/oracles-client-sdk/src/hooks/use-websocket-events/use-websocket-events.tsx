@@ -2,6 +2,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { useOraclesContext } from '../../providers/oracles-provider/oracles-context.js';
+import {
+  isCredentialRefusalMessage,
+  type AuthRenewalStage,
+  type RefusedCredentials,
+} from '../../utils/auth-renewal.js';
 import { useOraclesConfig } from '../use-oracles-config.js';
 import {
   executeBrowserToolCall,
@@ -22,7 +27,8 @@ export function useWebSocketEvents(
     props.oracleDid,
     props.overrides,
   );
-  const { wallet, getDelegation, getInvocation } = useOraclesContext();
+  const { wallet, getDelegation, getInvocation, renewOracleAuth } =
+    useOraclesContext();
 
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -81,18 +87,29 @@ export function useWebSocketEvents(
         return;
       }
 
-      // Resolve the UCAN invocation (treated like a bearer token) alongside
-      // the delegation. Migration-safe: if no createInvocation callback is
-      // provided this is null and the handshake behaves as before.
-      const invocation = await getInvocation(props.oracleDid);
-      if (cancelled) return;
-
-      // Create WebSocket connection
+      // The handshake payload is built on every CONNECT (socket.io calls
+      // `auth` again for each reconnect), so a socket that reconnects after
+      // the cached invocation expired sends a current one. The invocation
+      // is treated like a bearer token; without a createInvocation callback
+      // it is null and the handshake carries the delegation only.
+      const oracleDid = props.oracleDid;
+      // The credentials the latest CONNECT carried, for the renewal.
+      let sent: RefusedCredentials = {};
       const newSocket = io(apiUrl, {
         query: { sessionId, userDid: wallet.did },
-        auth: {
-          ucanDelegation: delegation,
-          ...(invocation && { invocation }),
+        auth: (cb) => {
+          void Promise.all([getDelegation(oracleDid), getInvocation(oracleDid)])
+            .then(([current, invocation]) => {
+              sent = { delegation: current ?? delegation, invocation };
+              cb({
+                ucanDelegation: current ?? delegation,
+                ...(invocation && { invocation }),
+              });
+            })
+            .catch(() => {
+              sent = { delegation, invocation: null };
+              cb({ ucanDelegation: delegation });
+            });
         },
         transports: ['websocket'],
       });
@@ -100,8 +117,18 @@ export function useWebSocketEvents(
       activeSocket = newSocket;
       socketRef.current = newSocket;
 
+      // socket.io never retries a CONNECT the server refused (the socket is
+      // no longer `active`). A refusal of the credentials renews them
+      // (stage 1: a fresh invocation) and connects again; refused again,
+      // stage 2 (a fresh delegation, then a fresh invocation) and one last
+      // CONNECT. Any other refusal (an unknown session, a failed session
+      // check) is final. A connection that succeeds earns the next refusal
+      // its own renewal, starting again at stage 1.
+      let renewalStage: 0 | AuthRenewalStage = 0;
+
       // Connection event handlers
       newSocket.on('connect', () => {
+        renewalStage = 0;
         setIsConnected(true);
         setConnectionStatus('connected');
         setLastActivity(new Date().toISOString());
@@ -119,28 +146,41 @@ export function useWebSocketEvents(
         setConnectionStatus('error');
         setError(err);
         setLastActivity(new Date().toISOString());
+        if (
+          newSocket.active ||
+          !isCredentialRefusalMessage(err.message) ||
+          renewalStage === 2 ||
+          cancelled
+        )
+          return;
+        const stage: AuthRenewalStage = renewalStage === 0 ? 1 : 2;
+        renewalStage = stage;
+        void renewOracleAuth(oracleDid, stage, sent).then((renewed) => {
+          if (renewed && !cancelled) newSocket.connect();
+        });
       });
 
       // Every server event is forwarded once, by the `onAny` listener below
       // (a dedicated `on(...)` per event name on top of it delivered
       // tool_call / render_component / cache invalidation twice).
 
-      if (
-        browserToolsRef.current &&
-        Object.keys(browserToolsRef.current).length > 0
-      ) {
-        // Listen for browser tool calls
-        newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
-          await executeBrowserToolCall(
-            newSocket,
-            browserToolsRef.current,
-            data,
-          );
-        });
-      }
+      // Tools can arrive after connection: always listen, and read the
+      // current registry only at dispatch. A call is run only for this
+      // connection's own session and only while this connection is current
+      // (a late call to a socket of a previous session or lifecycle is not).
+      // A client with no browser tools leaves the call to another client of
+      // the session.
+      newSocket.on('browser_tool_call', async (data: BrowserToolCall) => {
+        if (cancelled || data.sessionId !== sessionId) return;
+        const tools = browserToolsRef.current;
+        if (!tools || Object.keys(tools).length === 0) return;
+        await executeBrowserToolCall(newSocket, tools, data);
+      });
 
       // Listen for AG-UI action calls (always register listener, even if no tools yet)
-      // The listener will check actionToolsRef at execution time
+      // The listener will check actionToolsRef at execution time. Only a
+      // running call of this session is executed; a status frame of an
+      // action that already ran (`done` / `error`) is not a new call.
       newSocket.on(
         'action_call',
         async (data: {
@@ -151,6 +191,12 @@ export function useWebSocketEvents(
           args: Record<string, unknown>;
           status: string;
         }) => {
+          if (
+            cancelled ||
+            data.sessionId !== sessionId ||
+            data.status !== 'isRunning'
+          )
+            return;
           const tool = actionToolsRef.current?.[data.toolName];
           if (!tool) {
             console.error(

@@ -3,7 +3,8 @@
  * gateway) to the core's `SecretsAdapter` shape — the same mapping the Node
  * runtime's `ambient-factory` performs over its `SecretsService`:
  * `getIndex` lists names (plugins never see event ids), `getValues` decrypts
- * only the requested names. Degrades exactly like Node when the oracle has no
+ * only the requested names, and `getAll` decrypts every listed name from one
+ * read of the room state. Degrades exactly like Node when the oracle has no
  * P-256 key seated: the index still lists, values come back empty.
  *
  * The runtime's own LLM credentials (BYO API keys, the ChatGPT OAuth tokens
@@ -18,7 +19,10 @@ import type { SecretIndex } from '../plugin-api/types';
 import type { WorkersSecretsService } from '../secrets/secrets-service';
 
 export function createSecretsAdapter(
-  service: Pick<WorkersSecretsService, 'getIndex' | 'getValues'>,
+  service: Pick<
+    WorkersSecretsService,
+    'getIndex' | 'getValues' | 'getValuesFor'
+  >,
 ): SecretsAdapter {
   return {
     async getIndex(roomId: string): Promise<SecretIndex> {
@@ -36,6 +40,12 @@ export function createSecretsAdapter(
     ): Promise<Record<string, string>> {
       const allowed = keys.filter((key) => !isRuntimeOnlySecret(key));
       return allowed.length > 0 ? service.getValues(roomId, allowed) : {};
+    },
+    async getAll(roomId: string): Promise<Record<string, string>> {
+      const entries = (await service.getIndex(roomId)).filter(
+        (entry) => !isRuntimeOnlySecret(entry.name),
+      );
+      return entries.length > 0 ? service.getValuesFor(roomId, entries) : {};
     },
   };
 }

@@ -435,7 +435,11 @@ async function main(): Promise<void> {
     );
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);
-  if (failed.length > 0) process.exitCode = 1;
+  // matrix-js-sdk arms a five-minute timer for every encrypted live event (it
+  // waits that long for a late decryption) and `stopClient()` leaves them
+  // armed, so without an explicit exit the process idles that long after the
+  // summary. The empty write lets a piped stdout drain first.
+  process.stdout.write('', () => process.exit(failed.length > 0 ? 1 : 0));
 }
 
 main().catch((err) => {

@@ -32,6 +32,7 @@ import type {
   ToolCallEventPayload,
   UcanDelegation,
   UserContextData,
+  UserKvSurface,
 } from '../plugin-api/types';
 import { UcanMintUnavailableError } from '../plugin-api/ucan-errors';
 import { NOOP_LOGGER, sweepExpired } from './utils';
@@ -45,6 +46,12 @@ import { NOOP_LOGGER, sweepExpired } from './utils';
 export interface SecretsAdapter {
   getIndex(roomId: string): Promise<SecretIndex>;
   getValues(roomId: string, keys: string[]): Promise<Record<string, string>>;
+  /**
+   * Values of every secret {@link getIndex} would list, from one read of the
+   * index. Optional: an adapter without it is served by `getIndex` followed
+   * by `getValues` of every listed name.
+   */
+  getAll?(roomId: string): Promise<Record<string, string>>;
 }
 
 /**
@@ -186,6 +193,8 @@ export interface AmbientServices {
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   /** Host user-preferences store for the current user, when provided. */
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
+  /** Host key-value rows in the current user's own database, when provided. */
+  kv?: UserKvSurface;
   /** Host bridge to the user's browser (realtime channel), when provided. */
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Host attachment access for the current session, when provided. */
@@ -451,6 +460,14 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
         }
         return ambient.secrets.getValues(session.roomId, keys);
       },
+      getAll: async () => {
+        const roomId = session.roomId;
+        if (!roomId) return {};
+        const { secrets } = ambient;
+        if (secrets.getAll) return secrets.getAll(roomId);
+        const keys = Object.keys(await secrets.getIndex(roomId));
+        return keys.length > 0 ? secrets.getValues(roomId, keys) : {};
+      },
     },
     blobStore: {
       put: (params) => ambient.blobStore.put(params),
@@ -504,6 +521,7 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     abortSignal,
     ...(ambient.tasks ? { tasks: ambient.tasks } : {}),
     ...(ambient.preferences ? { preferences: ambient.preferences } : {}),
+    ...(ambient.kv ? { kv: ambient.kv } : {}),
     ...(ambient.frontend ? { frontend: ambient.frontend } : {}),
     ...(ambient.attachments ? { attachments: ambient.attachments } : {}),
     ...(ambient.onTurnEnd ? { onTurnEnd: ambient.onTurnEnd } : {}),
@@ -711,5 +729,6 @@ export function createNoopAmbient(
     ucan: overrides.ucan ?? createUnsignedUcanAdapter(),
     logger: overrides.logger ?? NOOP_LOGGER,
     ...(overrides.decisions ? { decisions: overrides.decisions } : {}),
+    ...(overrides.kv ? { kv: overrides.kv } : {}),
   };
 }

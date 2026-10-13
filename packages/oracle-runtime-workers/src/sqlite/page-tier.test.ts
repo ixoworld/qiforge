@@ -20,7 +20,9 @@ import { DoSqliteDatabase } from './database';
 import { CHUNK_SIZE } from './do-vfs';
 import {
   FULL_MASK,
+  PageTier,
   PageTierError,
+  resolvePageTierOptions,
   SEGMENT_BYTES,
   SEGMENT_CHUNKS,
   type PageTierOptions,
@@ -195,6 +197,140 @@ function age(clock: Clock): void {
   clock.now += 3 * PERIOD_MS;
 }
 
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+interface HeldCall {
+  /** Resolves with the key once the held call was reached. */
+  reached: Promise<string>;
+  /** Let the held call complete. */
+  release: () => void;
+}
+
+interface Hold {
+  reached: Deferred<string>;
+  release: Deferred<void>;
+}
+
+/**
+ * A bucket that can hold its next `get` or `put`. A held GET is answered
+ * by R2 at once but handed to the caller only on `release()` — a response
+ * still in flight while other work runs; a held PUT reaches R2 only on
+ * `release()` — a slow upload. Everything else passes straight through.
+ */
+function holdingBucket(inner: R2Bucket): {
+  bucket: R2Bucket;
+  holdNextGet: () => HeldCall;
+  holdNextPut: () => HeldCall;
+  gets: string[];
+} {
+  let getHold: Hold | null = null;
+  let putHold: Hold | null = null;
+  const gets: string[] = [];
+  const bucket = new Proxy(inner, {
+    get(target, prop) {
+      if (prop === 'get') {
+        return async (key: string) => {
+          gets.push(key);
+          const current = getHold;
+          getHold = null;
+          const object = await target.get(key);
+          if (current === null) return object;
+          const bytes = object === null ? null : await object.arrayBuffer();
+          current.reached.resolve(key);
+          await current.release.promise;
+          return bytes === null ? null : { arrayBuffer: async () => bytes };
+        };
+      }
+      if (prop === 'put') {
+        return async (key: string, value: ArrayBuffer) => {
+          const current = putHold;
+          putHold = null;
+          if (current !== null) {
+            current.reached.resolve(key);
+            await current.release.promise;
+          }
+          return target.put(key, value);
+        };
+      }
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const arm = (set: (hold: Hold) => void): HeldCall => {
+    const next = { reached: deferred<string>(), release: deferred<void>() };
+    set(next);
+    return {
+      reached: next.reached.promise,
+      release: () => next.release.resolve(),
+    };
+  };
+  return {
+    bucket,
+    gets,
+    holdNextGet: () =>
+      arm((hold) => {
+        getHold = hold;
+      }),
+    holdNextPut: () =>
+      arm((hold) => {
+        putHold = hold;
+      }),
+  };
+}
+
+/** The R2 keys the file's tier map references. */
+function referencedKeys(
+  state: DurableObjectState,
+  prefix: string,
+  file: string,
+): string[] {
+  return state.storage.sql
+    .exec<{
+      segno: number;
+      gen: number;
+    }>('SELECT segno, gen FROM vfs2_tier_segments WHERE file = ?', file)
+    .toArray()
+    .map((row) => `${prefix}/${file}/${row.segno}.${row.gen}`)
+    .sort();
+}
+
+/** Every row of `t` read back in one statement, as id → bytes. */
+async function readAll(db: DoSqliteDatabase): Promise<Map<number, Uint8Array>> {
+  const rows = await db.exec<{ id: number; data: Uint8Array }>(
+    'SELECT id, data FROM t ORDER BY id',
+  );
+  return new Map(rows.map((row) => [row.id, row.data]));
+}
+
+function expectRows(
+  actual: Map<number, Uint8Array>,
+  expected: Map<number, Uint8Array>,
+): void {
+  expect([...actual.keys()]).toEqual([...expected.keys()]);
+  const wrong: number[] = [];
+  for (const [id, bytes] of expected) {
+    const got = actual.get(id);
+    if (
+      got === undefined ||
+      createHash('sha256').update(got).digest('hex') !==
+        createHash('sha256').update(bytes).digest('hex')
+    )
+      wrong.push(id);
+  }
+  expect(wrong).toEqual([]);
+}
+
 describe('R2 page tier', () => {
   it('without a tier every row is full and nothing is written to R2', async () => {
     await runInDurableObject(stub('tier-off'), async (_i, state) => {
@@ -309,7 +445,7 @@ describe('R2 page tier', () => {
     const clock: Clock = { now: 10 * PERIOD_MS };
     const prefix = 'tier-partial';
     await runInDurableObject(stub(prefix), async (_i, state) => {
-      const db = await openTiered(state, prefix, clock);
+      let db = await openTiered(state, prefix, clock);
       await fill(db, 0, 64, 60_000);
       // Free half the pages, then make everything cold.
       await db.run('DELETE FROM t WHERE id % 2 = 0');
@@ -324,6 +460,23 @@ describe('R2 page tier', () => {
         `[page-tier] free-list reuse produced ${partial} partial rows, ${db.tierStatus().coldMisses - misses0} cold misses`,
       );
       expect(partial).toBeGreaterThan(0);
+      // Reading back what was just written needs no R2: every page of the
+      // new rows is in a partial row's mask. A fresh connection, so the
+      // reads reach the VFS instead of SQLite's own page cache.
+      await db.close();
+      db = await openTiered(state, prefix, clock);
+      const missesBeforeReadBack = db.tierStatus().coldMisses;
+      const r2GetsBeforeReadBack = db.tierStatus().r2Gets;
+      for (let id = 100; id < 132; id++) {
+        const row = await db.get<{ data: Uint8Array }>(
+          'SELECT data FROM t WHERE id = ?',
+          [id],
+        );
+        expect(row?.data).toEqual(rowBytes(id, 60_000));
+      }
+      expect(db.tierStatus().coldMisses).toBe(missesBeforeReadBack);
+      expect(db.tierStatus().r2Gets).toBe(r2GetsBeforeReadBack);
+      expect(await partialRows(state, 'tier.db')).toBe(partial);
       const checksum = await db.checksum();
       // Everything still reads correctly, old and new.
       for (const id of [1, 33, 63, 100, 131]) {
@@ -489,9 +642,93 @@ describe('R2 page tier', () => {
       // A crash between a put and its map update leaves an orphan.
       await env.TIER_TEST.put(`${prefix}/tier.db/999.7`, new Uint8Array(16));
       await env.TIER_TEST.put(`${prefix}/tier.db/0.999`, new Uint8Array(16));
+      // The result store shares the prefix: its objects are not the tier's.
+      const result = `${prefix}/results/${'ab'.repeat(32)}`;
+      await env.TIER_TEST.put(result, new Uint8Array(16));
       const swept = await db.tierMaintenance({ sweep: true });
       expect(swept.deleted).toBe(2);
-      expect((await listKeys(prefix)).sort()).toEqual(referenced.sort());
+      expect((await listKeys(prefix)).sort()).toEqual(
+        [...referenced, result].sort(),
+      );
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
+  it('the orphan sweep is scheduled from persisted state and works through the prefix a page at a time', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-sweep-schedule';
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const options = resolvePageTierOptions({
+        ...tierOptions(prefix, clock),
+        orphanSweepIntervalMs: 10 * PERIOD_MS,
+      });
+      // How the VFS drives it from every pass: a step when one is due.
+      const tick = (tier: PageTier) =>
+        tier.maintenance({ sweep: tier.sweepDue() ? 'step' : 'none' });
+      const first = new PageTier(state.storage, options);
+      expect(first.sweepDue()).toBe(true); // never swept
+      await tick(first);
+      expect(first.sweepDue()).toBe(false);
+
+      // Orphans appear: more than one listing page of them.
+      const orphans: string[] = [];
+      for (let i = 0; i < 1005; i++) orphans.push(`${prefix}/tier.db/${i}.1`);
+      for (let i = 0; i < orphans.length; i += 100)
+        await Promise.all(
+          orphans
+            .slice(i, i + 100)
+            .map((key) => env.TIER_TEST.put(key, new Uint8Array(1))),
+        );
+      const result = `${prefix}/results/${'cd'.repeat(32)}`;
+      await env.TIER_TEST.put(result, new Uint8Array(1));
+
+      // The object restarts (fresh in-memory state) and maintenance runs
+      // many times within the interval: nothing is swept.
+      const second = new PageTier(state.storage, options);
+      for (let i = 0; i < 20; i++) await tick(second);
+      expect((await listKeys(prefix)).length).toBe(orphans.length + 1);
+
+      // Past the interval, each run examines one listing page.
+      clock.now += 10 * PERIOD_MS;
+      const third = new PageTier(state.storage, options);
+      expect(third.sweepDue()).toBe(true);
+      const step1 = await tick(third);
+      expect(step1.deleted).toBeGreaterThan(0);
+      expect(step1.deleted).toBeLessThanOrEqual(1000);
+      expect(third.sweepDue()).toBe(true); // in progress
+      const step2 = await tick(new PageTier(state.storage, options));
+      expect(step1.deleted + step2.deleted).toBe(orphans.length);
+      expect(third.sweepDue()).toBe(false);
+      expect(await listKeys(prefix)).toEqual([result]);
+    });
+  });
+
+  it('no orphan sweep runs while a pass has an upload in flight', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-sweep-vs-pass';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'tier.db', {
+        tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+        cachePages: 64,
+      });
+      await fill(db, 0, 32, 60_000);
+      age(clock);
+      const orphan = `${prefix}/tier.db/77.3`;
+      await env.TIER_TEST.put(orphan, new Uint8Array(1));
+      const hold = held.holdNextPut();
+      const pass = db.tierFlush({ force: true });
+      await hold.reached;
+      await db.tierMaintenance({ sweep: true });
+      expect(await listKeys(prefix)).toContain(orphan);
+      hold.release();
+      expect((await pass).evictedChunks).toBeGreaterThan(0);
+      await db.tierMaintenance({ sweep: true });
+      expect(await listKeys(prefix)).not.toContain(orphan);
+      expect((await listKeys(prefix)).sort()).toEqual(
+        referencedKeys(state, prefix, 'tier.db'),
+      );
       expect(await integrityOk(db)).toBe(true);
       await db.close();
     });
@@ -689,5 +926,264 @@ describe('R2 page tier', () => {
   it('segments are chunk-aligned 1 MiB objects keyed by generation', () => {
     expect(SEGMENT_CHUNKS * CHUNK_SIZE).toBe(SEGMENT_BYTES);
     expect(SEGMENT_BYTES).toBe(1024 * 1024);
+  });
+});
+
+describe('R2 page tier under concurrency', () => {
+  /**
+   * A file whose every segment is cold in R2 AND carries hot rows on top
+   * (rewritten rows land as partial rows over the cold chunks, appended
+   * rows as hot-only chunks): exactly the state in which a resolve's view
+   * of a segment goes stale when an eviction pass rewrites it. Returns the
+   * expected content of `t`.
+   */
+  async function coldWithHotOverlay(
+    db: DoSqliteDatabase,
+    clock: Clock,
+  ): Promise<Map<number, Uint8Array>> {
+    await fill(db, 0, 48, 60_000);
+    age(clock);
+    expect((await db.tierFlush()).evictedChunks).toBeGreaterThan(30);
+    const expected = new Map<number, Uint8Array>();
+    for (let id = 0; id < 48; id++) expected.set(id, rowBytes(id, 60_000));
+    for (let id = 0; id < 48; id += 2) {
+      const bytes = rowBytes(id + 5000, 60_000);
+      await db.run('UPDATE t SET data = ? WHERE id = ?', [bytes, id]);
+      expected.set(id, bytes);
+    }
+    await fill(db, 48, 56, 60_000);
+    for (let id = 48; id < 56; id++) expected.set(id, rowBytes(id, 60_000));
+    return expected;
+  }
+
+  it('a resolve overtaken by an eviction pass re-reads the generation the map points at', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-race-resolve';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const open = () =>
+        DoSqliteDatabase.open(state, 'tier.db', {
+          tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+          cachePages: 64,
+        });
+      let db = await open();
+      const expected = await coldWithHotOverlay(db, clock);
+      expect(await partialRows(state, 'tier.db')).toBeGreaterThan(0);
+      // A fresh connection: SQLite's own page cache must not serve the scan.
+      await db.close();
+      db = await open();
+
+      const hold = held.holdNextGet();
+      const scan = readAll(db);
+      const heldKey = await hold.reached;
+      // The pass runs straight on the VFS (no database mutex), so it lands
+      // while the resolve's segment response is still in flight: it uploads
+      // a new generation of that segment and deletes the hot rows the
+      // response predates.
+      const pass = await db.vfs.tierFlush('tier.db', { force: true });
+      expect(pass.evictedChunks).toBeGreaterThan(0);
+      expect(await partialRows(state, 'tier.db')).toBe(0);
+      hold.release();
+      expectRows(await scan, expected);
+      // The resolve noticed and fetched the generation the map points at.
+      const [heldSegment, heldGen] = heldKey
+        .slice(`${prefix}/tier.db/`.length)
+        .split('.')
+        .map(Number);
+      expect(
+        held.gets.some((key) => {
+          const [segno, gen] = key
+            .slice(`${prefix}/tier.db/`.length)
+            .split('.')
+            .map(Number);
+          return segno === heldSegment && (gen ?? 0) > (heldGen ?? 0);
+        }),
+      ).toBe(true);
+      expect(await integrityOk(db)).toBe(true);
+
+      // A write after the resolve dirties chunks the resolve pinned: what
+      // it persists must be the real bytes, never the stale response.
+      for (let id = 1; id < 48; id += 4) {
+        const bytes = rowBytes(id + 9000, 60_000);
+        await db.run('UPDATE t SET data = ? WHERE id = ?', [bytes, id]);
+        expected.set(id, bytes);
+      }
+      await db.close();
+      db = await open();
+      expectRows(await readAll(db), expected);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
+  it('a pass issued while a statement is resolving waits for it and leaves the data intact', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-race-exclusion';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const open = () =>
+        DoSqliteDatabase.open(state, 'tier.db', {
+          tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+          cachePages: 64,
+        });
+      let db = await open();
+      const expected = await coldWithHotOverlay(db, clock);
+      await db.close();
+      db = await open();
+
+      const order: string[] = [];
+      const hold = held.holdNextGet();
+      const scan = readAll(db).then((rows) => {
+        order.push('scan');
+        return rows;
+      });
+      await hold.reached;
+      const pass = db.tierFlush({ force: true }).then((result) => {
+        order.push('pass');
+        return result;
+      });
+      // Give the pass every chance to run ahead of the held response.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(order).toEqual([]);
+      hold.release();
+      expectRows(await scan, expected);
+      expect((await pass).evictedChunks).toBeGreaterThan(0);
+      expect(order).toEqual(['scan', 'pass']);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+      db = await open();
+      expectRows(await readAll(db), expected);
+      await db.close();
+    });
+  });
+
+  it("a turn's checkpoint write completes while a segment upload is in flight", async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-race-upload';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'tier.db', {
+        tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+        cachePages: 64,
+      });
+      await fill(db, 0, 48, 60_000);
+      const saver = new SqliteSaver(db);
+      await saver.setup();
+      age(clock);
+      const hold = held.holdNextPut();
+      let passDone = false;
+      const pass = db.tierFlush({ force: true }).then((result) => {
+        passDone = true;
+        return result;
+      });
+      await hold.reached;
+      const config = { configurable: { thread_id: 'th', checkpoint_ns: '' } };
+      const checkpointId = uuid6(1);
+      const checkpoint: Checkpoint = {
+        ...emptyCheckpoint(),
+        id: checkpointId,
+        channel_values: {
+          messages: [new HumanMessage({ id: 'h-1', content: 'mid-pass' })],
+        },
+      };
+      await saver.put(config, checkpoint, {
+        source: 'loop',
+        step: 1,
+        parents: {},
+      });
+      // The write committed with the upload still held.
+      expect(passDone).toBe(false);
+      hold.release();
+      const result = await pass;
+      expect(result.evictedChunks).toBeGreaterThan(0);
+      expect(result.skipped).toBeUndefined();
+      const tuple = await saver.getTuple(config);
+      expect(tuple?.checkpoint.id).toBe(checkpointId);
+      const messages = tuple?.checkpoint.channel_values['messages'];
+      expect(Array.isArray(messages) ? messages.length : 0).toBe(1);
+      const expected = new Map<number, Uint8Array>();
+      for (let id = 0; id < 48; id++) expected.set(id, rowBytes(id, 60_000));
+      expectRows(await readAll(db), expected);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
+  it('a truncation during a segment upload makes the pass give up that segment; nothing stale survives', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-race-truncate';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'tier.db', {
+        tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+        cachePages: 64,
+      });
+      await db.run('PRAGMA auto_vacuum = FULL');
+      await fill(db, 0, 64, 60_000);
+      age(clock);
+      // Hold the upload of the LAST segment of the pass: the truncation
+      // below removes it.
+      const hold = held.holdNextPut();
+      const pass = db.tierFlush({ force: true, maxSegments: 1 });
+      const heldKey = await hold.reached;
+      expect(heldKey).toMatch(/\/tier\.db\/0\.\d+$/);
+      const sizeBefore = db.fileSize;
+      await db.run('DELETE FROM t WHERE id >= 4');
+      expect(db.fileSize).toBeLessThan(sizeBefore / 4);
+      hold.release();
+      const result = await pass;
+      expect(result.evictedChunks).toBe(0);
+      expect(result.remaining).toBeGreaterThan(0);
+      // Regrow over the truncated range with new content.
+      await fill(db, 100, 160, 60_000);
+      const expected = new Map<number, Uint8Array>();
+      for (let id = 0; id < 4; id++) expected.set(id, rowBytes(id, 60_000));
+      for (let id = 100; id < 160; id++) expected.set(id, rowBytes(id, 60_000));
+      expectRows(await readAll(db), expected);
+      expect(await integrityOk(db)).toBe(true);
+      // The abandoned upload is not referenced and goes with maintenance.
+      await db.tierMaintenance({ sweep: true });
+      expect((await listKeys(prefix)).sort()).toEqual(
+        referencedKeys(state, prefix, 'tier.db'),
+      );
+      // A later pass completes normally.
+      age(clock);
+      expect(
+        (await db.tierFlush({ force: true })).evictedChunks,
+      ).toBeGreaterThan(0);
+      expectRows(await readAll(db), expected);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
+  });
+
+  it('a snapshot opened during a segment upload keeps its rows: the pass gives up and the snapshot reads the pre-pass bytes', async () => {
+    const clock: Clock = { now: 10 * PERIOD_MS };
+    const prefix = 'tier-race-snapshot';
+    const held = holdingBucket(env.TIER_TEST);
+    await runInDurableObject(stub(prefix), async (_i, state) => {
+      const db = await DoSqliteDatabase.open(state, 'tier.db', {
+        tier: { ...tierOptions(prefix, clock), bucket: held.bucket },
+        cachePages: 64,
+      });
+      await fill(db, 0, 48, 60_000);
+      const checksum = await db.checksum();
+      age(clock);
+      const hold = held.holdNextPut();
+      const pass = db.tierFlush({ force: true });
+      await hold.reached;
+      const snapshot = await db.snapshot();
+      try {
+        hold.release();
+        const result = await pass;
+        expect(result.evictedChunks).toBe(0);
+        expect(await sha256(snapshot.open())).toBe(checksum);
+      } finally {
+        snapshot.close();
+      }
+      expect(await db.checksum()).toBe(checksum);
+      expect(await integrityOk(db)).toBe(true);
+      await db.close();
+    });
   });
 });

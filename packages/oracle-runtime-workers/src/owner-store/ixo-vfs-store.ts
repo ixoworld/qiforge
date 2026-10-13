@@ -24,7 +24,9 @@
  * `POST /upload` + `PATCH /upload/:id` (tus, larger files), `GET
  * /files/:id/content` (bytes, streamed), `POST /batch/delete`, `POST
  * /batch/move`. The file is never `PUT` (a new VERSION, capped at 50 by the
- * VFS): every flush uploads to a temp path and swaps it in — see `save()`.
+ * VFS): every flush uploads to a temp path and swaps it in with moves — see
+ * `save()`. The VFS refuses to move onto an occupied path (per-item 409
+ * "Destination occupied"), so the old file is moved aside first.
  *
  * Two VFS semantics this store must respect:
  *   - `/.oracles` is a dot-folder, so the file is HIDDEN by the VFS dotfile
@@ -136,6 +138,12 @@ export class VfsRequestError extends Error {
  * once complete; anything still carrying the infix is a crashed flush.
  */
 export const TEMP_PATH_INFIX = '.uploading-';
+/**
+ * The previous file is moved to `<path>.replaced-<ts>` while the new one
+ * moves into place, and deleted once it has. Anything still carrying the
+ * infix is a complete earlier copy a crashed or failed swap left behind.
+ */
+export const ASIDE_PATH_INFIX = '.replaced-';
 /** tus part size: a multiple of 64 KiB, ≥ 5 MiB (the VFS minimum) — and the peak upload buffer. */
 export const TUS_PART_BYTES = 5 * 1024 * 1024;
 /** Gzipped files up to one part go through the single-request `POST /files`. */
@@ -206,7 +214,7 @@ export class IxoVfsOwnerStore implements OwnerStore {
   }
 
   async head(): Promise<{ etag: string } | null> {
-    const stat = await this.statPath(this.path);
+    const stat = await this.ownerCopy();
     return stat ? { etag: this.etagOf(stat) } : null;
   }
 
@@ -217,7 +225,7 @@ export class IxoVfsOwnerStore implements OwnerStore {
    * on the first one.
    */
   async load(): Promise<OwnerCopy | null> {
-    const stat = await this.statPath(this.path);
+    const stat = await this.ownerCopy();
     if (!stat) return null;
     const res = await this.request(
       'fs/read',
@@ -232,24 +240,29 @@ export class IxoVfsOwnerStore implements OwnerStore {
   }
 
   /**
-   * Atomic replace, always delete + re-create, never a new version:
+   * Replace the file by moves, never a new version, and never leave the
+   * user without a complete upstream copy:
    *
-   *   1. drop stale `.uploading-*` temp files a crashed flush left behind;
-   *   2. take the gzipped length from `hints` (the object measured it in the
+   *   1. take the gzipped length from `hints` (the object measured it in the
    *      same pass as its checksum) or, without a hint, count it in a pass
    *      of its own (the VFS needs `Upload-Length` at session creation —
    *      `Upload-Defer-Length` is not supported — and gzip output is
    *      deterministic for identical input);
-   *   3. upload gzip → a TEMP path next to the real one: one `POST /files`
+   *   2. upload gzip → a TEMP path next to the real one: one `POST /files`
    *      when it fits in a single part, else a tus session in 5 MiB parts
    *      (`tusUpload`, resumable per part);
-   *   4. delete the old file at the real path, then `batch/move` the temp
-   *      file into place.
+   *   3. move the old file aside (`.replaced-<ts>`), then the temp file
+   *      into place; when that move fails for good, the old file is moved
+   *      back before the error is thrown;
+   *   4. only once the new file is at the path: delete the old copy and any
+   *      leftovers of earlier flushes (`.uploading-` / `.replaced-` files).
+   *      A leftover may be the only complete copy (a swap that failed after
+   *      the old file was moved aside), so none is deleted earlier.
    *
-   * Every request is retried with backoff; a step that still fails throws,
-   * the working copy stays dirty and the next tick starts over (the temp
-   * file is cleaned up then). Peak memory is one part (5 MiB) plus fixed
-   * overhead, whatever the file size.
+   * The path is empty only between the two moves. Every request is retried
+   * with backoff; a step that still fails throws, the working copy stays
+   * dirty and the next tick starts over. Peak memory is one part (5 MiB)
+   * plus fixed overhead, whatever the file size.
    */
   async save(
     snapshot: FileSnapshot,
@@ -257,20 +270,12 @@ export class IxoVfsOwnerStore implements OwnerStore {
   ): Promise<SaveResult> {
     const listing = await this.listOracleFiles();
     const existing = listing.filter((f) => f.path === this.path);
-    const stale = listing.filter((f) =>
-      f.path.startsWith(`${this.path}${TEMP_PATH_INFIX}`),
-    );
-    if (stale.length > 0) {
-      await this.batchDelete(stale.map((f) => f.id)).catch((err: unknown) => {
-        console.warn(
-          `[owner-store] could not delete ${stale.length} stale temp upload(s): ${describe(err)}`,
-        );
-      });
-    }
+    const leftovers = listing.filter((f) => this.isLeftover(f.path));
 
     const gzLength =
       hints.gzippedLength ?? (await countStream(gzipStream(snapshot.open())));
-    const tempPath = `${this.path}${TEMP_PATH_INFIX}${Date.now().toString(36)}`;
+    const stamp = Date.now().toString(36);
+    const tempPath = `${this.path}${TEMP_PATH_INFIX}${stamp}`;
     const uploaded =
       gzLength <= SINGLE_SHOT_MAX_BYTES
         ? await this.uploadSingleShot(tempPath, snapshot)
@@ -282,27 +287,100 @@ export class IxoVfsOwnerStore implements OwnerStore {
       );
     }
 
-    if (existing.length > 0) {
-      await withRetry(() => this.batchDelete(existing.map((f) => f.id)), {
+    const aside: VfsFileStat[] = [];
+    for (const [i, file] of existing.entries()) {
+      const asidePath = `${this.path}${ASIDE_PATH_INFIX}${stamp}${i > 0 ? `-${i}` : ''}`;
+      await this.moveWithRetry(
+        file.id,
+        asidePath,
+        'moving the previous state file aside',
+      );
+      aside.push({ ...file, path: asidePath });
+    }
+    try {
+      await this.moveIntoPlace(tempId, stamp, aside);
+    } catch (error) {
+      await this.restoreAside(aside);
+      throw error;
+    }
+
+    const stale = [...leftovers, ...aside].filter((f) => f.id !== tempId);
+    if (stale.length > 0) {
+      await withRetry(() => this.batchDelete(stale.map((f) => f.id)), {
         isRetryable: isRetryableRequest,
         ...this.retryOptions(),
-        onRetry: (err, attempt, delay) =>
-          console.warn(
-            `[owner-store] delete of the previous state file failed (${describe(err)}) — retry ${attempt} in ${delay} ms`,
-          ),
+      }).catch((err: unknown) => {
+        console.warn(
+          `[owner-store] could not delete ${stale.length} earlier cop${stale.length === 1 ? 'y' : 'ies'} of ${this.path} (the next flush retries): ${describe(err)}`,
+        );
       });
     }
+    const etag =
+      uploaded.contentHash ??
+      (await this.statPath(this.path))?.checksum ??
+      tempId;
+    return { etag, bytes: gzLength };
+  }
+
+  /**
+   * The file at the path or, when a swap failed after moving the previous
+   * file aside (and could not put it back), the newest set-aside copy — the
+   * last complete file this store landed. Never an `.uploading-` temp: its
+   * swap did not finish, so it is not the owner copy. `save()` removes the
+   * set-aside copies only after its own file is at the path.
+   */
+  private async ownerCopy(): Promise<VfsFileStat | null> {
+    const listing = await this.listOracleFiles();
+    const exact = listing.find((f) => f.path === this.path);
+    if (exact) return exact;
+    const prefix = `${this.path}${ASIDE_PATH_INFIX}`;
+    let newest: { file: VfsFileStat; at: number } | null = null;
+    for (const file of listing) {
+      if (!file.path.startsWith(prefix)) continue;
+      // `<stamp>` or `<stamp>-<n>`: the stamp is the save's base-36 time.
+      const at = Number.parseInt(
+        file.path.slice(prefix.length).split('-')[0] ?? '',
+        36,
+      );
+      if (!Number.isFinite(at)) continue;
+      if (newest === null || at > newest.at) newest = { file, at };
+    }
+    return newest?.file ?? null;
+  }
+
+  /** A crashed or failed flush's temp upload or set-aside copy of this file. */
+  private isLeftover(path: string): boolean {
+    return (
+      path.startsWith(`${this.path}${TEMP_PATH_INFIX}`) ||
+      path.startsWith(`${this.path}${ASIDE_PATH_INFIX}`)
+    );
+  }
+
+  /**
+   * Move the uploaded temp file to the real path. A "Destination occupied"
+   * answer means something still sits there (a concurrent or crashed
+   * flush): it is moved aside too (`aside` collects it, so a failure
+   * restores it and success deletes it) and the move retried.
+   */
+  private async moveIntoPlace(
+    tempId: string,
+    stamp: string,
+    aside: VfsFileStat[],
+  ): Promise<void> {
     await withRetry(
       async () => {
         try {
           await this.move(tempId, this.path);
         } catch (err) {
-          // Someone (a crashed earlier flush) still occupies the path: clear it
-          // and let the retry move again.
           if (err instanceof VfsRequestError && err.status === 409) {
             const occupant = await this.statPath(this.path);
-            if (occupant && occupant.id !== tempId)
-              await this.batchDelete([occupant.id]);
+            // An earlier attempt committed but its answer was lost.
+            if (occupant?.id === tempId) return;
+            if (occupant) {
+              const asidePath = `${this.path}${ASIDE_PATH_INFIX}${stamp}-o${aside.length}`;
+              await this.move(occupant.id, asidePath);
+              aside.push({ ...occupant, path: asidePath });
+            }
           }
           throw err;
         }
@@ -318,11 +396,61 @@ export class IxoVfsOwnerStore implements OwnerStore {
           ),
       },
     );
-    const etag =
-      uploaded.contentHash ??
-      (await this.statPath(this.path))?.checksum ??
-      tempId;
-    return { etag, bytes: gzLength };
+  }
+
+  /**
+   * The new file could not be moved into place: put the previous one back
+   * so the path keeps a complete copy. Best effort — if this fails too the
+   * set-aside copy stays where it is, and the next flush (which only
+   * deletes leftovers after its own file landed) cleans it up.
+   */
+  private async restoreAside(aside: VfsFileStat[]): Promise<void> {
+    const previous = aside[0];
+    if (previous === undefined) return;
+    try {
+      await this.moveWithRetry(
+        previous.id,
+        this.path,
+        'restoring the previous state file',
+      );
+    } catch (err) {
+      console.error(
+        `[owner-store] ${this.path} is empty: the previous copy stays at ${previous.path} until the next flush (${describe(err)})`,
+      );
+    }
+  }
+
+  private async moveWithRetry(
+    id: string,
+    destinationPath: string,
+    what: string,
+  ): Promise<void> {
+    await withRetry(
+      async () => {
+        try {
+          await this.move(id, destinationPath);
+        } catch (err) {
+          // The VFS checks the file's version on every move: a retry of a
+          // move that committed but lost its answer gets a 409 although the
+          // file is already where it was sent.
+          if (
+            err instanceof VfsRequestError &&
+            err.status === 409 &&
+            (await this.statPath(destinationPath))?.id === id
+          )
+            return;
+          throw err;
+        }
+      },
+      {
+        isRetryable: isRetryableRequest,
+        ...this.retryOptions(),
+        onRetry: (err, attempt, delay) =>
+          console.warn(
+            `[owner-store] ${what} failed (${describe(err)}) — retry ${attempt} in ${delay} ms`,
+          ),
+      },
+    );
   }
 
   /** ≤ one part: buffer the gzip once and `POST /files` it (retried as a whole). */
@@ -387,9 +515,7 @@ export class IxoVfsOwnerStore implements OwnerStore {
   async remove(): Promise<void> {
     const listing = await this.listOracleFiles();
     const mine = listing.filter(
-      (f) =>
-        f.path === this.path ||
-        f.path.startsWith(`${this.path}${TEMP_PATH_INFIX}`),
+      (f) => f.path === this.path || this.isLeftover(f.path),
     );
     if (mine.length === 0) return;
     await this.batchDelete(mine.map((f) => f.id));

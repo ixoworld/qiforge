@@ -11,7 +11,8 @@ export interface EditorMatrixClientConfig {
 const logger = createConsoleLogger({ module: 'editor-mx' });
 
 /**
- * Per-isolate singleton wrapper around a `matrix-js-sdk` `MatrixClient`. Used
+ * Per-isolate wrapper around a `matrix-js-sdk` `MatrixClient`, one live
+ * instance per set of credentials (see {@link EditorMatrixClient.getInstance}). Used
  * by `@ixo/matrix-crdt` to read/write BlockNote Y.js documents.
  *
  * No `startClient()` / sync is performed — matrix-crdt's `MatrixReader`
@@ -35,15 +36,32 @@ export class EditorMatrixClient {
   }
 
   /**
-   * Get the singleton instance. First caller supplies the Matrix admin
-   * config used for the lifetime of the isolate; subsequent callers
-   * receive the same instance and the config argument is ignored.
+   * Get the isolate's instance for these credentials. Callers pass the
+   * credentials the gateway handed out for the current request; when they
+   * differ from the cached instance's (the gateway re-minted the device
+   * token, or the homeserver or user changed) a new instance replaces it, so
+   * a warm isolate never keeps sending a revoked token. Requests already
+   * holding the previous client finish with it; it runs no sync loop, so
+   * nothing needs stopping.
    */
   public static getInstance(cfg: EditorMatrixClientConfig): EditorMatrixClient {
-    if (!EditorMatrixClient.instance) {
-      EditorMatrixClient.instance = new EditorMatrixClient(cfg);
-    }
-    return EditorMatrixClient.instance;
+    const current = EditorMatrixClient.instance;
+    if (current && current.hasCredentials(cfg)) return current;
+    const next = new EditorMatrixClient({
+      baseUrl: cfg.baseUrl,
+      userId: cfg.userId,
+      accessToken: cfg.accessToken,
+    });
+    EditorMatrixClient.instance = next;
+    return next;
+  }
+
+  private hasCredentials(cfg: EditorMatrixClientConfig): boolean {
+    return (
+      this.cfg.baseUrl === cfg.baseUrl &&
+      this.cfg.userId === cfg.userId &&
+      this.cfg.accessToken === cfg.accessToken
+    );
   }
 
   /**
@@ -113,7 +131,8 @@ export class EditorMatrixClient {
 /**
  * Resolve the `MatrixClient` used by editor tools. Prefers the
  * `matrixClient` from the plugin's runtime config (host/test-provided);
- * otherwise lazily constructs the internal singleton.
+ * otherwise lazily constructs the internal instance, rebuilt whenever the
+ * credentials passed in differ from the ones it was built with.
  *
  * Centralised so every call site (standalone-editor-tool, the flows plugin's
  * flow-doc) goes through one resolution path.

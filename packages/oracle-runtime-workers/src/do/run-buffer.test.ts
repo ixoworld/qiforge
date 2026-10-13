@@ -128,3 +128,108 @@ describe('RunBuffer', () => {
     expect(buf.lastSeq).toBe(2);
   });
 });
+
+describe('RunBuffer frames in flight', () => {
+  it('keeps packed frames readable from the tail until their segment write settles', async () => {
+    let release!: () => void;
+    const written = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { buf, packed } = buffer({
+      onPack: async (segment) => {
+        await written;
+        packed.push(segment);
+      },
+    });
+    buf.push('message', { content: 'a' });
+    buf.push('message', { content: 'b' });
+    const flushing = buf.flush();
+    buf.push('message', { content: 'c' });
+    // Neither in the store nor gone: still served from memory, in order.
+    expect(packed).toHaveLength(0);
+    expect(buf.tailAfter(0).map((f) => f.seq)).toEqual([1, 2, 3]);
+    expect(buf.tailAfter(1).map((f) => f.seq)).toEqual([2, 3]);
+    release();
+    await flushing;
+    expect(packed).toHaveLength(1);
+    expect(buf.tailAfter(0).map((f) => f.seq)).toEqual([3]);
+  });
+
+  it('drops the frames of a failed pack from memory once it settled', async () => {
+    const { buf } = buffer({
+      onPack: () => {
+        throw new Error('disk');
+      },
+      onPackError: () => undefined,
+    });
+    buf.push('message', { content: 'a' });
+    await buf.flush();
+    expect(buf.tailAfter(0)).toEqual([]);
+  });
+
+  it('packs consecutive segments that cover every frame once', async () => {
+    const { buf, packed, timers } = buffer({ flushBytes: 80 });
+    for (let i = 0; i < 12; i += 1) {
+      buf.push('message', { content: `chunk-${i}` });
+      if (i % 5 === 4) timers.fire();
+    }
+    await buf.close();
+    const seqs = framesOfSegments(packed).map((f) => f.seq);
+    expect(seqs).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
+    for (let i = 1; i < packed.length; i += 1)
+      expect(packed[i]!.seqFrom).toBe(packed[i - 1]!.seqTo + 1);
+  });
+
+  it('numbers a later attempt from its start sequence; cursors below, at and beyond it', () => {
+    const { buf } = buffer({ startSeq: 100 });
+    buf.push('run', {});
+    buf.push('message', { content: 'x' });
+    expect(buf.tailAfter(7).map((f) => f.seq)).toEqual([101, 102]);
+    expect(buf.tailAfter(100).map((f) => f.seq)).toEqual([101, 102]);
+    expect(buf.tailAfter(102)).toEqual([]);
+    expect(buf.tailAfter(10_000)).toEqual([]);
+    expect(buf.packedSeq).toBe(100);
+  });
+});
+
+describe('RunBuffer close', () => {
+  it('tells subscribers it ended, after every frame, and at once to a late subscriber', async () => {
+    const { buf } = buffer();
+    const order: string[] = [];
+    buf.subscribe(
+      (f) => order.push(f.event),
+      () => order.push('end'),
+    );
+    buf.push('message', { content: 'a' });
+    buf.push('done', {});
+    await buf.close();
+    expect(order).toEqual(['message', 'done', 'end']);
+    let late = 0;
+    buf.subscribe(
+      () => undefined,
+      () => (late += 1),
+    );
+    expect(late).toBe(1);
+  });
+
+  it('keeps its done frame for a reader that arrives after the run ended', async () => {
+    const { buf } = buffer();
+    expect(buf.hasDone).toBe(false);
+    buf.push('message', { content: 'a' });
+    buf.push('done', { aborted: true });
+    expect(buf.hasDone).toBe(true);
+    await buf.close();
+    expect(buf.tailAfter(0)).toEqual([
+      { seq: 2, event: 'done', data: { aborted: true } },
+    ]);
+    expect(buf.tailAfter(2)).toEqual([]);
+  });
+
+  it('closes twice without a second pack', async () => {
+    const { buf, packed } = buffer();
+    buf.push('message', { content: 'a' });
+    await buf.close();
+    await buf.close();
+    expect(packed).toHaveLength(1);
+  });
+});

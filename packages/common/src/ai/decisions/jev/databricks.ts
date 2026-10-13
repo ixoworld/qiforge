@@ -8,6 +8,7 @@ import type {
 import {
   JevDecisionError,
   parseJevResult,
+  systemOneInferenceProvenance,
   toJevQuestions,
 } from './wire.js';
 
@@ -129,11 +130,12 @@ export class DatabricksSystemOneDecisionAdapter implements DecisionAdapter {
     return {
       ...result,
       provenance: {
-        apiDialect: 'systemone-v1',
-        requestedModel: this.model,
-        ...(result.modelVersion ? { returnedModel: result.modelVersion } : {}),
-        modelPinning: 'mutable',
-        providerArtifactRef: this.model,
+        method: { kind: 'provider-native' },
+        ...systemOneInferenceProvenance(
+          this.model,
+          result.modelVersion,
+          this.capabilities.modelPinning,
+        ),
       },
     };
   }
@@ -224,6 +226,7 @@ export class DatabricksAiDecideDecisionAdapter implements DecisionAdapter {
     return {
       ...result,
       provenance: {
+        method: { kind: 'provider-native' },
         apiDialect: 'databricks-ai-decide-v1',
         functionVersion: envelope.data.metadata.version,
         modelPinning: 'mutable',

@@ -1,5 +1,7 @@
+import { frontendOutcomeUnknown } from '@ixo/common/ai/frontend-bridge';
 import { ToolMessage } from '@langchain/core/messages';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { ProviderStallError } from '../../llm/stream-liveness';
 import { ToolScheduler } from '../tool-scheduler';
 import { HarnessLimitError, TurnBudget } from '../turn-budget';
 import {
@@ -16,13 +18,16 @@ type WrapToolCall = NonNullable<
   ReturnType<typeof createToolExecutionMiddleware>['wrapToolCall']
 >;
 
-function requestFor(name: string, args: Record<string, unknown> = {}) {
+function requestFor(
+  name: string,
+  args: Record<string, unknown> = {},
+): Parameters<WrapToolCall>[0] {
   return {
-    toolCall: { id: `call_${name}`, name, args, type: 'tool_call' as const },
+    toolCall: { id: `call_${name}`, name, args, type: 'tool_call' },
     tool: undefined,
-    state: {},
+    state: { messages: [] },
     runtime: {},
-  } as unknown as Parameters<WrapToolCall>[0];
+  };
 }
 
 const okResult = (name: string) =>
@@ -31,10 +36,7 @@ const okResult = (name: string) =>
 function middlewareFor(
   overrides: Partial<Parameters<typeof createToolExecutionMiddleware>[0]> = {},
 ) {
-  const budget = new TurnBudget(
-    { tokens: 1_000_000, tools: 5, durationMs: 60_000 },
-    () => 0,
-  );
+  const budget = new TurnBudget({ tools: 5, durationMs: 60_000 }, () => 0);
   const claims = makeClaimStore();
   const middleware = createToolExecutionMiddleware({
     budget,
@@ -99,6 +101,20 @@ describe('isUncertainOutcome', () => {
     );
   });
 
+  it('is true for a tool whose own model call stalled, wrapped or not', () => {
+    const stall = new ProviderStallError({
+      phase: 'stream',
+      idleMs: 90_000,
+      elapsedMs: 100_000,
+      bytesSeen: 10,
+      label: 'openrouter subagent m',
+    });
+    expect(isUncertainOutcome(stall)).toBe(true);
+    expect(
+      isUncertainOutcome(new Error('Connection error.', { cause: stall })),
+    ).toBe(true);
+  });
+
   it('is false for a failure the service reported', () => {
     expect(isUncertainOutcome(new Error('invalid recipient'))).toBe(false);
     // Definite refusals that merely contain a transport-sounding word.
@@ -130,6 +146,28 @@ describe('uncertainResultReason', () => {
   ): ToolMessage =>
     new ToolMessage({ tool_call_id: 'c', name: 'w', content, status });
 
+  it('keeps the claim for a frontend call whose outcome is unknown', () => {
+    // The bridge's deadline / lost-socket result: the browser may have
+    // written, so an identical write must not run again unverified.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify(frontendOutcomeUnknown('tc-req:inv'))),
+      ),
+    ).toBe('outcome unknown');
+    // A client that cannot tell whether its own write landed.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ success: false, outcome: 'unknown' })),
+      ),
+    ).toBe('outcome unknown');
+    // A definite refusal from the browser is a known outcome.
+    expect(
+      uncertainResultReason(
+        result(JSON.stringify({ success: false, error: 'Permission denied' })),
+      ),
+    ).toBeNull();
+  });
+
   it('names the reason when an error-shaped result reports a timeout, a transport failure or a 5xx', () => {
     // The flows plugin's catch-all around a dropped connection.
     expect(
@@ -142,18 +180,19 @@ describe('uncertainResultReason', () => {
         ),
       ),
     ).toBe('fetch failed');
-    // The editor's unconfirmed save.
+    // The editor's undelivered write: a send that failed with a server
+    // error may still have landed.
     expect(
       uncertainResultReason(
         result(
           JSON.stringify({
             ok: false,
-            code: 'flush_timeout',
-            message: 'The edit could not be confirmed as saved.',
+            code: 'write_not_saved',
+            message: 'The edit was NOT saved.',
           }),
         ),
       ),
-    ).toBe('flush_timeout');
+    ).toBe('write_not_saved');
     expect(
       uncertainResultReason(
         result(JSON.stringify({ successful: false, error: 'Bad Gateway' })),
@@ -403,6 +442,37 @@ describe('createToolExecutionMiddleware', () => {
     });
     expect(ran).toBe(true);
     expect(shared.rows.size).toBe(0);
+  });
+
+  it('leaves a debug trace of every completed call', async () => {
+    const logger = {
+      log: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const { wrap } = middlewareFor({ logger });
+    await wrap(requestFor('get_page'), async () => okResult('get_page'));
+    await wrap(
+      requestFor('send'),
+      async () =>
+        new ToolMessage({
+          tool_call_id: 'call_send',
+          name: 'send',
+          content: 'invalid recipient',
+          status: 'error',
+        }),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] get_page \(call_get_page\): ok in \d+ ms$/,
+      ),
+    );
+    expect(logger.debug).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\[tool-execution\] send \(call_send\): returned an error in \d+ ms$/,
+      ),
+    );
   });
 
   it('never claims reads or sub-agent dispatches', async () => {

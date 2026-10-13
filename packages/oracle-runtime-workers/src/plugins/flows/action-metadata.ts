@@ -16,8 +16,10 @@
  *     `describe_action`) and are not derivable from the registry.
  *
  * `requires` captures human/environment prerequisites the user must supply (a
- * claim collection, a template id, a connected account, a PIN) — the things the
- * agent must STOP and ASK the user for rather than invent. The multi-operation
+ * claim collection, a template id, a connected account) — the things the
+ * agent must STOP and ASK the user for rather than invent. A PIN is the
+ * exception: it is listed so the agent knows the step needs one, but the
+ * portal collects it at run time ({@link PIN_AT_RUN_TIME}). The multi-operation
  * actions (`qi/collection.lifecycle`, `qi/collection.users`) dispatch on an
  * `operation` input; their `inputPorts` note which fields apply to which op.
  *
@@ -30,6 +32,12 @@ export interface ActionPort {
   portType: string;
   /** True when the action's `run()` throws if this field is missing. */
   required?: boolean;
+  /**
+   * The value is a credential (PIN, mnemonic, password, token, API key). It
+   * is never stored in a flow document — every room member can read it — so
+   * an input with this name only accepts a `{{step.output.field}}` reference.
+   */
+  secret?: boolean;
   /** One-line, agent-facing description of what to put here. */
   description?: string;
 }
@@ -55,6 +63,13 @@ export interface OverlayEntry {
  * NOT listed here — they come from the registry's `outputSchema` (actions.ts
  * outputFields). Covers every registered action type.
  */
+/**
+ * How every PIN prerequisite is described: the portal collects the PIN when
+ * the user runs the step, so the agent never asks for one and never stores one.
+ */
+const PIN_AT_RUN_TIME =
+  'Collected by the portal when the user runs the step — never ask for it in chat and never write it into the flow.';
+
 export const ACTION_METADATA: Record<string, OverlayEntry> = {
   // ── Claims & bids ─────────────────────────────────────────────────────────
   'qi/claim.submit': {
@@ -93,6 +108,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: false,
         description:
           'Verification PIN; if omitted the action requests it from the user at runtime.',
@@ -413,7 +429,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'collectionId',
         portType: 'claimCollectionId',
-        required: true,
+        required: false,
         description:
           'Target collection — required for every op EXCEPT create (which mints a new one).',
       },
@@ -903,6 +919,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Wallet mnemonic used to sign the IID creation. Typically wired from an upstream wallet step output (mnemonic).',
@@ -946,6 +963,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Wallet mnemonic used to create the IID document and Matrix account. Typically wired from an upstream wallet step output (mnemonic).',
@@ -974,6 +992,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'PIN used to register the Matrix account.',
       },
@@ -999,7 +1018,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
     requires: [
       {
         kind: 'pin',
-        description: 'A PIN is required to register the Matrix account.',
+        description: `A PIN is required to register the Matrix account. ${PIN_AT_RUN_TIME}`,
       },
       {
         kind: 'oracleName',
@@ -1022,6 +1041,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Wallet mnemonic used to register the Matrix account. Typically wired from an upstream wallet step output (mnemonic).',
@@ -1043,6 +1063,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'PIN used to register the Matrix account.',
       },
@@ -1061,7 +1082,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
     requires: [
       {
         kind: 'pin',
-        description: 'A PIN is required to register the Matrix account.',
+        description: `A PIN is required to register the Matrix account. ${PIN_AT_RUN_TIME}`,
       },
       {
         kind: 'oracleName',
@@ -1082,6 +1103,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Oracle wallet BIP39 mnemonic, typically from the wallet.generate output.',
@@ -1109,6 +1131,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description:
           'PIN used to sign the entity creation; typically from the form output.',
@@ -1116,6 +1139,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixAccessToken',
         portType: 'string',
+        secret: true,
         required: true,
         description:
           'Oracle Matrix access token, typically from the matrix.register output.',
@@ -1215,7 +1239,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       },
       {
         kind: 'pin',
-        description: 'A PIN used to sign the entity creation — ask the user.',
+        description: `A PIN used to sign the entity creation. ${PIN_AT_RUN_TIME}`,
       },
     ],
   },
@@ -1301,12 +1325,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixPassword',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix password, from the matrix.register output.',
       },
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Oracle wallet mnemonic, from the wallet.generate output; stored as SECP_MNEMONIC secret.',
@@ -1314,12 +1340,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixRecoveryPhrase',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix recovery phrase, from the matrix.register output.',
       },
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description:
           'PIN, from the form output; stored as MATRIX_VALUE_PIN secret.',
@@ -1346,6 +1374,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'openRouterApiKeyPlaintext',
         portType: 'string',
+        secret: true,
         description:
           'Optional plaintext OpenRouter API key passed through to the deploy output.',
       },
@@ -1448,7 +1477,10 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
         description:
           'An OpenRouter API key, JWE-encrypted before submit (openRouterApiKeyJwe) — ask the user.',
       },
-      { kind: 'pin', description: 'A PIN stored as a secret — ask the user.' },
+      {
+        kind: 'pin',
+        description: `A PIN stored as a secret. ${PIN_AT_RUN_TIME}`,
+      },
     ],
   },
   'qi/oracle.storeSecrets': {
@@ -1499,12 +1531,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixPassword',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix password, from the matrix.register output.',
       },
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Oracle wallet mnemonic, from the wallet.generate output; stored as SECP_MNEMONIC.',
@@ -1512,12 +1546,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixRecoveryPhrase',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix recovery phrase, from the matrix.register output.',
       },
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'PIN, from the form output; stored as MATRIX_VALUE_PIN.',
       },
@@ -1541,7 +1577,10 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
         description:
           'An OpenRouter API key, JWE-encrypted before submit (openRouterApiKeyJwe) — ask the user.',
       },
-      { kind: 'pin', description: 'A PIN stored as a secret — ask the user.' },
+      {
+        kind: 'pin',
+        description: `A PIN stored as a secret. ${PIN_AT_RUN_TIME}`,
+      },
     ],
   },
   'qi/oracle.storeConfig': {
@@ -1704,12 +1743,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixPassword',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix password, from the matrix.register output.',
       },
       {
         path: 'mnemonic',
         portType: 'mnemonic',
+        secret: true,
         required: true,
         description:
           'Oracle wallet mnemonic, from the wallet.generate output; stored as SECP_MNEMONIC.',
@@ -1717,12 +1758,14 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'matrixRecoveryPhrase',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'Matrix recovery phrase, from the matrix.register output.',
       },
       {
         path: 'pin',
         portType: 'string',
+        secret: true,
         required: true,
         description: 'PIN, from the form output; stored as MATRIX_VALUE_PIN.',
       },
@@ -1838,7 +1881,10 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
         description:
           'An OpenRouter API key, JWE-encrypted before submit (openRouterApiKeyJwe) — ask the user.',
       },
-      { kind: 'pin', description: 'A PIN stored as a secret — ask the user.' },
+      {
+        kind: 'pin',
+        description: `A PIN stored as a secret. ${PIN_AT_RUN_TIME}`,
+      },
     ],
   },
   'qi/oracle.deploy': {
@@ -1880,6 +1926,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'secrets',
         portType: 'object',
+        secret: true,
         description: 'Optional map of secret name to value passed to deploy.',
       },
     ],
@@ -1917,6 +1964,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'secrets',
         portType: 'object',
+        secret: true,
         description:
           'Optional map of secret name to value passed to deploy setup.',
       },
@@ -1955,6 +2003,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'secrets',
         portType: 'object',
+        secret: true,
         description:
           'Optional map of secret name to value passed to deploy start.',
       },
@@ -1997,7 +2046,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'userMessage',
         portType: 'string',
-        required: true,
+        required: false,
         description:
           'User-provided purpose text used to query the Domain Indexer (run() throws if both this and purposeDescription are empty).',
       },
@@ -2066,7 +2115,7 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
       {
         path: 'selectedEntityDid',
         portType: 'did',
-        required: true,
+        required: false,
         description:
           'DID of the parent entity; required when not skipping (run() throws if absent and skipped is falsy).',
       },
@@ -3499,6 +3548,57 @@ export const ACTION_METADATA: Record<string, OverlayEntry> = {
         portType: 'boolean',
         description:
           'Whether the checkbox should be checked; defaults to true when the step executes.',
+      },
+    ],
+  },
+
+  // ── DAO governance proposals ─────────────────────────────────────────────
+  // The registry ships these three without an input schema, so their inputs
+  // are unknown here. Summaries and requirements state only what the action
+  // manifest declares: a side effect, confirmation by default, a
+  // `flow/block/execute` capability, and the output fields.
+  'qi/governance.member-proposal': {
+    summary:
+      'Creates a DAO governance proposal that changes membership (the operation output is add, remove or update-weight). Side effect; asks for confirmation by default. Outputs the proposal id, status, proposal contract address, DAO core address, operation and creation time.',
+    whenToUse: [
+      'A flow needs to put a DAO membership change (add, remove or re-weight a member) to a governance proposal.',
+    ],
+    tags: ['governance', 'proposals', 'dao'],
+    requires: [
+      {
+        kind: 'inputsUndeclared',
+        description:
+          "The action registry does not declare this action's inputs — ask the user what the proposal needs; never invent DAO addresses, members or weights.",
+      },
+    ],
+  },
+  'qi/governance.settings-proposal': {
+    summary:
+      'Creates a DAO governance proposal that changes DAO settings. Side effect; asks for confirmation by default. Outputs the proposal id, status, proposal contract address, DAO core address and creation time.',
+    whenToUse: [
+      'A flow needs to put a change to DAO settings to a governance proposal.',
+    ],
+    tags: ['governance', 'proposals', 'dao'],
+    requires: [
+      {
+        kind: 'inputsUndeclared',
+        description:
+          "The action registry does not declare this action's inputs — ask the user what the proposal needs; never invent DAO addresses or settings.",
+      },
+    ],
+  },
+  'qi/governance.transaction.send-funds': {
+    summary:
+      'Creates a DAO governance proposal to send funds from the DAO to a recipient. Moves money once the proposal executes; side effect; asks for confirmation by default. Outputs the proposal id, status, proposal contract address, DAO core address, recipient and creation time.',
+    whenToUse: [
+      'A flow needs a DAO to vote on spending funds to a recipient address.',
+    ],
+    tags: ['governance', 'proposals', 'dao', 'payments'],
+    requires: [
+      {
+        kind: 'inputsUndeclared',
+        description:
+          "The action registry does not declare this action's inputs — ask the user for the DAO, the recipient and the amount; never invent addresses or amounts.",
       },
     ],
   },

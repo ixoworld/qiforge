@@ -93,6 +93,7 @@ describe('OpenRouterJevDecisionAdapter', () => {
         },
       },
       provenance: {
+        method: { kind: 'provider-native' },
         apiDialect: 'systemone-v1',
         requestedModel: 'typesafe/jev-1.13',
         returnedModel: 'typesafe/jev-1.13',

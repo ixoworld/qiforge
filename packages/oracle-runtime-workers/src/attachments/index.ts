@@ -5,6 +5,9 @@ export {
 } from './content-blocks';
 export {
   ALLOWED_URI_SCHEMES,
+  AttachmentRejectedError,
+  AttachmentTooLargeError,
+  DOWNLOAD_TIMEOUT_MS,
   downloadFromUrl,
   loadAttachmentBytes,
   MAX_FILE_SIZE,
@@ -83,3 +86,9 @@ export {
   type AttachmentViewSurface,
   type ViewAttachmentDeps,
 } from './view';
+export {
+  AttachmentTextCacheStore,
+  LOCAL_TEXT_EXTRACTION,
+  VIEW_CACHE_MAX_CHARS,
+  type AttachmentTextCache,
+} from './view-cache';

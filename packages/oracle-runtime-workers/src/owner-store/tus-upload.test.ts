@@ -38,6 +38,10 @@ interface FakeTusOptions {
   failPart?: number;
   /** Answer the n-th PATCH with this fatal status. */
   fatalPart?: { part: number; status: number };
+  /** Commit only the first `bytes` of the n-th PATCH, then drop the connection. */
+  partialCommit?: { part: number; bytes: number };
+  /** Make the n-th HEAD probe fail at the network level (1-based). */
+  failHead?: number;
 }
 
 function fakeTus(total: number, opts: FakeTusOptions = {}) {
@@ -47,6 +51,7 @@ function fakeTus(total: number, opts: FakeTusOptions = {}) {
   let partSize: number | null = null;
   let created = 0;
   let deleted = 0;
+  let heads = 0;
   const log: string[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -66,6 +71,10 @@ function fakeTus(total: number, opts: FakeTusOptions = {}) {
     }
     if (url.pathname !== '/api/fs/upload/sess-1')
       return new Response('nope', { status: 404 });
+    if (method === 'HEAD') {
+      heads += 1;
+      if (opts.failHead === heads) throw new TypeError('fetch failed');
+    }
     if (method === 'HEAD')
       return new Response(null, {
         status: 200,
@@ -94,6 +103,11 @@ function fakeTus(total: number, opts: FakeTusOptions = {}) {
         } else if (body.byteLength !== partSize) {
           return new Response('part size changed', { status: 400 });
         }
+      }
+      if (opts.partialCommit?.part === patches) {
+        received.set(body.subarray(0, opts.partialCommit.bytes), at);
+        offset += opts.partialCommit.bytes;
+        throw new TypeError('fetch failed: connection reset mid-part');
       }
       received.set(body, at);
       offset += body.byteLength;
@@ -224,6 +238,58 @@ describe('tusUpload', () => {
     expect(err).toBeInstanceOf(TusUploadError);
     expect((err as TusUploadError).message).toMatch(/declared/);
     expect(server.deleted).toBe(1);
+  });
+
+  it('refuses to resume when the server committed only part of a part', async () => {
+    const data = bytes(2 * PART + 10);
+    const server = fakeTus(data.byteLength, {
+      partialCommit: { part: 1, bytes: 1000 },
+    });
+    const err = await run(data, server).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TusUploadError);
+    expect((err as TusUploadError).message).toMatch(/cannot be resumed/);
+    expect(server.deleted).toBe(1);
+  });
+
+  it('a failed offset probe after a committed part never sends the part twice', async () => {
+    const data = bytes(2 * PART + 77);
+    // Part 1 commits but its response is lost, and the first probe fails:
+    // the resend is refused (offset moved), the next probe sees the commit.
+    const server = fakeTus(data.byteLength, {
+      dropResponseOfPart: 1,
+      failHead: 1,
+    });
+    const result = await run(data, server);
+    expect(result.parts).toBe(3);
+    expect(sameBytes(server.received, data)).toBe(true);
+    expect(result.fileId).toBe('file-new');
+  });
+
+  it('a length that is an exact multiple of the part size ends on a full final part', async () => {
+    const data = bytes(2 * PART);
+    const server = fakeTus(data.byteLength);
+    const result = await run(data, server);
+    expect(result).toMatchObject({ parts: 2, fileId: 'file-new' });
+    expect(server.patches).toBe(2);
+    expect(sameBytes(server.received, data)).toBe(true);
+  });
+
+  it('cuts fixed parts from source chunks that do not line up with them', async () => {
+    const data = bytes(2 * PART + 4321);
+    const server = fakeTus(data.byteLength);
+    const piece = 3 * 1024 * 1024 + 17;
+    const result = await run(data, server, {
+      source: () =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let at = 0; at < data.byteLength; at += piece)
+              controller.enqueue(data.slice(at, at + piece));
+            controller.close();
+          },
+        }),
+    });
+    expect(result.parts).toBe(3);
+    expect(sameBytes(server.received, data)).toBe(true);
   });
 
   it('sends a single part of any size when the whole file fits', async () => {

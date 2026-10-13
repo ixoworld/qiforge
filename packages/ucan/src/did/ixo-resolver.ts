@@ -9,7 +9,18 @@
 
 import type { DID } from '@ucanto/interface';
 import type { DIDKeyResolver, KeyDID } from '../types.js';
-import { base58Encode, hexDecode, base58Decode } from './utils.js';
+import {
+  base58Encode,
+  hexDecode,
+  base58Decode,
+  ed25519MultibaseToDidKey,
+} from './utils.js';
+import {
+  boundedResolution,
+  DEFAULT_RESOLUTION_CACHE_MAX_ENTRIES,
+  DEFAULT_RESOLUTION_TIMEOUT_MS,
+  type ResolutionResult,
+} from './bounded-resolution.js';
 
 /**
  * Configuration for the IXO DID resolver
@@ -25,7 +36,39 @@ export interface IxoDIDResolverConfig {
    * Optional fetch implementation (for testing or custom environments)
    */
   fetch?: typeof globalThis.fetch;
+
+  /**
+   * Upper bound for one resolution (request and response body), in
+   * milliseconds. The request is aborted with `AbortSignal.timeout()` and
+   * the resolution fails with a `DIDKeyResolutionError` once it elapses,
+   * also when a custom `fetch` ignores the signal.
+   * @default 3000
+   */
+  timeoutMs?: number;
+
+  /**
+   * Cache successful resolutions for this many milliseconds (0 = no cache).
+   * Failures are never cached. Concurrent resolutions of one DID share a
+   * single request while the cache is on. A key that is rotated out of or
+   * removed from the DID document stays trusted for up to this long.
+   * @default 0
+   */
+  cacheTtlMs?: number;
+
+  /**
+   * Maximum number of DIDs kept in the cache; the oldest entry is dropped
+   * when a new one would exceed it.
+   * @default 1000
+   */
+  cacheMaxEntries?: number;
 }
+
+/** Default upper bound for one did:ixo resolution. */
+export const DEFAULT_IXO_RESOLVER_TIMEOUT_MS = DEFAULT_RESOLUTION_TIMEOUT_MS;
+
+/** Default size bound of the did:ixo resolution cache. */
+export const DEFAULT_IXO_RESOLVER_CACHE_MAX_ENTRIES =
+  DEFAULT_RESOLUTION_CACHE_MAX_ENTRIES;
 
 /**
  * GraphQL query to fetch DID document from IXO indexer
@@ -106,21 +149,16 @@ function rawPublicKeyToDidKey(publicKeyBytes: Uint8Array): KeyDID | null {
  * Supports Ed25519 keys in multibase, hex, or base58 format
  */
 function publicKeyToDidKey(vm: VerificationMethod): KeyDID | null {
-  // console.log('vm', vm);
-  // Handle multibase format (preferred)
+  // Handle multibase format (preferred). Only an Ed25519 multicodec key
+  // (base58btc 'z' + 0xed01 + 32 bytes) is already in did:key form.
   if (vm.publicKeyMultibase) {
-    // Multibase Ed25519 public keys start with 'z' (base58btc)
-    // The did:key format for Ed25519 is did:key:z6Mk...
-    if (vm.publicKeyMultibase.startsWith('z')) {
-      // Already in the correct format for did:key
-      return `did:key:${vm.publicKeyMultibase}`;
+    const didKey = ed25519MultibaseToDidKey(vm.publicKeyMultibase);
+    if (!didKey) {
+      console.warn(
+        `[IxoDIDResolver] Skipping ${vm.id}: publicKeyMultibase is not an Ed25519 multicodec key`,
+      );
     }
-
-    // Handle other multibase prefixes if needed
-    console.warn(
-      `[IxoDIDResolver] Unsupported multibase prefix for ${vm.id}: ${vm.publicKeyMultibase.charAt(0)}`,
-    );
-    return null;
+    return didKey;
   }
 
   // Handle hex format
@@ -178,13 +216,25 @@ function publicKeyToDidKey(vm: VerificationMethod): KeyDID | null {
 export function createIxoDIDResolver(
   config: IxoDIDResolverConfig,
 ): DIDKeyResolver {
-  const fetchFn = config.fetch ?? globalThis.fetch;
+  const resolve = boundedResolution(
+    {
+      timeoutMs: config.timeoutMs ?? DEFAULT_IXO_RESOLVER_TIMEOUT_MS,
+      cacheTtlMs: config.cacheTtlMs ?? 0,
+      cacheMaxEntries:
+        config.cacheMaxEntries ?? DEFAULT_IXO_RESOLVER_CACHE_MAX_ENTRIES,
+    },
+    // The global fetch is read per lookup, so a resolver built at module
+    // load uses whatever fetch the environment provides when it runs.
+    (did, signal) =>
+      queryDidDocument(
+        config.fetch ?? globalThis.fetch,
+        config.indexerUrl,
+        did,
+        signal,
+      ),
+  );
 
-  return async (
-    did: DID,
-  ): Promise<
-    { ok: KeyDID[] } | { error: { name: string; did: string; message: string } }
-  > => {
+  return async (did: DID): Promise<ResolutionResult> => {
     // Only handle did:ixo
     if (!did.startsWith('did:ixo:')) {
       return {
@@ -195,95 +245,97 @@ export function createIxoDIDResolver(
         },
       };
     }
-
-    try {
-      // Query the IXO indexer
-      const response = await fetchFn(config.indexerUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: DID_DOCUMENT_QUERY,
-          variables: { id: did },
-        }),
-      });
-
-      if (!response.ok) {
-        return {
-          error: {
-            name: 'DIDKeyResolutionError',
-            did,
-            message: `Failed to fetch DID document: HTTP ${response.status}`,
-          },
-        };
-      }
-
-      const data = (await response.json()) as {
-        data?: { iids?: { nodes?: IxoDIDDocument[] } };
-        errors?: Array<{ message: string }>;
-      };
-
-      if (data.errors && data.errors.length > 0) {
-        return {
-          error: {
-            name: 'DIDKeyResolutionError',
-            did,
-            message: `GraphQL error: ${data.errors[0]?.message ?? 'Unknown error'}`,
-          },
-        };
-      }
-
-      const didDoc = data.data?.iids?.nodes?.[0];
-      if (!didDoc) {
-        return {
-          error: {
-            name: 'DIDKeyResolutionError',
-            did,
-            message: `DID document not found for ${did}`,
-          },
-        };
-      }
-
-      // Extract verification methods and convert to did:key
-      const keys: KeyDID[] = [];
-
-      for (const vm of didDoc.verificationMethod || []) {
-        // Look for Ed25519 verification methods
-        // Common types: Ed25519VerificationKey2018, Ed25519VerificationKey2020, JsonWebKey2020
-        if (
-          vm.type.includes('Ed25519') ||
-          vm.type === 'JsonWebKey2020' ||
-          vm.id.includes('signing')
-        ) {
-          const keyDid = publicKeyToDidKey(vm);
-          if (keyDid) {
-            keys.push(keyDid);
-          }
-        }
-      }
-
-      if (keys.length === 0) {
-        return {
-          error: {
-            name: 'DIDKeyResolutionError',
-            did,
-            message: `No valid Ed25519 verification methods found in DID document for ${did}`,
-          },
-        };
-      }
-
-      return { ok: keys };
-    } catch (error) {
-      return {
-        error: {
-          name: 'DIDKeyResolutionError',
-          did,
-          message: `Failed to resolve ${did}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        },
-      };
-    }
+    return resolve(did);
   };
+}
+
+/**
+ * Fetch a did:ixo document from the indexer and extract its Ed25519 keys.
+ */
+async function queryDidDocument(
+  fetchFn: typeof globalThis.fetch,
+  indexerUrl: string,
+  did: DID,
+  signal: AbortSignal,
+): Promise<ResolutionResult> {
+  // Query the IXO indexer
+  const response = await fetchFn(indexerUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      query: DID_DOCUMENT_QUERY,
+      variables: { id: did },
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    return {
+      error: {
+        name: 'DIDKeyResolutionError',
+        did,
+        message: `Failed to fetch DID document: HTTP ${response.status}`,
+      },
+    };
+  }
+
+  const data = (await response.json()) as {
+    data?: { iids?: { nodes?: IxoDIDDocument[] } };
+    errors?: Array<{ message: string }>;
+  };
+
+  if (data.errors && data.errors.length > 0) {
+    return {
+      error: {
+        name: 'DIDKeyResolutionError',
+        did,
+        message: `GraphQL error: ${data.errors[0]?.message ?? 'Unknown error'}`,
+      },
+    };
+  }
+
+  const didDoc = data.data?.iids?.nodes?.[0];
+  if (!didDoc) {
+    return {
+      error: {
+        name: 'DIDKeyResolutionError',
+        did,
+        message: `DID document not found for ${did}`,
+      },
+    };
+  }
+
+  // Extract verification methods and convert to did:key
+  const keys: KeyDID[] = [];
+
+  for (const vm of didDoc.verificationMethod || []) {
+    // Look for Ed25519 verification methods
+    // Common types: Ed25519VerificationKey2018, Ed25519VerificationKey2020, JsonWebKey2020
+    if (
+      vm.type.includes('Ed25519') ||
+      vm.type === 'JsonWebKey2020' ||
+      vm.id.includes('signing')
+    ) {
+      const keyDid = publicKeyToDidKey(vm);
+      if (keyDid) {
+        keys.push(keyDid);
+      }
+    }
+  }
+
+  if (keys.length === 0) {
+    return {
+      error: {
+        name: 'DIDKeyResolutionError',
+        did,
+        message: `No valid Ed25519 verification methods found in DID document for ${did}`,
+      },
+    };
+  }
+
+  return { ok: keys };
 }
 
 /**
@@ -319,5 +371,4 @@ export function createCompositeDIDResolver(
   };
 }
 
-// TODO: Add caching layer for resolved DIDs
 // TODO: Add support for resolving from local DID document store

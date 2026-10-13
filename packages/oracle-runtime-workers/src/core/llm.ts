@@ -3,6 +3,19 @@ import { LangChainTracer } from '@langchain/core/tracers/tracer_langchain';
 import { ChatOpenAI } from '@langchain/openai';
 import { Client } from 'langsmith';
 import type { ChatOpenAIFields, Logger, ModelRole } from '../plugin-api/types';
+import {
+  livenessFetchFor,
+  livenessModelFields,
+  type StreamLivenessSettings,
+} from '../llm/stream-liveness';
+import {
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
+  LLM_HEADERS_TIMEOUT_MS_DEFAULT,
+  LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
+  LLM_STREAM_RETRIES_DEFAULT,
+  LLM_STREAM_RETRIES_MAX,
+  TURN_TIMEOUT_MS_DEFAULT,
+} from './env';
 import { fetchOpenRouterPrices } from './openrouter-pricing';
 import type { LlmAdapter } from './runtime-context';
 import { NOOP_LOGGER } from './utils';
@@ -46,6 +59,13 @@ export interface ModelCatalogEntry {
   /** Whether the model accepts image input. */
   vision: boolean;
   /**
+   * The model's context window in tokens, as the OpenRouter catalogue lists
+   * it (the smaller of `context_length` and `top_provider.context_length`).
+   * The built-in fallback when the live catalogue cannot be reached
+   * (`BUILTIN_CONTEXT_WINDOWS`, `context-window.ts`).
+   */
+  contextTokens: number;
+  /**
    * Baseline list price, used when live OpenRouter pricing is unavailable
    * (see `openrouter-pricing.ts`). Raw provider price; markup applied later.
    */
@@ -82,12 +102,13 @@ export const TIER_DISPLAY: Record<
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   // ── $ Everyday — fast and cheap ─────────────────────────────────────────
   {
-    id: DEFAULT_MODEL_ID,
+    id: 'openai/gpt-5.4-nano',
     label: 'GPT-5.4 Nano',
     family: 'openai',
     tier: 'everyday',
     blurb: 'Fast and low-cost — great for everyday questions and quick help.',
     vision: true,
+    contextTokens: 400_000,
     baselinePrice: { inputPerMillion: 0.2, outputPerMillion: 1.2 },
   },
   {
@@ -97,6 +118,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'everyday',
     blurb: 'Speedy and inexpensive, and it can read images too.',
     vision: true,
+    contextTokens: 1_048_576,
     baselinePrice: { inputPerMillion: 0.25, outputPerMillion: 1.5 },
   },
   {
@@ -106,6 +128,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'everyday',
     blurb: 'Budget-friendly open model that handles general chat well.',
     vision: false,
+    contextTokens: 1_048_576,
     baselinePrice: { inputPerMillion: 0.2968, outputPerMillion: 0.9328 },
   },
   {
@@ -115,17 +138,19 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'everyday',
     blurb: 'Low-cost open model that can also look at images.',
     vision: true,
+    contextTokens: 262_144,
     baselinePrice: { inputPerMillion: 0.57, outputPerMillion: 2.85 },
   },
 
   // ── $$ Balanced — smarter, still affordable ─────────────────────────────
   {
-    id: 'openai/gpt-5.6-luna',
+    id: DEFAULT_MODEL_ID,
     label: 'GPT-5.6 Luna',
     family: 'openai',
     tier: 'balanced',
     blurb: 'A smart all-rounder that balances speed and reasoning.',
     vision: true,
+    contextTokens: 1_050_000,
     baselinePrice: { inputPerMillion: 1.0, outputPerMillion: 6.0 },
   },
   {
@@ -135,6 +160,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'balanced',
     blurb: 'Capable multimodal model for tougher, more detailed tasks.',
     vision: true,
+    contextTokens: 1_048_576,
     baselinePrice: { inputPerMillion: 1.5, outputPerMillion: 9.0 },
   },
   {
@@ -144,6 +170,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'balanced',
     blurb: 'Great at careful writing, reasoning and coding.',
     vision: true,
+    contextTokens: 1_000_000,
     baselinePrice: { inputPerMillion: 2.0, outputPerMillion: 10.0 },
   },
 
@@ -155,6 +182,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'top',
     blurb: 'Powerful open model for complex, long-running tasks.',
     vision: true,
+    contextTokens: 1_048_576,
     baselinePrice: { inputPerMillion: 3.0, outputPerMillion: 15.0 },
   },
   {
@@ -164,6 +192,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'top',
     blurb: "Anthropic's most capable model for hard problems.",
     vision: true,
+    contextTokens: 1_000_000,
     baselinePrice: { inputPerMillion: 5.0, outputPerMillion: 25.0 },
   },
   {
@@ -173,6 +202,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
     tier: 'top',
     blurb: "OpenAI's flagship for the most complex work.",
     vision: true,
+    contextTokens: 1_050_000,
     baselinePrice: { inputPerMillion: 5.0, outputPerMillion: 30.0 },
   },
 ];
@@ -239,7 +269,10 @@ export function getDefaultModelId(
   return override.length > 0 ? override : DEFAULT_MODEL_ID;
 }
 
-const MODEL_INPUT_CAPS: Record<string, ModelInputCapabilities> = {
+/** Native input capabilities per catalog id (every key is a `MODEL_CATALOG` id). */
+export const MODEL_INPUT_CAPS: Readonly<
+  Record<string, ModelInputCapabilities>
+> = {
   'openai/gpt-5.4-nano': {
     image: true,
     file: true,
@@ -396,12 +429,19 @@ export async function listModels(
         OPEN_ROUTER_API_KEY?: unknown;
       }
     | undefined,
+  options: {
+    /** Keeps a background price refresh alive past the response (`ctx.waitUntil`). */
+    waitUntil?: (work: Promise<unknown>) => void;
+  } = {},
 ): Promise<ModelListing> {
   const apiKey =
     typeof env?.OPEN_ROUTER_API_KEY === 'string' && env.OPEN_ROUTER_API_KEY
       ? env.OPEN_ROUTER_API_KEY
       : undefined;
-  const livePrices = await fetchOpenRouterPrices({ apiKey });
+  const livePrices = await fetchOpenRouterPrices({
+    apiKey,
+    ...(options.waitUntil ? { waitUntil: options.waitUntil } : {}),
+  });
   return listModelCatalog(env, livePrices);
 }
 
@@ -411,9 +451,18 @@ export async function listModels(
  * Every role the provider maps to a model id. The plugin-API exposes a lean
  * `ModelRole` (`'main' | 'subagent' | 'utility' | string`); the adapter falls
  * back to `subagent` for unrecognized strings.
+ *
+ * `summarizer` condenses a thread's history (the summarization middleware).
+ * It is always served by the turn's own `main` model, on the same lane: the
+ * same id (`DEFAULT_MODEL`, a per-request choice passed as `params.model`,
+ * or the BYO model), so the summary is written by a model whose window holds
+ * everything the turn holds, and a BYO turn's history never leaves the
+ * user's own provider. `routing` stays the cheap helper (capability router,
+ * other one-shot helper calls).
  */
 export type ProviderModelRole =
   | 'main'
+  | 'summarizer'
   | 'skills'
   | 'subagent'
   | 'vision'
@@ -424,9 +473,13 @@ export type ProviderModelRole =
   | 'custom_medium'
   | 'custom_low';
 
-/** OpenRouter role map. `main` is resolved through `getDefaultModelId`. */
+/**
+ * OpenRouter role map. `main` and `summarizer` are resolved through
+ * `getDefaultModelId` (the entries here are the catalog default).
+ */
 export const OPENROUTER_MODEL_MAP: Record<ProviderModelRole, string> = {
   main: DEFAULT_MODEL_ID,
+  summarizer: DEFAULT_MODEL_ID,
   skills: 'openai/gpt-5.6-luna',
   subagent: 'openai/gpt-5.6-luna',
   vision: 'google/gemini-3.1-flash-lite',
@@ -471,6 +524,8 @@ export const NEBIUS_BASE_URL = 'https://api.tokenfactory.nebius.com/v1/';
  */
 export const NEBIUS_MODEL_MAP: Record<ProviderModelRole, string> = {
   main: 'Qwen/Qwen3-235B-A22B-Thinking-2507',
+  // The main model, as on every lane.
+  summarizer: 'Qwen/Qwen3-235B-A22B-Thinking-2507',
   skills: 'Qwen/Qwen3-235B-A22B-Thinking-2507',
   subagent: 'Qwen/Qwen3-235B-A22B-Instruct-2507',
   vision: 'Qwen/Qwen2.5-VL-72B-Instruct',
@@ -481,6 +536,67 @@ export const NEBIUS_MODEL_MAP: Record<ProviderModelRole, string> = {
   'session-title': 'meta-llama/Meta-Llama-3.1-8B-Instruct',
   embedding: 'Qwen/Qwen3-Embedding-8B',
 };
+
+// ── Built-in context windows ────────────────────────────────────────────────
+
+/**
+ * Context windows (tokens) of the non-catalog model ids the runtime itself
+ * sends to a provider, keyed the way `catalogCandidates` (`context-window.ts`)
+ * looks a model up: an OpenRouter or Nebius id as is, a BYO provider-native
+ * id under its vendor prefix (`claude-haiku-4-5` → `anthropic/claude-haiku-4-5`).
+ *
+ * Unless noted, a number is OpenRouter's `/models` listing (the smaller of
+ * `context_length` and `top_provider.context_length`) as of 2026-10-09.
+ * Embedding models are left out: their input limit is not a chat window and
+ * no context budget is derived for them.
+ */
+const NON_CATALOG_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+  // OpenRouter role map and `main` fallbacks.
+  'openai/gpt-oss-120b': 131_072,
+  'meta-llama/llama-3.1-8b-instruct': 131_072,
+  'qwen/qwen3-235b-a22b-thinking-2507': 131_072,
+  'google/gemini-2.5-flash-lite': 1_048_576,
+  // BYO provider-native ids (`BYO_ROLE_MODELS`, `BYO_PROVIDER_MODELS` in
+  // `src/llm/byo-catalog.ts`) the curated catalog does not list. The
+  // ChatGPT lane resolves to the same `openai/…` keys as the OpenAI lane.
+  'openai/gpt-5.6-terra': 1_050_000,
+  'anthropic/claude-opus-5': 1_000_000,
+  // Anthropic's native id; OpenRouter lists it as `anthropic/claude-haiku-4.5`.
+  'anthropic/claude-haiku-4-5': 200_000,
+  'google/gemini-3.6-flash': 1_048_576,
+  // Not on OpenRouter under this id: Google's Gemini API model page
+  // (`gemini-3.1-pro-preview`, input token limit 1,048,576).
+  'google/gemini-3.1-pro': 1_048_576,
+  'deepseek/deepseek-v4-flash': 1_048_576,
+  'deepseek/deepseek-v4-pro': 1_024_000,
+  // Nebius role map. Nebius's own listing needs an API key; these are the
+  // model publishers' published windows (the Hugging Face model configs'
+  // `max_position_embeddings`; Meta's Llama 3.1 models, whose configs are
+  // gated, at Meta's published 128K, the 131,072 OpenRouter lists for
+  // Llama 3.1 8B). A deployment serving less is learned from its first
+  // overflow error.
+  'Qwen/Qwen3-235B-A22B-Thinking-2507': 262_144,
+  'Qwen/Qwen3-235B-A22B-Instruct-2507': 262_144,
+  'Qwen/Qwen3-30B-A3B-Instruct-2507': 262_144,
+  'Qwen/Qwen2.5-VL-72B-Instruct': 128_000,
+  'meta-llama/Llama-Guard-3-8B': 131_072,
+  'meta-llama/Meta-Llama-3.1-8B-Instruct': 131_072,
+};
+
+/**
+ * Every model id the runtime knows a context window for without asking
+ * anyone: the curated catalog's `contextTokens` plus
+ * {@link NON_CATALOG_CONTEXT_WINDOWS}. The context-window resolver falls
+ * back to it when the live OpenRouter catalogue is unreachable or does not
+ * list the id, before the deployment default.
+ */
+export const BUILTIN_CONTEXT_WINDOWS: ReadonlyMap<string, number> = new Map([
+  ...MODEL_CATALOG.map((entry): [string, number] => [
+    entry.id,
+    entry.contextTokens,
+  ]),
+  ...Object.entries(NON_CATALOG_CONTEXT_WINDOWS),
+]);
 
 /** Provider families the platform adapter can be built for. */
 export type LlmProvider = 'openrouter' | 'nebius';
@@ -495,6 +611,73 @@ export interface LlmEnv {
   LLM_PROVIDER?: LlmProvider;
   /** Required when `LLM_PROVIDER=nebius`. */
   NEBIUS_API_KEY?: string;
+  /** Model-call liveness budgets (defaults in `env.ts`). */
+  LLM_HEADERS_TIMEOUT_MS?: number;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: number;
+  LLM_STREAM_RETRIES?: number;
+  /** The turn deadline the stall retries are clamped to. */
+  TURN_TIMEOUT_MS?: number;
+}
+
+/** The liveness-related env keys, as validated config (numbers) or raw Worker env (strings). */
+export interface StreamLivenessEnv {
+  LLM_HEADERS_TIMEOUT_MS?: unknown;
+  LLM_STREAM_IDLE_TIMEOUT_MS?: unknown;
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS?: unknown;
+  LLM_STREAM_RETRIES?: unknown;
+  TURN_TIMEOUT_MS?: unknown;
+}
+
+/** A whole number at least `min` (a number or a numeric string), else undefined. */
+function wholeNumber(value: unknown, min: number): number | undefined {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : Number.NaN;
+  return Number.isInteger(n) && n >= min ? n : undefined;
+}
+
+/**
+ * The liveness budgets of a model lane: `platform` (OpenRouter / Nebius,
+ * idle `LLM_STREAM_IDLE_TIMEOUT_MS`) or `byo` (the user's own provider, idle
+ * `LLM_BYO_STREAM_IDLE_TIMEOUT_MS`). Unset or invalid values take the
+ * defaults in `env.ts`.
+ *
+ * Retries are clamped so every attempt the guard may make fits the turn:
+ * the largest count up to `LLM_STREAM_RETRIES` (at most 5) with
+ * `(retries + 1) × (headers + idle) ≤ TURN_TIMEOUT_MS`, never below 0. A
+ * retry that cannot finish before the deadline would only end in
+ * `budget_exhausted` after a wasted second request. With the defaults the
+ * platform lane keeps one retry (2 × 210 s) and BYO lanes get none (420 s).
+ */
+export function streamLivenessFromEnv(
+  env: StreamLivenessEnv,
+  lane: 'platform' | 'byo',
+): StreamLivenessSettings {
+  const headersTimeoutMs =
+    wholeNumber(env.LLM_HEADERS_TIMEOUT_MS, 1) ??
+    LLM_HEADERS_TIMEOUT_MS_DEFAULT;
+  const idleTimeoutMs =
+    lane === 'platform'
+      ? (wholeNumber(env.LLM_STREAM_IDLE_TIMEOUT_MS, 1) ??
+        LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT)
+      : (wholeNumber(env.LLM_BYO_STREAM_IDLE_TIMEOUT_MS, 1) ??
+        LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT);
+  const configured = Math.min(
+    wholeNumber(env.LLM_STREAM_RETRIES, 0) ?? LLM_STREAM_RETRIES_DEFAULT,
+    LLM_STREAM_RETRIES_MAX,
+  );
+  const turnTimeoutMs =
+    wholeNumber(env.TURN_TIMEOUT_MS, 1) ?? TURN_TIMEOUT_MS_DEFAULT;
+  const fitting =
+    Math.floor(turnTimeoutMs / (headersTimeoutMs + idleTimeoutMs)) - 1;
+  return {
+    headersTimeoutMs,
+    idleTimeoutMs,
+    retries: Math.max(0, Math.min(configured, fitting)),
+  };
 }
 
 /**
@@ -519,6 +702,29 @@ export function llmEnvFromWorkerEnv(env: Record<string, unknown>): LlmEnv {
     ORACLE_NAME: str('ORACLE_NAME'),
     LLM_PROVIDER: str('LLM_PROVIDER') === 'nebius' ? 'nebius' : 'openrouter',
     NEBIUS_API_KEY: str('NEBIUS_API_KEY'),
+    ...platformStreamLivenessEnv(env),
+  };
+}
+
+/** The platform lane's liveness keys of `env`, as numbers (unset when absent or invalid). */
+export function platformStreamLivenessEnv(
+  env: StreamLivenessEnv,
+): Pick<
+  LlmEnv,
+  | 'LLM_HEADERS_TIMEOUT_MS'
+  | 'LLM_STREAM_IDLE_TIMEOUT_MS'
+  | 'LLM_STREAM_RETRIES'
+  | 'TURN_TIMEOUT_MS'
+> {
+  const headers = wholeNumber(env.LLM_HEADERS_TIMEOUT_MS, 1);
+  const idle = wholeNumber(env.LLM_STREAM_IDLE_TIMEOUT_MS, 1);
+  const retries = wholeNumber(env.LLM_STREAM_RETRIES, 0);
+  const turnTimeout = wholeNumber(env.TURN_TIMEOUT_MS, 1);
+  return {
+    ...(headers !== undefined ? { LLM_HEADERS_TIMEOUT_MS: headers } : {}),
+    ...(idle !== undefined ? { LLM_STREAM_IDLE_TIMEOUT_MS: idle } : {}),
+    ...(retries !== undefined ? { LLM_STREAM_RETRIES: retries } : {}),
+    ...(turnTimeout !== undefined ? { TURN_TIMEOUT_MS: turnTimeout } : {}),
   };
 }
 
@@ -550,12 +756,17 @@ function asRecord(value: unknown): Record<string, unknown> {
  * Build the platform LLM adapter from validated config, selecting the
  * provider by `LLM_PROVIDER` (`openrouter` default | `nebius`). `ChatOpenAI`
  * speaks to both OpenAI-compatible endpoints over `fetch`, so it runs
- * unchanged on Workers. Every model is created with `maxRetries: 2`.
+ * unchanged on Workers. Every model is created with `maxRetries: 2` and the
+ * stream liveness guard (`src/llm/stream-liveness.ts`) as its `fetch`, with
+ * the platform lane's budgets (`LLM_HEADERS_TIMEOUT_MS`,
+ * `LLM_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`).
  *
  * OpenRouter role handling mirrors the Node provider:
  *   - `main` → `DEFAULT_MODEL` (or the catalog default), with the OpenRouter
  *     `models` fallback array and `provider.sort: 'latency'`; reasoning
  *     effort from `MAIN_REASONING_EFFORT`.
+ *   - `summarizer` → the same model as `main` (no fallback array), with the
+ *     helper calls' `medium` reasoning effort.
  *   - every other role → the fixed map; unknown roles fall back to `subagent`.
  *   - `params.model` always wins over the role default.
  *
@@ -574,11 +785,12 @@ export function createLlmAdapter(
 ): OpenRouterLlmAdapter {
   if (env.LLM_PROVIDER === 'nebius') return createNebiusAdapter(env, logger);
   const defaultModelId = getDefaultModelId(env);
+  const liveness = streamLivenessFromEnv(env, 'platform');
   const mainEffort = env.MAIN_REASONING_EFFORT ?? 'medium';
   const headers = openRouterAttributionHeaders(env.ORACLE_NAME);
 
   const modelForRole = (role: ModelRole): string => {
-    if (role === 'main') return defaultModelId;
+    if (role === 'main' || role === 'summarizer') return defaultModelId;
     return (
       OPENROUTER_MODEL_MAP[role as ProviderModelRole] ??
       OPENROUTER_MODEL_MAP.subagent
@@ -606,6 +818,9 @@ export function createLlmAdapter(
           }
         : {};
 
+    // `MAIN_REASONING_EFFORT` is for the reply only; helper calls (the
+    // summarizer included, although it runs on the main model) reason at
+    // `medium`.
     const reasoningKwargs = {
       effort: role === 'main' ? mainEffort : 'medium',
       summary: 'auto',
@@ -626,6 +841,7 @@ export function createLlmAdapter(
     return new ChatOpenAI({
       temperature: 0.8,
       maxRetries: 2,
+      ...livenessModelFields(liveness),
       apiKey: env.OPEN_ROUTER_API_KEY,
       ...rest,
       model,
@@ -633,6 +849,12 @@ export function createLlmAdapter(
       configuration: {
         baseURL: OPENROUTER_BASE_URL,
         ...configuration,
+        fetch: livenessFetchFor({
+          settings: liveness,
+          label: `openrouter ${String(role)} ${model}`,
+          logger,
+          callerFetch: configuration.fetch,
+        }),
         defaultHeaders: { ...headers, ...overrideHeaders },
       },
       modelKwargs: {
@@ -677,6 +899,7 @@ function createNebiusAdapter(
 
   const modelForRole = (role: ModelRole): string =>
     NEBIUS_MODEL_MAP[role as ProviderModelRole] ?? NEBIUS_MODEL_MAP.subagent;
+  const liveness = streamLivenessFromEnv(env, 'platform');
 
   const get = (role: ModelRole, params?: ChatOpenAIFields): BaseChatModel => {
     const {
@@ -691,17 +914,25 @@ function createNebiusAdapter(
     logger.debug?.(
       `[llm] creating model — provider=nebius, role=${String(role)}, model=${model}`,
     );
+    const configuration = asRecord(paramsConfiguration);
     return new ChatOpenAI({
       // Cold for classification (guard), platform default otherwise.
       temperature: role === 'guard' ? 0 : 0.8,
       maxRetries: 2,
+      ...livenessModelFields(liveness),
       apiKey,
       __includeRawResponse: true,
       ...rest,
       model,
       configuration: {
         baseURL: NEBIUS_BASE_URL,
-        ...asRecord(paramsConfiguration),
+        ...configuration,
+        fetch: livenessFetchFor({
+          settings: liveness,
+          label: `nebius ${String(role)} ${model}`,
+          logger,
+          callerFetch: configuration.fetch,
+        }),
       },
     });
   };

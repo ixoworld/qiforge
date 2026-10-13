@@ -3,15 +3,19 @@
  * lane behind payload retention (`retention.ts`). The same routing as the
  * turn pipeline applies: when the current model reads the modality the bytes
  * come back as a native content block, otherwise the helper (`vision` role)
- * model turns them into text; plain text is decoded locally.
+ * model turns them into text; plain text is decoded locally. Text results
+ * are cached per session (`deps.cache`); native views are not (they are the
+ * bytes themselves).
  */
 import { classifyAttachment } from './classify';
 import type { NativeAttachment } from './content-blocks';
 import { loadAttachmentBytes, type MatrixMediaSource } from './download';
 import { extractText, type ExtractionProvider } from './extract';
-import { categorizeFile, verifyMagicBytes } from './magic';
+import { categorizeFile, isPlainTextType, verifyMagicBytes } from './magic';
+import { attachmentRef } from './retention';
 import { routeAttachment } from './route';
 import { sanitizeAttachmentFilename } from './sanitize';
+import { LOCAL_TEXT_EXTRACTION, type AttachmentTextCache } from './view-cache';
 import type { AttachmentInput } from './types';
 import type { ModelInputCapabilities } from '../core/llm';
 import type { AttachmentMeta } from '../sqlite/serialization';
@@ -31,6 +35,11 @@ export interface ViewAttachmentDeps {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   logger: Logger;
+  /**
+   * The session's cache of extracted text (`AttachmentTextCacheStore`):
+   * a hit costs no download and no helper-model call.
+   */
+  cache?: AttachmentTextCache;
 }
 
 /** What the `view_attachment` tool sees on the host: session-scoped access. */
@@ -62,20 +71,25 @@ export async function viewAttachment(
   const attachment = toInput(meta);
   const kind = classifyAttachment(attachment);
   const strategy = routeAttachment(kind, deps.caps);
-  const { bytes, mimetype } = await loadAttachmentBytes(
-    attachment,
-    deps.roomId,
-    deps.source,
-    { fetchImpl: deps.fetchImpl, signal: deps.signal },
-  );
-  deps.logger.log(
-    `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
-  );
   if (strategy === 'send-native') {
+    const { bytes, mimetype, sniffed } = await loadAttachmentBytes(
+      attachment,
+      deps.roomId,
+      deps.source,
+      { fetchImpl: deps.fetchImpl, signal: deps.signal },
+    );
+    deps.logger.log(
+      `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
+    );
     const loaded = classifyAttachment({
       mimetype,
-      filename: attachment.filename,
+      filename: sniffed ? '' : attachment.filename,
     });
+    // Bytes that are not what the file claims never go back as a block.
+    if (loaded !== kind)
+      throw new Error(
+        `File content mismatch: claimed ${attachment.mimetype} but detected ${mimetype}`,
+      );
     return {
       kind: 'native',
       native: {
@@ -86,6 +100,7 @@ export async function viewAttachment(
       },
     };
   }
+
   const category = categorizeFile(attachment.mimetype);
   if (category === 'unsupported') {
     return {
@@ -93,6 +108,31 @@ export async function viewAttachment(
       text: `[File "${sanitizeAttachmentFilename(attachment.filename)}" (${attachment.mimetype}) is not a supported file type and could not be processed]`,
     };
   }
+  // Text extracted earlier in this session by the same model is final.
+  const ref = attachmentRef(meta);
+  const model =
+    category === 'document' && isPlainTextType(attachment.mimetype)
+      ? LOCAL_TEXT_EXTRACTION
+      : deps.extraction?.model;
+  const cacheKey = deps.cache && ref && model ? { ref, model } : undefined;
+  if (cacheKey) {
+    const cached = await deps.cache?.get(cacheKey.ref, cacheKey.model);
+    if (cached !== undefined) {
+      deps.logger.log(
+        `[attachments] view "${attachment.filename}" → cached text (${cacheKey.model})`,
+      );
+      return { kind: 'text', text: cached };
+    }
+  }
+  const { bytes, mimetype } = await loadAttachmentBytes(
+    attachment,
+    deps.roomId,
+    deps.source,
+    { fetchImpl: deps.fetchImpl, signal: deps.signal },
+  );
+  deps.logger.log(
+    `[attachments] view "${attachment.filename}" (${mimetype}) kind=${kind} → ${strategy} (${bytes.length} bytes)`,
+  );
   verifyMagicBytes(bytes, category, attachment, (m) =>
     deps.logger.warn(`[attachments] ${m}`),
   );
@@ -103,5 +143,6 @@ export async function viewAttachment(
     deps.extraction,
     { fetchImpl: deps.fetchImpl, signal: deps.signal },
   );
+  if (cacheKey) await deps.cache?.put(cacheKey.ref, cacheKey.model, text);
   return { kind: 'text', text };
 }

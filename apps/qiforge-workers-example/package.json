@@ -1,6 +1,6 @@
 {
   "name": "qiforge-workers-example",
-  "version": "0.0.1",
+  "version": "0.0.6",
   "description": "Reference QiForge oracle running on Cloudflare Workers (@ixo/oracle-runtime-workers).",
   "private": true,
   "type": "module",
@@ -26,7 +26,9 @@
     "test:e2e:transcript": "tsx test/e2e-transcript.ts",
     "test:e2e:threads": "tsx test/e2e-threads.ts",
     "test:e2e:group": "tsx test/e2e-group.ts",
-    "test:e2e:channels": "tsx test/e2e-channels.ts"
+    "test:e2e:channels": "tsx test/e2e-channels.ts",
+    "test:e2e:feedback": "tsx test/e2e-feedback.ts",
+    "test:e2e:pod": "tsx test/e2e-pod-creator.ts"
   },
   "dependencies": {
     "@ixo/matrix-bot-workers-sdk": "0.7.0",
@@ -36,6 +38,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260825.1",
+    "@ixo/ixo-transaction": "workspace:*",
     "@ixo/ucan": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^22.10.7",

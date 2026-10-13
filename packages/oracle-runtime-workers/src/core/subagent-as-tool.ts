@@ -38,6 +38,12 @@ export interface AgentSpec {
   systemPrompt: string;
   model?: Parameters<typeof createAgent>[0]['model'];
   middleware?: AgentMiddleware[];
+  /**
+   * Middlewares built per dispatch, placed before `middleware` (outermost
+   * after the dangling-call repair). `dispatch` names this dispatch: the
+   * parent's tool-call id, or a fresh id when the parent call has none.
+   */
+  dispatchMiddleware?: (dispatch: string) => AgentMiddleware[];
   userDid: string;
   sessionId: string;
   /** Appended to thread_id to scope the agent's conversation (e.g. a room ID). */
@@ -176,6 +182,41 @@ export function computeSubAgentToolName(subAgentName: string): string {
 }
 
 /**
+ * `middleware` as seen from inside one sub-agent dispatch: its tool hook
+ * sees each call id prefixed with `dispatch/`, everything else unchanged.
+ *
+ * Models number tool calls per conversation, and every dispatch of a
+ * sub-agent is a new conversation, so two dispatches in one run can emit the
+ * same call id. A middleware that records calls by run and call id (the
+ * durable-run marks, the execution attempt counter) would take the second
+ * dispatch's call for the first's. The tool itself, the messages and the
+ * results keep the model's own id; a result the middleware produces with
+ * the prefixed id is handed back with the original.
+ */
+export function scopeToolCallIds(
+  middleware: AgentMiddleware,
+  dispatch: string,
+): AgentMiddleware {
+  const wrap = middleware.wrapToolCall;
+  if (!wrap) return middleware;
+  return {
+    ...middleware,
+    wrapToolCall: async (request, handler) => {
+      const id = request.toolCall.id;
+      if (!id) return wrap(request, handler);
+      const scoped = `${dispatch}/${id}`;
+      const output = await wrap(
+        { ...request, toolCall: { ...request.toolCall, id: scoped } },
+        (inner) => handler({ ...inner, toolCall: { ...inner.toolCall, id } }),
+      );
+      if (ToolMessage.isInstance(output) && output.tool_call_id === scoped)
+        output.tool_call_id = id;
+      return output;
+    },
+  };
+}
+
+/**
  * Wraps an AgentSpec as a LangChain tool. When the parent agent calls this
  * tool with a task, an ephemeral agent runs (model + tools + systemPrompt)
  * and the final reply text is returned.
@@ -261,6 +302,7 @@ export function createSubagentAsTool(
           ...(spec.passthroughTools ?? []),
         ];
 
+        const dispatch = config.toolCall?.id || `run_${crypto.randomUUID()}`;
         const agent = createAgent({
           model: spec.model,
           tools: innerTools,
@@ -269,6 +311,7 @@ export function createSubagentAsTool(
           // call in one would poison its later invocations the same way.
           middleware: [
             createDanglingToolCallRepairMiddleware(),
+            ...(spec.dispatchMiddleware?.(dispatch) ?? []),
             ...(spec.middleware ?? []),
           ],
           checkpointer,

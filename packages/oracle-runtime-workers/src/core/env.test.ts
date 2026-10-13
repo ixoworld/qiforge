@@ -35,6 +35,54 @@ describe('composeEnvSchema', () => {
     );
     expect(schema.parse({ SHARED_KEY: '42' })).toEqual({ SHARED_KEY: 42 });
   });
+
+  it('treats one schema object declared by two plugins as shared, not a collision', () => {
+    const warn = vi.fn();
+    const chainId = z.string().default('pandora-8');
+    const first = makePlugin({
+      name: 'first',
+      configSchema: z.object({ SHARED_CHAIN_ID: chainId }),
+    });
+    const second = makePlugin({
+      name: 'second',
+      configSchema: z.object({ SHARED_CHAIN_ID: chainId }),
+    });
+    const { schema, pluginOwnership } = composeEnvSchema(
+      [first, second],
+      undefined,
+      { log: vi.fn(), warn, error: vi.fn() },
+    );
+    expect(warn).not.toHaveBeenCalled();
+    expect(pluginOwnership.get('SHARED_CHAIN_ID')).toBe('first');
+    expect(schema.parse({})).toEqual({ SHARED_CHAIN_ID: 'pandora-8' });
+  });
+
+  it('refuses a plugin that asks for the runtime-only feedback secrets', () => {
+    const nosy = makePlugin({
+      name: 'nosy',
+      configSchema: z.object({ FEEDBACK_HMAC_SECRET: z.string() }),
+    });
+    expect(() => composeEnvSchema([nosy], baseEnvSchema)).toThrow(
+      /'nosy' declares env key 'FEEDBACK_HMAC_SECRET'.*reserved for the runtime/,
+    );
+  });
+
+  it('never hands the feedback secrets to plugins through the validated config', () => {
+    const { schema, pluginOwnership } = composeEnvSchema([], baseEnvSchema);
+    const result = validateEnv(
+      schema,
+      {
+        ...makeEnv(),
+        FEEDBACK_LINEAR_API_KEY: 'lin_api_secret',
+        FEEDBACK_HMAC_SECRET: 'x'.repeat(32),
+      },
+      pluginOwnership,
+    );
+    expect(result.valid).toBe(true);
+    expect(
+      Object.keys(result.config).filter((k) => k.startsWith('FEEDBACK_')),
+    ).toEqual([]);
+  });
 });
 
 describe('validateEnv', () => {

@@ -16,7 +16,7 @@ export type EditorFailureCode =
   | 'block_not_found'
   | 'not_a_member'
   | 'no_document'
-  | 'flush_timeout'
+  | 'write_not_saved'
   | 'error';
 
 export interface EditorFailure {
@@ -120,17 +120,38 @@ export function notAMember(roomId: string): EditorFailure {
   };
 }
 
-/** The write was made locally but could not be confirmed as sent. */
-export function flushTimeout(roomId: string): EditorFailure {
+/**
+ * The write was made locally but its delivery could not be confirmed: the
+ * homeserver kept failing (5xx, timeouts, network) until the retry budget ran
+ * out, so the change may or may not have been stored. Not an access problem —
+ * the assistant may write here.
+ */
+export function writeNotSaved(roomId: string, detail: string): EditorFailure {
   return {
     ok: false,
-    code: 'flush_timeout',
+    code: 'write_not_saved',
     roomId,
     message:
-      `The edit could not be confirmed as saved within the time limit — treat ` +
-      `it as NOT applied. Tell the user the document service is not responding ` +
-      `and they can retry shortly. Do not claim the edit succeeded.`,
+      `The edit could not be confirmed as saved — the document service did ` +
+      `not acknowledge it (${detail}), so it may or may not have landed. Do ` +
+      `not claim it succeeded. It can be retried: in a later request, read ` +
+      `the document first, then apply it again only if it is missing.`,
   };
+}
+
+/**
+ * The homeserver refused the write outright (an oversized change, a revoked
+ * token, a malformed request): nothing was stored, and sending the same
+ * change again fails the same way. Not an access problem in the room.
+ */
+export function writeRefused(roomId: string, detail: string): EditorFailure {
+  return editorError(
+    `The edit was NOT saved — the document service refused it (${detail}). ` +
+      `Nothing was stored. Do not claim it succeeded, and do not send the ` +
+      `same change again: if it was a large change, split it into smaller ` +
+      `edits.`,
+    roomId,
+  );
 }
 
 /**

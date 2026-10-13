@@ -37,6 +37,24 @@ describe('readFlowDecisionContext authorization', () => {
     },
   );
 
+  it('denies a requester without a Matrix id before opening the document', async () => {
+    const ctx = makeRuntimeContext();
+    const getRoomState = vi.fn(ctx.matrix.getRoomState);
+    const botCredentials = vi.fn(ctx.matrix.botCredentials);
+    await expect(
+      readFlowDecisionContext(
+        {
+          ...ctx,
+          user: { ...ctx.user, matrixUserId: '' },
+          matrix: { ...ctx.matrix, getRoomState, botCredentials },
+        },
+        '!decision-anonymous:example.com',
+      ),
+    ).rejects.toMatchObject({ code: 'not_in_room' });
+    expect(getRoomState).not.toHaveBeenCalled();
+    expect(botCredentials).not.toHaveBeenCalled();
+  });
+
   it('does not open a flow for an already cancelled request', async () => {
     const ctx = makeRuntimeContext({
       abortSignal: AbortSignal.abort(new Error('cancelled')),

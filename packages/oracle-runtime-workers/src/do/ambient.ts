@@ -29,6 +29,7 @@ import type {
   MatrixEvent,
   OracleIdentity,
   RoomStateSnapshot,
+  UserKvSurface,
 } from '../plugin-api/types';
 import type { MatrixGatewayObject } from './contracts';
 import { type WorkersUcanService } from './ucan-service';
@@ -131,6 +132,44 @@ export function createBlobStore(
   };
 }
 
+/** Keys one blob sweep call reads at most (one `storage.list` page). */
+export const BLOB_SWEEP_PAGE = 128;
+
+/**
+ * Delete expired blobs (a plugin may store one and never read it back; a
+ * read deletes an expired blob, nothing else does). Bounded: one call reads
+ * at most `limit` entries in key order after `startAfter`, deletes the
+ * expired ones, and returns where the next call continues (`next`), or
+ * `null` once the end of the `blob:` keys was reached.
+ */
+export async function sweepExpiredBlobs(
+  storage: Pick<DurableObjectStorage, 'list' | 'delete'>,
+  options: { startAfter?: string; limit?: number; now?: number } = {},
+): Promise<{ deleted: number; next: string | null }> {
+  const limit = Math.max(1, Math.min(options.limit ?? BLOB_SWEEP_PAGE, 128));
+  const now = options.now ?? Date.now();
+  const page = await storage.list<{ expiresAt?: unknown }>({
+    prefix: 'blob:',
+    limit,
+    ...(options.startAfter !== undefined
+      ? { startAfter: options.startAfter }
+      : {}),
+  });
+  const expired: string[] = [];
+  let last: string | null = null;
+  for (const [key, entry] of page) {
+    last = key;
+    const expiresAt = entry?.expiresAt;
+    if (typeof expiresAt !== 'number' || expiresAt <= now) expired.push(key);
+  }
+  // `delete` takes at most 128 keys, the page size cap.
+  if (expired.length > 0) await storage.delete(expired);
+  return {
+    deleted: expired.length,
+    next: page.size < limit ? null : last,
+  };
+}
+
 export function createMatrixAdapter(
   gateway: DurableObjectStub<MatrixGatewayObject>,
 ): AmbientServices['matrix'] {
@@ -230,6 +269,8 @@ export interface CreateAmbientInput {
   /** Host task scheduler surface for this user, when tasks are enabled. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   preferences?: import('../plugin-api/types').UserPreferencesSurface;
+  /** `ctx.kv` over the user's working copy (`SqliteUserKv`). */
+  kv?: UserKvSurface;
   /** Host bridge to the user's browser (realtime channel), when terminated here. */
   frontend?: import('../plugin-api/types').FrontendCallSurface;
   /** Per-turn cleanup registry (see `RuntimeContext.onTurnEnd`). */
@@ -262,6 +303,7 @@ export function createAmbientServices(
   return {
     ...(input.tasks ? { tasks: input.tasks } : {}),
     ...(input.preferences ? { preferences: input.preferences } : {}),
+    ...(input.kv ? { kv: input.kv } : {}),
     ...(input.frontend ? { frontend: input.frontend } : {}),
     ...(input.onTurnEnd ? { onTurnEnd: input.onTurnEnd } : {}),
     ...(input.background ? { background: input.background } : {}),

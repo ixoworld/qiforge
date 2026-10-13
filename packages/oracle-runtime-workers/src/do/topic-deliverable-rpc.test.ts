@@ -90,15 +90,22 @@ function bootedObject(opts: { startThrows?: boolean } = {}) {
     flushInFlight: null,
     runs: null,
     alarmArm: Promise.resolve(),
+    housekeepingFloor: Infinity,
+    flushAt: null,
+    lastAccessAt: null,
+    persistedAccessAt: null,
     taskScheduler: scheduler,
   });
   const call = async (method: string, ...args: unknown[]): Promise<unknown> =>
     Reflect.apply(Reflect.get(host, method), host, args);
   const rpc = (command: unknown) =>
     call('topicDeliverable', { userDid: USER_DID }, 'op', command);
-  /** Make the last request look older than the idle window. */
-  const ageAccess = () =>
-    storage.values.set('meta:lastAccessAt', Date.now() - 6 * DAY_MS);
+  /** Make the last request look older than the idle window (stored and as this instance saw it). */
+  const ageAccess = () => {
+    const at = Date.now() - 6 * DAY_MS;
+    storage.values.set('meta:lastAccessAt', at);
+    Object.assign(host, { lastAccessAt: at, persistedAccessAt: at });
+  };
   return { host, call, rpc, storage, db, scheduler, ageAccess };
 }
 

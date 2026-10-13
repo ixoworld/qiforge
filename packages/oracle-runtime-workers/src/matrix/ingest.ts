@@ -165,7 +165,13 @@ export interface UserAttribution {
  * oracle room. When the speaker is DID-shaped but differs from the room
  * owner (a third member invited into the room), the SPEAKER wins — a turn
  * must never run inside another user's object. A non-DID sender in an
- * owner's room is attributed to the owner (legacy / non-DID accounts).
+ * owner's room is attributed to the owner (legacy / non-DID accounts), but
+ * only when the sender's account lives on the alias's own server: an
+ * account on any other server is someone else, whatever the room says.
+ *
+ * `alias` must be one the caller verified (the alias resolves to this very
+ * room on its homeserver — `room-alias.ts`): a room's canonical-alias state
+ * is written by its members and proves nothing on its own.
  */
 export function attributeUser(opts: {
   alias: string | null;
@@ -176,13 +182,12 @@ export function attributeUser(opts: {
   if (fromSender) {
     return { userDid: fromSender, server: serverNameOf(opts.sender) };
   }
-  const fromAlias = opts.alias
-    ? userDidFromRoomAlias(opts.alias, opts.oracleDid)
-    : null;
-  if (fromAlias && opts.alias) {
-    return { userDid: fromAlias, server: serverNameOf(opts.alias) };
-  }
-  return null;
+  if (!opts.alias) return null;
+  const fromAlias = userDidFromRoomAlias(opts.alias, opts.oracleDid);
+  const aliasServer = serverNameOf(opts.alias);
+  if (!fromAlias || !aliasServer) return null;
+  if (serverNameOf(opts.sender) !== aliasServer) return null;
+  return { userDid: fromAlias, server: aliasServer };
 }
 
 /** The DID `attributeUser` names, without the server it came from. */
@@ -220,11 +225,13 @@ export class IngestPipeline {
    * Offer a decrypted message. Returns the reason it was dropped, `'queued'`
    * when it entered the debounce buffer, or `'unverified'` when the sender's
    * registered homeserver is not known — neither queued nor dropped.
+   * `alias`: the room's verified alias as the caller just checked it (null
+   * for none); omitted, `canonicalAlias` is asked.
    */
-  offer(msg: InboundMessage): OfferOutcome {
+  offer(msg: InboundMessage, alias?: string | null): OfferOutcome {
     if (!msg.body.trim() && !msg.attachment) return 'empty';
     const attribution = attributeUser({
-      alias: this.deps.canonicalAlias(msg.roomId),
+      alias: alias === undefined ? this.deps.canonicalAlias(msg.roomId) : alias,
       sender: msg.sender,
       oracleDid: this.deps.oracleDid,
     });

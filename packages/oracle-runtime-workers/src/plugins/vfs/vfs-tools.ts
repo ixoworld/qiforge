@@ -3,6 +3,7 @@ import { tool } from '../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../plugin-api/types';
 import { vfsBearer } from './vfs-auth';
 import {
+  hasGlobWildcard,
   VfsClient,
   type VfsBatchItemResult,
   type VfsSearchHit,
@@ -191,6 +192,31 @@ async function withConflictRetry<T>(op: () => Promise<T>): Promise<T> {
   }
 }
 
+/** Appended wherever a path resolved to no file — folders never resolve. */
+const FILES_ONLY_NOTE =
+  'Paths must name files exactly — folders and wildcard patterns are not accepted (find files with `vfs_glob`).';
+
+/** The answer for a move/delete source that is not a file. */
+function notAFileMessage(path: string, verb: string): string {
+  return `No file at \`${path}\` to ${verb}. ${FILES_ONLY_NOTE}`;
+}
+
+/**
+ * Map `items` through `fn` with at most `width` calls in flight, preserving
+ * order. Each batch settles before the next starts.
+ */
+async function mapInBatches<T, R>(
+  items: readonly T[],
+  width: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += width) {
+    out.push(...(await Promise.all(items.slice(i, i + width).map(fn))));
+  }
+  return out;
+}
+
 export function invalidArgs(err: z.ZodError): string {
   return `Invalid arguments: ${err.issues
     .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
@@ -291,16 +317,32 @@ const editSchema = z.object({
 });
 
 const moveSchema = z.object({
-  from: z.string().describe('Absolute source path.'),
+  from: z.string().describe('Absolute path of the file to move.'),
   to: z.string().describe('Absolute destination path.'),
 });
+
+/**
+ * Most paths one `vfs_delete` call accepts. Each path costs one `/glob`
+ * lookup (plus, on a cold delegation cache, a UCAN-store fetch), so the cap
+ * keeps a call well inside the per-invocation subrequest budget.
+ */
+export const VFS_DELETE_MAX_PATHS = 50;
+
+/**
+ * Path lookups `vfs_delete` keeps in flight at once — the Workers limit on
+ * simultaneous open connections per invocation. Requests beyond it would
+ * queue inside `fetch` while their timeout is already running.
+ */
+export const VFS_PATH_LOOKUP_CONCURRENCY = 6;
 
 const deleteSchema = z.object({
   paths: z
     .array(z.string())
     .min(1)
-    .max(1000)
-    .describe('Absolute paths to move to trash.'),
+    .max(VFS_DELETE_MAX_PATHS)
+    .describe(
+      `Absolute paths of the files to move to trash (at most ${VFS_DELETE_MAX_PATHS} per call).`,
+    ),
 });
 
 const shareSchema = z.object({
@@ -529,13 +571,7 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
         withConflictRetry(async () => {
           // The worker addresses moves by file id, not source path — resolve it.
           const stat = await c.statByPath(from);
-          if (!stat) {
-            throw new VfsHttpError({
-              status: 404,
-              message: `No such file at ${from}`,
-              raw: '',
-            });
-          }
+          if (!stat) return notAFileMessage(from, 'move');
           const results = await c.move([{ id: stat.id, destinationPath: to }]);
           const failed = results.find((r) => !r.ok);
           if (failed) {
@@ -548,7 +584,7 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
     {
       name: 'vfs_move',
       description:
-        'Move or rename a file or folder. Confirm destructive actions with the user first.',
+        'Move or rename one file (`from` must be the exact path of a file; wildcards and folders are not accepted). To move a folder, find its files with `vfs_glob` and move each. Confirm destructive actions with the user first.',
       schema: moveSchema,
     },
   );
@@ -561,33 +597,32 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
         const err = validatePath(p);
         if (err) return `Invalid path "${p}": ${err}`;
       }
+      const paths = [...new Set(parsed.data.paths)];
       const c = client(ctx);
       return guard(ctx, {}, async () => {
-        const resolved = await Promise.all(
-          parsed.data.paths.map(async (p) => ({
-            path: p,
-            stat: await c.statByPath(p),
-          })),
+        const resolved = await mapInBatches(
+          paths,
+          VFS_PATH_LOOKUP_CONCURRENCY,
+          async (p) => ({ path: p, stat: await c.statByPath(p) }),
         );
         const missing = resolved
           .filter((x) => x.stat === null)
           .map((x) => x.path);
         const ids = resolved.flatMap((x) => (x.stat ? [x.stat.id] : []));
         if (ids.length === 0) {
-          return `No such file(s): ${parsed.data.paths.join(', ')}.`;
+          return `No such file(s): ${paths.join(', ')}. ${FILES_ONLY_NOTE}`;
         }
         const results = await c.trash(ids);
         let summary = summarizeBatch(results, 'Moved to trash', ids.length);
         if (missing.length > 0) {
-          summary += `\nNot found (skipped): ${missing.join(', ')}.`;
+          summary += `\nNot found (skipped): ${missing.join(', ')}. ${FILES_ONLY_NOTE}`;
         }
         return summary;
       });
     },
     {
       name: 'vfs_delete',
-      description:
-        'Move a file or folder to trash (recoverable). Confirm destructive actions with the user first. Deletes go to trash, not permanent.',
+      description: `Move files to trash (recoverable), up to ${VFS_DELETE_MAX_PATHS} per call. Each path must be the exact path of a file; wildcards and folders are not accepted — find a folder's files with \`vfs_glob\` and pass them. Confirm destructive actions with the user first. Deletes go to trash, not permanent.`,
       schema: deleteSchema,
     },
   );
@@ -603,6 +638,11 @@ export function createVfsTools(deps: CreateVfsToolsDeps): PluginTool[] {
       const c = client(ctx);
       return guard(ctx, { path }, async () => {
         const stat = await c.statByPath(path);
+        // A path that is not a file is published as a folder; a wildcard
+        // pattern is neither, so it is refused rather than sent on.
+        if (!stat && hasGlobWildcard(path)) {
+          return `No file at \`${path}\`. \`*\` and \`?\` are not wildcards here — give the exact path of one file or folder (find it with \`vfs_glob\`).`;
+        }
         const result = stat
           ? await c.setFilePublic(stat.id, pub)
           : await c.setFolderPublic(path, pub);

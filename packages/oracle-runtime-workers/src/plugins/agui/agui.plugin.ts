@@ -20,7 +20,11 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { logActionToMatrix } from '../portal/action-log';
+import { logFrontendAction } from '../portal/action-log';
+import {
+  describeDropped,
+  sanitizeDeclaredTools,
+} from '../portal/declared-tools';
 import { createAguiSubAgent } from './agui-agent';
 
 const manifest: PluginManifest = {
@@ -60,12 +64,16 @@ const AG_ACTION_SHAPE = z.object({
 
 const ARGS_RECORD_SHAPE = z.record(z.string(), z.unknown());
 
+/** The client's AG-UI actions; a name declared twice keeps its first descriptor. */
 export function parseAgActions(value: unknown): AgAction[] {
   if (!Array.isArray(value)) return [];
   const out: AgAction[] = [];
+  const names = new Set<string>();
   for (const entry of value) {
     const parsed = AG_ACTION_SHAPE.safeParse(entry);
-    if (parsed.success) out.push(parsed.data);
+    if (!parsed.success || names.has(parsed.data.name)) continue;
+    names.add(parsed.data.name);
+    out.push(parsed.data);
   }
   return out;
 }
@@ -95,24 +103,20 @@ export function buildActionTool(action: AgAction): PluginTool | null {
           `No browser is connected to session ${sessionId}, so AG-UI action ${action.name} cannot run — the client must open the realtime (socket.io) channel for this session first.`,
         );
       }
-      const args = parseArgs(input);
-      const requestId = ctx.session.requestId;
-      const toolCallId = `ag_${requestId || 'noreq'}_${crypto
-        .randomUUID()
-        .slice(0, 8)}`;
+      // The bridge makes every invocation unique (`ag_<requestId>:<uuid>`).
+      let invocationId: string | undefined;
       const result = await frontend.callAgAction({
         sessionId,
-        toolCallId,
+        toolCallId: `ag_${ctx.session.requestId || 'noreq'}`,
         toolName: action.name,
-        args,
+        args: parseArgs(input),
         timeoutMs: AG_ACTION_TIMEOUT_MS,
+        signal: ctx.abortSignal,
+        onInvocation: (id) => {
+          invocationId = id;
+        },
       });
-      logActionToMatrix(ctx, {
-        name: action.name,
-        args,
-        result,
-        success: true,
-      });
+      logFrontendAction(ctx, { name: action.name, invocationId, result });
       return JSON.stringify(result);
     },
     {
@@ -125,8 +129,17 @@ export function buildActionTool(action: AgAction): PluginTool | null {
   );
 }
 
+/**
+ * The AG-UI actions declared on this request that may become tools: invalid,
+ * duplicate and oversized declarations are dropped (`declared-tools.ts`).
+ */
 function readAgActions(rtCtx: RuntimeContext): AgAction[] {
-  return parseAgActions(rtCtx.history.state.agActions);
+  const { kept, dropped } = sanitizeDeclaredTools(
+    parseAgActions(rtCtx.history.state.agActions),
+  );
+  const summary = describeDropped('AG-UI actions', dropped);
+  if (summary) rtCtx.logger.warn(summary);
+  return kept;
 }
 
 export class AGUIPlugin extends OraclePlugin {

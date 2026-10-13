@@ -1,8 +1,14 @@
+import { ToolMessage } from '@langchain/core/messages';
 import { FakeListChatModel } from '@langchain/core/utils/testing';
 import { tool } from '@langchain/core/tools';
+import type { AgentMiddleware } from 'langchain';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { createSubagentAsTool, type AgentSpec } from './subagent-as-tool';
+import {
+  createSubagentAsTool,
+  scopeToolCallIds,
+  type AgentSpec,
+} from './subagent-as-tool';
 
 const noop = tool(async () => 'ok', {
   name: 'noop',
@@ -83,5 +89,59 @@ describe('createSubagentAsTool', () => {
     );
     controller.abort();
     await expect(pending).rejects.toThrow();
+  });
+
+  it("scopes the call id a tool middleware sees to the dispatch, and hands results back under the model's id", async () => {
+    const seen: string[] = [];
+    const recorder: AgentMiddleware = {
+      name: 'Recorder',
+      wrapToolCall: async (request, handler) => {
+        seen.push(String(request.toolCall.id));
+        if (request.toolCall.name === 'blocked')
+          return new ToolMessage({
+            content: 'not run',
+            tool_call_id: String(request.toolCall.id),
+            status: 'error',
+          });
+        return handler(request);
+      },
+    };
+    const scoped = scopeToolCallIds(recorder, 'p1');
+    const wrap = scoped.wrapToolCall;
+    if (!wrap) throw new Error('wrapToolCall missing');
+    const inner: string[] = [];
+    const handler = async (request: { toolCall: { id?: string } }) => {
+      inner.push(String(request.toolCall.id));
+      return new ToolMessage({
+        content: 'ran',
+        tool_call_id: String(request.toolCall.id),
+      });
+    };
+    const ran = (await wrap(
+      {
+        toolCall: { id: 's1', name: 'send', args: {} },
+        tool: undefined,
+        state: { messages: [] },
+        runtime: {},
+      } as never,
+      handler as never,
+    )) as ToolMessage;
+    expect(seen).toEqual(['p1/s1']);
+    expect(inner).toEqual(['s1']);
+    expect(ran.tool_call_id).toBe('s1');
+    const blocked = (await wrap(
+      {
+        toolCall: { id: 's1', name: 'blocked', args: {} },
+        tool: undefined,
+        state: { messages: [] },
+        runtime: {},
+      } as never,
+      handler as never,
+    )) as ToolMessage;
+    expect(blocked.tool_call_id).toBe('s1');
+    expect(blocked.content).toBe('not run');
+    // A middleware without a tool hook is passed through as it is.
+    const plain: AgentMiddleware = { name: 'Plain' };
+    expect(scopeToolCallIds(plain, 'p1')).toBe(plain);
   });
 });

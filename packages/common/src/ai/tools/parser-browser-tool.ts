@@ -1,5 +1,6 @@
 import { type IRunnableConfigWithRequiredFields } from '@ixo/matrix';
 import { tool } from '@langchain/core/tools';
+import { summarizeFrontendResult } from '../frontend-bridge/index.js';
 import { callBrowserTool } from './browser-tool-caller.js';
 import { logActionToMatrix } from './log-action-to-matrix.js';
 
@@ -20,20 +21,25 @@ export function parserBrowserTool(params: IParserBrowserToolParams) {
         throw new Error('sessionId is required');
       }
 
+      let invocationId: string | undefined;
       const result = await callBrowserTool({
         sessionId,
         toolName,
         args: input as Record<string, unknown>,
         toolCallId: `tc-${requestId}`,
+        onInvocation: (id) => {
+          invocationId = id;
+        },
       });
 
       if (configs?.matrix.roomId) {
+        // The action log is diagnostic: identifiers and status only, never
+        // the arguments or the result body (they carry user content).
         void logActionToMatrix(
           {
             name: toolName,
-            args: input as Record<string, unknown>,
-            result,
-            success: true,
+            args: {},
+            ...summarizeFrontendResult(result, invocationId),
           },
           {
             roomId: configs.matrix.roomId,

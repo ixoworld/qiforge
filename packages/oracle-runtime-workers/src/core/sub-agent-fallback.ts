@@ -55,8 +55,20 @@ export interface CollectSubAgentsInput {
    * in name collisions.
    */
   passthroughTools?: StructuredTool[];
-  /** Middlewares every sub-agent's inner graph gets in addition to its own (the durable-run tool marks). */
+  /**
+   * Runtime context appended to every sub-agent's system prompt (the turn's
+   * domain-context block), so a sub-agent works from what the main agent saw.
+   */
+  contextPrompt?: string;
+  /** Middlewares every sub-agent's inner graph gets in addition to its own. */
   extraMiddleware?: AgentMiddleware[];
+  /**
+   * Middlewares built for each dispatch of a sub-agent (see
+   * `AgentSpec.dispatchMiddleware`), placed before `extraMiddleware`: the
+   * main agent's tool middlewares scoped to the dispatch, and its
+   * repetition guard.
+   */
+  dispatchMiddleware?: (dispatch: string) => AgentMiddleware[];
   /** The turn's result cap, applied to every wrapped sub-agent tool (see `wrapPluginTool`). */
   resultCap?: ResultCapConfig;
   /**
@@ -88,6 +100,7 @@ function defaultToAgentSpec(
   fallbackContext: RunConfigContext | undefined,
   extraMiddleware?: AgentMiddleware[],
   resultCap?: ResultCapConfig,
+  dispatchMiddleware?: (dispatch: string) => AgentMiddleware[],
 ): AgentSpec {
   const systemPrompt =
     typeof subAgent.systemPrompt === 'function'
@@ -133,6 +146,7 @@ function defaultToAgentSpec(
     tools,
     model,
     middleware: [...(extraMiddleware ?? []), ...(subAgent.middlewares ?? [])],
+    ...(dispatchMiddleware ? { dispatchMiddleware } : {}),
     userDid,
     sessionId,
     logger: ambient.logger,
@@ -161,9 +175,11 @@ export async function collectSubAgentsWithFallback(
     fallbackContext,
     toAgentSpec,
     passthroughTools,
+    contextPrompt,
     subAgents,
     extraMiddleware,
     resultCap,
+    dispatchMiddleware,
   } = input;
 
   const entries = subAgents ?? (await registry.collect(buildCtx, rtCtx));
@@ -185,10 +201,17 @@ export async function collectSubAgentsWithFallback(
               fallbackContext,
               extraMiddleware,
               resultCap,
+              dispatchMiddleware,
             );
-        const withPassthrough: AgentSpec = passthroughTools?.length
-          ? { ...spec, passthroughTools }
+        const withContext: AgentSpec = contextPrompt
+          ? {
+              ...spec,
+              systemPrompt: `${spec.systemPrompt}\n\n${contextPrompt}`,
+            }
           : spec;
+        const withPassthrough: AgentSpec = passthroughTools?.length
+          ? { ...withContext, passthroughTools }
+          : withContext;
         return createSubagentAsTool(
           withPassthrough,
           withPassthrough.forwardTools

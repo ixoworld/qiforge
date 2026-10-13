@@ -4,8 +4,10 @@
 > The live runtime is `@ixo/oracle-runtime-workers`; its maintainer docs are in
 > [`packages/oracle-runtime-workers/docs/`](../packages/oracle-runtime-workers/docs/)
 > (architecture, configuration, operations, testing, node-parity). Only
-> `testing/test-harness.md` and the plans under `plans/` are still referenced by
-> Workers work.
+> `testing/test-harness.md`, the plans under `plans/`, and the pages Workers
+> work keeps current — `architecture/decisions.md` (the shared Decision module),
+> `architecture/request-admission.md` and `testing/channels-acceptance.md` —
+> are still referenced by Workers work.
 
 This directory is for people **growing the framework**. If you're building an oracle with QiForge (i.e. using the framework, not editing it), read the public docs at `ixo-docs/build-an-oracle/` instead.
 

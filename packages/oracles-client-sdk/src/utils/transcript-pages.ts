@@ -10,6 +10,7 @@
  * the cursor split so tool results fold into their reply again — a client
  * folds such a page in by message id.
  */
+import type { ChatCapabilities } from '../hooks/use-chat/v2/types.js';
 import { RequestError } from './request.js';
 
 export const DEFAULT_HISTORY_PAGE_SIZE = 20;
@@ -22,6 +23,8 @@ export interface TranscriptPage<M extends { id: string }> {
   nextCursor: string | null;
   hasOlder: boolean;
   hasNewer: boolean;
+  /** Optional features the runtime advertises (absent on older runtimes). */
+  capabilities?: ChatCapabilities;
 }
 
 export interface HistoryPage<
@@ -73,10 +76,16 @@ export async function fetchHistoryPage<M extends { id: string }>(
     // Older or newer than "everything" is nothing.
     if (query.before || query.after)
       return { messages: [], ...EMPTY, legacy: true };
-    const { messages } = await request<{ messages: M[] }>(
-      `${apiUrl}/messages/${sessionId}`,
-    );
-    return { messages, ...EMPTY, legacy: true };
+    const { messages, capabilities } = await request<{
+      messages: M[];
+      capabilities?: ChatCapabilities;
+    }>(`${apiUrl}/messages/${sessionId}`);
+    return {
+      messages,
+      ...EMPTY,
+      legacy: true,
+      ...(capabilities && { capabilities }),
+    };
   }
 }
 

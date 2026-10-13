@@ -12,9 +12,15 @@ const ROOM = '!oracle:example.org';
 
 function serviceHolding(values: Record<string, string>) {
   const reads: string[][] = [];
+  let indexReads = 0;
+  const pick = (names: string[]) =>
+    Object.fromEntries(
+      names.filter((n) => n in values).map((n) => [n, values[n] ?? '']),
+    );
   const service = {
     getIndex: async (roomId: string) => {
       expect(roomId).toBe(ROOM);
+      indexReads += 1;
       return Object.keys(values).map((name, i) => ({
         name,
         eventId: `$${i}`,
@@ -24,12 +30,22 @@ function serviceHolding(values: Record<string, string>) {
     getValues: async (roomId: string, names: string[]) => {
       expect(roomId).toBe(ROOM);
       reads.push(names);
-      return Object.fromEntries(
-        names.filter((n) => n in values).map((n) => [n, values[n] ?? '']),
-      );
+      return pick(names);
     },
-  } satisfies Pick<WorkersSecretsService, 'getIndex' | 'getValues'>;
-  return { service, reads };
+    getValuesFor: async (
+      roomId: string,
+      index: ReadonlyArray<{ name: string; eventId: string }>,
+    ) => {
+      expect(roomId).toBe(ROOM);
+      const names = index.map((entry) => entry.name);
+      reads.push(names);
+      return pick(names);
+    },
+  } satisfies Pick<
+    WorkersSecretsService,
+    'getIndex' | 'getValues' | 'getValuesFor'
+  >;
+  return { service, reads, indexReads: () => indexReads };
 }
 
 describe('createSecretsAdapter', () => {
@@ -63,6 +79,14 @@ describe('createSecretsAdapter', () => {
     expect(reads).toEqual([['GITHUB_TOKEN']]);
     expect(await adapter.getValues(ROOM, byo)).toEqual({});
     expect(reads).toHaveLength(1);
+  });
+
+  it('getAll returns every user secret from one index read and never reads the runtime credentials', async () => {
+    const { service, reads, indexReads } = serviceHolding(stored);
+    const adapter = createSecretsAdapter(service);
+    expect(await adapter.getAll?.(ROOM)).toEqual({ GITHUB_TOKEN: 'ghp_user' });
+    expect(indexReads()).toBe(1);
+    expect(reads).toEqual([['GITHUB_TOKEN']]);
   });
 
   it('reserves every BYO secret name, the ChatGPT OAuth tokens included', () => {

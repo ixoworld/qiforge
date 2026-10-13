@@ -1,5 +1,5 @@
-import { Authz } from '@ixo/oracles-chain-client/react';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { authzConfigQueryOptions } from '../../hooks/authz-config-query.js';
 import MatrixReactSdkClient from '../../matrix/matrix-client.js';
 
 import { type LanguageCode, type VoiceName } from '@ixo/matrix';
@@ -32,19 +32,9 @@ export const useLiveAgent = (
     [wallet?.matrix.accessToken],
   );
 
-  const { data: authzConfig } = useQuery({
-    queryKey: ['authz-config', oracleDid],
-    queryFn: async () => {
-      const config = await Authz.getOracleAuthZConfig({
-        oracleDid,
-        granterAddress: wallet?.address ?? '',
-        matrixAccessToken: wallet?.matrix.accessToken,
-        matrixHomeServer: wallet?.matrix.homeServer,
-      });
-      return config;
-    },
-    enabled: Boolean(wallet?.address),
-  });
+  const { data: authzConfig } = useQuery(
+    authzConfigQueryOptions(oracleDid, wallet),
+  );
 
   const { data: oracleRoomId } = useQuery({
     queryKey: ['oracle-room-id', authzConfig?.granteeAddress, wallet?.did],

@@ -316,6 +316,13 @@ export function estimateTokensApprox(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/**
+ * Size above which a plugin's `operatingGuide` is reported at boot (chars/4
+ * tokens). The guide rides in the system prompt of every turn that has the
+ * plugin loaded; the bundled flows guide is about 2,000.
+ */
+export const OPERATING_GUIDE_WARN_TOKENS = 3_000;
+
 function formatExample(ex: ManifestExample): string {
   const argSummary =
     ex.args && Object.keys(ex.args).length > 0

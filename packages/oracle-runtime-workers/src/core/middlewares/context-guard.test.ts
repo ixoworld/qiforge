@@ -1,5 +1,8 @@
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
+import { tool } from '@langchain/core/tools';
+import { convertToOpenAITool } from '@langchain/core/utils/function_calling';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { contextBudgetFor } from '../context-budget';
 import {
   type ContextGuardEvent,
@@ -10,6 +13,17 @@ import {
   PRUNE_SOFT,
   pruneToolResults,
 } from './context-guard';
+
+vi.mock('@langchain/core/utils/function_calling', async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import('@langchain/core/utils/function_calling')
+    >();
+  return {
+    ...original,
+    convertToOpenAITool: vi.fn(original.convertToOpenAITool),
+  };
+});
 
 const silent = {
   log: () => undefined,
@@ -116,6 +130,36 @@ describe('createContextGuardMiddleware', () => {
       handler as never,
     );
   };
+
+  it('sizes a tool schema once, not again on every turn that binds the same tool', async () => {
+    const convert = vi.mocked(convertToOpenAITool);
+    convert.mockClear();
+    const schema = z.object({ city: z.string(), days: z.number() });
+    // Every turn binds fresh tool objects over the plugin's own schema.
+    const bound = (description: string) =>
+      tool(async () => 'ok', { name: 'get_forecast', description, schema });
+    const turnWith = async (description: string) => {
+      const mw = createContextGuardMiddleware({ budget, logger: silent });
+      const wrap = mw.wrapModelCall;
+      if (!wrap) throw new Error('wrapModelCall missing');
+      await (wrap as (r: never, h: never) => Promise<unknown>)(
+        {
+          messages: turn(1, 100),
+          systemMessage: { content: 'sys' },
+          tools: [bound(description)],
+          runtime: {},
+        } as never,
+        (async () => 'ok') as never,
+      );
+    };
+    await turnWith('Forecast.');
+    await turnWith('Forecast.');
+    await turnWith('Forecast.');
+    expect(convert).toHaveBeenCalledTimes(1);
+    // A different description is a different schema payload.
+    await turnWith('Weather forecast.');
+    expect(convert).toHaveBeenCalledTimes(2);
+  });
 
   it('passes a small request through unchanged', async () => {
     const mw = createContextGuardMiddleware({ budget, logger: silent });

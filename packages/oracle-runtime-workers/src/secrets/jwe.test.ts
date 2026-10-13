@@ -55,6 +55,29 @@ describe('jwe (ECDH-ES+A256KW / A256GCM compact JWE)', () => {
     await expect(decryptJwe(FIXTURE_JWE, wrongJwk)).rejects.toThrow();
   });
 
+  it('refuses a ciphertext, tag or protected header that was tampered with', async () => {
+    const parts = FIXTURE_JWE.split('.');
+    /** Flip one base64url character of part `i` to another valid one. */
+    const tamper = (i: number): string =>
+      parts
+        .map((p, j) => {
+          if (j !== i) return p;
+          const at = Math.floor(p.length / 2);
+          const swapped = p[at] === 'A' ? 'B' : 'A';
+          return p.slice(0, at) + swapped + p.slice(at + 1);
+        })
+        .join('.');
+    // 0: protected header (also the AAD), 3: ciphertext, 4: tag.
+    for (const i of [0, 3, 4])
+      await expect(
+        decryptJwe(tamper(i), FIXTURE_PRIVATE_JWK),
+        `part ${i}`,
+      ).rejects.toThrow();
+    await expect(
+      decryptJwe(parts.slice(0, 4).join('.'), FIXTURE_PRIVATE_JWK),
+    ).rejects.toThrow();
+  });
+
   describe('parseJwk', () => {
     it('parses a valid private JWK JSON', () => {
       const jwk = parseJwk(JSON.stringify(FIXTURE_PRIVATE_JWK));

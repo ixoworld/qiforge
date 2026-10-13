@@ -73,6 +73,18 @@ function json404(): Response {
   });
 }
 
+/** A fetch that never answers, rejecting only when its signal aborts — what a stalled host looks like. */
+function stalledFetch(): typeof fetch {
+  return (_input, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) return;
+      signal.addEventListener('abort', () => reject(signal.reason), {
+        once: true,
+      });
+    });
+}
+
 function makeService(
   secrets: ByoSecretsBackend,
   opts?: { enabled?: boolean; roomId?: string | null },
@@ -116,6 +128,25 @@ describe('WorkersByoService', () => {
       enabled: false,
       providers: [],
     });
+  });
+
+  it('resolves credentials through getValues when the backend has no getValuesFor', async () => {
+    const secrets = makeSecrets();
+    secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user-key');
+    secrets.values.set('UNRELATED_SECRET', 'ignored');
+    const requested: string[][] = [];
+    const getValues = secrets.getValues.bind(secrets);
+    secrets.getValues = async (roomId, names) => {
+      requested.push(names);
+      return getValues(roomId, names);
+    };
+
+    expect('getValuesFor' in secrets).toBe(false);
+    await expect(makeService(secrets).getCredentials(DID)).resolves.toEqual({
+      openai: { provider: 'openai', apiKey: 'sk-user-key' },
+    });
+    // Only the BYO names from the index it already read are requested.
+    expect(requested).toEqual([[BYO_SECRET_NAMES.openai]]);
   });
 
   it('reads credentials from the room secrets and caches them', async () => {
@@ -332,6 +363,24 @@ describe('WorkersByoService', () => {
       });
     });
 
+    it('gives up on a provider that does not answer', async () => {
+      const secrets = makeSecrets();
+      secrets.values.set(BYO_SECRET_NAMES.openai, 'sk-user');
+      const service = new WorkersByoService({
+        probeFetch: async () => json404(),
+        enabled: true,
+        secrets,
+        resolveRoomId: async () => ROOM,
+        store: makeStore(),
+        keyCheckTimeoutMs: 20,
+      });
+      vi.stubGlobal('fetch', stalledFetch());
+      await expect(service.validate(DID, 'openai')).resolves.toMatchObject({
+        valid: false,
+        error: expect.stringMatching(/^Could not reach the provider/),
+      });
+    });
+
     it('reports not-connected without a stored credential', async () => {
       const service = makeService(makeSecrets());
       await expect(service.validate(DID, 'gemini')).resolves.toEqual({
@@ -412,6 +461,19 @@ describe('WorkersByoService — ChatGPT backend reachability', () => {
       const turn = await service.resolveForTurn({ userDid: DID });
       expect(turn?.provider).toBe('chatgpt');
     }
+  });
+
+  it('a probe that gets no answer counts as reachable and does not hold the turn', async () => {
+    const service = new WorkersByoService({
+      enabled: true,
+      secrets: connectedChatGpt(),
+      resolveRoomId: async () => ROOM,
+      store: makeStore(),
+      probeFetch: stalledFetch(),
+      probeTimeoutMs: 20,
+    });
+    const turn = await service.resolveForTurn({ userDid: DID });
+    expect(turn?.provider).toBe('chatgpt');
   });
 
   it('probes the configured backend proxy with the gate header', async () => {

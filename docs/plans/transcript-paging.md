@@ -36,7 +36,9 @@ useful on its own:
   not, so the cursor is resolved to its `(created_at, rowid)` position at
   query time. An unknown cursor is a 400; an unknown session is an empty
   page (a 404 from this route means the runtime does not page).
-- Response: `{ messages, prevCursor, nextCursor, hasOlder, hasNewer }`.
+- Response: `{ messages, prevCursor, nextCursor, hasOlder, hasNewer }`; each
+  message is a `MessageDto`, `createdAt` included (ISO 8601, the row's
+  `created_at`).
   `limit` is 1–100 (default 20).
 - Cost: one indexed range read per 80 rows, plus one row lookup per cursor.
   The summarizer's bookkeeping row is skipped and never a turn boundary.

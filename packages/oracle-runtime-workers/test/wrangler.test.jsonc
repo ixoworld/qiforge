@@ -16,6 +16,11 @@
     "jsdom": "../src/plugins/editor/jsdom-shim.ts",
   },
   // Local (miniflare) R2 buckets for the page-tier and artefact tests.
+  // The worker bound to itself: tests reach the stub routes of `worker.ts`
+  // through workerd's real `fetch` (see `domainContextStub`).
+  "services": [
+    { "binding": "LOOPBACK", "service": "oracle-runtime-workers-test" },
+  ],
   "r2_buckets": [
     { "binding": "TIER_TEST", "bucket_name": "tier-test" },
     { "binding": "ARTIFACT_TEST", "bucket_name": "artifact-test" },
@@ -29,6 +34,7 @@
       { "name": "RUN_STORE_TEST", "class_name": "RunStoreTestDO" },
       { "name": "RESULT_STORE_TEST", "class_name": "ResultStoreTestDO" },
       { "name": "ARTIFACT_STORE_TEST", "class_name": "ArtifactStoreTestDO" },
+      { "name": "FEEDBACK_TEST", "class_name": "FeedbackTestDO" },
     ],
   },
   "migrations": [
@@ -40,5 +46,6 @@
     { "tag": "v3", "new_sqlite_classes": ["ResultStoreTestDO"] },
     { "tag": "v4", "new_sqlite_classes": ["ChannelTurnsTestDO"] },
     { "tag": "v5", "new_sqlite_classes": ["ArtifactStoreTestDO"] },
+    { "tag": "v6", "new_sqlite_classes": ["FeedbackTestDO"] },
   ],
 }

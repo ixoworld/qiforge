@@ -1,134 +1,164 @@
+import { DecisionNotApplicableError } from './errors.js';
 import type {
-  ChoiceDecisionQuestion,
-  DecisionQuestion,
+  DecisionAdapter,
+  DecisionAnswer,
+  DecisionProviderOptions,
   DecisionRequest,
 } from './types.js';
+import {
+  validateDecisionProviderResult,
+  validateDecisionRequest,
+} from './validation.js';
 
-export type SemanticConformanceVariantKind =
-  | 'baseline'
-  | 'option-permutation'
-  | 'opaque-option-ids'
-  | 'rubric-paraphrase'
-  | 'no-evidence'
-  | 'missing-question';
+export interface DecisionQuestionIsolationObservation {
+  question: string;
+  kind: DecisionAnswer['kind'];
+  /**
+   * Boolean: the side of 0.5 changed. Choice: the selected option changed.
+   * Absent for ordinal questions, whose movement is `scoreDelta`.
+   */
+  selectedChanged?: boolean;
+  /** Largest absolute difference across the question's probability map. */
+  maxProbabilityDelta?: number;
+  /** Ordinal only: absolute difference between the packed and isolated score. */
+  scoreDelta?: number;
+}
 
-export interface SemanticConformanceVariant {
-  kind: SemanticConformanceVariantKind;
-  request: DecisionRequest;
-  /** Maps transformed option ids back to baseline ids. */
-  optionIdMap?: Record<string, string>;
+export interface DecisionQuestionIsolationReport {
+  observations: DecisionQuestionIsolationObservation[];
+  /** Largest `maxProbabilityDelta` across all questions, when any has one. */
+  maxProbabilityDelta?: number;
+  /** Questions whose selection flipped between packed and isolated runs. */
+  changedSelections: string[];
 }
 
 /**
- * Generates deterministic probes for semantic stability. The probes do not
- * declare a provider conformant by themselves; callers must compare outputs
- * against workload-specific tolerances and labelled truth.
+ * Conformance probe for packed-question interference.
+ *
+ * Evaluates the whole request once, then every question alone against the
+ * same state, and reports how far each answer moved. It sets no pass/fail
+ * tolerance: that is a workload or profile policy. It calls the adapter
+ * `1 + questions` times, so run it against test or staging providers, not on
+ * a live request path. Provider output is validated exactly as the runtime
+ * validates it, and a request declared inapplicable or evidence-incomplete is
+ * refused before any provider call.
  */
-export function buildSemanticConformanceVariants(
+export async function measureDecisionQuestionIsolation(
+  adapter: DecisionAdapter,
   request: DecisionRequest,
-  options: {
-    paraphraseInstructions?: (instructions: string) => string;
-    noEvidenceState?: DecisionRequest['state'];
-  } = {},
-): SemanticConformanceVariant[] {
-  const variants: SemanticConformanceVariant[] = [
-    { kind: 'baseline', request },
-    {
-      kind: 'option-permutation',
-      request: {
-        ...request,
-        questions: mapQuestions(request.questions, (question) =>
-          question.kind === 'choice'
-            ? {
-                ...question,
-                options: Object.fromEntries(
-                  Object.entries(question.options).reverse(),
-                ),
-              }
-            : question,
-        ),
-      },
-    },
-  ];
-
-  const opaque = opaqueChoiceQuestions(request.questions);
-  variants.push({
-    kind: 'opaque-option-ids',
-    request: { ...request, questions: opaque.questions },
-    optionIdMap: opaque.optionIdMap,
-  });
-
-  if (options.paraphraseInstructions) {
-    variants.push({
-      kind: 'rubric-paraphrase',
-      request: {
-        ...request,
-        questions: mapQuestions(request.questions, (question) => ({
-          ...question,
-          instructions: options.paraphraseInstructions!(
-            question.instructions,
-          ),
-        })),
-      },
-    });
+  options?: DecisionProviderOptions,
+): Promise<DecisionQuestionIsolationReport> {
+  validateDecisionRequest(request);
+  if (
+    request.applicability &&
+    (!request.applicability.applicable ||
+      !request.applicability.evidenceComplete)
+  ) {
+    throw new DecisionNotApplicableError(request.applicability);
   }
 
-  variants.push({
-    kind: 'no-evidence',
-    request: {
-      ...request,
-      state: options.noEvidenceState ?? null,
-    },
-  });
+  const packed = validateDecisionProviderResult(
+    request,
+    await adapter.evaluate(request, options),
+  );
 
-  variants.push({
-    kind: 'missing-question',
-    request: {
+  const observations: DecisionQuestionIsolationObservation[] = [];
+  for (const [question, definition] of Object.entries(request.questions)) {
+    const isolatedRequest: DecisionRequest = {
       ...request,
-      questions: mapQuestions(request.questions, (question) => ({
-        ...question,
-        instructions: 'Choose only from the declared answer space.',
-      })),
-    },
-  });
+      questions: { [question]: definition },
+    };
+    const isolated = validateDecisionProviderResult(
+      isolatedRequest,
+      await adapter.evaluate(isolatedRequest, options),
+    );
+    observations.push(
+      compareAnswers(
+        question,
+        packed.answers[question],
+        isolated.answers[question],
+      ),
+    );
+  }
 
-  return variants;
+  const probabilityDeltas = observations.flatMap((observation) =>
+    observation.maxProbabilityDelta === undefined
+      ? []
+      : [observation.maxProbabilityDelta],
+  );
+
+  return {
+    observations,
+    ...(probabilityDeltas.length > 0
+      ? { maxProbabilityDelta: Math.max(...probabilityDeltas) }
+      : {}),
+    changedSelections: observations
+      .filter((observation) => observation.selectedChanged === true)
+      .map((observation) => observation.question),
+  };
 }
 
-function mapQuestions(
-  questions: Record<string, DecisionQuestion>,
-  map: (question: DecisionQuestion) => DecisionQuestion,
-): Record<string, DecisionQuestion> {
-  return Object.fromEntries(
-    Object.entries(questions).map(([id, question]) => [id, map(question)]),
+/**
+ * Both answers were validated against the same question, so they share its
+ * kind; the mismatch branch only satisfies the type checker.
+ */
+function compareAnswers(
+  question: string,
+  packed: DecisionAnswer | undefined,
+  isolated: DecisionAnswer | undefined,
+): DecisionQuestionIsolationObservation {
+  if (packed?.kind === 'boolean' && isolated?.kind === 'boolean') {
+    return {
+      question,
+      kind: 'boolean',
+      selectedChanged:
+        packed.probabilityTrue >= 0.5 !== isolated.probabilityTrue >= 0.5,
+      maxProbabilityDelta: Math.abs(
+        packed.probabilityTrue - isolated.probabilityTrue,
+      ),
+    };
+  }
+
+  if (packed?.kind === 'choice' && isolated?.kind === 'choice') {
+    return {
+      question,
+      kind: 'choice',
+      selectedChanged: packed.value !== isolated.value,
+      maxProbabilityDelta: maxMapDelta(
+        packed.probabilities,
+        isolated.probabilities,
+      ),
+    };
+  }
+
+  if (packed?.kind === 'ordinal' && isolated?.kind === 'ordinal') {
+    return {
+      question,
+      kind: 'ordinal',
+      scoreDelta: Math.abs(packed.score - isolated.score),
+      ...(packed.probabilities && isolated.probabilities
+        ? {
+            maxProbabilityDelta: maxMapDelta(
+              packed.probabilities,
+              isolated.probabilities,
+            ),
+          }
+        : {}),
+    };
+  }
+
+  throw new Error(
+    `Decision question "${question}" was answered with different kinds in the packed and isolated runs.`,
   );
 }
 
-function opaqueChoiceQuestions(
-  questions: Record<string, DecisionQuestion>,
-): {
-  questions: Record<string, DecisionQuestion>;
-  optionIdMap: Record<string, string>;
-} {
-  const optionIdMap: Record<string, string> = {};
-  const transformed = Object.fromEntries(
-    Object.entries(questions).map(([questionId, question]) => {
-      if (question.kind !== 'choice') return [questionId, question];
-
-      const options = Object.entries(question.options).map(
-        ([originalId, description], index) => {
-          const opaqueId = `opt_${index + 1}`;
-          optionIdMap[`${questionId}:${opaqueId}`] = originalId;
-          return [opaqueId, description] as const;
-        },
-      );
-      const next: ChoiceDecisionQuestion = {
-        ...question,
-        options: Object.fromEntries(options),
-      };
-      return [questionId, next];
-    }),
-  );
-
-  return { questions: transformed, optionIdMap };
+function maxMapDelta(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): number {
+  let max = 0;
+  for (const key of new Set([...Object.keys(left), ...Object.keys(right)])) {
+    max = Math.max(max, Math.abs((left[key] ?? 0) - (right[key] ?? 0)));
+  }
+  return max;
 }

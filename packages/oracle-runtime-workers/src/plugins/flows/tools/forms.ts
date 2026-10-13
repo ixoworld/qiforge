@@ -7,37 +7,51 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import { tool } from '../../../plugin-api/tool-helper';
 import type { PluginTool, RuntimeContext } from '../../../plugin-api/types';
 import { toToolError } from '../errors';
+import { stepIdSchema } from '../types';
 import { withFlowDoc } from '../flow-doc';
 import { describeForm, fillForm, setFormSchema } from '../forms';
+import {
+  MAX_DESCRIPTION_CHARS,
+  MAX_FORM_QUESTIONS,
+  MAX_NAME_CHARS,
+  MAX_QUESTION_CHOICES,
+} from '../input-policy';
 
 const describeSchema = z.object({
   flowRef: z
     .string()
     .optional()
     .describe('Which flow. Omit to use the flow that is currently open.'),
-  stepId: z.string().min(1).describe('The form step to describe.'),
+  stepId: stepIdSchema.describe('The form step to describe.'),
 });
 
 const questionSchema = z.object({
   name: z
     .string()
     .min(1)
+    .max(MAX_NAME_CHARS)
     .describe(
       'The answer key this question produces (referenced downstream as {{step-id.output.<name>}}).',
     ),
   label: z
     .string()
+    .max(MAX_DESCRIPTION_CHARS)
     .optional()
     .describe('The question text shown to the user (defaults to the name).'),
   type: z
     .string()
+    .max(MAX_NAME_CHARS)
     .optional()
     .describe(
       'Question type: text (default), comment (multi-line), dropdown, radiogroup, checkbox (multi-select), boolean, rating.',
     ),
   required: z.boolean().optional(),
   choices: z
-    .array(z.string())
+    .array(z.string().max(MAX_NAME_CHARS))
+    .max(
+      MAX_QUESTION_CHOICES,
+      `A question may have at most ${MAX_QUESTION_CHOICES} choices.`,
+    )
     .optional()
     .describe(
       'Allowed options for choice questions (dropdown/radiogroup/checkbox).',
@@ -56,6 +70,10 @@ const setFormSchemaSchema = z.object({
   questions: z
     .array(questionSchema)
     .min(1)
+    .max(
+      MAX_FORM_QUESTIONS,
+      `A form may have at most ${MAX_FORM_QUESTIONS} questions.`,
+    )
     .describe('The questions the form should ask, in order.'),
 });
 
@@ -134,6 +152,7 @@ export function buildFormTools(
         name: 'fill_form',
         description:
           'Pre-fill a form step with answers. Does NOT submit — the user reviews and submits in the portal. ' +
+          'Refused once the user has submitted the form or the step is running. Never pre-fill a PIN, mnemonic, password, token or API key. ' +
           'Returns which answers applied, which were rejected, and any still-required questions.',
         schema: fillSchema,
       },

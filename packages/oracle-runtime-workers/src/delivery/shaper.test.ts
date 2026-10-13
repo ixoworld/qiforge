@@ -230,3 +230,21 @@ describe('splitText', () => {
     });
   });
 });
+
+describe('splitText limits', () => {
+  it('never exceeds the size and keeps every word, in order, for mixed text at many sizes', () => {
+    const text = [
+      'First paragraph. It has two sentences!',
+      'Second one\nwith a line break and a verylongtokenwithoutanyspacesatall.',
+      '第三段。中文句子。',
+      'x'.repeat(57),
+    ].join('\n\n');
+    const words = (s: string) => s.split(/\s+/).filter(Boolean).join('');
+    for (const max of [1, 3, 7, 16, 40, 80, 500]) {
+      const pieces = splitText(text, max);
+      for (const piece of pieces)
+        expect(piece.length, `max ${max}`).toBeLessThanOrEqual(max);
+      expect(words(pieces.join('')), `max ${max}`).toBe(words(text));
+    }
+  });
+});

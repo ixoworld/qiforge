@@ -6,6 +6,11 @@ formats are the same, so a user can move between the runtimes. This page is
 the contract — what is identical, what is ported with a different
 implementation, and what is deliberately left out.
 
+The Node runtime is deprecated (October 2026, pull request 330): nothing new
+is built there and no parity work is done. Features added to the Workers
+runtime since then exist only here; they are listed under
+[Workers only](#workers-only) rather than as divergences.
+
 ## Identical
 
 - **Plugin API**: `OraclePlugin` / `defineOraclePlugin` / `tool()`,
@@ -24,7 +29,14 @@ implementation, and what is deliberately left out.
   `DECISION_MODEL` env (`openrouter-jev` reusing `OPEN_ROUTER_API_KEY`). The
   one Workers difference: `cloudflare-jev` runs through the Worker's `AI`
   binding when one is declared, so no Cloudflare account credentials are
-  needed there. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
+  needed there. Workers-only: multi-provider routing
+  (`createOracleWorker({ decisionProviders, decisionProviderPolicy })`, the
+  env provider registered beside host providers as the default, `providerId`
+  and selection provenance on evaluations), applicability gating
+  (`DecisionNotApplicableError`), judgment-method provenance, Final Decision
+  Subject receipts and the isolation probe, all from `@ixo/common`. The Node
+  runtime constructs `DecisionRuntime` with a single adapter and gets the
+  shared applicability and provenance behaviour, but not the host options. The capability router (`CAPABILITY_ROUTER=off|shadow|on`,
   `src/core/capability-router.ts`) is the first runtime consumer of Decisions
   on both runtimes, with identical semantics: the shared
   `capabilityRouteDecision` predicts the on-demand plugin a message needs,
@@ -108,7 +120,11 @@ implementation, and what is deliberately left out.
   an `expiration` sent in the body.
 - **`GET /models`**: Node's `ModelListing` shape, priced from live OpenRouter
   list prices (cached an hour, catalog baselines on failure) times
-  `MODEL_PRICE_MARKUP`.
+  `MODEL_PRICE_MARKUP`. A host override, `createOracleWorker({ listModels })`,
+  is called as `listModels(env, { waitUntil? })` (`ListModelsOptions`,
+  exported from the package root): `waitUntil` is the request's, for
+  background work such as a price refresh, and is absent when the request
+  has no execution context; an `(env) => …` override keeps working.
 - **Agent**: same graph state (including `loadedPlugins`), meta-tools
   (`load_capability` / `list_capabilities`), the ChatGPT-subscription history
   sanitizer, the summarization / capability-gate / tool-validation /
@@ -137,7 +153,9 @@ implementation, and what is deliberately left out.
   socket of a session going away.
 - **Per-room secrets**: the JWE scheme byte-compatible with
   `oracles-chain-client` (`ECDH-ES+A256KW` + `A256GCM`, PIN-locked account
-  room key), served to plugins through the same secrets surface, minus the
+  room key), served to plugins through the same secrets surface
+  (`ctx.secrets.getIndex` / `getValues`, plus `getAll()`: the values of
+  every listed secret from one read of the room's secret index), minus the
   runtime's own LLM credentials. Every secret named `BYO_LLM_*` (the BYO
   API keys and the ChatGPT OAuth tokens, refresh token included) is
   neither listed nor read for a plugin (`src/do/secrets-adapter.ts`). Node
@@ -155,18 +173,46 @@ implementation, and what is deliberately left out.
 
 | Surface                            | Node                                 | Workers                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ---------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences; `FlowsPlugin` exported for opt-in wiring. MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                                                                                                                                       |
+| Bundled plugins                    | `BUNDLED_PLUGINS`                    | `BUNDLED_WORKERS_PLUGINS` (`src/plugins/`): memory, sandbox, firecrawl, domain-indexer, composio, vfs, tasks, editor, user-preferences, pod-creator; `FlowsPlugin` exported for opt-in wiring; `IxoTransactionPlugin` exported, opt-in and Workers-only ([ixo-transaction](ixo-transaction.md)). MCP plugins drive the real `MultiServerMCPClient` inside workerd with per-user UCAN headers.                                                        |
 | Tasks                              | BullMQ / Redis                       | DO alarms; records live in the user's SQLite file; runs re-enter the agent as background sessions and deliver to the room, same preview → confirm → create and approval-gate contract; dedicated `[Task] <title>` rooms as on Node. Runs are at-most-once per occurrence (a run ledger in the user's file; Node's BullMQ jobs re-run after a worker restart) and deliveries are idempotent (fixed transaction id, retried across a gateway restart). |
 | Editor / flows                     | JSDOM                                | linkedom DOM shim; the heavy chain is lazy-imported; a second, crypto-less bot device from the gateway (`ctx.matrix.botCredentials()`).                                                                                                                                                                                                                                                                                                              |
-| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                                                                                             |
-| Realtime channel                   | socket.io server                     | socket.io v4 wire protocol over Hibernatable WebSockets, one socket per tab, addressed by session; heartbeat from the object's alarm so an idle tab lets the object hibernate; websocket transport only (a polling handshake gets a 426). Chat events use Node's wire envelope (`event` → `{ eventName, payload }`); `browser_tool_call` / `action_call` are raw by name.                                                                            |
-| Portal browser tools / AG-UI       | portal + agui plugins                | Same contract over the realtime channel (`ctx.frontend.callBrowserTool` / `callAgAction`, 15 s / 10 s timeouts); proven live with the Portal's `create_page_room`.                                                                                                                                                                                                                                                                                   |
+| Attachments                        | `src/attachments/` pipeline          | Same pipeline (classify → route by modality → native blocks or the helper model; SSRF blocklist, 25 MB per file / 50 MB per turn, the 50 MB shared by the native and extraction lanes). No local PDF/office parser on workerd (those go to the helper model).                                                                                                                                                                                        |
+| Realtime channel                   | socket.io server                     | socket.io v4 wire protocol over Hibernatable WebSockets, one socket per tab, addressed by session; heartbeat from the object's alarm so an idle tab lets the object hibernate; websocket transport only (a polling handshake gets a 426). Chat events use Node's wire envelope (`event` → `{ eventName, payload }`); `browser_tool_call` / `action_call` are raw by name and sent only to the one socket executing the invocation.                   |
+| Portal browser tools / AG-UI       | portal + agui plugins                | Same contract over the realtime channel (`ctx.frontend.callBrowserTool` / `callAgAction`, 15 s; `mutate_topic` 120 s), version 2 of the [frontend bridge](frontend-bridge.md): unique invocation ids, one executing socket, `FRONTEND_OUTCOME_UNKNOWN` on a deadline; proven live with the Portal's `create_page_room`.                                                                                                                              |
 | User preferences                   | `user_prefs` room state              | Same envelope; hydrated into `state.userPreferences` before every agent build (5-minute read cache, invalidated by the tool's own write).                                                                                                                                                                                                                                                                                                            |
 | Matrix user id on non-Matrix turns | `didToMatrixUserId(did, homeServer)` | Same derivation (homeserver from the DID document via Blocksync, fallback to the oracle's server), cached in object storage (`meta:matrixUserId`).                                                                                                                                                                                                                                                                                                   |
 | Session creation                   | marker event id = session id         | Same; the marker send is retried with the same transaction id across a gateway restart (`src/do/gateway-retry.ts`), never replayed blindly. If every attempt fails the create fails — no silent local id when the user has an oracle room.                                                                                                                                                                                                           |
 | LLM                                | OpenRouter                           | OpenRouter or Nebius (`LLM_PROVIDER`), optional LangSmith tracing, the full BYO-LLM lane (catalog, per-user keys, ChatGPT OAuth — see the proxy note in [operations](operations.md#chatgpt-subscription-lane-needs-a-proxy)).                                                                                                                                                                                                                        |
 
 ## Deliberate divergences
+
+- **Anonymous response feedback.** Ported from the Node implementation
+  proposed in qiforge pull request 224 (never merged into the Node runtime).
+  One feedback per user per Agent reply:
+  the user object keeps a marker per message, a replay of the delivered
+  submission is answered again and other feedback for the message is a
+  `409` (Node accepted any number of submissions, deduplicated per
+  submission id). The Linear marker is the message pseudonym instead of the
+  submission id. The route answers `404` while the feature is off and for a
+  target that is not a completed Agent reply (Node: `503` and `400`), `422`
+  for identifiers in the text (Node: `400`) and `502` when Linear fails
+  (Node: `503`). The per-user limit lives in the user's object; the per-IP
+  limit is a Cloudflare rate-limit binding (see
+  [configuration](configuration.md#anonymous-response-feedback)). The issue
+  names the deployment's default model, not the model of the reply. Every
+  refusal carries a `code` and `retryable` (Node: messages only); a retry
+  of a submission still being delivered is `409 FEEDBACK_IN_FLIGHT`. The
+  screen normalises the text (NFKC, invisible format characters removed)
+  first and no longer takes dates or grouped amounts for phone numbers;
+  `locale` and `portalBuildVersion` accept only a language-region tag and a
+  release or commit shape (Node: any tag-like or build-like string). Linear
+  retries back off on 5xx; only a rate limit waits for Linear's reset
+  headers (Node read them on every failure and so never retried).
+- **POD Creator state.** Node held blueprints and create sessions in process
+  memory on the plugin instance (lost on restart); Workers keeps them in the
+  user's own SQLite through `ctx.kv`, bounded per user with the same limits,
+  and AG-UI signing goes through `ctx.frontend`. The full list is in
+  [pod-creator](pod-creator.md#differences-from-the-node-implementation-pull-request-210).
 
 - **Attachment payload retention.** Inline base64 blocks stay in a session's
   messages only for the newest 2 user turns (`ATTACHMENT_PAYLOAD_TURNS`,
@@ -231,15 +277,28 @@ implementation, and what is deliberately left out.
 tool schema: …`), and reaches the client as a `tool_call` frame with
   `status: 'error'` and the message, so the Portal renders it as failed
   instead of as a finished call.
-- **Turn resume after an isolate reset** is not built: the in-flight turn
-  dies with an SSE `error` and the user resends.
+- **A turn survives an isolate reset.** Every turn is a durable run: a reset
+  mid-turn is recovered from the last checkpoint on the next boot, a started
+  write tool is not run again (the model is told its outcome is unknown),
+  and a client re-joins the run's frames with a cursor
+  ([operations](operations.md#turns-durable-runs)). Node has no
+  equivalent.
 - **A room message's sender is checked against the DID's homeserver.**
   Node maps `@did-ixo-<id>:<any server>` to `did:ixo:<id>`; here the
   sender's server (or, for a non-DID sender, the room alias's) must be the
   homeserver the DID document registers, or the message is dropped
-  (`operations.md`, "Rooms and aliases"). Browser-tool and AG-UI results
-  settle a call only from a socket of the call's own session; Node matched
-  them by `toolCallId` alone.
+  (`operations.md`, "Rooms and aliases"). A room's canonical alias counts
+  only when its own server resolves it to that room, and a non-DID sender
+  is attributed to the alias's user only from the alias's server.
+- **Frontend calls run on one socket and end unknown, not failed.** Each
+  browser-tool / AG-UI invocation has its own id, goes to the most recently
+  active authenticated socket of its session, and settles only from that
+  socket (the Node runtime broadcasts to every socket of the session). An
+  invocation whose socket goes, or whose turn aborts after it was sent,
+  resolves with `FRONTEND_OUTCOME_UNKNOWN` at once instead of at its
+  deadline, and the SSE stream's own `action_call` frames never reach a
+  socket. A client tool that shadows a server tool is dropped for the turn
+  with a warning. See [frontend bridge](frontend-bridge.md).
 - **The capability gate also guards execution.** Node's gate only trims the
   tools advertised to the model, and every on-demand tool is bound, so a
   call to a hidden tool still runs there. Here the gate checks each tool
@@ -274,9 +333,9 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   `is_direct` flag and the joined-member count alone; a user↔oracle room on
   an ixo homeserver also holds the rooms appservice bot and the
   memory-engine bot, so that rule would gate the oracle's own conversation
-  with its user. Here a room whose canonical alias is a user↔oracle alias
-  of this oracle is direct whatever its member count; the two Node rules
-  apply to every other room.
+  with its user. Here a room whose verified canonical alias is a
+  user↔oracle alias of this oracle is direct whatever its member count; the
+  two Node rules apply to every other room.
 - **Group rooms are gated in the gateway, not in a middleware.** Node
   dispatched every group-room message as a turn and let the plugin's
   `beforeAgent` middleware end it silently; here the gateway decides before
@@ -296,6 +355,33 @@ tool schema: …`), and reaches the client as a `tool_call` frame with
   durable, so a quiet room's messages are compacted at its next engagement.
   Node's weekly/monthly tier rollups were never scheduled on Node either
   and are not ported (the `tier` column stays at 1).
+
+## Workers only
+
+Built on the Workers runtime with no Node counterpart; none will be added to
+the deprecated Node runtime:
+
+- **IXO Channels ingress** (`POST /channels/turn`) — [channels](channels.md).
+- **Chat delivery and artefacts** (Reply Plans, `create_artifact`, the
+  `/a/:id` links, the R2 sweep) — [chat delivery](chat-delivery.md).
+- **Request admission** (`getRequestAdmission`, `getRequestMiddlewares`) —
+  [architecture](architecture.md#useroracledo--one-per-user-did).
+- **Supplied-context tasks and the Topic deliverable API** —
+  [architecture](architecture.md#tasks).
+- **Plugin state in the user's file** (`ctx.kv`) —
+  [architecture](architecture.md#plugin-state-in-the-users-file-ctxkv).
+- **The `IxoTransactionPlugin`** — [ixo-transaction](ixo-transaction.md).
+- **Model-call liveness** — the stream guard on every model call
+  (`LLM_HEADERS_TIMEOUT_MS`, `LLM_STREAM_IDLE_TIMEOUT_MS`,
+  `LLM_BYO_STREAM_IDLE_TIMEOUT_MS`, `LLM_STREAM_RETRIES`) and the `[llm]`
+  call trace; Node relied on the SDK's headers-only timeout and the turn
+  deadline — [configuration](configuration.md#model-call-liveness).
+
+The portable-work and AgentWake adapters exist on both runtimes, over each
+runtime's own task shape (`portableWorkFromTaskRecord` /
+`agentWakeFromTaskRecord` here, `portableWorkFromTaskSpec` /
+`agentWakeFromTaskSpec` on Node); the admin tool plane exists on both with
+the naming difference above.
 
 ## Not ported
 

@@ -5,10 +5,15 @@
  * those through the `AmbientServices` adapters and mounts `pluginRoutes`.
  */
 import {
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   DecisionRuntime,
+  HOST_DECISION_PROVIDER_ID,
   resolveDecisionAdapter,
   type DecisionAdapter,
   type DecisionEvaluator,
+  type DecisionProviderPolicy,
+  type DecisionProviderRegistration,
   type WorkersAiBinding,
 } from '@ixo/common/ai/decisions';
 import { z } from 'zod';
@@ -24,9 +29,15 @@ import { baseEnvSchema, composeEnvSchema, validateEnv } from './env';
 import {
   createLlmAdapter,
   openRouterAttributionHeaders,
+  platformStreamLivenessEnv,
   type OpenRouterLlmAdapter,
 } from './llm';
-import { validateManifest, type PluginManifestOverride } from './manifest';
+import {
+  estimateTokensApprox,
+  OPERATING_GUIDE_WARN_TOKENS,
+  validateManifest,
+  type PluginManifestOverride,
+} from './manifest';
 import {
   resolvePlugins,
   type ExcludedPlugin,
@@ -88,25 +99,55 @@ export type {
 } from './registries';
 
 export {
+  AmbiguousDecisionProviderError,
   CloudflareJevDecisionAdapter,
   DECISION_PROVIDERS,
+  DecisionNotApplicableError,
+  DecisionProviderNotFoundError,
+  DecisionProviderRegistry,
+  DecisionProviderRouter,
   DecisionProviderUnavailableError,
   DecisionRuntime,
+  HOST_DECISION_PROVIDER_ID,
   JevDecisionError,
   OpenRouterJevDecisionAdapter,
+  StaleDecisionSubjectError,
   UNAVAILABLE_DECISION_EVALUATOR,
   WorkersAiJevDecisionAdapter,
+  assertFinalDecisionSubjectUnchanged,
+  canonicalizeFinalDecisionSubject,
+  createDecisionAuthorityReceipt,
+  createDecisionExecutionReceipt,
   decisionProviderEnvShape,
+  digestFinalDecisionSubject,
+  measureDecisionQuestionIsolation,
   resolveDecisionAdapter,
 } from '@ixo/common/ai/decisions';
 export type {
   CloudflareJevAdapterOptions,
   DecisionAdapter,
+  DecisionApplicability,
+  DecisionAuthorityReceipt,
+  DecisionCalibrationProvenance,
   DecisionEvaluator,
+  DecisionExecution,
+  DecisionExecutionReceipt,
+  DecisionJudgmentMethod,
+  DecisionJudgmentProvenance,
   DecisionLookup,
   DecisionProviderConfigIssue,
   DecisionProviderName,
+  DecisionProviderPolicy,
+  DecisionProviderProvenance,
+  DecisionProviderRegistration,
+  DecisionProviderResolution,
+  DecisionProviderSelection,
+  DecisionQuestionIsolationObservation,
+  DecisionQuestionIsolationReport,
   DecisionRuntimeLogger,
+  FinalDecisionSubject,
+  FinalDecisionSubjectBinding,
+  FinalDecisionSubjectValue,
   JevProviderName,
   OpenRouterJevAdapterOptions,
   ResolveDecisionAdapterOptions,
@@ -117,6 +158,7 @@ export type {
 
 export {
   estimateTokensApprox,
+  OPERATING_GUIDE_WARN_TOKENS,
   manifestCategorySchema,
   manifestExampleSchema,
   manifestStabilitySchema,
@@ -192,9 +234,16 @@ export type {
 export {
   buildOracleSection,
   composePrompt,
+  formatDateContext,
   formatTimeContext,
   formatUserPreferences,
+  renderTurnTimeNote,
 } from './prompt-composer';
+export {
+  stripTurnTimeNote,
+  TURN_TIME_NOTE_KWARG,
+  withTurnTimeNote,
+} from './turn-time-note';
 export type {
   ComposePromptInput,
   MemoryCommunity,
@@ -208,6 +257,8 @@ export { compileTemplate, renderTemplate } from './template';
 export type { CompiledTemplate, TemplateValues } from './template';
 
 export * from './middlewares';
+
+export { createMemoryUserKv } from './user-kv';
 
 export {
   EMPTY_SHARED,
@@ -300,11 +351,25 @@ export interface RuntimeCoreOptions {
    */
   env: Record<string, unknown>;
   /**
-   * Host-supplied bounded Decision adapter (the Node runtime's
-   * `createOracleApp` option of the same name). Wins over the
-   * `DECISION_PROVIDER` env configuration, which is then not checked.
+   * Single host-supplied Decision adapter, registered as provider `host` and
+   * the default. Wins over the `DECISION_PROVIDER` env configuration, which
+   * is then neither checked nor registered. Mutually exclusive with
+   * `decisionProviders`.
    */
   decisionAdapter?: DecisionAdapter;
+  /**
+   * Host-configured Decision providers, registered beside the env-selected
+   * provider (`DECISION_PROVIDER`, registered under that value as its id).
+   * Ids must be unique across both.
+   */
+  decisionProviders?: readonly DecisionProviderRegistration[];
+  /**
+   * Default and per-Decision routes over the registered providers. Without a
+   * `defaultProviderId` the env-selected provider is the default. With
+   * several providers and neither a route nor a default for a Decision, its
+   * evaluation is refused with `AmbiguousDecisionProviderError`.
+   */
+  decisionProviderPolicy?: DecisionProviderPolicy;
   /** Boot + runtime logger. Defaults to a silent logger. */
   logger?: Logger;
 }
@@ -423,10 +488,44 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
   }
   const manifestErrors: string[] = [];
+  const lintVerbose = opts.env['BOOT_LINT_VERBOSE'] === 'true';
+  const lintCounts = new Map<string, number>();
   for (const { pluginName, manifest } of registries.manifests.collect()) {
     const result = validateManifest(manifest, pluginName);
-    for (const warning of result.warnings) logger.warn(`[boot] ${warning}`);
+    if (lintVerbose)
+      for (const warning of result.warnings) logger.warn(`[boot] ${warning}`);
+    else if (result.warnings.length > 0)
+      lintCounts.set(pluginName, result.warnings.length);
     if (!result.valid) manifestErrors.push(...result.errors);
+  }
+  // The soft-rule warnings are the same on every boot of an isolate (one
+  // core per isolate): one summary line, the full list with
+  // BOOT_LINT_VERBOSE=true.
+  if (lintCounts.size > 0)
+    logger.warn(
+      `[boot] manifest lint: ${[...lintCounts.values()].reduce((a, b) => a + b, 0)} soft warning(s) (${[
+        ...lintCounts,
+      ]
+        .map(([plugin, count]) => `${plugin}=${count}`)
+        .join(', ')}); set BOOT_LINT_VERBOSE=true to list them`,
+    );
+  const guides = registries.manifests.operatingGuides();
+  if (guides.length > 0) {
+    logger.log(
+      `[boot] operating guides: ${guides
+        .map(
+          ({ pluginName, guide }) =>
+            `${pluginName}=${guide.length} chars (~${estimateTokensApprox(guide)} tokens)`,
+        )
+        .join(', ')}`,
+    );
+    for (const { pluginName, guide } of guides) {
+      const tokens = estimateTokensApprox(guide);
+      if (tokens > OPERATING_GUIDE_WARN_TOKENS)
+        logger.warn(
+          `[boot] operating guide of '${pluginName}' is ~${tokens} tokens (over ${OPERATING_GUIDE_WARN_TOKENS}); it is in the system prompt of every turn that has the plugin loaded`,
+        );
+    }
   }
   if (manifestErrors.length > 0) {
     for (const err of manifestErrors) reportBootError(logger, err);
@@ -460,13 +559,26 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     );
   }
 
-  // 4. Decision provider — resolved here so a selected provider with missing
-  // credentials fails at boot rather than on the first evaluation. A host
-  // adapter wins over env and skips the check. The Workers AI binding is not
-  // a string, so Zod strips it from `validated.config`; it is read from the
-  // raw env.
-  let decisionAdapter = opts.decisionAdapter;
-  if (!decisionAdapter) {
+  // 4. Decision providers — resolved here so a selected provider with missing
+  // credentials, or a policy naming an unknown provider, fails at boot rather
+  // than on the first evaluation. A single host adapter wins over env and
+  // skips the env check. The Workers AI binding is not a string, so Zod
+  // strips it from `validated.config`; it is read from the raw env.
+  if (opts.decisionAdapter && opts.decisionProviders !== undefined) {
+    const message =
+      'createRuntimeCore: decisionAdapter and decisionProviders are mutually exclusive.';
+    reportBootError(logger, message);
+    throw new Error(message);
+  }
+  const decisionRegistrations: DecisionProviderRegistration[] = [];
+  let defaultDecisionProviderId: string | undefined;
+  if (opts.decisionAdapter) {
+    decisionRegistrations.push({
+      id: HOST_DECISION_PROVIDER_ID,
+      adapter: opts.decisionAdapter,
+    });
+    defaultDecisionProviderId = HOST_DECISION_PROVIDER_ID;
+  } else {
     const workersAi = opts.env.AI;
     const resolvedAdapter = resolveDecisionAdapter(validated.config, {
       ...(isWorkersAiBinding(workersAi) ? { workersAi } : {}),
@@ -489,7 +601,36 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
         `Env validation failed (${lines.length} issues):\n  - ${lines.join('\n  - ')}`,
       );
     }
-    decisionAdapter = resolvedAdapter.adapter;
+    if (resolvedAdapter.adapter) {
+      // `resolveDecisionAdapter` only builds an adapter for a set provider.
+      const envProviderId = String(validated.config.DECISION_PROVIDER);
+      decisionRegistrations.push({
+        id: envProviderId,
+        adapter: resolvedAdapter.adapter,
+      });
+      defaultDecisionProviderId = envProviderId;
+    }
+    decisionRegistrations.push(...(opts.decisionProviders ?? []));
+  }
+  let decisionProviders: DecisionProviderRouter;
+  try {
+    const policy = opts.decisionProviderPolicy;
+    const defaultProviderId =
+      policy?.defaultProviderId ?? defaultDecisionProviderId;
+    decisionProviders = new DecisionProviderRouter(
+      new DecisionProviderRegistry(decisionRegistrations),
+      {
+        ...(defaultProviderId !== undefined && { defaultProviderId }),
+        ...(policy?.routes !== undefined && { routes: policy.routes }),
+      },
+    );
+  } catch (err) {
+    reportBootError(
+      logger,
+      `Decision provider configuration is invalid: ${err instanceof Error ? err.message : String(err)}`,
+      'Check createOracleWorker({ decisionProviders, decisionProviderPolicy }) against DECISION_PROVIDER.',
+    );
+    throw err;
   }
 
   // 5. Identity.
@@ -518,7 +659,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
   }
   const decisions: DecisionEvaluator = new DecisionRuntime(
     registries.decisions,
-    decisionAdapter,
+    decisionProviders,
     logger,
   );
 
@@ -554,6 +695,7 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
         | 'high'
         | undefined,
       ORACLE_NAME: String(validated.config.ORACLE_NAME),
+      ...platformStreamLivenessEnv(validated.config),
     },
     logger,
   );
@@ -581,9 +723,26 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
           registries.tools,
           registries.subAgents,
         );
-        for (const issue of cross.errors) {
+        if (lintVerbose) {
+          for (const issue of cross.errors) {
+            logger.warn(
+              `[boot] ${issue} (boot-time tools only — ignore if the tool comes from getRequestTools)`,
+            );
+          }
+        } else if (cross.errors.length > 0) {
+          const perPlugin = new Map<string, number>();
+          for (const issue of cross.errors) {
+            const plugin = /^\[([^\]]+)\]/.exec(issue)?.[1] ?? 'unknown';
+            perPlugin.set(plugin, (perPlugin.get(plugin) ?? 0) + 1);
+          }
           logger.warn(
-            `[boot] ${issue} (boot-time tools only — ignore if the tool comes from getRequestTools)`,
+            `[boot] manifest examples: ${cross.errors.length} reference(s) to tools not registered at boot (${[
+              ...perPlugin,
+            ]
+              .map(([plugin, count]) => `${plugin}=${count}`)
+              .join(
+                ', ',
+              )}; ignore those from getRequestTools); set BOOT_LINT_VERBOSE=true to list them`,
           );
         }
       } catch (err) {

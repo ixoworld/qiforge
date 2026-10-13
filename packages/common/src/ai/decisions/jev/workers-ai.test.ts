@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
+import { defineDecision } from '../define-decision.js';
+import { DecisionRuntime } from '../runtime.js';
 import type { DecisionRequest } from '../types.js';
 import { JevDecisionError } from './wire.js';
 import {
@@ -72,6 +75,7 @@ describe('WorkersAiJevDecisionAdapter', () => {
     expect(result).toEqual({
       modelVersion: 'jev-1.13.0',
       provenance: {
+        method: { kind: 'provider-native', name: 'typesafe-system-one' },
         apiDialect: 'systemone-v1',
         requestedModel: 'typesafe/jev',
         returnedModel: 'jev-1.13.0',
@@ -107,6 +111,37 @@ describe('WorkersAiJevDecisionAdapter', () => {
     expect(result.answers.work).toEqual({
       kind: 'boolean',
       probabilityTrue: 0.9,
+    });
+    // Another model's method is not known, so no method name is claimed.
+    expect(result.provenance).toEqual({
+      method: { kind: 'provider-native' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev-next',
+      returnedModel: 'jev-1.13.0',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev-next',
+    });
+  });
+
+  it('returns a fresh provenance object on every call', async () => {
+    const adapter = new WorkersAiJevDecisionAdapter({
+      ai: binding(async () => jevResult),
+    });
+
+    const first = await adapter.evaluate(request);
+    if (!first.provenance) throw new Error('provenance missing');
+    first.provenance.method.name = 'tampered';
+    first.provenance.method.kind = 'calibrated';
+    const second = await adapter.evaluate(request);
+
+    expect(second.provenance).not.toBe(first.provenance);
+    expect(second.provenance).toEqual({
+      method: { kind: 'provider-native', name: 'typesafe-system-one' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev',
+      returnedModel: 'jev-1.13.0',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev',
     });
   });
 
@@ -144,5 +179,71 @@ describe('WorkersAiJevDecisionAdapter', () => {
     await expect(adapter.evaluate(request)).rejects.toBeInstanceOf(
       JevDecisionError,
     );
+  });
+
+  it('calls the binding without options when no signal is given', async () => {
+    const run = vi.fn<WorkersAiBinding['run']>(async () => jevResult);
+    const adapter = new WorkersAiJevDecisionAdapter({ ai: binding(run) });
+
+    await adapter.evaluate(request);
+
+    expect(run.mock.calls[0]).toHaveLength(2);
+  });
+
+  it('hands the caller signal to the binding, which stops on abort', async () => {
+    const run = vi.fn<WorkersAiBinding['run']>(
+      (_model, _inputs, options) =>
+        new Promise((_resolve, reject) => {
+          const signal = options?.signal;
+          if (!(signal instanceof AbortSignal)) {
+            reject(new Error('no signal'));
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const adapter = new WorkersAiJevDecisionAdapter({ ai: binding(run) });
+    const controller = new AbortController();
+    const reason = new Error('turn cancelled');
+
+    const pending = adapter.evaluate(request, { signal: controller.signal });
+    controller.abort(reason);
+
+    await expect(pending).rejects.toBe(reason);
+    expect(run.mock.calls[0]?.[2]).toEqual({ signal: controller.signal });
+  });
+
+  it('aborts the inference when the decision runtime times out', async () => {
+    let received: unknown;
+    const ai = binding(
+      (_model, _inputs, options) =>
+        new Promise(() => {
+          received = options?.signal;
+        }),
+    );
+    const runtime = new DecisionRuntime(
+      undefined,
+      new WorkersAiJevDecisionAdapter({ ai }),
+    );
+    const decision = defineDecision({
+      name: 'test.workers-ai.timeout',
+      version: '1.0.0',
+      description: 'Times out.',
+      inputSchema: z.object({ text: z.string() }),
+      project: ({ text }) => ({
+        state: { text },
+        questions: {
+          yes: { kind: 'boolean', instructions: 'Is this a yes?' },
+        },
+      }),
+    });
+
+    await expect(
+      runtime.evaluate(decision, { text: 'yes' }, { timeoutMs: 10 }),
+    ).rejects.toThrow(/timed out after 10ms/);
+    expect(received).toBeInstanceOf(AbortSignal);
+    expect(received instanceof AbortSignal && received.aborted).toBe(true);
   });
 });

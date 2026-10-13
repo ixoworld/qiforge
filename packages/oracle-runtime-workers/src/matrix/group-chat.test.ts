@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import type { SqliteTestDO } from '../sqlite/test-do';
 import {
   botPowerLevelOf,
+  COMPACT_BATCH_MAX,
   COMPACT_BUFFER_THRESHOLD,
+  COMPACT_RETRY_MIN_MS,
   COMPACT_JIT_MIN,
   type GateInput,
   GroupChatService,
@@ -593,6 +595,114 @@ describe('GroupChatService', () => {
       await svc.compact(ROOM);
       expect(svc.store.bufferCount(ROOM)).toBe(0);
       expect(svc.recall(ROOM, 30).chunks).toHaveLength(2);
+    });
+  });
+
+  it('backs off after a failed summary: five more messages make one call, not five; the window doubles and a success resets it', async () => {
+    await runInDurableObject(stub('group-backoff'), async (_i, state) => {
+      let fail = true;
+      const f = fakeDeps({
+        summarize: async (messages) =>
+          fail ? null : `summary of ${messages.length}`,
+      });
+      const svc = new GroupChatService(state.storage.sql, f.deps, options);
+      const observed = (i: number): ObservedMessage => ({
+        eventId: `$b${i}`,
+        threadId: '$t',
+        senderDid: 'did:ixo:ixo1alice',
+        senderMatrixUserId: ALICE,
+        senderDisplayName: 'Alice',
+        body: `m ${i}`,
+        timestamp: i,
+      });
+      for (let i = 1; i <= COMPACT_BUFFER_THRESHOLD; i += 1)
+        svc.observe(ROOM, observed(i));
+      await f.settle();
+      expect(f.calls.summaries).toBe(1);
+      for (let i = 1; i <= 5; i += 1)
+        svc.observe(ROOM, observed(COMPACT_BUFFER_THRESHOLD + i));
+      await svc.compactJustInTime(ROOM);
+      await f.settle();
+      expect(f.calls.summaries).toBe(1);
+      // The window passes: one more attempt, which fails again …
+      f.tick(COMPACT_RETRY_MIN_MS);
+      svc.observe(ROOM, observed(100));
+      await f.settle();
+      expect(f.calls.summaries).toBe(2);
+      // … so the next window is twice as long.
+      f.tick(COMPACT_RETRY_MIN_MS);
+      svc.observe(ROOM, observed(101));
+      await f.settle();
+      expect(f.calls.summaries).toBe(2);
+      fail = false;
+      f.tick(COMPACT_RETRY_MIN_MS);
+      svc.observe(ROOM, observed(102));
+      await f.settle();
+      expect(f.calls.summaries).toBe(3);
+      expect(svc.recall(ROOM).chunks).toHaveLength(1);
+      // Recovered: the next threshold compacts at once again.
+      expect(svc.store.bufferCount(ROOM)).toBeLessThan(
+        COMPACT_BUFFER_THRESHOLD,
+      );
+    });
+  });
+
+  it('summarizes at most COMPACT_BATCH_MAX of the oldest buffered messages per chunk', async () => {
+    await runInDurableObject(stub('group-batch'), async (_i, state) => {
+      const seen: number[] = [];
+      const f = fakeDeps({
+        summarize: async (messages) => {
+          seen.push(messages.length);
+          return `summary of ${messages.length}`;
+        },
+      });
+      const svc = new GroupChatService(state.storage.sql, f.deps, options);
+      for (let i = 1; i <= COMPACT_BATCH_MAX + 7; i += 1)
+        svc.store.bufferAppend(ROOM, {
+          eventId: `$c${i}`,
+          threadId: '$t',
+          senderDid: 'did:ixo:ixo1alice',
+          senderMatrixUserId: ALICE,
+          senderDisplayName: 'Alice',
+          body: `m ${i}`,
+          timestamp: i,
+        });
+      await svc.compact(ROOM);
+      expect(seen).toEqual([COMPACT_BATCH_MAX]);
+      expect(svc.recall(ROOM).chunks[0]).toMatchObject({
+        fromEventId: '$c1',
+        toEventId: `$c${COMPACT_BATCH_MAX}`,
+      });
+      expect(svc.store.bufferCount(ROOM)).toBe(7);
+    });
+  });
+
+  it('reports whether a buffer append or an unpin changed anything, without counting rows', async () => {
+    await runInDurableObject(stub('group-rows-written'), async (_i, state) => {
+      const svc = new GroupChatService(
+        state.storage.sql,
+        fakeDeps().deps,
+        options,
+      );
+      const msg: ObservedMessage = {
+        eventId: '$once',
+        threadId: '$t',
+        senderDid: 'did:ixo:ixo1alice',
+        senderMatrixUserId: ALICE,
+        senderDisplayName: 'Alice',
+        body: 'hello',
+        timestamp: 1,
+      };
+      expect(svc.store.bufferAppend(ROOM, msg)).toBe(true);
+      expect(svc.store.bufferAppend(ROOM, msg)).toBe(false);
+      const fact = svc.pinFact({
+        roomId: ROOM,
+        fact: 'x',
+        pinnedByDid: 'did:ixo:ixo1alice',
+      });
+      expect(svc.unpinFact('!other:ixo.test', fact.id)).toBe(false);
+      expect(svc.unpinFact(ROOM, fact.id)).toBe(true);
+      expect(svc.unpinFact(ROOM, fact.id)).toBe(false);
     });
   });
 

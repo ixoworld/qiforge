@@ -1,6 +1,6 @@
 {
   "name": "@ixo/common",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": false,
   "publishConfig": {
     "access": "public"
@@ -30,6 +30,10 @@
       "types": "./dist/ai/decisions/index.d.ts",
       "import": "./dist/ai/decisions/index.js"
     },
+    "./ai/frontend-bridge": {
+      "types": "./dist/ai/frontend-bridge/index.d.ts",
+      "import": "./dist/ai/frontend-bridge/index.js"
+    },
     "./*": {
       "types": "./dist/*.d.ts",
       "import": "./dist/*.js"
@@ -51,7 +55,8 @@
     "@types/store": "^2.0.5",
     "better-sqlite3": "^12.9.0",
     "testcontainers": "^10.16.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "@cosmjs/proto-signing": "^0.39.0",

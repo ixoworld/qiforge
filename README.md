@@ -18,52 +18,61 @@ QiForge is a plugin-based framework for building **Agentic Oracles** on the [IXO
 > - **Reference app and test suites:** [`apps/qiforge-workers-example`](./apps/qiforge-workers-example)
 > - **Maintainer docs:** [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/)
 >
-> The Node runtime — [`packages/oracle-runtime`](./packages/oracle-runtime) (`@ixo/oracle-runtime`, NestJS) and its reference app [`apps/qiforge-example`](./apps/qiforge-example) — is **no longer developed**. It stays in the repository only so existing forks keep building. Do not add features, parity work or fixes there; port them to the Workers runtime instead. The Node-centric sections below are kept for those forks.
+> The Node runtime — [`packages/oracle-runtime`](./packages/oracle-runtime) (`@ixo/oracle-runtime`, NestJS) and its reference app [`apps/qiforge-example`](./apps/qiforge-example) — is **no longer developed**. It stays in the repository only so existing forks keep building. Do not add features, parity work or fixes there; port them to the Workers runtime instead. The rest of this README describes the Workers runtime; what the Node runtime had and the Workers runtime does not is listed in [`node-parity.md`](./packages/oracle-runtime-workers/docs/node-parity.md#not-ported).
 
 ---
 
 ## Why QiForge?
 
-Most AI frameworks give you a chatbot. QiForge gives you a **verified, autonomous agent** that can reason, remember, learn new skills, charge for its work, and prove its identity — out of the box.
+Most AI frameworks give you a chatbot. QiForge gives you a **verified, autonomous agent** that can reason, remember, learn new skills, and prove its identity — out of the box.
 
-|                          | QiForge                                                                | Typical AI Framework |
-| ------------------------ | ---------------------------------------------------------------------- | -------------------- |
-| **Verified identity**    | Blockchain DID — users can verify who your agent is                    | None                 |
-| **Encrypted comms**      | Per-user encrypted Matrix rooms, synced and self-healing               | Plain text / logs    |
-| **Plugins**              | 15 bundled capability packs — toggle with one switch                   | Hardcoded wiring     |
-| **Skills at runtime**    | Discovered from a shared registry, executed in a sandbox — no redeploy | Hardcoded tools      |
-| **Capability discovery** | The agent equips its own tools mid-conversation                        | Static toolset       |
-| **Multi-LLM**            | OpenRouter + Nebius, per-role models, automatic failover               | Vendor lock-in       |
-| **Built-in billing**     | Per-user budgets, metering, on-chain settlement                        | DIY                  |
-| **Multi-client**         | Portal, CLI, Matrix, Slack — one oracle, every interface               | Single client        |
-| **Persistent memory**    | Graph-based, time-aware memory with knowledge scopes                   | External DB required |
-| **Secrets safety**       | The AI uses credentials it can never see, print, or leak               | Keys in the prompt   |
+|                          | QiForge                                                                                      | Typical AI Framework |
+| ------------------------ | -------------------------------------------------------------------------------------------- | -------------------- |
+| **Verified identity**    | Blockchain DID — users can verify who your agent is                                          | None                 |
+| **Encrypted comms**      | Per-user encrypted Matrix rooms, synced and self-healing                                     | Plain text / logs    |
+| **Plugins**              | 14 bundled capability packs plus opt-in ones; each switches itself on from its config        | Hardcoded wiring     |
+| **Skills at runtime**    | Discovered from a shared registry, executed in a sandbox — no redeploy                       | Hardcoded tools      |
+| **Capability discovery** | The agent equips its own tools mid-conversation                                              | Static toolset       |
+| **Multi-LLM**            | OpenRouter, or the user's own provider credentials (BYO)                                     | Vendor lock-in       |
+| **Multi-client**         | Portal, CLI, Matrix rooms, IXO Channels (WhatsApp) — one oracle, every interface             | Single client        |
+| **Persistent memory**    | Graph-based, time-aware memory with knowledge scopes                                         | External DB required |
+| **Secrets safety**       | The AI uses credentials it can never see, print, or leak                                     | Keys in the prompt   |
+| **Wallet signing**       | The agent prepares and validates chain transactions; the user signs them in their own wallet | Keys on the server   |
 
 ---
 
 ## An Oracle in ~30 Lines
 
 ```ts
-import { createOracleApp } from '@ixo/oracle-runtime';
-import { WeatherPlugin } from './plugins/weather/index.js';
-import { config } from './config.js';
+// src/index.ts of your oracle Worker
+import {
+  createOracleWorker,
+  WeatherPlugin,
+  BUNDLED_WORKERS_PLUGINS,
+} from '@ixo/oracle-runtime-workers';
+import { config } from './config';
 
-const app = await createOracleApp({
-  config, // name, org, personality, features
-  plugins: [new WeatherPlugin()], // your plugins, next to 15 bundled ones
+const oracle = createOracleWorker({
+  config, // name, org, personality
+  plugins: [new WeatherPlugin(), ...BUNDLED_WORKERS_PLUGINS],
 });
 
-await app.listen();
+// wrangler binds the two Durable Object classes by name
+export const { UserOracleDO, MatrixGatewayDO } = oracle;
+export default { fetch: oracle.fetch, scheduled: oracle.scheduled };
 ```
 
 That's a working oracle. The runtime hands you, for free:
 
-- A fully wired NestJS app — HTTP + WebSocket, validation, CORS, rate limiting, graceful shutdown, Swagger at `/docs`
+- A Hono shell on Cloudflare Workers — HTTP + SSE and a socket.io realtime channel
 - UCAN auth on every request and an on-chain identity for the oracle
-- Encrypted per-user storage with Matrix sync and corruption recovery
-- A LangGraph agent rebuilt per request — dynamic tool loading and always-on safety middlewares (validation, retry, loop-breaking, summarization)
-- 15 bundled plugins behind simple `features` toggles
+- One Durable Object per user holding their SQLite database, exported as an encrypted owner copy to the user's own VFS
+- A LangGraph agent per turn, run as a durable run that survives a platform reset, with always-on middlewares (validation, write claims, turn budgets, summarization)
+- An E2EE Matrix gateway (one Durable Object per oracle)
+- 14 bundled plugins that switch themselves on from their config, and opt-in ones you add yourself
 - A typed plugin API for everything custom
+
+The complete, runnable version is [`apps/qiforge-workers-example`](./apps/qiforge-workers-example/).
 
 ---
 
@@ -85,7 +94,7 @@ qiforge chat
 
 > **Full developer docs:** [docs.ixo.world](https://docs.ixo.world) — quickstart, plugin recipes, env vars, CLI reference, deployment.
 >
-> **Canonical reference:** [`apps/qiforge-example/`](./apps/qiforge-example/) — a complete oracle wiring the full bundled plugin set, plus a custom Weather plugin that exercises **every** plugin hook. Walkthrough: [`WEATHER-PLUGIN.md`](./apps/qiforge-example/WEATHER-PLUGIN.md)
+> **Canonical reference:** [`apps/qiforge-workers-example/`](./apps/qiforge-workers-example/) — the reference Worker wiring the bundled plugin set plus the opt-in ones, its wrangler configs, and every local and devnet test drill. The plugin-hook walkthrough [`WEATHER-PLUGIN.md`](./apps/qiforge-example/WEATHER-PLUGIN.md) was written for the Node runtime; the plugin class it describes is the same on Workers.
 
 ---
 
@@ -93,41 +102,51 @@ qiforge chat
 
 ```mermaid
 graph TD
-    Dev[You write ~30 lines: main.ts] --> Framework[QiForge Framework<br/>oracle-runtime]
-    Framework --> Plugins[15 Bundled Plugins<br/>+ your own plugins]
+    Dev[You write ~30 lines: src/index.ts] --> Framework[QiForge Framework<br/>oracle-runtime-workers]
+    Framework --> Plugins[14 Bundled Plugins<br/>+ opt-in and your own plugins]
     Framework --> Brain[AI Brain<br/>runs each conversation safely]
     Plugins --> Memory[Memory Engine<br/>long-term memory]
     Plugins --> Sandbox[AI Sandbox<br/>safe code execution]
     Plugins --> Skills[Skills Registry<br/>packaged abilities]
     Sandbox --> Skills
-    Brain --> Channels[Users reach it via<br/>Web · Matrix · Slack]
+    Brain --> Channels[Users reach it via<br/>Web · Matrix · IXO Channels]
 ```
 
-Plugins give the agent its powers — including three major services: a **Memory Engine** that never forgets, a **Sandbox** that safely runs real code, and a **Skills registry** of packaged abilities. Users talk to the finished oracle from the web, Matrix, or Slack.
+Plugins give the agent its powers — including three major services: a **Memory Engine** that never forgets, a **Sandbox** that safely runs real code, and a **Skills registry** of packaged abilities. Users talk to the finished oracle from the web, Matrix rooms, or a chat app through IXO Channels.
 
 ---
 
 ## Bundled Plugins
 
-| Plugin                 | What it adds                                                         | Status         |
-| ---------------------- | -------------------------------------------------------------------- | -------------- |
-| **memory**             | Durable cross-conversation memory per user                           | ✅             |
-| **user-preferences**   | Tone, language, names, free-form standing instructions               | ✅             |
-| **matrix-group-chats** | Group-room manners (reply only when mentioned) + per-room memory     | ✅ beta        |
-| **sandbox**            | A private Linux box per user — run code, produce files               | ✅             |
-| **skills**             | Discover skill capsules — private first, then the public registry    | ✅             |
-| **composio**           | Gmail, GitHub, Linear, Slack, Calendar, Notion… on the user's behalf | ✅             |
-| **editor**             | Edit live workspace documents — blocks, forms, executable flows      | ✅             |
-| **firecrawl**          | Web search + page reading                                            | ✅             |
-| **domain-indexer**     | Search IXO entities — orgs, projects, DAOs, events, geo filters      | ✅             |
-| **portal**             | Drive the user's web app (frontend-declared actions)                 | ✅             |
-| **agui**               | Render tables, charts, and forms in the user's browser               | ✅             |
-| **slack**              | Run the oracle as a Slack bot                                        | ✅             |
-| **credits**            | Budgets, metering, on-chain settlement                               | ✅             |
-| **tasks**              | Background jobs                                                      | ⚠️ placeholder |
-| **calls**              | Voice/video calls                                                    | ⚠️ placeholder |
+`BUNDLED_WORKERS_PLUGINS` (spread it into `createOracleWorker({ plugins })`):
 
-Unconfigured plugins exclude themselves quietly. Two plugins claiming the same tool name stop the boot with a named conflict. A missing env var fails startup with the exact setting, the plugin that needs it, and the one-line fix.
+| Plugin                 | What it adds                                                                                                        | Loaded when                                |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| **memory**             | Durable cross-conversation memory per user (the memory engine)                                                      | `MEMORY_MCP_URL`                           |
+| **sandbox**            | A private Linux box per user — run code, produce files                                                              | `SANDBOX_MCP_URL`                          |
+| **firecrawl**          | Web search + page reading                                                                                           | `FIRECRAWL_MCP_URL`                        |
+| **domain-indexer**     | Entity lookup across the IXO ecosystem — organizations, projects, DAOs, DIDs                                        | always                                     |
+| **composio**           | Gmail, GitHub, Linear, Calendar, Notion… on the user's behalf                                                       | `COMPOSIO_API_KEY`                         |
+| **vfs**                | The user's Virtual Filesystem: their documents, notes and datasets                                                  | the oracle's signing key                   |
+| **tasks**              | Scheduled runs of the agent, delivered to the user's oracle room                                                    | always                                     |
+| **editor**             | Read and edit the user's editor documents                                                                           | always                                     |
+| **user-preferences**   | Tone, language, formality, what to call the agent                                                                   | always                                     |
+| **portal**             | Browser-side actions on the user's Portal (frontend-declared browser tools)                                         | always                                     |
+| **agui**               | Render tables, charts and forms in the user's browser (AG-UI actions)                                               | always                                     |
+| **attachments**        | Re-read a file the user attached earlier in the conversation                                                        | always                                     |
+| **matrix-group-chats** | Group-room manners (reply only when mentioned) + searchable per-room memory                                         | group behaviour needs `MATRIX_GROUP_ROOMS` |
+| **pod-creator**        | Design an IXO Programmable Organisational Domain and prepare its creation batch for the user to sign (experimental) | always                                     |
+
+Exported but opt-in — construct them yourself:
+
+| Plugin                     | What it adds                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`IxoTransactionPlugin`** | Prepares and strictly validates IXO chain transactions; the user signs them in their Portal wallet. Mainnet drafts are refused unless `IXO_TRANSACTION_ALLOW_MAINNET=true`, and then need a testnet receipt for the same message. See [`ixo-transaction.md`](./packages/oracle-runtime-workers/docs/ixo-transaction.md) and [`@ixo/ixo-transaction`](./packages/ixo-transaction). |
+| **`FlowsPlugin`**          | Build runnable automation flow templates by conversation                                                                                                                                                                                                                                                                                                                          |
+| **`SkillsPlugin`**         | Discover skill capsules — the caller's private skills first, then the public registry                                                                                                                                                                                                                                                                                             |
+| **`WeatherPlugin`**        | The example plugin                                                                                                                                                                                                                                                                                                                                                                |
+
+On-demand plugins stay hidden until the agent loads them (`load_capability`). A plugin whose config is missing excludes itself quietly; one forced on through `createOracleWorker({ features })` without its config fails the boot with the setting it needs. Two plugins registering the same tool name stop the boot with a named conflict. A tool can declare the `admin` plane; it is then hidden unless the user's delegation grants `admin-tool/invoke` for it. The Slack transport and the commerce lane of the Node runtime are not ported ([node-parity](./packages/oracle-runtime-workers/docs/node-parity.md#not-ported)).
 
 ---
 
@@ -156,19 +175,27 @@ apps/qiforge-workers-example/    → reference Worker — copy this to start; th
                                    harness e2e, durable-run, context and Matrix
                                    drills live in its test/
 packages/
-  @ixo/common               → shared contracts (bounded semantic Decisions, …)
+  @ixo/common               → shared contracts: bounded semantic Decisions
+                              (/ai/decisions), the frontend bridge
+                              (/ai/frontend-bridge), portable work and
+                              AgentWake (/work)
   @ixo/ucan                 → UCAN delegations, invocations, validation
+  @ixo/ixo-transaction      → IXO message catalog, intent routing and strict
+                              validation for IxoTransactionPlugin; the Portal
+                              signing hook at /react
   @ixo/oracles-chain-client → blockchain ops, claims, payments
-  @ixo/oracles-client-sdk   → React SDK (useChat() hook)
-  @ixo/matrix               → Matrix client, encrypted room management
+  @ixo/oracles-client-sdk   → React SDK (useChat(), useAgAction() hooks)
+  @ixo/matrix               → Matrix client, encrypted room management (the
+                              Workers runtime uses @ixo/matrix-bot-workers-sdk)
 
 DEPRECATED (kept building, no longer developed):
 packages/oracle-runtime/    → the Node runtime (@ixo/oracle-runtime, NestJS)
 apps/qiforge-example/       → its reference oracle
-packages/sqlite-saver, @ixo/events → Node-runtime persistence and streaming
+packages/sqlite-saver, packages/events (@ixo/oracles-events)
+                            → Node-runtime persistence and streaming
 ```
 
-Workers runtime docs live in [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/) (architecture, configuration, operations, testing, Node parity). The older [`docs/`](./docs/) tree and [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md) describe the deprecated Node runtime.
+Workers runtime docs live in [`packages/oracle-runtime-workers/docs/`](./packages/oracle-runtime-workers/docs/) (architecture, configuration, operations, testing, Node parity, and the feature pages for channels, chat delivery, the frontend bridge, IXO transaction signing and POD Creator). Of the root [`docs/`](./docs/) tree, [`docs/architecture/decisions.md`](./docs/architecture/decisions.md) (the shared Decision module) and [`docs/architecture/request-admission.md`](./docs/architecture/request-admission.md) are kept current for the Workers runtime; the rest, and [`specs/ORA-219-plugin-based-runtime.md`](./specs/ORA-219-plugin-based-runtime.md), describe the deprecated Node runtime.
 
 ---
 
@@ -186,10 +213,19 @@ pnpm --filter @ixo/oracle-runtime-workers typecheck
 pnpm --filter @ixo/oracle-runtime-workers test:core   # plain-Node suites
 pnpm --filter @ixo/oracle-runtime-workers test        # inside workerd
 
+# Shared packages
+pnpm --filter @ixo/common test
+pnpm --filter @ixo/ixo-transaction test
+
 # In apps/qiforge-workers-example
 pnpm dev              # wrangler dev
 pnpm test:e2e         # against the local ixo testing harness + a real LLM
+                      # (also test:e2e:durable, :context, :threads, :group,
+                      # :transcript, :vfs, :legacy-large, :tier, :mcp,
+                      # :feedback, :pod, :channels and test:stress)
 ```
+
+The runtime resolves `@ixo/ucan`, `@ixo/common` and `@ixo/ixo-transaction` through their `dist`, so build them first (`pnpm --filter @ixo/ucan --filter "@ixo/common..." --filter "@ixo/ixo-transaction..." build`).
 
 **Prerequisites:** Node.js 22+, pnpm 11+, [OpenRouter API key](https://openrouter.ai/keys), and for the e2e suites the [ixo testing harness](https://github.com/ixoworld/ixo-testing-harness).
 
@@ -222,6 +258,7 @@ What protects the document:
 - The decryption key is in the link's fragment (`#k=…`). Browsers never send the fragment to a server, so link previews, proxies and server logs never see it.
 - The oracle's bucket holds only ciphertext. The readable copy lives in the user's own database.
 - The link expires. The user can revoke it (`DELETE /artifacts/:id`). Deleting the conversation deletes its documents.
+- Expired share copies are deleted from R2 by the cron tick of the script that binds `ARTIFACT_BUCKET` (a full sweep every `ARTIFACT_SWEEP_INTERVAL_HOURS`, 24 by default), including copies nobody opens again. In a gateway split the oracle script needs its own cron trigger for this.
 
 What it does not protect against: anyone the link is forwarded to, or who sees it, can read the document until it expires or is revoked. The operator holds the key: it is generated in the oracle and stored with the user's data, in the chat history the model provider receives, and in the response to the channel gateway, so it is shielded from R2 and the viewer host, not from the oracle operator or the chat provider. Revoking a channel binding does not revoke links already sent.
 
@@ -239,8 +276,7 @@ The implementation is described in [`packages/oracle-runtime-workers/docs/chat-d
 
 ## Roadmap
 
-- **Tasks plugin** — background jobs (placeholder today; clean rebuild planned)
-- **Calls plugin** — voice/video (placeholder, deferred)
+- **Calls plugin** — voice/video (not on the Workers runtime; deferred)
 - **1.0 hardening** — production-grade logger, CLI polish, docs refresh, retiring the deprecated Node runtime
 - **Growing skill registry** — publish yours at [ai-skills](https://github.com/ixoworld/ai-skills)
 

@@ -10,6 +10,7 @@ import type { RunSummary, TurnRequest } from './contracts';
 import type { RunRecord } from './run-store';
 import type { TurnBody } from './turn-body';
 import type { RequestDisposition } from '../plugin-api/request-admission';
+import type { DomainContextPins } from '../core/domain-context';
 
 /** The client-declared surface of a turn, as the body carries it. */
 export type ClientSurfaceBody = Pick<TurnBody, 'tools' | 'agActions'>;
@@ -21,6 +22,11 @@ export interface StoredRunRequest extends ClientSurfaceBody {
   };
   timezone?: string;
   stream?: boolean;
+  /**
+   * Domain-context anchors the run's first attempt read, by DID: a resumed
+   * attempt reads the same revisions instead of whatever is anchored now.
+   */
+  domainPins?: DomainContextPins;
 }
 
 export function storedRunRequest(

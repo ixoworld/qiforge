@@ -72,6 +72,18 @@ export function setCachedInvocation(
   saveMap(map);
 }
 
+/** Forget one user's invocation for one oracle (it is being replaced). */
+export function removeCachedInvocation(
+  userDid: string,
+  oracleDid: string,
+): void {
+  const map = loadMap();
+  const key = cacheKey(userDid, oracleDid);
+  if (!(key in map)) return;
+  delete map[key];
+  saveMap(map);
+}
+
 export function clearInvocationCache(): void {
   localStorage.removeItem(STORAGE_KEY);
 }

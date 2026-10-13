@@ -32,13 +32,26 @@ Both scripts need:
 - A Cloudflare `ratelimits` binding named `RATE_LIMIT` on the oracle script
   (the example uses 100 requests / 60 s). The shell enforces it per
   authenticated user DID, so co-located users never share a bucket and a
-  leaked token cannot burn unbounded LLM spend. No binding = no limiting
-  (local harness). Pair it with a WAF rate-limiting rule at the edge for
-  unauthenticated flood protection.
+  leaked token cannot burn unbounded LLM spend; a channel turn is counted
+  as soon as its invocation proves the user, before the Auth Hub call. The
+  unauthenticated routes that cost work are limited per client IP
+  (`cf-connecting-ip`): the artefact data route, socket.io upgrades,
+  `GET /matrix/status` and `POST /matrix/start`. Every key is
+  `<ORACLE_DID>|<scope>|<subject>` (`rateLimitKey`, scopes `user`,
+  `artifact`, `socket`, `status`, `start`), and the
+  binding's `namespace_id` must be unique per oracle on the account:
+  bindings that share a `namespace_id` share their counters, even across
+  Workers. No binding = no limiting (local harness). Pair it with a WAF
+  rate-limiting rule at the edge for unauthenticated flood protection.
 - Optionally a Workers AI binding named `AI` (`"ai": { "binding": "AI" }`)
   when the oracle uses [Decisions](#decisions) with
   `DECISION_PROVIDER=cloudflare-jev`: the binding authenticates implicitly, so
   no Cloudflare account credentials are needed. Leave it off otherwise.
+- The other optional bindings are described with their feature below: the
+  R2 buckets `TIER_BUCKET` ([storage](#storage)) and `ARTIFACT_BUCKET`
+  ([chat delivery](#chat-delivery-and-artefacts)), the `FEEDBACK_RATE_LIMIT`
+  rate limiter ([feedback](#anonymous-response-feedback)) and the `AUTH_HUB`
+  service binding ([channels](#channels-ingress)).
 
 ### Two scripts and migrations
 
@@ -97,27 +110,51 @@ Verify after `pnpm install`: the bundle from
 `lib0`, `y-protocols` and `@ixo/matrix-crdt` already resolve to single
 copies.
 
+LangSmith before 0.6.0 can trust public prompt pulls implicitly
+(CVE-2026-45134). The runtime and `@ixo/common` depend on `langsmith`
+`^0.6.0`, and this repo also forces every other path (LangChain's own
+dependency on it) onto the patched line with a second override. pnpm does
+not inherit it either, so an app that wants the same guarantee for its
+transitive copies carries it too, and checks with `pnpm why langsmith`:
+
+```yaml
+overrides:
+  'langsmith@<0.6.0': '^0.6.0'
+```
+
 ## Environment
 
 Non-secret values go in `vars`; secrets through `wrangler secret put` (or
 `.dev.vars` under `wrangler dev`). The gateway script needs only the
 identity, auth and Matrix groups plus `LOG_LEVEL`. Plugins read their own
 variables (e.g. `MEMORY_MCP_URL`, `FIRECRAWL_MCP_URL`, `SANDBOX_MCP_URL`,
-`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`) through the
-same object; each plugin's `configSchema` is the reference.
+`DOMAIN_INDEXER_URL`, `SKILLS_CAPSULES_BASE_URL`, `COMPOSIO_*`,
+`IXO_TRANSACTION_*`) through the same object; each plugin's `configSchema` is
+the reference. Two plugin keys gate money: `POD_CREATOR_ALLOW_MAINNET`
+(default `false`) must be `'true'` before the POD Creator plugin prepares a
+mainnet creation batch — with `NETWORK` at its `mainnet` default and the flag
+unset, the create path refuses ([pod-creator](pod-creator.md)); the opt-in
+wallet-signing plugin's variables, including `IXO_TRANSACTION_ALLOW_MAINNET`,
+are described in [ixo-transaction](ixo-transaction.md#configuration). The
+`IXO_TRANSACTION_CHAIN_ID_DEVNET` / `_TESTNET` / `_MAINNET` chain ids are
+declared by both wallet-signing plugins (the same schema objects, so the
+boot does not report them as a collision): one set of variables names the
+chain for `sign_ixo_transaction` and for the POD Creator's
+`request_pod_signature`, whichever plugins the oracle loads.
 
 ### Identity and auth
 
-| Variable                          | Required | Meaning                                                                                                                                                                                                                                                |
-| --------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ORACLE_NAME`                     | yes      | Display name (device names, replies).                                                                                                                                                                                                                  |
-| `ORACLE_DID`                      | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                             |
-| `ORACLE_ENTITY_DID`               | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                                                    |
-| `NETWORK`                         | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                      |
-| `BLOCKSYNC_GRAPHQL_URL`           | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                  |
-| `UCAN_AUTH_MAX_TTL_SECONDS`       | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
-| `UCAN_ALLOW_BARE_DELEGATION_AUTH` | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
-| `ORACLE_SIGNING_MNEMONIC`         | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
+| Variable                              | Required | Meaning                                                                                                                                                                                                                                                |
+| ------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ORACLE_NAME`                         | yes      | Display name (device names, replies).                                                                                                                                                                                                                  |
+| `ORACLE_DID`                          | yes      | UCAN audience — the DID users address invocations and delegations to; routes user objects.                                                                                                                                                             |
+| `ORACLE_ENTITY_DID`                   | no       | On-chain entity DID; forms the oracle half of the user ↔ oracle room alias (falls back to the DID).                                                                                                                                                    |
+| `NETWORK`                             | no       | `mainnet` / `testnet` / `devnet`; picks defaults for the VFS and UCAN store URLs.                                                                                                                                                                      |
+| `BLOCKSYNC_GRAPHQL_URL`               | yes      | Blocksync GraphQL endpoint for `did:ixo` key resolution and users' homeserver lookup.                                                                                                                                                                  |
+| `UCAN_AUTH_MAX_TTL_SECONDS`           | no       | Maximum lifetime accepted for a user auth invocation (default 900).                                                                                                                                                                                    |
+| `UCAN_ALLOW_BARE_DELEGATION_AUTH`     | no       | `true` lets an `x-ucan-delegation` without an invocation authenticate (the legacy fallback, logged per HTTP request and per socket CONNECT as `[auth] … authenticated with a bare delegation`). Off by default: requests must carry a UCAN invocation. |
+| `UCAN_REAUTH_PROMPT_THROTTLE_SECONDS` | no       | Minimum time between two `delegation_required` prompts a Matrix turn posts for one user without a usable delegation (default 21600 = 6 h; anything not a positive number keeps the default). See [operations](operations.md#best-effort-room-posts).   |
+| `ORACLE_SIGNING_MNEMONIC`             | no       | Ed25519 mnemonic the oracle signs downstream UCAN invocations with (secret). Unset = read from the account room like the Node runtime (needs `MATRIX_ACCOUNT_ROOM_ID` + `MATRIX_VALUE_PIN`; see first-time setup).                                     |
 
 ### Matrix
 
@@ -162,6 +199,28 @@ same object; each plugin's `configSchema` is the reference.
 | `TIER_EVICT_AFTER_PERIODS` | no       | Periods a chunk must go untouched before eviction (default 2).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `TIER_PERIOD_MS`           | no       | Length of one access-tracking period (default one day; ≥ 1000). Tests shorten it; production keeps the day.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
+### Channels ingress
+
+`POST /channels/turn` lets IXO Channels (WhatsApp now) submit a turn to the
+user's Companion; the authorization model, retries and replies are in
+[channels](channels.md). Set these on the script that serves HTTP (the
+oracle script in a gateway split).
+
+| Binding or variable            | Required         | Meaning                                                                                                                                                                                               |
+| ------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHANNEL_SERVICE_DID`          | to enable        | The one channel service DID allowed to invoke this deployment. Unset = the route answers `503 Channels are not configured`.                                                                           |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                      |
+| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set. |
+| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                  |
+
+Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
+validation is "not configured": a new channel turn gets `503` and nothing is
+recorded, and an admitted run waits on the recovery backoff
+([channels](channels.md#authorization)). Channel requests count against
+`RATE_LIMIT` under the user's DID in their own budget (key
+`<ORACLE_DID>|channel|<userDid>`), apart from the user's Portal requests
+(`<ORACLE_DID>|user|<userDid>`); both use the binding's limit.
+
 ### Chat delivery and artefacts
 
 Turns from IXO Channels reply in chat style: a few short messages, with a browser document for anything long. Matrix rooms do so only when `MATRIX_CHAT_DELIVERY=true`. The Portal and scheduled tasks keep the whole reply. See [chat delivery](chat-delivery.md). New artefacts need a bucket and a public origin. Without them, long chat replies are split into messages, and `create_artifact` is not offered. The env schema rejects a malformed or insecure URL, a lifetime outside 1–365 days and a sweep interval outside 1–168 hours at boot; the user object also logs a warning when the bucket is bound without `ORACLE_PUBLIC_URL` (or the other way round).
@@ -191,25 +250,36 @@ wrangler r2 bucket lifecycle add <oracle>-artifacts artefact-expiry art/ --expir
 
 ### LLM, tracing, BYO
 
-| Variable                                                                                                                                                                                                                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OPEN_ROUTER_API_KEY` (secret), `DEFAULT_MODEL`, `MODEL_PRICE_MARKUP`, `MAIN_REASONING_EFFORT`                                                                                                                                            | Platform model configuration; `LLM_PROVIDER=nebius` with `NEBIUS_API_KEY` for self-hosted models.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `TURN_RECURSION_LIMIT`                                                                                                                                                                                                                    | LangGraph steps one turn may take (a model call, a batch of tool calls, a middleware hook each count) before it fails with `GraphRecursionError`. Default 600, three times the Node runtime's hard-coded 200. With the bundled middleware stack a tool-call round trip costs about 6 steps (measured on devnet: 60 failed after 10 chained calls), so 600 is roughly 100 chained tool calls; raise it for oracles whose turns chain more, lower it to cap runaway loops.                                                                                                                          |
-| `RUN_KEEPALIVE_MS`, `RUN_SEGMENT_FLUSH_MS`, `RUN_SEGMENT_BYTES`, `RUN_RECOVERY_ATTEMPTS`, `RUN_RECOVERY_DELAYS_MS`, `TURN_MULTITASK_DEFAULT`                                                                                              | Durable runs (see [operations](operations.md#turns-durable-runs)): the keep-alive alarm horizon while a run executes (default 20000 ms), how often the streamed output is packed into SQLite (2000 ms / 16384 bytes), how many consecutive recovery attempts without progress a reset run gets before it is closed as interrupted (4) and the delay before each (`5000,15000,30000,60000`), and what a new message does to a run already active on its session (`interrupt`, or `enqueue`).                                                                                                       |
-| `MODEL_CONTEXT_TOKENS`, `MODEL_CONTEXT_OVERRIDES`                                                                                                                                                                                         | Context windows (see [operations](operations.md#turns-context-budgets)): the window for a model no source knows (default 100000, min 16000) and explicit per-model windows as `model=tokens,…` (`openai/gpt-5.6-luna=400000`). Everything else is resolved from the OpenRouter `/models` listing per model, and lowered permanently when a provider's "too long" error names a smaller limit.                                                                                                                                                                                                     |
-| `CONTEXT_SUMMARIZE_FRACTION`, `CONTEXT_PRUNE_FRACTION`, `CONTEXT_RESULT_CAP_FRACTION`, `CONTEXT_RESULT_CAP_MAX_CHARS`, `CONTEXT_REQUEST_FRACTION`, `CONTEXT_OUTPUT_RESERVE_TOKENS`, `CONTEXT_KEEP_MESSAGES`, `CONTEXT_SUMMARIZE_MESSAGES` | Fractions of the model's window at which the history is summarized (0.5), old tool results are pruned from the request (0.35), one tool result is capped (0.12, ×4 chars, never above the ceiling of 200,000 chars — a million-token window does not make a half-megabyte tool result useful; the rest is reachable through `read_result`), and a request is refused (0.95, minus the reply reserve of 8000 tokens, at most a quarter of the window); the recent messages the summarizer keeps verbatim (10); and an optional message-count trigger on top of the token one (unset: tokens only). |
-| `TOOL_RESULT_TTL_HOURS`, `TOOL_RESULT_R2_MIN_BYTES`                                                                                                                                                                                       | Saved tool results (the whole text behind a capped result): lifetime (24) and the size from which they go to the R2 tier bucket instead of the object's SQLite (1000000; 65536 … 1500000).                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `LANGSMITH_TRACED_DIDS`                                                                                                                              | Global (`'true'`) or per-DID allowlist tracing (`*` = everyone).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `BYO_LLM_ENABLED`                                                                                                                                                                                                                         | `'true'` enables the bring-your-own-credential lane (`/byo-llm/*`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `BYO_CHATGPT_BACKEND_URL`, `BYO_CHATGPT_PROXY_AUTH_TOKEN`, `BYO_CHATGPT_CLIENT_ID`                                                                                                                                                        | ChatGPT-subscription backend proxy (required on Cloudflare, see operations), its optional gate token, OAuth client id override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Variable                                                                                                                                                                                                                                  | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `OPEN_ROUTER_API_KEY` (secret), `DEFAULT_MODEL`, `MODEL_PRICE_MARKUP`, `MAIN_REASONING_EFFORT`                                                                                                                                            | Platform model configuration; `LLM_PROVIDER=nebius` with `NEBIUS_API_KEY` for self-hosted models. Each model call asks for a role (`OPENROUTER_MODEL_MAP` / `NEBIUS_MODEL_MAP` in `src/core/llm.ts`, `BYO_ROLE_MODELS` for BYO turns): `main` is the reply model (`DEFAULT_MODEL`, a per-request choice, or the BYO model; `MAIN_REASONING_EFFORT` applies to it alone; on OpenRouter it carries the `OPENROUTER_MAIN_FALLBACKS` list, `qwen/qwen3-235b-a22b-thinking-2507` (131,072-token window) and `google/gemini-2.5-flash-lite` (1,048,576) — with summarization at 60% of a 1,050,000 window (630,000), the Qwen fallback cannot take a long thread, so only the Gemini fallback covers one); `summarizer`, which condenses a long history, is always that same model on the same lane, so a BYO turn's history is summarized on the user's own provider and key (on OpenRouter it gets the helper calls' `medium` reasoning effort, not `MAIN_REASONING_EFFORT`); `routing` stays the cheap helper for the capability router and other one-shot helper calls: `openai/gpt-oss-120b` on OpenRouter, `Qwen/Qwen3-30B-A3B-Instruct-2507` on Nebius, and the provider's `BYO_ROLE_MODELS` entry on a BYO turn. |
+| `TURN_RECURSION_LIMIT`                                                                                                                                                                                                                    | LangGraph steps one turn may take (a model call, a batch of tool calls, a middleware hook each count) before it fails with `GraphRecursionError`. Default 600, three times the Node runtime's hard-coded 200. With the bundled middleware stack a tool-call round trip costs about 6 steps (measured on devnet: 60 failed after 10 chained calls), so 600 is roughly 100 chained tool calls; raise it for oracles whose turns chain more, lower it to cap runaway loops.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `RUN_KEEPALIVE_MS`, `RUN_SEGMENT_FLUSH_MS`, `RUN_SEGMENT_BYTES`, `RUN_RECOVERY_ATTEMPTS`, `RUN_RECOVERY_DELAYS_MS`, `TURN_MULTITASK_DEFAULT`                                                                                              | Durable runs (see [operations](operations.md#turns-durable-runs)): the keep-alive alarm horizon while a run executes (default 20000 ms), how often the streamed output is packed into SQLite (2000 ms / 16384 bytes), how many consecutive recovery attempts without progress a reset run gets before it is closed as interrupted (4) and the delay before each (`5000,15000,30000,60000`), and what a new message does to a run already active on its session (`interrupt`, or `enqueue`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `MODEL_CONTEXT_TOKENS`, `MODEL_CONTEXT_OVERRIDES`                                                                                                                                                                                         | Context windows (see [operations](operations.md#turns-context-budgets)): the window for a model no source knows (default 100000, min 16000) and optional per-model windows as `model=tokens,…` (`openai/gpt-5.6-luna=400000`). Neither is needed: a window resolves, first hit wins, from a window learned from the provider (a "too long" error naming a smaller limit, kept permanently), the override, the live OpenRouter `/models` listing (3 s timeout, 60 s back-off after a failure), the runtime's built-in table (`BUILTIN_CONTEXT_WINDOWS` in `src/core/llm.ts`: every curated catalog model's `contextTokens` plus every other model id the runtime sends — the role maps, Nebius and the BYO models; origin `builtin`), and only then the default.                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `CONTEXT_SUMMARIZE_FRACTION`, `CONTEXT_PRUNE_FRACTION`, `CONTEXT_RESULT_CAP_FRACTION`, `CONTEXT_RESULT_CAP_MAX_CHARS`, `CONTEXT_REQUEST_FRACTION`, `CONTEXT_OUTPUT_RESERVE_TOKENS`, `CONTEXT_KEEP_MESSAGES`, `CONTEXT_SUMMARIZE_MESSAGES` | Fractions of the model's window at which the history is summarized (0.6), old tool results are pruned from the request (0.35), one tool result is capped (0.12, ×4 chars, never above the ceiling of 200,000 chars — a million-token window does not make a half-megabyte tool result useful; the rest is reachable through `read_result`), and a request is refused (0.95, minus the reply reserve of 8000 tokens, at most a quarter of the window); the recent messages the summarizer keeps verbatim (10); and an optional message-count trigger on top of the token one (unset: tokens only). The summary is written by the turn's main model (the `summarizer` role), so only the main model's window counts: the summarizer reads at most the request cap less 4000 tokens for its prompt, and summarizing starts at the smallest of the summarize fraction of the window, the request cap and that summary input, so the earlier summary is never dropped unread (a 1,050,000-token window summarizes at 630,000; the summary-input bound only binds below a window of about 34.3k, e.g. 32k summarizes at 18,400).                                                                                         |
+| `TOOL_RESULT_TTL_HOURS`, `TOOL_RESULT_R2_MIN_BYTES`                                                                                                                                                                                       | Saved tool results (the whole text behind a capped result): lifetime (24) and the size from which they go to the R2 tier bucket instead of the object's SQLite (1000000; 65536 … 1500000).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `LANGSMITH_TRACED_DIDS`                                                                                                                              | Global (`'true'`) or per-DID allowlist tracing (`*` = everyone).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `BYO_LLM_ENABLED`                                                                                                                                                                                                                         | `'true'` enables the bring-your-own-credential lane (`/byo-llm/*`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `BYO_CHATGPT_BACKEND_URL`, `BYO_CHATGPT_PROXY_AUTH_TOKEN`, `BYO_CHATGPT_CLIENT_ID`                                                                                                                                                        | ChatGPT-subscription backend proxy (required on Cloudflare, see operations), its optional gate token, OAuth client id override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 ### Decisions
 
-Bounded semantic Decisions (`getDecisions` / `ctx.decisions`, the Node
-runtime's primitive of the same name). Unset = Decisions unconfigured: every
-`ctx.decisions` call rejects with `DecisionProviderUnavailableError`.
-`createOracleWorker({ decisionAdapter })` supplies an adapter directly and
-bypasses these variables.
+Bounded semantic Decisions (`getDecisions` / `ctx.decisions`). The provider
+`DECISION_PROVIDER` selects is registered under that value as its id
+(`cloudflare-jev` / `openrouter-jev`) and is the default provider.
+`createOracleWorker({ decisionProviders, decisionProviderPolicy })` registers
+further host providers beside it and routes Decisions between them
+(`defaultProviderId`, exact per-Decision `routes`); a caller may pick one per
+evaluation with `{ providerId }`. With no provider at all every
+`ctx.decisions` call rejects with `DecisionProviderUnavailableError`; with
+several and neither a route nor a default for a Decision, its evaluation
+rejects with `AmbiguousDecisionProviderError`. A policy naming an unknown
+provider, a duplicate provider id, or `decisionProviders` together with
+`decisionAdapter` fails the boot. `createOracleWorker({ decisionAdapter })`
+supplies a single adapter (provider `host`) and bypasses these variables. A
+Decision whose projection declares its evidence incomplete is refused with
+`DecisionNotApplicableError` before any provider is called. See
+`docs/architecture/decisions.md#choosing-a-provider` at the repo root.
 
 When the turn is traced (see the LangSmith variables), every evaluation is a
 `decision:<name>` span on the turn's tracer: a tool's Decision nests under the
@@ -223,15 +293,112 @@ tool, and the capability router's Decision is its own trace with the turn's
 | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (secret) | Only for `cloudflare-jev` **without** the `AI` binding: the account and Workers AI token for the REST API. With `"ai": { "binding": "AI" }` declared in `wrangler.jsonc` the binding is used and neither is needed.                                                                                                                                                                        |
 | `CAPABILITY_ROUTER`                                      | Capability router, the runtime's own Decision (requires a `DECISION_PROVIDER`). `off` (default) never evaluates; `shadow` evaluates off the turn's path and logs `[capability-router-shadow]` verdicts for accuracy measurement; `on` awaits the verdict before the first model call and preloads the predicted on-demand plugin's tools for that turn only. Any failure preloads nothing. |
 
+### Anonymous response feedback
+
+Users can send anonymous free-text feedback about one completed Agent reply
+(`POST /messages/:sessionId/:messageId/feedback`). Each user can give one
+feedback per reply, and it becomes one Linear issue; a retry of the same
+submission never creates a second one. Off unless both the Linear key and the HMAC secret are set; then
+the transcript routes advertise `capabilities.anonymousMessageFeedback` and
+the client SDK shows the control. Setting only one of the two, a secret
+shorter than 32 characters, a malformed id or an insecure API URL fails the
+boot (`Anonymous feedback is half-configured …` / `… configuration is
+invalid …`; the message names keys, never values). Set them on the script
+that serves HTTP (the oracle script in a gateway split). What operators see
+and what is never sent: [operations](operations.md#anonymous-response-feedback).
+
+The runtime reads these keys in the shell. They are kept out of the
+validated config plugins receive as `ctx.config`, and a plugin whose
+`configSchema` declares any `FEEDBACK_` key fails the boot. A plugin HTTP
+route (`getRoutes`) still receives the raw Worker env, which holds these keys
+like every other binding and secret.
+
+| Variable                     | Required        | Meaning                                                                                                                                                        |
+| ---------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FEEDBACK_LINEAR_API_KEY`    | to enable       | Linear API key (secret) able to create issues in the feedback team, sent as `Authorization: <key>`. Use a key restricted to that team.                         |
+| `FEEDBACK_HMAC_SECRET`       | to enable       | At least 32 characters (secret). Derives the user, session, message and IP pseudonyms. Rotating it starts new pseudonyms; old issues can no longer be grouped. |
+| `FEEDBACK_LINEAR_TEAM_ID`    | no              | Linear team id (default Studio, `c781a53a-d432-469f-9c9c-2345a0f8243b`).                                                                                       |
+| `FEEDBACK_LINEAR_PROJECT_ID` | no              | Linear project id (default "User Feedback from Portal", `6c1474a9-620c-4e3c-b443-0263992f3b55`).                                                               |
+| `FEEDBACK_LINEAR_LABEL_IDS`  | no              | Comma-separated Linear label ids for every issue.                                                                                                              |
+| `FEEDBACK_LINEAR_API_URL`    | no              | GraphQL endpoint (default `https://api.linear.app/graphql`; `http` only on localhost — the harness e2e points it at a fake).                                   |
+| `QIFORGE_BUILD_VERSION`      | no              | Release or commit shown as "QiForge build" in the issue (default `unknown`).                                                                                   |
+| `FEEDBACK_RATE_LIMIT`        | no, **binding** | `ratelimits` binding for the per-IP limit, e.g. `{ "name": "FEEDBACK_RATE_LIMIT", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } }`.           |
+
+Without `FEEDBACK_RATE_LIMIT` the per-IP check uses `RATE_LIMIT` under a
+feedback-only key, so it allows that binding's limit (100 a minute in the
+example) per address; declare the dedicated binding to get the Node runtime's
+3 a minute. With neither binding there is no per-IP limit. The per-user limit
+(3 new submissions a minute) is kept in the user's object and needs no binding.
+
 ### Ops and misc
 
-| Variable                     | Meaning                                                                                                                                                                                                                                                        |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SLACK_ALERT_WEBHOOK_URL`    | Slack incoming webhook (secret): one alert per whole-GB watermark as a user's working copy grows toward the 10 GB cap.                                                                                                                                         |
-| `ORACLE_DEBUG_ROUTES`        | `'true'` enables the authenticated `/debug/*` operator routes. Leave off in production.                                                                                                                                                                        |
-| `TOPIC_DELIVERABLES_ENABLED` | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on. |
-| `LOG_LEVEL`                  | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                 |
-| `CORS_ORIGIN`                | Default `*`.                                                                                                                                                                                                                                                   |
+| Variable                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SLACK_ALERT_WEBHOOK_URL`    | Slack incoming webhook (secret): one alert per whole-GB watermark as a user's working copy grows toward the 10 GB cap.                                                                                                                                                                                                                                                                                                                                                       |
+| `ORACLE_DEBUG_ROUTES`        | `'true'` enables the `/debug/*` operator routes; every one needs a UCAN invocation, the gateway's stop and restart included. Leave off in production.                                                                                                                                                                                                                                                                                                                        |
+| `ORACLE_OPERATOR_DIDS`       | Optional, comma-separated DIDs allowed onto the gateway-wide operator routes `/debug/matrix/*` (stop, restart, abort, rotate-device, outbox, event). When set, every other authenticated caller gets 403 there. A list with an entry that is not a DID admits nobody and logs an error. Unset: any authenticated caller may use them while `ORACLE_DEBUG_ROUTES=true` — set it on any shared deployment that enables debug routes. The per-user debug routes are unaffected. |
+| `TOPIC_DELIVERABLES_ENABLED` | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on.                                                                                                                                                                                                               |
+| `LOG_LEVEL`                  | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                                                                                                                                                                                                                               |
+| `BOOT_LINT_VERBOSE`          | `'true'` logs every plugin-manifest soft warning (`[boot] [plugin] field: …`) and every example that names a tool not registered at boot, one line each. Unset: one `[boot] manifest lint: N soft warning(s) (plugin=count, …)` line and one `[boot] manifest examples: …` line per core build (once per isolate).                                                                                                                                                           |
+| `CORS_ORIGIN`                | Default `*`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+### Built-in limits
+
+Not configurable; listed so an operator knows where each refusal comes
+from. Behaviour is in [operations](operations.md).
+
+| Constant                                                                                    | Value                 | Where it applies                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MAX_TURN_BODY_BYTES`                                                                       | 256 KiB               | `POST /messages/:id` body (413 above it, checked before the body is read; `src/shell/turn-body-cap.ts`).                                                                                           |
+| `DELEGATION_BODY_BYTES`, `BYO_LLM_BODY_BYTES`, `DEBUG_BODY_BYTES`                           | 64 KiB each           | `POST /delegation`, `/byo-llm/*`, `/debug/*` bodies (`src/shell/app.ts`).                                                                                                                          |
+| `ABORT_BODY_BYTES`                                                                          | 4 KiB                 | `POST /messages/abort` body.                                                                                                                                                                       |
+| `HANDSHAKE_DEADLINE_MS`, `MAX_PAYLOAD_BYTES`                                                | 10 s, 1,000,000 bytes | A socket must authenticate within the deadline; a larger text frame closes it with 1009 (`src/realtime/`).                                                                                         |
+| `BLOCKSYNC_LOOKUP_TIMEOUT_MS`                                                               | 5 s                   | One Blocksync homeserver lookup in the gateway (`src/matrix/user-homeserver.ts`); the user object bounds its own at 3 s.                                                                           |
+| `UNREGISTERED_CACHE_TTL_MS`                                                                 | 5 min                 | How long the gateway remembers that a DID document names no homeserver (a DID Blocksync does not know is not cached).                                                                              |
+| `DEFAULT_IXO_RESOLVER_TIMEOUT_MS`, `IXO_DID_RESOLUTION_CACHE_TTL_MS`                        | 3 s, 60 s             | did:ixo key resolution for UCAN validation (and the channel route's did:web service identity), and how long a resolved key set is reused per isolate.                                              |
+| UCAN store / `did.json` look-up timeout (`fetchTimeoutMs`)                                  | 10 s                  | The user object's look-up of a service delegation in the UCAN store and of a service's `did.json` (`src/do/ucan-service.ts`).                                                                      |
+| `MEDIA_DOWNLOAD_TIMEOUT_MS`, `DOWNLOAD_TIMEOUT_MS`                                          | 60 s                  | A Matrix media transfer in the gateway; any attachment download.                                                                                                                                   |
+| `MAX_FILE_SIZE`, `MAX_TOTAL_SIZE`                                                           | 25 MB, 50 MB          | One attachment; all attachments of a turn, both lanes together.                                                                                                                                    |
+| `OPENROUTER_FETCH_TIMEOUT_MS`, `OPENROUTER_FAILURE_TTL_MS`, `OPENROUTER_INFLIGHT_MARGIN_MS` | 3 s, 60 s, 1 s        | The OpenRouter `/models` fetch; the wait after a failed one; a shared fetch older than timeout + margin is abandoned and the next caller starts a new one.                                         |
+| `CHATGPT_PROBE_TIMEOUT_MS`, `KEY_CHECK_TIMEOUT_MS`                                          | 5 s, 10 s             | The BYO ChatGPT reachability probe (no answer counts as reachable); a BYO API-key check (`src/llm/byo-service.ts`).                                                                                |
+| `MAX_CONCURRENT_TASK_RUNS`, `MAX_RUNS_KEPT_PER_TASK`                                        | 3, 50                 | Due tasks one alarm tick runs at once; run-history rows kept per task (open ones on top).                                                                                                          |
+| `COMPACT_STEP_MAX_BYTES`                                                                    | 8 MiB                 | Legacy-blob compactor step (at least one row).                                                                                                                                                     |
+| `DEFAULT_TIER_ORPHAN_SWEEP_INTERVAL_MS`                                                     | 7 days                | R2 tier orphan sweep.                                                                                                                                                                              |
+| `VFS_DELETE_MAX_PATHS`, `VFS_PATH_LOOKUP_CONCURRENCY`                                       | 50, 6                 | Paths per `vfs_delete` call; path lookups at once.                                                                                                                                                 |
+| `MAX_VISION_BYTES`, `MAX_SANDBOX_TRANSFER_BYTES`                                            | 10 MB each            | `vfs_read` downloads of images and documents; `sandbox_to_vfs` / `vfs_to_sandbox` transfers.                                                                                                       |
+| `SANDBOX_MCP_TIMEOUT_MS`, `MEMORY_TOOL_TIMEOUT_MS`, `FIRECRAWL_TOOL_TIMEOUT_MS`             | 180 s, 420 s, 120 s   | One sandbox, memory-engine or Firecrawl MCP call: the MCP request's own timeout (`metadata.timeoutMs`, otherwise the MCP SDK's 60 s default), plus the runtime's own timer that closes the client. |
+| `COMPOSIO_TOOL_TIMEOUT_MS`                                                                  | 190 s                 | One Composio call, raced against the runtime's timer and the turn's abort (the SDK takes no signal; see operations).                                                                               |
+| `MAX_TONE_LENGTH`                                                                           | 120 characters        | The stored `tone` preference.                                                                                                                                                                      |
+| `DOC_WRITE_MAX_ATTEMPTS`, `DOC_WRITE_RETRY_BUDGET_MS`, `DOC_FLUSH_TIMEOUT_MS`               | 4, 15 s, 20 s         | Sends of one editor or flow document write; the time to give up on it; a caller's wait for pending writes.                                                                                         |
+| `MAX_DECLARED_TOOLS`                                                                        | 64                    | Browser tools and AG-UI actions kept per request (descriptions ≤ 2,048 characters, schemas ≤ 16,384).                                                                                              |
+
+`VFS_REQUEST_TIMEOUT_MS` (vfs plugin config, default 20,000 ms) covers a
+VFS request until its response body has been read.
+
+## `createOracleWorker` options
+
+What an oracle sets in code rather than in the environment
+(`CreateOracleWorkerOptions`, `src/index.ts`). The result is
+`{ fetch, scheduled, UserOracleDO, MatrixGatewayDO, core }`: the Worker
+exports `fetch` and `scheduled` as its default export and the two classes by
+name.
+
+| Option                                        | Meaning                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config`                                      | Required `OracleConfig`: `name`, optional `org`, `description`, `prompt` (opening, communication style, capabilities) and `delivery` ([chat delivery](chat-delivery.md#delivery-profiles)). The entity DID comes from `ORACLE_ENTITY_DID`, never from here.                                               |
+| `plugins`                                     | Every plugin the oracle may load, e.g. `[...BUNDLED_WORKERS_PLUGINS, new IxoTransactionPlugin()]`. Each passes `features` and its own `autoDetect`.                                                                                                                                                       |
+| `features`                                    | Per-plugin toggle by name. `false` leaves the plugin out; `true` requires it, so a failing `autoDetect` fails the boot (`boot.plugin.env_missing`); `'auto'` or no entry loads it when its `autoDetect` passes (or it has none). A loaded plugin whose `configSchema` rejects the env fails the boot too. |
+| `manifestOverrides`                           | Shallow-merged over a loaded plugin's manifest at boot (e.g. `{ portal: { visibility: 'always' } }`); unknown names are logged and ignored; the merged manifest is validated.                                                                                                                             |
+| `decisionAdapter`                             | One host Decision adapter, registered as provider `host`; wins over `DECISION_PROVIDER`; cannot be combined with `decisionProviders` ([Decisions](#decisions)).                                                                                                                                           |
+| `decisionProviders`, `decisionProviderPolicy` | Further host Decision providers beside the env-selected one, and the default plus exact per-Decision routes over them ([Decisions](#decisions)).                                                                                                                                                          |
+| `routes`, `authExcludedRoutes`                | Extra host routes on the shell (after the plugins' `getRoutes`), and host routes exempt from UCAN auth.                                                                                                                                                                                                   |
+| `listModels`                                  | Replaces the `GET /models` listing (default: the curated catalog with live OpenRouter prices).                                                                                                                                                                                                            |
+| `hooks`                                       | Per-turn build hooks: `getRoomTitle(roomId, ambient)` for the page-context middleware and `safetyModel(ambient)` for the safety-guardrail middleware (Node's `createOracleApp({ hooks })` pair).                                                                                                          |
+| `domainContext`                               | Observe-only domain context (default off): the oracle's and the selected subject's anchored `domain.md` documents in the prompt, with provenance. See [Domain context](#domain-context-observe-only-rollout).                                                                                             |
+
+The `scheduled` handler is the cron entry point: it keeps the gateway's sync
+loop alive and, where `ARTIFACT_BUCKET` is bound, runs the
+[artefact sweep](operations.md#artefact-sweep).
 
 ## First-time setup of an oracle
 
@@ -330,24 +497,36 @@ uploading and is the fastest check that the aliases resolve.
 
 ## Turn budgets and tool execution
 
-Every turn runs under one budget shared by the main agent, its sub-agents
-and the helper models the turn's LLM adapter hands out (the summarizer,
-extraction). See [docs/plans/workers-harness-hardening.md](../../../docs/plans/workers-harness-hardening.md).
+Every turn runs under one budget shared by the main agent and its
+sub-agents. See [docs/plans/workers-harness-hardening.md](../../../docs/plans/workers-harness-hardening.md).
 
-| Variable                    | Default  | Meaning                                                                                                 |
-| --------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `TURN_MAX_TOKENS`           | `500000` | Cumulative model tokens: a chars/4 estimate plus the reply reserve per call, settled to reported usage. |
-| `TURN_MAX_TOOL_CALLS`       | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                                        |
-| `TURN_TIMEOUT_MS`           | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight.             |
-| `TURN_MAX_IDENTICAL_WRITES` | `1`      | Identical successful write calls (same tool, same arguments) per turn; one more is refused.             |
-| `TURN_MAX_IDENTICAL_READS`  | `5`      | The same for a read, or a `repeatable` UI step such as a browser tool.                                  |
+| Variable                    | Default  | Meaning                                                                                     |
+| --------------------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `TURN_MAX_TOOL_CALLS`       | `120`    | Tool attempts, counting a read's retry and a sub-agent dispatch.                            |
+| `TURN_TIMEOUT_MS`           | `600000` | Wall-clock deadline of the turn; the abort reaches sub-agents and provider calls in flight. |
+| `TURN_MAX_IDENTICAL_WRITES` | `1`      | Identical successful write calls (same tool, same arguments) per turn; one more is refused. |
+| `TURN_MAX_IDENTICAL_READS`  | `5`      | The same for a read, or a `repeatable` UI step such as a browser tool.                      |
 
-Exhaustion ends the turn with an `error` frame (`kind: budget_exhausted`,
-`limit: tokens | tools | time`, `retryable: false`) followed by `done`
-(`failed: true`); work already done is kept. These are estimated resource
-limits, not billing. The two `TURN_MAX_IDENTICAL_*` caps end nothing: the
+Model tokens are accounted, never limited. Every model call the turn's LLM
+adapter hands out — the main agent, sub-agents and the helper models (the
+summarizer, extraction) — reserves a chars/4 estimate of what it sends plus
+the reply reserve and settles to the provider's reported usage; the total is
+logged at the end of the turn (`[harness] turn … usage: ~N tokens (…)`) and
+kept in `turn_runs.usage`, but no token count ever fails a turn: every call
+re-sends the whole history, so a turn on a long thread legitimately sums to
+several times the window. Each request is bounded by the context budget
+instead. `TURN_MAX_TOKENS` no longer exists; a deployment that still sets it
+is unaffected (the env schema ignores unknown keys).
+
+Exhaustion of the tool attempts or the deadline ends the turn with an `error`
+frame (`kind: budget_exhausted`, `limit: tools | time`, `retryable: false`)
+followed by `done` (`failed: true`); work already done is kept. These are
+resource limits, not billing. The two `TURN_MAX_IDENTICAL_*` caps end nothing: the
 refused call gets an error tool message with the earlier outcome and the turn
-goes on. `TURN_RECURSION_LIMIT` remains the separate graph
+goes on. Sub-agents follow the same caps for their own tools, classified by
+each tool's declared effect, and each dispatch's tool marks are kept apart,
+so two dispatches whose models reuse a call id both run. The turn budget
+ignores a non-finite token estimate instead of corrupting its counter. `TURN_RECURSION_LIMIT` remains the separate graph
 guard; raising it does not raise a budget. The context window and reply
 reserve come from the context budget (`MODEL_CONTEXT_TOKENS`, `CONTEXT_*`).
 
@@ -356,6 +535,8 @@ plugin `getRequestAdmission` handler, the inference-free step that may answer
 a turn before the agent is built. A handler that has not answered by then is
 treated as `pass` (logged as a warning) and the turn continues with the next
 handler or the agent. See
+[architecture](architecture.md#useroracledo--one-per-user-did) and, for the
+plugin-author contract,
 [request admission](../../../docs/architecture/request-admission.md).
 
 Tool calls are scheduled per user object: writes one at a time across every
@@ -373,8 +554,223 @@ a sixth identical read (`TURN_MAX_IDENTICAL_WRITES` / `TURN_MAX_IDENTICAL_READS`
 in the table above); the model gets the earlier outcome instead. A tool
 that declares `repeatable: true` (the Portal's browser tools and AG-UI
 actions: a UI step such as scrolling, where the same arguments again is a new
-action) is capped like a read, whatever its `effect`.
+action) is capped like a read, whatever its `effect`. A plugin that proxies
+an upstream MCP read under its own name (Firecrawl's `firecrawl_search` and
+`firecrawl_scrape`) loses the upstream `readOnlyHint` and usually falls
+outside the read-name convention, so it must declare `effect: 'read'` on the
+`tool()` itself, or every call is scheduled, claimed and capped as a write.
 
 `@ixo/oracle-runtime-workers/prompt` exports the prompt composer, so a
 consuming instance can render its actual system prompt in a contract test
 without importing the Worker bootstrap.
+
+## Model-call liveness
+
+Every model call — main agent, sub-agents, helper models, platform and BYO
+alike — goes through a `fetch` guard (`src/llm/stream-liveness.ts`) that
+watches the raw response bytes. Without it nothing bounds one call below
+`TURN_TIMEOUT_MS`: the OpenAI SDK's request timeout only covers the wait for
+headers (10 minutes by default), and LangChain retries only on a thrown
+error, never on a stream that went quiet.
+
+| Variable                         | Default  | Meaning                                                                                                                                                                          |
+| -------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LLM_HEADERS_TIMEOUT_MS`         | `120000` | Time to response headers.                                                                                                                                                        |
+| `LLM_STREAM_IDLE_TIMEOUT_MS`     | `90000`  | Longest silence between body bytes, and before the first one, on the platform lane (OpenRouter, Nebius).                                                                         |
+| `LLM_BYO_STREAM_IDLE_TIMEOUT_MS` | `300000` | The same on BYO lanes (the user's own OpenAI, Anthropic, Gemini, DeepSeek or ChatGPT subscription).                                                                              |
+| `LLM_STREAM_RETRIES`             | `1`      | Whole-request retries for a call that stalled before its first body byte (headers or first byte), `0`–`5`. `0` disables them; clamped per lane to fit `TURN_TIMEOUT_MS` (below). |
+
+Any byte resets the idle clock, SSE comments included. That is why the two
+lanes differ: OpenRouter sends `: OPENROUTER PROCESSING` comments while the
+upstream model is busy, so a quiet OpenRouter stream really is stuck and
+the platform lane can be strict; a direct provider may send nothing at all
+while a model reasons, so BYO lanes get 300 s. The 90 s platform budget is
+generous against what was measured on 2026-10-09 on `openai/gpt-5.6-luna`
+through OpenRouter with reasoning effort high and medium: a
+`: OPENROUTER PROCESSING` comment every ≈ 0.5 s while the model reasons
+(longest gap 0.48 s), response headers in ≈ 1 s, and the first content token
+after 7–8 s. There is deliberately no cap
+on a call's total duration: a long sub-agent reply that keeps streaming is
+legitimate, and the turn deadline still bounds the turn. Reference points:
+OpenAI's Codex CLI uses a 300 s stream idle timeout with up to 5 stream and
+4 request retries; OpenRouter sends keep-alive comments and Anthropic `ping`
+events while a model works; the OpenAI and Anthropic SDKs both default to a
+10-minute request timeout.
+
+Calls the runtime makes without streaming — the session title, the group-chat
+summary (`summarizeObservedMessages`) and the platform model's answer when
+a BYO model is refused — get one JSON body at the end of the generation, so
+for them the headers and idle budgets bound the whole generation: 120 s to
+headers, then 90 s (platform) or 300 s (BYO) until the body starts. A longer
+generation is re-sent once and then fails. These calls are short, so this is
+accepted rather than special-cased.
+
+The guard owns stall retries. A retry re-sends the identical request, and
+only when nothing has reached the caller yet (the guard resolves `fetch`
+only once the first body byte is in) and the request body can be sent again.
+A stall after bytes were forwarded fails the call at once (`kind: timeout`,
+"The model stopped responding mid-reply"): the caller already consumed part
+of the reply, so it cannot be retried transparently. A stall the guard gave
+up on is not retried again by LangChain (`maxRetries: 2` still applies to
+every other retryable failure), so `LLM_STREAM_RETRIES` is the whole stall
+budget. The SDK's own `timeout` is set to `(retries + 1) × (headers + idle) +
+5 s` — a backstop that replaces the 10-minute default and never fires before
+the guard has decided.
+
+Retries are clamped per lane so the stall budget fits the turn: the
+effective retries are the largest number, `0` up to `LLM_STREAM_RETRIES`,
+for which `(retries + 1) × (headers + idle) ≤ TURN_TIMEOUT_MS`. A retry that
+could not finish before the turn deadline would only end in
+`budget_exhausted` after a wasted second request. With the defaults
+(`TURN_TIMEOUT_MS` 600 s): the platform lane keeps its retry (2 × 210 s =
+420 s worst case before a stalled call fails); the BYO lane gets none (one
+attempt of 120 s + 300 s = 420 s worst case). Raising `TURN_TIMEOUT_MS` to
+840 s or more gives BYO its retry back. What operators see is in
+[operations](operations.md#model-calls-liveness-and-the-call-trace).
+
+## Domain context (observe-only rollout)
+
+Domain context hands the model the oracle's own anchored `domain.md`
+(constitutional guidance) and the selected subject's (task context) as
+retrieved data. It is set in code, not in the environment, and is off by
+default: without `domainContext`, or with `mode: 'off'`, a turn makes no
+lookup, gets no prompt block and no extra tools. See
+[docs/plans/domain-context.md](../../../docs/plans/domain-context.md).
+
+```ts
+createOracleWorker({
+  config,
+  plugins,
+  domainContext: {
+    mode: 'observe',
+    allowedOrigins: ['https://docs.example.org'],
+    ipfsGateway: 'https://ipfs.io', // only needed for ipfs:// documents
+    // anchorTtlMs: 300_000,
+    // pass1: { maxDocuments: 4, maxTokens: 6000, timeoutMs: 3000 },
+    // readPrivateDocument: async (request, ctx, signal) => bytes,
+  },
+});
+```
+
+| Option                | Default  | Meaning                                                                                                               |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `mode`                | —        | `observe` loads domain context; `off` does nothing.                                                                   |
+| `anchorTtlMs`         | `300000` | How long a resolved IID anchor is reused before Blocksync is asked again.                                             |
+| `allowedOrigins`      | `[]`     | Extra https origins documents may be read from. The VFS, Matrix homeserver and IPFS gateway origins are always added. |
+| `ipfsGateway`         | unset    | https gateway for `ipfs://` URIs; without one an `ipfs://` document is refused (`ipfs-gateway-unconfigured`).         |
+| `pass1.maxDocuments`  | `4`      | Pass-1 documents read per domain before the first model call; more are left to `read_domain_document`.                |
+| `pass1.maxTokens`     | `6000`   | Estimated-token bound of each domain brief and of all pass-1 excerpts together.                                       |
+| `pass1.timeoutMs`     | `3000`   | One overall bound for every pass-1 read of the turn.                                                                  |
+| `readPrivateDocument` | unset    | Host reader for private documents that are not VFS files. It must authorize every call and return the exact bytes.    |
+
+**Which domains.** The oracle domain is `ORACLE_ENTITY_DID`. The subject is
+the turn's `metadata.currentEntityDid`, kept on the thread: a turn that omits
+it keeps the previous subject, an explicit `null` clears it. Neither selector
+grants anything.
+
+**Anchor.** The IID is read from Blocksync (`BLOCKSYNC_GRAPHQL_URL`), which is
+trusted as a read projection of the chain: no chain proof is checked. The
+anchor is the linked resource `<did>#dom` (or the IID's `{id}#dom`
+shorthand); both forms together are refused as ambiguous. Its `proof` must be
+a CIDv1 (raw codec, sha2-256) of the exact document bytes; a `proof` that does
+not parse as a CID or is longer than 128 characters, or a `serviceEndpoint`
+longer than 2,048 characters, is refused (`invalid-anchor-resources`) before
+it reaches provenance. `encrypted: true` marks it private. The bytes must be
+strict UTF-8 and stay inside the lint bounds: at most 64 KiB of YAML
+frontmatter, no list anywhere in it (`documents.entries`, `rights.entries`,
+`controllers.entries`, a list inside a list item, …) longer than 64 items,
+and no nesting deeper than 16 levels (the frontmatter mapping is level 1). An
+index outside them is `invalid` with the finding `index-too-large` and is
+never linted: the validator's lint time grows about quadratically with the
+length of a list of malformed items (about 9 s for 1,000 malformed
+`documents.entries`). That outcome is cached per CID like any invalid parse.
+Inside the bounds the worst case measured (frontmatter filled with malformed
+64-item lists, nested lists or wide objects, just under the validator's own
+10,000-node limit) lints in about 0.2 s. The index must then pass the
+`@ixo/domain.md/workers` lint, name the domain's own DID in `domain.id`,
+`domain.iid`, `source_of_truth.iid_document` and `constitution.subject`, and
+declare the `anchored` or `runtime` conformance profile. Passing these checks
+means integrity and static validity only, not live constitutional authority.
+
+**Caches** (one resolver per user object, shared by its sessions):
+
+- anchors per DID for `anchorTtlMs`, at most 32 DIDs; concurrent lookups of
+  one DID share one request (10 s bound). A failed refresh falls back to the
+  last verified anchor and marks it stale (`anchor-stale`); a malformed
+  anchor drops the fallback;
+- verified public bytes per CID (LRU, 8 MiB, no single entry over 2 MiB) and
+  their decoded text (LRU, 4 Mi characters);
+- the parsed index per CID (finding codes, brief, capsule inspection, and for
+  a valid index the parsed document with its raw text; LRU, 16 entries and
+  4 Mi characters of index text, no single index over 1 Mi characters; an
+  invalid parse keeps only its finding codes), so a repeat turn inside the
+  TTL with public documents makes no network call and parses nothing.
+
+Private bytes are never kept in the byte or text caches: every private read
+goes back to the VFS or `readPrivateDocument` and is authorized again. The
+parsed index of a private `domain.md`, its raw text included, does stay in
+the parsed-index cache, keyed by its CID, but it is only handed out (to a
+turn, or as a `read_domain_document` page) after a fresh authorized read
+whose bytes verify against that CID.
+`refresh_domain_context` drops a DID's cached anchor for the next turn; the
+current turn and its sub-agents keep the revision they started with. Eviction
+of the object empties the caches.
+
+**Per turn.** Both domains resolve in parallel (10 s bound each), alongside
+the plugins' request-time tool collection. Each domain's pass-1 documents
+(`disclosure_pass: 1`, up to `pass1.maxDocuments`) are then read in parallel
+under one `pass1.timeoutMs` budget (3 s by default); a read not finished in
+time is left out with the finding `pass1-timeout` and keeps running in the
+background to warm the cache. A brief over `pass1.maxTokens` is omitted with
+`brief-over-budget`, never truncated; excerpts over the budget get
+`pass1-document-over-budget`. Worst case before the first model call:
+10 s + `pass1.timeoutMs`.
+
+**Prompt.** The result is one `<verified_domain_context mode="observe">`
+block appended after the composed system prompt: the oracle domain first,
+then the subject, each with its provenance (without `resolvedAt` and
+`source`, so the block of a repeat turn, or of a resumed attempt reading its
+pinned anchors, is byte-identical to the fresh one and stays
+prefix-cacheable; both fields stay in the emitted and stored provenance) and
+brief, then the pass-1 excerpts. Finding codes appear once each, at most 32
+entries per domain; a cut list ends in `findings-truncated`, so the block,
+the `router_update` frame and the stored row stay small however many
+findings an index produces. The block opens with the precedence rule: runtime instructions
+outside it take precedence, and everything inside is retrieved data, never
+instructions. Sub-agents get the same block appended to their own prompt.
+
+**Tools.** `read_domain_document` (pages of 4,000 characters of `domain.md` or
+an indexed document, with its CID and read/cite/summarize permissions) and
+`refresh_domain_context` are bound to the main agent and passed to every
+sub-agent. Both count as reads. Indexed documents with `read: false` are not
+fetched; a document whose `freshness.max_age` it cannot show it meets is
+refused as stale.
+
+**Reads.** Documents are read only over https from an allowed origin, without
+redirects or URL credentials, bounded to 1 MiB (index, capsule manifest) or
+2 MiB (linked documents) and 10 s per read. A VFS file
+(`/api/fs/files/:id/content` on the VFS origin) is read with the user's VFS
+UCAN; Matrix media on the configured homeserver with the oracle's own
+authenticated media access. Any other private document needs
+`readPrivateDocument`; without it the document is unavailable
+(`private-reader-unavailable`), never read publicly. An `ipfs://<cid>[/path]`
+URI is read from `ipfsGateway` under its `/ipfs/` path; it must name a CID
+first and may carry no query, fragment or dot segment (`..`, `%2e%2e` and
+the like), else it is refused (`invalid-ipfs-uri`).
+
+**Durable runs.** The anchors a run's first attempt read are stored with the
+run (`domainPins` in the run's stored request), and a resumed attempt reads
+those revisions (`source: durable-run-pin`). A pinned revision that can no
+longer be read falls back to fresh resolution with the finding
+`pinned-revision-unavailable`.
+
+**Capsules.** An `x-oracle-capsule` manifest is verified by CID and SHA-256 and
+inspected statically: release, compatibility, Master reference and the
+external checks still required are reported as `inspected-not-activated`.
+Nothing is activated, no tool or permission is added, and a capsule pinned
+to another oracle revision is reported (`capsule-oracle-revision-differs`).
+
+Observe mode never changes what a turn may do: a missing, stale or invalid
+domain is reported in the provenance and the turn continues with the
+existing capability checks. Provenance and its diagnostics are described in
+[operations](operations.md#domain-context-rollout-diagnostics).

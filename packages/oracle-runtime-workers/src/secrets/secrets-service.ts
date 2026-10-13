@@ -165,12 +165,18 @@ export class WorkersSecretsService {
     const index = (await this.getIndex(roomId)).filter((entry) =>
       requested.has(entry.name),
     );
-    return this.loadValues(roomId, index);
+    return this.getValuesFor(roomId, index);
   }
 
-  private async loadValues(
+  /**
+   * Decrypted values for index entries the caller already read with
+   * {@link getIndex} — the values of exactly those entries, without reading
+   * room state again. The entries' eventIds decide cache hits, so a secret
+   * rotated after that read is still fetched fresh by the next one.
+   */
+  async getValuesFor(
     roomId: string,
-    index: SecretIndexEntry[],
+    index: ReadonlyArray<Pick<SecretIndexEntry, 'name' | 'eventId'>>,
   ): Promise<Record<string, string>> {
     const result: Record<string, string> = {};
     const now = Date.now();

@@ -1,9 +1,13 @@
 import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import type { ChannelTurnsTestDO } from './test-do';
-import type { ChannelTurnInput } from './contract';
+import {
+  CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+  type ChannelTurnInput,
+} from './contract';
 import type { ReplyPlan } from '../delivery/types';
 import { RUN_RETENTION_MS } from '../do/run-store';
+import { CHANNEL_RECORD_RETENTION_MS } from './turns';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace -- Workers test binding augmentation.
@@ -22,6 +26,14 @@ const message: ChannelTurnInput = {
   remoteMessageRef: `hmac:${'a'.repeat(64)}`,
   message: 'Help me plan',
   context: { kind: 'companion' },
+};
+
+const delegationRequired = {
+  ok: false,
+  status: 428,
+  code: 'delegation_required',
+  message:
+    'Companion delegation required: the user must authorize this oracle again',
 };
 
 describe('durable channel requests', () => {
@@ -121,6 +133,7 @@ describe('durable channel requests', () => {
     const expired = {
       ok: false,
       status: 410,
+      code: 'response_expired',
       message:
         'Channel response has expired; this request cannot execute again',
     };
@@ -142,6 +155,7 @@ describe('durable channel requests', () => {
     ).resolves.toEqual({
       ok: false,
       status: 409,
+      code: 'request_conflict',
       message: 'This request ID already belongs to another message',
     });
     expect(await stub.count()).toBe(1);
@@ -166,6 +180,7 @@ describe('durable channel requests', () => {
     ).resolves.toEqual({
       ok: false,
       status: 404,
+      code: 'session_not_found',
       message: 'Session not owned',
     });
     expect(await stub.count()).toBe(0);
@@ -176,7 +191,7 @@ describe('durable channel requests', () => {
     const first = await stub.submit(message);
     if (!first.ok) throw new Error('Turn rejected');
     await stub.finish(first.result.runId);
-    await stub.deliverReply(first.result.runId);
+    await stub.deliverReply();
     await stub.submit(message);
     await stub.reopen();
     await stub.submit(message);
@@ -195,7 +210,7 @@ describe('durable channel requests', () => {
       ],
     };
     await stub.finish(first.result.runId, plan, '## Answer\n\nShort answer.');
-    await stub.deliverReply(first.result.runId);
+    await stub.deliverReply();
     expect(await stub.mirroredReply()).toBe('Short answer.\n\nWant more?');
     expect(await stub.submit(message)).toMatchObject({
       ok: true,
@@ -219,7 +234,7 @@ describe('durable channel requests', () => {
       result: { status: 'finished', text: 'One answer' },
     });
     await stub.submit(message);
-    await stub.deliverReply(first.result.runId);
+    await stub.deliverReply();
     expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
   });
 
@@ -243,18 +258,82 @@ describe('durable channel requests', () => {
     if (!admitted.ok) throw new Error('Turn rejected');
     await stub.finish(admitted.result.runId);
     await stub.revokeDelegation();
-    expect(await stub.submit({ ...message, requestId: 'wa:two' })).toEqual({
-      ok: false,
-      status: 409,
-      message:
-        'Companion delegation required: the user must authorize this oracle again',
-    });
+    expect(await stub.submit({ ...message, requestId: 'wa:two' })).toEqual(
+      delegationRequired,
+    );
     expect(await stub.count()).toBe(1);
+    await stub.settle();
     expect((await stub.mirrors()).user).toBe(1);
     expect(await stub.submit(message)).toMatchObject({
       ok: true,
       result: { status: 'finished', text: 'One answer' },
     });
+  });
+
+  it.each([
+    { name: 'expired', left: -60 },
+    {
+      name: 'exactly at the margin',
+      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+    },
+    {
+      name: 'inside the margin',
+      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 1,
+    },
+  ])(
+    'refuses a new turn under a delegation $name (428 delegation_required)',
+    async ({ name, left }) => {
+      const stub = env.CHANNEL_TURNS_TEST.getByName(`delegation-${name}`);
+      await stub.setDelegation({
+        raw: 'grant',
+        expiration: Math.floor(Date.now() / 1000) + left,
+      });
+      expect(await stub.submit(message)).toEqual(delegationRequired);
+      expect(await stub.count()).toBe(0);
+      expect((await stub.mirrors()).user).toBe(0);
+    },
+  );
+
+  it('refuses a delegation whose expiry is unknown', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-no-expiry');
+    await stub.setDelegation({ raw: 'grant' });
+    expect(await stub.submit(message)).toEqual(delegationRequired);
+    expect(await stub.count()).toBe(0);
+  });
+
+  it('admits a turn under a delegation with more than the margin left', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('delegation-valid');
+    await stub.setDelegation({
+      raw: 'grant',
+      expiration:
+        Math.floor(Date.now() / 1000) +
+        CHANNEL_DELEGATION_MIN_REMAINING_SECONDS +
+        60,
+    });
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    expect(await stub.count()).toBe(1);
+  });
+
+  it('refuses a second session for a bound channel (409 session_conflict)', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('session-conflict');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(
+      await stub.submit({
+        ...message,
+        requestId: 'wa:two',
+        sessionId: '$channel-session-other',
+      }),
+    ).toEqual({
+      ok: false,
+      status: 409,
+      code: 'session_conflict',
+      message: 'This channel already has another session',
+    });
+    expect(await stub.count()).toBe(1);
   });
 });
 
@@ -265,4 +344,320 @@ it('does not execute again when the object is aborted immediately after admissio
   const recovered = env.CHANNEL_TURNS_TEST.getByName('forced-reset');
   expect(await recovered.submit(message)).toEqual(admitted);
   expect(await recovered.count()).toBe(1);
+});
+
+describe('channel polls', () => {
+  it('a poll of an admitted request writes nothing and checks the session only when it was bound', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('poll-costs');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.settle();
+    // Admission: the receipt, the session binding with the owed mirror;
+    // then, in the background, the user message mirrored.
+    const admitted = { assertSession: 1, changed: 3, createSession: 1 };
+    expect(await stub.hostCalls()).toEqual(admitted);
+    for (let i = 0; i < 5; i += 1)
+      expect(await stub.submit(message)).toEqual(first);
+    await stub.settle();
+    expect(await stub.hostCalls()).toEqual(admitted);
+    // A second request is bound to the binding's session (its receipt
+    // and the binding row are written) and checked once.
+    const second = await stub.submit({ ...message, requestId: 'wa:two' });
+    if (!second.ok) throw new Error('Turn rejected');
+    expect(second.result.sessionId).toBe(first.result.sessionId);
+    await stub.settle();
+    const twice = { assertSession: 2, changed: 6, createSession: 1 };
+    expect(await stub.hostCalls()).toEqual(twice);
+    await stub.submit({ ...message, requestId: 'wa:two' });
+    await stub.settle();
+    expect(await stub.hostCalls()).toEqual(twice);
+  });
+
+  it('answers a poll of an existing run without the admission path, and nothing else', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('poll-path');
+    expect(await stub.poll(message)).toBeNull();
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.settle();
+    const calls = await stub.hostCalls();
+    expect(await stub.poll(message)).toEqual(first);
+    // Another body under the same request id is left to admission (409).
+    expect(await stub.poll({ ...message, message: 'Changed' })).toBeNull();
+    expect(await stub.poll({ ...message, requestId: 'wa:none' })).toBeNull();
+    expect(await stub.hostCalls()).toEqual(calls);
+    await stub.finish(first.result.runId);
+    expect(await stub.poll(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+  });
+
+  it('a request naming a deleted session drops its receipt and answers 409 session_conflict; resent without sessionId it opens a new session', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('poll-deleted-session');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.deleteSession(first.result.sessionId);
+    // The gateway still names the session it was given last.
+    const late = {
+      ...message,
+      requestId: 'wa:late',
+      sessionId: first.result.sessionId,
+    };
+    expect(await stub.submit(late)).toEqual({
+      ok: false,
+      status: 409,
+      code: 'session_conflict',
+      message:
+        'The Companion session of this channel no longer exists; send the request again without sessionId',
+    });
+    expect(await stub.receipt('wa:late')).toBeNull();
+    expect(await stub.count()).toBe(1);
+    // The same request id, without the session: admitted into a new one.
+    const { sessionId: _dropped, ...resent } = late;
+    const admitted = await stub.submit(resent);
+    if (!admitted.ok) throw new Error(`Turn rejected: ${admitted.message}`);
+    expect(admitted.result.sessionId).not.toBe(first.result.sessionId);
+    expect(admitted.result.status).toBe('running');
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      admitted.result.sessionId,
+    );
+    expect(await stub.count()).toBe(2);
+  });
+
+  it('a binding still bound to a deleted session opens a new one at once when the request names none', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('stale-binding');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    // Deleted without the binding being released (an object that missed
+    // the release, or a binding row from before it existed).
+    await stub.markSessionDeleted(first.result.sessionId);
+    const next = await stub.submit({ ...message, requestId: 'wa:two' });
+    if (!next.ok) throw new Error(`Turn rejected: ${next.message}`);
+    expect(next.result.sessionId).not.toBe(first.result.sessionId);
+    expect(await stub.boundSession(message.bindingId)).toBe(
+      next.result.sessionId,
+    );
+    expect(await stub.count()).toBe(2);
+  });
+
+  it('a refused request leaves no receipt, so the same request id can be sent again', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('refused-receipt');
+    await stub.setDelegation({ raw: 'grant' });
+    expect(await stub.submit(message)).toEqual(delegationRequired);
+    expect(await stub.receipt(message.requestId)).toBeNull();
+    expect(await stub.hostCalls()).toMatchObject({ createSession: 0 });
+    await stub.setDelegation({
+      raw: 'grant',
+      expiration: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+  });
+
+  it('admits concurrent different requests of one binding into one session, one run each', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('concurrent-requests');
+    const results = await Promise.all(
+      ['wa:a', 'wa:b', 'wa:c'].map((requestId) =>
+        stub.submit({ ...message, requestId }),
+      ),
+    );
+    const ok = results.map((r) => {
+      if (!r.ok) throw new Error('Turn rejected');
+      return r.result;
+    });
+    expect(new Set(ok.map((r) => r.sessionId)).size).toBe(1);
+    expect(new Set(ok.map((r) => r.runId)).size).toBe(3);
+    expect(await stub.count()).toBe(3);
+    expect(await stub.hostCalls()).toMatchObject({ createSession: 1 });
+  });
+});
+
+/** Rejects when `work` takes longer than `ms`: proves it did not wait. */
+async function within<T>(work: () => Promise<T>, ms = 2000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`waited over ${ms} ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe('Companion room mirrors stay off the channel path', () => {
+  it('admits and answers a finished run while the mirrors hang, then mirrors both once, in order', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-hangs');
+    await stub.setMirror('hang');
+    const first = await within(async () => stub.submit(message));
+    if (!first.ok) throw new Error('Turn rejected');
+    expect(first.result.status).toBe('running');
+    expect(await stub.count()).toBe(1);
+    await stub.finish(first.result.runId);
+    expect(await within(async () => stub.submit(message))).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    expect(await stub.mirrors()).toEqual({ user: 0, oracle: 0 });
+    await stub.setMirror('ok');
+    await stub.deliverReply();
+    expect(await stub.mirrorLog()).toEqual([
+      'user:Help me plan',
+      'oracle:One answer',
+    ]);
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      user_mirrored: 1,
+      reply_mirrored: 1,
+      mirror_pending: 0,
+    });
+    await stub.submit(message);
+    await stub.settle();
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 1 });
+  });
+
+  it('a hanging mirror does not hold the admission lock: other requests and polls answer at once', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-lock');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.settle();
+    await stub.setMirror('hang');
+    await stub.finish(first.result.runId);
+    // The run end starts the reply mirror, which hangs.
+    const delivering = stub.deliverReply();
+    expect(await within(async () => stub.submit(message))).toMatchObject({
+      ok: true,
+      result: { status: 'finished' },
+    });
+    expect(
+      await within(async () =>
+        stub.submit({ ...message, requestId: 'wa:two' }),
+      ),
+    ).toMatchObject({ ok: true, result: { status: 'running' } });
+    await stub.setMirror('ok');
+    await delivering;
+    await stub.settle();
+    expect(await stub.mirrorLog()).toEqual([
+      'user:Help me plan',
+      'oracle:One answer',
+      'user:Help me plan',
+    ]);
+  });
+
+  it('answers finished while the mirror fails, retries it with backoff from the alarm, and keeps the room order', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-fails');
+    await stub.setMirror('transient');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    // The user mirror failed; the run started anyway.
+    expect(first.result.status).toBe('running');
+    await stub.settle();
+    const failed = await stub.receipt(message.requestId);
+    expect(failed).toMatchObject({
+      user_mirrored: 0,
+      mirror_pending: 1,
+      mirror_failures: 1,
+    });
+    const retryAt = Number(failed?.mirror_retry_at);
+    expect(await stub.retryWakes()).toContain(retryAt);
+    await stub.finish(first.result.runId);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    await stub.setMirror('ok');
+    // Not due yet: the alarm leaves it and asks to come back at its time.
+    expect(await stub.housekeeping()).toBe(retryAt);
+    await stub.settle();
+    expect(await stub.mirrors()).toEqual({ user: 0, oracle: 0 });
+    await stub.advance(60_000);
+    expect(await stub.housekeeping()).toBeNull();
+    await stub.settle();
+    expect(await stub.mirrorLog()).toEqual([
+      'user:Help me plan',
+      'oracle:One answer',
+    ]);
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      mirror_pending: 0,
+      mirror_failures: 0,
+      mirror_retry_at: null,
+    });
+  });
+
+  it('abandons the mirrors of a room that refuses the oracle (M_FORBIDDEN) and still answers the turn', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-forbidden');
+    await stub.setMirror('forbidden');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.settle();
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      mirror_pending: 0,
+      mirror_failures: 1,
+    });
+    await stub.finish(first.result.runId);
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'finished', text: 'One answer' },
+    });
+    await stub.settle();
+    expect(await stub.housekeeping()).toBeNull();
+    expect(await stub.mirrors()).toEqual({ user: 0, oracle: 0 });
+  });
+
+  it('a run that ends without a reply owes the room nothing more', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-failed-run');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.fail(first.result.runId);
+    await stub.deliverReply();
+    expect(await stub.receipt(message.requestId)).toMatchObject({
+      user_mirrored: 1,
+      reply_mirrored: 2,
+      mirror_pending: 0,
+    });
+    expect(await stub.mirrors()).toEqual({ user: 1, oracle: 0 });
+  });
+});
+
+describe('channel record pruning', () => {
+  it('removes, from the alarm, receipts that never started a run and run tombstones once 7 days old', async () => {
+    const stub = env.CHANNEL_TURNS_TEST.getByName('pruning');
+    const first = await stub.submit(message);
+    if (!first.ok) throw new Error('Turn rejected');
+    await stub.finish(first.result.runId);
+    await stub.orphanReceipt('wa:orphan-old');
+    // The run is pruned to a tombstone (boot pruning, run retention).
+    await stub.expire(RUN_RETENTION_MS + 1);
+    await stub.orphanReceipt('wa:orphan-new');
+    expect(await stub.retained()).toMatchObject({
+      channel_run_tombstones: 1,
+      channel_requests: 2,
+    });
+    expect(await stub.housekeeping()).toBeNull();
+    // The old orphan is past 7 days; the tombstone and the new orphan not.
+    expect(await stub.retained()).toMatchObject({
+      channel_run_tombstones: 1,
+      channel_requests: 1,
+    });
+    expect(await stub.receipt('wa:orphan-new')).not.toBeNull();
+    expect(await stub.submit(message)).toMatchObject({
+      ok: false,
+      code: 'response_expired',
+    });
+    await stub.advance(CHANNEL_RECORD_RETENTION_MS + 1);
+    expect(await stub.housekeeping()).toBeNull();
+    expect(await stub.retained()).toMatchObject({
+      channel_run_tombstones: 0,
+      channel_requests: 0,
+    });
+    // Past the replay horizon the request id is a new request.
+    expect(await stub.submit(message)).toMatchObject({
+      ok: true,
+      result: { status: 'running' },
+    });
+    expect(await stub.count()).toBe(2);
+  });
 });

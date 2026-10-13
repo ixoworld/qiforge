@@ -25,7 +25,7 @@ import type {
   PluginTool,
   RuntimeContext,
 } from '../../plugin-api/types';
-import { FLOWS_PLUGIN_NAME } from './prompts';
+import { FLOWS_OPERATING_GUIDE, FLOWS_PLUGIN_NAME } from './prompts';
 
 export interface FlowsPluginOptions {
   /** A long-lived Matrix client owned by the host (or a test), shared across rooms. */
@@ -35,10 +35,13 @@ export interface FlowsPluginOptions {
 /**
  * Discovery surface (returned by `list_capabilities` / `load_capability`). The
  * `summary` is the one-line teaser; `whenToUse`/`whenNotToUse`/`examples` teach
- * the agent when and how to load it. The full operating contract lives in
- * `FLOWS_OPERATING_GUIDE` (prompts.ts), injected into the system prompt once
- * the capability is loaded — kept out of the manifest so it costs no tokens on
- * turns where flows is never used.
+ * the agent when and how to load it. The full operating contract,
+ * `FLOWS_OPERATING_GUIDE` (prompts.ts), is the plugin's `operatingGuide`, not
+ * part of the manifest: `load_capability` returns it when it loads flows (also
+ * when the capability router had only preloaded it for the turn), and the
+ * system prompt carries it on every later turn that starts with flows loaded
+ * on the thread. A one-turn router preload leaves the system prompt alone, and
+ * turns that never use flows pay no tokens for it.
  */
 const manifest: PluginManifest = {
   title: 'Flow Builder',
@@ -54,6 +57,7 @@ const manifest: PluginManifest = {
   whenNotToUse: [
     'Editing prose/pages/documents (use the editor).',
     'Actually executing/running/signing a step — that happens in the portal, by the user.',
+    'Collecting a PIN, mnemonic or other secret — the portal asks for it when the user runs the step; never ask for one in chat or write one into a flow.',
   ],
   examples: [
     {
@@ -83,6 +87,8 @@ export class FlowsPlugin extends OraclePlugin {
   readonly name = FLOWS_PLUGIN_NAME;
   readonly version = '0.1.0';
   readonly manifest = manifest;
+  /** The operating contract — see the manifest comment above. */
+  override readonly operatingGuide = FLOWS_OPERATING_GUIDE;
 
   private readonly matrixClient?: MatrixClient;
 

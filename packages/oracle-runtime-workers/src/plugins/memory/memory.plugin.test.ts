@@ -175,10 +175,12 @@ describe('MemoryPlugin (Workers port)', () => {
     const upstreamAdd = upstreamTools.find(
       (t) => t.name === MEMORY_ADD_MCP_NAME,
     );
-    expect(upstreamAdd?.invoke).toHaveBeenCalledWith({
-      name: 'fact',
-      content: 'x',
-    });
+    // The second argument carries the MCP request timeout; without it the
+    // MCP SDK ends the call at its 60 s default.
+    expect(upstreamAdd?.invoke).toHaveBeenCalledWith(
+      { name: 'fact', content: 'x' },
+      { metadata: { timeoutMs: 420_000 } },
+    );
     expect(result).toEqual({
       echoed: { name: 'fact', content: 'x' },
       from: MEMORY_ADD_MCP_NAME,

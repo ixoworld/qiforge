@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { OraclePlugin } from '../plugin-api/oracle-plugin';
 import type { Logger } from '../plugin-api/types';
 import { NOOP_LOGGER } from './utils';
+import { FEEDBACK_ENV_PREFIX } from '../feedback/contract';
 import {
   isSecureUrl,
   MAX_ARTIFACT_SWEEP_INTERVAL_HOURS,
@@ -37,6 +38,27 @@ import {
  * env override.
  */
 export const TURN_RECURSION_LIMIT_DEFAULT = 600;
+
+/**
+ * Liveness budgets of one model call (`src/llm/stream-liveness.ts`). The
+ * headers budget is the wait for response headers. The idle budgets are the
+ * longest silence between body bytes (and before the first one): OpenRouter
+ * sends keep-alive comments while the upstream model works, so the platform
+ * lane can be strict; a direct provider (BYO) may stay silent while a model
+ * reasons, so its lane gets the Codex CLI's 300 s. Retries re-issue a call
+ * that stalled before its first body byte (at most 5), clamped per lane so
+ * `(retries + 1) × (headers + idle)` fits `TURN_TIMEOUT_MS`: with the
+ * defaults the platform lane keeps one retry (420 s worst case) and BYO
+ * lanes get none (one attempt, 420 s worst case). There is no cap on a
+ * call's total duration. See docs/configuration.md.
+ */
+export const LLM_HEADERS_TIMEOUT_MS_DEFAULT = 120_000;
+export const LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT = 90_000;
+export const LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT = 300_000;
+export const LLM_STREAM_RETRIES_DEFAULT = 1;
+export const LLM_STREAM_RETRIES_MAX = 5;
+/** The turn's wall-clock deadline when `TURN_TIMEOUT_MS` is unset. */
+export const TURN_TIMEOUT_MS_DEFAULT = 600_000;
 
 /** An https URL, or http on localhost / 127.0.0.1 (local harness). */
 const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
@@ -125,6 +147,35 @@ export const baseEnvSchema = z.object({
    */
   MAIN_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
   /**
+   * Model-call liveness (see `LLM_HEADERS_TIMEOUT_MS_DEFAULT`): time to
+   * response headers; silence allowed between body bytes on the platform
+   * lane (OpenRouter / Nebius) and on BYO lanes; whole-request retries for a
+   * call that stalled before its first byte. A stall mid-reply fails the
+   * call at once. Retries are 0–5, clamped per lane to fit `TURN_TIMEOUT_MS`.
+   * Parsed by `streamLivenessFromEnv` (src/core/llm.ts).
+   */
+  LLM_HEADERS_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(LLM_HEADERS_TIMEOUT_MS_DEFAULT),
+  LLM_STREAM_IDLE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(LLM_STREAM_IDLE_TIMEOUT_MS_DEFAULT),
+  LLM_BYO_STREAM_IDLE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(LLM_BYO_STREAM_IDLE_TIMEOUT_MS_DEFAULT),
+  LLM_STREAM_RETRIES: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(LLM_STREAM_RETRIES_MAX)
+    .default(LLM_STREAM_RETRIES_DEFAULT),
+  /**
    * LangGraph `recursionLimit` for one turn — the super-steps (a model call,
    * a batch of tool calls, a middleware hook) a turn may take before it fails
    * with `GraphRecursionError`. Default 600 (the Node runtime hard-codes 200);
@@ -136,14 +187,18 @@ export const baseEnvSchema = z.object({
     .min(1)
     .default(TURN_RECURSION_LIMIT_DEFAULT),
   /**
-   * The turn budget (docs/plans/workers-harness-hardening.md): cumulative
-   * model tokens across the main agent, sub-agents and helper models; tool
-   * attempts; and the wall-clock deadline. Exhaustion ends the turn and keeps
-   * the work done so far. Parsed by `turnLimitsFromEnv`.
+   * The turn budget (docs/plans/workers-harness-hardening.md): tool attempts
+   * across the main agent and its sub-agents, and the wall-clock deadline.
+   * Exhaustion ends the turn and keeps the work done so far. Model tokens are
+   * accounted and logged per turn but never limited. Parsed by
+   * `turnLimitsFromEnv`.
    */
-  TURN_MAX_TOKENS: z.coerce.number().int().positive().default(500_000),
   TURN_MAX_TOOL_CALLS: z.coerce.number().int().positive().default(120),
-  TURN_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
+  TURN_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(TURN_TIMEOUT_MS_DEFAULT),
   /**
    * The repetition guard's per-turn caps on identical successful calls
    * (same tool, same arguments): a write, and a read or `repeatable` tool.
@@ -240,6 +295,13 @@ export const baseEnvSchema = z.object({
   // --- misc ---------------------------------------------------------------
   LOG_LEVEL: z.string().default('info'),
   CORS_ORIGIN: z.string().default('*'),
+  /**
+   * Comma-separated DIDs allowed onto the gateway-wide operator routes
+   * (`/debug/matrix/*`). Unset: any authenticated caller (with
+   * `ORACLE_DEBUG_ROUTES=true`). A list with an entry that is not a DID
+   * admits nobody.
+   */
+  ORACLE_OPERATOR_DIDS: z.string().optional(),
 });
 
 export type BaseEnv = z.infer<typeof baseEnvSchema>;
@@ -300,8 +362,18 @@ export function composeEnvSchema(
     if (!plugin.configSchema) continue;
     const shape = plugin.configSchema.shape as Record<string, unknown>;
     for (const key of Object.keys(shape)) {
+      // Runtime-only secrets (the feedback sink's Linear key and pseudonym
+      // secret) must never reach a plugin's `ctx.config`.
+      if (key.startsWith(FEEDBACK_ENV_PREFIX))
+        throw new Error(
+          `Plugin '${plugin.name}' declares env key '${key}': the '${FEEDBACK_ENV_PREFIX}' prefix is reserved for the runtime`,
+        );
       const previous = pluginOwnership.get(key);
       if (previous !== undefined && previous !== plugin.name) {
+        // Plugins that declare the very same schema object share the key on
+        // purpose (the wallet-signing chain ids): nothing is replaced, and
+        // the first declarer stays its owner.
+        if (merged.shape[key] === shape[key]) continue;
         logger.warn(
           `[boot] env key '${key}' is defined by both '${previous}' and '${plugin.name}'; '${plugin.name}' wins.`,
         );

@@ -22,11 +22,16 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      # The Workers runtime resolves @ixo/ucan and @ixo/common/ai/decisions
-      # through their built `dist`, so both (and common's workspace deps) are
-      # built before the typecheck and the test runs.
-      - run: pnpm --filter @ixo/ucan --filter "@ixo/common..." build
+      # The Workers runtime resolves @ixo/ucan, @ixo/common/ai/decisions and
+      # @ixo/ixo-transaction through their built `dist`, so they (and their
+      # workspace deps) are built before the typecheck and the test runs.
+      - run: pnpm --filter @ixo/ucan --filter "@ixo/common..." --filter "@ixo/ixo-transaction..." build
       - run: pnpm --filter @ixo/oracle-runtime-workers typecheck
       - run: pnpm --filter @ixo/oracle-runtime-workers test:core
       - run: pnpm --filter @ixo/oracle-runtime-workers test
-      - run: pnpm --filter @ixo/oracles-client-sdk exec vitest run src/utils/sse-parser.test.ts
+      # The packages the runtime and the Portal build on: UCAN validation,
+      # the shared Decision and work contracts, and the client SDK.
+      - run: pnpm --filter @ixo/ucan test
+      - run: pnpm --filter @ixo/common test
+      - run: pnpm --filter @ixo/oracles-client-sdk typecheck
+      - run: pnpm --filter @ixo/oracles-client-sdk test

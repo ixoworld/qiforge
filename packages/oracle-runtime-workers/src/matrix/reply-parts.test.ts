@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { replyTxnId } from './inbox-store';
 import {
+  renderRoomMarkdown,
   replyPartContent,
   replyPartTxnId,
   roomReplyMessages,
@@ -71,5 +72,47 @@ describe('Matrix reply parts', () => {
     );
     expect(message?.formattedBody).toContain('&lt;script&gt;');
     expect(message?.formattedBody).toContain('<code>&lt;div&gt;</code>');
+  });
+
+  it('keeps http(s), mailto and mxc links and images; anything else is plain text', () => {
+    const html = renderRoomMarkdown(
+      [
+        '[site](https://example.com/a?b=1) [plain](http://example.com)',
+        '[mail](mailto:a@example.com) [file](mxc://ixo.test/abc)',
+        '![pic](mxc://ixo.test/img) ![remote](https://example.com/p.png)',
+      ].join('\n\n'),
+    );
+    expect(html).toContain('<a href="https://example.com/a?b=1">site</a>');
+    expect(html).toContain('<a href="http://example.com">plain</a>');
+    expect(html).toContain('<a href="mailto:a@example.com">mail</a>');
+    expect(html).toContain('<a href="mxc://ixo.test/abc">file</a>');
+    expect(html).toContain('<img src="mxc://ixo.test/img" alt="pic">');
+    expect(html).toContain(
+      '<img src="https://example.com/p.png" alt="remote">',
+    );
+  });
+
+  it('renders links and images with another scheme, or none, as their text', () => {
+    const html = renderRoomMarkdown(
+      [
+        '[x](javascript:alert(1))',
+        '[y](JavaScript:alert(1))',
+        '[z](data:text/html;base64,PHNjcmlwdD4=)',
+        '[rel](/relative/path)',
+        '![i](javascript:alert(1)) ![j](data:image/png;base64,AAAA)',
+        '<https://ok.example>',
+      ].join('\n\n'),
+    );
+    expect(html).not.toMatch(/javascript:/i);
+    expect(html).not.toContain('data:');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('href="/relative/path"');
+    expect(html).toContain('<p>x</p>');
+    expect(html).toContain('<p>rel</p>');
+    expect(html).toContain('<p>i j</p>');
+    // An autolink is a link like any other.
+    expect(html).toContain(
+      '<a href="https://ok.example">https://ok.example</a>',
+    );
   });
 });
