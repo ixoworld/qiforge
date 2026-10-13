@@ -12,7 +12,10 @@ export type DecisionState =
 export interface BooleanDecisionQuestion {
   kind: 'boolean';
   instructions: string;
-  criteria?: { true?: string; false?: string };
+  criteria?: {
+    true?: string;
+    false?: string;
+  };
 }
 
 export interface ChoiceDecisionQuestion {
@@ -66,7 +69,10 @@ export interface ChoiceDecisionAnswer {
 
 export interface OrdinalDecisionAnswer {
   kind: 'ordinal';
-  /** Continuous position on the declared ordinal scale (0..N-1). */
+  /**
+   * Continuous position on the declared ordinal scale. For N levels the
+   * valid range is 0..N-1; providers such as Jev may return fractional values.
+   */
   score: number;
   confidence: number;
   probabilities?: Record<string, number>;

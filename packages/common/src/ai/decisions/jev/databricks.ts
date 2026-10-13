@@ -37,6 +37,12 @@ function normalizeWorkspaceUrl(value: string): string {
   return trimmed;
 }
 
+/**
+ * HTTP Basic with the literal user `token` and the workspace token as the
+ * password, as the System One route documents (`curl -u token:$TOKEN`). The
+ * ai_decide REST reference names no scheme of its own, so it uses the same
+ * workspace credential.
+ */
 function authHeader(token: string): string {
   if (!token.trim()) throw new TypeError('Databricks token is required.');
   return `Basic ${globalThis.btoa(`token:${token.trim()}`)}`;
@@ -60,9 +66,11 @@ async function readJson(response: Response, message: string): Promise<unknown> {
 }
 
 /**
- * Pinned model-service path through Unity Gateway's TypeSafe System One route.
- * The requested model service and returned backend model are recorded
- * separately because Databricks documents that they may differ.
+ * Explicit Unity Catalog model-service path through the AI Gateway's TypeSafe
+ * System One route (`POST /ai-gateway/typesafe/v1/systemone`). The requested
+ * model service and the returned backend model are recorded separately
+ * because Databricks documents that they may differ, which is also why the
+ * model pinning is `mutable` rather than `pinned`.
  */
 export class DatabricksSystemOneDecisionAdapter implements DecisionAdapter {
   readonly provider = 'databricks';
