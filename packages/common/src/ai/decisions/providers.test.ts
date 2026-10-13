@@ -81,24 +81,32 @@ describe('resolveDecisionAdapter', () => {
       DECISION_PROVIDER: 'databricks-systemone',
       DECISION_MODEL: 'system.ai.openjev-qwen35-4b',
     });
-    expect(systemOne.ok).toBe(true);
-    if (systemOne.ok) {
-      expect(systemOne.adapter).toBeInstanceOf(
-        DatabricksSystemOneDecisionAdapter,
-      );
-    }
+    expect(systemOne).toEqual({
+      ok: true,
+      adapter: expect.any(DatabricksSystemOneDecisionAdapter),
+    });
+    expect(systemOne).toMatchObject({
+      adapter: {
+        model: 'system.ai.openjev-qwen35-4b',
+        capabilities: { apiDialect: 'systemone-v1' },
+      },
+    });
 
     const managed = resolveDecisionAdapter({
       ...common,
       DECISION_PROVIDER: 'databricks-ai-decide',
       DATABRICKS_AI_DECIDE_VERSION: '1.0',
     });
-    expect(managed.ok).toBe(true);
-    if (managed.ok) {
-      expect(managed.adapter).toBeInstanceOf(
-        DatabricksAiDecideDecisionAdapter,
-      );
-    }
+    expect(managed).toEqual({
+      ok: true,
+      adapter: expect.any(DatabricksAiDecideDecisionAdapter),
+    });
+    expect(managed).toMatchObject({
+      adapter: {
+        model: 'ai_decide',
+        capabilities: { apiDialect: 'databricks-ai-decide-v1' },
+      },
+    });
   });
 
   it('requires OPEN_ROUTER_API_KEY for openrouter-jev', () => {
