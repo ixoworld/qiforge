@@ -4,6 +4,7 @@ import type {
   DecisionJudgmentProvenance,
   DecisionProviderResult,
 } from './types.js';
+import { assertClaimableInferenceDialect } from './validation.js';
 
 const PROVIDER_NATIVE: DecisionJudgmentMethod = { kind: 'provider-native' };
 
@@ -31,13 +32,17 @@ export function recordedProvenance(
 ): DecisionRecordedProvenance {
   const provenance = result.provenance;
   const returnedModel = provenance?.returnedModel ?? result.modelVersion;
+  const apiDialect =
+    provenance?.apiDialect ?? adapter.capabilities?.apiDialect ?? 'custom';
+  // The result's own dialect was validated with it; one taken from the
+  // adapter's static capabilities is checked here.
+  assertClaimableInferenceDialect(apiDialect);
   return {
     method: { ...(provenance?.method ?? PROVIDER_NATIVE) },
     ...(provenance?.calibration
       ? { calibration: { ...provenance.calibration } }
       : {}),
-    apiDialect:
-      provenance?.apiDialect ?? adapter.capabilities?.apiDialect ?? 'custom',
+    apiDialect,
     requestedModel: provenance?.requestedModel ?? adapter.model,
     ...(returnedModel ? { returnedModel } : {}),
     ...(provenance?.functionVersion

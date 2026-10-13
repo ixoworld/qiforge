@@ -350,7 +350,9 @@ fields it leaves out come from its static `capabilities` (`apiDialect`,
 `modelPinning`) and its `model`, and otherwise default to `custom` and
 `unknown`, so a record never claims a pinned backend that nobody asserted. An
 unknown dialect or pinning class, or an empty string field, fails validation
-like the rest of the provenance.
+like the rest of the provenance. `openai-decisions` is a reserved dialect name
+with no contract yet: an adapter claiming it, in its result or its
+`capabilities`, fails the evaluation.
 
 ### Packed-question isolation
 

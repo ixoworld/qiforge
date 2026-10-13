@@ -611,6 +611,36 @@ describe('DecisionRuntime judgment provenance', () => {
     }
   });
 
+  it('rejects an adapter claiming the reserved openai-decisions dialect, from its result or its capabilities', async () => {
+    const fromResult = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+        provenance: {
+          method: { kind: 'provider-native' },
+          apiDialect: 'openai-decisions',
+        },
+      })),
+    );
+    const fromCapabilities = new DecisionRuntime(lookup, {
+      ...stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+      })),
+      capabilities: {
+        apiDialect: 'openai-decisions',
+        primitives: ['boolean'],
+        answerSemantics: 'distribution',
+        modelPinning: 'unknown',
+      },
+    });
+
+    for (const runtime of [fromResult, fromCapabilities]) {
+      await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+        /'openai-decisions' is reserved and has no contract yet/,
+      );
+    }
+  });
+
   it('rejects malformed adapter provenance like any other malformed output', async () => {
     const runtime = new DecisionRuntime(
       lookup,

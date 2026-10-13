@@ -231,14 +231,34 @@ function validateProvenance(provenance: DecisionProviderProvenance): void {
 }
 
 // Records keyed by the union, so adding a dialect or pinning class to the type
-// without listing it here fails the build.
-const INFERENCE_DIALECTS: Record<DecisionInferenceDialect, true> = {
-  'systemone-v1': true,
-  'databricks-ai-decide-v1': true,
-  'openai-decisions': true,
-  'native-classifier': true,
-  custom: true,
+// without listing it here fails the build. A reserved dialect is named in the
+// type so it cannot be reused for something else, but has no contract an
+// adapter could follow yet, so no adapter may claim it.
+const INFERENCE_DIALECTS: Record<
+  DecisionInferenceDialect,
+  'supported' | 'reserved'
+> = {
+  'systemone-v1': 'supported',
+  'databricks-ai-decide-v1': 'supported',
+  'openai-decisions': 'reserved',
+  'native-classifier': 'supported',
+  custom: 'supported',
 };
+
+/**
+ * Throws unless `value` is a dialect an adapter may claim: a known one that
+ * is not merely reserved.
+ */
+export function assertClaimableInferenceDialect(value: unknown): void {
+  if (!isKeyOf(INFERENCE_DIALECTS, value)) {
+    throw new Error('Decision provenance apiDialect is not a known dialect.');
+  }
+  if (INFERENCE_DIALECTS[value] === 'reserved') {
+    throw new Error(
+      `Decision provenance apiDialect '${value}' is reserved and has no contract yet; an adapter cannot claim it.`,
+    );
+  }
+}
 
 const MODEL_PINNINGS: Record<DecisionModelPinning, true> = {
   pinned: true,
@@ -246,18 +266,18 @@ const MODEL_PINNINGS: Record<DecisionModelPinning, true> = {
   unknown: true,
 };
 
-function isKeyOf(record: object, value: unknown): boolean {
+function isKeyOf<K extends string>(
+  record: Record<K, unknown>,
+  value: unknown,
+): value is K {
   return typeof value === 'string' && Object.hasOwn(record, value);
 }
 
 function validateInferenceProvenance(
   provenance: DecisionProviderProvenance,
 ): void {
-  if (
-    provenance.apiDialect !== undefined &&
-    !isKeyOf(INFERENCE_DIALECTS, provenance.apiDialect)
-  ) {
-    throw new Error('Decision provenance apiDialect is not a known dialect.');
+  if (provenance.apiDialect !== undefined) {
+    assertClaimableInferenceDialect(provenance.apiDialect);
   }
   if (
     provenance.modelPinning !== undefined &&
