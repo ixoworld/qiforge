@@ -73,6 +73,8 @@ export type {
 
 export { buildSemanticConformanceVariants } from './semantic-conformance.js';
 export type {
+  SemanticConformanceProbes,
+  SemanticConformanceSkippedVariant,
   SemanticConformanceVariant,
   SemanticConformanceVariantKind,
 } from './semantic-conformance.js';

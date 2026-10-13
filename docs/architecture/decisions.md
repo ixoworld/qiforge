@@ -613,9 +613,25 @@ metrics. The capability router's existing 0.7 threshold is now explicitly
 published as a `provisional` profile; it is not represented as empirically
 calibrated.
 
-Use `buildSemanticConformanceVariants()` to generate option-permutation,
-opaque-option-id, rubric-paraphrase, no-evidence and missing-question probes.
-Use `runDecisionProviderBakeoff()` for frozen labelled IXO fixtures.
+`buildSemanticConformanceVariants(request, options)` generates semantic
+stability probes for one request; it calls no provider. It returns
+`{ variants, notApplicable }`: the baseline plus option-permutation,
+opaque-option-id, rubric-paraphrase (when a paraphrase function is given),
+no-evidence and missing-question variants. Each variant names the variant it
+is compared with (`comparesWith`) and, when option ids were rebound, the map
+back to the original ids. Choice options travel as a JSON object, whose
+integer-like keys (`"1"`, `"2"`) always enumerate in numeric order, so a
+reordering of such options would reach the provider unchanged; the
+permutation is then applied over the opaque-id rebinding and compared with
+the `opaque-option-ids` variant. A probe whose request would equal the
+baseline (no choice questions, an already-empty state) is listed in
+`notApplicable` with the reason instead of being emitted. This is a different
+probe from `measureDecisionQuestionIsolation` (packed vs. single questions,
+above): it varies the presentation of the same questions.
+
+`runDecisionProviderBakeoff(adapter, cases)` scores frozen labelled IXO
+fixtures. It keeps every run with its response provenance and refuses to
+aggregate runs whose provenance differs (`DecisionBenchmarkProvenanceError`).
 
 See [Decision provider bakeoff](decision-bakeoff.md) and the
 [Open Decisions assurance profile](../../specs/open-decisions-assurance.md).

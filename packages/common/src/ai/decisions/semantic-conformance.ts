@@ -15,14 +15,40 @@ export type SemanticConformanceVariantKind =
 export interface SemanticConformanceVariant {
   kind: SemanticConformanceVariantKind;
   request: DecisionRequest;
-  /** Maps transformed option ids back to baseline ids. */
+  /**
+   * The variant whose answers this one is compared against: `baseline`, or
+   * `opaque-option-ids` for an option permutation applied over opaque ids.
+   */
+  comparesWith: SemanticConformanceVariantKind;
+  /** Maps transformed option ids (`question:option`) back to baseline ids. */
   optionIdMap?: Record<string, string>;
+}
+
+/** A probe that would have sent the provider the baseline request unchanged. */
+export interface SemanticConformanceSkippedVariant {
+  kind: SemanticConformanceVariantKind;
+  reason: string;
+}
+
+export interface SemanticConformanceProbes {
+  variants: SemanticConformanceVariant[];
+  notApplicable: SemanticConformanceSkippedVariant[];
 }
 
 /**
  * Generates deterministic probes for semantic stability. The probes do not
  * declare a provider conformant by themselves; callers must compare outputs
  * against workload-specific tolerances and labelled truth.
+ *
+ * Choice options travel as a JSON object, and ECMAScript enumerates
+ * integer-like keys (`"1"`, `"2"`) in ascending numeric order whatever their
+ * insertion order, so reversing such options would serialise exactly like the
+ * baseline. When any choice question has options whose order a reversal
+ * cannot change, the permutation is applied over the opaque-id rebinding and
+ * compared with the `opaque-option-ids` variant, which isolates the order
+ * effect. A probe whose request would equal the baseline (no choice
+ * questions, state already empty) is listed in `notApplicable` with the
+ * reason instead of being emitted.
  */
 export function buildSemanticConformanceVariants(
   request: DecisionRequest,
@@ -30,67 +56,123 @@ export function buildSemanticConformanceVariants(
     paraphraseInstructions?: (instructions: string) => string;
     noEvidenceState?: DecisionRequest['state'];
   } = {},
-): SemanticConformanceVariant[] {
+): SemanticConformanceProbes {
   const variants: SemanticConformanceVariant[] = [
-    { kind: 'baseline', request },
-    {
-      kind: 'option-permutation',
-      request: {
-        ...request,
-        questions: mapQuestions(request.questions, (question) =>
-          question.kind === 'choice'
-            ? {
-                ...question,
-                options: Object.fromEntries(
-                  Object.entries(question.options).reverse(),
-                ),
-              }
-            : question,
-        ),
-      },
-    },
+    { kind: 'baseline', request, comparesWith: 'baseline' },
   ];
+  const notApplicable: SemanticConformanceSkippedVariant[] = [];
+  const baselineJson = JSON.stringify(request);
+  const push = (variant: SemanticConformanceVariant, reason: string) => {
+    if (JSON.stringify(variant.request) === baselineJson) {
+      notApplicable.push({ kind: variant.kind, reason });
+    } else {
+      variants.push(variant);
+    }
+  };
 
   const opaque = opaqueChoiceQuestions(request.questions);
-  variants.push({
-    kind: 'opaque-option-ids',
-    request: { ...request, questions: opaque.questions },
-    optionIdMap: opaque.optionIdMap,
-  });
+  const reversed = reverseChoiceOptions(request.questions);
+  push(
+    reversed.orderChanged
+      ? {
+          kind: 'option-permutation',
+          request: { ...request, questions: reversed.questions },
+          comparesWith: 'baseline',
+        }
+      : {
+          kind: 'option-permutation',
+          request: {
+            ...request,
+            questions: reverseChoiceOptions(opaque.questions).questions,
+          },
+          comparesWith: 'opaque-option-ids',
+          optionIdMap: opaque.optionIdMap,
+        },
+    'The request has no choice question whose options can be reordered.',
+  );
+  push(
+    {
+      kind: 'opaque-option-ids',
+      request: { ...request, questions: opaque.questions },
+      comparesWith: 'baseline',
+      optionIdMap: opaque.optionIdMap,
+    },
+    'The request has no choice question whose option ids can be rebound.',
+  );
 
   if (options.paraphraseInstructions) {
-    variants.push({
-      kind: 'rubric-paraphrase',
+    const paraphrase = options.paraphraseInstructions;
+    push(
+      {
+        kind: 'rubric-paraphrase',
+        request: {
+          ...request,
+          questions: mapQuestions(request.questions, (question) => ({
+            ...question,
+            instructions: paraphrase(question.instructions),
+          })),
+        },
+        comparesWith: 'baseline',
+      },
+      'The paraphrase returned every instruction unchanged.',
+    );
+  }
+
+  push(
+    {
+      kind: 'no-evidence',
+      request: { ...request, state: options.noEvidenceState ?? null },
+      comparesWith: 'baseline',
+    },
+    'The baseline state already equals the no-evidence state.',
+  );
+
+  push(
+    {
+      kind: 'missing-question',
       request: {
         ...request,
         questions: mapQuestions(request.questions, (question) => ({
           ...question,
-          instructions: options.paraphraseInstructions!(question.instructions),
+          instructions: MISSING_QUESTION_INSTRUCTIONS,
         })),
       },
-    });
-  }
-
-  variants.push({
-    kind: 'no-evidence',
-    request: {
-      ...request,
-      state: options.noEvidenceState ?? null,
+      comparesWith: 'baseline',
     },
-  });
+    'Every question already carries only the generic instruction.',
+  );
 
-  variants.push({
-    kind: 'missing-question',
-    request: {
-      ...request,
-      questions: mapQuestions(request.questions, (question) => ({
-        ...question,
-        instructions: 'Choose only from the declared answer space.',
-      })),
-    },
-  });
+  return { variants, notApplicable };
+}
 
-  return variants;
+const MISSING_QUESTION_INSTRUCTIONS =
+  'Choose only from the declared answer space.';
+
+/**
+ * Reverses every choice question's options and reports whether the key order
+ * a serialiser would emit changed for every choice question. Integer-like
+ * keys are enumerated in numeric order, so their reversal is a no-op.
+ */
+function reverseChoiceOptions(questions: Record<string, DecisionQuestion>): {
+  questions: Record<string, DecisionQuestion>;
+  orderChanged: boolean;
+} {
+  let orderChanged = true;
+  let anyChoice = false;
+  const reversed = mapQuestions(questions, (question) => {
+    if (question.kind !== 'choice') return question;
+    anyChoice = true;
+    const options = Object.fromEntries(
+      Object.entries(question.options).reverse(),
+    );
+    const before = Object.keys(question.options);
+    const after = Object.keys(options);
+    if (before.every((key, index) => key === after[index])) {
+      orderChanged = false;
+    }
+    return { ...question, options };
+  });
+  return { questions: reversed, orderChanged: anyChoice && orderChanged };
 }
 
 function mapQuestions(

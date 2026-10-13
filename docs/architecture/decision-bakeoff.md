@@ -49,8 +49,10 @@ Add task-specific metrics where appropriate.
 
 Run `buildSemanticConformanceVariants()` on the same frozen cases to measure
 option permutation, opaque option ids, rubric paraphrase, no-evidence and
-missing-question controls. Do not tune prompts or thresholds on the final
-confirmation set.
+missing-question controls. Compare each variant with the variant it names in
+`comparesWith`, map rebound option ids back through `optionIdMap`, and report
+the probes listed in `notApplicable` as not run rather than as stable. Do not
+tune prompts or thresholds on the final confirmation set.
 
 Databricks must be tested as two separate assurance classes:
 `databricks-systemone` (explicit Unity Gateway model service) and
