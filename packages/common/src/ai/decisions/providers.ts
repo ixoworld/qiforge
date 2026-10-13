@@ -7,6 +7,10 @@ import {
   WorkersAiJevDecisionAdapter,
   type WorkersAiBinding,
 } from './jev/index.js';
+import {
+  DATABRICKS_WORKSPACE_URL_REQUIREMENT,
+  databricksWorkspaceOrigin,
+} from './jev/databricks.js';
 import type { DecisionAdapter } from './types.js';
 
 export const DECISION_PROVIDERS = [
@@ -65,13 +69,25 @@ export function resolveDecisionAdapter(
   switch (provider) {
     case 'databricks-systemone':
     case 'databricks-ai-decide': {
-      const workspaceUrl = readNonEmptyString(config.DATABRICKS_WORKSPACE_URL);
+      const rawWorkspaceUrl = readNonEmptyString(
+        config.DATABRICKS_WORKSPACE_URL,
+      );
+      const workspaceUrl =
+        rawWorkspaceUrl === undefined
+          ? undefined
+          : databricksWorkspaceOrigin(rawWorkspaceUrl);
       const token = readNonEmptyString(config.DATABRICKS_TOKEN);
       const issues: DecisionProviderConfigIssue[] = [];
-      if (!workspaceUrl) {
+      if (rawWorkspaceUrl === undefined) {
         issues.push({
           field: 'DATABRICKS_WORKSPACE_URL',
           message: `DECISION_PROVIDER='${provider}' requires DATABRICKS_WORKSPACE_URL.`,
+        });
+      } else if (workspaceUrl === undefined) {
+        // The value is not echoed: a pasted URL may carry credentials.
+        issues.push({
+          field: 'DATABRICKS_WORKSPACE_URL',
+          message: `DATABRICKS_WORKSPACE_URL ${DATABRICKS_WORKSPACE_URL_REQUIREMENT}.`,
         });
       }
       if (!token) {

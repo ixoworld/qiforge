@@ -29,12 +29,43 @@ export interface DatabricksAiDecideAdapterOptions extends DatabricksBaseOptions 
   functionVersion?: string;
 }
 
-function normalizeWorkspaceUrl(value: string): string {
-  const trimmed = value.trim().replace(/\/$/, '');
-  if (!/^https:\/\//.test(trimmed)) {
-    throw new TypeError('Databricks workspaceUrl must use https.');
+export const DATABRICKS_WORKSPACE_URL_REQUIREMENT =
+  'must be the workspace origin, https://<host> with no path, query, fragment or credentials';
+
+/**
+ * Parses a Databricks workspace URL and returns its origin, or `undefined`
+ * when it is not an `https:` origin. A URL copied from the browser
+ * (`https://<host>/?o=123`) is refused rather than trimmed, since the route
+ * paths are appended to the origin and a query would end up in the middle.
+ */
+export function databricksWorkspaceOrigin(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return undefined;
   }
-  return trimmed;
+  if (
+    url.protocol !== 'https:' ||
+    url.username !== '' ||
+    url.password !== '' ||
+    url.pathname !== '/' ||
+    url.search !== '' ||
+    url.hash !== ''
+  ) {
+    return undefined;
+  }
+  return url.origin;
+}
+
+function workspaceOrigin(value: string): string {
+  const origin = databricksWorkspaceOrigin(value);
+  if (!origin) {
+    throw new TypeError(
+      `Databricks workspaceUrl ${DATABRICKS_WORKSPACE_URL_REQUIREMENT}.`,
+    );
+  }
+  return origin;
 }
 
 /**
@@ -87,7 +118,7 @@ export class DatabricksSystemOneDecisionAdapter implements DecisionAdapter {
   private readonly fetchImpl: typeof globalThis.fetch;
 
   constructor(options: DatabricksSystemOneAdapterOptions) {
-    this.workspaceUrl = normalizeWorkspaceUrl(options.workspaceUrl);
+    this.workspaceUrl = workspaceOrigin(options.workspaceUrl);
     this.authorization = authHeader(options.token);
     this.model = options.model?.trim() || DATABRICKS_OPENJEV_MODEL;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
@@ -205,7 +236,7 @@ export class DatabricksAiDecideDecisionAdapter implements DecisionAdapter {
   private readonly fetchImpl: typeof globalThis.fetch;
 
   constructor(options: DatabricksAiDecideAdapterOptions) {
-    this.workspaceUrl = normalizeWorkspaceUrl(options.workspaceUrl);
+    this.workspaceUrl = workspaceOrigin(options.workspaceUrl);
     this.authorization = authHeader(options.token);
     this.functionVersion =
       options.functionVersion?.trim() || DATABRICKS_AI_DECIDE_VERSION;
@@ -252,6 +283,17 @@ export class DatabricksAiDecideDecisionAdapter implements DecisionAdapter {
       throw new JevDecisionError(
         'databricks',
         'Databricks ai_decide response did not match the expected envelope.',
+        { status: response.status },
+      );
+    }
+
+    // `metadata.version` is the function API version that evaluated the
+    // request. Databricks accepts only the versions it documents, so a
+    // different one means the request was not evaluated as configured.
+    if (envelope.data.metadata.version !== this.functionVersion) {
+      throw new JevDecisionError(
+        'databricks',
+        'Databricks ai_decide answered with a different function version than requested.',
         { status: response.status },
       );
     }

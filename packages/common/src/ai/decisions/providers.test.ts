@@ -71,6 +71,55 @@ describe('resolveDecisionAdapter', () => {
     }
   });
 
+  it.each([
+    [
+      'a browser URL with a query',
+      'https://example.cloud.databricks.com/?o=123',
+    ],
+    ['http', 'http://example.cloud.databricks.com'],
+    ['a path', 'https://example.cloud.databricks.com/api'],
+  ])(
+    'reports a Databricks workspace URL with %s as a config issue instead of throwing',
+    (_label, url) => {
+      const token = 'dapi-secret-token-value';
+      const result = resolveDecisionAdapter({
+        DECISION_PROVIDER: 'databricks-systemone',
+        DATABRICKS_WORKSPACE_URL: url,
+        DATABRICKS_TOKEN: token,
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        issues: [
+          {
+            field: 'DATABRICKS_WORKSPACE_URL',
+            message: expect.stringMatching(/workspace origin/),
+          },
+        ],
+      });
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(JSON.stringify(result)).not.toContain(url);
+    },
+  );
+
+  it('reports an empty Databricks token as missing without echoing config', () => {
+    const result = resolveDecisionAdapter({
+      DECISION_PROVIDER: 'databricks-ai-decide',
+      DATABRICKS_WORKSPACE_URL:
+        'https://user:hunter2@example.cloud.databricks.com',
+      DATABRICKS_TOKEN: '   ',
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      issues: [
+        { field: 'DATABRICKS_WORKSPACE_URL', message: expect.any(String) },
+        { field: 'DATABRICKS_TOKEN', message: expect.any(String) },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain('hunter2');
+  });
+
   it('builds both Databricks assurance classes', () => {
     const common = {
       DATABRICKS_WORKSPACE_URL: 'https://example.cloud.databricks.com',

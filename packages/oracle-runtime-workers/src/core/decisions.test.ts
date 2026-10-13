@@ -284,6 +284,28 @@ describe('createRuntimeCore decisions', () => {
     );
     expect(logger.error).toHaveBeenCalledTimes(2);
   });
+
+  it('DECISION_PROVIDER=databricks-systemone with a browser workspace URL fails the boot as a reported issue', () => {
+    const logger: Logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const token = 'dapi-secret-token-value';
+
+    expect(() =>
+      bootCore(
+        makeEnv({
+          DECISION_PROVIDER: 'databricks-systemone',
+          DATABRICKS_WORKSPACE_URL: 'https://example.cloud.databricks.com/?o=1',
+          DATABRICKS_TOKEN: token,
+        }),
+        { logger },
+      ),
+    ).toThrow(
+      /Env validation failed \(1 issues?\)[\s\S]*'DATABRICKS_WORKSPACE_URL'/,
+    );
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(vi.mocked(logger.error).mock.calls)).not.toContain(
+      token,
+    );
+  });
 });
 
 describe('createRuntimeCore Decision providers', () => {

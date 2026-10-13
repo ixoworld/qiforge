@@ -3,6 +3,7 @@ import {
   DatabricksAiDecideDecisionAdapter,
   DatabricksSystemOneDecisionAdapter,
 } from './databricks.js';
+import { JevDecisionError } from './wire.js';
 
 const request = {
   state: { message: 'refund please' },
@@ -132,6 +133,22 @@ describe('Databricks decision adapters', () => {
         probabilities: { 0: 0.01, 1: 0.08, 2: 0.91 },
       },
     };
+    const wireQuestions = {
+      is_billing: {
+        type: 'noul',
+        instructions: 'Is this a billing-related request?',
+      },
+      intent: {
+        type: 'choice',
+        instructions: 'Which intent best matches the message?',
+        criteria: allPrimitives.questions.intent.options,
+      },
+      urgency: {
+        type: 'score',
+        instructions: 'How urgent is the request?',
+        criteria: ['Can wait', 'Needs attention soon', 'Urgent'],
+      },
+    };
     const basicAuth = `Basic ${globalThis.btoa('token:secret')}`;
 
     it('System One: posts model, state and questions with token Basic auth and parses noul/choice/score', async () => {
@@ -165,22 +182,7 @@ describe('Databricks decision adapters', () => {
       expect(JSON.parse(String(init?.body))).toEqual({
         model: 'system.ai.openjev-qwen35-4b',
         state: allPrimitives.state,
-        questions: {
-          is_billing: {
-            type: 'noul',
-            instructions: 'Is this a billing-related request?',
-          },
-          intent: {
-            type: 'choice',
-            instructions: 'Which intent best matches the message?',
-            criteria: allPrimitives.questions.intent.options,
-          },
-          urgency: {
-            type: 'score',
-            instructions: 'How urgent is the request?',
-            criteria: ['Can wait', 'Needs attention soon', 'Urgent'],
-          },
-        },
+        questions: wireQuestions,
       });
       expect(result.answers).toEqual(expectedAnswers);
       expect(result.modelVersion).toBe('<returned-model-id>');
@@ -216,8 +218,9 @@ describe('Databricks decision adapters', () => {
       expect(url).toBe(`${workspaceUrl}/api/2.0/ai-functions/ai-decide`);
       expect(init?.method).toBe('POST');
       expect(init?.headers).toMatchObject({ Authorization: basicAuth });
-      expect(JSON.parse(String(init?.body))).toMatchObject({
+      expect(JSON.parse(String(init?.body))).toEqual({
         state: allPrimitives.state,
+        questions: wireQuestions,
         options: { version: '1.0' },
       });
       expect(result.answers).toEqual(expectedAnswers);
@@ -244,6 +247,126 @@ describe('Databricks decision adapters', () => {
       await expect(adapter.evaluate(request)).rejects.toThrow(
         /noul answer did not carry a numeric probability/,
       );
+    });
+  });
+
+  describe('failures', () => {
+    const token = 'dapi-secret-token-value';
+    const workspaceUrl = 'https://example.cloud.databricks.com';
+    const adapters = (fetchImpl: typeof fetch) => [
+      new DatabricksSystemOneDecisionAdapter({
+        workspaceUrl,
+        token,
+        fetch: fetchImpl,
+      }),
+      new DatabricksAiDecideDecisionAdapter({
+        workspaceUrl,
+        token,
+        fetch: fetchImpl,
+      }),
+    ];
+
+    async function failure(promise: Promise<unknown>): Promise<unknown> {
+      try {
+        await promise;
+      } catch (error) {
+        return error;
+      }
+      throw new Error('expected a rejection');
+    }
+
+    it('reports a non-2xx status without the response body or the token', async () => {
+      const body = 'workspace-error-text-that-must-not-leak';
+      for (const adapter of adapters(
+        vi.fn<typeof fetch>(async () => new Response(body, { status: 403 })),
+      )) {
+        const error = await failure(adapter.evaluate(request));
+        expect(error).toBeInstanceOf(JevDecisionError);
+        expect(error).toMatchObject({ provider: 'databricks', status: 403 });
+        expect(String(error)).not.toContain(body);
+        expect(String(error)).not.toContain(token);
+      }
+    });
+
+    it('reports malformed JSON as a Databricks decision error', async () => {
+      for (const adapter of adapters(
+        vi.fn<typeof fetch>(
+          async () => new Response('{not json', { status: 200 }),
+        ),
+      )) {
+        await expect(adapter.evaluate(request)).rejects.toMatchObject({
+          name: 'JevDecisionError',
+          message: 'Databricks decision response was not valid JSON.',
+          status: 200,
+        });
+      }
+    });
+
+    it('ai_decide refuses a response evaluated with another function version', async () => {
+      const [, aiDecide] = adapters(
+        vi.fn<typeof fetch>(
+          async () =>
+            new Response(
+              JSON.stringify({
+                response: {
+                  answers: { billing: { type: 'noul', probability: 0.8 } },
+                },
+                metadata: { version: '2.0' },
+              }),
+              { status: 200 },
+            ),
+        ),
+      );
+      await expect(aiDecide!.evaluate(request)).rejects.toThrow(
+        /different function version than requested/,
+      );
+    });
+
+    it.each([
+      [
+        'a browser URL with a query',
+        'https://example.cloud.databricks.com/?o=123',
+      ],
+      ['a path', 'https://example.cloud.databricks.com/workspace'],
+      ['http', 'http://example.cloud.databricks.com'],
+      ['credentials', 'https://user:pass@example.cloud.databricks.com'],
+      ['not a URL', 'example.cloud.databricks.com'],
+    ])('refuses a workspace URL with %s', (_label, url) => {
+      expect(
+        () =>
+          new DatabricksSystemOneDecisionAdapter({ workspaceUrl: url, token }),
+      ).toThrow(/workspace origin/);
+      expect(
+        () =>
+          new DatabricksAiDecideDecisionAdapter({ workspaceUrl: url, token }),
+      ).toThrow(/workspace origin/);
+    });
+
+    it('uses the origin of a workspace URL with a trailing slash', async () => {
+      const fetchMock = vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            JSON.stringify({
+              answers: { billing: { type: 'noul', noul: 0.5 } },
+            }),
+            { status: 200 },
+          ),
+      );
+      await new DatabricksSystemOneDecisionAdapter({
+        workspaceUrl: `${workspaceUrl}/`,
+        token,
+        fetch: fetchMock,
+      }).evaluate(request);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(
+        `${workspaceUrl}/ai-gateway/typesafe/v1/systemone`,
+      );
+    });
+
+    it('refuses an empty token without echoing anything', () => {
+      expect(
+        () =>
+          new DatabricksSystemOneDecisionAdapter({ workspaceUrl, token: ' ' }),
+      ).toThrow('Databricks token is required.');
     });
   });
 });
