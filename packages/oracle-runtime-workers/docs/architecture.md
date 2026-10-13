@@ -19,9 +19,13 @@ graph LR
 
 Turns reach a user object from four places: the Portal and other HTTP
 clients (`POST /messages/:id`, SSE), Matrix rooms through the gateway, IXO
-Channels (`POST /channels/turn`, [channels](channels.md); a channel turn
-is admitted only under a stored delegation with more than 900 s left,
-checked before the object boots, else `428 delegation_required`), and the task
+Channels (`POST /channels/turn`, [channels](channels.md); a NEW channel
+request is admitted only under a stored delegation with more than 900 s
+left, else `428 delegation_required`, while a poll of a run that exists
+answers its status, from a warm object without an Auth Hub call; Matrix is
+off the channel path: the session marker of a binding's first message is
+the only Matrix send a turn waits for, and the Companion room mirrors are
+owed by the request's receipt and sent in the background), and the task
 scheduler's alarm — which also runs the tasks the owner-only
 [Topic deliverable API](#topic-deliverable-api) creates. Every one of them
 is a durable run in the same object
@@ -637,7 +641,11 @@ How to read it:
 - **The gateway is a throughput limit before it is a cost.** Its loaded time
   is fixed at ≈ $4 whatever the user count, but one object with a
   3-messages-per-second Matrix send budget cannot mirror the traffic of
-  10,000-plus daily users.
+  10,000-plus daily users. Channel turns no longer wait on it (their room
+  mirrors are sent in the background and retried from the user object's
+  alarm), so a saturated or failing gateway delays the Companion room
+  transcript, not the WhatsApp reply; only a binding's first message waits
+  for its session marker.
 - **Logs are the avoidable line.** At the current verbosity they are the
   third-largest cost at scale.
 

@@ -12,10 +12,16 @@ import {
 } from '@ixo/ucan';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  assertActiveChannelBindingCached,
+  CHANNEL_BINDING_CACHE_MAX_ENTRIES,
+  CHANNEL_BINDING_CACHE_TTL_MS,
+  clearChannelBindingCache,
+} from '../channels/auth';
+import {
   channelRequestHash,
   type ChannelTurnInput,
 } from '../channels/contract';
-import { createShell } from './app';
+import { createShell, rateLimitKey } from './app';
 
 const USER_DID = 'did:ixo:ixo1channeluser';
 
@@ -112,10 +118,17 @@ function environment(
   turn: Awaited<ReturnType<typeof signedTurn>>,
   limited: boolean,
   channelTurn?: ChannelTurnStub,
+  options: {
+    /** What the object's poll path answers (null = no run yet). */
+    channelPoll?: () => Promise<unknown>;
+    /** The Auth Hub's answer (default: `{active: true}`). */
+    hub?: () => Response;
+  } = {},
 ) {
   const authHubCalls: string[] = [];
   const limiterKeys: string[] = [];
   const turns: string[] = [];
+  const polls: string[] = [];
   const env = {
     ORACLE_DID: turn.oracleDid,
     BLOCKSYNC_GRAPHQL_URL: turn.blocksync,
@@ -124,7 +137,7 @@ function environment(
     AUTH_HUB: {
       fetch: async (request: Request) => {
         authHubCalls.push(new URL(request.url).pathname);
-        return Response.json({ active: true });
+        return options.hub?.() ?? Response.json({ active: true });
       },
     },
     RATE_LIMIT: {
@@ -136,6 +149,10 @@ function environment(
     USER_ORACLE: {
       idFromName: (name: string) => name,
       get: () => ({
+        channelPoll: async (identity: { userDid: string }) => {
+          polls.push(identity.userDid);
+          return options.channelPoll ? options.channelPoll() : null;
+        },
         channelTurn: async (identity: { userDid: string }) => {
           turns.push(identity.userDid);
           if (channelTurn) return channelTurn(identity);
@@ -147,11 +164,12 @@ function environment(
       }),
     },
   };
-  return { env, authHubCalls, limiterKeys, turns };
+  return { env, authHubCalls, limiterKeys, turns, polls };
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
+  clearChannelBindingCache();
 });
 
 describe('POST /channels/turn rate limit', () => {
@@ -164,9 +182,28 @@ describe('POST /channels/turn rate limit', () => {
       env,
     );
     expect(res.status).toBe(429);
-    expect(limiterKeys).toEqual([`${turn.oracleDid}|user|${USER_DID}`]);
+    expect(limiterKeys).toEqual([`${turn.oracleDid}|channel|${USER_DID}`]);
     expect(authHubCalls).toEqual([]);
     expect(turns).toEqual([]);
+  });
+
+  it('spends a channel budget apart from the Portal one: a user at the Portal limit can still poll', async () => {
+    const turn = await signedTurn();
+    const { env, limiterKeys } = environment(turn, false);
+    const portalKey = `${turn.oracleDid}|user|${USER_DID}`;
+    // The limiter refuses the Portal key only (a user at its Portal limit).
+    env.RATE_LIMIT.limit = async ({ key }: { key: string }) => {
+      limiterKeys.push(key);
+      return { success: key !== portalKey };
+    };
+    const res = await createShell().request(
+      '/channels/turn',
+      { method: 'POST', headers: turn.headers, body: turn.raw },
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(limiterKeys).toEqual([`${turn.oracleDid}|channel|${USER_DID}`]);
+    expect(rateLimitKey(env, 'channel', USER_DID)).not.toBe(portalKey);
   });
 
   it('checks the binding with the Auth Hub once within the limit', async () => {
@@ -266,5 +303,172 @@ describe('POST /channels/turn error bodies', () => {
     // Nothing from the request: no token, no message text.
     expect(line).not.toContain(turn.headers.authorization.slice(7, 40));
     expect(line).not.toContain(input.message);
+  });
+});
+
+describe('POST /channels/turn polls and the binding check', () => {
+  const send = (
+    turn: Awaited<ReturnType<typeof signedTurn>>,
+    env: ReturnType<typeof environment>['env'],
+    shell = createShell(),
+  ) =>
+    shell.request(
+      '/channels/turn',
+      { method: 'POST', headers: turn.headers, body: turn.raw },
+      env,
+    );
+
+  it('answers a poll of an existing run from the object, without the Auth Hub', async () => {
+    const turn = await signedTurn();
+    const running = {
+      requestId: input.requestId,
+      runId: 'channel_run',
+      sessionId: '$session',
+      status: 'running',
+    };
+    const { env, authHubCalls, turns, polls } = environment(
+      turn,
+      false,
+      undefined,
+      { channelPoll: async () => ({ ok: true, result: running }) },
+    );
+    const res = await send(turn, env);
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual(running);
+    expect(polls).toEqual([USER_DID]);
+    expect(authHubCalls).toEqual([]);
+    expect(turns).toEqual([]);
+  });
+
+  it('releases a finished reply while the Auth Hub is down', async () => {
+    const turn = await signedTurn();
+    const finished = {
+      requestId: input.requestId,
+      runId: 'channel_run',
+      sessionId: '$session',
+      status: 'finished',
+      text: 'Done',
+    };
+    const { env, authHubCalls } = environment(turn, false, undefined, {
+      channelPoll: async () => ({ ok: true, result: finished }),
+      hub: () => new Response('down', { status: 500 }),
+    });
+    const res = await send(turn, env);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(finished);
+    expect(authHubCalls).toEqual([]);
+  });
+
+  it('admits a new request after the Auth Hub check, and reuses an active verdict for the next one', async () => {
+    const turn = await signedTurn();
+    const { env, authHubCalls, turns, polls } = environment(turn, false);
+    const shell = createShell();
+    expect((await send(turn, env, shell)).status).toBe(200);
+    expect((await send(turn, env, shell)).status).toBe(200);
+    expect(polls).toEqual([USER_DID, USER_DID]);
+    expect(turns).toEqual([USER_DID, USER_DID]);
+    expect(authHubCalls).toEqual(['/api/internal/channels/validate-binding']);
+  });
+
+  it.each([
+    {
+      name: 'an inactive binding',
+      hub: () => Response.json({ active: false }),
+      status: 403,
+      code: 'binding_inactive',
+    },
+    {
+      name: 'an unavailable Auth Hub',
+      hub: () => new Response('down', { status: 503 }),
+      status: 503,
+      code: 'binding_check_unavailable',
+    },
+  ])('never caches $name', async ({ hub, status, code }) => {
+    const turn = await signedTurn();
+    const { env, authHubCalls, turns } = environment(turn, false, undefined, {
+      hub,
+    });
+    const shell = createShell();
+    for (let i = 0; i < 2; i += 1) {
+      const res = await send(turn, env, shell);
+      expect(res.status).toBe(status);
+      expect(await res.json()).toMatchObject({ code });
+    }
+    expect(authHubCalls).toHaveLength(2);
+    expect(turns).toEqual([]);
+  });
+});
+
+describe('the binding verdict cache', () => {
+  const identity = {
+    userDid: USER_DID,
+    channel: {
+      callerDid: 'did:web:channels.test',
+      provider: 'whatsapp' as const,
+      bindingId: 'chb_cache',
+      bindingRevision: 1,
+    },
+  };
+  const hubEnv = (calls: unknown[]) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (request) => {
+      calls.push(request);
+      return Response.json({ active: true });
+    });
+    return {
+      ORACLE_DID: 'did:ixo:oracle',
+      AUTH_HUB_CHANNEL_SERVICE_KEY: 'k',
+      AUTH_HUB_URL: 'https://auth-hub.test',
+    };
+  };
+
+  it('keeps an active verdict for 60 s per binding revision and user, then asks again', async () => {
+    const calls: unknown[] = [];
+    const env = hubEnv(calls);
+    const t0 = 1_000_000;
+    expect(await assertActiveChannelBindingCached(identity, env, t0)).toBe(
+      'checked',
+    );
+    expect(
+      await assertActiveChannelBindingCached(
+        identity,
+        env,
+        t0 + CHANNEL_BINDING_CACHE_TTL_MS - 1,
+      ),
+    ).toBe('cached');
+    // Another revision of the binding is another verdict.
+    expect(
+      await assertActiveChannelBindingCached(
+        { ...identity, channel: { ...identity.channel, bindingRevision: 2 } },
+        env,
+        t0,
+      ),
+    ).toBe('checked');
+    expect(
+      await assertActiveChannelBindingCached(
+        identity,
+        env,
+        t0 + CHANNEL_BINDING_CACHE_TTL_MS,
+      ),
+    ).toBe('checked');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('stays bounded: the oldest verdict makes room', async () => {
+    const calls: unknown[] = [];
+    const env = hubEnv(calls);
+    const t0 = 2_000_000;
+    const user = (i: number) => ({ ...identity, userDid: `did:ixo:user${i}` });
+    for (let i = 0; i <= CHANNEL_BINDING_CACHE_MAX_ENTRIES; i += 1)
+      await assertActiveChannelBindingCached(user(i), env, t0);
+    expect(await assertActiveChannelBindingCached(user(0), env, t0)).toBe(
+      'checked',
+    );
+    expect(
+      await assertActiveChannelBindingCached(
+        user(CHANNEL_BINDING_CACHE_MAX_ENTRIES),
+        env,
+        t0,
+      ),
+    ).toBe('cached');
   });
 });

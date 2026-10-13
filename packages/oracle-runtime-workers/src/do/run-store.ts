@@ -486,8 +486,26 @@ export class RunStore {
         state TEXT NOT NULL DEFAULT 'pending'
       ) WITHOUT ROWID`);
     await this.db.run(`CREATE TABLE IF NOT EXISTS channel_run_tombstones (
-      run_id TEXT PRIMARY KEY, status TEXT NOT NULL
+      run_id TEXT PRIMARY KEY, status TEXT NOT NULL, pruned_at INTEGER
     ) WITHOUT ROWID`);
+    // When the run was pruned (epoch ms): tombstones are removed a while
+    // later (`pruneChannelTombstones`). Rows from before the column count
+    // from its migration.
+    const tombstoneColumns = await this.db.exec<{ name: string }>(
+      'PRAGMA table_info(channel_run_tombstones)',
+    );
+    if (!tombstoneColumns.some((c) => c.name === 'pruned_at')) {
+      await this.db.run(
+        'ALTER TABLE channel_run_tombstones ADD COLUMN pruned_at INTEGER',
+      );
+      await this.db.run(
+        'UPDATE channel_run_tombstones SET pruned_at = ? WHERE pruned_at IS NULL',
+        [this.now()],
+      );
+    }
+    await this.db.run(
+      'CREATE INDEX IF NOT EXISTS idx_channel_run_tombstones_pruned ON channel_run_tombstones(pruned_at)',
+    );
     // The Reply Plan a finished chat-surface run delivers (chat delivery).
     await this.db.run(`CREATE TABLE IF NOT EXISTS turn_run_plans (
       run_id TEXT PRIMARY KEY, plan TEXT NOT NULL
@@ -519,9 +537,9 @@ export class RunStore {
     if (await this.db.get(`${stale} LIMIT 1`, [cutoff]))
       await this.db.transaction(async () => {
         await this.db.run(
-          `INSERT OR IGNORE INTO channel_run_tombstones (run_id, status)
-           SELECT run_id, status FROM turn_runs WHERE client = 'channel' AND ${STALE_RUN_FILTER}`,
-          [cutoff],
+          `INSERT OR IGNORE INTO channel_run_tombstones (run_id, status, pruned_at)
+           SELECT run_id, status, ? FROM turn_runs WHERE client = 'channel' AND ${STALE_RUN_FILTER}`,
+          [this.now(), cutoff],
         );
         for (const table of [
           'turn_tool_marks',
@@ -537,8 +555,9 @@ export class RunStore {
       });
     // Every receipt whose run is tombstoned, this boot or an earlier one
     // that stopped before getting here. Driven by the receipts (at most the
-    // retention window of them), one key lookup each into the tombstones,
-    // which are never pruned and never scanned. The table exists once the
+    // retention window of them), one key lookup each into the tombstones
+    // (pruned separately, by age, from the housekeeping alarm through
+    // `pruneChannelTombstones`, never scanned here). The table exists once the
     // object has served a channel turn.
     const receipts = await this.db.get<{ name: string }>(
       `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_requests'`,
@@ -567,6 +586,22 @@ export class RunStore {
       [runId],
     );
     return row?.plan ?? null;
+  }
+
+  /**
+   * Remove up to `limit` tombstones of channel runs pruned before `before`
+   * (epoch ms); returns how many went. A request id reused after its
+   * tombstone is gone is a new request and runs again.
+   */
+  async pruneChannelTombstones(before: number, limit: number): Promise<number> {
+    await this.setup();
+    const pruned = await this.db.run(
+      `DELETE FROM channel_run_tombstones WHERE run_id IN (
+         SELECT run_id FROM channel_run_tombstones WHERE pruned_at < ? LIMIT ?
+       )`,
+      [before, limit],
+    );
+    return pruned.changes;
   }
 
   async wasChannelRunPruned(runId: string): Promise<boolean> {

@@ -290,6 +290,71 @@ export async function assertActiveChannelBinding(
 }
 
 /**
+ * How long an isolate trusts an Auth Hub "active" verdict for one binding
+ * revision and user. A revoked binding is therefore noticed by new
+ * admissions at most this late: inside the lifetime of the channel grant
+ * that authorized the request (at most 300 s, `authenticateChannel`), and
+ * attempts that start later (dequeued, recovered) check again uncached.
+ */
+export const CHANNEL_BINDING_CACHE_TTL_MS = 60_000;
+/** Verdicts an isolate keeps at most; the oldest makes room. */
+export const CHANNEL_BINDING_CACHE_MAX_ENTRIES = 1_000;
+
+/** Positive verdicts only (key → epoch ms it expires); a refusal is never kept. */
+const activeBindings = new Map<string, number>();
+
+/** Forget every cached verdict (tests). */
+export function clearChannelBindingCache(): void {
+  activeBindings.clear();
+}
+
+/**
+ * `assertActiveChannelBinding` for an admission through the shell, with an
+ * "active" verdict cached per isolate for `CHANNEL_BINDING_CACHE_TTL_MS`,
+ * keyed by the oracle, provider, binding, binding revision and user. An
+ * inactive binding (403) or an unavailable Auth Hub (503) is never cached.
+ * Returns whether the Auth Hub was asked.
+ */
+export async function assertActiveChannelBindingCached(
+  identity: TurnIdentity,
+  env: Parameters<typeof assertActiveChannelBinding>[1],
+  now: number = Date.now(),
+): Promise<'cached' | 'checked'> {
+  const channel = identity.channel;
+  const key = channel
+    ? JSON.stringify([
+        env.ORACLE_DID,
+        channel.provider,
+        channel.bindingId,
+        channel.bindingRevision,
+        identity.userDid,
+      ])
+    : null;
+  if (key) {
+    const until = activeBindings.get(key);
+    if (until !== undefined) {
+      if (until > now) return 'cached';
+      activeBindings.delete(key);
+    }
+  }
+  await assertActiveChannelBinding(identity, env);
+  if (!key) return 'checked';
+  if (activeBindings.size >= CHANNEL_BINDING_CACHE_MAX_ENTRIES) {
+    for (const [cached, until] of activeBindings)
+      if (until <= now) activeBindings.delete(cached);
+    // Still full: drop the oldest entry (Map keeps insertion order).
+    const oldest = activeBindings.keys().next();
+    if (
+      activeBindings.size >= CHANNEL_BINDING_CACHE_MAX_ENTRIES &&
+      !oldest.done
+    )
+      activeBindings.delete(oldest.value);
+  }
+  activeBindings.set(key, now + CHANNEL_BINDING_CACHE_TTL_MS);
+  return 'checked';
+}
+
+/**
  * The binding check before a channel attempt executes (a queued run being
  * dequeued, a recovery attempt). An inactive binding (403) ends the run. An
  * unavailable or unconfigured validator (503) defers the attempt to the run

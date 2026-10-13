@@ -412,8 +412,8 @@ async function legacyPrune(db: DoSqliteDatabase, now: number): Promise<void> {
     await db.transaction(async () => {
       if (row.client === 'channel')
         await db.run(
-          'INSERT OR IGNORE INTO channel_run_tombstones (run_id, status) VALUES (?, ?)',
-          [row.run_id, row.status],
+          'INSERT OR IGNORE INTO channel_run_tombstones (run_id, status, pruned_at) VALUES (?, ?, ?)',
+          [row.run_id, row.status, now],
         );
       for (const table of [
         'turn_tool_marks',

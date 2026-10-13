@@ -97,8 +97,10 @@ export class RoomMirror {
   /**
    * Queue one mirror behind the session's previous ones. `prepare` runs when
    * the session's earlier mirrors have settled and resolves what to send
-   * (`null` = nothing to mirror, e.g. no room). Never rejects: a mirror that
-   * cannot be posted is logged and the chain moves on.
+   * (`null` = nothing to mirror, e.g. no room). A mirror that cannot be
+   * posted is logged and the chain moves on; a `required` one (a channel
+   * request's, whose receipt records the delivery) rejects its caller
+   * instead, and the chain still moves on.
    */
   enqueue(
     sessionId: string,
@@ -107,7 +109,10 @@ export class RoomMirror {
     required = false,
   ): Promise<void> {
     const previous = this.chains.get(sessionId) ?? Promise.resolve();
+    // Starts once the previous mirror settled either way: a required mirror
+    // that failed (and rejected its own caller) must not skip this one.
     const tracked: Promise<void> = previous
+      .catch(() => undefined)
       .then(() => prepare())
       .then((send) => (send ? this.send(send, label) : undefined))
       .catch((err: unknown) => {

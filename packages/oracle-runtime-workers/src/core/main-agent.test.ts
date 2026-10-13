@@ -2399,4 +2399,47 @@ describe('createMainAgent — plugin operating guides', () => {
       "[boot] operating guide of 'huge' is ~3028 tokens (over 3000); it is in the system prompt of every turn that has the plugin loaded",
     ]);
   });
+
+  it.each([
+    {
+      verbose: false,
+      expected: [
+        '[boot] manifest lint: 3 soft warning(s) (wordy=2, chatty=1); set BOOT_LINT_VERBOSE=true to list them',
+      ],
+    },
+    {
+      verbose: true,
+      expected: [
+        '[boot] [wordy] whenToUse[0]: is 140 chars (recommended ≤ 100).',
+        '[boot] [wordy] whenToUse[1]: is 140 chars (recommended ≤ 100).',
+        '[boot] [chatty] whenToUse[0]: is 140 chars (recommended ≤ 100).',
+      ],
+    },
+  ])(
+    'collapses the manifest soft warnings into one summary line unless BOOT_LINT_VERBOSE (verbose: $verbose)',
+    ({ verbose, expected }) => {
+      const warn = vi.fn();
+      const long = 'w'.repeat(140);
+      createRuntimeCore({
+        config: { name: 'X' },
+        plugins: [
+          guided('wordy', undefined, { whenToUse: [long, long] }),
+          guided('chatty', undefined, { whenToUse: [long] }),
+          guided('tidy', undefined),
+        ],
+        env: {
+          ...makeEnv(),
+          ...(verbose ? { BOOT_LINT_VERBOSE: 'true' } : {}),
+        },
+        logger: { log: vi.fn(), warn, error: vi.fn() },
+      });
+      expect(
+        warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter(
+            (w) => w.includes('whenToUse') || w.includes('manifest lint'),
+          ),
+      ).toEqual(expected);
+    },
+  );
 });

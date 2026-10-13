@@ -93,11 +93,13 @@ export type ChannelErrorStatus =
  * | `identity_mismatch`               | 403    | the channel identity does not match the request       |
  * | `identity_required`               | 403    | the binding check got no channel identity             |
  * | `binding_inactive`                | 403    | the Auth Hub reports the binding inactive             |
- * | `channel_grant_not_tool_authority`| 403    | a channel request carried a delegation header         |
+ * | `channel_grant_not_tool_authority`| 403    | a channel request carried a delegation header         | * | `storage_unauthorized`            | 403    | the user's file storage rejected the oracle (final)   |
  * | `session_not_found`               | 404    | the session is not the user's Companion session       |
  * | `request_conflict`                | 409    | the request id already belongs to another message     |
- * | `session_conflict`                | 409    | the channel is already bound to another session       |
+ * | `session_conflict`                | 409    | another session is bound, or the named one is gone:   |
+ * |                                   |        | resend the same request without `sessionId`           |
  * | `room_not_encrypted`              | 409    | the Companion room is not end-to-end encrypted        |
+ * | `room_unavailable`                | 409    | the oracle cannot use the Companion room (final)      |
  * | `response_expired`                | 410    | the run was pruned; the request cannot run again      |
  * | `request_too_large`               | 413    | the body is over 64 kB                                |
  * | `room_not_ready`                  | 428    | the user has no Companion room yet                    |
@@ -115,10 +117,12 @@ export type ChannelErrorCode =
   | 'identity_required'
   | 'binding_inactive'
   | 'channel_grant_not_tool_authority'
+  | 'storage_unauthorized'
   | 'session_not_found'
   | 'request_conflict'
   | 'session_conflict'
   | 'room_not_encrypted'
+  | 'room_unavailable'
   | 'response_expired'
   | 'request_too_large'
   | 'room_not_ready'
@@ -146,6 +150,32 @@ export class ChannelError extends Error {
     super(message);
     this.name = 'ChannelError';
   }
+}
+
+/**
+ * The session a channel request would run in does not exist in the user's
+ * object (deleted in Qi.Space, or never created there). It answers like
+ * `session_not_found` wherever it escapes, but admission handles it first:
+ * the binding forgets the session and the request is answered with
+ * `session_conflict` (or, when the request named no session, opens a new
+ * one at once).
+ */
+export class StaleSessionError extends ChannelError {
+  constructor(message = 'Companion session not found') {
+    super(404, message, 'session_not_found');
+    this.name = 'StaleSessionError';
+  }
+}
+
+/**
+ * The run of one channel request: fixed by the binding and the request id,
+ * so every retry, poll and object restart lands on the same run.
+ */
+export async function channelRunId(
+  bindingId: string,
+  requestId: string,
+): Promise<string> {
+  return `channel_${await channelRequestHash(JSON.stringify([bindingId, requestId]))}`;
 }
 
 /**

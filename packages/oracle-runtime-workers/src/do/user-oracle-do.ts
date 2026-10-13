@@ -1,14 +1,17 @@
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
+  CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
   ChannelError,
   channelRequestHash,
   channelOrigin,
   delegationRequiredError,
   requireChannelDelegation,
+  StaleSessionError,
   type ChannelTurnInput,
   type ChannelTurnOutcome,
 } from '../channels/contract';
+import { classifyChannelFailure } from '../channels/failures';
 /* eslint-disable no-console -- console IS the logger on Workers (Logs/observability). */
 /**
  * `UserOracleDO` — one Durable Object per (user DID, oracle).
@@ -498,6 +501,8 @@ const META_LAST_ACCESS = 'meta:lastAccessAt';
 const META_DELEGATION = 'meta:delegation';
 /** How long a "no deposited delegation" verdict is trusted before re-checking the room. */
 const DELEGATION_MISS_TTL_MS = 60_000;
+/** Storage key prefix: a room this object found end-to-end encrypted. */
+const ROOM_ENCRYPTED_PREFIX = 'room-encrypted:';
 const META_REAUTH_PROMPT_AT = 'meta:reauthPromptAt';
 /** Node's `AgentBuilder.DEFAULT_REAUTH_THROTTLE_SECONDS`. */
 const DEFAULT_REAUTH_THROTTLE_SECONDS = 6 * 60 * 60;
@@ -862,6 +867,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private readonly sessionRooms = new Map<string, string>();
     /** The user's main oracle room, once resolved (the session list is scoped to it). */
     private mainRoomId: string | null = null;
+    /** Rooms known to be end-to-end encrypted (see `roomIsEncrypted`). */
+    private readonly encryptedRooms = new Set<string>();
     /** The throttled `delegation_required` prompt (see reauth-prompt.ts). */
     private reauthPrompter: ReauthPrompter | null = null;
     /** Room turns running right now, by Matrix event id: a gateway that asks again attaches instead of re-running. */
@@ -1165,9 +1172,19 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
      * this object's cache, then the `ucan_delegation` room state the client
      * deposited. Nothing found → plugins degrade exactly as before (no
      * downstream auth), re-checked after `DELEGATION_MISS_TTL_MS`.
+     *
+     * `minRemainingSeconds` (the channel path's margin): a stored copy with
+     * less than that left is held, but the room state is read anyway, at
+     * once and without the miss throttle — a newer deposit whose push to
+     * this object failed is there — and adopted when it outlives the held
+     * copy. The throttle stays for true misses (nothing stored).
      */
-    private async hydrateDelegation(userDid: string): Promise<void> {
+    private async hydrateDelegation(
+      userDid: string,
+      options: { minRemainingSeconds?: number } = {},
+    ): Promise<void> {
       const nowSeconds = Math.floor(Date.now() / 1000);
+      const margin = options.minRemainingSeconds ?? 0;
       const live = (
         d: StoredDelegation | null | undefined,
       ): d is StoredDelegation =>
@@ -1175,14 +1192,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         (typeof d?.expiration !== 'number' || d.expiration > nowSeconds);
       const cached =
         await this.ctx.storage.get<StoredDelegation>(META_DELEGATION);
+      let held: CachedDelegation | null = null;
       if (live(cached)) {
-        this.delegations.set(
-          userDid,
-          await this.delegationRecord(cached.raw, cached.expiration),
-        );
-        return;
+        held = await this.delegationRecord(cached.raw, cached.expiration);
+        this.delegations.set(userDid, held);
+        if (
+          margin === 0 ||
+          (typeof held.expiration === 'number' &&
+            held.expiration > nowSeconds + margin)
+        )
+          return;
       }
-      if (Date.now() < this.delegationMissUntil) return;
+      if (!held && Date.now() < this.delegationMissUntil) return;
       try {
         const room = await this.gateway.resolveUserRoom(userDid);
         const json = room
@@ -1209,15 +1230,23 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
                 : {}),
             }
           : null;
-        if (live(deposited)) {
-          this.delegations.set(
-            userDid,
-            await this.delegationRecord(deposited.raw, deposited.expiration),
+        if (live(deposited) && deposited.raw !== held?.raw) {
+          const record = await this.delegationRecord(
+            deposited.raw,
+            deposited.expiration,
           );
-          await this.ctx.storage.put(META_DELEGATION, deposited);
-          console.log(
-            `[user-do] delegation for ${userDid} loaded from the deposited room state (header-less turn)`,
-          );
+          // A held copy is replaced only by a deposit that outlives it.
+          if (
+            !held ||
+            (typeof record.expiration === 'number' &&
+              record.expiration > (held.expiration ?? 0))
+          ) {
+            this.delegations.set(userDid, record);
+            await this.ctx.storage.put(META_DELEGATION, deposited);
+            console.log(
+              `[user-do] delegation for ${userDid} loaded from the deposited room state (${held ? 'the held copy was inside the margin' : 'header-less turn'})`,
+            );
+          }
           return;
         }
       } catch (err) {
@@ -1225,7 +1254,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           `[user-do] could not load ${userDid}'s deposited delegation: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      this.delegationMissUntil = Date.now() + DELEGATION_MISS_TTL_MS;
+      if (!held) this.delegationMissUntil = Date.now() + DELEGATION_MISS_TTL_MS;
     }
 
     /**
@@ -1701,57 +1730,58 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       this.channelTurns = new ChannelTurns(liveDb, {
         createSession: async (identity, markerTxnId) => {
-          const room = await this.gateway.resolveUserRoom(identity.userDid);
-          if (!room)
+          const roomId = await this.resolveMainRoomId(identity.userDid);
+          if (!roomId)
             throw new ChannelError(
               428,
               'Companion room is not ready',
               'room_not_ready',
             );
-          return (
-            await this.createSession(identity, {
-              roomId: room.roomId,
-              markerTxnId,
-            })
-          ).sessionId;
+          return (await this.createSession(identity, { roomId, markerTxnId }))
+            .sessionId;
         },
         assertSession: async (identity, sessionId) => {
           const session = await this.sessions!.getSession(sessionId);
-          const room = await this.gateway.resolveUserRoom(identity.userDid);
+          // Deleted (or never created here): admission releases the
+          // binding's hold on it instead of refusing for ever.
+          if (!session) throw new StaleSessionError();
+          const roomId = await this.resolveMainRoomId(identity.userDid);
           if (
-            !session ||
             !sessionId.startsWith('$') ||
-            !room ||
-            session.roomId !== room.roomId
+            !roomId ||
+            session.roomId !== roomId
           )
             throw new ChannelError(
               404,
               'Companion session not found',
               'session_not_found',
             );
-          const encryption = await this.gateway.getRoomStateEvent(
-            room.roomId,
-            'm.room.encryption',
-          );
-          const parsed: unknown = encryption ? JSON.parse(encryption) : null;
-          if (
-            !parsed ||
-            typeof parsed !== 'object' ||
-            !('algorithm' in parsed) ||
-            parsed.algorithm !== 'm.megolm.v1.aes-sha2'
-          )
+          if (!(await this.roomIsEncrypted(roomId)))
             throw new ChannelError(
               409,
               'Companion room must be encrypted',
               'room_not_encrypted',
             );
         },
-        // Checked again as the run starts: admission may have waited.
-        requireDelegation: async (identity) =>
-          requireChannelDelegation(
-            this.delegations.get(identity.userDid),
-            Math.floor(Date.now() / 1000),
-          ),
+        // A new request only (a poll of an existing run is never refused
+        // for it); checked again as the run starts. A held delegation
+        // inside the margin re-reads the deposited room state first.
+        requireDelegation: async (identity) => {
+          try {
+            requireChannelDelegation(
+              this.delegations.get(identity.userDid),
+              Math.floor(Date.now() / 1000),
+            );
+          } catch {
+            await this.hydrateDelegation(identity.userDid, {
+              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+            });
+            requireChannelDelegation(
+              this.delegations.get(identity.userDid),
+              Math.floor(Date.now() / 1000),
+            );
+          }
+        },
         getRun: (runId) => this.runStore!.get(runId),
         getPlan: (runId) => this.runStore!.getPlan(runId),
         wasPruned: (runId) => this.runStore!.wasChannelRunPruned(runId),
@@ -1772,12 +1802,18 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           this.ctx.waitUntil(live.done.catch(() => undefined));
           return live.record;
         },
+        requestOf: (record) =>
+          (JSON.parse(record.request) as StoredRunRequest).turn,
         mirror: (request, text, author) =>
           this.replayToRoom(request, text, author),
         changed: async () => {
           this.markDirty();
           await this.ctx.storage.sync();
         },
+        scheduleRetry: (at) => this.ctx.waitUntil(this.requestHousekeeping(at)),
+        keepAlive: (work) => this.ctx.waitUntil(work),
+        pruneTombstones: (before, limit) =>
+          this.runStore!.pruneChannelTombstones(before, limit),
       });
 
       const core = this.core;
@@ -2316,6 +2352,20 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (next !== null) deadlines.push(Math.max(next, now + 1000));
       }
 
+      // Channel requests: retry the Companion room mirrors that are due, and
+      // prune (bounded) receipts that never started a run and old run
+      // tombstones (channels/turns.ts).
+      if (this.channelTurns) {
+        try {
+          const next = await this.channelTurns.housekeeping();
+          if (next !== null) deadlines.push(Math.max(next, now + 1000));
+        } catch (err) {
+          console.error(
+            `[user-do] channel housekeeping failed for ${this.userDid}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
       // Legacy-blob compaction: one bounded batch per tick until the whole
       // file is codec-compressed (see sqlite/blob-compactor.ts). A flush in
       // flight holds a snapshot of the file, which the compactor's swap-in
@@ -2663,24 +2713,28 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             'channel_grant_not_tool_authority',
           );
         // The shell (the only caller) checked the binding just before.
-        // The delegation is checked BEFORE the object boots: a cold boot
-        // loads the owner copy under it, and a user without a usable one
-        // must get `delegation_required`, not a boot failure. Hydration
-        // reads the cached copy, then the deposited room state (throttled
-        // after a miss); an in-memory one that no longer passes is
-        // re-read too, in case a newer deposit did not reach this object.
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        try {
-          requireChannelDelegation(
-            this.delegations.get(identity.userDid),
-            nowSeconds,
-          );
-        } catch {
-          await this.hydrateDelegation(identity.userDid);
-          requireChannelDelegation(
-            this.delegations.get(identity.userDid),
-            nowSeconds,
-          );
+        // The 900 s margin is checked by admission, for a NEW request only
+        // (and again as its run starts): a poll of a run that exists
+        // answers its status whatever the delegation's state. Before a
+        // COLD object boots, though, a delegation must be live (present,
+        // unexpired): the boot may load the owner copy under it, and a user
+        // without one must get `delegation_required`, not a boot failure.
+        // Hydration reads the stored copy, then the deposited room state
+        // (re-read when the stored copy is inside the margin).
+        if (!this.db) {
+          const live = (): boolean => {
+            const held = this.delegations.get(identity.userDid);
+            return (
+              Boolean(held?.raw) &&
+              (typeof held?.expiration !== 'number' ||
+                held.expiration > Math.floor(Date.now() / 1000))
+            );
+          };
+          if (!live())
+            await this.hydrateDelegation(identity.userDid, {
+              minRemainingSeconds: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS,
+            });
+          if (!live()) throw delegationRequiredError();
         }
         try {
           await this.ready(identity);
@@ -2699,15 +2753,46 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           result: await this.channelTurns!.submit(identity, input, requestHash),
         };
       } catch (error) {
-        if (error instanceof ChannelError)
+        // A failure retrying cannot fix (the room refused the oracle, the
+        // file storage rejected it) is a final refusal, not a 503.
+        const refusal =
+          error instanceof ChannelError ? error : classifyChannelFailure(error);
+        if (refusal)
           return {
             ok: false,
-            status: error.status,
-            code: error.code,
-            message: error.message,
+            status: refusal.status,
+            code: refusal.code,
+            message: refusal.message,
           };
         throw error;
       }
+    }
+
+    /**
+     * A poll of a channel request whose run exists, answered by a warm
+     * object from SQLite without booting, admitting or waiting on the
+     * admission lock. `null` when the object is cold or the request has no
+     * run yet: the shell then checks the binding with the Auth Hub and
+     * calls `channelTurn`. A binding revoked meanwhile is still enforced
+     * where it matters: before a queued or recovered attempt executes.
+     */
+    async channelPoll(
+      identity: TurnIdentity,
+      input: ChannelTurnInput,
+      requestHash: string,
+    ): Promise<ChannelTurnOutcome | null> {
+      if (identity.ucanDelegation || !this.initPromise || this.evicting)
+        return null;
+      try {
+        await this.initPromise;
+      } catch {
+        return null;
+      }
+      if (this.userDid !== identity.userDid || !this.channelTurns) return null;
+      const result = await this.channelTurns.poll(identity, input, requestHash);
+      if (!result) return null;
+      await this.recordAccess();
+      return { ok: true, result };
     }
 
     async listSessions(
@@ -2743,6 +2828,37 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       );
       if (room) this.mainRoomId = room.roomId;
       return room?.roomId ?? null;
+    }
+
+    /**
+     * Whether the room is end-to-end encrypted (Megolm). Encryption cannot
+     * be turned off in Matrix, so a positive answer is remembered for good,
+     * in memory and in storage (`room-encrypted:<roomId>`): the homeserver
+     * is asked once per room, not once per channel admission. A negative
+     * answer is never remembered.
+     */
+    private async roomIsEncrypted(roomId: string): Promise<boolean> {
+      if (this.encryptedRooms.has(roomId)) return true;
+      const key = `${ROOM_ENCRYPTED_PREFIX}${roomId}`;
+      if ((await this.ctx.storage.get<boolean>(key)) === true) {
+        this.encryptedRooms.add(roomId);
+        return true;
+      }
+      const encryption = await this.gateway.getRoomStateEvent(
+        roomId,
+        'm.room.encryption',
+      );
+      const parsed: unknown = encryption ? JSON.parse(encryption) : null;
+      const encrypted =
+        typeof parsed === 'object' &&
+        parsed !== null &&
+        'algorithm' in parsed &&
+        parsed.algorithm === 'm.megolm.v1.aes-sha2';
+      if (encrypted) {
+        this.encryptedRooms.add(roomId);
+        await this.ctx.storage.put(key, true);
+      }
+      return encrypted;
     }
 
     async deleteSession(
@@ -4646,16 +4762,11 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       record: RunRecord,
       outcome: RunOutcome,
     ): Promise<void> {
-      if (record.client === 'channel' && outcome.status === 'finished') {
-        const stored = JSON.parse(record.request) as StoredRunRequest;
-        // Without the handle (a reset dropped it mid-run) the next poll of
-        // the request delivers the reply instead.
-        await this.channelTurns?.deliverReply(
-          stored.turn,
-          record.runId,
-          outcome.text,
-        );
-      }
+      // A channel run's reply (or the end of a run without one) is mirrored
+      // into the Companion room in the background: never awaited here, so
+      // the session's next queued run starts at once. Without the handle (a
+      // reset dropped it mid-run) the next poll or alarm mirrors it.
+      if (record.client === 'channel') this.channelTurns?.deliverReply();
       if (!record.taskRunId || !this.taskScheduler) return;
       if (this.taskScheduler.isRunActive(record.taskRunId)) return;
       if (outcome.status === 'finished')

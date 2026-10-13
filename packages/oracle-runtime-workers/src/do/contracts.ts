@@ -660,6 +660,16 @@ export interface UserOracleObject extends Rpc.DurableObjectBranded {
     input: ChannelTurnInput,
     requestHash: string,
   ): Promise<ChannelTurnOutcome>;
+  /**
+   * A poll of a channel request whose run exists, answered by a warm
+   * object; `null` = admit it through `channelTurn` (after the binding
+   * check).
+   */
+  channelPoll(
+    identity: TurnIdentity,
+    input: ChannelTurnInput,
+    requestHash: string,
+  ): Promise<ChannelTurnOutcome | null>;
   /** Run a turn and return the final text (used by the Matrix gateway). */
   runTurn(req: TurnRequest): Promise<TurnResult>;
   /**

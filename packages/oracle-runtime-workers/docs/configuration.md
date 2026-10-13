@@ -216,8 +216,10 @@ oracle script in a gateway split).
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is
 recorded, and an admitted run waits on the recovery backoff
-([channels](channels.md#authorization)). Channel turns count against
-`RATE_LIMIT` under the user's DID, like an authenticated request.
+([channels](channels.md#authorization)). Channel requests count against
+`RATE_LIMIT` under the user's DID in their own budget (key
+`<ORACLE_DID>|channel|<userDid>`), apart from the user's Portal requests
+(`<ORACLE_DID>|user|<userDid>`); both use the binding's limit.
 
 ### Chat delivery and artefacts
 
@@ -337,6 +339,7 @@ example) per address; declare the dedicated binding to get the Node runtime's
 | `ORACLE_OPERATOR_DIDS`       | Optional, comma-separated DIDs allowed onto the gateway-wide operator routes `/debug/matrix/*` (stop, restart, abort, rotate-device, outbox, event). When set, every other authenticated caller gets 403 there. A list with an entry that is not a DID admits nobody and logs an error. Unset: any authenticated caller may use them while `ORACLE_DEBUG_ROUTES=true` — set it on any shared deployment that enables debug routes. The per-user debug routes are unaffected. |
 | `TOPIC_DELIVERABLES_ENABLED` | `'true'` enables the owner-only Topic deliverable routes (`/topic-deliverables/*`, see [architecture](architecture.md#topic-deliverable-api)). Off by default: the routes and the object's RPC answer `404`. Read the known limits there before turning it on.                                                                                                                                                                                                               |
 | `LOG_LEVEL`                  | `debug` / `info` / `warn` / `error` (default `info`); also the SDK's log level in the gateway.                                                                                                                                                                                                                                                                                                                                                                               |
+| `BOOT_LINT_VERBOSE`          | `'true'` logs every plugin-manifest soft warning (`[boot] [plugin] field: …`) and every example that names a tool not registered at boot, one line each. Unset: one `[boot] manifest lint: N soft warning(s) (plugin=count, …)` line and one `[boot] manifest examples: …` line per core build (once per isolate).                                                                                                                                                           |
 | `CORS_ORIGIN`                | Default `*`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 ### Built-in limits

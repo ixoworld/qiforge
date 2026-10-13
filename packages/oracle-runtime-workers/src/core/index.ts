@@ -488,11 +488,27 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
     registries.manifests.register(plugin, manifestOverrides[plugin.name]);
   }
   const manifestErrors: string[] = [];
+  const lintVerbose = opts.env['BOOT_LINT_VERBOSE'] === 'true';
+  const lintCounts = new Map<string, number>();
   for (const { pluginName, manifest } of registries.manifests.collect()) {
     const result = validateManifest(manifest, pluginName);
-    for (const warning of result.warnings) logger.warn(`[boot] ${warning}`);
+    if (lintVerbose)
+      for (const warning of result.warnings) logger.warn(`[boot] ${warning}`);
+    else if (result.warnings.length > 0)
+      lintCounts.set(pluginName, result.warnings.length);
     if (!result.valid) manifestErrors.push(...result.errors);
   }
+  // The soft-rule warnings are the same on every boot of an isolate (one
+  // core per isolate): one summary line, the full list with
+  // BOOT_LINT_VERBOSE=true.
+  if (lintCounts.size > 0)
+    logger.warn(
+      `[boot] manifest lint: ${[...lintCounts.values()].reduce((a, b) => a + b, 0)} soft warning(s) (${[
+        ...lintCounts,
+      ]
+        .map(([plugin, count]) => `${plugin}=${count}`)
+        .join(', ')}); set BOOT_LINT_VERBOSE=true to list them`,
+    );
   const guides = registries.manifests.operatingGuides();
   if (guides.length > 0) {
     logger.log(
@@ -707,9 +723,26 @@ export function createRuntimeCore(opts: RuntimeCoreOptions): RuntimeCore {
           registries.tools,
           registries.subAgents,
         );
-        for (const issue of cross.errors) {
+        if (lintVerbose) {
+          for (const issue of cross.errors) {
+            logger.warn(
+              `[boot] ${issue} (boot-time tools only — ignore if the tool comes from getRequestTools)`,
+            );
+          }
+        } else if (cross.errors.length > 0) {
+          const perPlugin = new Map<string, number>();
+          for (const issue of cross.errors) {
+            const plugin = /^\[([^\]]+)\]/.exec(issue)?.[1] ?? 'unknown';
+            perPlugin.set(plugin, (perPlugin.get(plugin) ?? 0) + 1);
+          }
           logger.warn(
-            `[boot] ${issue} (boot-time tools only — ignore if the tool comes from getRequestTools)`,
+            `[boot] manifest examples: ${cross.errors.length} reference(s) to tools not registered at boot (${[
+              ...perPlugin,
+            ]
+              .map(([plugin, count]) => `${plugin}=${count}`)
+              .join(
+                ', ',
+              )}; ignore those from getRequestTools); set BOOT_LINT_VERBOSE=true to list them`,
           );
         }
       } catch (err) {
