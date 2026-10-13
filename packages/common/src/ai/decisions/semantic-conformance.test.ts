@@ -26,7 +26,9 @@ describe('semantic conformance variants', () => {
       'no-evidence',
       'missing-question',
     ]);
-    const opaque = variants.find((variant) => variant.kind === 'opaque-option-ids')!;
+    const opaque = variants.find(
+      (variant) => variant.kind === 'opaque-option-ids',
+    )!;
     expect(opaque.request.questions.route).toMatchObject({
       options: { opt_1: 'Billing', opt_2: 'Support' },
     });
@@ -34,6 +36,8 @@ describe('semantic conformance variants', () => {
       'route:opt_1': 'billing',
       'route:opt_2': 'support',
     });
-    expect(variants.find((variant) => variant.kind === 'no-evidence')?.request.state).toBeNull();
+    expect(
+      variants.find((variant) => variant.kind === 'no-evidence')?.request.state,
+    ).toBeNull();
   });
 });

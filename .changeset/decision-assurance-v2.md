@@ -1,5 +1,5 @@
 ---
-"@ixo/common": minor
+'@ixo/common': minor
 ---
 
 Add decision inference dialect/model provenance, versioned calibration profiles,

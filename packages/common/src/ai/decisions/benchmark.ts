@@ -92,7 +92,7 @@ function scoreAnswer(
     const p = answer.probabilityTrue;
     const y = gold ? 1 : 0;
     return {
-      correct: (p >= 0.5) === gold ? 1 : 0,
+      correct: p >= 0.5 === gold ? 1 : 0,
       confidence: Math.max(p, 1 - p),
       brier: (p - y) ** 2,
       latencyMs,
@@ -114,7 +114,9 @@ function scoreAnswer(
     };
   }
 
-  throw new TypeError('Ordinal benchmark cases require a task-specific metric.');
+  throw new TypeError(
+    'Ordinal benchmark cases require a task-specific metric.',
+  );
 }
 
 function expectedCalibrationError(
@@ -129,7 +131,9 @@ function expectedCalibrationError(
     const indexes = confidence
       .map((value, index) => ({ value, index }))
       .filter(({ value }) =>
-        bin === bins - 1 ? value >= lo && value <= hi : value >= lo && value < hi,
+        bin === bins - 1
+          ? value >= lo && value <= hi
+          : value >= lo && value < hi,
       )
       .map(({ index }) => index);
     if (!indexes.length) continue;
@@ -156,7 +160,9 @@ function selectiveRisk(
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!;
+  return sorted[
+    Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))
+  ]!;
 }
 
 function mean(values: number[]): number {

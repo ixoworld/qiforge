@@ -13,15 +13,16 @@ const request = {
 
 describe('Databricks decision adapters', () => {
   it('records requested and returned model separately on System One', async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(
-        JSON.stringify({
-          model: 'openjev-qwen35-4b-build-7',
-          answers: { billing: { type: 'noul', noul: 0.9 } },
-          usage: { input_tokens: 12, output_tokens: 0 },
-        }),
-        { status: 200 },
-      ),
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            model: 'openjev-qwen35-4b-build-7',
+            answers: { billing: { type: 'noul', noul: 0.9 } },
+            usage: { input_tokens: 12, output_tokens: 0 },
+          }),
+          { status: 200 },
+        ),
     );
     const adapter = new DatabricksSystemOneDecisionAdapter({
       workspaceUrl: 'https://example.cloud.databricks.com',
@@ -43,16 +44,17 @@ describe('Databricks decision adapters', () => {
   });
 
   it('treats ai_decide as function-version-pinned but model-mutable', async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () =>
-      new Response(
-        JSON.stringify({
-          response: {
-            answers: { billing: { type: 'noul', noul: 0.8 } },
-          },
-          metadata: { version: '1.0' },
-        }),
-        { status: 200 },
-      ),
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            response: {
+              answers: { billing: { type: 'noul', noul: 0.8 } },
+            },
+            metadata: { version: '1.0' },
+          }),
+          { status: 200 },
+        ),
     );
     const adapter = new DatabricksAiDecideDecisionAdapter({
       workspaceUrl: 'https://example.cloud.databricks.com',

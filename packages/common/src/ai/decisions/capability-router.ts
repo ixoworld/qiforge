@@ -124,18 +124,19 @@ export const capabilityRouterEnvShape = {
  * probabilities, so operators can tune this from real traffic later instead
  * of guessing per deployment.
  */
-export const CAPABILITY_ROUTE_CALIBRATION_PROFILE: DecisionCalibrationProfile = {
-  id: 'ixo:calibration:runtime.route-capabilities:provisional-v1',
-  version: '1.0.0',
-  status: 'provisional',
-  providerArtifactRef: 'unscoped',
-  decisionName: CAPABILITY_ROUTE_DECISION_NAME,
-  decisionVersion: '1.0.0',
-  primitive: 'boolean',
-  questionId: 'needsCapability',
-  threshold: 0.7,
-  validFrom: '2026-10-03T00:00:00.000Z',
-};
+export const CAPABILITY_ROUTE_CALIBRATION_PROFILE: DecisionCalibrationProfile =
+  {
+    id: 'ixo:calibration:runtime.route-capabilities:provisional-v1',
+    version: '1.0.0',
+    status: 'provisional',
+    providerArtifactRef: 'unscoped',
+    decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+    decisionVersion: '1.0.0',
+    primitive: 'boolean',
+    questionId: 'needsCapability',
+    threshold: 0.7,
+    validFrom: '2026-10-03T00:00:00.000Z',
+  };
 
 /**
  * Backward-compatible numeric export. New policy code should retain the

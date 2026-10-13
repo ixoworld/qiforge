@@ -12,8 +12,7 @@ import {
   toJevQuestions,
 } from './wire.js';
 
-export const DATABRICKS_OPENJEV_MODEL =
-  'system.ai.openjev-qwen35-4b';
+export const DATABRICKS_OPENJEV_MODEL = 'system.ai.openjev-qwen35-4b';
 export const DATABRICKS_AI_DECIDE_VERSION = '1.0';
 
 interface DatabricksBaseOptions {
@@ -22,13 +21,11 @@ interface DatabricksBaseOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-export interface DatabricksSystemOneAdapterOptions
-  extends DatabricksBaseOptions {
+export interface DatabricksSystemOneAdapterOptions extends DatabricksBaseOptions {
   model?: string;
 }
 
-export interface DatabricksAiDecideAdapterOptions
-  extends DatabricksBaseOptions {
+export interface DatabricksAiDecideAdapterOptions extends DatabricksBaseOptions {
   functionVersion?: string;
 }
 
@@ -45,10 +42,7 @@ function authHeader(token: string): string {
   return `Basic ${globalThis.btoa(`token:${token.trim()}`)}`;
 }
 
-async function readJson(
-  response: Response,
-  message: string,
-): Promise<unknown> {
+async function readJson(response: Response, message: string): Promise<unknown> {
   if (!response.ok) {
     throw new JevDecisionError('databricks', message, {
       status: response.status,

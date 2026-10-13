@@ -65,9 +65,7 @@ export function buildSemanticConformanceVariants(
         ...request,
         questions: mapQuestions(request.questions, (question) => ({
           ...question,
-          instructions: options.paraphraseInstructions!(
-            question.instructions,
-          ),
+          instructions: options.paraphraseInstructions!(question.instructions),
         })),
       },
     });
@@ -104,9 +102,7 @@ function mapQuestions(
   );
 }
 
-function opaqueChoiceQuestions(
-  questions: Record<string, DecisionQuestion>,
-): {
+function opaqueChoiceQuestions(questions: Record<string, DecisionQuestion>): {
   questions: Record<string, DecisionQuestion>;
   optionIdMap: Record<string, string>;
 } {
