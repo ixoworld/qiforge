@@ -52,6 +52,7 @@ export type SendMode =
   | 'fail-transient-once'
   | 'lost-response-once'
   | 'fail'
+  | 'hang-before-send'
   | 'hang';
 
 /**
@@ -88,6 +89,9 @@ export const TEST_ROOM_ID = '!tasks-test-room:example.org';
 export class TasksTestDO extends DurableObject {
   private db: DoSqliteDatabase | undefined;
   private scheduler: TaskScheduler | undefined;
+  private nextTransactionGate: Promise<void> | undefined;
+  private transactionRelease: (() => void) | undefined;
+  private transactionBlocked = false;
   private store: TasksStore | undefined;
 
   private sent: SentMessage[] = [];
@@ -155,6 +159,17 @@ export class TasksTestDO extends DurableObject {
     const db = await DoSqliteDatabase.open(this.ctx, 'tasks-test.db');
     const exec = db.exec.bind(db);
     const run = db.run.bind(db);
+    const transaction = db.transaction.bind(db);
+    db.transaction = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const gate = this.nextTransactionGate;
+      this.nextTransactionGate = undefined;
+      if (gate) {
+        this.transactionBlocked = true;
+        await gate;
+        this.transactionBlocked = false;
+      }
+      return transaction(fn);
+    };
     db.exec = <T extends SqlRow = SqlRow>(sql: string, params?: SqlParams) => {
       this.statementLog?.push({ sql, ...(params ? { params } : {}) });
       return exec<T>(sql, params);
@@ -164,6 +179,19 @@ export class TasksTestDO extends DurableObject {
       return run(sql, params);
     };
     return db;
+  }
+
+  async blockNextTransaction(): Promise<void> {
+    this.nextTransactionGate = new Promise<void>((resolve) => {
+      this.transactionRelease = resolve;
+    });
+  }
+  async isTransactionBlocked(): Promise<boolean> {
+    return this.transactionBlocked;
+  }
+  async releaseTransaction(): Promise<void> {
+    this.transactionRelease?.();
+    this.transactionRelease = undefined;
   }
 
   async startStatementLog(): Promise<void> {
@@ -246,6 +274,8 @@ export class TasksTestDO extends DurableObject {
           return Promise.resolve({ roomId });
         },
         sendText: (roomId: string, body: string, opts?: { txnId?: string }) => {
+          if (this.sendMode === 'hang-before-send')
+            return new Promise<string>(() => undefined);
           if (
             this.sendMode === 'fail' ||
             (this.failingBody !== null && body.includes(this.failingBody))
@@ -462,13 +492,21 @@ export class TasksTestDO extends DurableObject {
     taskId: string,
     decision: 'approve' | 'reject',
     note?: string,
+    approvalRequestId?: string,
   ): Promise<{ resolved: boolean }> {
-    return this.ready().surface.resolveApproval(taskId, decision, note);
+    const surface = this.ready().surface;
+    const requestId =
+      approvalRequestId ?? (await surface.get(taskId))?.approvalRequest?.id;
+    return surface.resolveApproval(taskId, decision, note, requestId);
+  }
+
+  async approvalReceipts(taskId: string) {
+    return this.ready().approvalReceipts(taskId);
   }
 
   /**
-   * `resolve_task_approval` the way the tool execution middleware runs it:
-   * it declares no effect, so it holds the object's single write slot for
+   * A trusted host approval action while another caller holds the write slot:
+   * it holds the object's single write slot for
    * the whole call.
    */
   async resolveApprovalAsTool(
@@ -476,8 +514,10 @@ export class TasksTestDO extends DurableObject {
     decision: 'approve' | 'reject',
     note?: string,
   ): Promise<{ resolved: boolean }> {
+    const surface = this.ready().surface;
+    const requestId = (await surface.get(taskId))?.approvalRequest?.id;
     return this.toolScheduler.run('write', undefined, () =>
-      this.ready().surface.resolveApproval(taskId, decision, note),
+      surface.resolveApproval(taskId, decision, note, requestId),
     );
   }
 

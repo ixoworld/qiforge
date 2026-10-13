@@ -326,40 +326,65 @@ describe('task tools', () => {
     expect(missing).toEqual({ ok: false, error: 'Task not found.' });
   });
 
-  it('resolve_task_approval records the decision with the note', async () => {
+  it('a model can inspect an approval but cannot record or consume the owner decision', async () => {
     const surface = new FakeSurface();
     const record = surface.seed(
       makeRecord(
         { ...cronInput, approval: 'before-action' },
-        { pendingApprovalAt: '2026-08-26T00:00:00.000Z' },
+        {
+          pendingApprovalAt: '2026-08-26T00:00:00.000Z',
+          approvalRequest: {
+            id: '00000000-0000-4000-8000-000000000001',
+            digest: 'a'.repeat(64),
+            occurrence: '2026-08-26T00:00:00.000Z',
+            delivery: 'delivered',
+          },
+        },
       ),
     );
 
     const approved = asRecord(
       await toolByName('resolve_task_approval').handler(
-        { taskId: record.id, outcome: 'approved', note: 'fix the title' },
+        {
+          taskId: record.id,
+          outcome: 'approved',
+          note: 'fix the title',
+          approvalRequestId: '00000000-0000-4000-8000-000000000001',
+        },
         ctxWith(surface),
       ),
     );
-    expect(approved.ok).toBe(true);
-    // The run executes on the alarm, after this call: the note must not
-    // claim a result.
-    expect(String(approved.note)).toMatch(/starting now in the background/);
-    expect(String(approved.note)).not.toMatch(/was executed|was delivered/);
-    expect(surface.resolveCalls).toEqual([
-      { taskId: record.id, decision: 'approve', note: 'fix the title' },
-    ]);
+    expect(approved).toMatchObject({
+      ok: false,
+      reviewRequired: true,
+      approvalRequest: record.approvalRequest,
+    });
+    expect(surface.resolveCalls).toEqual([]);
+    expect(record.pendingApprovalAt).toBeDefined();
 
     const again = asRecord(
       await toolByName('resolve_task_approval').handler(
-        { taskId: record.id, outcome: 'declined' },
+        {
+          taskId: record.id,
+          outcome: 'declined',
+          approvalRequestId: '00000000-0000-4000-8000-000000000001',
+        },
         ctxWith(surface),
       ),
     );
-    expect(again).toEqual({
+    expect(again).toMatchObject({ ok: false, reviewRequired: true });
+    expect(surface.resolveCalls).toEqual([]);
+    const removal = asRecord(
+      await toolByName('update_task').handler(
+        { taskId: record.id, approval: 'never' },
+        ctxWith(surface),
+      ),
+    );
+    expect(removal).toMatchObject({
       ok: false,
-      error: 'No approval is pending for this task.',
+      error: expect.stringContaining('authenticated owner'),
     });
+    expect(record.approval).toBe('before-action');
   });
 
   it('suggest_spec_fix reports the failing intent or that nothing is wrong', async () => {

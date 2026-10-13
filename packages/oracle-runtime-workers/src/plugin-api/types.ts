@@ -851,6 +851,13 @@ export type OracleTaskSchedule =
 
 /** Stored task record (persisted in the user's own database → owner file). */
 export interface OracleTaskRecord {
+  /** Exact immutable approval request; a decision must name this id. */
+  approvalRequest?: {
+    id: string;
+    digest: string;
+    occurrence: string;
+    delivery: 'pending' | 'delivered';
+  };
   executionProfile?: TaskExecutionProfile;
   id: string;
   title: string;
@@ -947,6 +954,7 @@ export interface OracleTasksSurface {
     taskId: string,
     decision: 'approve' | 'reject',
     note?: string,
+    approvalRequestId?: string,
   ): Promise<{ resolved: boolean }>;
 }
 
@@ -976,6 +984,11 @@ export interface PluginTool {
    * outcome is unknown. See `core/middlewares/tool-marks.ts`.
    */
   effect?: 'read' | 'write';
+  /** Upstream MCP annotations, retained without changing their meaning. */
+  annotations?: Record<string, unknown> & {
+    readOnlyHint?: boolean;
+    idempotentHint?: boolean;
+  };
   /**
    * `true` when calling the tool again with the same arguments is a new,
    * intended action rather than a repeat — a step in the user's browser

@@ -12,9 +12,8 @@
  * agent: `{ ok: false, error }`, an error-status ToolMessage, `Error: …`).
  * An identical write attempted while a claim stands is
  * not executed: the model is told the earlier outcome is unknown and asked
- * to verify with a read (a `warned` claim). A later turn that asks for the
- * same write again, after that warning, runs it — the user was informed and
- * asked again — and the ledger drops claims with the run retention.
+ * to verify with a read (a `warned` claim). A host-authenticated reconciliation
+ * must account for the outcome before another attempt can be authorized.
  *
  * Placed innermost around the tool (`MainAgentHooks.toolExecution`): it
  * must see the tool's own thrown error, which the retry middlewares would
@@ -91,7 +90,7 @@ export async function operationKey(
 
 /** The result handed to the model for a write it must not repeat yet. */
 export function uncertainWriteToolResult(toolName: string): string {
-  return `An identical ${toolName} call was started earlier and its outcome is unknown (it was interrupted or its connection dropped), so it was NOT run again: running it twice could repeat its effect. Verify with a read-only call whether it already happened and tell the user; only repeat it if they confirm.`;
+  return `An identical ${toolName} call was started earlier and its outcome is unknown (it was interrupted or its connection dropped), so it was NOT run again: running it twice could repeat its effect. Verify with a read-only call whether it already happened and tell the user. An authenticated reconciliation with evidence is required before retry; a later conversation turn cannot clear this claim.`;
 }
 
 /**

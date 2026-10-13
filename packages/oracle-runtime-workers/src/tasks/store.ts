@@ -42,6 +42,11 @@ import {
   TASK_STATUSES,
   TaskScheduleSchema,
 } from './spec';
+import {
+  TaskApprovalRequestSchema,
+  TaskApprovalReceiptSchema,
+  type TaskApprovalReceipt,
+} from './approval';
 
 /**
  * A stored task. Extends the plugin-api record with the approval markers:
@@ -146,6 +151,7 @@ type TaskRow = {
   topic_request_json: string | null;
   approved_at: number | bigint | null;
   approval_note: string | null;
+  approval_request_json: string | null;
 };
 
 type RunRow = {
@@ -205,7 +211,7 @@ const TASK_COLUMNS = `id, title, spec, schedule_json, status, approval, created_
   updated_at, next_run_at, last_run_at, last_result_json, consecutive_failures, pending_approval_at,
   delivery_room_id, execution_profile, topic_operation_id, topic_request_json`;
 
-const TASK_SELECT = `${TASK_COLUMNS}, approved_at, approval_note`;
+const TASK_SELECT = `${TASK_COLUMNS}, approved_at, approval_note, approval_request_json`;
 
 /**
  * Rows this runtime may load: no execution profile (an ordinary task) or one
@@ -280,6 +286,11 @@ function rowToRecord(row: TaskRow): TaskRecord {
   }
   if (row.pending_approval_at !== null) {
     record.pendingApprovalAt = row.pending_approval_at;
+  }
+  if (row.approval_request_json !== null) {
+    record.approvalRequest = TaskApprovalRequestSchema.parse(
+      JSON.parse(row.approval_request_json),
+    );
   }
   if (row.approved_at !== null) {
     record.approvedAt = new Date(Number(row.approved_at)).toISOString();
@@ -374,10 +385,19 @@ export class TasksStore {
       ['topic_request_json', 'TEXT'],
       ['approved_at', 'INTEGER'],
       ['approval_note', 'TEXT'],
+      ['approval_request_json', 'TEXT'],
     ] as const) {
       if (!columns.some((c) => c.name === name))
         await this.db.run(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
     }
+    // Timestamp-only approvals from older runtimes cannot authorize an
+    // immutable input revision. Reissue them rather than strand one-shots.
+    await this.db.run(
+      `UPDATE tasks SET pending_approval_at = NULL, approved_at = NULL,
+      approval_note = NULL, next_run_at = ? WHERE status = 'active' AND approval = 'before-action'
+      AND approval_request_json IS NULL AND (pending_approval_at IS NOT NULL OR approved_at IS NOT NULL)`,
+      [Date.now()],
+    );
     await this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_topic_operation ON tasks(topic_operation_id) WHERE topic_operation_id IS NOT NULL`,
     );
@@ -390,6 +410,12 @@ export class TasksStore {
     await this.db.run(
       `CREATE INDEX IF NOT EXISTS idx_tasks_next_run ON tasks(status, next_run_at)`,
     );
+    await this.db.run(`
+      CREATE TABLE IF NOT EXISTS task_approval_receipts (
+        request_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        receipt_json TEXT NOT NULL
+      )`);
     await this.db.run(`
       CREATE TABLE IF NOT EXISTS task_runs (
         run_id TEXT PRIMARY KEY,
@@ -448,11 +474,13 @@ export class TasksStore {
          created_at = ?, updated_at = ?, next_run_at = ?, last_run_at = ?,
          last_result_json = ?, consecutive_failures = ?, pending_approval_at = ?,
          delivery_room_id = ?, execution_profile = ?, topic_operation_id = ?, topic_request_json = ?,
+         approval_request_json = ?,
          approved_at = CASE WHEN ? = 'active' THEN approved_at END,
          approval_note = CASE WHEN ? = 'active' THEN approval_note END
        WHERE id = ? AND (topic_operation_id IS NULL OR status != 'cancelled' OR ? = 'cancelled')`,
       [
         ...recordParams(record),
+        record.approvalRequest ? JSON.stringify(record.approvalRequest) : null,
         record.status,
         record.status,
         record.id,
@@ -490,6 +518,35 @@ export class TasksStore {
       [id],
     );
     return changes > 0;
+  }
+
+  async invalidateApproval(id: string): Promise<void> {
+    await this.setup();
+    await this.db.run(
+      `UPDATE tasks SET approved_at = NULL, approval_note = NULL,
+      pending_approval_at = NULL, approval_request_json = NULL WHERE id = ?`,
+      [id],
+    );
+  }
+
+  async recordApproval(receipt: TaskApprovalReceipt): Promise<void> {
+    await this.setup();
+    const parsed = TaskApprovalReceiptSchema.parse(receipt);
+    await this.db.run(
+      `INSERT INTO task_approval_receipts (request_id, task_id, receipt_json) VALUES (?, ?, ?)`,
+      [parsed.approvalRequestId, parsed.taskId, JSON.stringify(parsed)],
+    );
+  }
+
+  async approvalReceipts(taskId: string): Promise<TaskApprovalReceipt[]> {
+    await this.setup();
+    const rows = await this.db.exec<{ receipt_json: string }>(
+      `SELECT receipt_json FROM task_approval_receipts WHERE task_id = ? ORDER BY rowid`,
+      [taskId],
+    );
+    return rows.map((row) =>
+      TaskApprovalReceiptSchema.parse(JSON.parse(row.receipt_json)),
+    );
   }
 
   async get(id: string): Promise<TaskRecord | null> {

@@ -24,6 +24,11 @@ export interface RawMcpClientTool {
   name: string;
   description: string;
   schema?: unknown;
+  metadata?: Record<string, unknown>;
+  annotations?: Record<string, unknown> & {
+    readOnlyHint?: boolean;
+    idempotentHint?: boolean;
+  };
   invoke(
     input: unknown,
     config?: { metadata?: Record<string, unknown> },
@@ -47,6 +52,7 @@ export interface AdaptedMcpTool {
   name: string;
   description: string;
   schema: z.ZodType;
+  annotations?: RawMcpClientTool['annotations'];
   invoke(input: unknown): Promise<unknown>;
 }
 
@@ -103,6 +109,18 @@ export function adaptMcpClientTools(
     name: t.name,
     description: t.description,
     schema: mcpToolZodSchema(t.schema, t.name, logger),
+    annotations: t.annotations ?? annotationsOf(t.metadata?.annotations),
     invoke: (input: unknown) => t.invoke(input, config),
   }));
+}
+
+function annotationsOf(value: unknown): RawMcpClientTool['annotations'] {
+  const parsed = z
+    .object({
+      readOnlyHint: z.boolean().optional(),
+      idempotentHint: z.boolean().optional(),
+    })
+    .catchall(z.unknown())
+    .safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }

@@ -1,23 +1,6 @@
 /**
- * The task approval gate — the Workers port of the Node runtime's task-room
- * middleware. On every model call it checks whether any of the current user's
- * tasks is waiting on a `before-action` approval and, when one is, appends a
- * system-prompt hint so the model treats the user's reply as the decision.
- *
- * Differences from Node, by design of the Workers approval flow:
- *   - There are no dedicated task rooms or room→session bindings — pending
- *     approvals live on the task records themselves (`pendingApprovalAt`), so
- *     the gate reads them straight off `OracleTasksSurface.list()`.
- *   - The gate never resolves an approval itself: resolving an approval
- *     starts the run (a full agent turn, on the user object's alarm), which
- *     is the model's call to make through the tool, not a model-call
- *     wrapper's. Plain yes/no replies are still classified
- *     deterministically (`classifyReplyFast`) — the classification shapes the
- *     hint, and the model records the decision through the
- *     `resolve_task_approval` tool.
- *
- * Never short-circuits the model and never posts to Matrix — system-prompt
- * hints only. Any internal error degrades to a plain pass-through.
+ * Adds pending approval guidance to the model prompt. Natural-language replies
+ * are intent hints only; the signed owner host action records the decision.
  */
 import type { BaseMessage } from '@langchain/core/messages';
 import { createMiddleware, type AgentMiddleware } from 'langchain';
@@ -118,14 +101,14 @@ export async function computeApprovalHint(
   const only = pending.length === 1 ? pending[0] : undefined;
   if (only && decision === 'approved') {
     return (
-      `\n\n[Task approval gate] The user's reply APPROVES the pending run of task ${only.id} ("${only.title}"). ` +
-      'Call `resolve_task_approval` with outcome "approved" NOW — approval starts the run, and its result is posted to the room when it finishes — then tell the user it is running.'
+      `\n\n[Task approval gate] The reply appears to mean APPROVES for task ${only.id} ("${only.title}"). ` +
+      'Direct the owner to the authenticated approval interface. A conversation reply or model tool cannot authorize execution. Do not claim the run has started.'
     );
   }
   if (only && decision === 'rejected') {
     return (
-      `\n\n[Task approval gate] The user's reply DECLINES the pending run of task ${only.id} ("${only.title}"). ` +
-      'Call `resolve_task_approval` with outcome "declined" — nothing must be executed — then acknowledge briefly.'
+      `\n\n[Task approval gate] The reply appears to mean DECLINES for task ${only.id} ("${only.title}"). ` +
+      'Direct the owner to the authenticated approval interface to record the decision. No pending run is authorized.'
     );
   }
   const listing = pending
@@ -133,7 +116,7 @@ export async function computeApprovalHint(
     .join(', ');
   return (
     `\n\n[Task approval gate] ${pending.length} task run(s) are waiting for the user's approval: ${listing}. ` +
-    'If this reply decides one of them (possibly with tweaks), call `resolve_task_approval` with the outcome — "approved" starts the run (pass requested tweaks in `note`), "declined" drops it. ' +
+    'Direct the owner to the authenticated approval interface. Requested instruction changes require a new approval; notes are audit data. ' +
     'Otherwise answer normally and remind the user of the pending approval.'
   );
 }

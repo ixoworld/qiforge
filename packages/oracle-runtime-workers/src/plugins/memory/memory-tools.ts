@@ -45,6 +45,7 @@ export interface UpstreamMcpTool {
   name: string;
   description: string;
   schema: z.ZodType;
+  annotations?: PluginTool['annotations'];
   invoke: (input: unknown) => Promise<unknown>;
 }
 
@@ -61,6 +62,7 @@ interface MemoryToolDef {
   name: string;
   description: string;
   schema: z.ZodType;
+  annotations?: PluginTool['annotations'];
 }
 
 interface CachedToolDefs {
@@ -235,10 +237,11 @@ async function listToolDefs(
     const raw = await client.getTools();
     dumpSchemaOnce(raw);
     const tools = adaptMcpClientTools(raw, console);
-    return tools.map(({ name, description, schema }) => ({
+    return tools.map(({ name, description, schema, annotations }) => ({
       name,
       description,
       schema,
+      annotations,
     }));
   } finally {
     await client.close().catch(() => undefined);
@@ -328,6 +331,7 @@ function buildLazyUpstreamTools(
     name: def.name,
     description: def.description,
     schema: def.schema,
+    annotations: def.annotations,
     invoke: async (input: unknown) => {
       const { byName } = await connect();
       const upstream = byName.get(def.name);
@@ -443,6 +447,8 @@ function adaptMcpTool(mcpTool: UpstreamMcpTool): PluginTool {
     name: mcpTool.name,
     description: mcpTool.description,
     schema: mcpTool.schema,
+    annotations: mcpTool.annotations,
+    effect: mcpTool.annotations?.readOnlyHint === true ? 'read' : 'write',
     handler: async (args) => mcpTool.invoke(args),
   };
 }

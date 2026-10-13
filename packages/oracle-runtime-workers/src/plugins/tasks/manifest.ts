@@ -56,11 +56,10 @@ export const tasksManifest: PluginManifest = {
     {
       user: '(replying to an approval request) Yes — go ahead.',
       thought:
-        'The user approved the pending run — record it; approval starts the run, and its result is posted to the room when it finishes.',
-      tool: 'resolve_task_approval',
+        'Inspect the frozen pending request and direct the owner to the authenticated approval interface.',
+      tool: 'get_task',
       args: {
         taskId: 'task_daily-linkedin-update_a1b2c3d4',
-        outcome: 'approved',
       },
     },
     {
