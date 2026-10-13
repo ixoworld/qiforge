@@ -1,5 +1,6 @@
 import type {
   DecisionAdapter,
+  DecisionProviderCapabilities,
   DecisionProviderOptions,
   DecisionProviderResult,
   DecisionRequest,
@@ -27,12 +28,7 @@ export interface OpenRouterJevAdapterOptions {
 export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
   readonly provider = 'openrouter';
   readonly model: string;
-  readonly capabilities = {
-    apiDialect: 'systemone-v1' as const,
-    primitives: ['boolean', 'choice', 'ordinal'] as const,
-    answerSemantics: 'distribution' as const,
-    modelPinning: 'pinned' as const,
-  };
+  readonly capabilities: DecisionProviderCapabilities;
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -46,6 +42,14 @@ export class OpenRouterJevDecisionAdapter implements DecisionAdapter {
 
     this.apiKey = options.apiKey;
     this.model = options.model?.trim() || JEV_MODEL_OPENROUTER;
+    // The default model id names a release (`typesafe/jev-1.13`); an override
+    // may be an alias that moves, so only the default is recorded as pinned.
+    this.capabilities = {
+      apiDialect: 'systemone-v1',
+      primitives: ['boolean', 'choice', 'ordinal'],
+      answerSemantics: 'distribution',
+      modelPinning: this.model === JEV_MODEL_OPENROUTER ? 'pinned' : 'unknown',
+    };
     this.baseUrl = (options.baseUrl ?? OPENROUTER_API_BASE).replace(/\/$/, '');
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.extraHeaders = { ...options.headers };
