@@ -135,10 +135,46 @@ export class DatabricksSystemOneDecisionAdapter implements DecisionAdapter {
   }
 }
 
+/**
+ * The ai_decide REST response (`POST /api/2.0/ai-functions/ai-decide`):
+ * `{ response: { answers }, metadata: { version } }`. Its choice and score
+ * answers have the System One fields (`choice`/`probabilities`/`confidence`,
+ * `score`/`probabilities`/`legend`/`confidence`), but a noul answer carries
+ * its probability as `probability`, where System One uses `noul`. The answers
+ * are therefore rebound to the System One shape before the shared parser
+ * validates them, instead of being handed over as-is.
+ */
 const aiDecideEnvelopeSchema = z.object({
-  response: z.unknown(),
-  metadata: z.object({ version: z.string() }),
+  response: z.looseObject({
+    answers: z.record(z.string(), z.looseObject({ type: z.string() })),
+  }),
+  metadata: z.object({ version: z.string().min(1) }),
 });
+
+const aiDecideNoulAnswerSchema = z.looseObject({
+  type: z.literal('noul'),
+  probability: z.number(),
+});
+
+function toSystemOneAnswers(
+  answers: Record<string, { type: string }>,
+  status: number,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(answers).map(([name, answer]) => {
+      if (answer.type !== 'noul') return [name, answer];
+      const noul = aiDecideNoulAnswerSchema.safeParse(answer);
+      if (!noul.success) {
+        throw new JevDecisionError(
+          'databricks',
+          'Databricks ai_decide noul answer did not carry a numeric probability.',
+          { status },
+        );
+      }
+      return [name, { type: 'noul', noul: noul.data.probability }];
+    }),
+  );
+}
 
 /**
  * Databricks managed ai_decide path. It intentionally has a different
@@ -213,7 +249,12 @@ export class DatabricksAiDecideDecisionAdapter implements DecisionAdapter {
     }
 
     const result = parseJevResult(
-      envelope.data.response,
+      {
+        answers: toSystemOneAnswers(
+          envelope.data.response.answers,
+          response.status,
+        ),
+      },
       'databricks',
       response.status,
     );
