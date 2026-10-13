@@ -1,6 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { DoSqliteDatabase } from '../sqlite/database';
-import type { TurnRequest } from '../do/contracts';
+import { DoSqliteDatabase, type SqlRow } from '../sqlite/database';
 import { RunStore, type RunRecord } from '../do/run-store';
 import type { ReplyPlan } from '../delivery/types';
 import { ChannelTurns } from './turns';
@@ -11,7 +10,11 @@ import {
   type ChannelTurnInput,
   type ChannelTurnOutcome,
   ChannelError,
+  StaleSessionError,
 } from './contract';
+
+/** How the next room mirrors behave (`setMirror`). */
+type MirrorMode = 'ok' | 'transient' | 'forbidden' | 'hang';
 
 export class ChannelTurnsTestDO extends DurableObject {
   private db?: DoSqliteDatabase;
@@ -19,7 +22,12 @@ export class ChannelTurnsTestDO extends DurableObject {
   private turns?: ChannelTurns;
   private nowMs = Date.now();
   /** Host calls made since the object loaded. */
-  private calls = { assertSession: 0, changed: 0 };
+  private calls = { assertSession: 0, changed: 0, createSession: 0 };
+  private mirrorMode: MirrorMode = 'ok';
+  /** Mirrors held by `hang`, released by `setMirror` with another mode. */
+  private held: (() => void)[] = [];
+  /** Wake-ups the turns asked for (`scheduleRetry`), epoch ms. */
+  private retries: number[] = [];
 
   private async ready(): Promise<ChannelTurns> {
     if (this.turns) return this.turns;
@@ -29,13 +37,16 @@ export class ChannelTurnsTestDO extends DurableObject {
     await this.runs.setup();
     const runs = this.runs;
     this.turns = new ChannelTurns(db, {
-      createSession: async (_identity, marker) => `$${marker}`,
+      createSession: async (_identity, marker) => {
+        this.calls.createSession += 1;
+        return `$${marker}`;
+      },
       assertSession: async (_identity, sessionId) => {
         this.calls.assertSession += 1;
+        if ((await this.deletedSessions()).includes(sessionId))
+          throw new StaleSessionError('Session deleted');
         if (!sessionId.startsWith('$channel-session-'))
           throw new ChannelError(404, 'Session not owned', 'session_not_found');
-        if ((await this.deletedSessions()).includes(sessionId))
-          throw new ChannelError(404, 'Session deleted', 'session_not_found');
       },
       requireDelegation: async () =>
         requireChannelDelegation(
@@ -65,20 +76,114 @@ export class ChannelTurnsTestDO extends DurableObject {
         if (!row) throw new Error('Run was not persisted');
         return row;
       },
+      requestOf: (record) => JSON.parse(record.request),
       mirror: async (_request, text, author) => {
+        if (this.mirrorMode === 'hang')
+          await new Promise<void>((resolve) => this.held.push(resolve));
+        if (this.mirrorMode === 'transient')
+          throw new Error('Network connection lost');
+        if (this.mirrorMode === 'forbidden')
+          throw new Error(
+            'MatrixError: [403] User @oracle:test not in room !room:test',
+          );
         const key = `mirrors:${author}`;
         await this.ctx.storage.put(
           key,
           ((await this.ctx.storage.get<number>(key)) ?? 0) + 1,
         );
         await this.ctx.storage.put(`mirrored:${author}`, text);
+        await this.ctx.storage.put('mirror-log', [
+          ...((await this.ctx.storage.get<string[]>('mirror-log')) ?? []),
+          `${author}:${text}`,
+        ]);
       },
       changed: () => {
         this.calls.changed += 1;
         return this.ctx.storage.sync();
       },
+      scheduleRetry: (at) => {
+        this.retries.push(at);
+      },
+      keepAlive: (work) => this.ctx.waitUntil(work),
+      pruneTombstones: (before, limit) =>
+        runs.pruneChannelTombstones(before, limit),
+      now: () => this.nowMs,
     });
     return this.turns;
+  }
+
+  /** The shell's poll path: answered only for a request whose run exists. */
+  async poll(input: ChannelTurnInput): Promise<ChannelTurnOutcome | null> {
+    const result = await (
+      await this.ready()
+    ).poll(
+      this.identity(input),
+      input,
+      await channelRequestHash(JSON.stringify(input)),
+    );
+    return result ? { ok: true, result } : null;
+  }
+
+  private identity(input: ChannelTurnInput) {
+    return {
+      userDid: 'did:ixo:user',
+      channel: {
+        callerDid: 'did:web:channels.test',
+        provider: input.provider,
+        bindingId: input.bindingId,
+        bindingRevision: input.bindingRevision,
+      },
+    };
+  }
+
+  /** How the room mirrors behave from now on; held (`hang`) ones go on. */
+  async setMirror(mode: MirrorMode): Promise<void> {
+    this.mirrorMode = mode;
+    if (mode !== 'hang') for (const release of this.held.splice(0)) release();
+  }
+
+  /** Wait until no mirror pass runs. */
+  async settle(): Promise<void> {
+    await (await this.ready()).whenIdle();
+  }
+
+  async housekeeping(): Promise<number | null> {
+    return (await this.ready()).housekeeping();
+  }
+
+  async retryWakes(): Promise<number[]> {
+    return [...this.retries];
+  }
+
+  /** Every mirror posted, in order (`author:text`). */
+  async mirrorLog(): Promise<string[]> {
+    return (await this.ctx.storage.get<string[]>('mirror-log')) ?? [];
+  }
+
+  /** The receipt of a request, as stored. */
+  async receipt(requestId: string): Promise<SqlRow | null> {
+    await this.ready();
+    return (
+      (await this.db!.get(
+        'SELECT * FROM channel_requests WHERE request_id = ?',
+        [requestId],
+      )) ?? null
+    );
+  }
+
+  /** The session bound to a binding, if any. */
+  async boundSession(bindingId: string): Promise<string | null> {
+    await this.ready();
+    const row = await this.db!.get<{ session_id: string }>(
+      'SELECT session_id FROM channel_sessions WHERE binding_id = ?',
+      [bindingId],
+    );
+    return row?.session_id ?? null;
+  }
+
+  /** Advance the clock without reopening the database. */
+  async advance(ms: number): Promise<void> {
+    this.nowMs += ms;
   }
 
   async submit(input: ChannelTurnInput): Promise<ChannelTurnOutcome> {
@@ -86,15 +191,7 @@ export class ChannelTurnsTestDO extends DurableObject {
       const result = await (
         await this.ready()
       ).submit(
-        {
-          userDid: 'did:ixo:user',
-          channel: {
-            callerDid: 'did:web:channels.test',
-            provider: input.provider,
-            bindingId: input.bindingId,
-            bindingRevision: input.bindingRevision,
-          },
-        },
+        this.identity(input),
         input,
         await channelRequestHash(JSON.stringify(input)),
       );
@@ -126,13 +223,20 @@ export class ChannelTurnsTestDO extends DurableObject {
     });
   }
 
-  /** What the user object's `onRunEnded` does for a finished channel run. */
-  async deliverReply(runId: string): Promise<void> {
+  /**
+   * What the user object's `onRunEnded` does for a channel run (a mirror
+   * pass in the background), then wait for that pass.
+   */
+  async deliverReply(): Promise<void> {
     const turns = await this.ready();
-    const record = await this.runs!.get(runId);
-    if (!record) throw new Error('No such run');
-    const request: TurnRequest = JSON.parse(record.request);
-    await turns.deliverReply(request, runId, record.partialText ?? '');
+    turns.deliverReply();
+    await turns.whenIdle();
+  }
+
+  /** End a run without a reply, as a failed run does. */
+  async fail(runId: string): Promise<void> {
+    await this.ready();
+    await this.runs!.update(runId, { status: 'failed', partialText: null });
   }
 
   async run(runId: string): Promise<RunRecord | undefined> {
@@ -160,6 +264,24 @@ export class ChannelTurnsTestDO extends DurableObject {
       sessionId,
     ]);
     return turns.forgetSession(sessionId);
+  }
+
+  /** The session is gone, but the binding was never released. */
+  async markSessionDeleted(sessionId: string): Promise<void> {
+    await this.ctx.storage.put('deleted-sessions', [
+      ...(await this.deletedSessions()),
+      sessionId,
+    ]);
+  }
+
+  /** A receipt as a request leaves it when the object stops before its run starts. */
+  async orphanReceipt(requestId: string): Promise<void> {
+    await this.ready();
+    await this.db!.run(
+      `INSERT INTO channel_requests (binding_id, request_id, request_hash, run_id, created_at)
+       VALUES ('chb_one', ?, 'hash', ?, ?)`,
+      [requestId, `channel_orphan_${requestId}`, this.nowMs],
+    );
   }
 
   private async deletedSessions(): Promise<string[]> {
@@ -213,7 +335,11 @@ export class ChannelTurnsTestDO extends DurableObject {
     return counts;
   }
 
-  async hostCalls(): Promise<{ assertSession: number; changed: number }> {
+  async hostCalls(): Promise<{
+    assertSession: number;
+    changed: number;
+    createSession: number;
+  }> {
     return { ...this.calls };
   }
 

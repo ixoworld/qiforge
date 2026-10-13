@@ -1,6 +1,6 @@
 import {
   authenticateChannel,
-  assertActiveChannelBinding,
+  assertActiveChannelBindingCached,
   channelAuthConfig,
 } from '../channels/auth';
 import {
@@ -212,7 +212,7 @@ export function isDidShaped(value: string): boolean {
  */
 export function rateLimitKey(
   env: Pick<OracleWorkerEnv, 'ORACLE_DID'>,
-  scope: 'user' | 'artifact' | 'socket' | 'status' | 'start',
+  scope: 'user' | 'channel' | 'artifact' | 'socket' | 'status' | 'start',
   subject: string,
 ): string {
   return `${env.ORACLE_DID}|${scope}|${subject}`;
@@ -442,21 +442,28 @@ export function createShell(
       );
       // Limited as soon as the user is proven, before the Auth Hub round
       // trip: a flood or a tight poll must not cost one call there each.
+      // Channel traffic has its own budget (`channel` scope), apart from
+      // the user's Portal requests: polls never push the Portal into 429,
+      // nor the other way round.
       if (
         c.env.RATE_LIMIT &&
         !(
           await c.env.RATE_LIMIT.limit({
-            key: rateLimitKey(c.env, 'user', identity.userDid),
+            key: rateLimitKey(c.env, 'channel', identity.userDid),
           })
         ).success
       )
         throw new ChannelError(429, 'Too many requests', 'rate_limited');
-      await assertActiveChannelBinding(identity, c.env);
-      const outcome = await userStub(c.env, identity.userDid).channelTurn(
-        identity,
-        parsed.data,
-        await channelRequestHash(raw),
-      );
+      const stub = userStub(c.env, identity.userDid);
+      const requestHash = await channelRequestHash(raw);
+      // A poll of a run that exists is answered by the (warm) object with no
+      // Auth Hub call; anything else is checked with the Auth Hub (an
+      // "active" verdict is cached per isolate for 60 s) and admitted.
+      let outcome = await stub.channelPoll(identity, parsed.data, requestHash);
+      if (!outcome) {
+        await assertActiveChannelBindingCached(identity, c.env);
+        outcome = await stub.channelTurn(identity, parsed.data, requestHash);
+      }
       if (!outcome.ok)
         return c.json(
           { code: outcome.code, message: outcome.message },

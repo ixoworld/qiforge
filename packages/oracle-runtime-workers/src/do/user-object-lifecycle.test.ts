@@ -112,8 +112,21 @@ function fakeGateway() {
     ensureStarted: vi.fn(async () => ({})),
     getOracleSigningMnemonic: vi.fn(async () => null),
     getOracleSecretsKey: vi.fn(async () => null),
-    resolveUserRoom: vi.fn(async () => null),
-    getRoomStateEvent: vi.fn(async () => null),
+    resolveUserRoom: vi.fn(
+      async (
+        _userDid: string,
+      ): Promise<{
+        roomId: string;
+        alias: string;
+      } | null> => null,
+    ),
+    getRoomStateEvent: vi.fn(
+      async (
+        _roomId: string,
+        _type: string,
+        _stateKey?: string,
+      ): Promise<string | null> => null,
+    ),
     sendText: vi.fn(async () => '$event'),
     sendEvent: vi.fn(async () => '$event'),
     /** Media that never finishes arriving. */
@@ -1592,27 +1605,85 @@ describe('channel turn admission', () => {
     });
   });
 
-  it.each([
-    { name: 'expired', left: -60 },
-    {
-      name: 'inside the margin',
-      left: CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 30,
-    },
-  ])(
-    'refuses a stored delegation $name with 428 before the object boots',
-    async ({ name, left }) => {
-      await withObject(`channel-delegation-${name}`, {}, async (h) => {
-        await storeDelegation(h, secondsFromNow(left));
-        const submit = admitAfterBoot(h);
-        expect(
-          await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
-        ).toEqual(delegationRequired);
-        expect(h.db()).toBeNull();
-        expect(h.store.load).not.toHaveBeenCalled();
-        expect(submit).not.toHaveBeenCalled();
+  it('refuses an expired stored delegation with 428 before the object boots', async () => {
+    await withObject('channel-delegation-expired', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(-60));
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      expect(h.db()).toBeNull();
+      expect(h.store.load).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+    });
+  });
+
+  it('boots a cold object under a live delegation inside the margin, so a poll of an existing run still answers', async () => {
+    await withObject('channel-delegation-margin-poll', {}, async (h) => {
+      await storeDelegation(
+        h,
+        secondsFromNow(CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 30),
+      );
+      // Admission decides: here, the request's run exists.
+      const submit = admitAfterBoot(h);
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({ ok: true, result: { status: 'queued' } });
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(h.db()).not.toBeNull();
+    });
+  });
+
+  it('refuses a NEW request under a delegation inside the margin (428), before any session marker', async () => {
+    await withObject('channel-delegation-margin-new', {}, async (h) => {
+      await storeDelegation(
+        h,
+        secondsFromNow(CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 30),
+      );
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual(delegationRequired);
+      expect(h.gateway.sendText).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a NEW request re-reads the deposited room state when the stored delegation is inside the margin', async () => {
+    await withObject('channel-delegation-margin-reread', {}, async (h) => {
+      await storeDelegation(
+        h,
+        secondsFromNow(CHANNEL_DELEGATION_MIN_REMAINING_SECONDS - 30),
+      );
+      // The fresh deposit reached the room state; its push to the object
+      // was lost.
+      h.gateway.resolveUserRoom.mockImplementation(async () => ({
+        roomId: '!room:test',
+        alias: '#room:test',
+      }));
+      const fresh = secondsFromNow(7 * 24 * 3600);
+      h.gateway.getRoomStateEvent.mockImplementation(
+        async (_room: string, type: string) =>
+          type === 'ixo.room.state'
+            ? JSON.stringify({ raw: 'fresh-grant', expiration: fresh })
+            : null,
+      );
+      const outcome = await h.call(
+        'channelTurn',
+        channelIdentity,
+        channelInput,
+        'hash',
+      );
+      // Past the delegation check: the next refusal is the room's (the
+      // fake room is not encrypted).
+      expect(outcome).toMatchObject({ ok: false, code: 'room_not_encrypted' });
+      const delegations = h.field('delegations');
+      expect(
+        delegations instanceof Map && delegations.get(USER_DID),
+      ).toMatchObject({ raw: 'fresh-grant', expiration: fresh });
+      expect(await h.storage.get('meta:delegation')).toMatchObject({
+        raw: 'fresh-grant',
       });
-    },
-  );
+    });
+  });
 
   it('admits a turn under a stored delegation with more than the margin left', async () => {
     await withObject('channel-delegation-valid', {}, async (h) => {
@@ -1629,7 +1700,7 @@ describe('channel turn admission', () => {
     });
   });
 
-  it('refuses a delegation that lapsed while the object stayed warm', async () => {
+  it('a poll of an admitted request still answers after the delegation lapsed into the margin on a warm object', async () => {
     await withObject('channel-delegation-lapsed', {}, async (h) => {
       await storeDelegation(h, secondsFromNow(3600));
       const submit = admitAfterBoot(h);
@@ -1648,10 +1719,41 @@ describe('channel turn admission', () => {
         ]),
       );
       await storeDelegation(h, secondsFromNow(60));
+      // The same request (its run exists): admission answers its status.
       expect(
         await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({ ok: true, result: { status: 'queued' } });
+      expect(submit).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it('refuses a NEW request once the delegation lapsed into the margin on a warm object', async () => {
+    await withObject('channel-delegation-lapsed-new', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      // The first request gets past the delegation (no room yet).
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toMatchObject({ ok: false, code: 'room_not_ready' });
+      expect(h.db()).not.toBeNull();
+      Reflect.set(
+        h.host,
+        'delegations',
+        new Map([
+          [
+            USER_DID,
+            { raw: 'deposited-grant', expiration: secondsFromNow(60) },
+          ],
+        ]),
+      );
+      await storeDelegation(h, secondsFromNow(60));
+      expect(
+        await h.call(
+          'channelTurn',
+          channelIdentity,
+          { ...channelInput, requestId: 'wa:lifecycle-2' },
+          'hash',
+        ),
       ).toEqual(delegationRequired);
-      expect(submit).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1670,16 +1772,62 @@ describe('channel turn admission', () => {
     });
   });
 
-  it('lets any other boot failure propagate (the shell answers 503 unavailable)', async () => {
-    await withObject('channel-boot-failure', {}, async (h) => {
+  it.each([401, 403])(
+    'answers 403 storage_unauthorized when the file storage rejects the oracle (VFS %i), a final refusal',
+    async (status) => {
+      await withObject(`channel-storage-${status}`, {}, async (h) => {
+        await storeDelegation(h, secondsFromNow(3600));
+        h.store.load.mockRejectedValue(
+          new VfsRequestError(status, '', 'VFS rejected the oracle'),
+        );
+        const submit = admitAfterBoot(h);
+        expect(
+          await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+        ).toEqual({
+          ok: false,
+          status: 403,
+          code: 'storage_unauthorized',
+          message:
+            "The user's file storage rejected the oracle; the Companion cannot load the user's data",
+        });
+        expect(submit).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it('lets any other failure propagate (the shell answers 503 unavailable)', async () => {
+    await withObject('channel-other-failure', {}, async (h) => {
       await storeDelegation(h, secondsFromNow(3600));
-      h.store.load.mockRejectedValue(
-        new VfsRequestError(401, '', 'VFS rejected the oracle'),
-      );
-      admitAfterBoot(h);
+      const submit = admitAfterBoot(h);
+      submit.mockRejectedValue(new Error('Network connection lost'));
       await expect(
         h.call('channelTurn', channelIdentity, channelInput, 'hash'),
-      ).rejects.toThrow('VFS_AUTH_FAILED');
+      ).rejects.toThrow('Network connection lost');
+    });
+  });
+
+  it('answers 409 room_unavailable when the homeserver refuses the oracle in the room (M_FORBIDDEN)', async () => {
+    await withObject('channel-room-forbidden', {}, async (h) => {
+      await storeDelegation(h, secondsFromNow(3600));
+      h.gateway.resolveUserRoom.mockImplementation(async () => ({
+        roomId: '!room:test',
+        alias: '#room:test',
+      }));
+      // What crosses the gateway RPC: the MatrixError's message only.
+      h.gateway.sendText.mockRejectedValue(
+        new Error(
+          'MatrixError: [403] User @oracle:test not in room !room:test (https://hs.test/_matrix/client/v3/rooms/!room:test/send/m.room.message/x)',
+        ),
+      );
+      expect(
+        await h.call('channelTurn', channelIdentity, channelInput, 'hash'),
+      ).toEqual({
+        ok: false,
+        status: 409,
+        code: 'room_unavailable',
+        message:
+          'The oracle cannot use the Companion room (it is not a member or was refused)',
+      });
     });
   });
 
@@ -1721,16 +1869,22 @@ describe('channel turn admission', () => {
         expect(
           delegations instanceof Map && delegations.get(USER_DID),
         ).toMatchObject({ expiration });
-        admitAfterBoot(h);
         const outcome = await h.call(
           'channelTurn',
           channelIdentity,
           channelInput,
           'hash',
         );
+        // Admitted past the delegation check, the request meets the next
+        // one: this user has no Companion room yet.
         expect(outcome).toEqual(
           admitted
-            ? { ok: true, result: { status: 'queued' } }
+            ? {
+                ok: false,
+                status: 428,
+                code: 'room_not_ready',
+                message: 'Companion room is not ready',
+              }
             : delegationRequired,
         );
       });
@@ -1748,6 +1902,55 @@ describe('channel turn admission', () => {
         code: 'room_not_ready',
         message: 'Companion room is not ready',
       });
+    });
+  });
+});
+
+describe('channel polls and room checks', () => {
+  it('a cold object leaves a poll to admission; a warm one answers it without booting again', async () => {
+    await withObject('channel-poll', {}, async (h) => {
+      expect(
+        await h.call('channelPoll', channelIdentity, channelInput, 'hash'),
+      ).toBeNull();
+      expect(h.db()).toBeNull();
+      await storeDelegation(h, secondsFromNow(3600));
+      const submit = admitAfterBoot(h);
+      await h.call('channelTurn', channelIdentity, channelInput, 'hash');
+      const poll = vi.fn(
+        async (): Promise<{ status: string } | null> => ({ status: 'running' }),
+      );
+      Reflect.set(h.host, 'channelTurns', { submit, poll });
+      expect(
+        await h.call('channelPoll', channelIdentity, channelInput, 'hash'),
+      ).toEqual({ ok: true, result: { status: 'running' } });
+      poll.mockResolvedValueOnce(null);
+      expect(
+        await h.call('channelPoll', channelIdentity, channelInput, 'hash'),
+      ).toBeNull();
+    });
+  });
+
+  it('asks the homeserver whether a room is encrypted once, and remembers a yes across instances', async () => {
+    await withObject('channel-room-encrypted', {}, async (h) => {
+      h.gateway.getRoomStateEvent.mockImplementation(
+        async (_room: string, type: string) =>
+          type === 'm.room.encryption'
+            ? JSON.stringify({ algorithm: 'm.megolm.v1.aes-sha2' })
+            : null,
+      );
+      expect(await h.call('roomIsEncrypted', '!room:test')).toBe(true);
+      expect(await h.call('roomIsEncrypted', '!room:test')).toBe(true);
+      expect(h.gateway.getRoomStateEvent).toHaveBeenCalledTimes(1);
+      expect(await h.storage.get('room-encrypted:!room:test')).toBe(true);
+      // A new instance reads the stored answer.
+      Reflect.set(h.host, 'encryptedRooms', new Set<string>());
+      expect(await h.call('roomIsEncrypted', '!room:test')).toBe(true);
+      expect(h.gateway.getRoomStateEvent).toHaveBeenCalledTimes(1);
+      // A room without encryption is asked again every time.
+      h.gateway.getRoomStateEvent.mockImplementation(async () => null);
+      expect(await h.call('roomIsEncrypted', '!plain:test')).toBe(false);
+      expect(await h.call('roomIsEncrypted', '!plain:test')).toBe(false);
+      expect(h.gateway.getRoomStateEvent).toHaveBeenCalledTimes(3);
     });
   });
 });

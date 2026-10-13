@@ -415,9 +415,12 @@ it('prunes channel payloads and retains only a terminal tombstone', async () => 
   await s.reopen();
   expect(await s.get('channel-original')).toBeUndefined();
   expect(await s.wasChannelRunPruned('channel-original')).toBe(true);
+  // The run id, its final status, and when it was pruned (the tombstone's
+  // own retention): no request text, no reply.
   expect(await s.columnsOf('channel_run_tombstones')).toEqual([
     'run_id',
     'status',
+    'pruned_at',
   ]);
   expect(await s.rowCount('turn_tool_marks')).toBe(0);
   expect(await s.rowCount('turn_run_segments')).toBe(0);

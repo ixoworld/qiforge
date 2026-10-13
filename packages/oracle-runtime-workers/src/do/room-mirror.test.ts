@@ -202,4 +202,29 @@ describe('channel provenance', () => {
     await expect(pending).rejects.toThrow('M_FORBIDDEN');
     await Promise.allSettled(kept);
   });
+
+  it('a failed required mirror does not skip the next mirror queued in the same session', async () => {
+    const sendText = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('M_FORBIDDEN'))
+      .mockResolvedValue('$ev');
+    const { mirror, kept, warn } = harness(sendText);
+    const failed = mirror.enqueue(
+      '$s',
+      async () => send('$s', 'channel answer', 'txn-channel'),
+      'AI response',
+      true,
+    );
+    const next = mirror.enqueue(
+      '$s',
+      async () => send('$s', 'portal message', 'txn-portal'),
+      'user message',
+    );
+    await expect(failed).rejects.toThrow('M_FORBIDDEN');
+    await next;
+    expect(sendText).toHaveBeenCalledTimes(2);
+    expect(sendText.mock.calls[1]?.[0]).toMatchObject({ txnId: 'txn-portal' });
+    expect(warn).not.toHaveBeenCalled();
+    await Promise.allSettled(kept);
+  });
 });

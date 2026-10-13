@@ -63,7 +63,10 @@ ten simultaneous creators wait ≥ 3 s by arithmetic. Two ways down: raise
 `rc_message` for the bot with Synapse's per-user override and
 `MATRIX_SEND_RATE_PER_SECOND` to match (see configuration), or stop waiting
 for the marker at all — create the session row locally and send the marker
-asynchronously (ORA-410, not built).
+asynchronously (ORA-410, not built). Channel turns (`/channels/turn`) wait on
+this funnel only for a binding's first message; their room mirrors are sent
+in the background ([channels](channels.md#matrix-continuity)). No load test
+drives `/channels/turn` yet; these numbers are Portal sessions and turns.
 
 **Mixed load** (10 users creating 3 sessions each while 10 others run 3
 turns each) is the sensitive case, because every chat turn queues two
