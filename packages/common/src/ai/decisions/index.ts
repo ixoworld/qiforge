@@ -1,10 +1,16 @@
-export { runDecisionProviderBakeoff } from './benchmark.js';
+export {
+  DecisionBenchmarkProvenanceError,
+  runDecisionProviderBakeoff,
+} from './benchmark.js';
 export type {
   DecisionBenchmarkCase,
   DecisionBenchmarkGold,
   DecisionBenchmarkMetrics,
+  DecisionBenchmarkProvenanceCohort,
   DecisionBenchmarkResult,
+  DecisionBenchmarkRun,
 } from './benchmark.js';
+export type { DecisionRecordedProvenance } from './provenance.js';
 
 export { defineDecision } from './define-decision.js';
 export type { DefineDecisionOptions } from './define-decision.js';

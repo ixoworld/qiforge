@@ -4,6 +4,7 @@ import {
   DecisionNotApplicableError,
   DecisionProviderUnavailableError,
 } from './errors.js';
+import { recordedProvenance } from './provenance.js';
 import {
   DecisionProviderRegistry,
   DecisionProviderRouter,
@@ -15,9 +16,6 @@ import type {
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
-  DecisionJudgmentMethod,
-  DecisionJudgmentProvenance,
-  DecisionProviderProvenance,
   DecisionRegistration,
   DecisionRequest,
 } from './types.js';
@@ -36,8 +34,6 @@ const FULLY_APPLICABLE: DecisionApplicability = {
   applicable: true,
   evidenceComplete: true,
 };
-
-const PROVIDER_NATIVE: DecisionJudgmentMethod = { kind: 'provider-native' };
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
@@ -222,12 +218,10 @@ export class DecisionRuntime implements DecisionEvaluator {
         model: adapter.model,
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
         applicability: { ...applicability },
-        judgment: judgmentProvenance(
-          adapter,
-          result.provenance,
-          result.modelVersion,
-          registration.version,
-        ),
+        judgment: {
+          ...recordedProvenance(adapter, result),
+          questionSetVersion: registration.version,
+        },
         answers: result.answers,
         latencyMs,
         ...(result.usage ? { usage: result.usage } : {}),
@@ -275,47 +269,6 @@ export class DecisionRuntime implements DecisionEvaluator {
       sourceSignal?.removeEventListener('abort', forwardAbort);
     }
   }
-}
-
-/**
- * Builds the evaluation's judgment record. An adapter that declares no method
- * is recorded as provider-native, which makes no claim that its confidence is
- * calibrated. Inference fields the adapter leaves out come from its declared
- * `capabilities` and `model`, or are recorded as `custom` / `unknown`, so a
- * record never implies a pinned backend nobody asserted. Every nested object
- * is copied, so a caller mutating one evaluation cannot change the next.
- */
-function judgmentProvenance(
-  adapter: DecisionAdapter,
-  provenance: DecisionProviderProvenance | undefined,
-  modelVersion: string | undefined,
-  questionSetVersion: string,
-): DecisionJudgmentProvenance {
-  const returnedModel = provenance?.returnedModel ?? modelVersion;
-  return {
-    method: { ...(provenance?.method ?? PROVIDER_NATIVE) },
-    ...(provenance?.calibration
-      ? { calibration: { ...provenance.calibration } }
-      : {}),
-    apiDialect:
-      provenance?.apiDialect ?? adapter.capabilities?.apiDialect ?? 'custom',
-    requestedModel: provenance?.requestedModel ?? adapter.model,
-    ...(returnedModel ? { returnedModel } : {}),
-    ...(provenance?.functionVersion
-      ? { functionVersion: provenance.functionVersion }
-      : {}),
-    modelPinning:
-      provenance?.modelPinning ??
-      adapter.capabilities?.modelPinning ??
-      'unknown',
-    ...(provenance?.providerArtifactRef
-      ? { providerArtifactRef: provenance.providerArtifactRef }
-      : {}),
-    ...(provenance?.calibrationProfileRef
-      ? { calibrationProfileRef: provenance.calibrationProfileRef }
-      : {}),
-    questionSetVersion,
-  };
 }
 
 /**

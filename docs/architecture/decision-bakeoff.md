@@ -33,6 +33,17 @@ calibration profile
 fixture dataset version
 ```
 
+The runner records the provider-reported part of this for every case: each
+entry of `result.runs` carries the case's correctness, confidence, Brier,
+latency and the response provenance (dialect, requested model, returned
+model, function version, model pinning, provider artifact and method), and
+`result.provenance` labels the aggregate. When the runs disagree on any of
+these, the runner throws `DecisionBenchmarkProvenanceError` (with the runs and
+the cases grouped by provenance) instead of averaging across backends. A
+mutable backend that reports no returned model, such as `ai_decide`, cannot be
+told apart this way: its result shows `modelPinning: 'mutable'` and no
+`returnedModel`, so record the run date with the report.
+
 Report accuracy, Brier, ECE, selective risk at 80% coverage, and latency.
 Add task-specific metrics where appropriate.
 
