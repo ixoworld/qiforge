@@ -8,7 +8,10 @@ import type {
   ChannelTurnOutcome,
 } from '../channels/contract';
 import type { TaskExecutionProfile } from '../core/execution-profile';
-import type { CapabilityRouterMode } from '@ixo/common/ai/decisions';
+import type {
+  CapabilityRouterMode,
+  DecisionProviderName,
+} from '@ixo/common/ai/decisions';
 import type { TranscriptPageOptions } from './transcript';
 import type { TurnUsage } from '../core/turn-budget';
 import type { BotStatus, EncryptedFileInfo } from '@ixo/matrix-bot-workers-sdk';
@@ -273,10 +276,16 @@ export interface OracleWorkerEnv {
   NEBIUS_API_KEY?: string;
 
   // --- decisions ----------------------------------------------------------
-  /** Bounded semantic Decision provider; unset leaves Decisions unconfigured. `openrouter-jev` reuses `OPEN_ROUTER_API_KEY`. */
-  DECISION_PROVIDER?: 'cloudflare-jev' | 'openrouter-jev';
-  /** Jev model id override (`typesafe/jev` on Workers AI, `typesafe/jev-1.13` on OpenRouter). */
+  /** Bounded semantic Decision provider; unset leaves Decisions unconfigured. `openrouter-jev` reuses `OPEN_ROUTER_API_KEY`; the Databricks lanes need `DATABRICKS_WORKSPACE_URL` + `DATABRICKS_TOKEN`. */
+  DECISION_PROVIDER?: DecisionProviderName;
+  /** Model id override (`typesafe/jev` on Workers AI, `typesafe/jev-1.13` on OpenRouter, the Unity Catalog model service `system.ai.openjev-qwen35-4b` for `databricks-systemone`); not used by `databricks-ai-decide`. */
   DECISION_MODEL?: string;
+  /** Databricks workspace origin (`https://<host>`, no path or query) for both Databricks lanes. */
+  DATABRICKS_WORKSPACE_URL?: string;
+  /** Secret. Databricks workspace token for both Databricks lanes (sent as HTTP Basic `token:<token>`). */
+  DATABRICKS_TOKEN?: string;
+  /** `ai_decide` function API version for `databricks-ai-decide` (default and only accepted value `1.0`). */
+  DATABRICKS_AI_DECIDE_VERSION?: string;
   /** Cloudflare account for `cloudflare-jev` over the REST API; not needed when the `AI` binding is declared. */
   CLOUDFLARE_ACCOUNT_ID?: string;
   /** Workers AI token for `cloudflare-jev` over the REST API; not needed when the `AI` binding is declared. */
