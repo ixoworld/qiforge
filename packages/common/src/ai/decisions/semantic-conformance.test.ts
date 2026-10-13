@@ -3,6 +3,7 @@ import {
   buildSemanticConformanceVariants,
   type SemanticConformanceVariant,
 } from './semantic-conformance.js';
+import { toJevQuestions } from './jev/wire.js';
 import type { DecisionRequest } from './types.js';
 
 function routeOptions(variant: SemanticConformanceVariant) {
@@ -114,6 +115,19 @@ describe('semantic conformance variants', () => {
       'route:opt_2': '2',
       'route:opt_3': '3',
     });
+
+    // What reaches a System One provider: the serialised wire questions.
+    const wire = (variant: SemanticConformanceVariant) =>
+      JSON.stringify(toJevQuestions(variant.request));
+    const baselineWire = JSON.stringify(toJevQuestions(numbered));
+    expect(wire(permuted)).not.toBe(baselineWire);
+    expect(wire(permuted)).not.toBe(wire(opaque));
+    expect(wire(permuted).indexOf('"opt_3"')).toBeLessThan(
+      wire(permuted).indexOf('"opt_1"'),
+    );
+    expect(wire(opaque).indexOf('"opt_1"')).toBeLessThan(
+      wire(opaque).indexOf('"opt_3"'),
+    );
   });
 
   it('reports probes that would equal the baseline as not applicable instead of emitting them', () => {
