@@ -12,3 +12,6 @@ adapters as distinct assurance classes (`DECISION_PROVIDER=databricks-systemone`
 (`buildSemanticConformanceVariants`, alongside the existing question-isolation
 probe); and a provider-neutral bakeoff runner that keeps each run's provenance
 and refuses to aggregate runs whose provenance differs.
+
+`DecisionJudgmentProvenance` now requires `apiDialect`, `requestedModel` and
+`modelPinning`, so a hand-built `judgment` literal must set them.

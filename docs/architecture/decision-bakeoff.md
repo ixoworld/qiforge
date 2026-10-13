@@ -6,9 +6,10 @@ The provider bakeoff has two layers.
 
 Use the independent 37-dataset harness from
 `AppliedMachineLearning-Lab/jev-benchmarking` (arXiv:2609.37647) as a
-methodological baseline. It evaluates 346,009 pinned Jev requests and includes
-accuracy/F1, Brier, ECE, selective accuracy, AURC, bootstrap intervals and
-per-question Noul threshold tuning.
+methodological baseline. It evaluates 346,009 requests to the pinned
+`jev-1.13.0` and includes accuracy/F1, Brier, ECE, selective accuracy,
+bootstrap confidence intervals and per-question Noul thresholds tuned on dev
+data.
 
 Do not vendor its response archive into QiForge. The repository code is MIT,
 but the published Jev responses carry separate research/evaluation terms that
