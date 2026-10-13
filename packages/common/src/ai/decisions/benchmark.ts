@@ -40,9 +40,17 @@ export interface DecisionBenchmarkRun {
   provenance: DecisionRecordedProvenance;
 }
 
+export type DecisionBenchmarkPrimitive = 'boolean' | 'choice';
+
 export interface DecisionBenchmarkResult {
   provider: string;
   model: string;
+  /**
+   * The one question kind every case asks. Boolean Brier (0..1) and
+   * multiclass Brier (0..2) are on different scales, so a bakeoff never mixes
+   * them.
+   */
+  primitive: DecisionBenchmarkPrimitive;
   /**
    * The provenance every run reported. A bakeoff aggregates only runs that
    * agree on it, so the metrics describe one identified backend.
@@ -97,24 +105,32 @@ export async function runDecisionProviderBakeoff(
   adapter: DecisionAdapter,
   cases: readonly DecisionBenchmarkCase[],
 ): Promise<DecisionBenchmarkResult> {
-  if (!cases.length) {
-    throw new TypeError('A Decision bakeoff needs at least one case.');
-  }
+  const primitive = benchmarkPrimitive(cases);
 
   const runs: DecisionBenchmarkRun[] = [];
   for (const testCase of cases) {
-    const started = Date.now();
-    const raw = await adapter.evaluate(testCase.request);
-    const latencyMs = Date.now() - started;
-    const result = validateDecisionProviderResult(testCase.request, raw);
-    const answer = result.answers[testCase.questionId];
-    if (!answer) throw new Error(`Missing answer for ${testCase.questionId}`);
-    runs.push({
-      caseId: testCase.id,
-      ...scoreAnswer(answer, testCase.gold),
-      latencyMs,
-      provenance: recordedProvenance(adapter, result),
-    });
+    // One failing case aborts the bakeoff; the error names the case and
+    // keeps the adapter's or validator's error as its cause.
+    try {
+      const started = Date.now();
+      const raw = await adapter.evaluate(testCase.request);
+      const latencyMs = Date.now() - started;
+      const result = validateDecisionProviderResult(testCase.request, raw);
+      const answer = result.answers[testCase.questionId];
+      if (!answer) {
+        throw new Error(`Missing answer for ${testCase.questionId}.`);
+      }
+      runs.push({
+        caseId: testCase.id,
+        ...scoreAnswer(answer, testCase.gold),
+        latencyMs,
+        provenance: recordedProvenance(adapter, result),
+      });
+    } catch (cause) {
+      throw new Error(`Decision bakeoff case "${testCase.id}" failed.`, {
+        cause,
+      });
+    }
   }
 
   const cohorts = provenanceCohorts(runs);
@@ -132,6 +148,7 @@ export async function runDecisionProviderBakeoff(
   return {
     provider: adapter.provider,
     model: adapter.model,
+    primitive,
     provenance: runs[0]!.provenance,
     metrics: {
       count: runs.length,
@@ -165,6 +182,55 @@ function provenanceCohorts(
   return [...cohorts.values()];
 }
 
+/**
+ * Checks the case list before any provider call: at least one case, every
+ * case's question exists, all cases ask the same primitive (boolean or
+ * choice; ordinal needs a task-specific metric), and every gold label is a
+ * valid answer to its question.
+ */
+function benchmarkPrimitive(
+  cases: readonly DecisionBenchmarkCase[],
+): DecisionBenchmarkPrimitive {
+  let primitive: DecisionBenchmarkPrimitive | undefined;
+  for (const testCase of cases) {
+    const question = testCase.request.questions[testCase.questionId];
+    if (!question) {
+      throw new TypeError(
+        `Decision bakeoff case "${testCase.id}" asks for question "${testCase.questionId}", which its request does not contain.`,
+      );
+    }
+    if (question.kind === 'ordinal') {
+      throw new TypeError(
+        `Decision bakeoff case "${testCase.id}" is ordinal; ordinal cases require a task-specific metric.`,
+      );
+    }
+    primitive ??= question.kind;
+    if (question.kind !== primitive) {
+      throw new TypeError(
+        `Decision bakeoff cases mix ${primitive} and ${question.kind} questions (case "${testCase.id}"); their Brier scores are on different scales, so run one bakeoff per primitive.`,
+      );
+    }
+    if (question.kind === 'boolean' && typeof testCase.gold !== 'boolean') {
+      throw new TypeError(
+        `Decision bakeoff case "${testCase.id}" asks a boolean question but its gold label is not a boolean.`,
+      );
+    }
+    if (
+      question.kind === 'choice' &&
+      (typeof testCase.gold !== 'string' ||
+        !Object.hasOwn(question.options, testCase.gold))
+    ) {
+      throw new TypeError(
+        `Decision bakeoff case "${testCase.id}" has a gold label that is not one of its question's options.`,
+      );
+    }
+  }
+  if (primitive === undefined) {
+    throw new TypeError('A Decision bakeoff needs at least one case.');
+  }
+  return primitive;
+}
+
 function scoreAnswer(
   answer: DecisionAnswer,
   gold: DecisionBenchmarkGold,
@@ -186,9 +252,18 @@ function scoreAnswer(
     if (typeof gold !== 'string') {
       throw new TypeError('Choice answer requires string gold.');
     }
+    // Confidence in the answer actually given, not in whichever option has
+    // the largest probability: validation does not require `value` to be
+    // the argmax.
+    const confidence = answer.probabilities[answer.value];
+    if (confidence === undefined) {
+      throw new TypeError(
+        'Choice answer gives no probability for its own value.',
+      );
+    }
     return {
       correct: answer.value === gold,
-      confidence: Math.max(...Object.values(answer.probabilities)),
+      confidence,
       brier: Object.entries(answer.probabilities).reduce(
         (sum, [key, value]) => sum + (value - (key === gold ? 1 : 0)) ** 2,
         0,
@@ -240,11 +315,11 @@ function selectiveRisk(
   return 1 - mean(indexes.map((i) => correct[i]!));
 }
 
+/** Nearest-rank percentile of an ascending list. */
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
-  return sorted[
-    Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))
-  ]!;
+  const rank = Math.max(1, Math.ceil(sorted.length * p));
+  return sorted[Math.min(sorted.length, rank) - 1]!;
 }
 
 function mean(values: number[]): number {

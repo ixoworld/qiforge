@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DecisionBenchmarkProvenanceError,
   runDecisionProviderBakeoff,
@@ -188,5 +188,112 @@ describe('runDecisionProviderBakeoff', () => {
         [],
       ),
     ).rejects.toThrow(/at least one case/);
+  });
+
+  describe('case checks and scoring', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const routeQuestion = {
+      kind: 'choice' as const,
+      instructions: 'Which route?',
+      options: { billing: 'Billing', support: 'Support' },
+    };
+    function choiceCase(id: string, gold: string): DecisionBenchmarkCase {
+      return {
+        id,
+        request: { state: { id }, questions: { route: routeQuestion } },
+        questionId: 'route',
+        gold,
+      };
+    }
+    function choiceAdapter(answer: {
+      value: string;
+      probabilities: Record<string, number>;
+    }): DecisionAdapter {
+      return {
+        provider: 'test',
+        model: 'test',
+        async evaluate() {
+          return {
+            answers: {
+              route: { kind: 'choice', confidence: 0.5, ...answer },
+            },
+          };
+        },
+      };
+    }
+
+    it('scores choice confidence as the probability of the answer given, not the largest one', async () => {
+      const result = await runDecisionProviderBakeoff(
+        choiceAdapter({
+          value: 'billing',
+          probabilities: { billing: 0.4, support: 0.6 },
+        }),
+        [choiceCase('a', 'billing')],
+      );
+
+      expect(result.primitive).toBe('choice');
+      expect(result.runs[0]).toMatchObject({ correct: true, confidence: 0.4 });
+    });
+
+    it('refuses a case list that mixes boolean and choice questions', async () => {
+      await expect(
+        runDecisionProviderBakeoff(
+          choiceAdapter({
+            value: 'billing',
+            probabilities: { billing: 1, support: 0 },
+          }),
+          [choiceCase('a', 'billing'), booleanCase('b', true)],
+        ),
+      ).rejects.toThrow(/mix choice and boolean questions \(case "b"\)/);
+    });
+
+    it('refuses a gold label that is not one of the options', async () => {
+      const evaluate = vi.fn();
+      await expect(
+        runDecisionProviderBakeoff(
+          { provider: 'test', model: 'test', evaluate },
+          [choiceCase('a', 'sales')],
+        ),
+      ).rejects.toThrow(/case "a" has a gold label that is not one of/);
+      expect(evaluate).not.toHaveBeenCalled();
+    });
+
+    it('names the case whose evaluation failed and keeps the cause', async () => {
+      const cause = new Error('provider down');
+      const run = runDecisionProviderBakeoff(
+        {
+          provider: 'test',
+          model: 'test',
+          evaluate: vi.fn(async () => {
+            throw cause;
+          }),
+        },
+        [choiceCase('first', 'billing')],
+      );
+
+      await expect(run).rejects.toThrow(
+        'Decision bakeoff case "first" failed.',
+      );
+      await expect(run).rejects.toMatchObject({ cause });
+    });
+
+    it('reports nearest-rank latency percentiles', async () => {
+      // started/finished pairs: 10 ms, then 30 ms.
+      const now = vi.spyOn(Date, 'now');
+      for (const value of [0, 10, 100, 130]) now.mockReturnValueOnce(value);
+
+      const result = await runDecisionProviderBakeoff(
+        choiceAdapter({
+          value: 'billing',
+          probabilities: { billing: 0.9, support: 0.1 },
+        }),
+        [choiceCase('a', 'billing'), choiceCase('b', 'billing')],
+      );
+
+      expect(result.latencyMs).toEqual({ mean: 20, p50: 10, p95: 30 });
+    });
   });
 });

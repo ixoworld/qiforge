@@ -44,6 +44,16 @@ mutable backend that reports no returned model, such as `ai_decide`, cannot be
 told apart this way: its result shows `modelPinning: 'mutable'` and no
 `returnedModel`, so record the run date with the report.
 
+One bakeoff scores one primitive: all cases must ask boolean questions or
+all must ask choice questions (`result.primitive`), because boolean Brier
+(0..1) and multiclass Brier (0..2) are on different scales; a mixed list is
+refused before any provider call, as are ordinal cases (they need a
+task-specific metric) and gold labels that are not a valid answer (a choice
+gold that is not one of the question's options). Choice confidence is the
+probability the answer gives its own `value`. Latency percentiles are
+nearest-rank. One failing case aborts the bakeoff with an error naming the
+case, the provider's or validator's error as its cause.
+
 Report accuracy, Brier, ECE, selective risk at 80% coverage, and latency.
 Add task-specific metrics where appropriate.
 

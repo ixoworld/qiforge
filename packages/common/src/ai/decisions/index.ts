@@ -6,6 +6,7 @@ export type {
   DecisionBenchmarkCase,
   DecisionBenchmarkGold,
   DecisionBenchmarkMetrics,
+  DecisionBenchmarkPrimitive,
   DecisionBenchmarkProvenanceCohort,
   DecisionBenchmarkResult,
   DecisionBenchmarkRun,
