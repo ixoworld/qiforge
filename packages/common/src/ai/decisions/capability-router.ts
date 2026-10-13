@@ -128,6 +128,8 @@ export const CAPABILITY_ROUTE_CALIBRATION_PROFILE = {
   id: 'ixo:calibration:runtime.route-capabilities:provisional-v1',
   version: '1.0.0',
   status: 'provisional',
+  // Not tied to one provider artifact. Acceptable only while the profile is
+  // provisional: a validated profile must name the artifact it was fitted on.
   providerArtifactRef: 'unscoped',
   decisionName: CAPABILITY_ROUTE_DECISION_NAME,
   decisionVersion: capabilityRouteDecision.version,
@@ -152,6 +154,11 @@ export interface CapabilityRouteVerdict {
   /** Chosen option when it is not the synthetic "none" option. */
   capability?: string;
   capabilityConfidence?: number;
+  /**
+   * The calibration profile whose threshold decided this verdict. Omitted
+   * when the caller passed its own `minConfidence`, which no profile backs.
+   */
+  calibrationProfileRef?: string;
   reason:
     | 'preload'
     | 'no-capability'
@@ -189,6 +196,9 @@ export function decideCapabilityRoute(
     needsCapability: needs.probabilityTrue,
     ...(isNoneOption ? {} : { capability: choice.value }),
     capabilityConfidence: choice.confidence,
+    ...(minConfidence === CAPABILITY_ROUTE_CALIBRATION_PROFILE.threshold
+      ? { calibrationProfileRef: CAPABILITY_ROUTE_CALIBRATION_PROFILE.id }
+      : {}),
   };
 
   if (needs.probabilityTrue < minConfidence) {

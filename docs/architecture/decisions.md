@@ -613,7 +613,12 @@ Decision thresholds are policy artifacts, not provider defaults.
 provider artifact, validation population and calibration/selective-risk
 metrics. The capability router's existing 0.7 threshold is now explicitly
 published as a `provisional` profile; it is not represented as empirically
-calibrated.
+calibrated. `decideCapabilityRoute` stamps that profile's id on its verdict
+(`calibrationProfileRef`) when the profile's threshold decided it, and omits
+it when the caller passed its own `minConfidence`; the Workers shadow log
+prints it. The evaluation's `judgment` is the provider's record, built before
+any policy runs, so the profile reference travels with the verdict, not the
+judgment.
 
 `buildSemanticConformanceVariants(request, options)` generates semantic
 stability probes for one request; it calls no provider. It returns

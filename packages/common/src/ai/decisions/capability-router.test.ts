@@ -164,6 +164,7 @@ describe('decideCapabilityRoute', () => {
       needsCapability: 0.9,
       capability: 'weather',
       capabilityConfidence: 0.85,
+      calibrationProfileRef: CAPABILITY_ROUTE_CALIBRATION_PROFILE.id,
       reason: 'preload',
     });
   });
@@ -201,6 +202,19 @@ describe('decideCapabilityRoute', () => {
     ).toBe('no-capability');
   });
 
+  it('stamps the calibration profile only when its threshold decided the verdict', () => {
+    expect(
+      decideCapabilityRoute(
+        evaluation(0.9, 'weather', 0.9),
+        capabilities,
+        CAPABILITY_ROUTE_MIN_CONFIDENCE,
+      ).calibrationProfileRef,
+    ).toBe('ixo:calibration:runtime.route-capabilities:provisional-v1');
+    expect(
+      decideCapabilityRoute(evaluation(0.9, 'weather', 0.9), capabilities, 0.5),
+    ).not.toHaveProperty('calibrationProfileRef');
+  });
+
   it('preloads nothing when no capability is needed, even with a confident choice', () => {
     expect(
       decideCapabilityRoute(evaluation(0.2, 'weather', 0.99), capabilities),
@@ -209,6 +223,7 @@ describe('decideCapabilityRoute', () => {
       needsCapability: 0.2,
       capability: 'weather',
       capabilityConfidence: 0.99,
+      calibrationProfileRef: CAPABILITY_ROUTE_CALIBRATION_PROFILE.id,
       reason: 'no-capability',
     });
   });
@@ -233,6 +248,7 @@ describe('decideCapabilityRoute', () => {
       preload: [],
       needsCapability: 0.9,
       capabilityConfidence: 0.9,
+      calibrationProfileRef: CAPABILITY_ROUTE_CALIBRATION_PROFILE.id,
       reason: 'none-option',
     });
   });
