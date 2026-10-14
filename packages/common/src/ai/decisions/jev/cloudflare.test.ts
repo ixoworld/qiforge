@@ -142,6 +142,11 @@ describe('CloudflareJevDecisionAdapter', () => {
       modelVersion: 'jev-1.13.0',
       provenance: {
         method: { kind: 'provider-native', name: 'typesafe-system-one' },
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev',
+        returnedModel: 'jev-1.13.0',
+        modelPinning: 'mutable',
+        providerArtifactRef: 'typesafe/jev',
       },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.98 },
@@ -241,6 +246,10 @@ describe('CloudflareJevDecisionAdapter', () => {
 
     expect(second.provenance).toEqual({
       method: { kind: 'provider-native', name: 'typesafe-system-one' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev',
     });
     expect(second.provenance?.method).not.toBe(first.provenance.method);
     await expect(otherModel.evaluate(booleanRequest)).resolves.toMatchObject({

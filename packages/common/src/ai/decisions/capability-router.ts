@@ -1,6 +1,9 @@
 import { z } from 'zod';
 import { defineDecision } from './define-decision.js';
-import type { DecisionEvaluation } from './types.js';
+import type {
+  DecisionCalibrationProfile,
+  DecisionEvaluation,
+} from './types.js';
 
 export const CAPABILITY_ROUTE_DECISION_NAME = 'runtime.route-capabilities';
 
@@ -121,7 +124,27 @@ export const capabilityRouterEnvShape = {
  * probabilities, so operators can tune this from real traffic later instead
  * of guessing per deployment.
  */
-export const CAPABILITY_ROUTE_MIN_CONFIDENCE = 0.7;
+export const CAPABILITY_ROUTE_CALIBRATION_PROFILE = {
+  id: 'ixo:calibration:runtime.route-capabilities:provisional-v1',
+  version: '1.0.0',
+  status: 'provisional',
+  // Not tied to one provider artifact. Acceptable only while the profile is
+  // provisional: a validated profile must name the artifact it was fitted on.
+  providerArtifactRef: 'unscoped',
+  decisionName: CAPABILITY_ROUTE_DECISION_NAME,
+  decisionVersion: capabilityRouteDecision.version,
+  primitive: 'boolean',
+  questionId: 'needsCapability',
+  threshold: 0.7,
+  validFrom: '2026-10-03T00:00:00.000Z',
+} satisfies DecisionCalibrationProfile;
+
+/**
+ * Backward-compatible numeric export. New policy code should retain the
+ * profile reference so a threshold cannot be separated from its provenance.
+ */
+export const CAPABILITY_ROUTE_MIN_CONFIDENCE =
+  CAPABILITY_ROUTE_CALIBRATION_PROFILE.threshold;
 
 export interface CapabilityRouteVerdict {
   /** Capability names to preload for the turn; at most one today. */
@@ -131,6 +154,11 @@ export interface CapabilityRouteVerdict {
   /** Chosen option when it is not the synthetic "none" option. */
   capability?: string;
   capabilityConfidence?: number;
+  /**
+   * The calibration profile whose threshold decided this verdict. Omitted
+   * when the caller passed its own `minConfidence`, which no profile backs.
+   */
+  calibrationProfileRef?: string;
   reason:
     | 'preload'
     | 'no-capability'
@@ -168,6 +196,9 @@ export function decideCapabilityRoute(
     needsCapability: needs.probabilityTrue,
     ...(isNoneOption ? {} : { capability: choice.value }),
     capabilityConfidence: choice.confidence,
+    ...(minConfidence === CAPABILITY_ROUTE_CALIBRATION_PROFILE.threshold
+      ? { calibrationProfileRef: CAPABILITY_ROUTE_CALIBRATION_PROFILE.id }
+      : {}),
   };
 
   if (needs.probabilityTrue < minConfidence) {

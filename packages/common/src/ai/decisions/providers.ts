@@ -1,13 +1,24 @@
 import { z } from 'zod';
 import {
   CloudflareJevDecisionAdapter,
+  DatabricksAiDecideDecisionAdapter,
+  DatabricksSystemOneDecisionAdapter,
   OpenRouterJevDecisionAdapter,
   WorkersAiJevDecisionAdapter,
   type WorkersAiBinding,
 } from './jev/index.js';
+import {
+  DATABRICKS_WORKSPACE_URL_REQUIREMENT,
+  databricksWorkspaceOrigin,
+} from './jev/databricks.js';
 import type { DecisionAdapter } from './types.js';
 
-export const DECISION_PROVIDERS = ['cloudflare-jev', 'openrouter-jev'] as const;
+export const DECISION_PROVIDERS = [
+  'cloudflare-jev',
+  'openrouter-jev',
+  'databricks-systemone',
+  'databricks-ai-decide',
+] as const;
 export type DecisionProviderName = (typeof DECISION_PROVIDERS)[number];
 
 /**
@@ -20,6 +31,9 @@ export const decisionProviderEnvShape = {
   DECISION_MODEL: z.string().min(1).optional(),
   CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
   CLOUDFLARE_API_TOKEN: z.string().optional(),
+  DATABRICKS_WORKSPACE_URL: z.string().optional(),
+  DATABRICKS_TOKEN: z.string().optional(),
+  DATABRICKS_AI_DECIDE_VERSION: z.string().min(1).optional(),
 };
 
 export interface DecisionProviderConfigIssue {
@@ -53,6 +67,63 @@ export function resolveDecisionAdapter(
   const model = readNonEmptyString(config.DECISION_MODEL);
 
   switch (provider) {
+    case 'databricks-systemone':
+    case 'databricks-ai-decide': {
+      const rawWorkspaceUrl = readNonEmptyString(
+        config.DATABRICKS_WORKSPACE_URL,
+      );
+      const workspaceUrl =
+        rawWorkspaceUrl === undefined
+          ? undefined
+          : databricksWorkspaceOrigin(rawWorkspaceUrl);
+      const token = readNonEmptyString(config.DATABRICKS_TOKEN);
+      const issues: DecisionProviderConfigIssue[] = [];
+      if (rawWorkspaceUrl === undefined) {
+        issues.push({
+          field: 'DATABRICKS_WORKSPACE_URL',
+          message: `DECISION_PROVIDER='${provider}' requires DATABRICKS_WORKSPACE_URL.`,
+        });
+      } else if (workspaceUrl === undefined) {
+        // The value is not echoed: a pasted URL may carry credentials.
+        issues.push({
+          field: 'DATABRICKS_WORKSPACE_URL',
+          message: `DATABRICKS_WORKSPACE_URL ${DATABRICKS_WORKSPACE_URL_REQUIREMENT}.`,
+        });
+      }
+      if (!token) {
+        issues.push({
+          field: 'DATABRICKS_TOKEN',
+          message: `DECISION_PROVIDER='${provider}' requires DATABRICKS_TOKEN.`,
+        });
+      }
+      if (!workspaceUrl || !token) return { ok: false, issues };
+
+      if (provider === 'databricks-systemone') {
+        return {
+          ok: true,
+          adapter: new DatabricksSystemOneDecisionAdapter({
+            workspaceUrl,
+            token,
+            ...(model ? { model } : {}),
+            ...(opts.fetch ? { fetch: opts.fetch } : {}),
+          }),
+        };
+      }
+
+      const functionVersion = readNonEmptyString(
+        config.DATABRICKS_AI_DECIDE_VERSION,
+      );
+      return {
+        ok: true,
+        adapter: new DatabricksAiDecideDecisionAdapter({
+          workspaceUrl,
+          token,
+          ...(functionVersion ? { functionVersion } : {}),
+          ...(opts.fetch ? { fetch: opts.fetch } : {}),
+        }),
+      };
+    }
+
     case 'openrouter-jev': {
       const apiKey = readNonEmptyString(config.OPEN_ROUTER_API_KEY);
       if (!apiKey) {

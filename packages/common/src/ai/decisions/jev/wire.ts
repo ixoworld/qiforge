@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type {
   DecisionAnswer,
+  DecisionModelPinning,
   DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
@@ -30,7 +31,26 @@ export function cloudflareJevProvenance(
     : { method: { kind: 'provider-native' } };
 }
 
-export type JevProviderName = 'cloudflare' | 'openrouter';
+/**
+ * Inference provenance of a `systemone-v1` exchange: the model or service the
+ * adapter requested and, separately, the model the backend reported answering
+ * with, since a routed service may answer with a different backend.
+ */
+export function systemOneInferenceProvenance(
+  requestedModel: string,
+  returnedModel: string | undefined,
+  modelPinning: DecisionModelPinning,
+): Omit<DecisionProviderProvenance, 'method' | 'calibration'> {
+  return {
+    apiDialect: 'systemone-v1',
+    requestedModel,
+    ...(returnedModel ? { returnedModel } : {}),
+    modelPinning,
+    providerArtifactRef: requestedModel,
+  };
+}
+
+export type JevProviderName = 'cloudflare' | 'openrouter' | 'databricks';
 
 export interface JevNoulQuestion {
   type: 'noul';

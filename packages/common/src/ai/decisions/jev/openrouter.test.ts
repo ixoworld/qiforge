@@ -92,6 +92,14 @@ describe('OpenRouterJevDecisionAdapter', () => {
           probabilities: { tax: 0.8, none: 0.2 },
         },
       },
+      provenance: {
+        method: { kind: 'provider-native' },
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev-1.13',
+        returnedModel: 'typesafe/jev-1.13',
+        modelPinning: 'pinned',
+        providerArtifactRef: 'typesafe/jev-1.13',
+      },
       usage: { inputTokens: 50, outputTokens: 5 },
     });
   });
@@ -108,11 +116,17 @@ describe('OpenRouterJevDecisionAdapter', () => {
       fetch: fetchMock,
     });
 
-    await adapter.evaluate(
+    const result = await adapter.evaluate(
       { state: 'x', questions: { work: request.questions.work! } },
       { signal: controller.signal },
     );
 
+    // Only the default release id is recorded as pinned.
+    expect(adapter.capabilities.modelPinning).toBe('unknown');
+    expect(result.provenance).toMatchObject({
+      requestedModel: 'typesafe/jev-2',
+      modelPinning: 'unknown',
+    });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('https://proxy.example/api/alpha/decisions');
     expect(init?.signal).toBe(controller.signal);

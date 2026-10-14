@@ -521,7 +521,9 @@ describe('createCapabilityRouter', () => {
     expect(logger.log).toHaveBeenCalledWith(
       '[capability-router-shadow] request=req-1 status=ok needsCapability=0.92 ' +
         'capability=weather capabilityConfidence=0.88 wouldPreload=[weather] ' +
-        'reason=preload latencyMs=40 provider=stub model=stub-model',
+        'reason=preload ' +
+        'calibrationProfile=ixo:calibration:runtime.route-capabilities:provisional-v1 ' +
+        'latencyMs=40 provider=stub model=stub-model',
     );
     expect(onShadowVerdict).toHaveBeenCalledWith(['weather']);
   });

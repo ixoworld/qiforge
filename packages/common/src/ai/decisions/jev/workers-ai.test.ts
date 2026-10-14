@@ -76,6 +76,11 @@ describe('WorkersAiJevDecisionAdapter', () => {
       modelVersion: 'jev-1.13.0',
       provenance: {
         method: { kind: 'provider-native', name: 'typesafe-system-one' },
+        apiDialect: 'systemone-v1',
+        requestedModel: 'typesafe/jev',
+        returnedModel: 'jev-1.13.0',
+        modelPinning: 'mutable',
+        providerArtifactRef: 'typesafe/jev',
       },
       answers: {
         work: { kind: 'boolean', probabilityTrue: 0.9 },
@@ -108,7 +113,14 @@ describe('WorkersAiJevDecisionAdapter', () => {
       probabilityTrue: 0.9,
     });
     // Another model's method is not known, so no method name is claimed.
-    expect(result.provenance).toEqual({ method: { kind: 'provider-native' } });
+    expect(result.provenance).toEqual({
+      method: { kind: 'provider-native' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev-next',
+      returnedModel: 'jev-1.13.0',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev-next',
+    });
   });
 
   it('returns a fresh provenance object on every call', async () => {
@@ -125,6 +137,11 @@ describe('WorkersAiJevDecisionAdapter', () => {
     expect(second.provenance).not.toBe(first.provenance);
     expect(second.provenance).toEqual({
       method: { kind: 'provider-native', name: 'typesafe-system-one' },
+      apiDialect: 'systemone-v1',
+      requestedModel: 'typesafe/jev',
+      returnedModel: 'jev-1.13.0',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'typesafe/jev',
     });
   });
 

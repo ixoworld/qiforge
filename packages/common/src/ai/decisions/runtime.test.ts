@@ -97,6 +97,14 @@ describe('DecisionRuntime', () => {
     expect(result.provider).toBe('test-provider');
     expect(result.model).toBe('test-model');
     expect(result.modelVersion).toBe('v1');
+    expect(result.judgment).toEqual({
+      method: { kind: 'provider-native' },
+      apiDialect: 'custom',
+      requestedModel: 'test-model',
+      returnedModel: 'v1',
+      modelPinning: 'unknown',
+      questionSetVersion: '1.0.0',
+    });
     expect(result.usage).toEqual({ inputTokens: 12 });
     expect(result.answers.yes).toEqual({
       kind: 'boolean',
@@ -501,6 +509,9 @@ describe('DecisionRuntime judgment provenance', () => {
         ece: 0.03,
         brier: 0.11,
       },
+      apiDialect: 'custom',
+      requestedModel: 'test-model',
+      modelPinning: 'unknown',
       questionSetVersion: '1.0.0',
     });
   });
@@ -517,8 +528,117 @@ describe('DecisionRuntime judgment provenance', () => {
 
     expect(result.judgment).toEqual({
       method: { kind: 'provider-native' },
+      apiDialect: 'custom',
+      requestedModel: 'test-model',
+      modelPinning: 'unknown',
       questionSetVersion: '1.0.0',
     });
+  });
+
+  it('records the inference fields an adapter reports, separately from the requested model', async () => {
+    const runtime = new DecisionRuntime(lookup, {
+      ...stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+        modelVersion: 'backend-build-7',
+        provenance: {
+          method: { kind: 'provider-native' },
+          apiDialect: 'databricks-ai-decide-v1',
+          functionVersion: '1.0',
+          modelPinning: 'mutable',
+          providerArtifactRef: 'databricks:ai_decide:1.0',
+        },
+      })),
+      capabilities: {
+        apiDialect: 'systemone-v1',
+        primitives: ['boolean'],
+        answerSemantics: 'distribution',
+        modelPinning: 'pinned',
+      },
+    });
+
+    const result = await runtime.evaluate(decision, { text: 'yes' });
+
+    // The adapter's own report wins over its static capabilities.
+    expect(result.judgment).toEqual({
+      method: { kind: 'provider-native' },
+      apiDialect: 'databricks-ai-decide-v1',
+      requestedModel: 'test-model',
+      returnedModel: 'backend-build-7',
+      functionVersion: '1.0',
+      modelPinning: 'mutable',
+      providerArtifactRef: 'databricks:ai_decide:1.0',
+      questionSetVersion: '1.0.0',
+    });
+  });
+
+  it('falls back to the adapter capabilities for inference fields the result omits', async () => {
+    const runtime = new DecisionRuntime(lookup, {
+      ...stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+      })),
+      capabilities: {
+        apiDialect: 'systemone-v1',
+        primitives: ['boolean'],
+        answerSemantics: 'distribution',
+        modelPinning: 'pinned',
+      },
+    });
+
+    const result = await runtime.evaluate(decision, { text: 'yes' });
+
+    expect(result.judgment).toMatchObject({
+      apiDialect: 'systemone-v1',
+      modelPinning: 'pinned',
+    });
+  });
+
+  it('rejects an unknown dialect or pinning class and empty inference fields', async () => {
+    for (const provenance of [
+      { method: { kind: 'provider-native' }, apiDialect: 'grpc' },
+      { method: { kind: 'provider-native' }, modelPinning: 'frozen' },
+      { method: { kind: 'provider-native' }, returnedModel: ' ' },
+    ]) {
+      const runtime = new DecisionRuntime(
+        lookup,
+        stubAdapter(async () => ({
+          answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+          provenance: JSON.parse(JSON.stringify(provenance)),
+        })),
+      );
+      await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+        /Decision provenance/,
+      );
+    }
+  });
+
+  it('rejects an adapter claiming the reserved openai-decisions dialect, from its result or its capabilities', async () => {
+    const fromResult = new DecisionRuntime(
+      lookup,
+      stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+        provenance: {
+          method: { kind: 'provider-native' },
+          apiDialect: 'openai-decisions',
+        },
+      })),
+    );
+    const fromCapabilities = new DecisionRuntime(lookup, {
+      ...stubAdapter(async () => ({
+        answers: { yes: { kind: 'boolean', probabilityTrue: 0.8 } },
+      })),
+      capabilities: {
+        apiDialect: 'openai-decisions',
+        primitives: ['boolean'],
+        answerSemantics: 'distribution',
+        modelPinning: 'unknown',
+      },
+    });
+
+    for (const runtime of [fromResult, fromCapabilities]) {
+      await expect(runtime.evaluate(decision, { text: 'yes' })).rejects.toThrow(
+        /'openai-decisions' is reserved and has no contract yet/,
+      );
+    }
   });
 
   it('rejects malformed adapter provenance like any other malformed output', async () => {

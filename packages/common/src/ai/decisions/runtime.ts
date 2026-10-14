@@ -4,6 +4,7 @@ import {
   DecisionNotApplicableError,
   DecisionProviderUnavailableError,
 } from './errors.js';
+import { recordedProvenance } from './provenance.js';
 import {
   DecisionProviderRegistry,
   DecisionProviderRouter,
@@ -15,7 +16,6 @@ import type {
   DecisionDefinition,
   DecisionEvaluateOptions,
   DecisionEvaluation,
-  DecisionJudgmentMethod,
   DecisionRegistration,
   DecisionRequest,
 } from './types.js';
@@ -34,8 +34,6 @@ const FULLY_APPLICABLE: DecisionApplicability = {
   applicable: true,
   evidenceComplete: true,
 };
-
-const PROVIDER_NATIVE: DecisionJudgmentMethod = { kind: 'provider-native' };
 
 export const DEFAULT_DECISION_TIMEOUT_MS = 5_000;
 
@@ -221,12 +219,7 @@ export class DecisionRuntime implements DecisionEvaluator {
         ...(result.modelVersion ? { modelVersion: result.modelVersion } : {}),
         applicability: { ...applicability },
         judgment: {
-          // An adapter that declares nothing is recorded as provider-native,
-          // which makes no claim that its confidence is calibrated.
-          method: { ...(result.provenance?.method ?? PROVIDER_NATIVE) },
-          ...(result.provenance?.calibration
-            ? { calibration: { ...result.provenance.calibration } }
-            : {}),
+          ...recordedProvenance(adapter, result),
           questionSetVersion: registration.version,
         },
         answers: result.answers,
@@ -262,6 +255,7 @@ export class DecisionRuntime implements DecisionEvaluator {
             decision_provider_selection: providerSelection,
             decision_provider: adapter.provider,
             decision_model: adapter.model,
+            decision_api_dialect: adapter.capabilities?.apiDialect ?? 'custom',
           },
           ...(options?.callbacks !== undefined && {
             callbacks: options.callbacks,

@@ -210,7 +210,9 @@ preloads nothing and warns
 `[capability-router] … status=fallback reason=<error name>`; a preload logs
 `[capability-router] request=… preloaded=[…] candidates=<n>`. `shadow` runs
 the same evaluation under `waitUntil` without awaiting it, logs
-`[capability-router-shadow] … wouldPreload=[…]`, and after the turn compares
+`[capability-router-shadow] … wouldPreload=[…] calibrationProfile=<profile id>`
+(the provisional calibration profile whose threshold decided the verdict),
+and after the turn compares
 the prediction with what the turn actually loaded (`agree=<bool>`).
 
 **Operating guides.** A plugin's working rules (`OraclePlugin.operatingGuide`,

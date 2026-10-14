@@ -9,6 +9,7 @@ import {
   JEV_MODEL_CLOUDFLARE,
   JevDecisionError,
   parseJevResult,
+  systemOneInferenceProvenance,
   toJevQuestions,
 } from './wire.js';
 
@@ -37,6 +38,12 @@ export interface WorkersAiJevAdapterOptions {
 export class WorkersAiJevDecisionAdapter implements DecisionAdapter {
   readonly provider = 'cloudflare';
   readonly model: string;
+  readonly capabilities = {
+    apiDialect: 'systemone-v1' as const,
+    primitives: ['boolean', 'choice', 'ordinal'] as const,
+    answerSemantics: 'distribution' as const,
+    modelPinning: 'mutable' as const,
+  };
 
   private readonly ai: WorkersAiBinding;
 
@@ -70,9 +77,17 @@ export class WorkersAiJevDecisionAdapter implements DecisionAdapter {
       );
     }
 
+    const result = parseJevResult(payload, this.provider);
     return {
-      ...parseJevResult(payload, this.provider),
-      provenance: cloudflareJevProvenance(this.model),
+      ...result,
+      provenance: {
+        ...cloudflareJevProvenance(this.model),
+        ...systemOneInferenceProvenance(
+          this.model,
+          result.modelVersion,
+          this.capabilities.modelPinning,
+        ),
+      },
     };
   }
 }

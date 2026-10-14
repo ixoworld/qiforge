@@ -88,6 +88,25 @@ export interface DecisionUsage {
   outputTokens?: number;
 }
 
+/** External inference protocol, deliberately separate from provider identity. */
+export type DecisionInferenceDialect =
+  | 'systemone-v1'
+  | 'databricks-ai-decide-v1'
+  | 'openai-decisions'
+  | 'native-classifier'
+  | 'custom';
+
+export type DecisionModelPinning = 'pinned' | 'mutable' | 'unknown';
+
+export interface DecisionProviderCapabilities {
+  apiDialect: DecisionInferenceDialect;
+  primitives: readonly DecisionQuestion['kind'][];
+  answerSemantics: 'distribution' | 'score' | 'winner-only' | 'mixed';
+  modelPinning: DecisionModelPinning;
+  /** Optional workload/domain specialization asserted by the provider artifact. */
+  specializationDomain?: string;
+}
+
 export interface DecisionJudgmentMethod {
   /**
    * Provider-neutral method category, for example provider-native, raw,
@@ -114,12 +133,51 @@ export interface DecisionCalibrationProvenance {
 }
 
 /**
- * What an adapter can substantiate about how it judged. An adapter that cannot
- * back a calibration claim leaves `calibration` out.
+ * What an adapter can substantiate about how it judged and which backend
+ * answered. An adapter that cannot back a calibration claim leaves
+ * `calibration` out. The inference fields (`apiDialect` … `providerArtifactRef`)
+ * are optional here; `DecisionRuntime` fills the ones an adapter leaves out
+ * from its `capabilities` and `model`, or records them as `custom` / `unknown`.
  */
 export interface DecisionProviderProvenance {
   method: DecisionJudgmentMethod;
   calibration?: DecisionCalibrationProvenance;
+  /** Wire/API dialect the adapter spoke. */
+  apiDialect?: DecisionInferenceDialect;
+  /** Model/service requested by IXO. */
+  requestedModel?: string;
+  /** Model identifier actually reported by the backend. */
+  returnedModel?: string;
+  /** API/function version when distinct from the model version. */
+  functionVersion?: string;
+  modelPinning?: DecisionModelPinning;
+  /** Immutable or governed provider artifact/service reference. */
+  providerArtifactRef?: string;
+  /** Versioned IXO calibration profile applied by downstream policy. */
+  calibrationProfileRef?: string;
+}
+
+export type DecisionCalibrationPrimitive = 'boolean' | 'choice' | 'ordinal';
+
+export interface DecisionCalibrationProfile {
+  id: string;
+  version: string;
+  status: 'provisional' | 'validated' | 'retired';
+  providerArtifactRef: string;
+  decisionName: string;
+  decisionVersion: string;
+  primitive: DecisionCalibrationPrimitive;
+  questionId: string;
+  validationDatasetRef?: string;
+  targetPopulation?: string;
+  threshold?: number;
+  metrics?: {
+    brier?: number;
+    ece?: number;
+    coverage?: number;
+    selectiveRisk?: number;
+  };
+  validFrom: string;
 }
 
 export interface DecisionProviderResult {
@@ -136,6 +194,7 @@ export interface DecisionProviderOptions {
 export interface DecisionAdapter {
   readonly provider: string;
   readonly model: string;
+  readonly capabilities?: DecisionProviderCapabilities;
   evaluate(
     request: DecisionRequest,
     options?: DecisionProviderOptions,
@@ -192,9 +251,17 @@ export type DecisionTraceOptions = Pick<
   'callbacks' | 'metadata'
 >;
 
+/**
+ * The judgment record `DecisionRuntime` attaches to an evaluation: the
+ * adapter's provenance with the inference fields every record carries filled
+ * in.
+ */
 export interface DecisionJudgmentProvenance extends DecisionProviderProvenance {
   /** Version of the Decision definition (its question set) evaluated. */
   questionSetVersion: string;
+  apiDialect: DecisionInferenceDialect;
+  requestedModel: string;
+  modelPinning: DecisionModelPinning;
 }
 
 /**

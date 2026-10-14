@@ -222,6 +222,7 @@ export function createCapabilityRouter(
                 `capability=${verdict.capability ?? '-'} ` +
                 `capabilityConfidence=${verdict.capabilityConfidence?.toFixed(2) ?? '-'} ` +
                 `wouldPreload=${list(verdict.preload)} reason=${verdict.reason} ` +
+                `calibrationProfile=${verdict.calibrationProfileRef ?? '-'} ` +
                 `latencyMs=${now() - started} provider=${evaluation.provider} model=${evaluation.model}`,
             );
             turn.onShadowVerdict?.(verdict.preload);

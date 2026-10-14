@@ -281,7 +281,12 @@ The result preserves provenance:
   applicability: { applicable: true, evidenceComplete: true },
   judgment: {
     method: { kind: 'provider-native', name: 'typesafe-system-one' },
-    questionSetVersion: '1.0.0',     // the Decision version
+    apiDialect: 'systemone-v1',       // wire protocol, separate from provider identity
+    requestedModel: 'typesafe/jev',   // model/service the adapter asked for
+    returnedModel: '...',             // model the backend reported, when it does
+    modelPinning: 'mutable',          // pinned | mutable | unknown
+    providerArtifactRef: 'typesafe/jev',
+    questionSetVersion: '1.0.0',      // the Decision version
   },
   answers: { ... },
   latencyMs: 183,
@@ -331,8 +336,23 @@ The Cloudflare-hosted Jev adapters (`CloudflareJevDecisionAdapter`,
 when they run their default model, `typesafe/jev`. With any other model
 (`DECISION_MODEL` or the `model` option) they declare plain
 `{ kind: 'provider-native' }`, because that model's method is not known. Each
-result carries its own provenance object. The OpenRouter Jev adapter declares
-nothing, so it is recorded as plain `provider-native`.
+result carries its own provenance object. The OpenRouter and Databricks
+adapters declare plain `provider-native`.
+
+The same block records how the judgment was obtained: the inference dialect
+(`apiDialect`, the wire protocol, kept separate from provider identity), the
+model or service requested (`requestedModel`), the model the backend reported
+(`returnedModel`), a function/API version distinct from any model version
+(`functionVersion`), whether the backend can change underneath the request
+(`modelPinning`: `pinned`, `mutable` or `unknown`) and the provider artifact
+reference. An adapter reports these in `DecisionProviderResult.provenance`;
+fields it leaves out come from its static `capabilities` (`apiDialect`,
+`modelPinning`) and its `model`, and otherwise default to `custom` and
+`unknown`, so a record never claims a pinned backend that nobody asserted. An
+unknown dialect or pinning class, or an empty string field, fails validation
+like the rest of the provenance. `openai-decisions` is a reserved dialect name
+with no contract yet: an adapter claiming it, in its result or its
+`capabilities`, fails the evaluation.
 
 ### Packed-question isolation
 
@@ -483,14 +503,19 @@ The env keys are the shared `decisionProviderEnvShape`, spread into the
 Workers base env schema:
 
 ```text
-DECISION_PROVIDER=openrouter-jev | cloudflare-jev
-DECISION_MODEL=<optional model override>
+DECISION_PROVIDER=openrouter-jev | cloudflare-jev | databricks-systemone | databricks-ai-decide
+DECISION_MODEL=<optional model/service override>
+DATABRICKS_WORKSPACE_URL=<workspace https URL>
+DATABRICKS_TOKEN=<workspace token>
+DATABRICKS_AI_DECIDE_VERSION=1.0
 ```
 
-| `DECISION_PROVIDER` | Credentials                                                                                                                            |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `openrouter-jev`    | Reuses the existing `OPEN_ROUTER_API_KEY`; nothing else to set.                                                                        |
-| `cloudflare-jev`    | The Worker's `AI` binding, no keys. Without the binding: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` for the Cloudflare REST API. |
+| `DECISION_PROVIDER`    | Credentials                                                                                                                            |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `openrouter-jev`       | Reuses the existing `OPEN_ROUTER_API_KEY`; nothing else to set.                                                                        |
+| `cloudflare-jev`       | The Worker's `AI` binding, no keys. Without the binding: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` for the Cloudflare REST API. |
+| `databricks-systemone` | `DATABRICKS_WORKSPACE_URL` + `DATABRICKS_TOKEN`; optional `DECISION_MODEL` selects the AI Gateway model service.                       |
+| `databricks-ai-decide` | `DATABRICKS_WORKSPACE_URL` + `DATABRICKS_TOKEN`; optional `DATABRICKS_AI_DECIDE_VERSION` (default `1.0`).                              |
 
 Leaving `DECISION_PROVIDER` unset registers no env provider. Selecting a
 provider without its credentials fails boot with one reported issue per
@@ -576,6 +601,47 @@ configuration both make it preload nothing, with one warning per object.
 The deprecated Node runtime's commerce routing Decision
 (`oracle-payments.route-message`) has no Workers plugin, so it has no consumer
 here.
+
+## Assurance, calibration, and provider bakeoffs
+
+Provider identity, inference dialect, requested model, returned model, function
+version, and model pinning are separate provenance fields. This matters for
+managed services whose backend model can change without changing the API.
+
+Decision thresholds are policy artifacts, not provider defaults.
+`DecisionCalibrationProfile` versions a threshold together with the Decision,
+provider artifact, validation population and calibration/selective-risk
+metrics. The capability router's existing 0.7 threshold is now explicitly
+published as a `provisional` profile; it is not represented as empirically
+calibrated. `decideCapabilityRoute` stamps that profile's id on its verdict
+(`calibrationProfileRef`) when the profile's threshold decided it, and omits
+it when the caller passed its own `minConfidence`; the Workers shadow log
+prints it. The evaluation's `judgment` is the provider's record, built before
+any policy runs, so the profile reference travels with the verdict, not the
+judgment.
+
+`buildSemanticConformanceVariants(request, options)` generates semantic
+stability probes for one request; it calls no provider. It returns
+`{ variants, notApplicable }`: the baseline plus option-permutation,
+opaque-option-id, rubric-paraphrase (when a paraphrase function is given),
+no-evidence and missing-question variants. Each variant names the variant it
+is compared with (`comparesWith`) and, when option ids were rebound, the map
+back to the original ids. Choice options travel as a JSON object, whose
+integer-like keys (`"1"`, `"2"`) always enumerate in numeric order, so a
+reordering of such options would reach the provider unchanged; the
+permutation is then applied over the opaque-id rebinding and compared with
+the `opaque-option-ids` variant. A probe whose request would equal the
+baseline (no choice questions, an already-empty state) is listed in
+`notApplicable` with the reason instead of being emitted. This is a different
+probe from `measureDecisionQuestionIsolation` (packed vs. single questions,
+above): it varies the presentation of the same questions.
+
+`runDecisionProviderBakeoff(adapter, cases)` scores frozen labelled IXO
+fixtures. It keeps every run with its response provenance and refuses to
+aggregate runs whose provenance differs (`DecisionBenchmarkProvenanceError`).
+
+See [Decision provider bakeoff](decision-bakeoff.md) and the
+[Open Decisions assurance profile](../../specs/open-decisions-assurance.md).
 
 ## Read next
 

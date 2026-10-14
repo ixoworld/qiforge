@@ -2,6 +2,8 @@ import type {
   ChoiceDecisionAnswer,
   DecisionAnswer,
   DecisionApplicability,
+  DecisionInferenceDialect,
+  DecisionModelPinning,
   DecisionProviderProvenance,
   DecisionProviderResult,
   DecisionQuestion,
@@ -187,6 +189,8 @@ function validateProvenance(provenance: DecisionProviderProvenance): void {
     'Decision judgment method artifactRef must be non-empty when supplied.',
   );
 
+  validateInferenceProvenance(provenance);
+
   const calibration = provenance.calibration;
   if (calibration === undefined) return;
   if (typeof calibration.method !== 'string' || !calibration.method.trim()) {
@@ -222,6 +226,77 @@ function validateProvenance(provenance: DecisionProviderProvenance): void {
   ) {
     throw new Error(
       'Decision calibration evaluatedAt must be a valid timestamp.',
+    );
+  }
+}
+
+// Records keyed by the union, so adding a dialect or pinning class to the type
+// without listing it here fails the build. A reserved dialect is named in the
+// type so it cannot be reused for something else, but has no contract an
+// adapter could follow yet, so no adapter may claim it.
+const INFERENCE_DIALECTS: Record<
+  DecisionInferenceDialect,
+  'supported' | 'reserved'
+> = {
+  'systemone-v1': 'supported',
+  'databricks-ai-decide-v1': 'supported',
+  'openai-decisions': 'reserved',
+  'native-classifier': 'supported',
+  custom: 'supported',
+};
+
+/**
+ * Throws unless `value` is a dialect an adapter may claim: a known one that
+ * is not merely reserved.
+ */
+export function assertClaimableInferenceDialect(value: unknown): void {
+  if (!isKeyOf(INFERENCE_DIALECTS, value)) {
+    throw new Error('Decision provenance apiDialect is not a known dialect.');
+  }
+  if (INFERENCE_DIALECTS[value] === 'reserved') {
+    throw new Error(
+      `Decision provenance apiDialect '${value}' is reserved and has no contract yet; an adapter cannot claim it.`,
+    );
+  }
+}
+
+const MODEL_PINNINGS: Record<DecisionModelPinning, true> = {
+  pinned: true,
+  mutable: true,
+  unknown: true,
+};
+
+function isKeyOf<K extends string>(
+  record: Record<K, unknown>,
+  value: unknown,
+): value is K {
+  return typeof value === 'string' && Object.hasOwn(record, value);
+}
+
+function validateInferenceProvenance(
+  provenance: DecisionProviderProvenance,
+): void {
+  if (provenance.apiDialect !== undefined) {
+    assertClaimableInferenceDialect(provenance.apiDialect);
+  }
+  if (
+    provenance.modelPinning !== undefined &&
+    !isKeyOf(MODEL_PINNINGS, provenance.modelPinning)
+  ) {
+    throw new Error(
+      'Decision provenance modelPinning must be pinned, mutable or unknown.',
+    );
+  }
+  for (const [name, value] of [
+    ['requestedModel', provenance.requestedModel],
+    ['returnedModel', provenance.returnedModel],
+    ['functionVersion', provenance.functionVersion],
+    ['providerArtifactRef', provenance.providerArtifactRef],
+    ['calibrationProfileRef', provenance.calibrationProfileRef],
+  ] as const) {
+    assertOptionalNonEmpty(
+      value,
+      `Decision provenance ${name} must be non-empty when supplied.`,
     );
   }
 }
