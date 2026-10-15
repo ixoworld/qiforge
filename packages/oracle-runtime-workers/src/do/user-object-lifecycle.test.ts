@@ -1560,8 +1560,7 @@ const delegationRequired = {
   ok: false,
   status: 428,
   code: 'delegation_required',
-  message:
-    'Companion delegation required: the user must authorize this oracle again',
+  message: 'Delegation required: the user must authorize this oracle again',
 };
 
 /** What the shell's `/delegation` deposit stored for this user. */
@@ -1788,7 +1787,7 @@ describe('channel turn admission', () => {
           status: 403,
           code: 'storage_unauthorized',
           message:
-            "The user's file storage rejected the oracle; the Companion cannot load the user's data",
+            "The user's file storage rejected the oracle; the oracle cannot load the user's data",
         });
         expect(submit).not.toHaveBeenCalled();
       });
@@ -1826,7 +1825,7 @@ describe('channel turn admission', () => {
         status: 409,
         code: 'room_unavailable',
         message:
-          'The oracle cannot use the Companion room (it is not a member or was refused)',
+          "The oracle cannot use the user's oracle room (it is not a member or was refused)",
       });
     });
   });
@@ -1876,14 +1875,14 @@ describe('channel turn admission', () => {
           'hash',
         );
         // Admitted past the delegation check, the request meets the next
-        // one: this user has no Companion room yet.
+        // one: this user has no oracle room yet.
         expect(outcome).toEqual(
           admitted
             ? {
                 ok: false,
                 status: 428,
                 code: 'room_not_ready',
-                message: 'Companion room is not ready',
+                message: "The user's oracle room is not ready",
               }
             : delegationRequired,
         );
@@ -1891,7 +1890,7 @@ describe('channel turn admission', () => {
     },
   );
 
-  it('answers 428 room_not_ready while the user has no Companion room', async () => {
+  it('answers 428 room_not_ready while the user has no oracle room', async () => {
     await withObject('channel-room-not-ready', {}, async (h) => {
       await storeDelegation(h, secondsFromNow(3600));
       expect(
@@ -1900,7 +1899,7 @@ describe('channel turn admission', () => {
         ok: false,
         status: 428,
         code: 'room_not_ready',
-        message: 'Companion room is not ready',
+        message: "The user's oracle room is not ready",
       });
     });
   });

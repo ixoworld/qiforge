@@ -2,6 +2,7 @@ import {
   authenticateChannel,
   assertActiveChannelBindingCached,
   channelAuthConfig,
+  parseChannelServiceDids,
 } from '../channels/auth';
 import {
   ChannelError,
@@ -418,7 +419,7 @@ export function createShell(
 
   app.post('/channels/turn', async (c) => {
     try {
-      if (!c.env.CHANNEL_SERVICE_DID)
+      if (parseChannelServiceDids(c.env.CHANNEL_SERVICE_DID).length === 0)
         throw new ChannelError(
           503,
           'Channels are not configured',

@@ -43,7 +43,7 @@ export interface MirrorSend {
   threadId: string;
   txnId: string;
   origin?: {
-    provider: 'whatsapp';
+    provider: string;
     bindingId: string;
     remoteMessageRef: string;
   };

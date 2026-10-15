@@ -46,7 +46,7 @@ function linkLabel(title: string): string {
 }
 
 /**
- * The plan as one Markdown message: what the Companion room mirror of a
+ * The plan as one Markdown message: what the user's oracle room mirror of a
  * channel turn and gateways that predate plans receive. Never stored as a
  * run's text, which stays the model's own.
  */

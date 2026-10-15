@@ -1,23 +1,23 @@
 # Channels ingress
 
-`POST /channels/turn` lets IXO Channels submit a text turn to the user's existing Companion. The route has its own UCAN policy. The generic Portal authentication policy is unchanged.
+`POST /channels/turn` lets IXO Channels submit a text turn to the user's existing oracle session: this deployment's oracle, whether that is the Companion or any other oracle. One runtime serves every channel account (messaging number) bound to this oracle: any registered channel gateway whose DID is listed in `CHANNEL_SERVICE_DID` can bind numbers to this oracle. The route has its own UCAN policy. The generic Portal authentication policy is unchanged.
 
 ## Configuration
 
-| Binding or variable            | Purpose                                                        |
-| ------------------------------ | -------------------------------------------------------------- |
-| `CHANNEL_SERVICE_DID`          | The one channel service DID allowed to invoke this deployment. |
-| `AUTH_HUB`                     | Optional Cloudflare service binding to Auth Hub.               |
-| `AUTH_HUB_URL`                 | Auth Hub HTTPS URL when no service binding is configured.      |
-| `AUTH_HUB_CHANNEL_SERVICE_KEY` | Dedicated credential for Auth Hub channel validation.          |
+| Binding or variable            | Purpose                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `CHANNEL_SERVICE_DID`          | The channel service DID allowed to invoke this deployment, or a comma-separated list of them. |
+| `AUTH_HUB`                     | Optional Cloudflare service binding to Auth Hub.                                              |
+| `AUTH_HUB_URL`                 | Auth Hub HTTPS URL when no service binding is configured.                                     |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | Dedicated credential for Auth Hub channel validation.                                         |
 
-An unset `CHANNEL_SERVICE_DID` disables the route: it answers `503` with `Channels are not configured`. Binding validation needs the key and either `AUTH_HUB` or `AUTH_HUB_URL`; the service binding is used when both are set. The validation credential is separate from operator credentials. Neither the channel service nor its grant receives a Matrix access token. Required-ness and wrangler syntax are in [configuration](configuration.md#channels-ingress).
+`CHANNEL_SERVICE_DID` is parsed as a list: entries are split on commas, trimmed, empty entries dropped and duplicates removed (`did:web:a.example, did:web:b.example`). An unset value, or one with no entry left, disables the route: it answers `503` with `Channels are not configured`. Binding validation needs the key and either `AUTH_HUB` or `AUTH_HUB_URL`; the service binding is used when both are set. The validation credential is separate from operator credentials. Neither the channel service nor its grant receives a Matrix access token. Required-ness and wrangler syntax are in [configuration](configuration.md#channels-ingress).
 
 ## Authorization
 
 The `Authorization` header contains `Bearer <base64 UCAN CAR>`. The `x-auth-type` header is `ucan`. The invocation uses `@ixo/ucan` 2.2.0.
 
-The proof is a direct delegation from the user DID to `CHANNEL_SERVICE_DID`. Its sole capability is `ixo:channel/invoke` on `ixo:channel:<bindingId>`. Its caveats contain the provider, binding revision, and this deployment's `ORACLE_DID`. Its expiration is at most five minutes away.
+The proof is a direct delegation from the user DID to a channel service listed in `CHANNEL_SERVICE_DID`. The service that signs the invocation must be a listed DID, and the proof's audience must be that same service: a grant addressed to one listed service cannot be invoked by another. Its sole capability is `ixo:channel/invoke` on `ixo:channel:<bindingId>`. Its caveats contain the provider, binding revision, and this deployment's `ORACLE_DID`. Its expiration is at most five minutes away.
 
 The service invokes the same capability for `ORACLE_DID`. Its expiration is at most 60 seconds away. Its sole fact is `{requestId, requestHash}`. `requestHash` is the lowercase SHA-256 hex digest of the exact UTF-8 JSON request body.
 
@@ -35,9 +35,9 @@ At admission, an unavailable validator returns `503` and nothing is recorded. Be
 
 ## Tool authority
 
-A channel turn runs with the user's full stored delegation to this oracle: the same delegation, and therefore the same tool authority, as a Matrix turn in the Companion room. This is a product decision. The channel grant itself never becomes tool authority, and a channel request that carries a delegation is refused with `403`.
+A channel turn runs with the user's full stored delegation to this oracle: the same delegation, and therefore the same tool authority, as a Matrix turn in the user's oracle room. This is a product decision. The channel grant itself never becomes tool authority, and a channel request that carries a delegation is refused with `403`.
 
-A channel cannot recover a missing delegation. The `delegation_required` re-authorization prompt is posted only for Matrix turns. A NEW channel request is therefore refused, before it is recorded as a run and before any session marker is sent, unless the user's stored delegation is usable: present, with a known expiry, and with more than `CHANNEL_DELEGATION_MIN_REMAINING_SECONDS` (900 s) left, so that a turn never outlives the delegation its tools, memory, files and owner-copy flush run under. The response is `428` with code `delegation_required` and `Companion delegation required: the user must authorize this oracle again`. The same answer comes back when the delegation exists but cannot load the user's owner copy because it lacks the `ixo:filesystem` grant over `/.oracles` (the boot's `NO_VFS_DELEGATION`). The gateway should tell the user to open the Companion and authorize it. Retrying the same request ID after re-authorization admits it: `POST /delegation` hands the new delegation and its expiry to the user's object at once.
+A channel cannot recover a missing delegation. The `delegation_required` re-authorization prompt is posted only for Matrix turns. A NEW channel request is therefore refused, before it is recorded as a run and before any session marker is sent, unless the user's stored delegation is usable: present, with a known expiry, and with more than `CHANNEL_DELEGATION_MIN_REMAINING_SECONDS` (900 s) left, so that a turn never outlives the delegation its tools, memory, files and owner-copy flush run under. The response is `428` with code `delegation_required` and `Delegation required: the user must authorize this oracle again`. The same answer comes back when the delegation exists but cannot load the user's owner copy because it lacks the `ixo:filesystem` grant over `/.oracles` (the boot's `NO_VFS_DELEGATION`). The gateway should tell the user to open the oracle and authorize it. Retrying the same request ID after re-authorization admits it: `POST /delegation` hands the new delegation and its expiry to the user's object at once.
 
 The margin applies where it matters, and nowhere else:
 
@@ -60,13 +60,15 @@ The object holds the delegation with its expiry (unix seconds), taken from where
   "requestId": "wa:example",
   "remoteMessageRef": "hmac:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "message": "Help me plan my week",
-  "context": { "kind": "companion" }
+  "context": { "kind": "oracle" }
 }
 ```
 
-`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted Companion room. The session is checked when a request is bound to it, before it starts a run; a poll of an admitted request checks nothing and writes nothing, so it does not mark the user's database dirty. Subsequent messages reuse the binding's session. Deleting that session releases the binding: its next message opens a new session.
+`provider` is a provider id matching `^[a-z][a-z0-9_-]{0,31}$` (`whatsapp` today). The runtime does not enumerate providers: it echoes the id into the grant check (`nb.provider`), the Auth Hub binding check and the `org.ixo.qi.origin` Matrix event, and an id without its own delivery profile is shaped with the generic chat profile (WhatsApp keeps its own). `context.kind` is `oracle` (the gateway's value) or `companion` (accepted for gateways that predate channel accounts); the object is strict, so any other kind or extra field is `400 invalid_request`. The kind does not change behaviour: the oracle is always this deployment's.
 
-A new request that names a session the user's object no longer holds (deleted in Qi.Space, or never created there) is answered `409 session_conflict`, its receipt is removed and the binding forgets that session. The gateway clears its stored session and sends the **same request ID again without `sessionId`**; that resend is a new body under a free request ID and opens a new session. A request without `sessionId` whose binding still pointed at a deleted session opens a new session at once, with no round trip. A session that exists but is not this user's Companion session (another room, a local session) stays `404 session_not_found`.
+`sessionId` is optional on the first request. An existing session must belong to this user and the canonical encrypted oracle room. The session is checked when a request is bound to it, before it starts a run; a poll of an admitted request checks nothing and writes nothing, so it does not mark the user's database dirty. Subsequent messages reuse the binding's session. Deleting that session releases the binding: its next message opens a new session.
+
+A new request that names a session the user's object no longer holds (deleted in Qi.Space, or never created there) is answered `409 session_conflict`, its receipt is removed and the binding forgets that session. The gateway clears its stored session and sends the **same request ID again without `sessionId`**; that resend is a new body under a free request ID and opens a new session. A request without `sessionId` whose binding still pointed at a deleted session opens a new session at once, with no round trip. A session that exists but is not this user's oracle session (another room, a local session) stays `404 session_not_found`.
 
 Topics, attachments, provider identifiers, and caller-supplied user identities are not accepted. The body limit is 64,000 bytes. Text is limited to 16,000 characters.
 
@@ -106,15 +108,15 @@ Every refusal has the body `{ "code": "<code>", "message": "<text>" }`. A gatewa
 | `403`  | `identity_mismatch`                | The channel identity does not match the request.                                                                                                          |
 | `403`  | `channel_grant_not_tool_authority` | A channel request carried a delegation.                                                                                                                   |
 | `403`  | `storage_unauthorized`             | Final. The user's file storage rejected the oracle's credentials (VFS 401/403) while the owner copy loaded. Do not retry; send the failure reply.         |
-| `404`  | `session_not_found`                | The session exists but is not this user's session in the Companion room.                                                                                  |
+| `404`  | `session_not_found`                | The session exists but is not this user's session in the user's oracle room.                                                                              |
 | `409`  | `request_conflict`                 | The request ID already belongs to another message body.                                                                                                   |
 | `409`  | `session_conflict`                 | The binding already has another session, or the named session is gone. Clear the stored session and resend the same request ID without `sessionId`.       |
-| `409`  | `room_not_encrypted`               | The Companion room is not end-to-end encrypted.                                                                                                           |
-| `409`  | `room_unavailable`                 | Final. The homeserver refuses the oracle in the Companion room (`M_FORBIDDEN`/403, the bot is not a member). Do not retry; send the failure reply.        |
+| `409`  | `room_not_encrypted`               | The user's oracle room is not end-to-end encrypted.                                                                                                       |
+| `409`  | `room_unavailable`                 | Final. The homeserver refuses the oracle in the user's oracle room (`M_FORBIDDEN`/403, the bot is not a member). Do not retry; send the failure reply.    |
 | `410`  | `response_expired`                 | The run was pruned; the request cannot execute again.                                                                                                     |
 | `413`  | `request_too_large`                | The body is over 64,000 bytes.                                                                                                                            |
 | `428`  | `delegation_required`              | No usable delegation: none, unknown expiry, under 900 s left, or no file-storage grant. Re-authorize.                                                     |
-| `428`  | `room_not_ready`                   | The user has no Companion room yet. Finish Companion setup.                                                                                               |
+| `428`  | `room_not_ready`                   | The user has no oracle room yet. Finish the oracle's setup.                                                                                               |
 | `429`  | `rate_limited`                     | Over the user's rate limit.                                                                                                                               |
 | `503`  | `not_configured`                   | Channels or Auth Hub binding validation are not configured (or `AUTH_HUB_URL` is not HTTPS).                                                              |
 | `503`  | `binding_check_unavailable`        | Auth Hub could not be reached or answered badly.                                                                                                          |
@@ -124,7 +126,7 @@ Every refusal has the body `{ "code": "<code>", "message": "<text>" }`. A gatewa
 
 The tuple `(userDid, bindingId, requestId)` identifies one durable run. Concurrent submissions and requests after object restarts reuse it. A different request body under that tuple returns `409 request_conflict`. An aborted, failed, or interrupted run remains terminal. Retrying it never starts a replacement model or tool execution.
 
-Completed channel runs follow the ordinary seven-day run retention: database boot removes their request, answer, segments, and tool marks, set-based in one transaction. The same transaction retains only a tombstone: the run ID, its terminal status and when it was pruned. Until then, the receipt keeps the binding ID, request ID, body hash, run ID, session ID, when it was written, and the state of its Companion room mirrors, inside the user-scoped database. The same boot removes the receipt of every tombstoned run. No message text enters the receipt or tombstone. Any request for a pruned run returns `410 response_expired`, whatever its body, and writes no new receipt, for as long as its tombstone exists. The canonical session and Matrix transcript keep their existing retention policy.
+Completed channel runs follow the ordinary seven-day run retention: database boot removes their request, answer, segments, and tool marks, set-based in one transaction. The same transaction retains only a tombstone: the run ID, its terminal status and when it was pruned. Until then, the receipt keeps the binding ID, request ID, body hash, run ID, session ID, when it was written, and the state of its oracle room mirrors, inside the user-scoped database. The same boot removes the receipt of every tombstoned run. No message text enters the receipt or tombstone. Any request for a pruned run returns `410 response_expired`, whatever its body, and writes no new receipt, for as long as its tombstone exists. The canonical session and Matrix transcript keep their existing retention policy.
 
 Pruning, from the user object's housekeeping alarm, in batches of at most 200 rows per table and tick (a full batch comes back a minute later):
 
@@ -135,7 +137,7 @@ Storage growth is therefore bounded by two weeks of channel traffic per user: un
 
 ## Reply Plans
 
-A finished turn also carries `plan`, the reply as the ordered parts to deliver. `text` is then the plan as one Markdown message, with artefacts as links, for gateways that predate plans (without a plan it is the model's reply). A gateway that reads `plan` ignores `text`. The Companion room mirror shows the same rendering, posted once per run. The run record itself keeps the model's own text.
+A finished turn also carries `plan`, the reply as the ordered parts to deliver. `text` is then the plan as one Markdown message, with artefacts as links, for gateways that predate plans (without a plan it is the model's reply). A gateway that reads `plan` ignores `text`. The user's oracle room mirror shows the same rendering, posted once per run. The run record itself keeps the model's own text.
 
 ```json
 {
@@ -177,13 +179,13 @@ A finished turn also carries `plan`, the reply as the ordered parts to deliver. 
 - **Nothing to send.** An empty `parts`, like an empty `text`, completes delivery without a provider message. `plan` is absent when a run finished without one (a run from before plans); fall back to `text`.
 - **At most `maxPartsPerRun` parts** (6 on WhatsApp). A gateway may still merge adjacent text parts to respect a provider's pacing.
 
-The runtime picks the WhatsApp, Telegram or Slack profile from `provider`, and a generic chat profile for any other provider. See [chat delivery](chat-delivery.md).
+The runtime picks the WhatsApp, Telegram or Slack profile from `provider`, and a generic chat profile for any provider without a profile of its own (a provider id equal to another profile's name, `matrix` or `generic`, gets that profile). See [chat delivery](chat-delivery.md).
 
 ## Matrix continuity
 
 The session marker uses a deterministic transaction ID for the binding and the request that opens the session. Message mirrors use deterministic transaction IDs for the user, binding, request, and author. A lost response or a retried mirror therefore reuses the original Matrix event.
 
-Matrix is off the channel critical path. The only Matrix send a channel request waits for is the session marker of a binding's first message (its event ID is the session ID); concurrent first messages of one binding share that marker. The Companion room mirrors are owed by the request's receipt and sent in the background:
+Matrix is off the channel critical path. The only Matrix send a channel request waits for is the session marker of a binding's first message (its event ID is the session ID); concurrent first messages of one binding share that marker. The user's oracle room mirrors are owed by the request's receipt and sent in the background:
 
 - **Owed durably.** Admission records that the run owes the room its user message, then begins the run without waiting for Matrix. When the run ends, its reply (the rendered Reply Plan, as the channel user received it) is owed too, or nothing more when it ended without one. Each mirror is recorded in the receipt once it is posted, and is never sent twice.
 - **Answered first.** A poll of a finished run returns `finished` with `text` and `plan` at once, whether its mirror succeeded, is still in flight, or failed. A mirror failure never fails or delays a turn or a poll, and the admission lock is never held across a Matrix call.
@@ -192,7 +194,7 @@ Matrix is off the channel critical path. The only Matrix send a channel request 
 
 Both mirrors use the gateway's encrypted timeline event path (`sendEvent`, which carries the `org.ixo.qi.origin` content). That path, in `@ixo/matrix-bot-workers-sdk` 0.7.0, sends at the `interactive` priority and keeps no outbox of its own: the receipt is the outbox. Sending channel mirrors at the `background` priority needs a `priority` option on the SDK's `sendEvent`.
 
-Whether a room is end-to-end encrypted is asked from the homeserver once per room: encryption cannot be turned off in Matrix, so a "yes" is kept in the user object (memory and storage). The user's Companion room is resolved once per object instance.
+Whether a room is end-to-end encrypted is asked from the homeserver once per room: encryption cannot be turned off in Matrix, so a "yes" is kept in the user object (memory and storage). The user's oracle room is resolved once per object instance.
 
 The `org.ixo.qi.origin` content contains only `v`, `transport`, `binding_id`, and `remote_ref`. This metadata is inside the encrypted event. It contains no phone number, raw message ID, contact ID, or profile name. Human messages also expose the same envelope through `metadata` in both session-history APIs.
 

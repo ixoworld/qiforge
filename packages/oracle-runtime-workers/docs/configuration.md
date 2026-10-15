@@ -202,16 +202,16 @@ chain for `sign_ixo_transaction` and for the POD Creator's
 ### Channels ingress
 
 `POST /channels/turn` lets IXO Channels (WhatsApp now) submit a turn to the
-user's Companion; the authorization model, retries and replies are in
+user's oracle session; the authorization model, retries and replies are in
 [channels](channels.md). Set these on the script that serves HTTP (the
 oracle script in a gateway split).
 
-| Binding or variable            | Required         | Meaning                                                                                                                                                                                               |
-| ------------------------------ | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHANNEL_SERVICE_DID`          | to enable        | The one channel service DID allowed to invoke this deployment. Unset = the route answers `503 Channels are not configured`.                                                                           |
-| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                      |
-| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set. |
-| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                  |
+| Binding or variable            | Required         | Meaning                                                                                                                                                                                                            |
+| ------------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `CHANNEL_SERVICE_DID`          | to enable        | The channel service DID allowed to invoke this deployment, or a comma-separated list of them (trimmed, empties dropped, duplicates removed). Unset or empty = the route answers `503 Channels are not configured`. |
+| `AUTH_HUB_CHANNEL_SERVICE_KEY` | with the route   | Dedicated credential (secret) sent as `x-channels-service-key` when the runtime asks Auth Hub whether a channel binding is active. Never an operator credential.                                                   |
+| `AUTH_HUB`                     | one of these two | **Binding**, not a var: a Cloudflare service binding to Auth Hub (`"services": [{ "binding": "AUTH_HUB", "service": "<auth hub worker>" }]`). Used in preference to `AUTH_HUB_URL` when both are set.              |
+| `AUTH_HUB_URL`                 | one of these two | Auth Hub's origin when there is no service binding. Must be `https`.                                                                                                                                               |
 
 Without the key, or without both `AUTH_HUB` and `AUTH_HUB_URL`, binding
 validation is "not configured": a new channel turn gets `503` and nothing is

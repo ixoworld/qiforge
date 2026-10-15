@@ -32,8 +32,7 @@ const delegationRequired = {
   ok: false,
   status: 428,
   code: 'delegation_required',
-  message:
-    'Companion delegation required: the user must authorize this oracle again',
+  message: 'Delegation required: the user must authorize this oracle again',
 };
 
 describe('durable channel requests', () => {
@@ -408,7 +407,7 @@ describe('channel polls', () => {
       status: 409,
       code: 'session_conflict',
       message:
-        'The Companion session of this channel no longer exists; send the request again without sessionId',
+        'The oracle session of this channel no longer exists; send the request again without sessionId',
     });
     expect(await stub.receipt('wa:late')).toBeNull();
     expect(await stub.count()).toBe(1);
@@ -489,7 +488,7 @@ async function within<T>(work: () => Promise<T>, ms = 2000): Promise<T> {
   }
 }
 
-describe('Companion room mirrors stay off the channel path', () => {
+describe('oracle room mirrors stay off the channel path', () => {
   it('admits and answers a finished run while the mirrors hang, then mirrors both once, in order', async () => {
     const stub = env.CHANNEL_TURNS_TEST.getByName('mirror-hangs');
     await stub.setMirror('hang');

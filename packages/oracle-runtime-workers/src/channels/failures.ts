@@ -41,7 +41,7 @@ export function isRoomForbidden(error: unknown): boolean {
  * The final refusal for a failure retrying cannot fix, or null when the
  * failure stays a transient `503 unavailable`:
  *
- * - the Companion room refused the oracle → `409 room_unavailable`;
+ * - the user's oracle room refused the oracle → `409 room_unavailable`;
  * - the user's file storage rejected the oracle's credentials while the
  *   owner copy loaded (`VFS_AUTH_FAILED`; `NO_VFS_DELEGATION` is a
  *   `428 delegation_required` and is handled before this) →
@@ -51,13 +51,13 @@ export function classifyChannelFailure(error: unknown): ChannelError | null {
   if (parseOwnerCopyFailure(error)?.code === 'VFS_AUTH_FAILED')
     return new ChannelError(
       403,
-      "The user's file storage rejected the oracle; the Companion cannot load the user's data",
+      "The user's file storage rejected the oracle; the oracle cannot load the user's data",
       'storage_unauthorized',
     );
   if (isRoomForbidden(error))
     return new ChannelError(
       409,
-      'The oracle cannot use the Companion room (it is not a member or was refused)',
+      "The oracle cannot use the user's oracle room (it is not a member or was refused)",
       'room_unavailable',
     );
   return null;

@@ -41,7 +41,8 @@ export const ChannelInvoke = defineCapability({
 
 export interface ChannelAuthConfig {
   oracleDid: string;
-  channelDid: string;
+  /** Every channel service DID allowed to invoke this deployment. */
+  channelDids: readonly string[];
   didResolver: DIDKeyResolver;
 }
 
@@ -85,12 +86,16 @@ export async function authenticateChannel(
   );
   const chain = result.proofChain;
   const userDid = chain?.[0];
+  // The invoker is the one listed channel service that signed this
+  // invocation; the user's grant must be addressed to that same service.
+  const channelDid = result.invoker;
   if (
     !result.ok ||
     !userDid?.startsWith('did:ixo:') ||
     chain?.length !== 2 ||
-    chain[1] !== config.channelDid ||
-    result.invoker !== config.channelDid
+    !channelDid ||
+    !config.channelDids.includes(channelDid) ||
+    chain[1] !== channelDid
   )
     throw new ChannelError(
       401,
@@ -106,7 +111,7 @@ export async function authenticateChannel(
     !('issuer' in proof) ||
     proof.proofs.length !== 0 ||
     proof.issuer.did() !== userDid ||
-    proof.audience.did() !== config.channelDid ||
+    proof.audience.did() !== channelDid ||
     proof.capabilities.length !== 1 ||
     proof.capabilities[0]?.can !== 'ixo:channel/invoke' ||
     proof.capabilities[0]?.with !== `ixo:channel:${input.bindingId}` ||
@@ -159,7 +164,7 @@ export async function authenticateChannel(
   return {
     userDid,
     channel: {
-      callerDid: config.channelDid,
+      callerDid: channelDid,
       provider: input.provider,
       bindingId: input.bindingId,
       bindingRevision: input.bindingRevision,
@@ -176,13 +181,30 @@ const channelWebResolver = createWebDIDResolver({
   cacheTtlMs: IXO_DID_RESOLUTION_CACHE_TTL_MS,
 });
 
+/**
+ * `CHANNEL_SERVICE_DID` is one DID or a comma-separated list (one channel
+ * service per messaging provider, or a rotation overlap): entries are
+ * trimmed, empty ones dropped and duplicates removed, order kept.
+ */
+export function parseChannelServiceDids(raw: string | undefined): string[] {
+  return [
+    ...new Set(
+      (raw ?? '')
+        .split(',')
+        .map((did) => did.trim())
+        .filter((did) => did !== ''),
+    ),
+  ];
+}
+
 export function channelAuthConfig(
   env: Pick<
     OracleWorkerEnv,
     'CHANNEL_SERVICE_DID' | 'BLOCKSYNC_GRAPHQL_URL' | 'ORACLE_DID'
   >,
 ): ChannelAuthConfig {
-  if (!env.CHANNEL_SERVICE_DID)
+  const channelDids = parseChannelServiceDids(env.CHANNEL_SERVICE_DID);
+  if (channelDids.length === 0)
     throw new ChannelError(
       503,
       'Channels are not configured',
@@ -194,10 +216,10 @@ export function channelAuthConfig(
   ]);
   return {
     oracleDid: env.ORACLE_DID,
-    channelDid: env.CHANNEL_SERVICE_DID,
+    channelDids,
     didResolver: async (did) => {
       if (
-        did === env.CHANNEL_SERVICE_DID ||
+        channelDids.includes(did) ||
         did === env.ORACLE_DID ||
         did.startsWith('did:ixo:')
       )
