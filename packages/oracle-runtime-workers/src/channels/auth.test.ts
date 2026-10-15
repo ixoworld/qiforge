@@ -13,10 +13,12 @@ import {
   assertChannelAttemptAllowed,
   channelAuthConfig,
   ChannelInvoke,
+  parseChannelServiceDids,
 } from './auth';
 import { RunAttemptDeferred } from '../do/run-coordinator';
 import {
   ChannelError,
+  ChannelOrigin,
   channelRequestHash,
   ChannelTurnBody,
   readChannelBody,
@@ -69,7 +71,13 @@ async function fixture() {
     oracle,
     grant,
     capability,
-    config: { oracleDid: oracle.did, channelDid, didResolver: resolver },
+    config: {
+      oracleDid: oracle.did,
+      channelDids: [channelDid],
+      didResolver: resolver,
+    },
+    resolver,
+    service,
     sign: async (
       options: {
         capability?: Capability;
@@ -208,7 +216,7 @@ describe('channel UCAN authorization', () => {
     await expect(
       authenticateChannel(await f.sign(), f.raw, input, {
         ...f.config,
-        channelDid: 'did:web:unapproved.example.test',
+        channelDids: ['did:web:unapproved.example.test'],
       }),
     ).rejects.toThrow();
   });
@@ -231,10 +239,162 @@ describe('channel UCAN authorization', () => {
     ).rejects.toThrow();
     expect(ChannelInvoke.can).toBe('ixo:channel/invoke');
   });
+
+  it('accepts any listed channel service as the proof audience and invoker', async () => {
+    const f = await fixture();
+    // A second channel service (another messaging provider) in the list.
+    const secondDid = 'did:web:channels-two.example.test';
+    const second = await generateKeypair();
+    f.resolver.register(secondDid, second.did.slice('did:key:'.length));
+    const config = {
+      ...f.config,
+      channelDids: [f.channelDid, secondDid],
+    };
+    const secondGrant = await createDelegation({
+      issuer: f.signer,
+      audience: secondDid,
+      capabilities: [f.capability],
+      expiration: Math.floor(Date.now() / 1000) + 300,
+    });
+    const invoke = async (proof: typeof secondGrant) =>
+      new Headers({
+        authorization: `Bearer ${await serializeInvocation(
+          await createInvocation({
+            issuer: second.signer.withDID(secondDid),
+            audience: f.oracle.did,
+            capability: f.capability,
+            proofs: [proof],
+            expiration: Math.floor(Date.now() / 1000) + 60,
+            facts: [
+              {
+                requestId: input.requestId,
+                requestHash: await channelRequestHash(f.raw),
+              },
+            ],
+          }),
+        )}`,
+        'x-auth-type': 'ucan',
+      });
+
+    // The second service, with a grant addressed to it.
+    expect(
+      (
+        await authenticateChannel(
+          await invoke(secondGrant),
+          f.raw,
+          input,
+          config,
+        )
+      ).channel?.callerDid,
+    ).toBe(secondDid);
+    // The first service still works under the same list.
+    expect(
+      (await authenticateChannel(await f.sign(), f.raw, input, config)).channel
+        ?.callerDid,
+    ).toBe(f.channelDid);
+    // A grant addressed to the first service cannot be used by the second.
+    await expect(
+      authenticateChannel(await invoke(f.grant), f.raw, input, config),
+    ).rejects.toThrow();
+    // A service that is not listed stays refused.
+    await expect(
+      authenticateChannel(await invoke(secondGrant), f.raw, input, {
+        ...config,
+        channelDids: [f.channelDid],
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('refuses a grant addressed to another listed service even when both resolve to the same key', async () => {
+    const f = await fixture();
+    // A second listed DID that publishes the first service's key (a
+    // rotation overlap or a shared key). `@ixo/ucan` tolerates a proof
+    // audience that resolves to the invoker's key, so the chain must not
+    // be accepted on key equivalence: the grant's audience has to be the
+    // exact DID that invokes (`authenticateChannel` checks this itself as
+    // well, in case the validator ever relaxes).
+    const twinDid = 'did:web:channels-twin.example.test';
+    f.resolver.register(twinDid, f.service.did.slice('did:key:'.length));
+    const config = { ...f.config, channelDids: [f.channelDid, twinDid] };
+    const headers = new Headers({
+      authorization: `Bearer ${await serializeInvocation(
+        await createInvocation({
+          issuer: f.service.signer.withDID(twinDid),
+          audience: f.oracle.did,
+          capability: f.capability,
+          proofs: [f.grant],
+          expiration: Math.floor(Date.now() / 1000) + 60,
+          facts: [
+            {
+              requestId: input.requestId,
+              requestHash: await channelRequestHash(f.raw),
+            },
+          ],
+        }),
+      )}`,
+      'x-auth-type': 'ucan',
+    });
+    await expect(
+      authenticateChannel(headers, f.raw, input, config),
+    ).rejects.toMatchObject({ status: 401, code: 'unauthorized' });
+  });
+});
+
+describe('channel service DID list', () => {
+  it('trims, drops empty entries and removes duplicates, keeping order', () => {
+    expect(parseChannelServiceDids(undefined)).toEqual([]);
+    expect(parseChannelServiceDids('')).toEqual([]);
+    expect(parseChannelServiceDids(' , ,')).toEqual([]);
+    expect(parseChannelServiceDids('did:web:a.test')).toEqual([
+      'did:web:a.test',
+    ]);
+    expect(
+      parseChannelServiceDids(
+        ' did:web:a.test, did:web:b.test ,,did:web:a.test',
+      ),
+    ).toEqual(['did:web:a.test', 'did:web:b.test']);
+  });
+
+  it('exposes every listed DID and allowlists each of them', async () => {
+    const env = {
+      ORACLE_DID: 'did:ixo:ixo1oracle',
+      BLOCKSYNC_GRAPHQL_URL: 'https://blocksync-list.invalid/graphql',
+      CHANNEL_SERVICE_DID: 'did:web:one.example.test, did:web:two.example.test',
+    };
+    const config = channelAuthConfig(env);
+    expect(config.channelDids).toEqual([
+      'did:web:one.example.test',
+      'did:web:two.example.test',
+    ]);
+    // Unlisted identities are refused without any lookup.
+    expect(await config.didResolver('did:web:three.example.test')).toEqual({
+      error: expect.objectContaining({
+        message: 'Unapproved channel identity',
+      }),
+    });
+  });
+
+  it('answers 503 not_configured when the list is empty', () => {
+    for (const CHANNEL_SERVICE_DID of [undefined, '', ' , ']) {
+      const env = {
+        ORACLE_DID: 'did:ixo:ixo1oracle',
+        BLOCKSYNC_GRAPHQL_URL: 'https://blocksync-list.invalid/graphql',
+        CHANNEL_SERVICE_DID,
+      };
+      let thrown: unknown;
+      try {
+        channelAuthConfig(env);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ChannelError);
+      expect(thrown).toMatchObject({ status: 503, code: 'not_configured' });
+    }
+  });
 });
 
 describe('channel request boundary', () => {
-  it('accepts only Companion text with no injected identity or topic authority', () => {
+  it('accepts only oracle text with no injected identity or topic authority', () => {
     expect(ChannelTurnBody.safeParse(input).success).toBe(true);
     expect(
       ChannelTurnBody.safeParse({ ...input, userDid: 'did:ixo:attacker' })
@@ -246,6 +406,54 @@ describe('channel request boundary', () => {
         context: { kind: 'topic', topicId: 'other' },
       }).success,
     ).toBe(false);
+  });
+
+  it('accepts both oracle context kinds and refuses any other', () => {
+    for (const kind of ['oracle', 'companion'])
+      expect(
+        ChannelTurnBody.safeParse({ ...input, context: { kind } }).success,
+      ).toBe(true);
+    for (const context of [
+      { kind: 'agent' },
+      { kind: 'oracle', extra: true },
+      {},
+    ])
+      expect(ChannelTurnBody.safeParse({ ...input, context }).success).toBe(
+        false,
+      );
+  });
+
+  it('accepts any well-formed provider id and refuses a malformed one', () => {
+    for (const provider of [
+      'whatsapp',
+      'telegram',
+      'sms-2',
+      'a_b',
+      'a'.repeat(32),
+    ]) {
+      expect(ChannelTurnBody.safeParse({ ...input, provider }).success).toBe(
+        true,
+      );
+      expect(
+        ChannelOrigin.safeParse({
+          v: 1,
+          transport: provider,
+          binding_id: input.bindingId,
+          remote_ref: input.remoteMessageRef,
+        }).success,
+      ).toBe(true);
+    }
+    for (const provider of [
+      '',
+      'WhatsApp',
+      '1sms',
+      '-x',
+      'a b',
+      'a'.repeat(33),
+    ])
+      expect(ChannelTurnBody.safeParse({ ...input, provider }).success).toBe(
+        false,
+      );
   });
 
   it('rejects an oversized stream before buffering it', async () => {

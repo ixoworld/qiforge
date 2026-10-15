@@ -1734,7 +1734,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           if (!roomId)
             throw new ChannelError(
               428,
-              'Companion room is not ready',
+              "The user's oracle room is not ready",
               'room_not_ready',
             );
           return (await this.createSession(identity, { roomId, markerTxnId }))
@@ -1753,13 +1753,13 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           )
             throw new ChannelError(
               404,
-              'Companion session not found',
+              'Oracle session not found',
               'session_not_found',
             );
           if (!(await this.roomIsEncrypted(roomId)))
             throw new ChannelError(
               409,
-              'Companion room must be encrypted',
+              "The user's oracle room must be encrypted",
               'room_not_encrypted',
             );
         },
@@ -2352,7 +2352,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         if (next !== null) deadlines.push(Math.max(next, now + 1000));
       }
 
-      // Channel requests: retry the Companion room mirrors that are due, and
+      // Channel requests: retry the user's oracle room mirrors that are due, and
       // prune (bounded) receipts that never started a run and old run
       // tombstones (channels/turns.ts).
       if (this.channelTurns) {
@@ -4763,7 +4763,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       outcome: RunOutcome,
     ): Promise<void> {
       // A channel run's reply (or the end of a run without one) is mirrored
-      // into the Companion room in the background: never awaited here, so
+      // into the user's oracle room in the background: never awaited here, so
       // the session's next queued run starts at once. Without the handle (a
       // reset dropped it mid-run) the next poll or alarm mirrors it.
       if (record.client === 'channel') this.channelTurns?.deliverReply();

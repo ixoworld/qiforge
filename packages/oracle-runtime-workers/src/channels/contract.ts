@@ -1,22 +1,34 @@
 import { z } from 'zod';
 import type { ReplyPlan } from '../delivery/types';
 
+/**
+ * A channel provider id (`whatsapp`, later others): lower-case, starts with a
+ * letter, at most 32 characters. The runtime does not enumerate providers;
+ * the gateway and the Auth Hub do. An unknown provider is delivered with the
+ * default delivery profile.
+ */
+export const ChannelProviderId = z.string().regex(/^[a-z][a-z0-9_-]{0,31}$/);
+
 export const ChannelTurnBody = z.strictObject({
-  provider: z.literal('whatsapp'),
+  provider: ChannelProviderId,
   bindingId: z.string().regex(/^chb_[A-Za-z0-9_-]{1,120}$/),
   bindingRevision: z.number().int().positive().safe(),
   requestId: z.string().min(1).max(180),
   remoteMessageRef: z.string().regex(/^hmac:[a-f0-9]{64}$/),
   sessionId: z.string().min(1).max(255).optional(),
   message: z.string().min(1).max(16_000),
-  context: z.strictObject({ kind: z.literal('companion') }),
+  /**
+   * Which kind of oracle the gateway believes it addresses. `companion` is
+   * the legacy value; the gateway sends `oracle`. Both are accepted.
+   */
+  context: z.strictObject({ kind: z.enum(['companion', 'oracle']) }),
 });
 
 export type ChannelTurnInput = z.infer<typeof ChannelTurnBody>;
 
 export const ChannelOrigin = z.strictObject({
   v: z.literal(1),
-  transport: z.literal('whatsapp'),
+  transport: ChannelProviderId,
   binding_id: ChannelTurnBody.shape.bindingId,
   remote_ref: ChannelTurnBody.shape.remoteMessageRef,
 });
@@ -39,7 +51,7 @@ export function channelOrigin(
 
 export interface ChannelIdentity {
   callerDid: string;
-  provider: 'whatsapp';
+  provider: string;
   bindingId: string;
   bindingRevision: number;
 }
@@ -82,7 +94,7 @@ export type ChannelErrorStatus =
  * The machine-readable reason a channel turn was refused. The gateway maps
  * a refusal by `code` first and by HTTP status second. 428 (Precondition
  * Required) means a precondition on the user's side is missing: fix it
- * (authorize the oracle again, finish setting up the Companion room) and
+ * (authorize the oracle again, finish setting up the user's oracle room) and
  * retry; it is never a transient outage.
  *
  * | code                              | status | meaning                                               |
@@ -93,16 +105,17 @@ export type ChannelErrorStatus =
  * | `identity_mismatch`               | 403    | the channel identity does not match the request       |
  * | `identity_required`               | 403    | the binding check got no channel identity             |
  * | `binding_inactive`                | 403    | the Auth Hub reports the binding inactive             |
- * | `channel_grant_not_tool_authority`| 403    | a channel request carried a delegation header         | * | `storage_unauthorized`            | 403    | the user's file storage rejected the oracle (final)   |
- * | `session_not_found`               | 404    | the session is not the user's Companion session       |
+ * | `channel_grant_not_tool_authority`| 403    | a channel request carried a delegation header         |
+ * | `storage_unauthorized`            | 403    | the user's file storage rejected the oracle (final)   |
+ * | `session_not_found`               | 404    | the session is not the user's oracle session          |
  * | `request_conflict`                | 409    | the request id already belongs to another message     |
  * | `session_conflict`                | 409    | another session is bound, or the named one is gone:   |
  * |                                   |        | resend the same request without `sessionId`           |
- * | `room_not_encrypted`              | 409    | the Companion room is not end-to-end encrypted        |
- * | `room_unavailable`                | 409    | the oracle cannot use the Companion room (final)      |
+ * | `room_not_encrypted`              | 409    | the user's oracle room is not end-to-end encrypted    |
+ * | `room_unavailable`                | 409    | the oracle cannot use the user's oracle room (final)  |
  * | `response_expired`                | 410    | the run was pruned; the request cannot run again      |
  * | `request_too_large`               | 413    | the body is over 64 kB                                |
- * | `room_not_ready`                  | 428    | the user has no Companion room yet                    |
+ * | `room_not_ready`                  | 428    | the user has no oracle room yet                       |
  * | `delegation_required`             | 428    | no usable delegation to this oracle (see below)       |
  * | `rate_limited`                    | 429    | too many requests for this user                       |
  * | `not_configured`                  | 503    | channels or binding validation are not configured     |
@@ -161,7 +174,7 @@ export class ChannelError extends Error {
  * one at once).
  */
 export class StaleSessionError extends ChannelError {
-  constructor(message = 'Companion session not found') {
+  constructor(message = 'Oracle session not found') {
     super(404, message, 'session_not_found');
     this.name = 'StaleSessionError';
   }
@@ -195,7 +208,7 @@ export interface ChannelDelegation {
 export function delegationRequiredError(): ChannelError {
   return new ChannelError(
     428,
-    'Companion delegation required: the user must authorize this oracle again',
+    'Delegation required: the user must authorize this oracle again',
     'delegation_required',
   );
 }

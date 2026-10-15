@@ -23,11 +23,11 @@ interface ReceiptRow extends Record<string, string | number | null> {
   /** 1 once the user message was mirrored (or there is none to mirror). */
   user_mirrored: number;
   /**
-   * 0 while the reply is owed, 1 once it was mirrored into the Companion
+   * 0 while the reply is owed, 1 once it was mirrored into the user's oracle
    * room, 2 when the run ended without a reply to mirror.
    */
   reply_mirrored: number;
-  /** 1 while a mirror of this request is owed to the Companion room. */
+  /** 1 while a mirror of this request is owed to the user's oracle room. */
   mirror_pending: number;
   /** Failed mirror attempts since the last success. */
   mirror_failures: number;
@@ -71,7 +71,7 @@ export interface ChannelTurnsHost {
   /**
    * Throws `StaleSessionError` when the object holds no such session (it
    * was deleted), any other `ChannelError` when it is not the user's
-   * session in the encrypted Companion room.
+   * session in the encrypted oracle room.
    */
   assertSession(identity: TurnIdentity, sessionId: string): Promise<void>;
   /**
@@ -86,7 +86,7 @@ export interface ChannelTurnsHost {
   begin(runId: string, request: TurnRequest): Promise<RunRecord>;
   /** The turn a run was admitted with, read back from its stored request. */
   requestOf(record: RunRecord): TurnRequest;
-  /** Post one message into the Companion room; rejects when it could not. */
+  /** Post one message into the user's oracle room; rejects when it could not. */
   mirror(
     request: TurnRequest,
     text: string,
@@ -119,7 +119,7 @@ type Received =
  *    (gateway RPCs and a homeserver read);
  * 3. under the lock again, SQLite only: bind the session and begin the run.
  *
- * The Companion room mirrors (the user message, then the reply) are owed by
+ * The user's oracle room mirrors (the user message, then the reply) are owed by
  * the receipt and sent in the background, never awaited by a turn or a poll.
  */
 export class ChannelTurns {
@@ -257,7 +257,7 @@ export class ChannelTurns {
         if (stale)
           throw new ChannelError(
             409,
-            'The Companion session of this channel no longer exists; send the request again without sessionId',
+            'The oracle session of this channel no longer exists; send the request again without sessionId',
             'session_conflict',
           );
         throw error;
@@ -294,7 +294,7 @@ export class ChannelTurns {
   }
 
   /**
-   * A run ended: mirror what it still owes the Companion room (its reply)
+   * A run ended: mirror what it still owes the user's oracle room (its reply)
    * in the background. The receipt records each mirror, so nothing is sent
    * twice; a failed one is retried by the housekeeping alarm.
    */
@@ -318,7 +318,7 @@ export class ChannelTurns {
 
   /**
    * The session was deleted: release every binding that pointed at it, so
-   * the binding's next message opens a new Companion session. Returns
+   * the binding's next message opens a new oracle session. Returns
    * whether a binding was released.
    */
   forgetSession(sessionId: string): Promise<boolean> {
@@ -621,7 +621,7 @@ export class ChannelTurns {
       }
       return this.respond(input, receipt, session, record);
     }
-    // The run owes its user message to the Companion room from here on;
+    // The run owes its user message to the user's oracle room from here on;
     // the mirror pass sends it, the turn never waits for it.
     await this.db.run(
       `UPDATE channel_requests SET session_id = ?, user_mirrored = 0, reply_mirrored = 0,
@@ -710,7 +710,7 @@ export class ChannelTurns {
   }
 
   /**
-   * One mirror pass over the receipts that owe the Companion room a
+   * One mirror pass over the receipts that owe the user's oracle room a
    * message. Sessions are mirrored in parallel; within a session strictly
    * in receipt order, the user message before its reply, and a mirror that
    * fails holds the session's later ones back until it succeeds or is

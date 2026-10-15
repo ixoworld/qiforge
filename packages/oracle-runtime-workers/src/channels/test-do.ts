@@ -244,7 +244,7 @@ export class ChannelTurnsTestDO extends DurableObject {
     return this.runs!.get(runId);
   }
 
-  /** The text of the last assistant mirror into the Companion room. */
+  /** The text of the last assistant mirror into the user's oracle room. */
   async mirroredReply(): Promise<string | undefined> {
     return this.ctx.storage.get<string>('mirrored:oracle');
   }

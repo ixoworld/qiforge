@@ -269,15 +269,13 @@ describe('POST /channels/turn error bodies', () => {
       ok: false,
       status: 428,
       code: 'delegation_required',
-      message:
-        'Companion delegation required: the user must authorize this oracle again',
+      message: 'Delegation required: the user must authorize this oracle again',
     }));
     const res = await send(turn, env);
     expect(res.status).toBe(428);
     expect(await res.json()).toEqual({
       code: 'delegation_required',
-      message:
-        'Companion delegation required: the user must authorize this oracle again',
+      message: 'Delegation required: the user must authorize this oracle again',
     });
   });
 
@@ -470,5 +468,38 @@ describe('the binding verdict cache', () => {
         t0,
       ),
     ).toBe('cached');
+  });
+});
+
+describe('POST /channels/turn service DID list', () => {
+  const send = (
+    turn: Awaited<ReturnType<typeof signedTurn>>,
+    env: ReturnType<typeof environment>['env'],
+  ) =>
+    createShell().request(
+      '/channels/turn',
+      { method: 'POST', headers: turn.headers, body: turn.raw },
+      env,
+    );
+
+  it('admits a service listed second in a comma-separated CHANNEL_SERVICE_DID', async () => {
+    const turn = await signedTurn();
+    const { env, turns } = environment(turn, false);
+    env.CHANNEL_SERVICE_DID = `did:web:other.example.test, ${turn.serviceDid}`;
+    expect((await send(turn, env)).status).toBe(200);
+    expect(turns).toEqual([USER_DID]);
+  });
+
+  it('answers 503 not_configured, before reading the body, when the list is empty', async () => {
+    const turn = await signedTurn();
+    const { env, turns } = environment(turn, false);
+    env.CHANNEL_SERVICE_DID = ' , ';
+    const res = await send(turn, env);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      code: 'not_configured',
+      message: 'Channels are not configured',
+    });
+    expect(turns).toEqual([]);
   });
 });

@@ -135,7 +135,10 @@ export function resolveDeliveryProfile(
   const surface =
     turn.client === 'matrix'
       ? 'matrix'
-      : turn.channel?.provider && DEFAULT_LIMITS[turn.channel.provider]
+      : // An unknown provider id uses the generic profile. `hasOwn`: a
+        // provider id such as `constructor` must not hit the prototype.
+        turn.channel?.provider &&
+          Object.hasOwn(DEFAULT_LIMITS, turn.channel.provider)
         ? turn.channel.provider
         : 'generic';
   const merged: ChatLimits = {

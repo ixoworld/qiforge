@@ -5,7 +5,7 @@ import { renderSurfaceSection } from './prompt';
 const whatsapp = {
   client: 'channel' as const,
   channel: {
-    provider: 'whatsapp' as const,
+    provider: 'whatsapp',
     bindingId: 'chb_x',
     remoteMessageRef: 'hmac:x',
   },
@@ -26,6 +26,16 @@ describe('resolveDeliveryProfile', () => {
       label: 'WhatsApp',
       limits: { maxBubbles: 4, bubbleMax: 1500, tables: false },
     });
+  });
+
+  it('falls back to the generic profile for a provider without its own', () => {
+    for (const provider of ['telegram-bot', 'constructor', 'sms']) {
+      const profile = resolveDeliveryProfile({
+        ...whatsapp,
+        channel: { ...whatsapp.channel, provider },
+      });
+      expect(profile).toMatchObject({ kind: 'chat', surface: 'generic' });
+    }
   });
 
   it('keeps Matrix rooms on one message per reply unless the chat style is turned on', () => {

@@ -65,6 +65,7 @@ export interface OracleWorkerEnv {
   UCAN_AUTH_MAX_TTL_SECONDS?: string;
   /** `true` restores the legacy bare-delegation authentication (off by default). */
   UCAN_ALLOW_BARE_DELEGATION_AUTH?: string;
+  /** The channel service DID, or a comma-separated list of them. */
   CHANNEL_SERVICE_DID?: string;
   AUTH_HUB?: Fetcher;
   AUTH_HUB_URL?: string;
@@ -363,7 +364,8 @@ export interface TurnIdentity {
 /** Request the shell / gateway sends to `UserOracleDO` to run one turn. */
 export interface TurnRequest {
   channel?: {
-    provider: 'whatsapp';
+    /** A provider id (`/^[a-z][a-z0-9_-]{0,31}$/`), e.g. `whatsapp`. */
+    provider: string;
     bindingId: string;
     remoteMessageRef: string;
   };
