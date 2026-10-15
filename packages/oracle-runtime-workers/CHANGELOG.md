@@ -1,5 +1,25 @@
 # @ixo/oracle-runtime-workers
 
+## 0.19.0
+
+### Minor Changes
+
+- [#360](https://github.com/ixoworld/qiforge/pull/360) [`c801480`](https://github.com/ixoworld/qiforge/commit/c801480062aaae79071825acb3213626c15f314f) Thanks [@Michael-Ixo](https://github.com/Michael-Ixo)! - Channels ingress serves any oracle, not only the Companion. `POST /channels/turn`
+  accepts any provider id matching `^[a-z][a-z0-9_-]{0,31}$` (was `whatsapp`
+  only; an unknown provider uses the generic delivery profile) and
+  `context.kind` of `oracle` or `companion` (was `companion` only).
+  `CHANNEL_SERVICE_DID` may be a comma-separated list of channel service DIDs:
+  any listed service can invoke, and a user grant must be addressed to the
+  service that signs the invocation; an empty list still answers
+  `503 not_configured`. Error messages no longer name the Companion (for
+  example `Delegation required: the user must authorize this oracle again`,
+  `The user's oracle room is not ready`); error codes are unchanged.
+
+### Patch Changes
+
+- Updated dependencies [[`d1cb066`](https://github.com/ixoworld/qiforge/commit/d1cb066421afd12e7451180020e1bb43485613e2)]:
+  - @ixo/common@1.7.0
+
 ## 0.18.0
 
 ### Minor Changes

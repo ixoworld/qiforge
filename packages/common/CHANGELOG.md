@@ -1,5 +1,23 @@
 # @ixo/common
 
+## 1.7.0
+
+### Minor Changes
+
+- [#335](https://github.com/ixoworld/qiforge/pull/335) [`d1cb066`](https://github.com/ixoworld/qiforge/commit/d1cb066421afd12e7451180020e1bb43485613e2) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Decision assurance: an inference dialect separate from provider identity and
+  per-evaluation inference provenance (requested vs. returned model, function
+  version, model pinning, provider artifact) on the evaluation's `judgment`;
+  versioned calibration profiles, with the capability router's 0.7 floor
+  published as a `provisional` profile; Databricks System One and `ai_decide`
+  adapters as distinct assurance classes (`DECISION_PROVIDER=databricks-systemone`
+  / `databricks-ai-decide`); semantic-stability probes
+  (`buildSemanticConformanceVariants`, alongside the existing question-isolation
+  probe); and a provider-neutral bakeoff runner that keeps each run's provenance
+  and refuses to aggregate runs whose provenance differs.
+
+  `DecisionJudgmentProvenance` now requires `apiDialect`, `requestedModel` and
+  `modelPinning`, so a hand-built `judgment` literal must set them.
+
 ## 1.6.0
 
 ### Minor Changes

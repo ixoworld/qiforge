@@ -1,5 +1,12 @@
 # qiforge-example
 
+## 0.0.4
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @ixo/oracle-runtime@1.99.1
+
 ## 0.0.3
 
 ### Patch Changes
