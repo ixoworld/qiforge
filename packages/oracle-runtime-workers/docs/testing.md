@@ -5,6 +5,12 @@ iterating and the full matrix once at the end.
 
 ## Unit tests (seconds)
 
+The [Gmail connector](gmail-connectors.md#verification-boundaries) has a
+controlled HTTP/signature suite in `test:core` and an actual workerd agent-turn
+suite in `test/gmail-connectors.test.ts`. The workerd test checks capability
+loading, strict invocation binding and proof-free checkpoints. Both use
+synthetic accounts and prove local behavior, without live provider acceptance.
+
 - `pnpm test` — runs **inside workerd** through `@cloudflare/vitest-pool-workers`
   (`vitest.config.ts`, test worker in `test/worker.ts`, bindings in
   `test/wrangler.test.jsonc`): the SQLite VFS and saver (20 MiB files,

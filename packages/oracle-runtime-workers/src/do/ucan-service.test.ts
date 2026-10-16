@@ -8,6 +8,7 @@
  */
 import {
   createDelegation,
+  parseDelegation,
   serializeDelegation,
   signerFromMnemonic,
 } from '@ixo/ucan';
@@ -102,6 +103,51 @@ describe('WorkersUcanService.createInvocationFromDelegation', () => {
       'https://memory.example.com/.well-known/did.json',
       { signal: expect.any(AbortSignal) },
     );
+  });
+});
+
+describe('WorkersUcanService.mintSelfSignedInvocation caveats', () => {
+  it('preserves signed request caveats, short expiry and fresh facts while keeping existing calls valid', async () => {
+    const service = new WorkersUcanService({
+      oracleDid: ORACLE_DID,
+      signingMnemonic: ORACLE_MNEMONIC,
+    });
+    vi.spyOn(service, 'resolveServiceDid').mockResolvedValue(SERVICE_DID);
+    const capability = {
+      can: 'connector/status',
+      with: 'composio://agent/oracle/toolkit/gmail',
+      nb: { requestHash: 'a'.repeat(64) },
+    };
+    const first = await service.mintSelfSignedInvocation(
+      'https://proxy.example',
+      capability,
+      { maxTtlSeconds: 60 },
+    );
+    const second = await service.mintSelfSignedInvocation(
+      'https://proxy.example',
+      capability,
+      { maxTtlSeconds: 60 },
+    );
+    if ('error' in first || 'error' in second)
+      throw new Error('self-signed mint failed');
+    const parsed = await parseDelegation(first.invocation);
+    expect(parsed.capabilities[0]?.nb).toEqual(capability.nb);
+    expect(parsed.proofs).toHaveLength(0);
+    expect(parsed.expiration).toBeLessThanOrEqual(
+      Math.floor(Date.now() / 1000) + 60,
+    );
+    expect(first.invocation).not.toBe(second.invocation);
+    const legacy = await service.mintSelfSignedInvocation(
+      'https://proxy.example',
+      {
+        can: 'connector/status',
+        with: 'composio://agent/oracle/toolkit/gmail',
+      },
+    );
+    if ('error' in legacy) throw new Error('existing self-signed call failed');
+    expect(
+      (await parseDelegation(legacy.invocation)).capabilities[0]?.nb,
+    ).toBeUndefined();
   });
 });
 

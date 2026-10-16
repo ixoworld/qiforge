@@ -86,6 +86,11 @@ script>`), which moves the existing `MatrixGatewayDO` namespace — crypto
 
 ## Dependencies
 
+The opt-in [Gmail connector](gmail-connectors.md) uses `GMAIL_CONNECTOR_URL`
+and `GMAIL_CONNECTOR_OWNER_URL`. It verifies a direct owner grant for the
+selected account and exposes profile reads only. It requires no Composio API
+key. Keep broad Composio access disabled for this connector deployment.
+
 The editor chain (`@ixo/editor`, `@ixo/matrix-crdt`, `@blocknote/*`,
 `y-prosemirror`, `y-protocols`) and the runtime's own editor and flows
 plugins hand `Y.Doc`s to each other, so a Workers bundle must contain exactly

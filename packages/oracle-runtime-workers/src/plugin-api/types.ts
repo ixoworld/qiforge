@@ -699,7 +699,7 @@ export interface RuntimeContext<TConfig = MergedConfig> {
      */
     mintSelfSignedInvocation: (
       serviceUrl: string,
-      capability: { can: string; with: string },
+      capability: { can: string; with: string; nb?: Record<string, unknown> },
       options?: { maxTtlSeconds?: number },
     ) => Promise<{ invocation: string } | { error: string }>;
     /**
