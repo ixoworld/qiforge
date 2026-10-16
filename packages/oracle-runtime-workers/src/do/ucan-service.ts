@@ -373,7 +373,7 @@ export class WorkersUcanService {
 
   async mintSelfSignedInvocation(
     serviceUrl: string,
-    capability: { can: string; with: string },
+    capability: { can: string; with: string; nb?: Record<string, unknown> },
     options: { maxTtlSeconds?: number } = {},
   ): Promise<MintResult> {
     if (!this.opts.signingMnemonic)
@@ -398,6 +398,7 @@ export class WorkersUcanService {
         capability: {
           can: capability.can as `${string}/${string}`,
           with: capability.with as `${string}:${string}`,
+          ...(capability.nb !== undefined ? { nb: capability.nb } : {}),
         },
         proofs: [],
         expiration: nowSeconds + (options.maxTtlSeconds ?? 120),

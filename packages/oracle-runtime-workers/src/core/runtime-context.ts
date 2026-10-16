@@ -141,12 +141,12 @@ export interface UcanAdapter {
   createInvocationFromDelegation(
     delegationCar: string,
     serviceUrl: string,
-    capability: { can: string; with: string },
+    capability: { can: string; with: string; nb?: Record<string, unknown> },
     options?: { maxTtlSeconds?: number },
   ): Promise<{ invocation: string } | { error: string }>;
   mintSelfSignedInvocation(
     serviceUrl: string,
-    capability: { can: string; with: string },
+    capability: { can: string; with: string; nb?: Record<string, unknown> },
     options?: { maxTtlSeconds?: number },
   ): Promise<{ invocation: string } | { error: string }>;
   getServiceDelegation(
