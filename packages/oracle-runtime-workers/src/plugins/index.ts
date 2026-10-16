@@ -30,6 +30,7 @@ import { MatrixGroupChatsPlugin } from './matrix-group-chats';
 import { PodCreatorPlugin } from './pod-creator';
 
 export * from './composio';
+export * from './gmail-connectors';
 export * from './editor';
 export * from './flows';
 export * from './tasks';
