@@ -1,5 +1,11 @@
 # @ixo/oracle-runtime-workers
 
+## 0.19.1
+
+### Patch Changes
+
+- [#361](https://github.com/ixoworld/qiforge/pull/361) [`75e04cc`](https://github.com/ixoworld/qiforge/commit/75e04cc69443e9364d0ad38ed3c1cc9424077803) Thanks [@ig-shaun](https://github.com/ig-shaun)! - Add the opt-in GmailConnectorPlugin for owner-approved Gmail profile reads through the IXO connector proxy. Keep consent links, exact account and owner UCAN binding, bounded transport, safe readiness, and proof isolation in the Workers runtime.
+
 ## 0.19.0
 
 ### Minor Changes
