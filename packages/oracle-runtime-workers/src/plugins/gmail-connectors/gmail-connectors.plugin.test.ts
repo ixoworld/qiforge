@@ -1,5 +1,4 @@
 import { createServer, type Server } from 'node:http';
-import { once } from 'node:events';
 import assert from 'node:assert/strict';
 import {
   createDelegation,
@@ -187,8 +186,13 @@ beforeAll(async () => {
       res.end('controlled endpoint assertion failed');
     }
   });
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
   const address = server.address();
   if (!address || typeof address === 'string')
     throw new Error('HTTP server missing address');
@@ -197,8 +201,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   server.closeAllConnections();
-  server.close();
-  await once(server, 'close');
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 });
 
 beforeEach(async () => {
