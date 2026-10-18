@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "issue": "IXO-5618",
+  "observedAt": "2026-10-18",
+  "preparation": {
+    "ACTION_PROPOSALS_ENABLED": false,
+    "ACTION_TOPIC_PROPOSALS_ENABLED": false
+  },
+  "sources": {
+    "runtime": "16fe4e65f97d57c064e6615e18dfe4ea7527bf25",
+    "runtimeBase": "2ddc380ba8adc2e815eff86d221b31791da829dd",
+    "upstreamMain": "baec324161c0f3be5d284e28ee3272e261102a3c",
+    "portal": "ded28cdb48482872fd73a790292a8e27c0b46725",
+    "gateway": "c7564b573cb4d220b335f11084894658e40af901",
+    "companionBase": "cc151dafdbd2e4534eb01e3ca426ee5d371ebcf9"
+  },
+  "plannedReleases": [
+    {
+      "name": "@ixo/common",
+      "version": "1.7.1",
+      "status": "unpublished"
+    },
+    {
+      "name": "@ixo/ixo-transaction",
+      "version": "0.2.0",
+      "status": "unpublished"
+    },
+    {
+      "name": "@ixo/oracle-runtime-workers",
+      "version": "0.20.0",
+      "status": "unpublished"
+    },
+    {
+      "name": "@ixo/oracle-runtime",
+      "version": "1.99.2",
+      "status": "unpublished"
+    },
+    {
+      "name": "qiforge-workers-example",
+      "version": "0.0.8",
+      "status": "unpublished"
+    },
+    {
+      "name": "qiforge-example",
+      "version": "0.0.5",
+      "status": "unpublished"
+    }
+  ],
+  "localEvidence": {
+    "workerd": {
+      "files": 189,
+      "tests": 2237,
+      "result": "passed before final mixed-marker hardening"
+    },
+    "finalActionWorkerd": {
+      "files": 17,
+      "tests": 164,
+      "result": "passed after final hardening"
+    },
+    "core": {
+      "files": 71,
+      "tests": 895,
+      "result": "passed after final hardening"
+    },
+    "decisions": {
+      "files": 15,
+      "tests": 198,
+      "result": "passed after final hardening"
+    },
+    "commonBuild": "passed",
+    "workersTypecheck": "passed",
+    "changedFileLintAndFormatting": "passed",
+    "independentReview": "accepted finding fixed and reverified; no remaining actionable findings",
+    "companionCandidate": {
+      "typecheck": "passed",
+      "tests": 2,
+      "dryRun": "passed; no deployment",
+      "bundleSha256": "4f0ede61aa785d68b60407bcf0cbc02f3c71ee3872bb09abb5c80a58e6cb91cb",
+      "dependencyResolution": "reviewed local source links; future registry pins not installed",
+      "lockfile": "not regenerated; waits for package publication",
+      "config": "devnet; openrouter-jev; both preparation flags false; proposed Portal origin requires operator review",
+      "adoptionPatchSha256": "6f930189030785412cd6e928ac20b124f43dc546b76a6af5c80c44e983d2d8b8"
+    }
+  },
+  "providerEvidence": {
+    "cloudflare": {
+      "status": "normalization_verified",
+      "httpStatus": 200,
+      "returnedModel": "jev-1.13.0",
+      "booleanProbability": 0.98,
+      "choice": "requested",
+      "choiceConfidence": 0.78,
+      "requestedProbability": 0.89,
+      "clarifyProbability": 0.11,
+      "requiredMinimum": 0.95,
+      "policyOutcome": "clarification_required",
+      "liveTestedWireSha256": "656558c3b7e139071f73406ddc04cc06baae00d3abe211b0151f59a2f934b40c",
+      "committedWireSha256": "d6b793a1cde0cc4759c29915c6544373263f17f3d8057e8738626b50d768bb33",
+      "scope": "safe synthetic adapter call; no trusted owner/room resolved; mixed-marker hardening subsequently verified locally"
+    },
+    "selectedDeployedProvider": {
+      "provider": "openrouter-jev",
+      "status": "not_verified"
+    }
+  },
+  "gates": [
+    {
+      "id": "selected-provider",
+      "status": "open",
+      "needs": "Successful real bounded evaluation through selected OpenRouter provider with versioned intent fixtures"
+    },
+    {
+      "id": "package-deployment-identity",
+      "status": "open",
+      "needs": "Publish compatible graph, frozen consumer installs, exact Worker and Portal deployment attestations"
+    },
+    {
+      "id": "transfer",
+      "status": "open",
+      "needs": "Authenticated review, exact values, real owner wallet and independently verified test-chain receipt"
+    },
+    {
+      "id": "topic-create",
+      "status": "open",
+      "needs": "Portal and WhatsApp-origin discussion requests, exact consent and verified encrypted Matrix root/body/operation/state events"
+    },
+    {
+      "id": "topic-access",
+      "status": "open",
+      "needs": "Current NFT-owner authority, unchanged grant constraints, mobile signing and exact-message chain receipt"
+    },
+    {
+      "id": "conversation-continuity",
+      "status": "open",
+      "needs": "Same authenticated proposal and receipt across Portal/WhatsApp; outcome delivered only to original conversation"
+    },
+    {
+      "id": "security",
+      "status": "open",
+      "needs": "Forwarded/wrong-owner links, expiry, revocation, supersession, edits and changed grants/identity/authority on deployed candidate"
+    },
+    {
+      "id": "recovery",
+      "status": "open",
+      "needs": "Two devices, duplicate taps, navigation/disconnection, DO restart and lost signing responses without blind resubmission"
+    },
+    {
+      "id": "mobile-and-latency",
+      "status": "open",
+      "needs": "Cold/warm action-page and Decision timings; operator-reviewed real screenshots and recordings"
+    },
+    {
+      "id": "disable-and-recover",
+      "status": "open",
+      "needs": "Authenticated reads, reconciliation and receipt access with preparation disabled on deployed candidate"
+    }
+  ]
+}
