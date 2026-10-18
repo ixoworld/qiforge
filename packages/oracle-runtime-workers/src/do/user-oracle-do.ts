@@ -1,3 +1,15 @@
+import type { ChannelTurnResponse } from '../channels/contract';
+import { refreshActionProposal } from '../action-proposals/reconcile';
+import { actionOutcome } from '@ixo/ixo-transaction/action-proposals';
+import {
+  ActionProposalConflict,
+  ActionProposalStore,
+  type ProposalCommand,
+} from '../action-proposals/store';
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import { ChannelTurns } from '../channels/turns';
 import { assertChannelAttemptAllowed } from '../channels/auth';
 import {
@@ -780,6 +792,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
     private resultStore: ResultStore | null = null;
     /** Chat delivery's artefacts; null when no bucket is bound (see `canShare` for new ones). */
     private artifacts: ArtifactStore | null = null;
+    private actionProposals: ActionProposalStore | null = null;
     /** Text `view_attachment` extracted, per session (`attachments/view-cache.ts`). */
     private attachmentTextCache: AttachmentTextCacheStore | null = null;
     /**
@@ -1680,6 +1693,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         oracleName: this.core.identity.name,
       });
       await this.saver.setup();
+      this.actionProposals = new ActionProposalStore(liveDb);
+      await this.actionProposals.setup();
       this.sessions = new SessionsStore(liveDb);
       await this.sessions.setup();
       this.matrixLedger = new MatrixTurnLedger(liveDb);
@@ -1882,6 +1897,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         logger: console,
       });
       this.ambient = createAmbientServices({
+        actionProposals: {
+          create: (subject) => this.prepareActionProposal(subject),
+        },
         ...(this.taskScheduler ? { tasks: this.taskScheduler.surface } : {}),
         preferences: this.preferences,
         kv: new SqliteUserKv(liveDb),
@@ -1959,6 +1977,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       this.runs = null;
       this.resultStore = null;
       this.artifacts = null;
+      this.actionProposals = null;
       this.attachmentTextCache = null;
       this.domainContextStore = null;
       // Its store is bound to the database just dropped: a caller that sees
@@ -2287,6 +2306,8 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
 
       const now = Date.now();
       const deadlines: number[] = [];
+      const receiptDeadline = await this.mirrorActionReceipts();
+      if (receiptDeadline !== undefined) deadlines.push(receiptDeadline);
 
       // Durable runs: start the recovery attempts that are due (the boot
       // above may have just scheduled them), then keep the alarm inside the
@@ -2750,7 +2771,10 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         }
         return {
           ok: true,
-          result: await this.channelTurns!.submit(identity, input, requestHash),
+          result: await this.withActionOutcomes(
+            identity.userDid,
+            await this.channelTurns!.submit(identity, input, requestHash),
+          ),
         };
       } catch (error) {
         // A failure retrying cannot fix (the room refused the oracle, the
@@ -2792,7 +2816,41 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       const result = await this.channelTurns.poll(identity, input, requestHash);
       if (!result) return null;
       await this.recordAccess();
-      return { ok: true, result };
+      return {
+        ok: true,
+        result: await this.withActionOutcomes(identity.userDid, result),
+      };
+    }
+
+    private async withActionOutcomes(
+      ownerDid: string,
+      result: ChannelTurnResponse,
+    ): Promise<ChannelTurnResponse> {
+      if (result.status !== 'finished' || !this.actionProposals) return result;
+      const proposals = await this.actionProposals.forRun(
+        ownerDid,
+        result.sessionId,
+        result.runId,
+      );
+      const actionOutcomes = [];
+      let attempted = false;
+      for (const proposal of proposals) {
+        const refreshed: Awaited<ReturnType<typeof refreshActionProposal>> =
+          attempted
+            ? { proposal, attempted: false }
+            : await refreshActionProposal(
+                this.actionProposals,
+                proposal,
+                this.actionProposalRpc(proposal),
+              );
+        attempted ||= refreshed.attempted;
+        actionOutcomes.push(actionOutcome(refreshed.proposal));
+      }
+      if (attempted) {
+        this.markDirty();
+        await this.requestHousekeeping(Date.now() + 1000);
+      }
+      return actionOutcomes.length ? { ...result, actionOutcomes } : result;
     }
 
     async listSessions(
@@ -2924,10 +2982,130 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       return deleted;
     }
 
-    /**
-     * `GET /artifacts/:id` — the canonical copy, for its owner. `url` is
-     * present only while the share link still works.
-     */
+    private async prepareActionProposal(
+      subject: ActionProposalSubject,
+    ): Promise<ActionProposal> {
+      if (
+        this.env.ACTION_PROPOSALS_ENABLED !== 'true' ||
+        subject.ownerDid !== this.userDid
+      )
+        throw new Error('Action proposal preparation unavailable');
+      const record = await this.runStore!.get(subject.origin.runId);
+      if (!record) throw new Error('Action proposal origin unavailable');
+      const request = (JSON.parse(record.request) as StoredRunRequest).turn;
+      if (
+        request.identity.userDid !== subject.ownerDid ||
+        request.sessionId !== subject.origin.sessionId
+      )
+        throw new Error('Action proposal origin mismatch');
+      let origin = null;
+      if (request.sessionId.startsWith('$')) {
+        const roomId =
+          request.roomId ??
+          this.sessionRooms.get(request.sessionId) ??
+          (await this.sessions!.getSession(request.sessionId))?.roomId ??
+          (
+            await retryGateway(() =>
+              this.gateway.resolveUserRoom(subject.ownerDid),
+            )
+          )?.roomId;
+        if (!roomId) throw new Error('Action proposal room unavailable');
+        origin = {
+          sessionId: request.sessionId,
+          roomId,
+          client: request.client,
+          ...(request.channel ? { channel: request.channel } : {}),
+        };
+      }
+      const proposal = await this.actionProposals!.create(subject, origin);
+      this.markDirty();
+      return proposal;
+    }
+
+    private async mirrorActionReceipts(): Promise<number | undefined> {
+      if (!this.userDid || !this.actionProposals) return undefined;
+      const receipts = await this.actionProposals.takeReceipts(this.userDid);
+      if (receipts.length) this.markDirty();
+      for (const { proposal, origin } of receipts) {
+        try {
+          if (
+            proposal.lifecycle.status !== 'succeeded' &&
+            proposal.lifecycle.status !== 'failed'
+          )
+            continue;
+          const status =
+            proposal.lifecycle.status === 'succeeded'
+              ? 'confirmed on chain'
+              : 'failed on chain';
+          const text = `${proposal.title} ${status}. Transaction ${proposal.lifecycle.transactionHash}. Block ${proposal.lifecycle.height}. Code ${proposal.lifecycle.code}.`;
+          await this.replayToRoom(
+            {
+              ...origin,
+              identity: { userDid: proposal.ownerDid },
+              message: '',
+              requestId: `action-receipt:${proposal.id}:${proposal.digest}`,
+            },
+            text,
+            'oracle',
+            true,
+          );
+          await this.actionProposals.receiptMirrored(
+            proposal.ownerDid,
+            proposal.id,
+          );
+          this.markDirty();
+        } catch (error) {
+          console.warn(
+            '[action-proposals] receipt mirror pending',
+            error instanceof Error ? error.message : 'mirror failed',
+          );
+        }
+      }
+      return this.actionProposals.nextReceiptAttempt(this.userDid);
+    }
+
+    private actionProposalRpc(proposal: ActionProposal): string | undefined {
+      return {
+        devnet: this.env.ACTION_PROPOSALS_RPC_DEVNET,
+        testnet: this.env.ACTION_PROPOSALS_RPC_TESTNET,
+        mainnet: this.env.ACTION_PROPOSALS_RPC_MAINNET,
+      }[proposal.action.network];
+    }
+    async actionProposal(
+      identity: TurnIdentity,
+      id: string,
+      command?: ProposalCommand,
+    ): Promise<string | null> {
+      await this.ready(identity);
+      try {
+        let result = command
+          ? await this.actionProposals!.transition(
+              identity.userDid,
+              id,
+              command,
+            )
+          : await this.actionProposals!.get(identity.userDid, id);
+        if (command && result) this.markDirty();
+        if (command?.kind === 'reconcile' && result) {
+          const refreshed = await refreshActionProposal(
+            this.actionProposals!,
+            result,
+            this.actionProposalRpc(result),
+          );
+          result = refreshed.proposal;
+          if (refreshed.attempted) {
+            this.markDirty();
+            await this.requestHousekeeping(Date.now() + 1000);
+          }
+        }
+        return result ? JSON.stringify({ ok: true, proposal: result }) : null;
+      } catch (error) {
+        if (error instanceof ActionProposalConflict)
+          return JSON.stringify({ ok: false, error: error.message });
+        throw error;
+      }
+    }
+
     async artifact(
       identity: TurnIdentity,
       artifactId: string,
@@ -5701,6 +5879,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
             id: req.sessionId,
             client: req.client,
             requestId: req.requestId,
+            runId: run.runId,
             roomId: sessionRoomId,
           },
           model: effectiveModel,
@@ -5852,8 +6031,9 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
       req: TurnRequest,
       text: string,
       who: 'user' | 'oracle',
+      receipt = false,
     ): Promise<void> {
-      if (req.client === 'matrix') return Promise.resolve();
+      if (req.client === 'matrix' && !receipt) return Promise.resolve();
       if (req.sessionId.startsWith(SYNTHETIC_SESSION_PREFIX))
         return Promise.resolve();
       // A local session id has no marker event to thread on: the user had
@@ -5868,6 +6048,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
         req.sessionId,
         async () => {
           const roomId =
+            (receipt ? req.roomId : undefined) ??
             this.sessionRooms.get(req.sessionId) ??
             req.roomId ??
             (await this.sessions?.getSession(req.sessionId))?.roomId ??
@@ -5895,7 +6076,7 @@ export function createUserOracleDO(opts: UserOracleDOOptions) {
           };
         },
         label,
-        req.client === 'channel',
+        req.client === 'channel' || receipt,
       );
     }
 

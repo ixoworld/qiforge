@@ -66,6 +66,19 @@ const SIGNER = req('signer', 'address');
  * Cosmos authz are intentionally out of v1 (see `DEFERRED_MODULES`).
  */
 export const MESSAGE_CATALOG: readonly MessageSpec[] = [
+  {
+    module: 'bank',
+    action: 'send',
+    messageName: 'MsgSend',
+    typeUrl: '/cosmos.bank.v1beta1.MsgSend',
+    fields: [
+      req('fromAddress', 'address'),
+      req('toAddress', 'address'),
+      req('amount', 'coinArray'),
+    ],
+    riskLevel: 'high',
+    risks: ['Transfers tokens to another address.'],
+  },
   ...buildModule('entity', 'entity.v1beta1', [
     [
       'create',

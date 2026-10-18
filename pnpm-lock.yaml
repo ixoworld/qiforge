@@ -202,6 +202,9 @@ importers:
       '@ixo/impactxclient-sdk':
         specifier: ^3.0.0
         version: 3.0.0
+      '@ixo/ixo-transaction':
+        specifier: workspace:*
+        version: link:../ixo-transaction
       '@ixo/logger':
         specifier: workspace:*
         version: link:../logger
@@ -378,6 +381,9 @@ importers:
 
   packages/ixo-transaction:
     dependencies:
+      '@scure/base':
+        specifier: 2.2.0
+        version: 2.2.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -670,6 +676,9 @@ importers:
       '@ixo/editor':
         specifier: 6.0.1
         version: 6.0.1(@cosmjs/crypto@0.39.0)(@cosmjs/encoding@0.39.0)(@ixo/matrix-crdt@1.3.2(lib0@0.2.117)(matrix-js-sdk@42.2.0)(y-protocols@1.0.7(yjs@13.6.32))(yjs@13.6.32))(@ixo/surveys@0.1.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/dates@7.17.8(@mantine/core@7.17.8(@mantine/hooks@7.17.8(react@18.3.1))(@types/react@18.3.31)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(dayjs@1.11.21)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(@mantine/hooks@7.17.8(react@18.3.1))(@tiptap/pm@2.27.2)(@types/hast@3.0.4)(@types/react@18.3.31)(matrix-js-sdk@42.2.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.9.3)(use-sync-external-store@1.6.0(react@18.3.1))
+      '@ixo/impactxclient-sdk':
+        specifier: ^3.0.0
+        version: 3.0.0
       '@ixo/ixo-transaction':
         specifier: workspace:*
         version: link:../ixo-transaction
@@ -730,6 +739,9 @@ importers:
       multiformats:
         specifier: 14.0.4
         version: 14.0.4
+      protobufjs:
+        specifier: ^7.6.5
+        version: 7.6.5
       superjson:
         specifier: 1.13.3
         version: 1.13.3
@@ -10309,10 +10321,6 @@ packages:
   prosemirror-view@1.41.9:
     resolution: {integrity: sha512-clTunTX+eaLbr87L1V1QPheRlEQJyTlL3gXe9x3jQIk3rL0RVWxviDGz8tFaydwIVm+hKhYCyr+R/zBtWr9s6A==}
 
-  protobufjs@7.6.4:
-    resolution: {integrity: sha512-RJJPTTpvFfHcWLkIa2JFWK4XvtSzS0yEWDmunqHXli1h3JlkbcQZXDZdcWxv+JK3Xsl5/UFDPZ0iGm7DAengYw==}
-    engines: {node: '>=12.0.0'}
-
   protobufjs@7.6.5:
     resolution: {integrity: sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==}
     engines: {node: '>=12.0.0'}
@@ -19862,7 +19870,7 @@ snapshots:
       '@grpc/grpc-js': 1.14.4
       '@grpc/proto-loader': 0.7.15
       docker-modem: 5.0.7
-      protobufjs: 7.6.4
+      protobufjs: 7.6.5
       tar-fs: 2.1.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -23993,20 +24001,6 @@ snapshots:
       prosemirror-model: 1.25.9
       prosemirror-state: 1.4.4
       prosemirror-transform: 1.12.0
-
-  protobufjs@7.6.4:
-    dependencies:
-      '@protobufjs/aspromise': 1.1.2
-      '@protobufjs/base64': 1.1.2
-      '@protobufjs/codegen': 2.0.5
-      '@protobufjs/eventemitter': 1.1.1
-      '@protobufjs/fetch': 1.1.1
-      '@protobufjs/float': 1.0.2
-      '@protobufjs/path': 1.1.2
-      '@protobufjs/pool': 1.1.0
-      '@protobufjs/utf8': 1.1.1
-      '@types/node': 22.20.1
-      long: 5.3.2
 
   protobufjs@7.6.5:
     dependencies:

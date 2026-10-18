@@ -66,6 +66,11 @@ const secureUrlSchema = z.string().refine((raw) => isSecureUrl(raw), {
 });
 
 export const baseEnvSchema = z.object({
+  ACTION_PROPOSALS_RPC_TESTNET: z.url().optional(),
+  ACTION_PROPOSALS_RPC_DEVNET: z.url().optional(),
+  ACTION_PROPOSALS_RPC_MAINNET: z.url().optional(),
+  ACTION_PROPOSALS_ENABLED: z.enum(['true', 'false']).default('false'),
+  ACTION_PROPOSALS_PORTAL_ORIGIN: z.url().optional(),
   // --- identity -----------------------------------------------------------
   ORACLE_NAME: z.string().min(1),
   /** UCAN audience — the DID users address invocations/delegations to. */

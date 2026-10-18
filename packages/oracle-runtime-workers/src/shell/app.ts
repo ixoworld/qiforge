@@ -1,4 +1,11 @@
 import {
+  ActionProposalClaimSchema,
+  ActionProposalIdSchema,
+  ActionProposalReconcileSchema,
+  ActionProposalRpcSchema,
+} from '@ixo/ixo-transaction/action-proposals';
+import { ActionProposalConflict } from '../action-proposals/store';
+import {
   authenticateChannel,
   assertActiveChannelBindingCached,
   channelAuthConfig,
@@ -471,6 +478,8 @@ export function createShell(
           outcome.status,
         );
       const result = outcome.result;
+      if (result.actionOutcomes?.length)
+        await assertActiveChannelBindingCached(identity, c.env);
       return c.json(
         result,
         ['queued', 'running', 'recovering'].includes(result.status) ? 202 : 200,
@@ -542,6 +551,71 @@ export function createShell(
       );
     return next();
   });
+
+  app.get('/action-proposals/:proposalId', async (c) => {
+    c.header('Cache-Control', 'private, no-store');
+    c.header('Vary', 'Authorization');
+    const parsed = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+    if (!parsed.success) return c.json({ error: 'Invalid proposal ID' }, 400);
+    const identity = identityOf(c.get('auth'), c.req.raw.headers);
+    const proposal = await userStub(c.env, identity.userDid).actionProposal(
+      identity,
+      parsed.data,
+    );
+    if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
+    const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+    return result.ok
+      ? c.json({ proposal: result.proposal })
+      : c.json({ error: result.error }, 409);
+  });
+  for (const operation of ['claim', 'reject', 'revoke', 'reconcile'] as const) {
+    app.post(
+      `/action-proposals/:proposalId/${operation}`,
+      limitBody(4096),
+      async (c) => {
+        c.header('Cache-Control', 'private, no-store');
+        c.header('Vary', 'Authorization');
+        const id = ActionProposalIdSchema.safeParse(c.req.param('proposalId'));
+        const body = await c.req.json().catch(() => null);
+        const parsed = (
+          operation === 'reconcile'
+            ? ActionProposalReconcileSchema
+            : ActionProposalClaimSchema
+        ).safeParse(body);
+        if (!id.success || !parsed.success)
+          return c.json({ error: 'Invalid proposal command' }, 400);
+        const identity = identityOf(c.get('auth'), c.req.raw.headers);
+        try {
+          const command =
+            operation === 'reconcile'
+              ? {
+                  kind: operation,
+                  ...ActionProposalReconcileSchema.parse(parsed.data),
+                }
+              : {
+                  kind: operation,
+                  ...ActionProposalClaimSchema.parse(parsed.data),
+                };
+          const proposal = await userStub(
+            c.env,
+            identity.userDid,
+          ).actionProposal(identity, id.data, command);
+          if (!proposal) return c.json({ error: 'Proposal not found' }, 404);
+          const result = ActionProposalRpcSchema.parse(JSON.parse(proposal));
+          return result.ok
+            ? c.json({ proposal: result.proposal })
+            : c.json({ error: result.error }, 409);
+        } catch (error) {
+          if (
+            error instanceof ActionProposalConflict ||
+            (error instanceof Error && error.name === 'ActionProposalConflict')
+          )
+            return c.json({ error: error.message }, 409);
+          throw error;
+        }
+      },
+    );
+  }
 
   // --- sessions ----------------------------------------------------------------
   app.post('/sessions', async (c) => {

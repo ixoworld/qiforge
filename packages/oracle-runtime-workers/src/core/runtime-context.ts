@@ -1,3 +1,7 @@
+import type {
+  ActionProposal,
+  ActionProposalSubject,
+} from '@ixo/ixo-transaction/action-proposals';
 import {
   UNAVAILABLE_DECISION_EVALUATOR,
   type DecisionEvaluateOptions,
@@ -189,6 +193,9 @@ export interface AmbientServices {
    * `DecisionProviderUnavailableError`.
    */
   decisions?: DecisionEvaluator;
+  actionProposals?: {
+    create(subject: ActionProposalSubject): Promise<ActionProposal>;
+  };
   /** Host task scheduler for the current user, when the host provides one. */
   tasks?: import('../plugin-api/types').OracleTasksSurface;
   /** Host user-preferences store for the current user, when provided. */
@@ -317,6 +324,7 @@ export interface RuntimeSessionContext {
   client: 'portal' | 'matrix' | 'slack' | 'channel';
   wsId?: string;
   requestId: string;
+  runId?: string;
   roomId?: string;
   surface?: SessionSurface;
 }
@@ -520,6 +528,9 @@ export function buildRuntimeContext<TConfig = MergedConfig>(
     logger: ambient.logger,
     abortSignal,
     ...(ambient.tasks ? { tasks: ambient.tasks } : {}),
+    ...(ambient.actionProposals
+      ? { actionProposals: ambient.actionProposals }
+      : {}),
     ...(ambient.preferences ? { preferences: ambient.preferences } : {}),
     ...(ambient.kv ? { kv: ambient.kv } : {}),
     ...(ambient.frontend ? { frontend: ambient.frontend } : {}),
